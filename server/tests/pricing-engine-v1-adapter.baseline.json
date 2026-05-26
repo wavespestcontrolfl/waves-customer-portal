@@ -3,33 +3,28 @@
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1176,
-      "annualAfterDiscount": 1058.4,
-      "monthlyTotal": 88.2,
-      "savings": 117.6,
+      "annualBeforeDiscount": 1572,
+      "annualAfterDiscount": 1414.8,
+      "monthlyTotal": 117.9,
+      "savings": 157.2,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 35,
+          "mo": 63,
           "recommended": false,
-          "name": "4x"
+          "name": "6 Applications"
         },
         {
-          "mo": 45,
-          "recommended": false,
-          "name": "6x"
-        },
-        {
-          "mo": 59,
+          "mo": 92,
           "recommended": true,
-          "name": "9x"
+          "name": "9 Applications"
         },
         {
-          "mo": 84,
+          "mo": 123,
           "recommended": false,
-          "name": "12x"
+          "name": "12 Applications"
         }
       ],
       "pestTiers": [
@@ -63,41 +58,36 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1157.4,
-      "year2": 1058.4
+      "year1": 1513.8,
+      "year2": 1414.8
     }
   },
   "v1adapter_platinum_bundle_4_services_zone_a": {
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 3705,
-      "annualAfterDiscount": 2964,
-      "monthlyTotal": 247,
-      "savings": 741,
+      "annualBeforeDiscount": 4173,
+      "annualAfterDiscount": 3338.4,
+      "monthlyTotal": 278.2,
+      "savings": 834.6,
       "serviceCount": 4
     },
     "results": {
       "lawn": [
         {
-          "mo": 35,
+          "mo": 63,
           "recommended": false,
-          "name": "4x"
+          "name": "6 Applications"
         },
         {
-          "mo": 45,
+          "mo": 92,
           "recommended": false,
-          "name": "6x"
+          "name": "9 Applications"
         },
         {
-          "mo": 59,
-          "recommended": false,
-          "name": "9x"
-        },
-        {
-          "mo": 84,
+          "mo": 123,
           "recommended": true,
-          "name": "12x"
+          "name": "12 Applications"
         }
       ],
       "pestTiers": [
@@ -151,8 +141,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 3063,
-      "year2": 2964
+      "year1": 3437.4,
+      "year2": 3338.4
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -206,18 +196,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 1341,
+      "total": 1054,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
           "name": "Pre-Slab Termiticide Treatment",
-          "price": 1341
+          "price": 1054
         }
       ]
     },
     "totals": {
-      "year1": 1341,
+      "year1": 1054,
       "year2": 0
     }
   },
@@ -494,33 +484,28 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 2009.7,
-      "annualAfterDiscount": 1708.25,
-      "monthlyTotal": 142.35,
-      "savings": 301.45,
+      "annualBeforeDiscount": 2393.7,
+      "annualAfterDiscount": 2034.65,
+      "monthlyTotal": 169.55,
+      "savings": 359.05,
       "serviceCount": 3
     },
     "results": {
       "lawn": [
         {
-          "mo": 33,
-          "recommended": false,
-          "name": "4x"
-        },
-        {
-          "mo": 47,
-          "recommended": false,
-          "name": "6x"
-        },
-        {
           "mo": 62,
-          "recommended": true,
-          "name": "9x"
+          "recommended": false,
+          "name": "6 Applications"
         },
         {
-          "mo": 87,
+          "mo": 94,
+          "recommended": true,
+          "name": "9 Applications"
+        },
+        {
+          "mo": 118,
           "recommended": false,
-          "name": "12x"
+          "name": "12 Applications"
         }
       ],
       "pestTiers": [
@@ -565,41 +550,36 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1807.25,
-      "year2": 1708.25
+      "year1": 2133.65,
+      "year2": 2034.65
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1128,
-      "annualAfterDiscount": 1015.2,
-      "monthlyTotal": 84.6,
-      "savings": 112.8,
+      "annualBeforeDiscount": 1464,
+      "annualAfterDiscount": 1317.6,
+      "monthlyTotal": 109.8,
+      "savings": 146.4,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 30,
+          "mo": 59,
           "recommended": false,
-          "name": "4x"
+          "name": "6 Applications"
         },
         {
-          "mo": 40,
-          "recommended": false,
-          "name": "6x"
-        },
-        {
-          "mo": 55,
+          "mo": 83,
           "recommended": true,
-          "name": "9x"
+          "name": "9 Applications"
         },
         {
-          "mo": 78,
+          "mo": 105,
           "recommended": false,
-          "name": "12x"
+          "name": "12 Applications"
         }
       ],
       "pestTiers": [
@@ -633,8 +613,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1114.2,
-      "year2": 1015.2
+      "year1": 1416.6,
+      "year2": 1317.6
     }
   }
 }

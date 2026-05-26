@@ -1808,15 +1808,11 @@ function LawnBracketsTab() {
                     textTransform: "capitalize",
                   }}
                 >
-                  {t} (
-                  {t === "basic"
-                    ? "4x"
-                    : t === "standard"
-                      ? "6x"
-                      : t === "enhanced"
-                        ? "9x"
-                        : "12x"}
-                  )
+                  {t === "basic" ? (
+                    <span style={{ opacity: 0.45 }}>basic (4x) — hidden</span>
+                  ) : (
+                    `${t} (${t === "standard" ? "6x" : t === "enhanced" ? "9x" : "12x"})`
+                  )}
                 </th>
               ))}
             </tr>{" "}

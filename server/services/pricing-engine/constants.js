@@ -196,13 +196,14 @@ const PEST = {
 // ============================================================
 // LAWN CARE — 4 Tracks (St. Augustine merged, Bermuda, Zoysia, Bahia)
 // ============================================================
-// Tiers: basic(4x), standard(6x), enhanced(9x), premium(12x)
+// Tiers: basic(4x) is hidden/manager-only; standard(6x), enhanced(9x), premium(12x) are sold.
 const LAWN_TIERS = {
-  basic:    { freq: 4,  index: 0 },
-  standard: { freq: 6,  index: 1 },
-  enhanced: { freq: 9,  index: 2 },
-  premium:  { freq: 12, index: 3 },
+  basic:    { freq: 4,  index: 0, label: '4 Applications', hidden: true },
+  standard: { freq: 6,  index: 1, label: '6 Applications' },
+  enhanced: { freq: 9,  index: 2, label: '9 Applications' },
+  premium:  { freq: 12, index: 3, label: '12 Applications' },
 };
+const LAWN_SOLD_TIERS = ['standard', 'enhanced', 'premium'];
 
 const LAWN_FREQS = [4, 6, 9, 12];
 const LAWN_TABLE_MAX_SQFT = 20000;
@@ -1580,7 +1581,7 @@ const ACH_DISCOUNT = {
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
-  PEST, LAWN_TIERS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,

@@ -503,4 +503,55 @@ describe('lawn pricing production follow-up', () => {
     expect(floor.selected.pricingSource).toBe('COST_FLOOR');
     expect(floor.pricingSource).toBe('COST_FLOOR');
   });
+
+  test('default tiers are 3 (standard/enhanced/premium) — basic is hidden', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
+    const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+
+    expect(lawn.tiers).toHaveLength(3);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.tiers.every(t => t.label)).toBe(true);
+    expect(lawn.tiers[0].label).toBe('6 Applications');
+    expect(lawn.tiers[1].label).toBe('9 Applications');
+    expect(lawn.tiers[2].label).toBe('12 Applications');
+  });
+
+  test('includeHiddenTiers exposes basic tier for admin/manager override', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
+    const lawn = priceLawnCare(property, {
+      track: 'st_augustine', lawnFreq: 9, includeHiddenTiers: true,
+    });
+
+    expect(lawn.tiers).toHaveLength(4);
+    expect(lawn.tiers[0].tier).toBe('basic');
+    expect(lawn.tiers[0].label).toBe('4 Applications');
+  });
+
+  test('cost floor uses annual material budgets by grass type (not $8/K fallback)', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4492 }));
+
+    const stAug = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+    const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9 });
+    const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9 });
+
+    // St. Augustine enhanced at 4,492 sqft ≈ $117/app
+    expect(stAug.selected.perApp).toBeGreaterThanOrEqual(116);
+    expect(stAug.selected.perApp).toBeLessThanOrEqual(118);
+
+    // Bermuda enhanced at 4,492 sqft ≈ $117/app
+    expect(bermuda.selected.perApp).toBeGreaterThanOrEqual(116);
+    expect(bermuda.selected.perApp).toBeLessThanOrEqual(118);
+
+    // Zoysia enhanced at 4,492 sqft ≈ $119/app
+    expect(zoysia.selected.perApp).toBeGreaterThanOrEqual(118);
+    expect(zoysia.selected.perApp).toBeLessThanOrEqual(120);
+  });
+
+  test('useLawnCostFloor defaults to true for recurring lawn', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
+    const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+
+    // With cost floor on by default and material budgets, most tiers will show COST_FLOOR
+    expect(lawn.selected.costFloorAnnual).toBeGreaterThan(0);
+  });
 });
