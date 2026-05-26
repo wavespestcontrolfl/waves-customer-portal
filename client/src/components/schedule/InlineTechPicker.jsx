@@ -19,11 +19,12 @@ export default function InlineTechPicker({ serviceId, currentTechId, technicians
     setBusy(true);
     try {
       const token = localStorage.getItem('waves_admin_token');
-      await fetch(`${API_BASE}/admin/schedule/${serviceId}/assign`, {
+      const res = await fetch(`${API_BASE}/admin/schedule/${serviceId}/assign`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ technicianId: techId || null }),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       onAssigned?.(techId);
     } catch (e) {
       console.error('Assign failed:', e);
