@@ -83,6 +83,18 @@ describe('lawn assessment route contracts', () => {
     })).toBe(true);
   });
 
+  test('customer-facing snapshot and recommendation copy rejects internal or guarantee language', () => {
+    expect(adminLawnAssessmentRouter._test.customerCopyViolation(
+      'This lawn has callback risk and should be an upsell.',
+    )).toMatch(/blocked wording/);
+    expect(adminLawnAssessmentRouter._test.customerCopyViolation(
+      'We guarantee this diagnosed fungus will recover.',
+    )).toMatch(/blocked wording/);
+    expect(adminLawnAssessmentRouter._test.customerCopyViolation(
+      'WaveGuard Gold may be a better fit because it provides more proactive monitoring.',
+    )).toBeNull();
+  });
+
   test('snapshot and recommendation rows normalize json columns for admin review', () => {
     expect(adminLawnAssessmentRouter._test.normalizeSnapshotRow({
       id: 'snapshot-1',
