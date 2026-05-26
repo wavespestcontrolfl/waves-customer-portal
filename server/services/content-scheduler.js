@@ -422,10 +422,7 @@ const ContentScheduler = {
 
     // ── Process social posts ────────────────────────────────────
     const pendingSocials = await db('social_media_posts')
-      .where(function() {
-        this.where('publish_status', 'pending')
-          .orWhere('publish_status', 'dry_run');
-      })
+      .where('publish_status', 'pending')
       .whereNotNull('scheduled_for')
       .where('scheduled_for', '<=', now);
 
