@@ -1933,8 +1933,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             break;
           }
           case 'mark_prepaid': {
-            const amt = Number(payload?.totalAmount || 0);
-            if (amt <= 0) throw Object.assign(new Error('totalAmount must be > 0'), { isValidation: true });
+            const amt = Number(payload?.totalAmount);
+            if (!Number.isFinite(amt) || amt <= 0) throw Object.assign(new Error('totalAmount must be a positive number'), { isValidation: true });
             await db('scheduled_services').where({ id }).update({
               prepaid_amount: amt,
               prepaid_method: payload?.method || 'cash',

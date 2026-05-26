@@ -148,11 +148,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
 
   const handlePointerDown = useCallback(() => {
     longPressTriggered.current = false;
+    if (!onQuickAction) return;
     longPressTimer.current = setTimeout(() => {
-      longPressTriggered.current = true; if (!onQuickAction) return;
+      longPressTriggered.current = true;
       setShowQuickMenu(true);
     }, 500);
-  }, []);
+  }, [onQuickAction]);
   const handlePointerUp = useCallback(() => {
     clearTimeout(longPressTimer.current);
   }, []);
