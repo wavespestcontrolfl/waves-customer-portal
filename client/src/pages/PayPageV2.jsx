@@ -298,7 +298,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // mandate wording switches between one-time and recurring on the
   // setup_future_usage change.
   useEffect(() => {
-    if (!paymentIntentId) return;
+    if (!paymentIntentId || awaitingConfirm) return;
     syncAmountForMethod(selectedMethod, !!saveCard);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveCard]);
