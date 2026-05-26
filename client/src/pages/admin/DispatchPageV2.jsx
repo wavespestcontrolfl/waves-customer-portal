@@ -809,7 +809,6 @@ function ServiceCardV2({
               type="file"
               accept="image/*"
               multiple
-              capture="environment"
               onChange={handleLawnPhotos}
               className="hidden"
             />{" "}

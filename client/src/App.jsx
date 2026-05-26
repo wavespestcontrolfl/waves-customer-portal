@@ -147,7 +147,7 @@ function lazyWithRetry(factory) {
 }
 const AdminDashboardPage = lazyWithRetry(() => import('./pages/admin/DashboardPageV2'));
 const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
-const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/pipeline/UnifiedPipelineView'));
+const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));

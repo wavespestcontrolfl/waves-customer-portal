@@ -50,6 +50,22 @@ function mapProduct(product, vendorPricing = []) {
     lowStockThreshold,
     lowStock,
     vendorPricing,
+    // Product Registry fields
+    customerVisibility: product.customer_visibility || 'internal_only',
+    contentStatus: product.content_status || 'draft',
+    commonName: product.common_name || null,
+    publicSummary: product.public_summary || null,
+    portalSummary: product.portal_summary || null,
+    customerSafetySummary: product.customer_safety_summary || null,
+    petKidGuidanceText: product.pet_kid_guidance_text || null,
+    targetPests: product.target_pests || null,
+    applicationZones: product.application_zones || null,
+    epaRegNumber: product.epa_reg_number || null,
+    signalWord: product.signal_word || null,
+    reentryText: product.reentry_text || null,
+    rainfastMinutes: product.rainfast_minutes || null,
+    labelUrl: product.label_url || null,
+    sdsUrl: product.sds_url || null,
   };
 }
 
@@ -911,6 +927,16 @@ router.put('/:id', async (req, res, next) => {
       pollinatorPrecautions: 'pollinator_precautions', aquaticBufferFt: 'aquatic_buffer_ft',
       compatibilityNotes: 'compatibility_notes', epaRegNumber: 'epa_reg_number',
       monthlyUsageEstimate: 'monthly_usage_estimate',
+      // Product Registry — customer-facing content + visibility
+      customerVisibility: 'customer_visibility',
+      contentStatus: 'content_status',
+      commonName: 'common_name',
+      publicSummary: 'public_summary',
+      portalSummary: 'portal_summary',
+      customerSafetySummary: 'customer_safety_summary',
+      petKidGuidanceText: 'pet_kid_guidance_text',
+      targetPests: 'target_pests',
+      applicationZones: 'application_zones',
     };
 
     const upd = { updated_at: new Date() };
