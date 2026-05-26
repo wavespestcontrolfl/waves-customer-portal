@@ -8,6 +8,33 @@ const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
 const { adminAuthenticate } = require('../middleware/admin-auth');
+
+// Accepts both regular admin JWTs and terminal-scoped JWTs (minted by
+// /validate-handoff). Regular adminAuthenticate rejects scope:'terminal'
+// so these tokens can't escalate to other admin routes.
+async function terminalAuthenticate(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  try {
+    const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid token' });
+    if (decoded.scope && decoded.scope !== 'terminal') {
+      return res.status(401).json({ error: 'Invalid token scope' });
+    }
+    const tech = await db('technicians').where({ id: decoded.technicianId }).first();
+    if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
+    req.technician = tech;
+    req.technicianId = tech.id;
+    req.techRole = tech.role;
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
 const {
   auditTerminalHandoffMint,
   auditTerminalHandoffRateLimited,
@@ -422,12 +449,14 @@ router.post('/validate-handoff', async (req, res) => {
       user_agent: ua,
     });
 
-    // Mint a fresh admin JWT so the iOS app's subsequent /connection-token
-    // and /payment-intent calls succeed even if the Keychain token expired.
+    // Mint a short-lived, terminal-scoped JWT so the iOS app's subsequent
+    // /connection-token and /payment-intent calls succeed even if the
+    // Keychain login token expired. scope:'terminal' is rejected by
+    // adminAuthenticate, so this token can't access other admin routes.
     const authToken = jwt.sign(
-      { technicianId: tech.id, role: tech.role, name: tech.name },
+      { technicianId: tech.id, role: tech.role, name: tech.name, scope: 'terminal' },
       config.jwt.secret,
-      { expiresIn: '12h' },
+      { expiresIn: '15m' },
     );
 
     return res.json({
@@ -446,7 +475,7 @@ router.post('/validate-handoff', async (req, res) => {
 // POST /api/stripe/terminal/connection-token
 // Issues a short-lived connection token to the iOS Terminal SDK.
 // Auth: admin OR tech JWT (both roles can collect in person).
-router.post('/connection-token', adminAuthenticate, async (req, res) => {
+router.post('/connection-token', terminalAuthenticate, async (req, res) => {
   try {
     const stripe = getStripe();
     const opts = TERMINAL_LOCATION_ID ? { location: TERMINAL_LOCATION_ID } : {};
@@ -465,9 +494,9 @@ router.post('/connection-token', adminAuthenticate, async (req, res) => {
 // binding work is already done — we just need to create the PI and record
 // it on the handoff row.
 //
-// Auth: adminAuthenticate (tech JWT in header). Consistent with every other
-// terminal endpoint. Body: { jti }. invoice_id, amount, and the authorized
-// tech are all read from the handoff row — never from the request.
+// Auth: terminalAuthenticate (regular admin JWT or terminal-scoped JWT).
+// Body: { jti }. invoice_id, amount, and the authorized tech are all
+// read from the handoff row — never from the request.
 //
 // Timing: no TTL on this call. Once validate has burned the jti, the tech
 // can take as long as they need to show the amount to the customer, answer
@@ -482,7 +511,7 @@ router.post('/connection-token', adminAuthenticate, async (req, res) => {
 // (stripe_payment_intent_id column, SET to the same value).
 //
 // Returns: { clientSecret, paymentIntentId, amount }
-router.post('/payment-intent', adminAuthenticate, async (req, res) => {
+router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
   try {
     const { jti } = req.body || {};
     if (!jti || typeof jti !== 'string') {

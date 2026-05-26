@@ -11,6 +11,7 @@ async function adminAuthenticate(req, res, next) {
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
     if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid admin token' });
+    if (decoded.scope === 'terminal') return res.status(401).json({ error: 'Terminal-scoped token not accepted here' });
 
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
     if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
