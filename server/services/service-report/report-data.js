@@ -1028,6 +1028,7 @@ function lawnAssessmentSummary(current, initial, count) {
 
 function hasLawnAssessmentCustomerSignal(lawnAssessment) {
   if (!lawnAssessment) return false;
+  if (String(lawnAssessment.snapshot?.summary || '').trim()) return true;
   if (String(lawnAssessment.customerSummary || '').trim()) return true;
   if (Array.isArray(lawnAssessment.photos) && lawnAssessment.photos.length) return true;
   const scores = lawnAssessment.scores || {};
@@ -1035,6 +1036,100 @@ function hasLawnAssessmentCustomerSignal(lawnAssessment) {
   if (String(lawnAssessment.observations || '').trim()) return true;
   const recommendations = lawnAssessment.recommendations || {};
   return Object.values(recommendations).some((value) => String(value || '').trim());
+}
+
+function formatApprovedLawnSnapshot(row) {
+  if (!row) return null;
+  const findings = parseJsonArray(row.findings)
+    .map((finding) => ({
+      key: finding.key || null,
+      label: finding.label || null,
+      severity: finding.severity ?? null,
+      customerCopy: finding.customer_copy || finding.customerCopy || '',
+      locationLabel: finding.location_label || finding.locationLabel || null,
+    }))
+    .filter((finding) => finding.customerCopy);
+  const treatment = parseJsonObject(row.treatment_context);
+  const expectedWindow = parseJsonObject(row.expected_window);
+  return {
+    id: row.id,
+    assessmentId: row.assessment_id || null,
+    headline: row.headline || '',
+    summary: row.summary_customer || '',
+    findings,
+    treatment: {
+      completedToday: treatment.completed_today === true,
+      serviceType: treatment.service_type || null,
+      productsAppliedSummary: treatment.products_applied_summary || null,
+    },
+    weatherContext: parseJsonObject(row.weather_context).customer_copy || null,
+    expectedWindow: {
+      minDays: expectedWindow.min_days || null,
+      maxDays: expectedWindow.max_days || null,
+    },
+    nextWatchItems: parseJsonArray(row.next_watch_items),
+    disclaimers: parseJsonArray(row.disclaimers),
+    generatedAt: row.generated_at || null,
+  };
+}
+
+function formatApprovedLawnRecommendation(row) {
+  if (!row) return null;
+  const action = parseJsonObject(row.recommended_action);
+  return {
+    id: row.id,
+    type: row.type || null,
+    title: row.title || '',
+    priority: row.priority || 'low',
+    customerCopy: row.customer_copy || '',
+    action: {
+      type: action.action_type || null,
+      label: action.cta_label || null,
+      plan: action.plan || null,
+    },
+  };
+}
+
+async function loadApprovedLawnSnapshot({ customerId, assessmentId }, knex = db) {
+  if (!customerId || !assessmentId) return null;
+  let query = knex('property_health_snapshots')
+    .where({
+      customer_id: customerId,
+      assessment_id: assessmentId,
+      domain: 'lawn',
+      customer_visible: true,
+    });
+  if (typeof query.whereNotNull === 'function') {
+    query = query.whereNotNull('approved_at');
+  }
+  const row = await query
+    .orderBy('created_at', 'desc')
+    .first()
+    .catch(() => null);
+  if (!row?.approved_at) return null;
+  return formatApprovedLawnSnapshot(row);
+}
+
+async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, knex = db) {
+  if (!customerId || !snapshotId) return [];
+  const rows = await knex('property_recommendation_cards')
+    .where({
+      customer_id: customerId,
+      snapshot_id: snapshotId,
+      domain: 'lawn',
+      customer_visible: true,
+    })
+    .orderBy('created_at', 'asc')
+    .catch(() => []);
+
+  const priorityRank = { high: 1, medium: 2, low: 3 };
+  return rows
+    .filter((row) => ['approved', 'customer_visible', 'accepted'].includes(row.status))
+    .filter((row) => row.approved_at || (row.type === 'customer_education' && row.requires_human_approval === false))
+    .sort((a, b) => (priorityRank[a.priority] || 4) - (priorityRank[b.priority] || 4))
+    .slice(0, 3)
+    .map(formatApprovedLawnRecommendation)
+    .filter(Boolean);
 }
 
 async function lawnPhotoUrl(photo) {
@@ -1175,6 +1270,17 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     thatchScore: lawnScoreValue(row.thatch_level),
     season: row.season || null,
   }));
+  const snapshot = await loadApprovedLawnSnapshot({
+    customerId: service.customer_id,
+    assessmentId: assessment.id,
+  }, knex);
+  const recommendationCards = snapshot
+    ? await loadApprovedLawnRecommendationCards({
+      customerId: service.customer_id,
+      snapshotId: snapshot.id,
+    }, knex)
+    : [];
+  const defaultCustomerSummary = lawnAssessmentSummary(currentScore, initialScore, trend.length);
 
   return {
     assessmentId: assessment.id,
@@ -1190,6 +1296,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     observations: assessment.observations || '',
     aiSummary: assessment.ai_summary || null,
     fawnSnapshot: parseJsonObject(assessment.fawn_snapshot),
+    snapshot,
+    recommendationCards,
     turfProfile: turfProfile ? {
       grassType: turfProfile.grass_type || null,
       cultivar: turfProfile.cultivar || null,
@@ -1201,7 +1309,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       knownDiseaseHistory: !!turfProfile.known_disease_history,
       knownDroughtStress: !!turfProfile.known_drought_stress,
     } : null,
-    customerSummary: lawnAssessmentSummary(currentScore, initialScore, trend.length),
+    customerSummary: snapshot?.summary || defaultCustomerSummary,
+    trendSummary: defaultCustomerSummary,
   };
 }
 
@@ -1618,6 +1727,8 @@ module.exports = {
   serviceDisplayName,
   treatmentScope,
   buildLawnAssessmentReportData,
+  formatApprovedLawnSnapshot,
+  formatApprovedLawnRecommendation,
   defaultGeometry,
   defaultZones,
   zoneSupportsServiceLine,

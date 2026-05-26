@@ -197,6 +197,23 @@ function formatCustomerRecommendation(row) {
   };
 }
 
+const CUSTOMER_RECOMMENDATION_EVENT_TYPES = new Set([
+  'snapshot_viewed',
+  'recommendation_shown',
+  'recommendation_clicked',
+  'follow_up_requested',
+]);
+
+function recommendationEventMetadata(body = {}) {
+  const metadata = parseJsonObject(body.metadata);
+  return {
+    source: 'customer_portal',
+    surface: String(body.surface || metadata.surface || 'lawn_health').slice(0, 80),
+    placement: String(body.placement || metadata.placement || '').slice(0, 80) || null,
+    action_type: String(body.actionType || metadata.action_type || '').slice(0, 80) || null,
+  };
+}
+
 async function getCustomerVisibleSnapshotData(customerId, latestAssessmentId) {
   const snapshot = await db('property_health_snapshots')
     .where({
@@ -243,6 +260,43 @@ async function getCustomerVisibleSnapshotData(customerId, latestAssessmentId) {
     latestSnapshot: formatCustomerSnapshot(snapshot),
     recommendationCards: cards.map(formatCustomerRecommendation).filter(Boolean),
   };
+}
+
+async function getVisibleSnapshotForCustomer(customerId, snapshotId) {
+  if (!customerId || !snapshotId) return null;
+  return db('property_health_snapshots')
+    .where({
+      id: snapshotId,
+      customer_id: customerId,
+      domain: 'lawn',
+      customer_visible: true,
+    })
+    .whereNotNull('approved_at')
+    .first()
+    .catch(() => null);
+}
+
+async function getVisibleRecommendationForCustomer(customerId, recommendationId, snapshotId) {
+  if (!customerId || !recommendationId) return null;
+  return db('property_recommendation_cards')
+    .where({
+      id: recommendationId,
+      customer_id: customerId,
+      domain: 'lawn',
+      customer_visible: true,
+    })
+    .modify((query) => {
+      if (snapshotId) query.where({ snapshot_id: snapshotId });
+    })
+    .whereIn('status', ['approved', 'customer_visible', 'accepted'])
+    .where(function () {
+      this.whereNotNull('approved_at')
+        .orWhere(function () {
+          this.where({ type: 'customer_education', requires_human_approval: false });
+        });
+    })
+    .first()
+    .catch(() => null);
 }
 
 // =========================================================================
@@ -422,6 +476,56 @@ router.get('/:customerId', async (req, res, next) => {
 });
 
 // =========================================================================
+// POST /api/lawn-health/:customerId/recommendation-events — customer outcome tracking
+// =========================================================================
+router.post('/:customerId/recommendation-events', async (req, res, next) => {
+  try {
+    const { customerId } = req.params;
+    if (customerId !== req.customerId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const eventType = String(req.body?.eventType || req.body?.event_type || '').trim();
+    if (!CUSTOMER_RECOMMENDATION_EVENT_TYPES.has(eventType)) {
+      return res.status(400).json({ error: 'Unsupported event type' });
+    }
+
+    const snapshotId = String(req.body?.snapshotId || req.body?.snapshot_id || '').trim() || null;
+    const recommendationId = String(req.body?.recommendationId || req.body?.recommendation_id || '').trim() || null;
+
+    const snapshot = snapshotId
+      ? await getVisibleSnapshotForCustomer(customerId, snapshotId)
+      : null;
+    if (snapshotId && !snapshot) return res.status(404).json({ error: 'Snapshot not found' });
+
+    const recommendation = recommendationId
+      ? await getVisibleRecommendationForCustomer(customerId, recommendationId, snapshotId)
+      : null;
+    if (recommendationId && !recommendation) return res.status(404).json({ error: 'Recommendation not found' });
+    if (eventType !== 'snapshot_viewed' && !recommendation) {
+      return res.status(400).json({ error: 'recommendationId is required for recommendation events' });
+    }
+    if (eventType === 'snapshot_viewed' && !snapshot) {
+      return res.status(400).json({ error: 'snapshotId is required for snapshot events' });
+    }
+
+    await db('property_recommendation_events').insert({
+      recommendation_id: recommendation?.id || null,
+      snapshot_id: snapshot?.id || recommendation?.snapshot_id || null,
+      customer_id: customerId,
+      event_type: eventType,
+      actor_type: 'customer',
+      actor_id: customerId,
+      metadata: JSON.stringify(recommendationEventMetadata(req.body)),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
 // GET /api/lawn-health/:customerId/history — All assessments with photos
 // =========================================================================
 router.get('/:customerId/history', async (req, res, next) => {
@@ -522,6 +626,7 @@ router._test = {
   photoAssessmentLookupCriteria,
   formatCustomerSnapshot,
   formatCustomerRecommendation,
+  recommendationEventMetadata,
 };
 
 module.exports = router;

@@ -482,6 +482,35 @@ describe('service report v1', () => {
     expect(answer).not.toContain('No activity was observed');
   });
 
+  test('Ask Waves AI uses approved lawn snapshot copy for lawn findings and next steps', () => {
+    const data = {
+      serviceLine: 'lawn',
+      lawnAssessment: {
+        scores: { overallScore: 83, turfDensity: 80, weedSuppression: 90, fungusControl: 88, thatchScore: 70 },
+        customerSummary: 'Approved snapshot: moderate weed pressure is being monitored.',
+        observations: 'Older tech observation should not replace approved snapshot copy.',
+        snapshot: {
+          summary: 'Approved snapshot: moderate weed pressure is being monitored.',
+          findings: [{ customerCopy: 'We saw moderate weed pressure in the front lawn.' }],
+          expectedWindow: { minDays: 14, maxDays: 21 },
+          nextWatchItems: ['Compare the front lawn on the next service.'],
+        },
+        recommendationCards: [
+          { customerCopy: 'We will keep watching this area on your next visit.' },
+        ],
+      },
+      findings: [],
+      recommendations: [],
+    };
+
+    expect(answerServiceReportQuestion({ question: 'What did you find?', data }))
+      .toContain('We saw moderate weed pressure in the front lawn.');
+    expect(answerServiceReportQuestion({ question: 'What should I do next?', data }))
+      .toContain('We will keep watching this area on your next visit.');
+    expect(answerServiceReportQuestion({ question: 'What should I do next?', data }))
+      .toContain('Visible improvement usually takes 14-21 days');
+  });
+
   test('treatment map is deterministic and exposes interactive layer data', () => {
     const input = {
       geometry: {
@@ -1586,6 +1615,78 @@ describe('service report v1', () => {
           irrigation_type: 'in_ground',
         },
       ],
+      property_health_snapshots: [
+        {
+          id: 'snapshot-draft',
+          customer_id: 'customer-1',
+          assessment_id: 'assessment-2',
+          domain: 'lawn',
+          customer_visible: true,
+          approved_at: null,
+          headline: 'Draft snapshot',
+          summary_customer: 'Draft copy should not appear.',
+          findings: JSON.stringify([{ customer_copy: 'Draft finding should not appear.', internal_copy: 'internal' }]),
+          created_at: '2026-05-16T10:00:00.000Z',
+        },
+        {
+          id: 'snapshot-approved',
+          customer_id: 'customer-1',
+          assessment_id: 'assessment-2',
+          domain: 'lawn',
+          customer_visible: true,
+          approved_at: '2026-05-16T11:00:00.000Z',
+          headline: 'Moderate issue being treated',
+          summary_customer: 'Approved snapshot: moderate weed pressure is being monitored.',
+          findings: JSON.stringify([{
+            key: 'weed_pressure',
+            label: 'Weed pressure',
+            severity: 2,
+            confidence: 0.84,
+            customer_copy: 'We saw moderate weed pressure in the front lawn.',
+            internal_copy: 'Internal scoring detail',
+            evidence_refs: ['assessment:2'],
+          }]),
+          treatment_context: JSON.stringify({
+            completed_today: true,
+            service_type: 'Lawn Care',
+            products_applied_summary: 'the scheduled lawn application',
+          }),
+          expected_window: JSON.stringify({ min_days: 14, max_days: 21 }),
+          next_watch_items: JSON.stringify(['Compare the front lawn on the next service.']),
+          created_at: '2026-05-16T11:00:00.000Z',
+        },
+      ],
+      property_recommendation_cards: [
+        {
+          id: 'card-draft',
+          snapshot_id: 'snapshot-approved',
+          customer_id: 'customer-1',
+          domain: 'lawn',
+          customer_visible: true,
+          status: 'draft',
+          type: 'tier_upgrade',
+          priority: 'high',
+          customer_copy: 'Draft recommendation should not appear.',
+        },
+        {
+          id: 'card-approved',
+          snapshot_id: 'snapshot-approved',
+          customer_id: 'customer-1',
+          domain: 'lawn',
+          customer_visible: true,
+          status: 'approved',
+          approved_at: '2026-05-16T11:05:00.000Z',
+          type: 'follow_up',
+          title: 'Keep watching this area',
+          priority: 'medium',
+          confidence: 0.77,
+          internal_reason: 'Internal reason',
+          trigger_signals: JSON.stringify([{ key: 'callback_risk' }]),
+          customer_copy: 'We will keep watching this area on your next visit.',
+          recommended_action: JSON.stringify({ action_type: 'request_follow_up', cta_label: 'Request follow-up' }),
+          created_at: '2026-05-16T11:05:00.000Z',
+        },
+      ],
     };
     const knex = (table) => {
       let rows = [...(fixtures[table] || [])];
@@ -1595,6 +1696,10 @@ describe('service report v1', () => {
             rows = rows.filter((row) => Object.entries(criteria)
               .every(([key, value]) => row[key] === value));
           }
+          return query;
+        },
+        whereNotNull(column) {
+          rows = rows.filter((row) => row[column] !== null && row[column] !== undefined);
           return query;
         },
         orderBy(column, direction = 'asc') {
@@ -1640,7 +1745,27 @@ describe('service report v1', () => {
     expect(data.serviceLine).toBe('lawn');
     expect(data.lawnAssessment.scores.overallScore).toBe(83);
     expect(data.lawnAssessment.initialScores.overallScore).toBe(66);
-    expect(data.lawnAssessment.customerSummary).toBe('Lawn health is up 17 points since your first assessment.');
+    expect(data.lawnAssessment.customerSummary).toBe('Approved snapshot: moderate weed pressure is being monitored.');
+    expect(data.lawnAssessment.trendSummary).toBe('Lawn health is up 17 points since your first assessment.');
+    expect(data.lawnAssessment.snapshot).toMatchObject({
+      id: 'snapshot-approved',
+      headline: 'Moderate issue being treated',
+      summary: 'Approved snapshot: moderate weed pressure is being monitored.',
+      findings: [{ key: 'weed_pressure', customerCopy: 'We saw moderate weed pressure in the front lawn.' }],
+      expectedWindow: { minDays: 14, maxDays: 21 },
+    });
+    expect(data.lawnAssessment.snapshot.findings[0]).not.toHaveProperty('internal_copy');
+    expect(data.lawnAssessment.snapshot.findings[0]).not.toHaveProperty('confidence');
+    expect(data.lawnAssessment.snapshot.findings[0]).not.toHaveProperty('evidence_refs');
+    expect(data.lawnAssessment.recommendationCards).toEqual([
+      expect.objectContaining({
+        id: 'card-approved',
+        customerCopy: 'We will keep watching this area on your next visit.',
+      }),
+    ]);
+    expect(data.lawnAssessment.recommendationCards[0]).not.toHaveProperty('internal_reason');
+    expect(data.lawnAssessment.recommendationCards[0]).not.toHaveProperty('trigger_signals');
+    expect(data.lawnAssessment.recommendationCards[0]).not.toHaveProperty('confidence');
     expect(data.lawnAssessment.trend.map((point) => point.overallScore)).toEqual([66, 83]);
     expect(data.lawnAssessment.turfProfile).toMatchObject({ grassType: 'st_augustine', lawnSqft: 6200 });
     expect(data.findings).toEqual([]);

@@ -277,6 +277,28 @@ function targetsFromApplications(applications = []) {
 
 function answerNextSteps({ data = {}, nextAppointment } = {}) {
   const dynamic = data.dynamicContext || {};
+  const lawnAssessment = data.lawnAssessment || null;
+  if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
+    const cards = Array.isArray(lawnAssessment.recommendationCards) ? lawnAssessment.recommendationCards : [];
+    const cardLines = cards
+      .map((card) => cleanText(card.customerCopy || card.title))
+      .filter(Boolean)
+      .slice(0, 2);
+    const watchItems = Array.isArray(lawnAssessment.snapshot.nextWatchItems)
+      ? lawnAssessment.snapshot.nextWatchItems.map(cleanText).filter(Boolean)
+      : [];
+    const expected = lawnAssessment.snapshot.expectedWindow || {};
+    const expectedLine = expected.minDays && expected.maxDays
+      ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
+      : '';
+    return [
+      cardLines.length ? `Recommended next step: ${cardLines[0]}` : '',
+      cardLines.length > 1 ? `Also noted: ${cardLines.slice(1).join(' ')}` : '',
+      watchItems.length ? `What we are watching: ${watchItems.slice(0, 2).join(' ')}` : '',
+      expectedLine,
+      nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '',
+    ].filter(Boolean).join('\n') || lawnAssessment.snapshot.summary;
+  }
   const primaryMove = dynamic.premiumExperience?.primaryMove?.title
     || dynamic.aiSummary?.recommendedNextStep?.text
     || pickRecommendedFinding(Array.isArray(data.findings) ? data.findings : [])?.recommendation;
@@ -338,10 +360,11 @@ function answerTrend({ data = {} } = {}) {
   if (lawnAssessment?.scores) {
     const scores = lawnAssessment.scores;
     return [
+      lawnAssessment.snapshot?.summary,
       lawnAssessment.customerSummary,
       `Current lawn health is ${scores.overallScore}% overall.`,
       `Breakdown: turf density ${scores.turfDensity}%, weed suppression ${scores.weedSuppression}%, fungus control ${scores.fungusControl}%, thatch ${scores.thatchScore}%.`,
-    ].filter(Boolean).join(' ');
+    ].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join(' ');
   }
   return dynamic.pressureTrend?.customerSummary
     || `This visit's pressure index is ${customerVisiblePressureIndex(data.pressureIndex)?.toFixed(1) || '0.3'} on a 0-5 scale. Lower is better.`;
@@ -351,6 +374,16 @@ function answerFindings({ data = {} } = {}) {
   const lawnAssessment = data.lawnAssessment || null;
   const findings = Array.isArray(data.findings) ? data.findings : [];
   const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
+  if (lawnAssessment?.snapshot) {
+    const snapshot = lawnAssessment.snapshot;
+    const findingLines = Array.isArray(snapshot.findings)
+      ? snapshot.findings.map((finding) => cleanText(finding.customerCopy)).filter(Boolean)
+      : [];
+    return [
+      snapshot.summary,
+      findingLines.slice(0, 3).join('\n'),
+    ].filter(Boolean).join('\n');
+  }
   if (lawnAssessment?.observations) return lawnAssessment.observations;
   if (!findings.length && recommendations.length) {
     return recommendations.slice(0, 3).map((rec) => `Recommended next step: ${rec}`).join('\n');

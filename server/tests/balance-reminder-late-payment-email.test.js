@@ -132,11 +132,19 @@ describe('late-payment email sidecar', () => {
 
     await BalanceReminder.latePaymentCheck();
 
-    expect(renderSmsTemplate).toHaveBeenCalledWith('late_payment_7d', expect.objectContaining({
-      first_name: 'Taylor',
-      invoice_title: 'Quarterly Pest Control',
-      pay_url: 'https://portal.wavespestcontrol.com/l/pay123',
-    }));
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'late_payment_7d',
+      expect.objectContaining({
+        first_name: 'Taylor',
+        invoice_title: 'Quarterly Pest Control',
+        pay_url: 'https://portal.wavespestcontrol.com/l/pay123',
+      }),
+      expect.objectContaining({
+        workflow: 'balance_late_payment_check',
+        entity_type: 'invoice',
+        entity_id: 'inv-1',
+      }),
+    );
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415550101',
       body: 'sms body for late_payment_7d',

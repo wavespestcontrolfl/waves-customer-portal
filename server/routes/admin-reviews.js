@@ -1,17 +1,14 @@
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const gbp = require('../services/google-business');
+const ReviewService = require('../services/review-request');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { getServiceContact } = require('../services/customer-contact');
-const { publicPortalUrl } = require('../utils/portal-url');
 
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
@@ -31,26 +28,42 @@ function whereHasRealReply(qb) {
     .where('google_reviews.review_reply', 'not like', `${DRAFT_REPLY_PREFIX}%`);
 }
 
+async function getReviewLocationStatuses() {
+  const statuses = {};
+  await Promise.all(WAVES_LOCATIONS.map(async (loc) => {
+    let hasGbpAccess = false;
+    let authError = null;
+    if (loc.googleLocationResourceName) {
+      try {
+        await gbp._getHeaders(loc.id);
+        hasGbpAccess = true;
+      } catch (err) {
+        authError = err.message;
+      }
+    }
+    statuses[loc.id] = {
+      reviewsSource: hasGbpAccess ? 'gbp' : 'places_fallback',
+      hasGbpAccess,
+      authError,
+    };
+  }));
+  return statuses;
+}
+
 /**
- * Generate a unique review request token and create a review_requests record.
- * Returns the created record.
+ * Create an admin review request through the centralized review service.
  */
 async function createReviewRequest({ customerId, locationId, techName, serviceType, serviceDate }) {
-  const token = crypto.randomBytes(24).toString('base64url'); // 32 chars, URL-safe
-  const expiresAt = new Date(Date.now() + 14 * 86400000); // 14 days
-
-  const [record] = await db('review_requests').insert({
-    customer_id: customerId,
-    token,
-    location_id: locationId,
-    tech_name: techName || null,
-    service_type: serviceType || null,
-    service_date: serviceDate || null,
-    status: 'pending',
-    expires_at: expiresAt.toISOString(),
-  }).returning('*');
-
-  return record;
+  return ReviewService.create({
+    customerId,
+    triggeredBy: 'admin',
+    delayMinutes: 0,
+    locationId,
+    techName,
+    serviceType,
+    serviceDate,
+    expiresAt: new Date(Date.now() + 14 * 86400000).toISOString(),
+  });
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -187,6 +200,8 @@ router.get('/', async (req, res, next) => {
     };
     const googleStatsComplete = WAVES_LOCATIONS.every(loc => isFresh(loc.id));
 
+    const locationStatuses = await getReviewLocationStatuses();
+
     res.json({
       reviews: reviews.map(r => ({
         id: r.id, googleReviewId: r.google_review_id, locationId: r.location_id,
@@ -222,7 +237,12 @@ router.get('/', async (req, res, next) => {
           };
         }),
       },
-      locations: WAVES_LOCATIONS.map(l => ({ id: l.id, name: l.name, reviewUrl: l.googleReviewUrl })),
+      locations: WAVES_LOCATIONS.map(l => ({
+        id: l.id,
+        name: l.name,
+        reviewUrl: l.googleReviewUrl,
+        ...(locationStatuses[l.id] || {}),
+      })),
     });
   } catch (err) { next(err); }
 });
@@ -249,11 +269,13 @@ router.post('/:id/reply', async (req, res, next) => {
           const { WAVES_LOCATIONS } = require('../config/locations');
           const loc = WAVES_LOCATIONS.find(l => l.id === review.location_id);
           if (loc?.googleLocationResourceName) {
-            const gbpReviews = await gbp.getReviews(loc.googleLocationResourceName, review.location_id, 100);
+            const gbpReviews = await gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 100);
             const match = gbpReviews.find(g => {
               const gName = (g.reviewer?.displayName || '').toLowerCase();
               const rName = (review.reviewer_name || '').toLowerCase();
-              return gName === rName;
+              const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
+              const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
+              return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000;
             });
             if (match?.name) {
               resourceName = match.name;
@@ -530,8 +552,6 @@ router.post('/send-request', async (req, res, next) => {
     }
 
     const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
-    const firstName = contact.name || customer.first_name || 'there';
-
     // Get last completed service for context
     const lastSvc = await db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -546,42 +566,15 @@ router.post('/send-request', async (req, res, next) => {
       serviceDate: lastSvc?.scheduled_date || null,
     });
 
-    const rateUrl = `${publicPortalUrl()}/rate/${reviewReq.token}`;
-    const svcLabel = reviewReq.service_type || 'pest control service';
-    const body = await renderRequiredSmsTemplate('review_request', {
-      first_name: firstName,
-      review_url: rateUrl,
-      service_type: svcLabel,
-    }, {
-      workflow: 'admin_review_request',
-      entity_type: 'review_request',
-      entity_id: reviewReq.id,
-    });
-
-    const smsResult = await sendCustomerMessage({
-      to: contact.phone,
-      body,
-      channel: 'sms',
-      audience: 'customer',
-      purpose: 'review_request',
-      customerId: customer.id,
-      identityTrustLevel: 'phone_matches_customer',
-      entryPoint: 'admin_reviews_manual_request',
-      metadata: {
-        original_message_type: 'review_request',
-        customerLocationId: customer.nearest_location_id,
-        review_request_id: reviewReq.id,
-      },
-    });
-    if (!smsResult.sent) {
-      await db('review_requests').where({ id: reviewReq.id }).update({ status: 'failed' }).catch(() => {});
-      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    await ReviewService.sendSMS(reviewReq.id);
+    const sentReq = await db('review_requests').where({ id: reviewReq.id }).first();
+    if (!sentReq?.sms_sent_at) {
+      return res.status(422).json({ error: 'Review request SMS was blocked, deferred, or failed. Check the request status and messaging audit log.' });
     }
 
     await db('review_requests').where({ id: reviewReq.id }).update({
       status: 'sent',
       sent_at: db.fn.now(),
-      sms_sent_at: db.fn.now(),
     }).catch(() => {});
 
     await db('activity_log').insert({

@@ -281,6 +281,26 @@ function useLawnHealth(customerId) {
   return data;
 }
 
+const sentLawnRecommendationEvents = new Set();
+
+function trackLawnRecommendationEvent(customerId, payload = {}) {
+  if (!customerId || !payload.eventType) return;
+  const key = [
+    customerId,
+    payload.eventType,
+    payload.snapshotId || '',
+    payload.recommendationId || '',
+    payload.placement || '',
+  ].join(':');
+  if (sentLawnRecommendationEvents.has(key)) return;
+  sentLawnRecommendationEvents.add(key);
+  api.trackLawnRecommendationEvent(customerId, {
+    surface: 'customer_portal',
+    placement: 'lawn_snapshot_card',
+    ...payload,
+  }).catch(() => {});
+}
+
 // =========================================================================
 // BEFORE / AFTER PHOTO COMPARISON SLIDER — real S3 photos or gradient fallback
 // =========================================================================
@@ -554,7 +574,23 @@ function PhotoGallery({ photos }) {
 // =========================================================================
 // LAWN HEALTH CARD — overall score, progress bars, photos, trend, recs
 // =========================================================================
-function LawnSnapshotCard({ snapshot, recommendationCards = [], onRequest }) {
+function LawnSnapshotCard({ customerId, snapshot, recommendationCards = [], onRequest }) {
+  useEffect(() => {
+    if (!customerId || !snapshot?.id) return;
+    trackLawnRecommendationEvent(customerId, {
+      eventType: 'snapshot_viewed',
+      snapshotId: snapshot.id,
+    });
+    recommendationCards.forEach((card) => {
+      if (!card?.id) return;
+      trackLawnRecommendationEvent(customerId, {
+        eventType: 'recommendation_shown',
+        snapshotId: snapshot.id,
+        recommendationId: card.id,
+      });
+    });
+  }, [customerId, snapshot?.id, recommendationCards]);
+
   if (!snapshot) return null;
   const finding = snapshot.findings?.[0];
   const treatment = snapshot.treatment || {};
@@ -620,7 +656,15 @@ function LawnSnapshotCard({ snapshot, recommendationCards = [], onRequest }) {
                 <button
                   type="button"
                   style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, padding: '9px 12px', fontSize: 14 }}
-                  onClick={() => onRequest?.(card.action)}
+                  onClick={() => {
+                    trackLawnRecommendationEvent(customerId, {
+                      eventType: 'recommendation_clicked',
+                      snapshotId: snapshot.id,
+                      recommendationId: card.id,
+                      actionType: card.action?.type || null,
+                    });
+                    onRequest?.(card.action);
+                  }}
                 >
                   {card.action.label}
                 </button>
@@ -646,7 +690,7 @@ function SnapshotDetail({ label, value }) {
   );
 }
 
-function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, latestSnapshot, recommendationCards, onRequest }) {
+function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, latestSnapshot, recommendationCards, onRequest }) {
   const [animated, setAnimated] = useState(false);
   const [showTrend, setShowTrend] = useState(false);
 
@@ -680,7 +724,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       ...PORTAL_CARD_STYLE,
       padding: 20,
     }}>
-      <LawnSnapshotCard snapshot={latestSnapshot} recommendationCards={recommendationCards} onRequest={onRequest} />
+      <LawnSnapshotCard customerId={customerId} snapshot={latestSnapshot} recommendationCards={recommendationCards} onRequest={onRequest} />
 
       {/* Header with overall score ring */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
@@ -1457,6 +1501,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
       {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (
         <LawnHealthCard
+          customerId={customer.id}
           scores={lawnHealth.scores}
           initialScores={lawnHealth.initialScores}
           photos={lawnHealth.photos}

@@ -909,6 +909,12 @@ function lawnMetricRows(assessment = {}) {
 }
 
 function lawnAssessmentBody(assessment = {}) {
+  const snapshotSummary = String(assessment.snapshot?.summary || '').trim();
+  if (snapshotSummary) return snapshotSummary;
+  const snapshotFinding = (assessment.snapshot?.findings || [])
+    .map((finding) => String(finding.customerCopy || '').trim())
+    .find(Boolean);
+  if (snapshotFinding) return snapshotFinding;
   const observations = String(assessment.observations || assessment.scores?.observations || '').trim();
   if (observations) return observations;
   const profile = assessment.turfProfile;

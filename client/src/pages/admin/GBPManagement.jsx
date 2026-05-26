@@ -342,13 +342,18 @@ export default function GBPManagement() {
               )}
             </div>{" "}
             <div
+              title={l.authError || ""}
               style={{
                 fontSize: 10,
                 marginTop: 4,
-                color: l.hasCredentials ? D.green : D.muted,
+                color: l.hasCredentials ? D.green : l.authError ? D.red : D.muted,
               }}
             >
-              {l.hasCredentials ? "● API Connected" : "○ Places API only"}
+              {l.hasCredentials
+                ? "● API Connected"
+                : l.authError
+                  ? "● API auth error"
+                  : "○ Places API only"}
             </div>{" "}
           </button>
         ))}

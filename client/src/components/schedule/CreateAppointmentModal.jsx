@@ -113,7 +113,6 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
-const WAVEGUARD_TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 
 function discountAvailableForCustomer(discount, customer) {
   const requiredTier = discount?.requires_waveguard_tier || '';
@@ -416,9 +415,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return discountPresets.filter((d) => (
       d.is_active
       && d.show_in_invoices
-      && discountAvailableForCustomer(d, selectedCustomer)
     ));
-  }, [discountPresets, selectedCustomer]);
+  }, [discountPresets]);
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');

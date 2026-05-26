@@ -182,6 +182,12 @@ const ReviewService = {
     serviceRecordId,
     triggeredBy = "auto",
     delayMinutes,
+    locationId,
+    techName: overrideTechName,
+    serviceType: overrideServiceType,
+    serviceDate: overrideServiceDate,
+    technicianId: overrideTechnicianId,
+    expiresAt,
   }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
@@ -195,10 +201,10 @@ const ReviewService = {
     }
 
     // Pull service + tech context
-    let techName = null,
-      serviceType = null,
-      serviceDate = null,
-      technicianId = null;
+    let techName = overrideTechName || null,
+      serviceType = overrideServiceType || null,
+      serviceDate = overrideServiceDate || null,
+      technicianId = overrideTechnicianId || null;
     if (serviceRecordId) {
       const sr = await db("service_records")
         .where({ "service_records.id": serviceRecordId })
@@ -210,10 +216,10 @@ const ReviewService = {
         .select("service_records.*", "technicians.name as tech_name")
         .first();
       if (sr) {
-        techName = sr.tech_name;
-        serviceType = sr.service_type;
-        serviceDate = sr.service_date;
-        technicianId = sr.technician_id;
+        techName = techName || sr.tech_name;
+        serviceType = serviceType || sr.service_type;
+        serviceDate = serviceDate || sr.service_date;
+        technicianId = technicianId || sr.technician_id;
 
         // Tech fallback: when service_records.technician_id wasn't set
         // (legacy rows or services completed before a tech was tagged
@@ -260,6 +266,7 @@ const ReviewService = {
         token,
         customer_id: customerId,
         service_record_id: serviceRecordId,
+        location_id: locationId || resolveLocation(customer),
         technician_id: technicianId,
         tech_name: techName,
         service_type: serviceType,
@@ -267,6 +274,7 @@ const ReviewService = {
         triggered_by: triggeredBy,
         scheduled_for: scheduledFor,
         status: "pending",
+        expires_at: expiresAt || null,
       })
       .returning("*");
 

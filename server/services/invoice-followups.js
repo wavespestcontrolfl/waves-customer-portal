@@ -17,6 +17,33 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
+const EmailTemplateLibrary = require('./email-template-library');
+const { getInvoiceEmailRecipients } = require('./customer-contact');
+const { currency } = require('./email-template');
+const { formatDateOnly } = require('../utils/date-only');
+
+const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
+  d3_friendly: 'invoice.followup_3_day',
+  d7_reminder: 'invoice.followup_7_day',
+  d14_firmer: 'invoice.followup_14_day',
+  d30_final: 'invoice.followup_30_day',
+};
+
+function clean(value) {
+  return String(value || '').trim();
+}
+
+function cleanEmail(value) {
+  return clean(value).toLowerCase();
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
+}
+
+function firstToken(value) {
+  return clean(value).split(/\s+/)[0] || '';
+}
 
 /**
  * Load the SMS body from the editable sms_templates table. Returns null if the
@@ -37,6 +64,128 @@ async function resolveBody(step, ctx) {
     entity_type: 'invoice',
     entity_id: ctx.invoiceId || null,
   });
+}
+
+async function logFollowupEmailAttempt({
+  customerId,
+  invoiceId,
+  stepId,
+  templateKey,
+  status,
+  providerMessageId = null,
+  sentAt = null,
+  failureReason = null,
+}) {
+  try {
+    await db('customer_interactions').insert({
+      customer_id: customerId,
+      interaction_type: 'email_outbound',
+      subject: `Invoice follow-up email ${status}`,
+      body: failureReason
+        ? `Invoice follow-up ${stepId} email ${status}: ${failureReason}`
+        : `Invoice follow-up ${stepId} email ${status}.`,
+      metadata: JSON.stringify({
+        invoice_id: invoiceId,
+        step_id: stepId,
+        template_key: templateKey,
+        channel: 'email',
+        provider_message_id: providerMessageId,
+        status,
+        sent_at: sentAt,
+        failure_reason: failureReason,
+      }),
+    });
+  } catch (err) {
+    logger.warn(`[invoice-followups] email audit log failed for invoice ${invoiceId}: ${err.message}`);
+  }
+}
+
+async function sendFollowupEmail({ row, customer, step, ctx }) {
+  const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
+  if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
+
+  const latestInvoice = await db('invoices').where({ id: row.invoice_id }).first().catch(() => null);
+  if (!latestInvoice || ['paid', 'void', 'processing'].includes(String(latestInvoice.status || '').toLowerCase())) {
+    return { ok: false, skipped: true, reason: 'invoice_not_eligible' };
+  }
+
+  const prefs = await db('notification_prefs')
+    .where({ customer_id: customer.id })
+    .first()
+    .catch((err) => {
+      logger.warn(`[invoice-followups] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
+      return null;
+    });
+  const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
+    .filter((entry) => isEmailLike(entry.email));
+  if (!recipient?.email) return { ok: false, skipped: true, reason: 'missing_email' };
+
+  const payload = {
+    first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
+    invoice_title: ctx.invoiceTitle || latestInvoice.title || latestInvoice.service_type || 'your service',
+    invoice_number: latestInvoice.invoice_number || row.invoice_number || '',
+    amount_due: currency(latestInvoice.total || row.total || 0),
+    due_date: formatDateOnly(latestInvoice.due_date, { fallback: '' }),
+    service_date: formatDateOnly(latestInvoice.service_date, { fallback: '' }),
+    service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+    pay_url: ctx.payUrl,
+    customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
+  };
+
+  try {
+    const result = await EmailTemplateLibrary.sendTemplate({
+      templateKey,
+      to: recipient.email,
+      payload,
+      recipientType: 'customer',
+      recipientId: customer.id,
+      triggerEventId: `invoice_followup:${row.invoice_id}:${step.id}`,
+      idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
+      categories: ['invoice_followup', step.id],
+      suppressionGroupKey: 'transactional_required',
+    });
+
+    if (result.deduped) {
+      return {
+        ok: !!result.sent,
+        deduped: true,
+        blocked: !!result.blocked,
+        messageId: result.message?.provider_message_id || null,
+      };
+    }
+
+    const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
+    await logFollowupEmailAttempt({
+      customerId: customer.id,
+      invoiceId: row.invoice_id,
+      stepId: step.id,
+      templateKey,
+      status,
+      providerMessageId: result.message?.provider_message_id || null,
+      sentAt: result.message?.sent_at || null,
+      failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
+    });
+
+    if (!result.sent) {
+      return {
+        ok: false,
+        blocked: !!result.blocked,
+        reason: result.reason || 'email_not_sent',
+      };
+    }
+    return { ok: true, messageId: result.message?.provider_message_id || null };
+  } catch (err) {
+    await logFollowupEmailAttempt({
+      customerId: customer.id,
+      invoiceId: row.invoice_id,
+      stepId: step.id,
+      templateKey,
+      status: 'failed',
+      failureReason: err.message,
+    });
+    logger.error(`[invoice-followups] ${step.id} email failed for invoice ${row.invoice_id}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
 }
 
 
@@ -166,16 +315,6 @@ async function fireStep(row) {
   }
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
-  if (!customer?.phone) {
-    logger.warn(`[invoice-followups] no phone for customer ${row.customer_id}; pausing`);
-    await db('invoice_followup_sequences').where({ id: row.id }).update({
-      status: 'paused',
-      paused_reason: 'no_customer_phone',
-      next_touch_at: null,
-    });
-    return;
-  }
-
   const amount = parseFloat(row.total || 0).toFixed(2);
   const serviceDate = row.service_date
     ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
@@ -185,40 +324,52 @@ async function fireStep(row) {
     kind: 'invoice', entityType: 'invoices', entityId: row.invoice_id, customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(row),
   });
-  const body = await resolveBody(step, {
+  const ctx = {
     name: customer.first_name || 'there',
     invoiceTitle: row.title || 'your service',
     amount,
     serviceDate,
     payUrl,
     invoiceId: row.invoice_id,
-  });
-  if (!body) {
-    logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id} — pausing`);
-    await db('invoice_followup_sequences').where({ id: row.id }).update({
-      status: 'paused',
-      paused_reason: 'missing_template',
-      next_touch_at: null,
-    });
-    return;
+  };
+
+  const emailResult = await sendFollowupEmail({ row, customer, step, ctx });
+
+  let smsSent = false;
+  let smsSkipReason = null;
+  if (customer?.phone) {
+    const body = await resolveBody(step, ctx);
+    if (!body) {
+      smsSkipReason = 'missing_template';
+      logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id}`);
+    } else {
+      const sendResult = await sendCustomerMessage({
+        to: customer.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'payment_link',
+        customerId: customer.id,
+        invoiceId: row.invoice_id,
+        entryPoint: 'invoice_followup_sequence',
+        metadata: { original_message_type: 'invoice_followup' },
+      });
+      if (sendResult.blocked || sendResult.sent === false) {
+        smsSkipReason = sendResult.code || 'sms_blocked';
+        logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+      } else {
+        smsSent = true;
+      }
+    }
+  } else {
+    smsSkipReason = 'no_customer_phone';
+    logger.warn(`[invoice-followups] no phone for customer ${row.customer_id}`);
   }
 
-  const sendResult = await sendCustomerMessage({
-    to: customer.phone,
-    body,
-    channel: 'sms',
-    audience: 'customer',
-    purpose: 'payment_link',
-    customerId: customer.id,
-    invoiceId: row.invoice_id,
-    entryPoint: 'invoice_followup_sequence',
-    metadata: { original_message_type: 'invoice_followup' },
-  });
-  if (sendResult.blocked || sendResult.sent === false) {
-    logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+  if (!smsSent && !emailResult.ok) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
       status: 'paused',
-      paused_reason: sendResult.code || 'sms_blocked',
+      paused_reason: smsSkipReason || emailResult.reason || emailResult.error || 'no_channel_delivered',
       next_touch_at: null,
     });
     return;
@@ -247,6 +398,9 @@ async function fireStep(row) {
         invoice_id: row.invoice_id,
         step_id: step.id,
         step_index: row.step_index,
+        sms_sent: smsSent,
+        email_sent: !!emailResult.ok,
+        email_reason: emailResult.reason || emailResult.error || null,
       }),
     });
   } catch { /* non-critical */ }

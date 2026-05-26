@@ -643,28 +643,10 @@ async function loadInvoiceDiscount(discountId) {
   return discount;
 }
 
-const WAVEGUARD_TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
-
-function assertDiscountEligibleForCustomer(discount, customer) {
-  if (!discount?.requires_waveguard_tier) return;
-  if (discount.is_waveguard_tier_discount) {
-    if (customer?.waveguard_tier !== discount.requires_waveguard_tier) {
-      throw httpError(400, 'Selected WaveGuard tier discount is not available for this customer');
-    }
-    return;
-  }
-  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(discount.requires_waveguard_tier);
-  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customer?.waveguard_tier);
-  if (requiredIdx >= 0 && customerIdx < requiredIdx) {
-    throw httpError(400, 'Selected discount is not available for this customer tier');
-  }
-}
-
 async function resolveLineDiscount(input, baseAmount, customer) {
   const discountId = input?.discountId || input?.id || null;
   if (!discountId) return null;
   const row = await loadInvoiceDiscount(discountId);
-  assertDiscountEligibleForCustomer(row, customer);
   const resolved = calculateDiscountDollars(row, baseAmount, input?.discountAmount ?? input?.amount);
   if (!(resolved.dollars > 0)) return null;
   return {
@@ -715,7 +697,6 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
-    assertDiscountEligibleForCustomer(appointmentDiscount, customer);
     const resolvedAppointmentDiscount = appointmentDiscount
       ? calculateDiscountDollars(appointmentDiscount, subtotal, discountAmount)
       : null;
@@ -2812,7 +2793,6 @@ router.post('/:id/invoice', async (req, res, next) => {
     for (const e of extraLines) {
       if (Number(e.amount) < 0 && e.discount_id) {
         const discount = await loadInvoiceDiscount(e.discount_id);
-        assertDiscountEligibleForCustomer(discount, { waveguard_tier: svc.cust_waveguard_tier });
         const resolved = calculateDiscountDollars(discount, extraDiscountBase, discount.amount);
         const submittedDollars = Math.round(Math.abs(Number(e.amount) || 0) * 100) / 100;
         const dollars = Math.min(submittedDollars, resolved.dollars);
