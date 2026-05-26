@@ -1320,6 +1320,8 @@ const StripeService = {
     if (saveCard && invoice.customer_id) {
       updateParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
       updateParams.setup_future_usage = 'off_session';
+    } else {
+      updateParams.setup_future_usage = '';
     }
 
     try {
@@ -1494,26 +1496,27 @@ const StripeService = {
 
         if (pmFunding === 'credit') {
           logger.error(
-            `[stripe] SURCHARGE UNDER-COLLECTION: Credit card on PI ${paymentIntentId} ` +
-            `confirmed without /finalize. Invoice ${invoice.invoice_number} charged at base only.`,
+            `[stripe] Card payment on PI ${paymentIntentId} bypassed /finalize. ` +
+            `Invoice ${invoice.invoice_number}. Blocking confirm — customer must use /quote+/finalize.`,
           );
           try {
             await db('customer_health_alerts').insert({
               customer_id: invoice.customer_id,
-              alert_type: 'surcharge_under_collection',
-              severity: 'high',
-              title: `Surcharge under-collection — invoice ${invoice.invoice_number}`,
-              description: `Credit card payment confirmed without surcharge finalization. PI: ${paymentIntentId}. Charged base-only.`,
+              alert_type: 'surcharge_bypass_blocked',
+              severity: 'medium',
+              title: `Surcharge bypass blocked — invoice ${invoice.invoice_number}`,
+              description: `Credit card confirm attempt without surcharge finalization. PI: ${paymentIntentId}. Customer redirected to retry.`,
               metadata: JSON.stringify({
                 stripe_payment_intent_id: paymentIntentId,
-                invoice_number: invoice.invoice_number,
                 card_funding: pmFunding,
-                expected_surcharge_bps: 300,
               }),
             });
           } catch (alertErr) {
-            logger.error(`[stripe] Under-collection alert insert failed: ${alertErr.message}`);
+            logger.error(`[stripe] Bypass-blocked alert insert failed: ${alertErr.message}`);
           }
+          const err = new Error('Payment requires surcharge finalization. Please refresh and try again.');
+          err.code = 'SURCHARGE_NOT_FINALIZED';
+          throw err;
         } else {
           logger.info(
             `[stripe] Non-credit card (${pmFunding || 'unknown'}) on PI ${paymentIntentId} ` +
