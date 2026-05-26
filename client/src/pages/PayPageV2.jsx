@@ -429,6 +429,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             if (nextMethod !== 'us_bank_account') setAmountSyncError(false);
             selectedMethodRef.current = nextMethod;
             setSelectedMethod(nextMethod);
+            setAwaitingConfirm(false);
+            setQuoteData(null);
             syncAmountForMethod(nextMethod);
           }
         });
