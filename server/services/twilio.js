@@ -162,9 +162,15 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
     });
     if (!internalAlertNotificationDelivered(stats)) {
       logger.warn(
-        `[twilio] internal alert notification redirect did not deliver; falling back to Twilio SMS (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
+        `[twilio] internal alert notification redirect did not deliver; suppressed owner/admin SMS fallback (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
       );
-      return null;
+      return {
+        success: true,
+        sid: "internal-admin-notification-undelivered",
+        suppressed: true,
+        notificationRedirected: false,
+        notificationUndelivered: true,
+      };
     }
     logger.info(
       `[twilio] redirected owner/admin SMS to Waves notification (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
@@ -176,8 +182,14 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
       notificationRedirected: true,
     };
   } catch (err) {
-    logger.error(`[twilio] internal alert notification redirect failed; falling back to Twilio SMS: ${err.message}`);
-    return null;
+    logger.error(`[twilio] internal alert notification redirect failed; suppressed owner/admin SMS fallback: ${err.message}`);
+    return {
+      success: true,
+      sid: "internal-admin-notification-error",
+      suppressed: true,
+      notificationRedirected: false,
+      notificationError: true,
+    };
   }
 }
 
