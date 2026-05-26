@@ -328,7 +328,11 @@ describe("TwilioService legacy customer SMS helpers", () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
     ).mockReturnValueOnce(
-      firstQuery({ seasonal_tips: true, sms_enabled: true }),
+      firstQuery({
+        seasonal_tips: true,
+        sms_enabled: true,
+        updated_at: "2026-05-01T12:00:00.000Z",
+      }),
     );
     smsTemplates.getTemplate.mockResolvedValue("Seasonal alert body");
     sendCustomerMessage.mockResolvedValue({ sent: true });
@@ -350,6 +354,11 @@ describe("TwilioService legacy customer SMS helpers", () => {
         channel: "sms",
         audience: "customer",
         purpose: "marketing",
+        consentBasis: {
+          status: "opted_in",
+          source: "notification_prefs.seasonal_tips",
+          capturedAt: "2026-05-01T12:00:00.000Z",
+        },
         customerId: "cust-1",
         identityTrustLevel: "phone_matches_customer",
         metadata: { original_message_type: "seasonal_alert" },

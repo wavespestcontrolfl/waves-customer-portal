@@ -789,6 +789,11 @@ const TwilioService = {
       body,
       purpose: "marketing",
       customerId,
+      consentBasis: {
+        status: "opted_in",
+        source: "notification_prefs.seasonal_tips",
+        capturedAt: prefs.updated_at || prefs.created_at || undefined,
+      },
       messageType: "seasonal_alert",
     });
   },
