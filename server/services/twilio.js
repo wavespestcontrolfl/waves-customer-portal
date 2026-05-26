@@ -60,6 +60,20 @@ function formatTwilioSendError(err) {
   return parts.filter(Boolean).join(": ") || "Twilio send failed";
 }
 
+async function sendCustomerPolicySms(input) {
+  const { sendCustomerMessage } = require("./messaging/send-customer-message");
+  return sendCustomerMessage({
+    channel: "sms",
+    audience: "customer",
+    identityTrustLevel: "phone_matches_customer",
+    ...input,
+    metadata: {
+      original_message_type: input.messageType,
+      ...(input.metadata || {}),
+    },
+  });
+}
+
 function getOwnerPhoneSet() {
   const candidates = [
     process.env.OWNER_PHONE,
@@ -508,8 +522,12 @@ const TwilioService = {
       return;
     }
 
-    return this.sendSMS(customer.phone, body, {
+    return sendCustomerPolicySms({
+      to: customer.phone,
+      body,
+      purpose: "appointment_reminder_24h",
       customerId,
+      identityTrustLevel: "service_contact_authorized",
       messageType: "appointment_reminder",
     });
   },
@@ -692,9 +710,14 @@ const TwilioService = {
       return;
     }
 
-    return this.sendSMS(customer.phone, body, {
-      customerId: customerId,
+    return sendCustomerPolicySms({
+      to: customer.phone,
+      body,
+      purpose: "service_completion",
+      customerId,
+      identityTrustLevel: "service_contact_authorized",
       messageType: "service_complete",
+      metadata: { serviceRecordId },
     });
   },
 
@@ -724,7 +747,13 @@ const TwilioService = {
       return;
     }
 
-    return this.sendSMS(customer.phone, body);
+    return sendCustomerPolicySms({
+      to: customer.phone,
+      body,
+      purpose: "billing",
+      customerId,
+      messageType: "billing_reminder",
+    });
   },
 
   /**
@@ -751,7 +780,13 @@ const TwilioService = {
       return;
     }
 
-    return this.sendSMS(customer.phone, body);
+    return sendCustomerPolicySms({
+      to: customer.phone,
+      body,
+      purpose: "marketing",
+      customerId,
+      messageType: "seasonal_alert",
+    });
   },
 };
 

@@ -50,6 +50,13 @@ function joinedFirstQuery(row) {
   };
 }
 
+function selectQuery(rows) {
+  return {
+    where: jest.fn().mockReturnThis(),
+    select: jest.fn().mockResolvedValue(rows),
+  };
+}
+
 describe("TwilioService.sendTechEnRoute", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -90,14 +97,18 @@ describe("TwilioService.sendTechEnRoute", () => {
         customerId: "cust-1",
       }),
     );
-    expect(smsTemplates.getTemplate).toHaveBeenCalledWith("tech_en_route", {
-      first_name: "Sam",
-      tech_name: "Bryan",
-      eta_line: "",
-      track_clause:
-        "Track live: https://portal.wavespestcontrol.com/l/abc23\n\n",
-      track_url: "https://portal.wavespestcontrol.com/l/abc23",
-    });
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      "tech_en_route",
+      {
+        first_name: "Sam",
+        tech_name: "Bryan",
+        eta_line: "",
+        track_clause:
+          "Track live: https://portal.wavespestcontrol.com/l/abc23\n\n",
+        track_url: "https://portal.wavespestcontrol.com/l/abc23",
+      },
+      { workflow: "tech_en_route", entity_type: "customer", entity_id: "cust-1" },
+    );
     expect(sendCustomerMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         to: "+15551112222",
@@ -125,10 +136,14 @@ describe("TwilioService.sendTechEnRoute", () => {
 
     const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
 
-    expect(smsTemplates.getTemplate).toHaveBeenCalledWith("tech_arrived", {
-      first_name: "Sam",
-      tech_name: "Bryan",
-    });
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      "tech_arrived",
+      {
+        first_name: "Sam",
+        tech_name: "Bryan",
+      },
+      { workflow: "tech_arrived", entity_type: "customer", entity_id: "cust-1" },
+    );
     expect(sendCustomerMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         to: "+15551112222",
@@ -172,27 +187,150 @@ describe("TwilioService.sendServiceReminder", () => {
     smsTemplates.getTemplate.mockResolvedValue(
       "Hello Sam! Reminder: your Pest Control with Waves is tomorrow at 8:00 AM.",
     );
-    const sendSpy = jest
-      .spyOn(TwilioService, "sendSMS")
-      .mockResolvedValue({ success: true, sid: "SM123" });
+    sendCustomerMessage.mockResolvedValue({ sent: true });
 
     const result = await TwilioService.sendServiceReminder("cust-1", "svc-1");
 
-    expect(smsTemplates.getTemplate).toHaveBeenCalledWith("reminder_24h", {
-      first_name: "Sam",
-      service_type: "Pest Control",
-      time: "8:00 AM",
-    });
-    expect(sendSpy).toHaveBeenCalledWith(
-      "+15551112222",
-      "Hello Sam! Reminder: your Pest Control with Waves is tomorrow at 8:00 AM.",
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      "reminder_24h",
       {
-        customerId: "cust-1",
-        messageType: "appointment_reminder",
+        first_name: "Sam",
+        service_type: "Pest Control",
+        time: "8:00 AM",
       },
+      { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: "svc-1" },
     );
-    expect(result.success).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "+15551112222",
+        body: "Hello Sam! Reminder: your Pest Control with Waves is tomorrow at 8:00 AM.",
+        channel: "sms",
+        audience: "customer",
+        purpose: "appointment_reminder_24h",
+        customerId: "cust-1",
+        identityTrustLevel: "service_contact_authorized",
+        metadata: { original_message_type: "appointment_reminder" },
+      }),
+    );
+    expect(result.sent).toBe(true);
+  });
+});
 
-    sendSpy.mockRestore();
+describe("TwilioService legacy customer SMS helpers", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("sendBillingReminder uses the canonical customer send wrapper", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({
+        id: "cust-1",
+        first_name: "Sam",
+        phone: "+15551112222",
+        waveguard_tier: "Pro",
+      }),
+    ).mockReturnValueOnce(
+      firstQuery({ billing_reminder: true, sms_enabled: true }),
+    );
+    smsTemplates.getTemplate.mockResolvedValue("Billing reminder body");
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendBillingReminder("cust-1", 125, "June 1");
+
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      "billing_reminder",
+      {
+        first_name: "Sam",
+        waveguard_tier: "Pro",
+        amount: "125.00",
+        charge_date: "June 1",
+      },
+      { workflow: "billing_reminder", entity_type: "customer", entity_id: "cust-1" },
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "+15551112222",
+        body: "Billing reminder body",
+        channel: "sms",
+        audience: "customer",
+        purpose: "billing",
+        customerId: "cust-1",
+        identityTrustLevel: "phone_matches_customer",
+        metadata: { original_message_type: "billing_reminder" },
+      }),
+    );
+    expect(result.sent).toBe(true);
+  });
+
+  test("sendServiceCompletedSummary uses the canonical customer send wrapper", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ service_completed: true, sms_enabled: true }),
+    ).mockReturnValueOnce(
+      joinedFirstQuery({ id: "record-1", service_type: "Pest Control", tech_name: "Bryan" }),
+    ).mockReturnValueOnce(
+      selectQuery([{ product_name: "Barrier spray" }]),
+    );
+    smsTemplates.getTemplate.mockResolvedValue("Service complete body");
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendServiceCompletedSummary("cust-1", "record-1");
+
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      "service_complete",
+      { first_name: "Sam" },
+      { workflow: "service_complete", entity_type: "service_record", entity_id: "record-1" },
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "+15551112222",
+        body: "Service complete body",
+        channel: "sms",
+        audience: "customer",
+        purpose: "service_completion",
+        customerId: "cust-1",
+        identityTrustLevel: "service_contact_authorized",
+        metadata: {
+          original_message_type: "service_complete",
+          serviceRecordId: "record-1",
+        },
+      }),
+    );
+    expect(result.sent).toBe(true);
+  });
+
+  test("sendSeasonalAlert uses the canonical customer send wrapper", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ seasonal_tips: true, sms_enabled: true }),
+    );
+    smsTemplates.getTemplate.mockResolvedValue("Seasonal alert body");
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendSeasonalAlert("cust-1", "Mosquitoes", "Check standing water.");
+
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      "seasonal_alert",
+      {
+        first_name: "Sam",
+        tip: "Check standing water.",
+      },
+      { workflow: "seasonal_alert", entity_type: "customer", entity_id: "cust-1" },
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "+15551112222",
+        body: "Seasonal alert body",
+        channel: "sms",
+        audience: "customer",
+        purpose: "marketing",
+        customerId: "cust-1",
+        identityTrustLevel: "phone_matches_customer",
+        metadata: { original_message_type: "seasonal_alert" },
+      }),
+    );
+    expect(result.sent).toBe(true);
   });
 });
