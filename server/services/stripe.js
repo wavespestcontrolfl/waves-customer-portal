@@ -1487,6 +1487,7 @@ const StripeService = {
         // a credit card that should have been surcharged.
         let pmFunding = null;
         let isWalletPM = false;
+        let pmLookupFailed = false;
         try {
           const pmId = typeof pi.payment_method === 'string' ? pi.payment_method : pi.payment_method?.id;
           if (pmId) {
@@ -1494,7 +1495,10 @@ const StripeService = {
             pmFunding = pmObj.card?.funding || null;
             isWalletPM = !!pmObj.card?.wallet;
           }
-        } catch { /* non-fatal — PM may be detached */ }
+        } catch (pmErr) {
+          pmLookupFailed = true;
+          logger.error(`[stripe] PM lookup failed for bypass check on PI ${paymentIntentId}: ${pmErr.message}`);
+        }
 
         if (pmFunding === 'credit' && !isWalletPM) {
           logger.error(
@@ -1524,6 +1528,25 @@ const StripeService = {
             `[stripe] Wallet credit card on PI ${paymentIntentId} confirmed at base-only ` +
             `(Express Checkout, phase 1). Invoice ${invoice.invoice_number}.`,
           );
+        } else if (pmLookupFailed) {
+          logger.error(
+            `[stripe] FAIL-CLOSED: Could not determine funding for unfinalized card PI ${paymentIntentId}. ` +
+            `Invoice ${invoice.invoice_number}. Creating alert for manual review.`,
+          );
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: invoice.customer_id,
+              alert_type: 'surcharge_bypass_unknown_funding',
+              severity: 'high',
+              title: `Unknown funding on unfinalized card — invoice ${invoice.invoice_number}`,
+              description: `Card payment confirmed without /finalize and PM funding lookup failed. PI: ${paymentIntentId}. May be under-collected.`,
+              metadata: JSON.stringify({
+                stripe_payment_intent_id: paymentIntentId,
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[stripe] Unknown-funding alert insert failed: ${alertErr.message}`);
+          }
         } else {
           logger.info(
             `[stripe] Non-credit card (${pmFunding || 'unknown'}) on PI ${paymentIntentId} ` +
