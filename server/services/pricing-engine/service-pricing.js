@@ -4952,7 +4952,11 @@ function normalizeFleaComplexity(value) {
   return 'light';
 }
 
-function fleaComplexityAdjustment(complexity) {
+function fleaComplexityAdjustment(complexity, config = {}) {
+  const configured = config?.[complexity] || {};
+  if (configured.initial !== undefined || configured.followUp !== undefined || configured.followup !== undefined) {
+    return fleaAdjustment(configured.initial, configured.followUp ?? configured.followup);
+  }
   if (complexity === 'heavy') return fleaAdjustment(75, 35);
   if (complexity === 'moderate') return fleaAdjustment(35, 15);
   return fleaAdjustment(0, 0);
@@ -5062,7 +5066,7 @@ function priceFlea(property = {}) {
   const complexityCfg = cfg.landscapeComplexityAdjustments?.[landscapeComplexity] || cfg.landscapeComplexityAdjustments?.simple || {};
   const treeDensityAdj = hasPricedExteriorFleaSpray ? fleaAdjustment(treeCfg.initial, treeCfg.followUp) : fleaAdjustment(0, 0);
   const landscapeComplexityAdj = hasPricedExteriorFleaSpray ? fleaAdjustment(complexityCfg.initial, complexityCfg.followUp) : fleaAdjustment(0, 0);
-  const infestationComplexityAdj = fleaComplexityAdjustment(infestationComplexity);
+  const infestationComplexityAdj = fleaComplexityAdjustment(infestationComplexity, cfg.complexityAdjustments);
 
   const baseInitial = Math.round(Number(offer.baseInitial) || 225);
   const baseFollowUp = Math.round(Number(offer.baseFollowUp) || 0);

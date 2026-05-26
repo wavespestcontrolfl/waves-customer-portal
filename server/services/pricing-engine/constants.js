@@ -1177,6 +1177,11 @@ const SPECIALTY = {
       moderate: { initial: r(5), followUp: r(5) },
       simple: { initial: 0, followUp: 0 },
     },
+    complexityAdjustments: {
+      light: { initial: 0, followUp: 0 },
+      moderate: { initial: r(35), followUp: r(15) },
+      heavy: { initial: r(75), followUp: r(35) },
+    },
     exterior: {
       enabled: true,
       maxSqFt: 20000,

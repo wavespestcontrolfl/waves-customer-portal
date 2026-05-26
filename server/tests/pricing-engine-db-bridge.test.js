@@ -306,6 +306,34 @@ describe('pricing engine DB bridge', () => {
               { min: 5001, max: 12000, initial: 130, followUp: 90 },
             ],
           },
+          offers: [
+            {
+              offerKey: 'flea_knockdown_single',
+              displayName: 'Flea Knockdown Visit',
+              visitCount: 1,
+              warrantyType: 'none',
+              baseInitial: 225,
+              floorInitial: 185,
+              packageFloor: 185,
+              exteriorAddOnMode: 'initial_only',
+            },
+            {
+              offerKey: 'flea_elimination_two_visit',
+              displayName: 'Flea Elimination Package',
+              visitCount: 2,
+              warrantyType: 'conditional_retreat',
+              baseInitial: 225,
+              baseFollowUp: 125,
+              floorInitial: 185,
+              floorFollowUp: 95,
+              packageFloor: 280,
+              exteriorAddOnMode: 'two_visit',
+            },
+          ],
+          complexityAdjustments: {
+            moderate: { initial: 50, followUp: 20 },
+            heavy: { initial: 90, followUp: 45 },
+          },
         },
       },
       { config_key: 'onetime_urgency', data: { soon: 1.30 } },
@@ -321,6 +349,23 @@ describe('pricing engine DB bridge', () => {
       { min: 1, max: 5000, initial: 80, followUp: 50 },
       { min: 5001, max: 12000, initial: 130, followUp: 90 },
     ]);
+    expect(constants.SPECIALTY.flea.offers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        offerKey: 'flea_knockdown_single',
+        baseInitial: 240,
+        floorInitial: 200,
+        packageFloor: 200,
+      }),
+      expect.objectContaining({
+        offerKey: 'flea_elimination_two_visit',
+        baseInitial: 240,
+        baseFollowUp: 130,
+        floorInitial: 200,
+        floorFollowUp: 100,
+        packageFloor: 300,
+      }),
+    ]));
+    expect(constants.SPECIALTY.flea.complexityAdjustments.moderate).toEqual({ initial: 50, followUp: 20 });
 
     const result = priceFlea({
       services: { flea: true, fleaExterior: true },
@@ -340,6 +385,20 @@ describe('pricing engine DB bridge', () => {
     });
     expect(result.total).toBe(550);
     expect(result.recurringCustomerDiscountRate).toBe(0.20);
+
+    const knockdown = priceFlea({
+      services: { flea: { offerKey: 'flea_knockdown_single' } },
+      footprintSqFt: 2000,
+      lotSqFt: 7500,
+    });
+    expect(knockdown.total).toBe(240);
+
+    const moderate = priceFlea({
+      services: { flea: { fleaComplexity: 'moderate' } },
+      footprintSqFt: 2000,
+      lotSqFt: 7500,
+    });
+    expect(moderate.raw.total).toBe(440);
   });
 
   test('ignores legacy scalar palm pricing keys and syncs explicit protocol keys', async () => {
