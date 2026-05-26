@@ -262,6 +262,30 @@ describe("TwilioService legacy customer SMS helpers", () => {
     expect(result.sent).toBe(true);
   });
 
+  test("sendBillingReminder throws when the policy wrapper reports provider failure", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({
+        id: "cust-1",
+        first_name: "Sam",
+        phone: "+15551112222",
+        waveguard_tier: "Pro",
+      }),
+    ).mockReturnValueOnce(
+      firstQuery({ billing_reminder: true, sms_enabled: true }),
+    );
+    smsTemplates.getTemplate.mockResolvedValue("Billing reminder body");
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: false,
+      code: "PROVIDER_FAILURE",
+      reason: "Twilio rejected the message",
+    });
+
+    await expect(
+      TwilioService.sendBillingReminder("cust-1", 125, "June 1"),
+    ).rejects.toThrow("Twilio rejected the message");
+  });
+
   test("sendServiceCompletedSummary uses the canonical customer send wrapper", async () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),

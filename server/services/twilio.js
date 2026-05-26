@@ -62,7 +62,7 @@ function formatTwilioSendError(err) {
 
 async function sendCustomerPolicySms(input) {
   const { sendCustomerMessage } = require("./messaging/send-customer-message");
-  return sendCustomerMessage({
+  const result = await sendCustomerMessage({
     channel: "sms",
     audience: "customer",
     identityTrustLevel: "phone_matches_customer",
@@ -72,6 +72,10 @@ async function sendCustomerPolicySms(input) {
       ...(input.metadata || {}),
     },
   });
+  if (result && result.sent === false && result.blocked !== true) {
+    throw new Error(result.reason || result.code || "SMS provider send failed");
+  }
+  return result;
 }
 
 function getOwnerPhoneSet() {
