@@ -54,7 +54,7 @@ async function sharePublishedBlog(blog) {
   }
   if (await isPausedByAdmin()) {
     logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — paused by admin`);
-    return true;
+    return false;
   }
 
   try {
@@ -161,7 +161,7 @@ async function sharePublishedNewsletter(send) {
   }
   if (await isPausedByAdmin()) {
     logger.info(`[content-scheduler] Newsletter social share skipped for send ${send.id} — paused by admin`);
-    return true;
+    return false;
   }
 
   if (!send.auto_share_social) {
