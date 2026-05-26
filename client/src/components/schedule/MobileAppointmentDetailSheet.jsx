@@ -137,7 +137,6 @@ export default function MobileAppointmentDetailSheet({
     if (!service?.sourceEstimateId) return;
     let cancelled = false;
     adminFetch(`/admin/schedule/${service.id}/estimate-source`)
-      .then(r => r.ok ? r.json() : null)
       .then(data => { if (!cancelled && data?.linked) setEstimateSource(data); })
       .catch(() => {});
     return () => { cancelled = true; };

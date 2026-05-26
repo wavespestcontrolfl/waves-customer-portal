@@ -149,7 +149,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   const handlePointerDown = useCallback(() => {
     longPressTriggered.current = false;
     longPressTimer.current = setTimeout(() => {
-      longPressTriggered.current = true;
+      longPressTriggered.current = true; if (!onQuickAction) return;
       setShowQuickMenu(true);
     }, 500);
   }, []);
@@ -326,13 +326,13 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           </div>
         )}
       </div>
-      {showQuickMenu && (
+      {showQuickMenu && onQuickAction && (
         <QuickActionMenu
           service={service}
           isMobile
-          onReschedule={(svc) => onQuickAction?.('reschedule', svc)}
-          onCancel={(svc) => onQuickAction?.('cancel', svc)}
-          onMarkPrepaid={(svc) => onQuickAction?.('markPrepaid', svc)}
+          onReschedule={(svc) => onQuickAction('reschedule', svc)}
+          onCancel={(svc) => onQuickAction('cancel', svc)}
+          onMarkPrepaid={(svc) => onQuickAction('markPrepaid', svc)}
           onClose={() => setShowQuickMenu(false)}
         />
       )}
