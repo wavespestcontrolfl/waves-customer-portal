@@ -1882,51 +1882,48 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     const updated = [];
     const failed = [];
 
-    await db.transaction(async (trx) => {
-      for (const id of serviceIds) {
-        try {
+    for (const id of serviceIds) {
+      try {
+        await db.transaction(async (trx) => {
           const svc = await trx('scheduled_services').where({ id }).first();
-          if (!svc) { failed.push({ id, reason: 'not found' }); continue; }
+          if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
 
           switch (action) {
             case 'reassign': {
               const techId = payload?.technicianId || null;
               await trx('scheduled_services').where({ id }).update({ technician_id: techId });
-              updated.push(id);
               break;
             }
             case 'reschedule': {
               const updates = { scheduled_date: payload?.scheduledDate };
               if (payload?.windowStart) updates.window_start = payload.windowStart;
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
-              if (!updates.scheduled_date) { failed.push({ id, reason: 'scheduledDate required' }); continue; }
+              if (!updates.scheduled_date) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
               await trx('scheduled_services').where({ id }).update(updates);
-              updated.push(id);
               break;
             }
             case 'cancel': {
               await trx('scheduled_services').where({ id }).update({ status: 'cancelled' });
-              updated.push(id);
               break;
             }
             case 'mark_prepaid': {
               const amt = Number(payload?.totalAmount || 0);
-              if (amt <= 0) { failed.push({ id, reason: 'totalAmount must be > 0' }); continue; }
+              if (amt <= 0) throw Object.assign(new Error('totalAmount must be > 0'), { isValidation: true });
               await trx('scheduled_services').where({ id }).update({
                 prepaid_amount: amt,
                 prepaid_method: payload?.method || 'cash',
                 prepaid_note: payload?.note || null,
                 prepaid_at: new Date(),
               });
-              updated.push(id);
               break;
             }
           }
-        } catch (e) {
-          failed.push({ id, reason: e.message });
-        }
+        });
+        updated.push(id);
+      } catch (e) {
+        failed.push({ id, reason: e.message });
       }
-    });
+    }
 
     res.json({
       success: true,
