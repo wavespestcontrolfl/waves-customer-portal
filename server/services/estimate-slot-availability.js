@@ -612,15 +612,16 @@ function dateWithTimeSlotId(date, windowStart, techId) {
 }
 
 function dedupeSlots(slots = []) {
-  const seen = new Set();
-  const out = [];
+  const byKey = new Map();
   for (const slot of slots) {
     const key = slot?.slotId || `${slot?.date}|${slot?.windowStart}|${slot?.techId || 'unassigned'}`;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(slot);
+    if (!key) continue;
+    const existing = byKey.get(key);
+    if (!existing || slot?.routeOptimal === true || (slot?.nearbyJob && !existing.nearbyJob)) {
+      byKey.set(key, slot);
+    }
   }
-  return out;
+  return [...byKey.values()];
 }
 
 function compareCustomerFacingSlots(a, b) {
@@ -1063,6 +1064,7 @@ module.exports = {
     classifySlot,
     buildAsapCapacitySlots,
     buildAsapCapacitySlotsForTechs,
+    dedupeSlots,
     earliestBookableMinuteForDate,
     enumerateETDateStrings,
     etDateRange,
