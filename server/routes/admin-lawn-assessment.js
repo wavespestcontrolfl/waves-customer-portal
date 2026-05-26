@@ -187,6 +187,34 @@ function canShowRecommendationToCustomer(card) {
   return card.type === 'customer_education' && card.requires_human_approval === false;
 }
 
+const CUSTOMER_COPY_BLOCKLIST = [
+  /callback\s+risk/i,
+  /\bchurn\b/i,
+  /\bupsell\b/i,
+  /\bmargin\b/i,
+  /AI\s+predicted/i,
+  /artificial\s+intelligence\s+predicted/i,
+  /\bguarantee(?:d|s)?\b/i,
+  /\bwill\s+recover\b/i,
+  /\bpromise(?:d|s)?\b/i,
+  /\bdiagnosed\b/i,
+  /\bconfirmed\s+(?:fungus|disease|chinch|pest)\b/i,
+];
+
+function customerCopyViolation(copy = '') {
+  const text = String(copy || '');
+  const match = CUSTOMER_COPY_BLOCKLIST.find((pattern) => pattern.test(text));
+  if (!match) return null;
+  return `Customer-facing copy contains blocked wording: ${match.source}`;
+}
+
+function assertCustomerCopySafe(res, copy) {
+  const violation = customerCopyViolation(copy);
+  if (!violation) return true;
+  res.status(400).json({ error: 'Unsafe customer-facing copy', details: [violation] });
+  return false;
+}
+
 function recommendationEventMetadata(card = {}, extra = {}) {
   return {
     type: card.type || null,
@@ -859,7 +887,10 @@ router.patch('/snapshots/:snapshotId', async (req, res, next) => {
     const { headline, summary_customer, summary_internal, status, customer_visible: customerVisible } = req.body || {};
 
     if (headline != null) patch.headline = String(headline).slice(0, 180);
-    if (summary_customer != null) patch.summary_customer = String(summary_customer);
+    if (summary_customer != null) {
+      if (!assertCustomerCopySafe(res, summary_customer)) return;
+      patch.summary_customer = String(summary_customer);
+    }
     if (summary_internal != null) patch.summary_internal = String(summary_internal);
     if (status != null) {
       if (!allowedStatuses.has(status)) return res.status(400).json({ error: 'Invalid snapshot status' });
@@ -868,12 +899,16 @@ router.patch('/snapshots/:snapshotId', async (req, res, next) => {
     if (customerVisible != null) {
       patch.customer_visible = customerVisible === true;
       if (customerVisible === true) {
+        const effectiveSummary = patch.summary_customer ?? snapshot.summary_customer ?? '';
+        if (!assertCustomerCopySafe(res, effectiveSummary)) return;
         patch.status = 'customer_visible';
         patch.approved_by = req.technicianId;
         patch.approved_at = new Date();
       }
     }
     if (req.body?.approve === true) {
+      const effectiveSummary = patch.summary_customer ?? snapshot.summary_customer ?? '';
+      if (!assertCustomerCopySafe(res, effectiveSummary)) return;
       patch.status = 'admin_approved';
       patch.approved_by = req.technicianId;
       patch.approved_at = new Date();
@@ -919,7 +954,10 @@ router.patch('/recommendations/:recommendationId', async (req, res, next) => {
     const body = req.body || {};
 
     if (body.title != null) patch.title = String(body.title).slice(0, 180);
-    if (body.customer_copy != null) patch.customer_copy = String(body.customer_copy);
+    if (body.customer_copy != null) {
+      if (!assertCustomerCopySafe(res, body.customer_copy)) return;
+      patch.customer_copy = String(body.customer_copy);
+    }
     if (body.internal_reason != null) patch.internal_reason = String(body.internal_reason);
     if (body.priority != null) {
       if (!['low', 'medium', 'high'].includes(body.priority)) return res.status(400).json({ error: 'Invalid priority' });
@@ -931,6 +969,8 @@ router.patch('/recommendations/:recommendationId', async (req, res, next) => {
     }
 
     if (body.approve === true) {
+      const effectiveCopy = patch.customer_copy ?? card.customer_copy ?? '';
+      if (!assertCustomerCopySafe(res, effectiveCopy)) return;
       patch.status = 'approved';
       patch.approved_by = req.technicianId;
       patch.approved_at = new Date();
@@ -946,6 +986,8 @@ router.patch('/recommendations/:recommendationId', async (req, res, next) => {
     if (body.customer_visible != null) {
       const nextVisible = body.customer_visible === true;
       const candidate = { ...card, ...patch, customer_visible: nextVisible };
+      const effectiveCopy = patch.customer_copy ?? card.customer_copy ?? '';
+      if (nextVisible && !assertCustomerCopySafe(res, effectiveCopy)) return;
       if (nextVisible && !canShowRecommendationToCustomer(candidate)) {
         patch.approved_by = req.technicianId;
         patch.approved_at = new Date();
@@ -1109,6 +1151,7 @@ router._test = {
   normalizeSnapshotRow,
   normalizeRecommendationRow,
   canShowRecommendationToCustomer,
+  customerCopyViolation,
 };
 
 module.exports = router;
