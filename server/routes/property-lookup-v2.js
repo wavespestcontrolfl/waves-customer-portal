@@ -1903,13 +1903,31 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('EXCLUSION')) {
-    services.exclusion = {
-      simple: o.exclSimple || 0,
-      moderate: o.exclModerate || 0,
-      advanced: o.exclAdvanced || 0,
-      waiveInspection: !!o.exclWaiveInspection,
-      urgency, afterHours,
-    };
+    const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
+      o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
+      o.exclMeshSoftLF || o.exclMeshConcreteLF);
+    if (hasV2Fields) {
+      services.exclusion = {
+        pricingVersion: 'v2',
+        standardWireMeshPoints: o.exclStandardWireMesh || 0,
+        advancedWireMeshPoints: o.exclAdvancedWireMesh || 0,
+        standardBirdBoxes: o.exclStandardBirdBox || 0,
+        tileHighBirdBoxes: o.exclTileHighBirdBox || 0,
+        customBirdBoxes: o.exclCustomBirdBox || 0,
+        meshSoftLF: o.exclMeshSoftLF || 0,
+        meshConcreteLF: o.exclMeshConcreteLF || 0,
+        waiveInspection: !!o.exclWaiveInspection,
+        urgency, afterHours,
+      };
+    } else {
+      services.exclusion = {
+        simple: o.exclSimple || 0,
+        moderate: o.exclModerate || 0,
+        advanced: o.exclAdvanced || 0,
+        waiveInspection: !!o.exclWaiveInspection,
+        urgency, afterHours,
+      };
+    }
   }
   if (sel.has('TOPDRESS')) services.topDressing = { depth: 'eighth' };
   if (sel.has('DETHATCH')) {

@@ -727,6 +727,48 @@ const RODENT = {
     },
   },
 
+  // ── Exclusion V2 (unified mesh-point + bird-box + linear-mesh) ─
+  exclusionV2: {
+    inspectionFee: r(125),
+
+    floors: {
+      pointOnly: r(195),
+      includesLinearMesh: r(295),
+    },
+
+    wireMeshPoints: {
+      standard: r(75),
+      advancedRoofHigh: r(150),
+    },
+
+    birdBoxes: {
+      standard: r(150),
+      tileHighAccess: r(210),
+      customOversized: r(250),
+    },
+
+    linearMesh: {
+      softRatePerLF: r(14),
+      hardRatePerLF: r(22),
+    },
+
+    modifiers: {
+      tileRoof: 1.40,
+      metalRoof: 1.20,
+      twoStory: 1.30,
+      difficultAccess: 1.15,
+    },
+
+    equivalentPointWeights: {
+      standardWireMeshPoint: 1,
+      advancedWireMeshPoint: 2,
+      standardBirdBox: 2,
+      tileHighBirdBox: 3,
+      customBirdBox: 3,
+      linearMeshLFPer: 10,
+    },
+  },
+
   // ── Annual rodent guarantee (gated) ───────────────────────
   guarantee: {
     standard:  r(199),  // ≤2,500 sf, one-story, ≤8 sealed points

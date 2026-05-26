@@ -1788,9 +1788,13 @@ export default function EstimateToolViewV2({
     mosquitoStationCount: "0",
     mosquitoDunkCount: "0",
     otLawnType: "FERT",
-    exclSimple: "0",
-    exclModerate: "0",
-    exclAdvanced: "0",
+    exclStandardWireMesh: "0",
+    exclAdvancedWireMesh: "0",
+    exclStandardBirdBox: "0",
+    exclTileHighBirdBox: "0",
+    exclCustomBirdBox: "0",
+    exclMeshSoftLF: "0",
+    exclMeshConcreteLF: "0",
     exclWaive: "NO",
     rodentTrappingPlan: "standard",
     rodentTrappingEmergency: false,
@@ -2743,8 +2747,7 @@ export default function EstimateToolViewV2({
       if (form.svcFoam) selectedServices.push("FOAM");
       if (form.svcRodentTrap) selectedServices.push("RODENT_TRAP");
       if (form.svcTrapOnlyRetainer) selectedServices.push("TRAP_ONLY_RETAINER");
-      if (form.svcRodentWireMesh) selectedServices.push("RODENT_WIRE_MESH");
-      if (form.svcRodentBirdBox) selectedServices.push("RODENT_BIRD_BOX");
+      // Legacy RODENT_WIRE_MESH / RODENT_BIRD_BOX — folded into EXCLUSION V2
       if (form.svcRodentSanitation) selectedServices.push("RODENT_SANITATION");
       if (form.svcFlea || form.svcFleaExterior) selectedServices.push("FLEA");
       if (form.svcWasp) selectedServices.push("STING");
@@ -2872,9 +2875,13 @@ export default function EstimateToolViewV2({
         bedbugEquipment: form.bedbugEquipment || "INHOUSE",
         bedbugHeatScope: form.bedbugHeatScope || "ROOMS_ONLY",
         bedbugSubcontractCost: form.bedbugSubcontractCost,
-        exclSimple: parseInt(form.exclSimple, 10) || 0,
-        exclModerate: parseInt(form.exclModerate, 10) || 0,
-        exclAdvanced: parseInt(form.exclAdvanced, 10) || 0,
+        exclStandardWireMesh: parseInt(form.exclStandardWireMesh, 10) || 0,
+        exclAdvancedWireMesh: parseInt(form.exclAdvancedWireMesh, 10) || 0,
+        exclStandardBirdBox: parseInt(form.exclStandardBirdBox, 10) || 0,
+        exclTileHighBirdBox: parseInt(form.exclTileHighBirdBox, 10) || 0,
+        exclCustomBirdBox: parseInt(form.exclCustomBirdBox, 10) || 0,
+        exclMeshSoftLF: parseInt(form.exclMeshSoftLF, 10) || 0,
+        exclMeshConcreteLF: parseInt(form.exclMeshConcreteLF, 10) || 0,
         exclWaiveInspection: form.exclWaive === "YES",
         rodentTrappingPlan: form.rodentTrappingPlan || "standard",
         rodentTrappingEmergency: !!form.rodentTrappingEmergency,
@@ -5395,57 +5402,7 @@ export default function EstimateToolViewV2({
                   </div>
                 </div>
               )}
-              <CheckboxV2 k="svcRodentWireMesh" label="Wire Mesh Exclusion" />
-              {form.svcRodentWireMesh && (
-                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="grid grid-cols-3 gap-3">
-                    <FieldV2 label="Linear Feet">
-                      <InputV2 k="meshLinearFeet" type="number" min="0" />
-                    </FieldV2>
-                    <FieldV2 label="Substrate">
-                      <SelectV2
-                        k="meshSubstrate"
-                        options={[
-                          { value: "wood_soft", label: "Wood / soft - $14/LF" },
-                          { value: "concrete_masonry", label: "Concrete / masonry - $20/LF" },
-                          { value: "roofline_soffit_eave", label: "Roofline / soffit / eave - $24/LF" },
-                          { value: "tile_steep_fragile_roofline", label: "Tile / steep / fragile - quote" },
-                        ]}
-                      />
-                    </FieldV2>
-                    <FieldV2 label="Measurement">
-                      <SelectV2
-                        k="meshMeasuredOrEstimated"
-                        options={[
-                          { value: "estimated", label: "Estimated" },
-                          { value: "measured", label: "Measured" },
-                        ]}
-                      />
-                    </FieldV2>
-                  </div>
-                </div>
-              )}
-              <CheckboxV2 k="svcRodentBirdBox" label="Bird Box / Roof-Entry Cover" />
-              {form.svcRodentBirdBox && (
-                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Type">
-                      <SelectV2
-                        k="birdBoxType"
-                        options={[
-                          { value: "small_bird_box", label: "Small - $195" },
-                          { value: "standard_bird_box", label: "Standard - $225" },
-                          { value: "large_bird_box", label: "Large - $295" },
-                          { value: "oversized_complex_custom", label: "Complex/custom - $395+" },
-                        ]}
-                      />
-                    </FieldV2>
-                    <FieldV2 label="Quantity">
-                      <InputV2 k="birdBoxQuantity" type="number" min="1" />
-                    </FieldV2>
-                  </div>
-                </div>
-              )}
+              {/* Legacy Wire Mesh / Bird Box checkboxes removed — folded into Rodent Exclusion V2 above */}
               <CheckboxV2 k="svcRodentSanitation" label="Rodent Sanitation" />
               {form.svcRodentSanitation && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
@@ -5488,29 +5445,46 @@ export default function EstimateToolViewV2({
               )}
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion" />
               {form.svcExclusion && (
-                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  {" "}
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
+                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium">Wire Mesh Points</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Standard — $75/pt">
+                      <InputV2 k="exclStandardWireMesh" type="number" min="0" />
+                    </FieldV2>
+                    <FieldV2 label="Roof/High — $150/pt">
+                      <InputV2 k="exclAdvancedWireMesh" type="number" min="0" />
+                    </FieldV2>
+                  </div>
+                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium">Bird Boxes</p>
                   <div className="grid grid-cols-3 gap-3">
-                    {" "}
-                    <FieldV2 label="Simple Seals">
-                      <InputV2 k="exclSimple" type="number" min="0" />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Moderate">
-                      <InputV2 k="exclModerate" type="number" min="0" />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Advanced/Roof">
-                      <InputV2 k="exclAdvanced" type="number" min="0" />
-                    </FieldV2>{" "}
-                  </div>{" "}
-                  <FieldV2 label="Waive Inspection ($85)?">
+                    <FieldV2 label="Standard — $150">
+                      <InputV2 k="exclStandardBirdBox" type="number" min="0" />
+                    </FieldV2>
+                    <FieldV2 label="Tile/High — $210">
+                      <InputV2 k="exclTileHighBirdBox" type="number" min="0" />
+                    </FieldV2>
+                    <FieldV2 label="Custom — $250+">
+                      <InputV2 k="exclCustomBirdBox" type="number" min="0" />
+                    </FieldV2>
+                  </div>
+                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium">Linear Mesh (LF)</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Soft material — $14/LF">
+                      <InputV2 k="exclMeshSoftLF" type="number" min="0" />
+                    </FieldV2>
+                    <FieldV2 label="Hard material — $22/LF">
+                      <InputV2 k="exclMeshConcreteLF" type="number" min="0" />
+                    </FieldV2>
+                  </div>
+                  <FieldV2 label="Waive Inspection ($125)?">
                     <SelectV2
                       k="exclWaive"
                       options={[
-                        { value: "NO", label: "No — charge $85" },
+                        { value: "NO", label: "No — charge $125" },
                         { value: "YES", label: "Yes — booking work" },
                       ]}
                     />
-                  </FieldV2>{" "}
+                  </FieldV2>
                 </div>
               )}
             </div>

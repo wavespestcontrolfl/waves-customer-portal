@@ -5991,6 +5991,138 @@ function priceExclusion(options = {}) {
 }
 
 // ============================================================
+// RODENT EXCLUSION V2 (unified mesh-point + bird-box + linear-mesh)
+// ============================================================
+// Replaces legacy simple/moderate/advanced model and the separate
+// rodentWireMesh / rodentBirdBoxes line items with a single unified
+// calculation. Per-item difficulty is captured at input time — no
+// blanket tile/roof multiplier applied to the whole property.
+function priceRodentExclusionV2(options = {}) {
+  const {
+    standardWireMeshPoints = 0,
+    advancedWireMeshPoints = 0,
+    standardBirdBoxes = 0,
+    tileHighBirdBoxes = 0,
+    customBirdBoxes = 0,
+    meshSoftLF = 0,
+    meshConcreteLF = 0,
+    waiveInspection = false,
+    hasServiceOptIn = false,
+    approvedTotalForWaiver = 0,
+    urgency = 'ROUTINE',
+    afterHours = false,
+  } = options;
+
+  const cfg = RODENT.exclusionV2;
+  const ins = RODENT.inspection || { fee: cfg.inspectionFee, waiveIfApprovedTotalOver: 995 };
+
+  const stdPts = Math.max(0, Number(standardWireMeshPoints) || 0);
+  const advPts = Math.max(0, Number(advancedWireMeshPoints) || 0);
+  const stdBoxes = Math.max(0, Number(standardBirdBoxes) || 0);
+  const tileBoxes = Math.max(0, Number(tileHighBirdBoxes) || 0);
+  const custBoxes = Math.max(0, Number(customBirdBoxes) || 0);
+  const softLF = Math.max(0, Number(meshSoftLF) || 0);
+  const hardLF = Math.max(0, Number(meshConcreteLF) || 0);
+
+  const wireMeshPointSubtotal =
+    stdPts * cfg.wireMeshPoints.standard +
+    advPts * cfg.wireMeshPoints.advancedRoofHigh;
+
+  const birdBoxSubtotal =
+    stdBoxes * cfg.birdBoxes.standard +
+    tileBoxes * cfg.birdBoxes.tileHighAccess +
+    custBoxes * cfg.birdBoxes.customOversized;
+
+  const linearMeshSubtotal =
+    softLF * cfg.linearMesh.softRatePerLF +
+    hardLF * cfg.linearMesh.hardRatePerLF;
+
+  const totalLinearMeshLF = softLF + hardLF;
+
+  const rawInstall =
+    wireMeshPointSubtotal +
+    birdBoxSubtotal +
+    linearMeshSubtotal;
+
+  const floor = totalLinearMeshLF > 0
+    ? cfg.floors.includesLinearMesh
+    : cfg.floors.pointOnly;
+
+  const installPrice = Math.max(floor, Math.round(rawInstall));
+  const installWithUrgency = applyUrgency(installPrice, urgency, afterHours);
+
+  const inspectionWaived =
+    waiveInspection ||
+    hasServiceOptIn ||
+    (approvedTotalForWaiver >= ins.waiveIfApprovedTotalOver);
+  const inspectionFee = inspectionWaived ? 0 : ins.fee;
+
+  const total = installWithUrgency + inspectionFee;
+
+  const w = cfg.equivalentPointWeights;
+  const equivalentExclusionPoints =
+    stdPts * w.standardWireMeshPoint +
+    advPts * w.advancedWireMeshPoint +
+    stdBoxes * w.standardBirdBox +
+    tileBoxes * w.tileHighBirdBox +
+    custBoxes * w.customBirdBox +
+    Math.ceil(totalLinearMeshLF / w.linearMeshLFPer);
+
+  const totalItems = stdPts + advPts + stdBoxes + tileBoxes + custBoxes;
+
+  const parts = [];
+  if (stdPts + advPts > 0)
+    parts.push(`${stdPts + advPts} wire-mesh point${stdPts + advPts !== 1 ? 's' : ''}`);
+  if (stdBoxes + tileBoxes + custBoxes > 0)
+    parts.push(`${stdBoxes + tileBoxes + custBoxes} bird-box exclusion${stdBoxes + tileBoxes + custBoxes !== 1 ? 's' : ''}`);
+  if (totalLinearMeshLF > 0)
+    parts.push(`${totalLinearMeshLF} LF mesh`);
+  const inspectDetail = inspectionFee > 0
+    ? ` + $${inspectionFee} inspect`
+    : (inspectionWaived ? ' (inspect waived)' : '');
+  const detail = parts.length > 0
+    ? `${parts.join(', ')}${inspectDetail}`
+    : `Rodent Exclusion${inspectDetail}`;
+
+  return {
+    service: 'rodent_exclusion',
+    name: 'Rodent Exclusion',
+    pricingVersion: 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX',
+    price: total,
+    detail,
+
+    quantities: {
+      standardWireMeshPoints: stdPts,
+      advancedWireMeshPoints: advPts,
+      standardBirdBoxes: stdBoxes,
+      tileHighBirdBoxes: tileBoxes,
+      customBirdBoxes: custBoxes,
+      meshSoftLF: softLF,
+      meshConcreteLF: hardLF,
+      totalLinearMeshLF,
+    },
+
+    subtotals: {
+      wireMeshPointSubtotal,
+      birdBoxSubtotal,
+      linearMeshSubtotal,
+      rawInstall,
+    },
+
+    floor,
+    floorApplied: installPrice > rawInstall,
+    inspectionFee,
+    inspectionWaived,
+    installPrice: installWithUrgency,
+    total,
+
+    equivalentExclusionPoints,
+    warrantyEligible: true,
+    exclusionCompleted: total > 0,
+  };
+}
+
+// ============================================================
 // RODENT INSPECTION (standalone diagnostic visit)
 // ============================================================
 // Creditable toward exclusion or full remediation when approved within 14
@@ -6019,6 +6151,8 @@ function priceRodentGuarantee(options = {}) {
     stories = 1,
     roofType = 'shingle',
     sealedPoints = 0,
+    equivalentExclusionPoints = null,
+    totalLinearMeshLF = 0,
     eligibility = {},
   } = options;
 
@@ -6029,21 +6163,22 @@ function priceRodentGuarantee(options = {}) {
   const missing = required.filter(flag => !eligibility[flag]);
   const eligible = missing.length === 0;
 
-  // Tier selection by complexity:
-  //   estate  — >4,000 sf or >15 sealed points
-  //   complex — 2,501–4,000 sf, two-story, tile roof, or 9–15 sealed points
-  //   standard — everything else
+  // V2 callers pass equivalentExclusionPoints (weighted: bird boxes count
+  // heavier); V1 callers pass raw sealedPoints. Use whichever is available.
+  const effectivePoints = Number(equivalentExclusionPoints ?? sealedPoints) || 0;
+  const meshLF = Number(totalLinearMeshLF) || 0;
   const storiesNum = Number(stories) || 1;
   const homeSqFtNum = Number(homeSqFt) || 0;
-  const sealedPointsNum = Number(sealedPoints) || 0;
+
   let tier = 'standard';
-  if (homeSqFtNum > 4000 || sealedPointsNum > 15) {
+  if (homeSqFtNum > 4000 || effectivePoints > 15 || meshLF > 150) {
     tier = 'estate';
   } else if (
     homeSqFtNum > 2500 ||
     storiesNum >= 2 ||
     roofType === 'tile' ||
-    sealedPointsNum >= 9
+    effectivePoints >= 9 ||
+    (meshLF > 75 && meshLF <= 150)
   ) {
     tier = 'complex';
   }
@@ -6057,6 +6192,7 @@ function priceRodentGuarantee(options = {}) {
     tier,
     eligible,
     eligibilityMissing: missing,
+    effectivePoints,
     detail: eligible
       ? `$${price}/yr — 12-month re-entry warranty (${tier} tier)`
       : `INELIGIBLE — missing: ${missing.join(', ')}`,
@@ -6320,7 +6456,7 @@ module.exports = {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
-  pricePlugging, priceFoamDrill, priceWasp, priceStingingInsect, priceExclusion, priceRodentGuarantee,
+  pricePlugging, priceFoamDrill, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,

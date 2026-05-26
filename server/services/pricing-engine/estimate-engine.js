@@ -16,7 +16,7 @@ const {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
-  pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
+  pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
@@ -894,33 +894,53 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control')) {
-    // Auto-waive inspection fee when any rodent service is opted in
-    // alongside exclusion (trapping or sanitation). Bait stations are fully
-    // excluded from rodent remediation benefits and do not waive inspection.
     const hasRodentServiceOptIn = !!(
       services.rodentTrapping || services.sanitation
     );
-    const result = priceExclusion({
-      simple: services.exclusion.simple || 0,
-      moderate: services.exclusion.moderate || 0,
-      advanced: services.exclusion.advanced || 0,
-      specialty: services.exclusion.specialty || 0,
-      specialtyCustomTotal: services.exclusion.specialtyCustomTotal || 0,
-      homeSqFt: services.exclusion.homeSqFt || property.footprint || 2000,
-      stories: services.exclusion.stories || property.stories || 1,
-      roofType: services.exclusion.roofType || property.roofType || 'shingle',
-      constructionType: services.exclusion.constructionType
-        || property.constructionMaterial || 'block',
-      waiveInspection: services.exclusion.waiveInspection || false,
-      hasServiceOptIn: hasRodentServiceOptIn,
-      approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
-      urgency: services.exclusion.urgency || 'ROUTINE',
-      afterHours: services.exclusion.afterHours || false,
-    });
-    lineItems.push(result);
+    const isV2 = services.exclusion.pricingVersion === 'v2';
+    if (isV2) {
+      const result = priceRodentExclusionV2({
+        standardWireMeshPoints: services.exclusion.standardWireMeshPoints || 0,
+        advancedWireMeshPoints: services.exclusion.advancedWireMeshPoints || 0,
+        standardBirdBoxes: services.exclusion.standardBirdBoxes || 0,
+        tileHighBirdBoxes: services.exclusion.tileHighBirdBoxes || 0,
+        customBirdBoxes: services.exclusion.customBirdBoxes || 0,
+        meshSoftLF: services.exclusion.meshSoftLF || 0,
+        meshConcreteLF: services.exclusion.meshConcreteLF || 0,
+        waiveInspection: services.exclusion.waiveInspection || false,
+        hasServiceOptIn: hasRodentServiceOptIn,
+        approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
+        urgency: services.exclusion.urgency || 'ROUTINE',
+        afterHours: services.exclusion.afterHours || false,
+      });
+      lineItems.push(result);
+    } else {
+      const result = priceExclusion({
+        simple: services.exclusion.simple || 0,
+        moderate: services.exclusion.moderate || 0,
+        advanced: services.exclusion.advanced || 0,
+        specialty: services.exclusion.specialty || 0,
+        specialtyCustomTotal: services.exclusion.specialtyCustomTotal || 0,
+        homeSqFt: services.exclusion.homeSqFt || property.footprint || 2000,
+        stories: services.exclusion.stories || property.stories || 1,
+        roofType: services.exclusion.roofType || property.roofType || 'shingle',
+        constructionType: services.exclusion.constructionType
+          || property.constructionMaterial || 'block',
+        waiveInspection: services.exclusion.waiveInspection || false,
+        hasServiceOptIn: hasRodentServiceOptIn,
+        approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
+        urgency: services.exclusion.urgency || 'ROUTINE',
+        afterHours: services.exclusion.afterHours || false,
+      });
+      lineItems.push(result);
+    }
   }
 
-  if (services.rodentWireMesh && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control')) {
+  // Legacy separate wire mesh / bird box line items — skipped when V2
+  // exclusion is active (V2 folds these into the unified calculation).
+  const exclusionIsV2 = services.exclusion?.pricingVersion === 'v2';
+
+  if (services.rodentWireMesh && !exclusionIsV2 && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control')) {
     const opts = typeof services.rodentWireMesh === 'object' ? services.rodentWireMesh : {};
     lineItems.push(priceRodentWireMesh({
       meshLinearFeet: opts.meshLinearFeet,
@@ -932,7 +952,7 @@ function generateEstimate(input) {
     }));
   }
 
-  if (services.rodentBirdBoxes && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control')) {
+  if (services.rodentBirdBoxes && !exclusionIsV2 && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control')) {
     const opts = typeof services.rodentBirdBoxes === 'object' ? services.rodentBirdBoxes : {};
     const result = priceRodentBirdBoxes({
       birdBoxType: opts.birdBoxType,
@@ -1030,18 +1050,25 @@ function generateEstimate(input) {
   // intent by setting services.rodentGuarantee = { eligibility: {...} }.
   if (services.rodentGuarantee && !useCommercialManualQuote(services.rodentGuarantee, 'pest_control')) {
     const opts = typeof services.rodentGuarantee === 'object' ? services.rodentGuarantee : {};
-    const result = priceRodentGuarantee({
+    const exclusionResult = lineItems.find(li => li.service === 'rodent_exclusion' || li.service === 'exclusion');
+    const guaranteeOpts = {
       homeSqFt: opts.homeSqFt || property.footprint || 2000,
       stories: opts.stories || property.stories || 1,
       roofType: opts.roofType || property.roofType || 'shingle',
-      sealedPoints: opts.sealedPoints || (
+      eligibility: opts.eligibility || {},
+    };
+    if (exclusionResult?.pricingVersion === 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX') {
+      guaranteeOpts.equivalentExclusionPoints = exclusionResult.equivalentExclusionPoints || 0;
+      guaranteeOpts.totalLinearMeshLF = exclusionResult.quantities?.totalLinearMeshLF || 0;
+    } else {
+      guaranteeOpts.sealedPoints = opts.sealedPoints || (
         (services.exclusion?.simple || 0)
         + (services.exclusion?.moderate || 0)
         + (services.exclusion?.advanced || 0)
         + (services.exclusion?.specialty || 0)
-      ),
-      eligibility: opts.eligibility || {},
-    });
+      );
+    }
+    const result = priceRodentGuarantee(guaranteeOpts);
     if (result.eligible) lineItems.push(result);
   }
 
