@@ -55,6 +55,27 @@ function isStaleAutoSendClaim(autoSend = {}, now = new Date(), staleClaimMinutes
   return now.getTime() - claimedTime >= Number(staleClaimMinutes || DEFAULT_STALE_CLAIM_MINUTES) * 60 * 1000;
 }
 
+function staleAutoSendRecoveryDecision(autoSend = {}, estimate = {}, now = new Date()) {
+  const staleSendMethod = autoSend.sendMethod || autoSend.send_method || estimate.send_method || 'both';
+  const includedSms = staleSendMethod === 'sms' || staleSendMethod === 'both';
+  return {
+    includedSms,
+    patch: {
+      claimedAt: null,
+      claimed_at: null,
+      recoveredAt: now.toISOString(),
+      recoveredReason: 'stale_claim',
+      ...(includedSms
+        ? {
+            blockedAt: now.toISOString(),
+            blockedReason: 'stale_claim_sms_idempotency_unknown',
+            result: 'blocked',
+          }
+        : {}),
+    },
+  };
+}
+
 function mergeAutoSendMetadata(estimateData, patch) {
   const data = parseJsonObject(estimateData);
   const automation = parseJsonObject(data.automation);
@@ -182,18 +203,14 @@ async function recoverStaleLeadEstimateAutoSendClaims({
     .limit(limit)
     .select('*');
 
-  let recovered = 0;
+  const result = { recovered: 0, blocked: 0 };
   for (const estimate of possibleStaleClaims) {
     const summary = leadAutomationSummary(estimate.estimate_data || estimate.estimateData);
     const claimedAt = summary.autoSend.claimedAt || summary.autoSend.claimed_at;
     if (!isStaleAutoSendClaim(summary.autoSend, now, staleClaimMinutes)) continue;
 
-    const nextData = mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, {
-      claimedAt: null,
-      claimed_at: null,
-      recoveredAt: now.toISOString(),
-      recoveredReason: 'stale_claim',
-    });
+    const recovery = staleAutoSendRecoveryDecision(summary.autoSend, estimate, now);
+    const nextData = mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, recovery.patch);
     const updated = await database('estimates')
       .where({ id: estimate.id, source: 'lead_webhook', status: 'sending' })
       .whereRaw(`(
@@ -210,9 +227,10 @@ async function recoverStaleLeadEstimateAutoSendClaims({
         estimate_data: JSON.stringify(nextData),
         updated_at: database.fn.now(),
       });
-    recovered += Number(updated || 0);
+    if (recovery.includedSms) result.blocked += Number(updated || 0);
+    else result.recovered += Number(updated || 0);
   }
-  return recovered;
+  return result;
 }
 
 async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(), sendMethod = 'both' } = {}) {
@@ -267,7 +285,7 @@ async function processLeadEstimateAutoSendBatch({
   config = leadEstimateAutoSendConfigFromEnv(),
   sendEstimateNow,
 } = {}) {
-  const recovered = await recoverStaleLeadEstimateAutoSendClaims({
+  const staleClaims = await recoverStaleLeadEstimateAutoSendClaims({
     database,
     now,
     staleClaimMinutes: config.staleClaimMinutes,
@@ -287,7 +305,8 @@ async function processLeadEstimateAutoSendBatch({
     blocked: 0,
     failed: 0,
     skipped: 0,
-    recovered,
+    recovered: staleClaims.recovered,
+    staleBlocked: staleClaims.blocked,
   };
 
   for (const estimate of candidates) {
@@ -362,6 +381,7 @@ module.exports = {
   DEFAULT_STALE_CLAIM_MINUTES,
   claimLeadEstimateAutoSend,
   isStaleAutoSendClaim,
+  staleAutoSendRecoveryDecision,
   leadEstimateAutoSendConfigFromEnv,
   leadEstimateAutoSendEligibility,
   leadAutomationSummary,

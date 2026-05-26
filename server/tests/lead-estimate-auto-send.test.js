@@ -5,6 +5,7 @@ const {
   leadEstimateAutoSendConfigFromEnv,
   leadEstimateAutoSendEligibility,
   mergeAutoSendMetadata,
+  staleAutoSendRecoveryDecision,
 } = require('../services/lead-estimate-auto-send');
 
 function generatedEstimate(overrides = {}) {
@@ -163,6 +164,33 @@ describe('lead estimate auto-send policy', () => {
     }), { now, staleClaimMinutes: 30 })).toEqual({
       eligible: true,
       reason: null,
+    });
+  });
+
+  test('blocks stale SMS claims instead of auto-retrying uncertain deliveries', () => {
+    const now = new Date('2026-05-26T12:00:00.000Z');
+
+    expect(staleAutoSendRecoveryDecision({ sendMethod: 'email' }, {}, now)).toEqual({
+      includedSms: false,
+      patch: {
+        claimedAt: null,
+        claimed_at: null,
+        recoveredAt: '2026-05-26T12:00:00.000Z',
+        recoveredReason: 'stale_claim',
+      },
+    });
+
+    expect(staleAutoSendRecoveryDecision({ sendMethod: 'both' }, {}, now)).toEqual({
+      includedSms: true,
+      patch: {
+        claimedAt: null,
+        claimed_at: null,
+        recoveredAt: '2026-05-26T12:00:00.000Z',
+        recoveredReason: 'stale_claim',
+        blockedAt: '2026-05-26T12:00:00.000Z',
+        blockedReason: 'stale_claim_sms_idempotency_unknown',
+        result: 'blocked',
+      },
     });
   });
 
