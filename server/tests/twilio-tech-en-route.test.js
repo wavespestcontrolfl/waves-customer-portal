@@ -366,4 +366,17 @@ describe("TwilioService legacy customer SMS helpers", () => {
     );
     expect(result.sent).toBe(true);
   });
+
+  test("sendSeasonalAlert fails before dispatch when the seasonal opt-in is missing", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ seasonal_tips: false, sms_enabled: true }),
+    );
+
+    const result = await TwilioService.sendSeasonalAlert("cust-1", "Mosquitoes", "Check standing water.");
+
+    expect(result).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });

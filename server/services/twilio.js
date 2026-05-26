@@ -61,6 +61,9 @@ function formatTwilioSendError(err) {
 }
 
 async function sendCustomerPolicySms(input) {
+  if (input.purpose === "marketing" && input.consentBasis?.status !== "opted_in") {
+    throw new Error("Marketing SMS requires explicit opted-in consent basis");
+  }
   const { sendCustomerMessage } = require("./messaging/send-customer-message");
   const result = await sendCustomerMessage({
     channel: "sms",
