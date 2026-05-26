@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const crypto = require('crypto');
 const logger = require('./logger');
 const { triggerNotification } = require('./notification-triggers');
 
@@ -20,6 +21,21 @@ function maskSid(sid) {
   const value = String(sid || '');
   if (!value) return 'none';
   return value.length <= 8 ? `${value.slice(0, 2)}...` : `${value.slice(0, 2)}...${value.slice(-6)}`;
+}
+
+function sanitizeFailureText(value) {
+  return String(value || '')
+    .replace(/https:\/\/lookups\.twilio\.com\/v2\/PhoneNumbers\/[^?\s)]+/gi, 'https://lookups.twilio.com/v2/PhoneNumbers/[phone]')
+    .replace(/%2B\d{10,15}/gi, '[phone]')
+    .replace(/\+\d{10,15}\b/g, '[phone]')
+    .replace(/\b\d{10,15}\b/g, '[phone]')
+    .replace(/\b[A-Z]{2}[a-f0-9]{32}\b/gi, (sid) => maskSid(sid))
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]');
+}
+
+function publicDedupeKey(rawKey) {
+  const digest = crypto.createHash('sha256').update(String(rawKey || '')).digest('hex').slice(0, 16);
+  return `twilio:${digest}`;
 }
 
 function isFailureStatus(status) {
@@ -56,7 +72,7 @@ async function alertTwilioFailure(input = {}) {
   } = input;
 
   const normalizedStatus = String(status || 'failed').toLowerCase();
-  const dedupeKey = input.dedupeKey || [
+  const rawDedupeKey = input.dedupeKey || [
     'twilio',
     channel || 'unknown',
     direction || 'unknown',
@@ -65,6 +81,8 @@ async function alertTwilioFailure(input = {}) {
     normalizedStatus,
     errorCode || 'no-code',
   ].join(':');
+  const dedupeKey = publicDedupeKey(rawDedupeKey);
+  const safeErrorMessage = sanitizeFailureText(errorMessage);
 
   if (await alreadyAlerted(dedupeKey)) return { skipped: true, reason: 'duplicate' };
 
@@ -79,10 +97,9 @@ async function alertTwilioFailure(input = {}) {
     direction,
     phase,
     status: normalizedStatus,
-    sid,
     sidMasked: maskSid(sid),
     errorCode,
-    errorMessage,
+    errorMessage: safeErrorMessage,
     fromMasked: maskPhone(from),
     toMasked: maskPhone(to),
     link,
@@ -95,4 +112,6 @@ module.exports = {
   isFailureStatus,
   maskSid,
   maskPhone,
+  publicDedupeKey,
+  sanitizeFailureText,
 };
