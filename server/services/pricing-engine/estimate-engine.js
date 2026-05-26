@@ -807,9 +807,17 @@ function generateEstimate(input) {
       ...property,
       services: {
         ...(property.services || {}),
-        flea: true,
+        flea: {
+          offerKey: fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? services.fleaOfferKey ?? input.fleaOfferKey,
+          fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
+          fleaComplexity: fleaOptions.fleaComplexity ?? services.fleaComplexity ?? input.fleaComplexity,
+          exteriorSourceSuspected: fleaOptions.exteriorSourceSuspected ?? services.fleaExteriorSourceSuspected ?? input.fleaExteriorSourceSuspected,
+        },
         fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
       },
+      fleaOfferKey: fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? services.fleaOfferKey ?? input.fleaOfferKey,
+      fleaComplexity: fleaOptions.fleaComplexity ?? services.fleaComplexity ?? input.fleaComplexity,
+      fleaExteriorSourceSuspected: fleaOptions.exteriorSourceSuspected ?? services.fleaExteriorSourceSuspected ?? input.fleaExteriorSourceSuspected,
       fleaExteriorAreaSqFt: fleaOptions.fleaExteriorAreaSqFt ?? services.fleaExteriorAreaSqFt ?? input.fleaExteriorAreaSqFt,
       fleaExteriorAreaSource: fleaOptions.fleaExteriorAreaSource ?? services.fleaExteriorAreaSource ?? input.fleaExteriorAreaSource,
       fleaExteriorZones: fleaOptions.fleaExteriorZones ?? services.fleaExteriorZones ?? input.fleaExteriorZones,

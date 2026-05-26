@@ -1814,12 +1814,15 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('WDO')) services.wdo = {};
   if (sel.has('FLEA')) {
     services.flea = {
+      offerKey: o.fleaOfferKey || o.fleaOffer || o.offerKey || 'flea_elimination_two_visit',
       urgency,
       afterHours,
       fleaExterior: !!o.fleaExterior,
       fleaExteriorAreaSqFt: o.fleaExteriorAreaSqFt,
       fleaExteriorAreaSource: o.fleaExteriorAreaSource,
       fleaExteriorZones: Array.isArray(o.fleaExteriorZones) ? o.fleaExteriorZones : [],
+      fleaComplexity: o.fleaComplexity || 'light',
+      exteriorSourceSuspected: !!o.fleaExteriorSourceSuspected,
     };
   }
   // ROACH: manual specialty (full $450+ program) vs recurring auto-fire.

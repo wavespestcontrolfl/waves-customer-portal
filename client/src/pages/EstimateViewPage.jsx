@@ -597,8 +597,25 @@ function isPreSlabBreakdownItem(item = {}) {
     && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
 }
 
+function isFleaBreakdownItem(item = {}) {
+  const raw = [item.service, item.offerKey, item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('flea');
+}
+
 function oneTimePriceCopy(breakdown = {}) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+  const fleaItems = items.filter(isFleaBreakdownItem);
+  if (fleaItems.length > 0) {
+    const hasEliminationPackage = fleaItems.some((item) => item.offerKey === 'flea_elimination_two_visit' || Number(item.visits) === 2);
+    if (hasEliminationPackage) {
+      return 'Includes two interior treatments scheduled about 10-21 days apart. Retreat guarantee applies to treated areas when prep, pet-source, and follow-up requirements are met.';
+    }
+    return 'One interior flea treatment for active flea pressure. No retreat warranty included.';
+  }
   const preSlabItems = items.filter(isPreSlabBreakdownItem);
   if (preSlabItems.length > 0) {
     const hasExtendedWarranty = preSlabItems.some((item) => {

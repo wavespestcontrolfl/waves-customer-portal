@@ -14,11 +14,33 @@ describe('flea treatment pricing', () => {
 
     expect(result).toMatchObject({
       service: 'flea_package',
+      offerKey: 'flea_elimination_two_visit',
+      billingCadence: 'one_time',
+      warrantyType: 'conditional_retreat',
       initial: 225,
       followUp: 125,
       total: 350,
       visits: 2,
       requiresCustomQuote: false,
+    });
+  });
+
+  test('knockdown offer prices a single visit with no retreat warranty', () => {
+    const result = priceFlea({
+      services: { flea: { offerKey: 'flea_knockdown_single' } },
+      footprintSqFt: 2000,
+      lotSqFt: 7500,
+    });
+
+    expect(result).toMatchObject({
+      service: 'flea_knockdown_single',
+      offerKey: 'flea_knockdown_single',
+      visits: 1,
+      initial: 225,
+      followUp: 0,
+      total: 225,
+      warrantyType: 'none',
+      warrantyLabel: 'No retreat warranty included',
     });
   });
 
@@ -96,7 +118,7 @@ describe('flea treatment pricing', () => {
     expect(result.warning).toContain('confirmed treatable lawn area');
   });
 
-  test('urgency and recurring-customer modifiers apply after exterior add-on', () => {
+  test('urgency premium is not reduced by recurring-customer discount', () => {
     const result = priceFlea({
       services: { flea: true, fleaExterior: true },
       footprintSqFt: 2000,
@@ -111,8 +133,21 @@ describe('flea treatment pricing', () => {
     expect(result.modifiers).toEqual({
       urgencyMultiplier: 1.25,
       recurringCustomerMultiplier: 0.85,
+      rushPremium: 126,
     });
-    expect(result.total).toBe(Math.round(505 * 1.25 * 0.85));
+    expect(result.total).toBe(555);
+  });
+
+  test('package floor applies after recurring-customer discount', () => {
+    const result = priceFlea({
+      services: { flea: true },
+      footprintSqFt: 800,
+      lotSqFt: 7500,
+      isRecurringCustomer: true,
+    });
+
+    expect(result.raw.total).toBe(310);
+    expect(result.total).toBe(280);
   });
 
   test('generateEstimate keeps server flea total authoritative without a second discount pass', () => {

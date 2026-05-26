@@ -148,7 +148,7 @@ describe('estimate v2 service toggle adapter', () => {
     expect(mapped.hasOneTime).toBe(true);
     expect(mapped.oneTime.specItems).toContainEqual(expect.objectContaining({
       service: 'flea_package',
-      name: 'Flea Treatment Package — 2 visits',
+      name: 'Flea Elimination Package — 2 visits',
       price: 505,
       exteriorDetail: 'Exterior flea spray — 5,000 sf',
       fleaExteriorZones: ['PET_RESTING_AREA'],

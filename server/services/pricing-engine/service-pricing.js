@@ -5164,10 +5164,88 @@ function fleaAdjustment(initial = 0, followUp = 0) {
   return { initial: Math.round(Number(initial) || 0), followUp: Math.round(Number(followUp) || 0) };
 }
 
+function normalizeFleaOfferKey(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (['flea_knockdown_single', 'knockdown', 'single', 'one_visit'].includes(raw)) return 'flea_knockdown_single';
+  return 'flea_elimination_two_visit';
+}
+
+function normalizeFleaComplexity(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (['moderate', 'heavy'].includes(raw)) return raw;
+  return 'light';
+}
+
+function fleaComplexityAdjustment(complexity, config = {}) {
+  const configured = config?.[complexity] || {};
+  if (configured.initial !== undefined || configured.followUp !== undefined || configured.followup !== undefined) {
+    return fleaAdjustment(configured.initial, configured.followUp ?? configured.followup);
+  }
+  if (complexity === 'heavy') return fleaAdjustment(75, 35);
+  if (complexity === 'moderate') return fleaAdjustment(35, 15);
+  return fleaAdjustment(0, 0);
+}
+
+function fleaOfferConfig(cfg, offerKey) {
+  const configured = Array.isArray(cfg.offers)
+    ? cfg.offers.find(offer => offer?.offerKey === offerKey || offer?.offer_key === offerKey)
+    : null;
+  const defaults = offerKey === 'flea_knockdown_single'
+    ? {
+      service: 'flea_knockdown_single',
+      displayName: 'Flea Knockdown Visit',
+      visitCount: 1,
+      warrantyType: 'none',
+      baseInitial: 225,
+      floorInitial: 185,
+      baseFollowUp: 0,
+      floorFollowUp: 0,
+      packageFloor: 185,
+      exteriorAddOnMode: 'initial_only',
+    }
+    : {
+      service: 'flea_package',
+      displayName: 'Flea Elimination Package',
+      visitCount: 2,
+      warrantyType: 'conditional_retreat',
+      baseInitial: cfg.initial?.base ?? 225,
+      floorInitial: cfg.initial?.floor ?? 185,
+      baseFollowUp: cfg.followUp?.base ?? 125,
+      floorFollowUp: cfg.followUp?.floor ?? 95,
+      packageFloor: (cfg.initial?.floor ?? 185) + (cfg.followUp?.floor ?? 95),
+      guaranteeWindowDaysAfterFollowUp: 30,
+      maxIncludedRetreats: 1,
+      exteriorAddOnMode: 'two_visit',
+    };
+  if (!configured) return defaults;
+  return {
+    ...defaults,
+    ...configured,
+    service: configured.service || configured.serviceKey || configured.service_key || defaults.service,
+    displayName: configured.displayName || configured.display_name || defaults.displayName,
+    visitCount: Number(configured.visitCount ?? configured.visit_count ?? defaults.visitCount) || defaults.visitCount,
+    warrantyType: configured.warrantyType || configured.warranty_type || defaults.warrantyType,
+    baseInitial: configured.baseInitial ?? configured.base_initial ?? defaults.baseInitial,
+    floorInitial: configured.floorInitial ?? configured.floor_initial ?? defaults.floorInitial,
+    baseFollowUp: configured.baseFollowUp ?? configured.base_follow_up ?? defaults.baseFollowUp,
+    floorFollowUp: configured.floorFollowUp ?? configured.floor_follow_up ?? defaults.floorFollowUp,
+    packageFloor: configured.packageFloor ?? configured.package_floor ?? defaults.packageFloor,
+    exteriorAddOnMode: configured.exteriorAddOnMode || configured.exterior_add_on_mode || defaults.exteriorAddOnMode,
+  };
+}
+
 function priceFlea(property = {}) {
   const cfg = SPECIALTY.flea;
   const services = property.services || {};
   const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
+  const offerKey = normalizeFleaOfferKey(
+    property.fleaOfferKey
+    ?? property.offerKey
+    ?? services.fleaOfferKey
+    ?? fleaOptions.offerKey
+    ?? fleaOptions.fleaOfferKey
+  );
+  const offer = fleaOfferConfig(cfg, offerKey);
   const footprintResolution = resolvePestFootprint({
     ...property,
     homeSqFt: property.homeSqFt
@@ -5179,6 +5257,19 @@ function priceFlea(property = {}) {
   const features = property.features || {};
   const treeDensity = String(property.treeDensity ?? features.trees ?? 'light').toLowerCase();
   const landscapeComplexity = String(property.landscapeComplexity ?? features.complexity ?? 'simple').toLowerCase();
+  const infestationComplexity = normalizeFleaComplexity(
+    property.fleaComplexity
+    ?? property.infestationComplexity
+    ?? services.fleaComplexity
+    ?? fleaOptions.complexity
+    ?? fleaOptions.fleaComplexity
+  );
+  const exteriorSourceSuspected = isTruthyPricingFlag(
+    property.fleaExteriorSourceSuspected
+    ?? property.exteriorSourceSuspected
+    ?? services.fleaExteriorSourceSuspected
+    ?? fleaOptions.exteriorSourceSuspected
+  );
   const exteriorSelected = !!(property.fleaExterior || services.fleaExterior || fleaOptions.fleaExterior);
   const exteriorArea = Number(property.fleaExteriorAreaSqFt ?? services.fleaExteriorAreaSqFt ?? fleaOptions.fleaExteriorAreaSqFt ?? 0) || 0;
   const exteriorSource = normalizeFleaAreaSource(
@@ -5194,19 +5285,23 @@ function priceFlea(property = {}) {
     interpolate(footprint, cfg.footprintAdjustments?.initial || [], 'at', 'adj'),
     interpolate(footprint, cfg.footprintAdjustments?.followUp || [], 'at', 'adj')
   );
-  const lotAdj = hasPricedExteriorFleaSpray ? fleaAdjustment(0, 0) : fleaAdjustment(
-    interpolate(lotSqFt, cfg.lotAdjustments?.initial || [], 'at', 'adj'),
-    interpolate(lotSqFt, cfg.lotAdjustments?.followUp || [], 'at', 'adj')
-  );
+  const lotAdj = fleaAdjustment(0, 0);
   const treeCfg = cfg.treeDensityAdjustments?.[treeDensity] || cfg.treeDensityAdjustments?.light || {};
   const complexityCfg = cfg.landscapeComplexityAdjustments?.[landscapeComplexity] || cfg.landscapeComplexityAdjustments?.simple || {};
-  const treeDensityAdj = fleaAdjustment(treeCfg.initial, treeCfg.followUp);
-  const landscapeComplexityAdj = fleaAdjustment(complexityCfg.initial, complexityCfg.followUp);
+  const treeDensityAdj = hasPricedExteriorFleaSpray ? fleaAdjustment(treeCfg.initial, treeCfg.followUp) : fleaAdjustment(0, 0);
+  const landscapeComplexityAdj = hasPricedExteriorFleaSpray ? fleaAdjustment(complexityCfg.initial, complexityCfg.followUp) : fleaAdjustment(0, 0);
+  const infestationComplexityAdj = fleaComplexityAdjustment(infestationComplexity, cfg.complexityAdjustments);
 
-  const baseInitial = Math.round(Number(cfg.initial.base) || 225);
-  const baseFollowUp = Math.round(Number(cfg.followUp.base) || 125);
-  const rawInitial = Math.max(Math.round(Number(cfg.initial.floor) || 185), baseInitial + footprintAdj.initial + lotAdj.initial + treeDensityAdj.initial + landscapeComplexityAdj.initial) + exterior.initial;
-  const rawFollowUp = Math.max(Math.round(Number(cfg.followUp.floor) || 95), baseFollowUp + footprintAdj.followUp + lotAdj.followUp + treeDensityAdj.followUp + landscapeComplexityAdj.followUp) + exterior.followUp;
+  const baseInitial = Math.round(Number(offer.baseInitial) || 225);
+  const baseFollowUp = Math.round(Number(offer.baseFollowUp) || 0);
+  const baseFloorInitial = Math.round(Number(offer.floorInitial) || 185);
+  const baseFloorFollowUp = Math.round(Number(offer.floorFollowUp) || 0);
+  const pricedExteriorInitial = offer.exteriorAddOnMode === 'none' ? 0 : exterior.initial;
+  const pricedExteriorFollowUp = offer.exteriorAddOnMode === 'two_visit' ? exterior.followUp : 0;
+  const rawInitial = Math.max(baseFloorInitial, baseInitial + footprintAdj.initial + lotAdj.initial + treeDensityAdj.initial + landscapeComplexityAdj.initial + infestationComplexityAdj.initial) + pricedExteriorInitial;
+  const rawFollowUp = offer.visitCount > 1
+    ? Math.max(baseFloorFollowUp, baseFollowUp + footprintAdj.followUp + lotAdj.followUp + treeDensityAdj.followUp + landscapeComplexityAdj.followUp + infestationComplexityAdj.followUp) + pricedExteriorFollowUp
+    : 0;
   const urgencyMultiplier = getFleaUrgencyMultiplier(property.urgency ?? fleaOptions.urgency, property.afterHours ?? fleaOptions.afterHours);
   const isRecurringCustomer = (
     isTruthyPricingFlag(property.isRecurringCustomer)
@@ -5215,10 +5310,13 @@ function priceFlea(property = {}) {
     || isTruthyPricingFlag(fleaOptions.recurringCustomer)
   );
   const rawTotal = rawInitial + rawFollowUp;
-  const discounted = applyOneTimeRecurringCustomerDiscount(rawTotal * urgencyMultiplier, { isRecurringCustomer });
+  const discounted = applyOneTimeRecurringCustomerDiscount(rawTotal, { isRecurringCustomer });
   const recurringCustomerMultiplier = 1 - discounted.rate;
-  const total = discounted.price;
-  const initial = Math.round(rawInitial * urgencyMultiplier * recurringCustomerMultiplier);
+  const packageFloor = Math.round(Number(offer.packageFloor) || (baseFloorInitial + baseFloorFollowUp));
+  const discountedStandard = Math.max(packageFloor, discounted.price);
+  const rushPremium = Math.round(rawTotal * Math.max(0, urgencyMultiplier - 1));
+  const total = Math.round(discountedStandard + rushPremium);
+  const initial = rawTotal > 0 ? Math.round(total * (rawInitial / rawTotal)) : 0;
   const followUp = total - initial;
   const exteriorDetail = exteriorSelected && exterior.areaSqFt > 0
     ? `Exterior flea spray — ${exterior.areaSqFt.toLocaleString()} sf${exterior.source === 'AI_ESTIMATE' ? ' AI estimate' : ''}`
@@ -5236,11 +5334,28 @@ function priceFlea(property = {}) {
   const warnings = uniqueList([
     ...footprintResolution.warnings,
     ...(exteriorSelected ? (exterior.warnings || []) : []),
+    ...(exteriorSourceSuspected && !exteriorSelected ? ['Exterior flea source suspected; guarantee scope is limited to treated interior areas.'] : []),
   ]);
+  const guaranteeScope = exteriorSelected && hasPricedExteriorFleaSpray
+    ? 'interior_and_treated_exterior_zones'
+    : 'interior_only';
+  const guaranteeExclusions = uniqueList([
+    ...(exteriorSourceSuspected && !exteriorSelected ? ['exterior_source_declined'] : []),
+    ...(offer.warrantyType === 'conditional_retreat'
+      ? ['untreated_pets', 'prep_not_completed', 'missed_follow_up', 'untreated_or_inaccessible_areas', 'reintroduction_after_service']
+      : []),
+  ]);
+  const warrantyLabel = offer.warrantyType === 'conditional_retreat'
+    ? 'Conditional retreat guarantee'
+    : 'No retreat warranty included';
 
   return {
-    service: 'flea_package',
-    visits: 2,
+    service: offer.service,
+    serviceKey: 'flea',
+    billingCadence: 'one_time',
+    offerKey,
+    pricingConfigKey: 'flea_2026_v1',
+    visits: offer.visitCount,
     initial,
     followUp,
     total,
@@ -5250,15 +5365,16 @@ function priceFlea(property = {}) {
       lot: lotAdj,
       treeDensity: treeDensityAdj,
       landscapeComplexity: landscapeComplexityAdj,
-      exteriorArea: { areaSqFt: exterior.areaSqFt, source: exterior.source, initial: exterior.initial, followUp: exterior.followUp, total: exterior.total },
+      infestationComplexity: infestationComplexityAdj,
+      exteriorArea: { areaSqFt: exterior.areaSqFt, source: exterior.source, initial: pricedExteriorInitial, followUp: pricedExteriorFollowUp, total: pricedExteriorInitial + pricedExteriorFollowUp, status: exteriorSelected ? (exterior.priced ? 'priced' : 'requires_confirmation') : 'not_included' },
     },
-    modifiers: { urgencyMultiplier, recurringCustomerMultiplier },
+    modifiers: { urgencyMultiplier, recurringCustomerMultiplier, rushPremium },
     display: {
-      name: 'Flea Treatment Package — 2 visits',
-      detail: `$${initial} initial + $${followUp} follow-up`,
+      name: offer.visitCount > 1 ? 'Flea Elimination Package — 2 visits' : 'Flea Knockdown Visit',
+      detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
       exteriorDetail,
     },
-    detail: `$${initial} initial + $${followUp} follow-up`,
+    detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
     exteriorDetail,
     scope: 'Exterior flea treatment is applied to eligible targeted outdoor areas where flea activity is likely, such as shaded pet resting areas, under decks, kennels, foundation edges, mulch beds, and other approved areas. Final treatment area is subject to technician confirmation and product label directions.',
     requiresCustomQuote: !!exterior.requiresCustomQuote,
@@ -5273,11 +5389,23 @@ function priceFlea(property = {}) {
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
+    infestationComplexity,
+    warrantyType: offer.warrantyType,
+    warrantyLabel,
+    guaranteeWindowDaysAfterFollowUp: offer.guaranteeWindowDaysAfterFollowUp || null,
+    maxIncludedRetreats: offer.maxIncludedRetreats || 0,
+    guaranteeScope,
+    guaranteeStatus: exteriorSourceSuspected && !exteriorSelected ? 'limited' : (offer.warrantyType === 'conditional_retreat' ? 'eligible_with_conditions' : 'none'),
+    guaranteeExclusions,
+    prepChecklistRequired: offer.warrantyType === 'conditional_retreat',
+    petSourceAttestationRequired: offer.warrantyType === 'conditional_retreat',
+    exteriorStatus: exteriorSelected ? (exterior.priced ? 'priced' : 'requires_confirmation') : 'not_included',
     raw: { initial: rawInitial, followUp: rawFollowUp, total: rawTotal },
     fleaExteriorZones: property.fleaExteriorZones || services.fleaExteriorZones || fleaOptions.fleaExteriorZones || [],
     discountHandledByPricingFunction: true,
     recurringCustomerDiscountRate: discounted.rate,
-    subtotalBeforeRecurringCustomerDiscount: rawTotal * urgencyMultiplier,
+    subtotalBeforeRecurringCustomerDiscount: rawTotal,
+    discountedStandard,
   };
 }
 

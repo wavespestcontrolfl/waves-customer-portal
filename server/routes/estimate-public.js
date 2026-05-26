@@ -5544,6 +5544,18 @@ function normalizeOneTimeBreakdown(estData) {
         measurementWarnings: Array.isArray(item.measurementWarnings) ? item.measurementWarnings : [],
         warrantyStatus: item.warrantyStatus || null,
         warrantyExtendedSelected: item.warrantyExtendedSelected === true,
+        offerKey: item.offerKey || null,
+        visits: item.visits || null,
+        warrantyType: item.warrantyType || null,
+        warrantyLabel: item.warrantyLabel || null,
+        guaranteeScope: item.guaranteeScope || null,
+        guaranteeStatus: item.guaranteeStatus || null,
+        guaranteeExclusions: Array.isArray(item.guaranteeExclusions) ? item.guaranteeExclusions : [],
+        guaranteeWindowDaysAfterFollowUp: item.guaranteeWindowDaysAfterFollowUp || null,
+        maxIncludedRetreats: item.maxIncludedRetreats || null,
+        prepChecklistRequired: item.prepChecklistRequired === true,
+        petSourceAttestationRequired: item.petSourceAttestationRequired === true,
+        exteriorStatus: item.exteriorStatus || null,
       });
     }
   };

@@ -135,6 +135,23 @@ const FLEA_EXTERIOR_SOURCE_OPTIONS = [
   { value: "MEASURED_TURF", label: "Measured turf" },
   { value: "MANUAL_OVERRIDE", label: "Manual override" },
 ];
+const FLEA_OFFER_OPTIONS = [
+  {
+    value: "flea_elimination_two_visit",
+    label: "Flea Elimination Package",
+    detail: "2 visits, conditional retreat guarantee",
+  },
+  {
+    value: "flea_knockdown_single",
+    label: "Flea Knockdown Visit",
+    detail: "1 visit, no retreat warranty",
+  },
+];
+const FLEA_COMPLEXITY_OPTIONS = [
+  { value: "light", label: "Light", detail: "$0" },
+  { value: "moderate", label: "Moderate", detail: "+$35 initial / +$15 follow-up" },
+  { value: "heavy", label: "Heavy", detail: "+$75 initial / +$35 follow-up" },
+];
 const FLEA_EXTERIOR_ZONES = [
   { value: "PET_RESTING_AREA", label: "Pet resting area" },
   { value: "KENNEL_DOG_RUN", label: "Kennel / dog run" },
@@ -1851,6 +1868,9 @@ export default function EstimateToolViewV2({
     birdBoxQuantity: "1",
     svcRodentSanitation: false,
     svcFlea: false,
+    fleaOfferKey: "flea_elimination_two_visit",
+    fleaComplexity: "light",
+    fleaExteriorSourceSuspected: false,
     svcFleaExterior: false,
     fleaExteriorAreaSqFt: "0",
     fleaExteriorAreaSource: "UNKNOWN",
@@ -2881,6 +2901,9 @@ export default function EstimateToolViewV2({
         onetimeLawnType: form.otLawnType || "FERT",
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
+        fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
+        fleaComplexity: form.fleaComplexity || "light",
+        fleaExteriorSourceSuspected: !!form.fleaExteriorSourceSuspected,
         fleaExterior: !!form.svcFleaExterior,
         fleaExteriorAreaSqFt: parseInt(form.fleaExteriorAreaSqFt, 10) || 0,
         fleaExteriorAreaSource: form.fleaExteriorAreaSource || "UNKNOWN",
@@ -3338,6 +3361,9 @@ export default function EstimateToolViewV2({
       palmLicensedApplicator: false,
       treeCount: "",
       measuredTurfSf: "",
+      fleaOfferKey: "flea_elimination_two_visit",
+      fleaComplexity: "light",
+      fleaExteriorSourceSuspected: false,
       svcFleaExterior: false,
       fleaExteriorAreaSqFt: "0",
       fleaExteriorAreaSource: "UNKNOWN",
@@ -4981,6 +5007,64 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcFlea" label="Flea Treatment" />{" "}
               {form.svcFlea && (
                 <div className="ml-7 mb-3 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+                    {FLEA_OFFER_OPTIONS.map((option) => {
+                      const active = (form.fleaOfferKey || "flea_elimination_two_visit") === option.value;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => set("fleaOfferKey", option.value)}
+                          className={cn(
+                            "text-left p-3 rounded-sm border-hairline u-focus-ring",
+                            active
+                              ? "bg-zinc-900 border-zinc-900 text-white"
+                              : "bg-white border-zinc-300 text-zinc-800 hover:bg-zinc-100",
+                          )}
+                        >
+                          <div className="text-13 font-semibold">{option.label}</div>
+                          <div className={cn("mt-1 text-11 leading-snug", active ? "text-zinc-200" : "text-ink-secondary")}>
+                            {option.detail}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mb-3">
+                    <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                      Infestation / prep complexity
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {FLEA_COMPLEXITY_OPTIONS.map((option) => {
+                        const active = (form.fleaComplexity || "light") === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => set("fleaComplexity", option.value)}
+                            className={cn(
+                              "h-8 px-2.5 rounded-sm border-hairline text-11 font-medium u-focus-ring",
+                              active
+                                ? "bg-zinc-900 border-zinc-900 text-white"
+                                : "bg-white border-zinc-300 text-zinc-700 hover:bg-zinc-100",
+                            )}
+                            title={option.detail}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <label className="flex items-start gap-2.5 mb-3 cursor-pointer text-12 text-zinc-900 select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!form.fleaExteriorSourceSuspected}
+                      onChange={(e) => set("fleaExteriorSourceSuspected", e.target.checked)}
+                      className="mt-0.5 h-4 w-4 accent-zinc-900"
+                    />
+                    <span>Exterior source suspected. If exterior treatment is declined, warranty scope remains interior-only.</span>
+                  </label>
                   <label className="flex items-center gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
                     <input
                       type="checkbox"
@@ -4988,8 +5072,11 @@ export default function EstimateToolViewV2({
                       onChange={(e) => setFleaExteriorEnabled(e.target.checked)}
                       className="h-4 w-4 accent-zinc-900"
                     />
-                    Add exterior flea spray
+                    Add exterior flea treatment
                   </label>
+                  <div className="mb-3 text-11 text-ink-secondary leading-snug">
+                    Exterior treatment focuses on likely flea zones such as shaded pet areas, fence lines, under decks, foundation edges, and landscape beds.
+                  </div>
                   {form.svcFleaExterior && (
                     <>
                       <div className="flex items-center justify-between gap-3 mb-2">

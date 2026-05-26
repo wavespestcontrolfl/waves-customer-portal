@@ -1277,6 +1277,54 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(target.initial, 'floor', initial.floor ?? flea.initial_floor, money);
       setNumber(target.followUp, 'base', followUp.base ?? flea.followup_base ?? flea.followUp_base, money);
       setNumber(target.followUp, 'floor', followUp.floor ?? flea.followup_floor ?? flea.followUp_floor, money);
+      const syncFleaOfferPricing = (offer) => {
+        if (offer.offerKey === 'flea_knockdown_single') {
+          return {
+            ...offer,
+            baseInitial: target.initial.base,
+            floorInitial: target.initial.floor,
+            baseFollowUp: 0,
+            floorFollowUp: 0,
+            packageFloor: target.initial.floor,
+          };
+        }
+        if (offer.offerKey === 'flea_elimination_two_visit') {
+          return {
+            ...offer,
+            baseInitial: target.initial.base,
+            floorInitial: target.initial.floor,
+            baseFollowUp: target.followUp.base,
+            floorFollowUp: target.followUp.floor,
+            packageFloor: target.initial.floor + target.followUp.floor,
+          };
+        }
+        return offer;
+      };
+
+      if (Array.isArray(flea.offers)) {
+        target.offers = flea.offers.map(offer => syncFleaOfferPricing({
+          ...offer,
+          offerKey: offer.offerKey || offer.offer_key,
+          displayName: offer.displayName || offer.display_name,
+          billingCadence: offer.billingCadence || offer.billing_cadence,
+          visitCount: Number(offer.visitCount ?? offer.visit_count ?? 1),
+          warrantyType: offer.warrantyType || offer.warranty_type,
+          exteriorAddOnMode: offer.exteriorAddOnMode || offer.exterior_add_on_mode,
+        })).filter(offer => offer.offerKey);
+      } else if (Array.isArray(target.offers)) {
+        target.offers = target.offers.map(syncFleaOfferPricing);
+      }
+
+      if (flea.complexityAdjustments && typeof flea.complexityAdjustments === 'object') {
+        for (const [key, value] of Object.entries(flea.complexityAdjustments)) {
+          if (!value || typeof value !== 'object') continue;
+          const current = target.complexityAdjustments[key] || {};
+          target.complexityAdjustments[key] = {
+            initial: value.initial !== undefined ? money(value.initial) : money(current.initial || 0),
+            followUp: value.followUp !== undefined || value.followup !== undefined ? money(value.followUp ?? value.followup) : money(current.followUp || 0),
+          };
+        }
+      }
 
       if (flea.exterior && typeof flea.exterior === 'object') {
         setBoolean(target.exterior, 'enabled', flea.exterior.enabled);
