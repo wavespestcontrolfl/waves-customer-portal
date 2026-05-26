@@ -58,6 +58,63 @@ function safeJsonParse(val) {
   try { return JSON.parse(val); } catch { return null; }
 }
 
+function normalizeNeighborBenchmark(value) {
+  const row = Array.isArray(value) ? value[0] : value;
+  if (!row || typeof row !== 'object') return null;
+
+  const customerScore = row.customerScore ?? row.yourScore;
+  const neighborhoodAvg = row.neighborhoodAvg ?? row.avgScore;
+  if (customerScore == null || neighborhoodAvg == null) return null;
+
+  return {
+    customerScore,
+    neighborhoodAvg,
+    percentile: row.percentile ?? null,
+    customerCount: row.customerCount ?? row.sampleSize ?? null,
+    avgImprovement: row.avgImprovement ?? null,
+    segmentName: row.segmentName ?? row.segment ?? null,
+    segmentType: row.segmentType ?? null,
+  };
+}
+
+function applyLawnServiceFilter(query, alias = 'ss') {
+  return query.where(function () {
+    this.whereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%lawn%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%waveguard%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%fertiliz%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%fungicide%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%turf%']);
+  });
+}
+
+async function hasCustomerLawnCare(customerId) {
+  const profile = await db('customer_turf_profiles')
+    .where({ customer_id: customerId, active: true })
+    .first('id')
+    .catch(() => null);
+  if (profile) return true;
+
+  const customer = await db('customers')
+    .where({ id: customerId })
+    .first('id', 'waveguard_tier', 'lawn_type')
+    .catch(() => null);
+  if (customer?.waveguard_tier || customer?.lawn_type) return true;
+
+  const scheduled = await applyLawnServiceFilter(
+    db('scheduled_services as ss').where('ss.customer_id', customerId),
+    'ss'
+  ).first('ss.id').catch(() => null);
+  return Boolean(scheduled);
+}
+
+function photoAssessmentLookupCriteria(customerId, assessmentId) {
+  return {
+    id: assessmentId,
+    customer_id: customerId,
+    confirmed_by_tech: true,
+  };
+}
+
 // =========================================================================
 // GET /api/lawn-health/:customerId — Full lawn health dashboard data
 // =========================================================================
@@ -80,7 +137,7 @@ router.get('/:customerId', async (req, res, next) => {
         .orderBy('service_date', 'asc');
 
       return res.json({
-        hasLawnCare: pending.length > 0,
+        hasLawnCare: pending.length > 0 || await hasCustomerLawnCare(customerId),
         hasPendingAssessment: pending.length > 0 && !pending[0].confirmed_by_tech,
         scores: null,
         initialScores: null,
@@ -217,7 +274,7 @@ router.get('/:customerId', async (req, res, next) => {
       trend,
       recommendations,
       seasonalContext,
-      neighborBenchmark,
+      neighborBenchmark: normalizeNeighborBenchmark(neighborBenchmark),
       assessmentCount: assessments.length,
       nextMilestone: assessments.length < 3
         ? { message: `${3 - assessments.length} more visit${assessments.length < 2 ? 's' : ''} until full trend data`, type: 'visits' }
@@ -285,7 +342,7 @@ router.get('/:customerId/photos/:assessmentId', async (req, res, next) => {
     }
 
     const assessment = await db('lawn_assessments')
-      .where({ id: assessmentId, customer_id: customerId })
+      .where(photoAssessmentLookupCriteria(customerId, assessmentId))
       .first();
 
     if (!assessment) {
@@ -323,5 +380,10 @@ router.get('/:customerId/photos/:assessmentId', async (req, res, next) => {
     next(err);
   }
 });
+
+router._test = {
+  normalizeNeighborBenchmark,
+  photoAssessmentLookupCriteria,
+};
 
 module.exports = router;
