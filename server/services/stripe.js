@@ -1189,7 +1189,8 @@ const StripeService = {
 
     // Create an HMAC-signed quote token for /finalize
     const crypto = require('crypto');
-    const hmacSecret = process.env.JWT_SECRET || 'waves-surcharge-quote';
+    const hmacSecret = process.env.JWT_SECRET;
+    if (!hmacSecret) throw new Error('JWT_SECRET is required for surcharge quote signing');
     const payloadJson = JSON.stringify({
       invoiceId,
       paymentMethodId,
@@ -1219,7 +1220,8 @@ const StripeService = {
 
     // Decode and verify the HMAC-signed quote token
     const crypto = require('crypto');
-    const hmacSecret = process.env.JWT_SECRET || 'waves-surcharge-quote';
+    const hmacSecret = process.env.JWT_SECRET;
+    if (!hmacSecret) throw new Error('JWT_SECRET is required for surcharge quote signing');
     let quote;
     try {
       const [payloadPart, sigPart] = quoteToken.split('.');
@@ -1434,24 +1436,22 @@ const StripeService = {
         }
       }
 
-      // Block card payments that bypassed the /quote+/finalize surcharge flow.
+      // Check for card payments that bypassed the /quote+/finalize surcharge flow.
       // Express Checkout (wallets) are allowed at base-only (phase 1).
       // The surcharge_policy_version metadata is set by /finalize — its absence
       // on a card payment means the two-step disclosure was skipped.
       const isCardFamily = pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach';
       const wasFinalized = pi.metadata?.surcharge_policy_version;
       if (isCardFamily && !wasFinalized) {
-        // Stripe reports wallets (Apple Pay, Google Pay, Link) as type='card'
-        // with the wallet subtype under payment_method_details.card.wallet.type.
-        // Check both the top-level type AND the nested wallet field.
-        const isExpressCheckout = ['apple_pay', 'google_pay', 'link'].includes(pmdType);
-        const chargeObj = typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
-        const walletType = chargeObj?.payment_method_details?.card?.wallet?.type;
-        const isWalletPayment = !!walletType;
-        if (!isExpressCheckout && !isWalletPayment) {
-          logger.error(`[stripe] Card payment on PI ${paymentIntentId} bypassed /finalize (no surcharge_policy_version). Rejecting.`);
-          throw new Error('Payment was not properly finalized. Please try again.');
-        }
+        // Card payment without surcharge_policy_version = either Express Checkout
+        // (wallets, intentionally base-only in phase 1) or a legacy/unexpected path.
+        // Log a warning but don't block — the payment already succeeded at Stripe,
+        // and throwing here would orphan the charge without recording it.
+        logger.warn(
+          `[stripe] Card payment on PI ${paymentIntentId} confirmed without /finalize ` +
+          `(no surcharge_policy_version). Possibly Express Checkout or legacy flow. ` +
+          `Invoice ${invoice.invoice_number}.`,
+        );
       }
 
       const actualMethodType = pmdType || resolvedPaymentMethod;
