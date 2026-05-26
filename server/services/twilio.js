@@ -64,15 +64,17 @@ async function sendCustomerPolicySms(input) {
   if (input.purpose === "marketing" && input.consentBasis?.status !== "opted_in") {
     throw new Error("Marketing SMS requires explicit opted-in consent basis");
   }
+  const { consentBasis, metadata, messageType, ...sendFields } = input;
   const { sendCustomerMessage } = require("./messaging/send-customer-message");
   const result = await sendCustomerMessage({
     channel: "sms",
     audience: "customer",
     identityTrustLevel: "phone_matches_customer",
-    ...input,
+    ...sendFields,
+    consentBasis,
     metadata: {
-      original_message_type: input.messageType,
-      ...(input.metadata || {}),
+      original_message_type: messageType,
+      ...(metadata || {}),
     },
   });
   if (result && result.sent === false && result.blocked !== true) {
