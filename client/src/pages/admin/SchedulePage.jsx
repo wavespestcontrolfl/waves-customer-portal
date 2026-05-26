@@ -4748,6 +4748,13 @@ function ScheduleLawnSnapshotReview({ review, loading, onSnapshotAction, onRecom
               <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
                 {card.status} · {card.customer_visible ? "Customer visible" : "Internal only"}
               </div>
+              {card.performance && (
+                <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                  Shown {card.performance.counts?.recommendation_shown || card.performance.counts?.shown || 0}
+                  {" · "}Clicked {card.performance.counts?.recommendation_clicked || card.performance.counts?.clicked || 0}
+                  {" · "}CTR {Number.isFinite(Number(card.performance.clickThroughRate)) ? `${Math.round(Number(card.performance.clickThroughRate) * 100)}%` : "—"}
+                </div>
+              )}
               <div style={{ display: "flex", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
                 <button type="button" onClick={() => onRecommendationAction(card.id, { approve: true })} style={miniOutlineButton}>
                   Approve
