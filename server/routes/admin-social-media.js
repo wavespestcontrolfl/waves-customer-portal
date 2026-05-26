@@ -29,7 +29,7 @@ router.get('/status', async (req, res, next) => {
         scheduledPosts: SOCIAL_FLAGS.scheduledPosts,
         newsletterAutoshare: SOCIAL_FLAGS.newsletterAutoshare,
       },
-      rssFeed: 'https://www.wavespestcontrol.com/feed/',
+      rssFeed: 'https://www.wavespestcontrol.com/feed.xml',
     });
   } catch (err) { next(err); }
 });
@@ -53,7 +53,7 @@ router.post('/pause', async (req, res, next) => {
 // GET /rss — fetch latest RSS items
 router.get('/rss', async (req, res, next) => {
   try {
-    const url = req.query.url || 'https://www.wavespestcontrol.com/feed/';
+    const url = req.query.url || 'https://www.wavespestcontrol.com/feed.xml';
     const items = await SocialMediaService.getRSSItems(url);
     // Mark which have been posted
     for (const item of items) {
@@ -102,7 +102,7 @@ router.post('/publish-single', async (req, res, next) => {
 // POST /check-rss — check RSS feed and auto-publish new items
 router.post('/check-rss', async (req, res, next) => {
   try {
-    const url = req.body.feedUrl || 'https://www.wavespestcontrol.com/feed/';
+    const url = req.body.feedUrl || 'https://www.wavespestcontrol.com/feed.xml';
     const result = await SocialMediaService.checkAndPublish(url, { manual: true });
     res.json(result);
   } catch (err) { next(err); }

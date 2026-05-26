@@ -526,7 +526,7 @@ const SocialMediaService = {
    * Check RSS feed for new posts and publish to all platforms.
    * Called by cron job or manually from admin.
    */
-  async checkAndPublish(feedUrl = 'https://www.wavespestcontrol.com/feed/', { manual = false } = {}) {
+  async checkAndPublish(feedUrl = 'https://www.wavespestcontrol.com/feed.xml', { manual = false } = {}) {
     if (!manual) {
       if (!SOCIAL_FLAGS.automationEnabled || !SOCIAL_FLAGS.rssAutopublish) {
         logger.info('[social] RSS auto-publish skipped — automation or RSS flag disabled');
@@ -856,7 +856,7 @@ const SocialMediaService = {
   /**
    * Fetch recent RSS items (for admin preview).
    */
-  async getRSSItems(feedUrl = 'https://www.wavespestcontrol.com/feed/') {
+  async getRSSItems(feedUrl = 'https://www.wavespestcontrol.com/feed.xml') {
     return fetchRSSFeed(feedUrl);
   },
 
