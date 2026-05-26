@@ -124,6 +124,26 @@ describe('lawn assessment route contracts', () => {
     expect(card).not.toHaveProperty('confidence');
   });
 
+  test('customer recommendation event metadata is source-scoped and bounded', () => {
+    const metadata = lawnHealthRouter._test.recommendationEventMetadata({
+      surface: 'customer_portal_dashboard',
+      placement: 'lawn_snapshot_card',
+      actionType: 'request_follow_up',
+      metadata: {
+        surface: 'ignored_nested_surface',
+        internal_reason: 'should not be copied',
+      },
+    });
+
+    expect(metadata).toEqual({
+      source: 'customer_portal',
+      surface: 'customer_portal_dashboard',
+      placement: 'lawn_snapshot_card',
+      action_type: 'request_follow_up',
+    });
+    expect(metadata).not.toHaveProperty('internal_reason');
+  });
+
   test('failed-quality photos stay auditable but are hidden from customer surfaces', () => {
     expect(adminLawnAssessmentRouter._test.customerVisibleForQualityCheck({ passed: false })).toBe(false);
     expect(adminLawnAssessmentRouter._test.customerVisibleForQualityCheck({ passed: true })).toBe(true);
