@@ -127,8 +127,8 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
     try {
       let payload = {};
       if (bulkAction === 'reassign') payload = { technicianId: bulkTechId || null };
-      else if (bulkAction === 'reschedule') payload = { date: bulkDate };
-      else if (bulkAction === 'mark_prepaid') payload = { amount: Number(bulkPrepaidAmount), method: bulkPrepaidMethod };
+      else if (bulkAction === 'reschedule') payload = { scheduledDate: bulkDate };
+      else if (bulkAction === 'mark_prepaid') payload = { totalAmount: Number(bulkPrepaidAmount), method: bulkPrepaidMethod };
 
       await adminFetch('/admin/schedule/bulk-action', {
         method: 'POST',
@@ -279,7 +279,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
               <th className={thClass} onClick={() => toggleSort('technicianName')}>Tech<SortIndicator col="technicianName" /></th>
               <th className={thClass} onClick={() => toggleSort('status')}>Status<SortIndicator col="status" /></th>
               <th className={thClass}>Prepaid</th>
-              <th className={cn(thClass, 'text-right')} onClick={() => toggleSort('estimatedPrice')}>Price<SortIndicator col="estimatedPrice" /></th>
+              <th className={cn(thClass, 'text-right')} onClick={() => toggleSort('price')}>Price<SortIndicator col="price" /></th>
             </tr>
           </thead>
           <tbody>
@@ -324,7 +324,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
                     ) : <span className="text-zinc-300">—</span>}
                   </td>
                   <td className={cn(tdClass, 'text-right u-nums')}>
-                    {s.estimatedPrice != null ? `$${s.estimatedPrice.toFixed(2)}` : <span className="text-zinc-300">—</span>}
+                    {s.price != null ? `$${s.price.toFixed(2)}` : <span className="text-zinc-300">—</span>}
                   </td>
                 </tr>
               );
