@@ -1182,19 +1182,16 @@ const StripeService = {
     const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
 
-    // Create a quote token that encodes the surcharge decision for /finalize
-    const quoteToken = Buffer.from(JSON.stringify({
+    // Create an HMAC-signed quote token for /finalize
+    const crypto = require('crypto');
+    const hmacSecret = process.env.JWT_SECRET || 'waves-surcharge-quote';
+    const payloadJson = JSON.stringify({
       invoiceId,
       paymentMethodId,
-      baseCents,
-      surchargeCents,
-      totalCents,
-      rateBps,
-      policyVersion,
-      funding,
-      methodType,
       quotedAt: Date.now(),
-    })).toString('base64url');
+    });
+    const signature = crypto.createHmac('sha256', hmacSecret).update(payloadJson).digest('base64url');
+    const quoteToken = `${Buffer.from(payloadJson).toString('base64url')}.${signature}`;
 
     return {
       quoteToken,
@@ -1215,12 +1212,18 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
-    // Decode and validate the quote token
+    // Decode and verify the HMAC-signed quote token
+    const crypto = require('crypto');
+    const hmacSecret = process.env.JWT_SECRET || 'waves-surcharge-quote';
     let quote;
     try {
-      quote = JSON.parse(Buffer.from(quoteToken, 'base64url').toString());
+      const [payloadPart, sigPart] = quoteToken.split('.');
+      if (!payloadPart || !sigPart) throw new Error('malformed');
+      const expectedSig = crypto.createHmac('sha256', hmacSecret).update(Buffer.from(payloadPart, 'base64url').toString()).digest('base64url');
+      if (sigPart !== expectedSig) throw new Error('signature mismatch');
+      quote = JSON.parse(Buffer.from(payloadPart, 'base64url').toString());
     } catch {
-      throw new Error('Invalid quote token');
+      throw new Error('Invalid or tampered quote token');
     }
 
     if (String(quote.invoiceId) !== String(invoiceId)) {
@@ -1228,9 +1231,8 @@ const StripeService = {
     }
 
     // Quote tokens expire after 10 minutes
-    const quoteAge = Date.now() - (quote.quotedAt || 0);
-    if (quoteAge > 10 * 60 * 1000) {
-      throw new Error('Quote has expired. Please request a new quote.');
+    if (Date.now() - (quote.quotedAt || 0) > 10 * 60 * 1000) {
+      throw new Error('Quote expired — please try again');
     }
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
@@ -1570,6 +1572,12 @@ const StripeService = {
           stripe_charge_id: typeof charge === 'string' ? charge : null,
           payment_date: etDateString(),
           amount: chargedTotal,
+          base_amount_cents: Math.round(Number(pi.metadata?.base_amount || invoice.total) * 100),
+          surcharge_amount_cents: Math.round(Number(pi.metadata?.card_surcharge || 0) * 100),
+          surcharge_rate_bps: Number(pi.metadata?.surcharge_rate_bps || 0),
+          surcharge_policy_version: pi.metadata?.surcharge_policy_version || null,
+          card_funding: pi.metadata?.card_funding || null,
+          card_brand: cardBrand || null,
           status: paymentStatus,
           description: paymentStatus === 'processing'
             ? `Invoice ${invoice.invoice_number} (bank payment pending)`
@@ -1588,7 +1596,6 @@ const StripeService = {
         };
 
         if (receiptUrl) paymentPayload.receipt_url = receiptUrl;
-        if (cardBrand) paymentPayload.card_brand = cardBrand;
         if (cardLastFour || bankLastFour) paymentPayload.card_last_four = cardLastFour || bankLastFour;
 
         const existingPayment = await trx('payments')
