@@ -199,6 +199,76 @@ describe('admin estimate email delivery', () => {
     })).toThrow(/Quote-required estimates need manual review/);
   });
 
+  test('summarizes lead estimate automation and blocks manual-review automated drafts', () => {
+    const estimateData = {
+      automation: {
+        leadEstimateAutomation: {
+          status: 'ready',
+          confidence: 'medium',
+          minimumConfidence: 'medium',
+          review: ['property_measurements_defaulted'],
+          missing: [],
+        },
+        draftEstimateAutomation: {
+          status: 'manual_review_required',
+          generated: false,
+          unsupportedReason: 'termite_treatment_requires_manual_scope',
+          review: ['property_measurements_defaulted'],
+        },
+      },
+    };
+
+    expect(router._internals.leadEstimateAutomationSummary(estimateData)).toEqual({
+      status: 'manual_review_required',
+      generated: false,
+      confidence: 'medium',
+      minimumConfidence: 'medium',
+      quoteRequired: false,
+      unsupportedReason: 'termite_treatment_requires_manual_scope',
+      quoteRequiredReason: null,
+      review: ['property_measurements_defaulted'],
+      missing: [],
+    });
+    expect(router._internals.estimateDataHasBlockingLeadAutomation(estimateData)).toBe(true);
+    expect(() => router._internals.assertEstimateSendable({
+      id: 'estimate-auto-review',
+      status: 'draft',
+      estimate_data: estimateData,
+    })).toThrow(/Automated lead estimates need manual review/);
+  });
+
+  test('allows generated lead automation drafts through the normal send gate', () => {
+    const estimateData = {
+      automation: {
+        leadEstimateAutomation: {
+          status: 'ready',
+          confidence: 'medium',
+          minimumConfidence: 'medium',
+          review: ['property_measurements_defaulted'],
+          missing: [],
+        },
+        draftEstimateAutomation: {
+          status: 'generated',
+          generated: true,
+          review: ['property_measurements_defaulted'],
+        },
+      },
+    };
+
+    expect(router._internals.leadEstimateAutomationSummary(estimateData)).toMatchObject({
+      status: 'generated',
+      generated: true,
+      confidence: 'medium',
+      review: ['property_measurements_defaulted'],
+    });
+    expect(router._internals.estimateDataHasBlockingLeadAutomation(estimateData)).toBe(false);
+    expect(() => router._internals.assertEstimateSendable({
+      id: 'estimate-auto-generated',
+      status: 'draft',
+      estimate_data: estimateData,
+    })).not.toThrow();
+  });
+
   test('blocks sending estimates with unresolved manager approval', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-manager-approval',

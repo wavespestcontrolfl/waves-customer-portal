@@ -77,6 +77,38 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
+function leadEstimateAutomationSummary(estimateData) {
+  const data = parseEstimateData(estimateData) || {};
+  const automation = data.automation || {};
+  const draft = automation.draftEstimateAutomation || null;
+  const gate = automation.leadEstimateAutomation || null;
+  if (!draft && !gate) return null;
+
+  const status = draft?.status || gate?.status || 'unknown';
+  const review = [
+    ...(Array.isArray(gate?.review) ? gate.review : []),
+    ...(Array.isArray(draft?.review) ? draft.review : []),
+  ];
+  const missing = Array.isArray(gate?.missing) ? gate.missing : [];
+  return {
+    status,
+    generated: draft?.generated === true,
+    confidence: gate?.confidence || null,
+    minimumConfidence: gate?.minimumConfidence || null,
+    quoteRequired: draft?.quoteRequired === true || data.quoteRequired === true,
+    unsupportedReason: draft?.unsupportedReason || null,
+    quoteRequiredReason: draft?.quoteRequiredReason || data.quoteRequiredReason || null,
+    review: [...new Set(review.filter(Boolean))],
+    missing: [...new Set(missing.filter(Boolean))],
+  };
+}
+
+function estimateDataHasBlockingLeadAutomation(estimateData) {
+  const summary = leadEstimateAutomationSummary(estimateData);
+  if (!summary) return false;
+  return ['blocked', 'manual_review_required', 'generation_failed'].includes(summary.status);
+}
+
 function currentTierDiscounts() {
   const tiers = PRICING_WAVEGUARD.tiers || {};
   return Object.fromEntries(
@@ -163,6 +195,11 @@ function assertEstimateSendable(estimate) {
   }
   if (estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {
+    const err = new Error('Automated lead estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
     throw err;
   }
@@ -753,6 +790,7 @@ router.get('/', async (req, res, next) => {
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
           confirmedAppointment,
+          automation: leadEstimateAutomationSummary(estData),
           pricingRisk: pricingRiskById.get(e.id) || null,
         };
       }),
@@ -1199,6 +1237,8 @@ router.post('/cleanup-demo', async (req, res, next) => {
 router._internals = {
   assertEstimateSendable,
   assertEstimateManagerApprovalResolved,
+  leadEstimateAutomationSummary,
+  estimateDataHasBlockingLeadAutomation,
   estimateMatchesSentOnlyScope,
   sendEstimateEmail,
   estimateEmailIdempotencyKey,

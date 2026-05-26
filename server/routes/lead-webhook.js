@@ -20,6 +20,11 @@ const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
+const {
+  automationNote,
+  buildAutomatedLeadDraftEstimate,
+  evaluateLeadEstimateAutomationReadiness,
+} = require('../services/lead-estimate-automation');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((alertErr) => {
@@ -90,6 +95,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Valid phone number required' });
     }
     const phoneFormatted = '+1' + phone.slice(-10);
+    let estimateAutomationReadiness = null;
 
     // Look up matching lead_sources record for proper attribution
     let leadSourceId = null;
@@ -230,6 +236,13 @@ router.post('/', async (req, res) => {
       await PipelineManager.onEvent(customer.id, 'lead_created');
       await LeadScorer.calculateScore(customer.id);
     }
+
+    estimateAutomationReadiness = evaluateLeadEstimateAutomationReadiness({
+      intake,
+      customer,
+      phone: phoneFormatted,
+      serviceInterest,
+    });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
       // Customer record + interaction note are written above so we still have an
@@ -452,6 +465,7 @@ router.post('/', async (req, res) => {
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     let createdEstimateId = null;
     let createdEstimateServiceInterest = serviceInterest || null;
+    let automatedDraftEstimate = null;
     try {
       await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
@@ -459,21 +473,40 @@ router.post('/', async (req, res) => {
         if (duplicateBlock) {
           logger.info(`[lead-webhook] Estimate creation blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${customer.id}`);
         } else {
+          automatedDraftEstimate = buildAutomatedLeadDraftEstimate({
+            intake,
+            customer,
+            body,
+            readiness: estimateAutomationReadiness,
+          });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');
+          const estimateData = automatedDraftEstimate?.estimateData || {
+            automation: {
+              leadEstimateAutomation: estimateAutomationReadiness,
+            },
+          };
+          const draftAutomation = automatedDraftEstimate?.automation;
+          const draftAutomationNote = draftAutomation
+            ? ` Draft automation: ${draftAutomation.status}${draftAutomation.unsupportedReason ? ` (${draftAutomation.unsupportedReason})` : ''}.`
+            : '';
           const [estimateRow] = await trx('estimates').insert({
             customer_id: customer.id,
             customer_name: `${firstName} ${lastName}`,
             customer_phone: phoneFormatted,
             customer_email: email || null,
             address: fullAddress || '',
+            monthly_total: automatedDraftEstimate?.monthly || null,
+            annual_total: automatedDraftEstimate?.annual || null,
+            onetime_total: automatedDraftEstimate?.oneTimeTotal || null,
             status: 'draft',
             source: 'lead_webhook',
             service_interest: serviceInterest || null,
             lead_source: leadSource.source,
             lead_source_detail: leadSource.detail,
             token: estimateToken,
-            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}.`,
+            estimate_data: JSON.stringify(estimateData),
+            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(estimateAutomationReadiness)}${draftAutomationNote}`,
           }).returning(['id', 'service_interest']);
           createdEstimateId = estimateRow?.id || null;
           createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
@@ -494,6 +527,29 @@ router.post('/', async (req, res) => {
         lead_source_id: leadSourceId,
         lead_type: 'form_submission',
         service_interest: serviceInterest || null,
+        extracted_data: JSON.stringify({
+          stage: 'lead_webhook_received',
+          service_interest: serviceInterest || null,
+          automation: {
+            leadEstimateAutomation: estimateAutomationReadiness,
+            draftEstimateAutomation: automatedDraftEstimate?.automation || null,
+          },
+          attribution: {
+            leadSource,
+            formId,
+            formName,
+            pageUrl,
+            landingUrl,
+            utm: {
+              source: utmSource,
+              medium: utmMedium,
+              campaign: utmCampaign,
+              content: utmContent,
+              term: utmTerm,
+            },
+          },
+          address: normalizedAddress,
+        }),
         first_contact_at: new Date(),
         first_contact_channel: 'form',
         status: 'new',
@@ -528,6 +584,24 @@ router.post('/', async (req, res) => {
               await db('leads').where('id', leadRecord.id).update(updates);
             }
             if (createdEstimateId && triageServiceInterestUpdate) {
+              const triageReadiness = evaluateLeadEstimateAutomationReadiness({
+                intake: {
+                  ...intake,
+                  serviceInterest: triageServiceInterestUpdate,
+                },
+                customer,
+                phone: phoneFormatted,
+                serviceInterest: triageServiceInterestUpdate,
+              });
+              const triageDraftEstimate = buildAutomatedLeadDraftEstimate({
+                intake: {
+                  ...intake,
+                  serviceInterest: triageServiceInterestUpdate,
+                },
+                customer,
+                body,
+                readiness: triageReadiness,
+              });
               const estimateUpdateQuery = db('estimates')
                 .where({
                   id: createdEstimateId,
@@ -543,6 +617,15 @@ router.post('/', async (req, res) => {
               }
               await estimateUpdateQuery.update({
                 service_interest: triageServiceInterestUpdate,
+                monthly_total: triageDraftEstimate?.monthly || null,
+                annual_total: triageDraftEstimate?.annual || null,
+                onetime_total: triageDraftEstimate?.oneTimeTotal || null,
+                estimate_data: JSON.stringify(triageDraftEstimate?.estimateData || {
+                  automation: {
+                    leadEstimateAutomation: triageReadiness,
+                    draftEstimateAutomation: triageDraftEstimate?.automation || null,
+                  },
+                }),
                 updated_at: new Date(),
               });
             }

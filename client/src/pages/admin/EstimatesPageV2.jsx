@@ -371,6 +371,45 @@ function PricingRiskBadges({ risk, onMissingCogs, onLowMargin }) {
   );
 }
 
+function automationBadgeLabel(automation) {
+  switch (automation?.status) {
+    case "generated":
+      return "Auto-priced";
+    case "manual_review_required":
+      return "Auto review";
+    case "generation_failed":
+      return "Auto failed";
+    case "blocked":
+      return "Auto blocked";
+    case "ready":
+      return "Auto ready";
+    default:
+      return null;
+  }
+}
+
+function AutomationStatusBadge({ automation }) {
+  const label = automationBadgeLabel(automation);
+  if (!label) return null;
+  const detail = [
+    automation.confidence ? `confidence=${automation.confidence}` : null,
+    automation.unsupportedReason,
+    automation.quoteRequiredReason,
+    ...(automation.missing || []),
+    ...(automation.review || []),
+  ].filter(Boolean);
+  const needsReview = [
+    "manual_review_required",
+    "generation_failed",
+    "blocked",
+  ].includes(automation.status);
+  return (
+    <Badge tone={needsReview ? "alert" : "neutral"} title={detail.join(" · ")}>
+      {label}
+    </Badge>
+  );
+}
+
 function v3ChipCounts(estimates) {
   const out = {};
   for (const c of V3_CHIPS) {
@@ -1752,6 +1791,7 @@ function EstimatePipelineViewV2() {
                             setAuditTarget({ estimate: e, focus: "low_margin" })
                           }
                         />
+                        <AutomationStatusBadge automation={e.automation} />
                         {e.confirmedAppointment && (
                           <Badge
                             tone="neutral"
@@ -2571,6 +2611,7 @@ function MobileEstimateRow({
               onMissingCogs={() => onAudit?.(estimate, "missing_cogs")}
               onLowMargin={() => onAudit?.(estimate, "low_margin")}
             />
+            <AutomationStatusBadge automation={estimate.automation} />
             {estimate.confirmedAppointment && (
               <span
                 className="text-11 text-ink-tertiary truncate"
@@ -2625,6 +2666,21 @@ function MobileEstimateRow({
                   : estimate.pricingRisk.lowMarginCount
                     ? "Low Margin"
                     : "Pricing Risk"}
+              </span>
+            )}
+            {automationBadgeLabel(estimate.automation) && (
+              <span
+                className={cn(
+                  "ml-2",
+                  ["manual_review_required", "generation_failed", "blocked"].includes(
+                    estimate.automation?.status,
+                  )
+                    ? "text-alert-fg"
+                    : "text-ink-tertiary",
+                )}
+                title={(estimate.automation?.review || []).join(" · ")}
+              >
+                {automationBadgeLabel(estimate.automation)}
               </span>
             )}
             {estimate.confirmedAppointment && (
