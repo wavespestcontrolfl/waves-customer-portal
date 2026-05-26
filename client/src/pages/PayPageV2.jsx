@@ -449,6 +449,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
   const selectPaymentMethod = (methodCategory) => {
     if (!ready || processing || syncingAmount || syncingAmountRef.current || methodCategory === selectedMethod) return;
+    // Clear any pending card quote when switching methods
+    setAwaitingConfirm(false);
+    setQuoteData(null);
     selectedMethodRef.current = methodCategory;
     setSelectedMethod(methodCategory);
     syncAmountForMethod(methodCategory);
