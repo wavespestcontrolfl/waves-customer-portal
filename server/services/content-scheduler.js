@@ -69,7 +69,7 @@ async function sharePublishedBlog(blog) {
     });
     if (result?.dryRun) {
       logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);
-      return true;
+      return false;
     }
 
     const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
