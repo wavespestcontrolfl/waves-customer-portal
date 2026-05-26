@@ -491,7 +491,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ...invoice,
       payUrl,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err?.isOperational && err.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
 });
 
 // POST /from-service — create from service record (convenience)

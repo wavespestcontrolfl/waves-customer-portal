@@ -2835,6 +2835,18 @@ function RecordPaymentModal({
   );
 }
 
+const WAVEGUARD_TIER_ORDER = ["Bronze", "Silver", "Gold", "Platinum"];
+
+function isDiscountEligibleForCustomer(discount, customer) {
+  const requiredTier = discount?.requires_waveguard_tier;
+  if (!requiredTier) return true;
+  const customerTier = customer?.waveguard_tier;
+  if (discount.is_waveguard_tier_discount) return customerTier === requiredTier;
+  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
+  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
+  return requiredIdx < 0 || customerIdx >= requiredIdx;
+}
+
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, isMobile }) {
   function defaultServiceDate() {
@@ -2890,6 +2902,20 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!selectedCustomer || availableDiscounts.length === 0) return;
+    const discountById = new Map(
+      availableDiscounts.map((discount) => [String(discount.id), discount]),
+    );
+    setLineItems((prev) =>
+      prev.filter((item) => {
+        if (item._kind !== "discount" || !item.discount_id) return true;
+        const discount = discountById.get(String(item.discount_id));
+        return isDiscountEligibleForCustomer(discount, selectedCustomer);
+      }),
+    );
+  }, [availableDiscounts, selectedCustomer]);
 
   // Customer search
   useEffect(() => {
@@ -3029,8 +3055,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const matchingDiscounts = (lineIdx) => {
     const lineKey = lineItems[lineIdx]?.client_id || lineIdx;
     const q = (discountQueries[lineKey] || "").trim().toLowerCase();
-    if (!q) return availableDiscounts.slice(0, 10);
-    return availableDiscounts
+    const eligibleDiscounts = availableDiscounts.filter((discount) =>
+      isDiscountEligibleForCustomer(discount, selectedCustomer),
+    );
+    if (!q) return eligibleDiscounts.slice(0, 10);
+    return eligibleDiscounts
       .filter((d) =>
         `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
           .toLowerCase()
@@ -3040,6 +3069,10 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   };
 
   const addDiscountToLine = (lineIdx, discount) => {
+    if (!isDiscountEligibleForCustomer(discount, selectedCustomer)) {
+      showToast("That discount is not available for this customer's tier");
+      return;
+    }
     const parent = lineItems[lineIdx];
     if (!parent || parent._kind === "discount") return;
     const baseAmount = Math.max(0, lineAmount(parent));
