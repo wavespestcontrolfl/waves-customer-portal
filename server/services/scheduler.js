@@ -692,8 +692,8 @@ function initScheduledJobs() {
       const result = await processLeadEstimateAutoSendBatch({
         config: leadEstimateAutoSendConfigFromEnv(),
       });
-      if (result.scanned || result.sent || result.blocked || result.failed) {
-        logger.info(`[lead-estimate-auto-send] scanned=${result.scanned} sent=${result.sent} blocked=${result.blocked} failed=${result.failed} skipped=${result.skipped}`);
+      if (result.scanned || result.sent || result.blocked || result.failed || result.recovered) {
+        logger.info(`[lead-estimate-auto-send] scanned=${result.scanned} sent=${result.sent} blocked=${result.blocked} failed=${result.failed} skipped=${result.skipped} recovered=${result.recovered}`);
       }
     } catch (err) {
       logger.error(`Lead estimate auto-send cron failed: ${err.message}`);

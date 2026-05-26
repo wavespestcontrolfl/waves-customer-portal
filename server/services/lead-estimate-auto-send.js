@@ -3,6 +3,7 @@ const logger = require('./logger');
 
 const DEFAULT_DELAY_MINUTES = 5;
 const DEFAULT_LIMIT = 10;
+const DEFAULT_STALE_CLAIM_MINUTES = 30;
 const DEFAULT_ALLOWED_REVIEW_REASONS = ['property_measurements_defaulted'];
 
 function parseJsonObject(value) {
@@ -35,11 +36,23 @@ function leadEstimateAutoSendConfigFromEnv(env = process.env) {
   return {
     delayMinutes: parsePositiveInt(env.LEAD_ESTIMATE_AUTO_SEND_DELAY_MINUTES, DEFAULT_DELAY_MINUTES),
     limit: parsePositiveInt(env.LEAD_ESTIMATE_AUTO_SEND_LIMIT, DEFAULT_LIMIT),
+    staleClaimMinutes: parsePositiveInt(
+      env.LEAD_ESTIMATE_AUTO_SEND_STALE_CLAIM_MINUTES,
+      DEFAULT_STALE_CLAIM_MINUTES
+    ),
     allowedReviewReasons: parseAllowedReviewReasons(env.LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS),
     sendMethod: ['sms', 'email', 'both'].includes(env.LEAD_ESTIMATE_AUTO_SEND_METHOD)
       ? env.LEAD_ESTIMATE_AUTO_SEND_METHOD
       : 'both',
   };
+}
+
+function isStaleAutoSendClaim(autoSend = {}, now = new Date(), staleClaimMinutes = DEFAULT_STALE_CLAIM_MINUTES) {
+  const claimedAt = autoSend.claimedAt || autoSend.claimed_at;
+  if (!claimedAt) return false;
+  const claimedTime = new Date(claimedAt).getTime();
+  if (!Number.isFinite(claimedTime)) return false;
+  return now.getTime() - claimedTime >= Number(staleClaimMinutes || DEFAULT_STALE_CLAIM_MINUTES) * 60 * 1000;
 }
 
 function mergeAutoSendMetadata(estimateData, patch) {
@@ -80,6 +93,7 @@ function leadAutomationSummary(estimateData) {
 function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   const config = {
     delayMinutes: DEFAULT_DELAY_MINUTES,
+    staleClaimMinutes: DEFAULT_STALE_CLAIM_MINUTES,
     allowedReviewReasons: DEFAULT_ALLOWED_REVIEW_REASONS,
     ...options,
   };
@@ -96,7 +110,12 @@ function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   if (estimate.archived_at || estimate.archivedAt) return { eligible: false, reason: 'archived' };
   if (summary.autoSend.attemptedAt || summary.autoSend.attempted_at) return { eligible: false, reason: 'already_attempted' };
   if (summary.autoSend.blockedAt || summary.autoSend.blocked_at) return { eligible: false, reason: 'already_blocked' };
-  if (summary.autoSend.claimedAt || summary.autoSend.claimed_at) return { eligible: false, reason: 'already_claimed' };
+  if (
+    (summary.autoSend.claimedAt || summary.autoSend.claimed_at)
+    && !isStaleAutoSendClaim(summary.autoSend, now, config.staleClaimMinutes)
+  ) {
+    return { eligible: false, reason: 'already_claimed' };
+  }
   if (summary.status !== 'generated' || !summary.generated) return { eligible: false, reason: 'not_generated' };
   if (summary.quoteRequired) return { eligible: false, reason: 'quote_required' };
   if (disallowedReview.length > 0) {
@@ -122,14 +141,113 @@ async function candidateLeadEstimateAutoSends({
     .where({ source: 'lead_webhook', status: 'draft' })
     .where('created_at', '<=', cutoff)
     .whereNull('sent_at')
+    .whereNull('scheduled_at')
     .whereRaw("estimate_data->'automation'->'draftEstimateAutomation'->>'status' = 'generated'")
-    .whereRaw("estimate_data->'automation'->'autoSend' IS NULL")
+    .whereRaw(`(
+      estimate_data->'automation'->'autoSend' IS NULL
+      OR (
+        estimate_data->'automation'->'autoSend'->>'claimedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'claimed_at' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL
+      )
+    )`)
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('*');
 }
 
-async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status) {
+async function recoverStaleLeadEstimateAutoSendClaims({
+  database = db,
+  now = new Date(),
+  staleClaimMinutes = DEFAULT_STALE_CLAIM_MINUTES,
+  limit = DEFAULT_LIMIT,
+} = {}) {
+  const possibleStaleClaims = await database('estimates')
+    .where({ source: 'lead_webhook', status: 'sending' })
+    .whereNull('sent_at')
+    .whereNull('scheduled_at')
+    .whereRaw("estimate_data->'automation'->'draftEstimateAutomation'->>'status' = 'generated'")
+    .whereRaw(`(
+      estimate_data->'automation'->'autoSend'->>'claimedAt' IS NOT NULL
+      OR estimate_data->'automation'->'autoSend'->>'claimed_at' IS NOT NULL
+    )`)
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL")
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL")
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL")
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL")
+    .orderBy('updated_at', 'asc')
+    .limit(limit)
+    .select('*');
+
+  let recovered = 0;
+  for (const estimate of possibleStaleClaims) {
+    const summary = leadAutomationSummary(estimate.estimate_data || estimate.estimateData);
+    const claimedAt = summary.autoSend.claimedAt || summary.autoSend.claimed_at;
+    if (!isStaleAutoSendClaim(summary.autoSend, now, staleClaimMinutes)) continue;
+
+    const nextData = mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, {
+      claimedAt: null,
+      claimed_at: null,
+      recoveredAt: now.toISOString(),
+      recoveredReason: 'stale_claim',
+    });
+    const updated = await database('estimates')
+      .where({ id: estimate.id, source: 'lead_webhook', status: 'sending' })
+      .whereRaw(`(
+        estimate_data->'automation'->'autoSend'->>'claimedAt' = ?
+        OR estimate_data->'automation'->'autoSend'->>'claimed_at' = ?
+      )`, [claimedAt, claimedAt])
+      .whereRaw("estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL")
+      .whereRaw("estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL")
+      .whereRaw("estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL")
+      .whereRaw("estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL")
+      .update({
+        status: 'draft',
+        send_method: null,
+        estimate_data: JSON.stringify(nextData),
+        updated_at: database.fn.now(),
+      });
+    recovered += Number(updated || 0);
+  }
+  return recovered;
+}
+
+async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(), sendMethod = 'both' } = {}) {
+  const nextData = mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, {
+    claimedAt: now.toISOString(),
+    sendMethod,
+  });
+
+  const [updated] = await database('estimates')
+    .where({ id: estimate.id, source: 'lead_webhook', status: 'draft' })
+    .whereNull('sent_at')
+    .whereNull('scheduled_at')
+    .whereRaw("estimate_data->'automation'->'draftEstimateAutomation'->>'status' = 'generated'")
+    .whereRaw(`(
+      estimate_data->'automation'->'autoSend' IS NULL
+      OR (
+        estimate_data->'automation'->'autoSend'->>'claimedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'claimed_at' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL
+      )
+    )`)
+    .update({
+      status: 'sending',
+      send_method: sendMethod,
+      estimate_data: JSON.stringify(nextData),
+      updated_at: database.fn.now(),
+    })
+    .returning('*');
+  return updated || null;
+}
+
+async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}) {
   const nextData = mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, patch);
   const [updated] = await database('estimates')
     .where({ id: estimate.id })
@@ -137,6 +255,7 @@ async function updateAutoSendMetadata(database, estimate, patch, status = estima
       status,
       estimate_data: JSON.stringify(nextData),
       updated_at: database.fn.now(),
+      ...extraUpdate,
     })
     .returning('*');
   return updated;
@@ -148,6 +267,13 @@ async function processLeadEstimateAutoSendBatch({
   config = leadEstimateAutoSendConfigFromEnv(),
   sendEstimateNow,
 } = {}) {
+  const recovered = await recoverStaleLeadEstimateAutoSendClaims({
+    database,
+    now,
+    staleClaimMinutes: config.staleClaimMinutes,
+    limit: config.limit,
+  });
+
   const candidates = await candidateLeadEstimateAutoSends({
     database,
     now,
@@ -161,6 +287,7 @@ async function processLeadEstimateAutoSendBatch({
     blocked: 0,
     failed: 0,
     skipped: 0,
+    recovered,
   };
 
   for (const estimate of candidates) {
@@ -179,15 +306,19 @@ async function processLeadEstimateAutoSendBatch({
       continue;
     }
 
-    const claimed = await updateAutoSendMetadata(database, estimate, {
-      claimedAt: now.toISOString(),
+    const claimed = await claimLeadEstimateAutoSend(database, estimate, {
+      now,
       sendMethod: config.sendMethod,
-    }, 'sending');
+    });
+    if (!claimed) {
+      results.skipped += 1;
+      continue;
+    }
 
     try {
       const sender = sendEstimateNow || require('../routes/admin-estimates').sendEstimateNow;
       const sendResult = await sender(claimed, config.sendMethod, {
-        idempotencyKey: `lead-estimate-auto-send:${claimed.id}:${now.toISOString()}`,
+        idempotencyKey: `lead-estimate-auto-send:${claimed.id}`,
         now: () => now,
       });
       if (sendResult.sent) {
@@ -208,7 +339,7 @@ async function processLeadEstimateAutoSendBatch({
           result: 'not_sent',
           channels: sendResult.channels || {},
           failedChannels: sendResult.failedChannels || [],
-        }, 'draft');
+        }, 'draft', { send_method: null });
         results.failed += 1;
       }
     } catch (error) {
@@ -216,7 +347,7 @@ async function processLeadEstimateAutoSendBatch({
         attemptedAt: now.toISOString(),
         result: 'failed',
         error: String(error.message || error).slice(0, 1000),
-      }, 'draft');
+      }, 'draft', { send_method: null });
       results.failed += 1;
       logger.error(`[lead-estimate-auto-send] estimate ${claimed.id} failed: ${error.message}`);
     }
@@ -228,6 +359,9 @@ async function processLeadEstimateAutoSendBatch({
 module.exports = {
   DEFAULT_ALLOWED_REVIEW_REASONS,
   DEFAULT_DELAY_MINUTES,
+  DEFAULT_STALE_CLAIM_MINUTES,
+  claimLeadEstimateAutoSend,
+  isStaleAutoSendClaim,
   leadEstimateAutoSendConfigFromEnv,
   leadEstimateAutoSendEligibility,
   leadAutomationSummary,

@@ -1,5 +1,7 @@
 const {
   DEFAULT_ALLOWED_REVIEW_REASONS,
+  DEFAULT_STALE_CLAIM_MINUTES,
+  isStaleAutoSendClaim,
   leadEstimateAutoSendConfigFromEnv,
   leadEstimateAutoSendEligibility,
   mergeAutoSendMetadata,
@@ -40,6 +42,7 @@ describe('lead estimate auto-send policy', () => {
     expect(leadEstimateAutoSendConfigFromEnv({})).toEqual({
       delayMinutes: 5,
       limit: 10,
+      staleClaimMinutes: DEFAULT_STALE_CLAIM_MINUTES,
       allowedReviewReasons: DEFAULT_ALLOWED_REVIEW_REASONS,
       sendMethod: 'both',
     });
@@ -47,11 +50,13 @@ describe('lead estimate auto-send policy', () => {
     expect(leadEstimateAutoSendConfigFromEnv({
       LEAD_ESTIMATE_AUTO_SEND_DELAY_MINUTES: '12',
       LEAD_ESTIMATE_AUTO_SEND_LIMIT: '3',
+      LEAD_ESTIMATE_AUTO_SEND_STALE_CLAIM_MINUTES: '45',
       LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: 'property_measurements_defaulted,email_missing_sms_only',
       LEAD_ESTIMATE_AUTO_SEND_METHOD: 'sms',
     })).toEqual({
       delayMinutes: 12,
       limit: 3,
+      staleClaimMinutes: 45,
       allowedReviewReasons: ['property_measurements_defaulted', 'email_missing_sms_only'],
       sendMethod: 'sms',
     });
@@ -113,6 +118,51 @@ describe('lead estimate auto-send policy', () => {
       eligible: false,
       reason: 'disallowed_review_reasons',
       review: ['city_or_zip_missing'],
+    });
+  });
+
+  test('treats fresh claims as active and old claims as recoverable', () => {
+    const now = new Date('2026-05-26T12:00:00.000Z');
+
+    expect(isStaleAutoSendClaim({
+      claimedAt: '2026-05-26T11:45:01.000Z',
+    }, now, 15)).toBe(false);
+    expect(isStaleAutoSendClaim({
+      claimedAt: '2026-05-26T11:44:59.000Z',
+    }, now, 15)).toBe(true);
+
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({
+      estimate_data: {
+        automation: {
+          draftEstimateAutomation: {
+            status: 'generated',
+            generated: true,
+          },
+          autoSend: {
+            claimedAt: '2026-05-26T11:59:00.000Z',
+          },
+        },
+      },
+    }), { now, staleClaimMinutes: 30 })).toMatchObject({
+      eligible: false,
+      reason: 'already_claimed',
+    });
+
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({
+      estimate_data: {
+        automation: {
+          draftEstimateAutomation: {
+            status: 'generated',
+            generated: true,
+          },
+          autoSend: {
+            claimedAt: '2026-05-26T11:00:00.000Z',
+          },
+        },
+      },
+    }), { now, staleClaimMinutes: 30 })).toEqual({
+      eligible: true,
+      reason: null,
     });
   });
 
