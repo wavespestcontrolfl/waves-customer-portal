@@ -524,11 +524,25 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       if (!finalRes.ok) throw new Error(result.error || 'Payment failed');
 
       if (result.requiresAction && result.clientSecret) {
-        const { error: actionError } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });
+        const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });
         if (actionError) { setElementError(actionError.message); setProcessing(false); return; }
+        if (actionPI && (actionPI.status === 'succeeded' || actionPI.status === 'processing')) {
+          onSuccess?.({ id: actionPI.id, status: actionPI.status, payment_method: actionPI.payment_method });
+          return;
+        }
+        setElementError('Payment could not be completed. Please try again.');
+        setProcessing(false);
+        return;
       }
 
-      onSuccess?.({ id: result.paymentIntentId, status: result.status || 'succeeded' });
+      if (result.status === 'succeeded' || result.status === 'processing') {
+        onSuccess?.({ id: result.paymentIntentId, status: result.status, payment_method: result.paymentMethodId });
+      } else {
+        setElementError('Payment was not completed. Please try again or use a different payment method.');
+        setProcessing(false);
+        setAwaitingConfirm(false);
+        setQuoteData(null);
+      }
     } catch (err) {
       setElementError(err.message || 'Payment failed');
       setProcessing(false);

@@ -1294,6 +1294,7 @@ const StripeService = {
 
       return {
         paymentIntentId: confirmed.id,
+        paymentMethodId: quote.paymentMethodId,
         clientSecret: confirmed.client_secret,
         status: confirmed.status,
         requiresAction: confirmed.status === 'requires_action',
@@ -1442,13 +1443,17 @@ const StripeService = {
       // and we can't unwind it cheaply. Log critical + create a health
       // alert so an operator can decide whether to follow up.
       if (paymentStatus === 'paid' && pmdType) {
-        const expected = computeChargeAmount(parseFloat(invoice.total), pmdType);
-        const expectedCents = Math.round(expected.total * 100);
+        // Compare against the surcharge policy stored on the PI at charge time,
+        // not a fresh recompute — the pay page may have intentionally charged
+        // differently (no surcharge for debit, base-only for express checkout).
+        const expectedBase = Math.round(Number(pi.metadata?.base_amount || invoice.total) * 100);
+        const expectedSurcharge = Math.round(Number(pi.metadata?.card_surcharge || 0) * 100);
+        const expectedCents = expectedBase + expectedSurcharge;
         const actualCents = Number(pi.amount) || 0;
         if (actualCents + 1 < expectedCents) {  // 1-cent tolerance for rounding
           logger.error(
             `[stripe] CRITICAL: Surcharge-bypass detected on PI ${paymentIntentId}. ` +
-            `Method=${pmdType}, expected=$${expected.total.toFixed(2)} (${expectedCents}c), ` +
+            `Method=${pmdType}, expected=$${(expectedCents / 100).toFixed(2)} (${expectedCents}c), ` +
             `actual=$${(actualCents / 100).toFixed(2)} (${actualCents}c). Invoice ${invoice.invoice_number}.`,
           );
           try {
@@ -1457,13 +1462,13 @@ const StripeService = {
               alert_type: 'stripe_surcharge_bypass',
               severity: 'high',
               title: `Surcharge bypass detected — invoice ${invoice.invoice_number}`,
-              description: `Customer paid $${(actualCents / 100).toFixed(2)} via ${pmdType}, expected $${expected.total.toFixed(2)} (surcharge shortfall). PI: ${paymentIntentId}.`,
+              description: `Customer paid $${(actualCents / 100).toFixed(2)} via ${pmdType}, expected $${(expectedCents / 100).toFixed(2)} (surcharge shortfall). PI: ${paymentIntentId}.`,
               metadata: JSON.stringify({
                 stripe_payment_intent_id: paymentIntentId,
                 method: pmdType,
-                expected_total: expected.total,
+                expected_total: expectedCents / 100,
                 actual_total: actualCents / 100,
-                shortfall: expected.total - (actualCents / 100),
+                shortfall: (expectedCents - actualCents) / 100,
               }),
             });
           } catch (alertErr) {
