@@ -462,7 +462,10 @@ const ContentScheduler = {
     }
 
     const pendingSocials = await db('social_media_posts')
-      .where('publish_status', 'pending')
+      .where(function() {
+        this.where('publish_status', 'pending')
+          .orWhere('publish_status', 'dry_run');
+      })
       .whereNotNull('scheduled_for')
       .where('scheduled_for', '<=', now);
 
@@ -485,8 +488,8 @@ const ContentScheduler = {
         });
 
         if (result?.dryRun) {
-          await db('social_media_posts').where('id', social.id).update({ publish_status: 'pending' });
-          logger.info(`[content-scheduler] Dry-run social: "${social.title}" — kept pending`);
+          await db('social_media_posts').where('id', social.id).update({ publish_status: 'dry_run', status: 'dry_run' });
+          logger.info(`[content-scheduler] Dry-run social: "${social.title}" — marked dry_run`);
         } else {
           await db('social_media_posts').where('id', social.id).update({
             publish_status: 'published',
