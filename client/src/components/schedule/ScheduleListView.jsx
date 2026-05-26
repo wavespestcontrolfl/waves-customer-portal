@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Badge, Button, cn } from '../ui';
+import { addETDays, etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -44,13 +45,10 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   const [sortDir, setSortDir] = useState('asc');
 
   const today = useMemo(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return etDateString();
   }, []);
   const thirtyDaysOut = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 30);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return etDateString(addETDays(new Date(), 30));
   }, []);
 
   const [filterFrom, setFilterFrom] = useState(today);

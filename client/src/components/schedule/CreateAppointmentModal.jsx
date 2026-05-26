@@ -926,7 +926,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const handleSubmit = async () => {
     if (!selectedCustomer || services.length === 0) return;
     setSaving(true);
-    const groups = groupServicesByCadence(services);
+    const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
     let firstError = null;
     for (const group of groups) {
