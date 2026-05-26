@@ -6,6 +6,7 @@ const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
+const config = require('../config');
 const { adminAuthenticate } = require('../middleware/admin-auth');
 const {
   auditTerminalHandoffMint,
@@ -421,11 +422,20 @@ router.post('/validate-handoff', async (req, res) => {
       user_agent: ua,
     });
 
+    // Mint a fresh admin JWT so the iOS app's subsequent /connection-token
+    // and /payment-intent calls succeed even if the Keychain token expired.
+    const authToken = jwt.sign(
+      { technicianId: tech.id, role: tech.role, name: tech.name },
+      config.jwt.secret,
+      { expiresIn: '12h' },
+    );
+
     return res.json({
       invoice_id: String(invoice.id),
       customer_name,
       amount_cents: Number(handoffRow.amount_cents),
       currency: 'usd',
+      authToken,
     });
   } catch (err) {
     logger.error(`[stripe-terminal] validate-handoff failed: ${err.message}`);

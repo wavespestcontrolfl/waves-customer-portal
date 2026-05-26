@@ -17,6 +17,7 @@ enum API {
         let customer_name: String?
         let amount_cents: Int
         let currency: String
+        let authToken: String?
     }
 
     struct PaymentIntentResponse: Decodable {
