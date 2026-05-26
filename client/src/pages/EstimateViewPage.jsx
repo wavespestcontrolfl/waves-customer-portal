@@ -576,8 +576,11 @@ export function getServiceLabel(frequency, estimate, pricing) {
   const category = frequencyServiceCategory(frequency, pricing);
   const service = recurringServiceForEstimate(pricing);
   const serviceLabel = service?.label || serviceLabelForKey(category);
-  if (category === 'pest_control' && estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
-    return `${frequency?.label || 'Quarterly'} Pest Control or One-Time Pest Control`;
+  if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
+    const recurringLabel = frequency?.label
+      ? (labelAlreadyIncludesService(frequency.label, serviceLabel) ? frequency.label : `${frequency.label} ${serviceLabel}`)
+      : serviceLabel;
+    return `${recurringLabel} or One-Time ${serviceLabel}`;
   }
   if (frequency?.label) {
     return labelAlreadyIncludesService(frequency.label, serviceLabel)
@@ -1600,7 +1603,7 @@ export default function EstimateViewPage() {
           {serviceMode === 'recurring' ? (
             <>
               {services.map((section) => {
-                const setupFees = renderFlags.showWaveGuardSetupFee && section.isPest
+                const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
                   ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
                     ? pricing.firstVisitFees
                     : (pricing.setupFee ? [pricing.setupFee] : []))
