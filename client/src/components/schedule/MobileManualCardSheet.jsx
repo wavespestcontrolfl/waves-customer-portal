@@ -3,14 +3,15 @@
 // customer to an external browser tab. Mirrors the Square-style layout
 // per IMG_3861: large amount header, Stripe card fields, Charge button.
 //
-// Uses the existing invoice token flow:
-//   POST /api/pay/:token/setup  { cardOnly: true }  → clientSecret
-//   stripe.confirmPayment()                           → charge
-//   POST /api/pay/:token/confirm                      → mark paid + SMS receipt
+// Uses the invoice token surcharge flow:
+//   POST /api/pay/:token/setup  { cardOnly: true }  -> clientSecret
+//   Stripe createPaymentMethod                       -> card funding lookup
+//   POST /api/pay/:token/quote                       -> exact surcharge disclosure
+//   POST /api/pay/:token/finalize                    -> server-side confirm
+//   POST /api/pay/:token/confirm                     -> mark paid + SMS receipt
 
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { computeCardTotal } from '../../lib/cardSurcharge';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -39,9 +40,8 @@ export default function MobileManualCardSheet({
   const [ready, setReady] = useState(false);
   const [complete, setComplete] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [paymentIntentId, setPaymentIntentId] = useState(null);
-
-  const { total: surcharge } = computeCardTotal(amount);
+  const [quoteData, setQuoteData] = useState(null);
+  const [awaitingConfirm, setAwaitingConfirm] = useState(false);
 
   useEffect(() => {
     if (!invoiceToken) return;
@@ -60,8 +60,6 @@ export default function MobileManualCardSheet({
         }
         const setup = await setupRes.json();
         if (cancelled) return;
-
-        setPaymentIntentId(setup.paymentIntentId);
 
         const stripe = await loadStripeJs(setup.publishableKey);
         if (cancelled) return;
@@ -107,6 +105,8 @@ export default function MobileManualCardSheet({
           if (cancelled) return;
           setComplete(!!event.complete);
           setFormError(event.error?.message || null);
+          setAwaitingConfirm(false);
+          setQuoteData(null);
         });
 
         if (mountRef.current) paymentElement.mount(mountRef.current);
@@ -124,42 +124,76 @@ export default function MobileManualCardSheet({
     setProcessing(true);
     setFormError(null);
     try {
-      const { error, paymentIntent } = await stripeRef.current.confirmPayment({
-        elements: elementsRef.current,
-        confirmParams: { return_url: window.location.href },
-        redirect: 'if_required',
-      });
+      if (awaitingConfirm && quoteData?.quoteToken) {
+        const finalRes = await fetch(`${API_BASE}/pay/${invoiceToken}/finalize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ quoteToken: quoteData.quoteToken }),
+        });
+        const finalized = await finalRes.json().catch(() => ({}));
+        if (!finalRes.ok) throw new Error(finalized.error || 'Payment failed');
 
-      if (error) {
-        setFormError(error.message || 'Payment failed');
-        setProcessing(false);
-        return;
-      }
+        let completedIntent = {
+          id: finalized.paymentIntentId,
+          status: finalized.status,
+          payment_method: finalized.paymentMethodId,
+        };
 
-      if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
+        if (finalized.requiresAction && finalized.clientSecret) {
+          const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({
+            clientSecret: finalized.clientSecret,
+          });
+          if (actionError) throw new Error(actionError.message || 'Additional verification failed');
+          completedIntent = actionPI || completedIntent;
+        }
+
+        if (!completedIntent || !['succeeded', 'processing'].includes(completedIntent.status)) {
+          throw new Error('Payment did not complete - try again');
+        }
+
         // Let the server mark the invoice paid + fire receipt SMS. Webhook
         // will reconcile if this call fails.
         try {
           await fetch(`${API_BASE}/pay/${invoiceToken}/confirm`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ paymentIntentId: paymentIntent.id }),
+            body: JSON.stringify({ paymentIntentId: completedIntent.id }),
           });
         } catch { /* webhook will reconcile */ }
-        onChargeSuccess?.({ paymentIntentId: paymentIntent.id, amount: surcharge });
+        onChargeSuccess?.({ paymentIntentId: completedIntent.id, amount: quoteData.total ?? amount });
         onClose?.();
         return;
       }
 
-      setFormError('Payment did not complete — try again');
+      const { error: submitError } = await elementsRef.current.submit();
+      if (submitError) throw new Error(submitError.message || 'Payment details are incomplete');
+
+      const { error: pmError, paymentMethod } = await stripeRef.current.createPaymentMethod({
+        elements: elementsRef.current,
+      });
+      if (pmError) throw new Error(pmError.message || 'Could not prepare card payment');
+
+      const quoteRes = await fetch(`${API_BASE}/pay/${invoiceToken}/quote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentMethodId: paymentMethod.id }),
+      });
+      const quote = await quoteRes.json().catch(() => ({}));
+      if (!quoteRes.ok) throw new Error(quote.error || 'Could not calculate card total');
+
+      setQuoteData({ ...quote, paymentMethodId: paymentMethod.id });
+      setAwaitingConfirm(true);
       setProcessing(false);
     } catch (err) {
       setFormError(err.message || 'Payment failed');
       setProcessing(false);
+      setAwaitingConfirm(false);
+      setQuoteData(null);
     }
   }
 
   const canCharge = ready && complete && !processing && !initError;
+  const displayedTotal = quoteData?.total ?? amount;
 
   return (
     <div className="fixed inset-0 z-[115] bg-white overflow-y-auto md:hidden">
@@ -186,13 +220,15 @@ export default function MobileManualCardSheet({
           className="text-zinc-900"
           style={{ fontSize: 56, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.05 }}
         >
-          ${amount.toFixed(2)}
+          ${displayedTotal.toFixed(2)}
         </div>
         <div
           className="text-ink-secondary"
           style={{ fontSize: 15, marginTop: 8 }}
         >
-          ${amount.toFixed(2)}
+          {quoteData
+            ? `$${quoteData.base.toFixed(2)} invoice + $${quoteData.surcharge.toFixed(2)} card fee`
+            : 'Credit card fee shown before charging'}
         </div>
 
         {/* Card form — Stripe Payment Element restricted to card tender */}
@@ -226,7 +262,7 @@ export default function MobileManualCardSheet({
             border: 'none',
           }}
         >
-          {processing ? 'Charging…' : 'Charge'}
+          {processing ? 'Charging…' : awaitingConfirm ? `Confirm & charge $${displayedTotal.toFixed(2)}` : 'Continue'}
         </button>
       </div>
     </div>
