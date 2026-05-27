@@ -3,26 +3,26 @@
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1572,
-      "annualAfterDiscount": 1414.8,
-      "monthlyTotal": 117.9,
-      "savings": 157.2,
+      "annualBeforeDiscount": 1626.98,
+      "annualAfterDiscount": 1464.28,
+      "monthlyTotal": 122.02,
+      "savings": 162.7,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 63,
+          "mo": 65.27,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 92,
+          "mo": 96.58,
           "recommended": true,
           "name": "9 Applications"
         },
         {
-          "mo": 123,
+          "mo": 129.13,
           "recommended": false,
           "name": "12 Applications"
         }
@@ -58,34 +58,34 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1513.8,
-      "year2": 1414.8
+      "year1": 1563.28,
+      "year2": 1464.28
     }
   },
   "v1adapter_platinum_bundle_4_services_zone_a": {
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 4173,
-      "annualAfterDiscount": 3338.4,
-      "monthlyTotal": 278.2,
-      "savings": 834.6,
+      "annualBeforeDiscount": 4402.06,
+      "annualAfterDiscount": 3521.65,
+      "monthlyTotal": 293.47,
+      "savings": 880.41,
       "serviceCount": 4
     },
     "results": {
       "lawn": [
         {
-          "mo": 63,
+          "mo": 71.75,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 92,
+          "mo": 106.3,
           "recommended": false,
           "name": "9 Applications"
         },
         {
-          "mo": 123,
+          "mo": 142.09,
           "recommended": true,
           "name": "12 Applications"
         }
@@ -141,8 +141,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 3437.4,
-      "year2": 3338.4
+      "year1": 3620.65,
+      "year2": 3521.65
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -484,26 +484,26 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 2393.7,
-      "annualAfterDiscount": 2034.65,
-      "monthlyTotal": 169.55,
-      "savings": 359.05,
+      "annualBeforeDiscount": 2441.97,
+      "annualAfterDiscount": 2075.68,
+      "monthlyTotal": 172.97,
+      "savings": 366.29,
       "serviceCount": 3
     },
     "results": {
       "lawn": [
         {
-          "mo": 62,
+          "mo": 65.07,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 94,
+          "mo": 98.02,
           "recommended": true,
           "name": "9 Applications"
         },
         {
-          "mo": 118,
+          "mo": 123.57,
           "recommended": false,
           "name": "12 Applications"
         }
@@ -550,34 +550,34 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2133.65,
-      "year2": 2034.65
+      "year1": 2174.68,
+      "year2": 2075.68
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1464,
-      "annualAfterDiscount": 1317.6,
-      "monthlyTotal": 109.8,
-      "savings": 146.4,
+      "annualBeforeDiscount": 1513.4,
+      "annualAfterDiscount": 1362.06,
+      "monthlyTotal": 113.51,
+      "savings": 151.34,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 59,
+          "mo": 62.19,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 83,
+          "mo": 87.12,
           "recommended": true,
           "name": "9 Applications"
         },
         {
-          "mo": 105,
+          "mo": 110.61,
           "recommended": false,
           "name": "12 Applications"
         }
@@ -613,8 +613,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1416.6,
-      "year2": 1317.6
+      "year1": 1461.06,
+      "year2": 1362.06
     }
   }
 }
