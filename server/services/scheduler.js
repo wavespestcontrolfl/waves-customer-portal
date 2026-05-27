@@ -1729,7 +1729,6 @@ function initBankingSync() {
       logger.error(`[stripe-banking] Scheduled sync failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
-  logger.info('[stripe-banking] Twice-daily payout sync scheduled (8 AM / 8 PM ET)');
 }
 
 module.exports = {
