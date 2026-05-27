@@ -622,9 +622,9 @@ const AppointmentReminders = {
         return null;
       }
 
-      // Reset reminder flags — but if the new time is already inside the
-      // 24h window, keep reminder_24h_sent true so the cron doesn't re-send
-      // a redundant day-before reminder right after the reschedule confirmation.
+      // Reset reminder flags. If we successfully send a reschedule notice
+      // below, we mark any already-due reminder windows as sent so cron does
+      // not immediately repeat the same appointment details.
       const now = new Date();
       const msUntil = newApptTime.getTime() - now.getTime();
       const hoursUntil = msUntil / 3600000;
@@ -637,10 +637,10 @@ const AppointmentReminders = {
         .where({ id: record.id })
         .update({
           appointment_time: newApptTime,
-          reminder_72h_sent: alreadyInside72hWindow,
-          reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
-          reminder_24h_sent: alreadyInside24hWindow,
-          reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
+          reminder_72h_sent: false,
+          reminder_72h_sent_at: null,
+          reminder_24h_sent: false,
+          reminder_24h_sent_at: null,
           updated_at: new Date(),
         });
 
@@ -658,7 +658,7 @@ const AppointmentReminders = {
         const time = formatTime(newApptTime);
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
-        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const sent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = contact.name || customer?.first_name || 'there';
           return renderRequiredTemplate('appointment_rescheduled', {
             first_name: firstName,
@@ -672,7 +672,18 @@ const AppointmentReminders = {
             entity_id: scheduledServiceId,
           });
         }, 'appointment_rescheduled', 'appointment_confirmation');
-        logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+        if (sent) {
+          await db('appointment_reminders')
+            .where({ id: record.id })
+            .update({
+              reminder_72h_sent: alreadyInside72hWindow,
+              reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
+              reminder_24h_sent: alreadyInside24hWindow,
+              reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
+              updated_at: new Date(),
+            });
+          logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+        }
       }
 
       return record;
