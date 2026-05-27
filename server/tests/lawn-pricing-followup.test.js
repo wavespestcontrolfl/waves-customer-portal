@@ -556,6 +556,8 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.tiers).toHaveLength(3);
     expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
     expect(lawn.selected.tier).toBe('enhanced');
+    expect(lawn.tier).toBe('enhanced');
+    expect(lawn.frequency).toBe(9);
   });
 
   test('useLawnCostFloor defaults to true for recurring lawn', () => {
