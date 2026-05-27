@@ -19,6 +19,7 @@ const AppointmentReminders = require('../services/appointment-reminders');
 function chain(overrides = {}) {
   return {
     where: jest.fn().mockReturnThis(),
+    whereIn: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
@@ -210,8 +211,14 @@ describe('appointment reminder reschedule windows', () => {
       first: jest.fn().mockResolvedValue(reminder),
     });
     const updateReminder = chain();
+    const finalReminderLookup = chain({
+      select: jest.fn().mockResolvedValue([{
+        id: reminder.id,
+        appointment_time: new Date('2026-05-07T13:00:00.000Z'),
+      }]),
+    });
     const finalReminderUpdate = chain();
-    const reminderQueries = [lookupReminder, updateReminder, finalReminderUpdate];
+    const reminderQueries = [lookupReminder, updateReminder, finalReminderLookup, finalReminderUpdate];
 
     const customerQuery = chain({
       first: jest.fn().mockResolvedValue(customer || null),
