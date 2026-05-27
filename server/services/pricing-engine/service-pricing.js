@@ -2,7 +2,7 @@
 // service-pricing.js — All service line pricing calculations
 // ============================================================
 const {
-  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_FREQS,
+  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
@@ -1690,7 +1690,12 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
     (['POOR', 'DEFERRED'].includes(maintenance) ? 5 : 0) +
     (['HIGH', 'SEVERE', 'VERY_HIGH'].includes(pressure) ? 5 : 0);
 
-  const materialCostPerVisit = turfK * materialCostPerK;
+  const annualMaterialBudget = Number.isFinite(Number(options.annualMaterialBudget))
+    ? Number(options.annualMaterialBudget)
+    : null;
+  const materialCostPerVisit = annualMaterialBudget !== null
+    ? (annualMaterialBudget * (lawnSqFt / 4500)) / visits
+    : turfK * materialCostPerK;
   const laborMinutesPerVisit = laborMinutesBase + turfK * laborMinutesPerK + complexityMinutes;
   const laborCostPerVisit = GLOBAL.LABOR_RATE * laborMinutesPerVisit / 60;
   const driveCostPerVisit = GLOBAL.LABOR_RATE * routeDriveMinutes / 60;
@@ -1706,7 +1711,8 @@ function priceLawnCare(property, options = {}) {
     tier = 'enhanced',
     lawnFreq,
     shadeClassification = 'FULL_SUN',
-    useLawnCostFloor = false,
+    useLawnCostFloor = true,
+    includeHiddenTiers = false,
   } = options;
 
   const normalizedTrack = normalizeGrassType(track);
@@ -1749,15 +1755,22 @@ function priceLawnCare(property, options = {}) {
 
   const annualCost = scaledMaterial + annualLabor + GLOBAL.ADMIN_ANNUAL;
 
-  // ── Tier array: 4 Apps / 6 Apps / 9 Apps / 12 Apps ──
+  // ── Tier array: 6 Apps / 9 Apps / 12 Apps (basic hidden unless includeHiddenTiers) ──
   const TIER_LIST = ['basic', 'standard', 'enhanced', 'premium'];
-  const tiers = TIER_LIST.map((t) => {
+  const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
+    const tierMaterial = (materialByTier[normalizedTrack] || materialByTier.st_augustine);
+    const tierShadeMat = tierMaterial[shadeClassification] || tierMaterial.FULL_SUN;
+    const tierAnnualBudget = tierShadeMat[t] || 100;
     const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack);
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);
-    const costFloorAnnual = calcLawnAnnualCostFloor(lawnSqFt, normalizedTrack, tc.freq, property, options);
+    const costFloorOpts = { ...options };
+    if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
+      costFloorOpts.annualMaterialBudget = tierAnnualBudget;
+    }
+    const costFloorAnnual = calcLawnAnnualCostFloor(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
     const ann = costFloorApplied ? costFloorAnnual : marketAnnual;
     return {
@@ -1768,7 +1781,7 @@ function priceLawnCare(property, options = {}) {
       perApp: Math.round(ann / tc.freq * 100) / 100,
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
-      label: tc.label || `${tc.freq} Apps`,
+      label: tc.label,
       recommended: t === selectedTier,
       pricingBasis: market.pricingBasis,
       pricingSource: costFloorApplied ? 'COST_FLOOR' : market.pricingSource,
@@ -1778,7 +1791,10 @@ function priceLawnCare(property, options = {}) {
       costFloorApplied,
     };
   }).filter(Boolean);
-  const selected = tiers.find(t => t.tier === selectedTier) || tiers[2];
+  const tiers = includeHiddenTiers
+    ? allTiers
+    : allTiers.filter(t => !LAWN_TIERS[t.tier]?.hidden);
+  const selected = tiers.find(t => t.tier === selectedTier) || tiers.find(t => t.tier === 'enhanced') || tiers[0];
   const monthly = selected.monthly;
   const annual = selected.annual;
   const perApp = selected.perApp;
@@ -1791,14 +1807,14 @@ function priceLawnCare(property, options = {}) {
     track: normalizedTrack,
     grassCode: display.code,
     grassType: display.label,
-    tier: selectedTier,
+    tier: selected.tier,
     shadeClassification,
     lawnSqFt,
     turfSf: lawnSqFt,
     turfEstimated: property.turfEstimated,
     turfConfidence: property.turfConfidence,
     turfBasis: property.turfBasis,
-    frequency: tierConfig.freq,
+    frequency: LAWN_TIERS[selected.tier]?.freq ?? tierConfig.freq,
     monthly, annual, perApp,
     tiers,
     selected,

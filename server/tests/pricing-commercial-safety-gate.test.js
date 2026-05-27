@@ -271,14 +271,14 @@ describe('commercial safety gate in generateEstimate', () => {
     const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
 
     expect(pest).toMatchObject({ monthly: 39, annual: 468, perApp: 117 });
-    expect(lawn).toMatchObject({ monthly: 58, annual: 696, perApp: 77.33 });
+    expect(lawn).toMatchObject({ monthly: 91, annual: 1092, perApp: 121.33 });
     expect(estimate.summary).toMatchObject({
-      recurringAnnualBeforeDiscount: 1164,
-      recurringAnnualAfterDiscount: 1047.6,
-      recurringMonthlyAfterDiscount: 87.3,
-      year1Total: 1048,
-      year2Annual: 1048,
-      year2Monthly: 87.3,
+      recurringAnnualBeforeDiscount: 1560,
+      recurringAnnualAfterDiscount: 1404,
+      recurringMonthlyAfterDiscount: 117,
+      year1Total: 1404,
+      year2Annual: 1404,
+      year2Monthly: 117,
     });
     expect(estimate.waveGuard).toMatchObject({
       tier: 'silver',

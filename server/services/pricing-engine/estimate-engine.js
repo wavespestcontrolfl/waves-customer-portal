@@ -555,7 +555,7 @@ function generateEstimate(input) {
         tier: services.lawn.tier || 'enhanced',
         lawnFreq: services.lawn.lawnFreq || input.lawnFreq,
         shadeClassification: services.lawn.shadeClassification || 'FULL_SUN',
-        useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? false,
+        useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? true,
         targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
         routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,
         lawnMaterialCostPerK: services.lawn.lawnMaterialCostPerK ?? input.lawnMaterialCostPerK,

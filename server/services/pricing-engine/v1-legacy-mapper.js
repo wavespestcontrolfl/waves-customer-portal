@@ -398,11 +398,10 @@ function mapV1ToLegacyShape(v1Result) {
   }
 
   // Lawn → R.lawn, R.lawnMeta
-  // Name convention: "{visits}x" to match v2-legacy-mapper output.
   if (lawnLI) {
     R.lawn = (lawnLI.tiers || []).map(t => ({
       pa: t.perApp, v: t.visits, ann: t.annual, mo: t.monthly,
-      name: `${t.visits}x`,
+      name: t.label || `${t.visits} Applications`,
       recommended: !!t.recommended, dimmed: !t.recommended,
       hasLandscape: t.visits >= 12,
       pricingSource: t.pricingSource,

@@ -1653,7 +1653,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       track,
       tier: lawnTier,
       lawnFreq: Number(o.lawnFreq) || 9,
-      useLawnCostFloor: !!o.useLawnCostFloor,
+      useLawnCostFloor: o.useLawnCostFloor != null ? !!o.useLawnCostFloor : undefined,
       targetLawnGrossMargin: o.targetLawnGrossMargin,
       routeDriveMinutes: o.routeDriveMinutes,
       lawnMaterialCostPerK: o.lawnMaterialCostPerK,
