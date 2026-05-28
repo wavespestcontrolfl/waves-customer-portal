@@ -3,6 +3,7 @@ const protocols = require('../config/protocols.json');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
+const { convertToOz, normalizeQuantityToOz } = require('./product-costing');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -156,7 +157,19 @@ function matchCatalogProduct(line, products) {
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
 
-  return candidates[0]?.product || null;
+  return enrichProductAnalysis(candidates[0]?.product || null);
+}
+
+function enrichProductAnalysis(product) {
+  if (!product) return null;
+  const parsedNpk = parseNpkFromText(product.name);
+  if (!parsedNpk) return product;
+  return {
+    ...product,
+    analysis_n: product.analysis_n ?? parsedNpk.n,
+    analysis_p: product.analysis_p ?? parsedNpk.p,
+    analysis_k: product.analysis_k ?? parsedNpk.k,
+  };
 }
 
 function productHasNitrogen(product) {
@@ -463,23 +476,147 @@ function effectiveAreaFactor(line, property = {}) {
   return 0;
 }
 
-function calculateProductAmount({ product, lawnSqft, carrierGalPer1000, areaFactor = 1 }) {
+function parseVisitNutrientTargets(notes) {
+  const text = String(Array.isArray(notes) ? notes.join(' ') : notes || '');
+  const nApp = text.match(/\bN\s+app\b[^@.]*@\s*([\d.]+)\s*lb\s*N\s*(?:\/|per)?\s*1K/i);
+  const nRate = text.match(/\bN\s+rate:?\s*([\d.]+)\s*lb\s*N/i);
+  const kApp = text.match(/\bK\s+app\b[^@.]*@\s*([\d.]+)\s*lb\s*K\s*(?:\/|per)?\s*1K/i);
+  const kRate = text.match(/\bK\s+rate:?\s*([\d.]+)\s*lb\s*K/i);
+  const numberOrNull = (match) => {
+    const value = match ? Number(match[1]) : null;
+    return Number.isFinite(value) ? value : null;
+  };
+  return {
+    targetNPer1000: numberOrNull(nApp) ?? numberOrNull(nRate),
+    targetKPer1000: numberOrNull(kApp) ?? numberOrNull(kRate),
+  };
+}
+
+function derivedNutrientRate(product, nutrient, targetPer1000) {
+  const target = Number(targetPer1000);
+  const enriched = enrichProductAnalysis(product);
+  const analysis = Number(enriched?.[nutrient] || 0);
+  if (!Number.isFinite(target) || target <= 0 || !Number.isFinite(analysis) || analysis <= 0) return null;
+  return Number((target / (analysis / 100)).toFixed(4));
+}
+
+function productRatePer1000(product, options = {}) {
+  const catalogRate = Number(product?.default_rate_per_1000 || 0);
+  if (catalogRate > 0) {
+    return {
+      rate: catalogRate,
+      unit: product?.rate_unit || null,
+      source: 'catalog_default_rate',
+    };
+  }
+
+  const nRate = derivedNutrientRate(product, 'analysis_n', options.targetNPer1000);
+  if (nRate != null) {
+    return {
+      rate: nRate,
+      unit: 'lb',
+      source: 'target_n_analysis',
+      targetNPer1000: Number(options.targetNPer1000),
+    };
+  }
+
+  const kRate = derivedNutrientRate(product, 'analysis_k', options.targetKPer1000);
+  if (kRate != null) {
+    return {
+      rate: kRate,
+      unit: 'lb',
+      source: 'target_k_analysis',
+      targetKPer1000: Number(options.targetKPer1000),
+    };
+  }
+
+  return {
+    rate: 0,
+    unit: product?.rate_unit || null,
+    source: 'missing_rate',
+  };
+}
+
+function productUnitSizeOz(product) {
+  const explicit = Number(product?.unit_size_oz || 0);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  return normalizeQuantityToOz(product?.container_size);
+}
+
+function materialCostForAmount(product, amount, amountUnit) {
+  const quantity = Number(amount);
+  if (!product || !Number.isFinite(quantity) || quantity <= 0) return null;
+
+  const costPerUnit = product.cost_per_unit != null ? Number(product.cost_per_unit) : null;
+  if (Number.isFinite(costPerUnit) && costPerUnit >= 0) {
+    const costUnit = product.cost_unit || amountUnit;
+    const amountOz = convertToOz(quantity, amountUnit);
+    const costUnitOz = convertToOz(1, costUnit);
+    const convertedQuantity = amountOz != null && costUnitOz != null
+      ? amountOz / costUnitOz
+      : quantity;
+    return {
+      cost: Number((convertedQuantity * costPerUnit).toFixed(2)),
+      source: 'inventory_cost_per_unit',
+      costPerUnit,
+      costUnit,
+      pricedQuantity: Number(convertedQuantity.toFixed(4)),
+    };
+  }
+
+  const bestPrice = product.best_price != null ? Number(product.best_price) : null;
+  const unitSizeOz = productUnitSizeOz(product);
+  const amountOz = convertToOz(quantity, amountUnit);
+  if (
+    Number.isFinite(bestPrice) && bestPrice >= 0
+    && Number.isFinite(unitSizeOz) && unitSizeOz > 0
+    && amountOz != null
+  ) {
+    return {
+      cost: Number(((amountOz / unitSizeOz) * bestPrice).toFixed(2)),
+      source: 'inventory_best_price_package_size',
+      bestPrice,
+      unitSizeOz,
+      pricedQuantity: Number(amountOz.toFixed(4)),
+      costUnit: 'oz',
+    };
+  }
+
+  return null;
+}
+
+function calculateProductAmount({
+  product,
+  lawnSqft,
+  carrierGalPer1000,
+  areaFactor = 1,
+  targetNPer1000 = null,
+  targetKPer1000 = null,
+} = {}) {
   const factor = Math.max(0, Number(areaFactor ?? 1));
   const treatedUnits = (Number(lawnSqft || 0) * factor) / 1000;
-  const rate = Number(product?.default_rate_per_1000 || 0);
-  const unit = product?.rate_unit || null;
+  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000 });
+  const rate = Number(rateInfo.rate || 0);
+  const unit = rateInfo.unit || null;
   const amount = treatedUnits > 0 && rate > 0 ? Number((treatedUnits * rate).toFixed(3)) : null;
   const carrierGallons = treatedUnits > 0 && Number(carrierGalPer1000 || 0) > 0
     ? Number((treatedUnits * Number(carrierGalPer1000)).toFixed(2))
     : null;
+  const materialCost = amount != null ? materialCostForAmount(product, amount, unit) : null;
   return {
     ratePer1000: rate || null,
     rateUnit: unit,
+    rateSource: rateInfo.source,
+    targetNPer1000: rateInfo.targetNPer1000 ?? null,
+    targetKPer1000: rateInfo.targetKPer1000 ?? null,
     areaFactor: factor,
     treatedSqft: Number(lawnSqft || 0) && factor ? Number((Number(lawnSqft || 0) * factor).toFixed(2)) : null,
     amount,
     amountUnit: unit,
     carrierGallons,
+    materialCost: materialCost?.cost ?? null,
+    materialCostSource: materialCost?.source || null,
+    materialCostDetail: materialCost,
   };
 }
 
@@ -745,7 +882,7 @@ async function getProducts(knex) {
       'frac_group', 'irac_group', 'hrac_group',
       'analysis_n', 'analysis_p', 'analysis_k',
       'default_rate_per_1000', 'rate_unit',
-      'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'needs_pricing',
+      'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at',
     )
@@ -929,6 +1066,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate);
   const baseLines = parseProtocolLines(visit?.primary, 'base');
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
+  const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
   const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
@@ -969,6 +1107,7 @@ async function buildPlanForService(serviceId, options = {}) {
       costPerUnit: item.product.cost_per_unit != null ? Number(item.product.cost_per_unit) : null,
       costUnit: item.product.cost_unit || null,
       containerSize: item.product.container_size || null,
+      unitSizeOz: item.product.unit_size_oz != null ? Number(item.product.unit_size_oz) : null,
       needsPricing: item.product.needs_pricing === true,
       mixing_order_category: item.product.mixing_order_category,
       mixing_instructions: item.product.mixing_instructions,
@@ -985,6 +1124,7 @@ async function buildPlanForService(serviceId, options = {}) {
         stressFlags,
         isFirstYear: options.isFirstYear,
       }),
+      ...nutrientTargets,
     }) : null,
   }));
   const plannedItems = planItems.filter((item) => item.selected);
@@ -1168,6 +1308,7 @@ async function buildPlanForService(serviceId, options = {}) {
 module.exports = {
   buildPlanForService,
   calculateProductAmount,
+  parseVisitNutrientTargets,
   effectiveAreaFactor,
   calculateNutrientLedgerFromRows,
   calculateNutrients,

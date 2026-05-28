@@ -11,6 +11,7 @@ const {
   isConditionalSelected,
   isDateInWindow,
   matchCatalogProduct,
+  parseVisitNutrientTargets,
   parseProtocolLines,
   resolveProtocolItems,
   selectedMayFertilizerBranch,
@@ -290,6 +291,137 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.treatedSqft).toBe(2500);
     expect(result.amount).toBe(0.283);
     expect(result.carrierGallons).toBe(2.5);
+  });
+
+  test('parseVisitNutrientTargets reads protocol N rate notes', () => {
+    expect(parseVisitNutrientTargets('LAST N before blackout. N app @ 0.75 lb N/1K.')).toMatchObject({
+      targetNPer1000: 0.75,
+      targetKPer1000: null,
+    });
+    expect(parseVisitNutrientTargets('Fall color. N app final @ 0.75 lb N/1K.')).toMatchObject({
+      targetNPer1000: 0.75,
+    });
+    expect(parseVisitNutrientTargets('Fall color. N app 4 FINAL @ 0.75 lb N/1K.')).toMatchObject({
+      targetNPer1000: 0.75,
+    });
+    expect(parseVisitNutrientTargets('Split timing. N app 1/2-3 @ 0.75 lb N/1K.')).toMatchObject({
+      targetNPer1000: 0.75,
+    });
+    expect(parseVisitNutrientTargets('N rate: 0 lb N.')).toMatchObject({
+      targetNPer1000: 0,
+    });
+  });
+
+  test('calculateProductAmount derives granular fertilizer rate and cost from target N and inventory', () => {
+    const zeroP = calculateProductAmount({
+      product: {
+        name: 'LESCO 24-0-11',
+        analysis_n: 24,
+        analysis_p: 0,
+        analysis_k: 11,
+        best_price: 33.79,
+        cost_per_unit: 33.79 / 50,
+        cost_unit: 'lb',
+        container_size: '50 lb',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 0,
+      targetNPer1000: 0.75,
+    });
+    const lowP = calculateProductAmount({
+      product: {
+        name: 'LESCO 24-2-11',
+        analysis_n: 24,
+        analysis_p: 2,
+        analysis_k: 11,
+        best_price: 40.48,
+        cost_per_unit: 40.48 / 50,
+        cost_unit: 'lb',
+        container_size: '50 lb',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 0,
+      targetNPer1000: 0.75,
+    });
+
+    expect(zeroP).toMatchObject({
+      ratePer1000: 3.125,
+      rateUnit: 'lb',
+      rateSource: 'target_n_analysis',
+      amount: 31.25,
+      amountUnit: 'lb',
+      materialCost: 21.12,
+      materialCostSource: 'inventory_cost_per_unit',
+    });
+    expect(lowP.materialCost).toBe(25.3);
+  });
+
+  test('calculateProductAmount derives fertilizer analysis from imported NPK product names', () => {
+    const result = calculateProductAmount({
+      product: {
+        name: 'LESCO 24-2-11 50% NOS Plus BIO 6% Fe',
+        best_price: 40.48,
+        cost_per_unit: 40.48 / 50,
+        cost_unit: 'lb',
+        container_size: '50 lb',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 0,
+      targetNPer1000: 0.75,
+    });
+
+    expect(result).toMatchObject({
+      ratePer1000: 3.125,
+      rateUnit: 'lb',
+      rateSource: 'target_n_analysis',
+      amount: 31.25,
+      materialCost: 25.3,
+    });
+  });
+
+  test('matched imported NPK fertilizers carry parsed analysis into compliance and nutrient projection', () => {
+    const product = matchCatalogProduct(
+      { raw: 'LESCO 24-2-11 fert' },
+      [{
+        id: 'imported-low-p',
+        name: 'LESCO 24-2-11 50% NOS Plus BIO 6% Fe',
+        best_price: 40.48,
+        cost_per_unit: 40.48 / 50,
+        cost_unit: 'lb',
+        container_size: '50 lb',
+      }]
+    );
+    const nutrients = calculateNutrients([{
+      product,
+      mix: { amount: 31.25, amountUnit: 'lb' },
+    }], 10000);
+    const ordinance = summarizeOrdinanceStatus({
+      date: new Date('2026-06-15T12:00:00'),
+      ordinances: [{
+        jurisdiction_name: 'Sarasota County',
+        restricted_start_month: 6,
+        restricted_start_day: 1,
+        restricted_end_month: 9,
+        restricted_end_day: 30,
+        restricted_nitrogen: true,
+        restricted_phosphorus: true,
+      }],
+      candidateItems: [{ product }],
+    });
+
+    expect(product).toMatchObject({
+      analysis_n: 24,
+      analysis_p: 2,
+      analysis_k: 11,
+    });
+    expect(nutrients).toEqual({
+      nPer1000: 0.75,
+      pPer1000: 0.063,
+      kPer1000: 0.344,
+    });
+    expect(ordinance.blocks.map((block) => block.code)).toEqual(
+      expect.arrayContaining(['nitrogen_blackout', 'phosphorus_blackout'])
+    );
   });
 
   test('classifyProtocolLine marks Celsius as spot allowance and May fertilizers as one-of branch', () => {
