@@ -50,6 +50,8 @@
     "@anthropic-ai/sdk": "^0.82.0",
     "@google-analytics/data": "^5.2.1",
     "@sentry/node": "^10.47.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "archiver": "^7.0.1",
     "csv-parse": "^6.2.1",
     "google-ads-api": "^23.0.0",

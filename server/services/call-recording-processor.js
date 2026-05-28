@@ -30,6 +30,14 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
 const { normalizeCallExtraction } = require('../utils/intake-normalize');
+const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
+const { toGeminiResponseSchema } = require('../utils/gemini-schema-adapter');
+const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
+const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
+
+const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 'true';
+const CALL_TRANSCRIPT_DIARIZATION_ENABLED = process.env.CALL_TRANSCRIPT_DIARIZATION_ENABLED === 'true';
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1103,6 +1111,93 @@ Return ONLY valid JSON.`;
   }
 }
 
+// ── V2 Extraction (shadow pipeline — stores alongside, never replaces v1) ──
+
+async function extractCallDataV2(transcription, callerPhone, opts = {}) {
+  if (!process.env.GEMINI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
+
+  const callDateET = etDateString(opts.callStartedAt || new Date());
+  const callId = opts.callId || null;
+  const prompt = buildExtractionPrompt(transcription, callerPhone, callDateET);
+  const geminiSchema = toGeminiResponseSchema(modelOutputSchema);
+
+  let rawText;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            response_mime_type: 'application/json',
+            response_schema: geminiSchema,
+            temperature: 0.2,
+          },
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      logger.error(`[call-proc-v2] Gemini HTTP ${res.status}: ${body.slice(0, 240)}`);
+      return { status: 'parse_failed', extraction: null, errors: [{ message: `Gemini HTTP ${res.status}` }] };
+    }
+
+    const data = await res.json();
+    rawText = data?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim() || '{}';
+  } catch (err) {
+    logger.error(`[call-proc-v2] Gemini request failed: ${err.message}`);
+    return { status: 'parse_failed', extraction: null, errors: [{ message: err.message }] };
+  }
+
+  // Pass 1: parse JSON
+  let parsed;
+  try {
+    const cleaned = rawText.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    logger.error(`[call-proc-v2] JSON parse failed: ${e.message} — raw: ${rawText.slice(0, 200)}`);
+    return { status: 'parse_failed', extraction: null, errors: [{ message: e.message, raw: rawText.slice(0, 500) }] };
+  }
+
+  // Pass 2: validate against model-output schema
+  const modelValidation = validateModelOutput(parsed);
+  if (!modelValidation.valid) {
+    logger.warn(`[call-proc-v2] Model output schema validation failed: ${JSON.stringify(modelValidation.errors?.slice(0, 5))}`);
+    return { status: 'schema_failed', extraction: parsed, errors: modelValidation.errors };
+  }
+
+  // Inject server-owned metadata
+  parsed.meta = {
+    ...parsed.meta,
+    call_id: callId,
+    schema_version: SCHEMA_VERSION,
+    extracted_at: new Date().toISOString(),
+    extraction_model: 'gemini-2.5-flash',
+    extraction_prompt_version: PROMPT_HASH,
+  };
+
+  // Normalize
+  let normalized;
+  try {
+    normalized = normalizeExtractionV2(parsed);
+  } catch (e) {
+    logger.error(`[call-proc-v2] Normalization failed: ${e.message}`);
+    return { status: 'normalization_failed', extraction: parsed, errors: [{ message: e.message }] };
+  }
+
+  // Pass 3: validate against persisted schema
+  const persistedValidation = validatePersisted(normalized);
+  if (!persistedValidation.valid) {
+    logger.warn(`[call-proc-v2] Persisted schema validation failed: ${JSON.stringify(persistedValidation.errors?.slice(0, 5))}`);
+    return { status: 'schema_failed', extraction: normalized, errors: persistedValidation.errors };
+  }
+
+  return { status: 'valid', extraction: normalized, errors: null };
+}
+
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
 async function generateLeadSynopsis(transcription) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
@@ -1263,11 +1358,19 @@ const CallRecordingProcessor = {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
       transcription = result.transcription;
       if (transcription) {
-        await db('call_log').where({ id: call.id }).update({
+        const transcriptUpdate = {
           transcription,
           transcription_status: 'completed',
           updated_at: new Date(),
-        });
+        };
+        if (CALL_TRANSCRIPT_DIARIZATION_ENABLED && result.structuredSegments) {
+          transcriptUpdate.transcript_structured = JSON.stringify({
+            provider: result.provider,
+            model: OPENAI_TRANSCRIPTION_MODEL,
+            segments: result.structuredSegments,
+          });
+        }
+        await db('call_log').where({ id: call.id }).update(transcriptUpdate);
         await updateUnifiedVoiceMessage(
           { ...call, transcription },
           { body: transcription }
@@ -1318,6 +1421,33 @@ const CallRecordingProcessor = {
         updated_at: new Date(),
       });
       return { success: false, error: `AI extraction failed: ${err.message}` };
+    }
+
+    // ── Shadow v2 extraction (records alongside v1, no side effects) ──
+    if (CALL_EXTRACTION_V2_ENABLED) {
+      try {
+        const v2Result = await extractCallDataV2(transcription, contactPhone, {
+          callStartedAt: call.created_at,
+          callId: call.id,
+        });
+        const v2Update = {
+          ai_extraction_enriched: v2Result.extraction ? JSON.stringify(v2Result.extraction) : null,
+          ai_extraction_validation_errors: v2Result.errors ? JSON.stringify(v2Result.errors) : null,
+          v2_extraction_status: v2Result.status,
+          ai_extraction_model: 'gemini-2.5-flash',
+          ai_extraction_prompt_version: PROMPT_HASH,
+          updated_at: new Date(),
+        };
+        await db('call_log').where({ id: call.id }).update(v2Update);
+        logger.info(`[call-proc-v2] Shadow extraction stored for ${callSid}: status=${v2Result.status}`);
+      } catch (err) {
+        logger.error(`[call-proc-v2] Shadow extraction failed for ${callSid}: ${err.message}`);
+        await db('call_log').where({ id: call.id }).update({
+          v2_extraction_status: 'parse_failed',
+          ai_extraction_validation_errors: JSON.stringify([{ message: err.message }]),
+          updated_at: new Date(),
+        });
+      }
     }
 
     // Skip voicemail/spam
@@ -2255,6 +2385,7 @@ CallRecordingProcessor._test = {
   extractedNameMatchesCustomer,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
+  extractCallDataV2,
 };
 
 module.exports = CallRecordingProcessor;
