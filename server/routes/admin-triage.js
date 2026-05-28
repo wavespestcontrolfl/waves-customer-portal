@@ -84,13 +84,23 @@ async function transition(req, res, nextStatus) {
     return res.status(409).json({ error: `Item already ${item.status}` });
   }
 
-  await db('triage_items').where({ id }).update({
-    status: nextStatus,
-    resolution_note: note,
-    assigned_to: req.technicianId,
-    resolved_at: new Date(),
-    updated_at: new Date(),
-  });
+  // Atomic compare-and-swap: only transition if the row is STILL open. Two staff
+  // resolving/dismissing the same item concurrently can both pass the read check
+  // above; the conditional update + affected-row count makes the loser a no-op 409
+  // instead of silently overwriting the winner's resolution.
+  const updated = await db('triage_items')
+    .where({ id })
+    .whereIn('status', OPEN_STATES)
+    .update({
+      status: nextStatus,
+      resolution_note: note,
+      assigned_to: req.technicianId,
+      resolved_at: new Date(),
+      updated_at: new Date(),
+    });
+  if (updated === 0) {
+    return res.status(409).json({ error: 'Item was just actioned by someone else' });
+  }
 
   // Keep call_log.review_status in sync with the call's remaining open items.
   if (item.call_log_id) {
