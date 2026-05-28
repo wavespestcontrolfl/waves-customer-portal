@@ -25,6 +25,7 @@ const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { createNewsletterDraft } = require('../services/newsletter-draft');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
+const { computeSendRates, aggregateSendMetrics } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 let Anthropic;
@@ -294,6 +295,12 @@ router.get('/sends', async (req, res, next) => {
       .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
       .limit(500);
 
+    // Attach derived engagement rates per send + a pooled aggregate so the
+    // History view renders open/click/bounce/unsub/complaint rates without
+    // re-deriving the math client-side.
+    const sends = rows.map((row) => ({ ...row, rates: computeSendRates(row) }));
+    const aggregate = aggregateSendMetrics(rows);
+
     // Uncapped status breakdown so callers (e.g. the Dashboard's Scheduled
     // tile) don't have to derive counts from the 500-row payload.
     const countRows = await db('newsletter_sends')
@@ -302,7 +309,7 @@ router.get('/sends', async (req, res, next) => {
       .groupBy('status');
     const counts = Object.fromEntries(countRows.map((r) => [r.status, Number(r.count)]));
 
-    res.json({ sends: rows, counts });
+    res.json({ sends, counts, aggregate });
   } catch (err) { next(err); }
 });
 

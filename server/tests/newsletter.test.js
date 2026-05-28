@@ -22,6 +22,7 @@ const sendgridWebhook = require('../routes/webhooks-sendgrid');
 const { lockEventFactsFromDb } = require('../services/newsletter-draft');
 const { findHallucinatedClaims, validateNewsletterDraft } = require('../services/newsletter-validator');
 const { preflightDigest } = require('../services/newsletter-autopilot');
+const { computeSendRates, aggregateSendMetrics } = require('../services/newsletter-analytics');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
 const {
@@ -924,5 +925,91 @@ describe('newsletter preflightDigest', () => {
     expect(r.stats.eligibleCount).toBe(2); // not 5
     expect(r.pass).toBe(false); // 2 distinct < 5 required
     expect(r.hardFailures.some((f) => /Eligible fresh approved events: 2 \/ required 5/.test(f))).toBe(true);
+  });
+});
+
+// ── Send analytics (derived engagement rates) ────────────────────────
+//
+// computeSendRates/aggregateSendMetrics derive open/click/bounce/unsub/
+// complaint rates from the per-send counters the SendGrid webhook keeps.
+// Denominator conventions: delivery/bounce over recipient_count; open/
+// click/unsub/complaint over delivered; CTOR = clicked/opened. Zero
+// denominators yield null so the UI shows "—" not a misleading 0%.
+
+describe('newsletter computeSendRates', () => {
+  test('computes all rates with the documented denominators', () => {
+    const r = computeSendRates({
+      recipient_count: 1000, delivered_count: 950, opened_count: 380,
+      clicked_count: 95, bounced_count: 50, unsubscribed_count: 19, complained_count: 9.5,
+    });
+    expect(r.deliveryRate).toBeCloseTo(0.95, 5);   // 950/1000
+    expect(r.openRate).toBeCloseTo(0.4, 5);        // 380/950
+    expect(r.clickRate).toBeCloseTo(0.1, 5);       // 95/950
+    expect(r.clickToOpenRate).toBeCloseTo(0.25, 5); // 95/380
+    expect(r.bounceRate).toBeCloseTo(0.05, 5);     // 50/1000
+    expect(r.unsubscribeRate).toBeCloseTo(0.02, 5); // 19/950
+    expect(r.complaintRate).toBeCloseTo(0.01, 5);  // 9.5/950
+  });
+
+  test('returns null (not 0) for every rate when nothing was sent', () => {
+    const r = computeSendRates({ recipient_count: 0, delivered_count: 0 });
+    expect(r.deliveryRate).toBeNull();
+    expect(r.openRate).toBeNull();
+    expect(r.clickRate).toBeNull();
+    expect(r.clickToOpenRate).toBeNull();
+    expect(r.bounceRate).toBeNull();
+    expect(r.unsubscribeRate).toBeNull();
+    expect(r.complaintRate).toBeNull();
+  });
+
+  test('open/click rates are null when delivered is 0 even if recipients > 0', () => {
+    const r = computeSendRates({ recipient_count: 100, delivered_count: 0, bounced_count: 100 });
+    expect(r.deliveryRate).toBe(0);       // 0/100
+    expect(r.bounceRate).toBe(1);         // 100/100
+    expect(r.openRate).toBeNull();        // 0 delivered
+    expect(r.clickToOpenRate).toBeNull(); // 0 opened
+  });
+
+  test('tolerates missing counter fields (treats as 0)', () => {
+    const r = computeSendRates({ recipient_count: 10, delivered_count: 10 });
+    expect(r.deliveryRate).toBe(1);
+    expect(r.openRate).toBe(0);  // 0 opened / 10 delivered
+  });
+});
+
+describe('newsletter aggregateSendMetrics', () => {
+  const sent = (o) => ({ status: 'sent', ...o });
+
+  test('pools totals across sent campaigns (weights by volume, not avg of rates)', () => {
+    const agg = aggregateSendMetrics([
+      sent({ recipient_count: 1000, delivered_count: 1000, opened_count: 100 }), // 10% open
+      sent({ recipient_count: 10, delivered_count: 10, opened_count: 10 }),       // 100% open
+    ]);
+    expect(agg.campaignCount).toBe(2);
+    expect(agg.totals.delivered).toBe(1010);
+    expect(agg.totals.opened).toBe(110);
+    // pooled = 110/1010 ≈ 0.1089, NOT the (10%+100%)/2 = 55% average
+    expect(agg.rates.openRate).toBeCloseTo(110 / 1010, 5);
+  });
+
+  test('ignores drafts, scheduled, failed, and zero-recipient rows', () => {
+    const agg = aggregateSendMetrics([
+      sent({ recipient_count: 100, delivered_count: 100, opened_count: 50 }),
+      { status: 'draft', recipient_count: 0 },
+      { status: 'scheduled', recipient_count: 500 },
+      { status: 'failed', recipient_count: 200, delivered_count: 0 },
+      sent({ recipient_count: 0 }), // sent but no recipients — excluded
+    ]);
+    expect(agg.campaignCount).toBe(1);
+    expect(agg.totals.recipients).toBe(100);
+    expect(agg.rates.openRate).toBeCloseTo(0.5, 5);
+  });
+
+  test('empty input yields zero campaigns and null rates', () => {
+    const agg = aggregateSendMetrics([]);
+    expect(agg.campaignCount).toBe(0);
+    expect(agg.totals.recipients).toBe(0);
+    expect(agg.rates.openRate).toBeNull();
+    expect(agg.rates.deliveryRate).toBeNull();
   });
 });
