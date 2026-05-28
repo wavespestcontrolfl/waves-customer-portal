@@ -745,6 +745,10 @@ describe('runNext internal-link shadow behavior', () => {
     expect(result.outcome).toBe('completed_pending_review');
     expect(result.skip_reason).toBe('internal_links_dry_run_shadow');
     expect(result.link_tasks_queued).toBe(1);
+    expect(briefBuilder.compose).toHaveBeenCalledWith('opp_links_1', {
+      persist: true,
+      skipSerp: true,
+    });
     expect(linkPlanner.planForTarget).toHaveBeenCalledWith(expect.objectContaining({
       url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
       keyword: 'ghost ants kitchen',

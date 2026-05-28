@@ -124,7 +124,10 @@ class AutonomousRunner {
     const t2 = Date.now();
     let brief;
     try {
-      brief = await briefBuilder.compose(opp.id, { persist: !dryRun, skipSerp: false });
+      brief = await briefBuilder.compose(opp.id, {
+        persist: !dryRun,
+        skipSerp: opp.action_type === 'add_internal_links',
+      });
     } catch (err) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed', failure_message: `brief_compose:${err.message}` });
