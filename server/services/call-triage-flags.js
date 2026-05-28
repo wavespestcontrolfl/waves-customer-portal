@@ -106,6 +106,22 @@ const SMS_ONLY_FLAGS = new Set([
   'sms_consent_missing',
 ]);
 
+// Flags that mean "this is not a customer we should write to canonical tables."
+// When any of these fire, skip customer upsert + lead creation entirely — the
+// call is recorded in call_log + triage_items for audit, but does not pollute
+// the customers/leads pipeline. Soft blocks (not_confirmed, ambiguous, hoa,
+// caller_not_authorized, etc.) are still real prospects and DO create a
+// customer/lead; they only block the appointment auto-creation.
+const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
+  'spam_or_wrong_number',
+  'out_of_service_area',
+  'do_not_contact_requested',
+]);
+
+function hasCanonicalWriteBlock(flags) {
+  return (flags || []).some((f) => CANONICAL_WRITE_BLOCKING_FLAGS.has(f));
+}
+
 function mergeTriageFlags(modelFlags, deterministicFlags) {
   return [...new Set([...(modelFlags || []), ...(deterministicFlags || [])])];
 }
@@ -150,6 +166,8 @@ module.exports = {
   mergeTriageFlags,
   canAutoRoute,
   SMS_ONLY_FLAGS,
+  CANONICAL_WRITE_BLOCKING_FLAGS,
+  hasCanonicalWriteBlock,
   SERVICE_AREA_COUNTIES,
   normalizeCounty,
   isInServiceAreaCounty,

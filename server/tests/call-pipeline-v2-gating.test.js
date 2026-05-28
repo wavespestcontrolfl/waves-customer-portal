@@ -5,6 +5,8 @@ const {
   SERVICE_AREA_COUNTIES,
   normalizeCounty,
   isInServiceAreaCounty,
+  hasCanonicalWriteBlock,
+  CANONICAL_WRITE_BLOCKING_FLAGS,
 } = require('../services/call-triage-flags');
 
 const {
@@ -553,6 +555,41 @@ describe('idempotency migration', () => {
   test('exports up and down functions', () => {
     expect(typeof migration.up).toBe('function');
     expect(typeof migration.down).toBe('function');
+  });
+});
+
+// ═══════════════════════════════════════════════════
+// Canonical-Write Blocking (hard vetoes)
+// ═══════════════════════════════════════════════════
+
+describe('hasCanonicalWriteBlock', () => {
+  test('spam_or_wrong_number is a hard veto', () => {
+    expect(hasCanonicalWriteBlock(['spam_or_wrong_number'])).toBe(true);
+  });
+  test('out_of_service_area is a hard veto', () => {
+    expect(hasCanonicalWriteBlock(['out_of_service_area'])).toBe(true);
+  });
+  test('do_not_contact_requested is a hard veto', () => {
+    expect(hasCanonicalWriteBlock(['do_not_contact_requested'])).toBe(true);
+  });
+  test('soft blocks are NOT canonical-write vetoes', () => {
+    expect(hasCanonicalWriteBlock(['ambiguous_scheduling'])).toBe(false);
+    expect(hasCanonicalWriteBlock(['hoa_common_area_requires_approval'])).toBe(false);
+    expect(hasCanonicalWriteBlock(['caller_not_authorized'])).toBe(false);
+    expect(hasCanonicalWriteBlock(['low_extraction_confidence'])).toBe(false);
+    expect(hasCanonicalWriteBlock(['prior_complaint_unresolved'])).toBe(false);
+  });
+  test('mixed flags: any hard veto present triggers block', () => {
+    expect(hasCanonicalWriteBlock(['ambiguous_scheduling', 'out_of_service_area'])).toBe(true);
+  });
+  test('empty / null is not a block', () => {
+    expect(hasCanonicalWriteBlock([])).toBe(false);
+    expect(hasCanonicalWriteBlock(null)).toBe(false);
+  });
+  test('set contains exactly the three hard vetoes', () => {
+    expect([...CANONICAL_WRITE_BLOCKING_FLAGS].sort()).toEqual(
+      ['do_not_contact_requested', 'out_of_service_area', 'spam_or_wrong_number']
+    );
   });
 });
 
