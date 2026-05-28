@@ -26,6 +26,7 @@ const {
   parsePrNumber,
   liveUrlForTask,
   htmlContainsCrawlableLink,
+  htmlContainsVisibleText,
   stripNonRenderedHtml,
   hiddenElementRanges,
   hasHiddenHtmlAttribute,
@@ -35,6 +36,15 @@ const {
 beforeEach(() => {
   jest.clearAllMocks();
   delete db.transaction;
+  global.fetch = jest.fn(async () => ({
+    ok: true,
+    text: async () => [
+      '<html><body>',
+      '<p>Call (941) 318-7612 for your free Bradenton pest control quote today.</p>',
+      '<p>A termite inspection in Florida helps confirm whether the swarmers came from an active colony.</p>',
+      '</body></html>',
+    ].join(''),
+  }));
 });
 
 function page(file, body, extra = {}) {
@@ -342,6 +352,7 @@ describe('internal-link dry-run executor helpers', () => {
       sha: 'source-sha',
     }));
     instance._loadTargetPage = jest.fn(async () => page('src/content/services/pest-control-bradenton-fl.md', serviceTarget));
+    instance._validateRenderedSourceAnchor = jest.fn(async () => ({ ok: true }));
     instance._reserveTasksForPr = jest.fn(async () => true);
     instance._markTasksPrOpen = jest.fn(async () => {});
 
@@ -388,6 +399,42 @@ describe('internal-link dry-run executor helpers', () => {
     const result = await instance.runPrBatch({ limit: 1 });
 
     expect(result.status).toBe('reservation_conflict');
+    expect(GitHubClient.createBranch).not.toHaveBeenCalled();
+    expect(GitHubClient.putFile).not.toHaveBeenCalled();
+    expect(GitHubClient.createPr).not.toHaveBeenCalled();
+  });
+
+  test('does not open a PR when current rendered source page lacks the source paragraph', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      text: async () => '<html><body>termite inspection in Florida appears only in unrelated chrome.</body></html>',
+    }));
+
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [{
+      id: 'task-unrendered-body',
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/termite-inspection/',
+      anchor_text: 'termite inspection in Florida',
+      status: 'patch_candidate',
+    }]);
+    instance._loadSourcePage = jest.fn(async () => ({
+      ...page('src/content/blog/termite-swarmers-bathroom.md', sourceBody),
+      sha: 'source-sha',
+    }));
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
+    instance._persistDryRunResult = jest.fn(async () => {});
+
+    const result = await instance.runPrBatch({ limit: 1 });
+
+    expect(result.status).toBe('no_candidates');
+    expect(instance._persistDryRunResult).toHaveBeenCalledWith(
+      'task-unrendered-body',
+      expect.objectContaining({
+        status: 'skipped',
+        skip_reason: 'source_rendered_context_missing',
+      })
+    );
     expect(GitHubClient.createBranch).not.toHaveBeenCalled();
     expect(GitHubClient.putFile).not.toHaveBeenCalled();
     expect(GitHubClient.createPr).not.toHaveBeenCalled();
@@ -492,6 +539,22 @@ describe('internal-link dry-run executor helpers', () => {
       '/pest-control-bradenton-fl/',
       'Bradenton pest control'
     )).toBe(false);
+    expect(htmlContainsVisibleText(
+      '<main><p>Call for Bradenton pest control today.</p></main>',
+      'Bradenton pest control'
+    )).toBe(true);
+    expect(htmlContainsVisibleText(
+      '<main><p hidden>Bradenton pest control</p><p>Other text</p></main>',
+      'Bradenton pest control'
+    )).toBe(false);
+    expect(htmlContainsVisibleText(
+      '<main><div class="hidden">Bradenton pest control</div><p>Other text</p></main>',
+      'Bradenton pest control'
+    )).toBe(false);
+    expect(htmlContainsVisibleText(
+      '<main><p>A termite inspection in Florida helps confirm activity.</p></main>',
+      'A **termite inspection in Florida** helps confirm activity.'
+    )).toBe(true);
   });
 
   test('ignores anchors inside non-rendered HTML blocks during live verification', () => {

@@ -81,6 +81,17 @@ class InternalLinkPrExecutor {
       const targetCount = targetCounts.get(targetUrl) || 0;
       if (targetCount >= maxLinksPerTarget) continue;
 
+      const renderedSource = await this._validateRenderedSourceAnchor(task, validation);
+      if (!renderedSource.ok) {
+        await this._persistDryRunResult(task.id, {
+          ...validation,
+          status: renderedSource.status || 'skipped',
+          skip_reason: renderedSource.status === 'failed' ? null : renderedSource.reason,
+          failure_reason: renderedSource.status === 'failed' ? renderedSource.reason : null,
+        });
+        continue;
+      }
+
       const patchedContent = planner.applyTaskToBody(source.body, { ...task, target_url: targetUrl });
       if (patchedContent === source.body) {
         await this._persistDryRunResult(task.id, { ...validation, status: 'skipped', skip_reason: 'patch_noop' });
@@ -159,6 +170,32 @@ class InternalLinkPrExecutor {
       commit_sha: headSha,
       results: selected.map((item) => ({ ...item.validation, status: 'pr_open', astro_pr_url: pr.html_url })),
     };
+  }
+
+  async _validateRenderedSourceAnchor(task, validation) {
+    if (!envBool('AUTONOMOUS_INTERNAL_LINK_REQUIRE_RENDERED_SOURCE_TEXT', true)) {
+      return { ok: true };
+    }
+    const liveUrl = liveUrlForTask({
+      source_url: validation.source_url || task.source_url,
+      source_canonical_url: validation.source_canonical_url || task.source_canonical_url,
+    });
+    if (!liveUrl) return { ok: false, status: 'skipped', reason: 'source_live_url_missing' };
+    let html;
+    try {
+      html = await fetchLiveHtml(liveUrl);
+    } catch (err) {
+      return {
+        ok: false,
+        status: 'failed',
+        reason: `source_rendered_fetch_failed:${String(err?.message || err).slice(0, 160)}`,
+      };
+    }
+    const expectedText = validation.link_context_before || task.context_snippet || task.anchor_text;
+    if (!htmlContainsVisibleText(html, expectedText)) {
+      return { ok: false, status: 'skipped', reason: 'source_rendered_context_missing' };
+    }
+    return { ok: true };
   }
 
   async runPostMergeVerification({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_LIMIT', 10), taskIds = null } = {}) {
@@ -715,6 +752,12 @@ function envInt(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function envBool(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(String(raw).trim());
+}
+
 function shortId(n = 6) {
   return Math.random().toString(36).slice(2, 2 + n);
 }
@@ -841,6 +884,38 @@ function htmlContainsCrawlableLink(html, targetUrl, anchorText) {
   return false;
 }
 
+function htmlContainsVisibleText(html, expectedText) {
+  const expected = normalizeHtmlText(markdownToVisibleText(expectedText));
+  if (!expected) return false;
+  const renderedHtml = stripNonRenderedHtml(html);
+  const visibleHtml = removeRanges(renderedHtml, hiddenElementRanges(renderedHtml));
+  const visibleText = normalizeHtmlText(stripTags(visibleHtml));
+  return visibleText.includes(expected);
+}
+
+function markdownToVisibleText(value) {
+  return String(value || '')
+    .replace(/!\[([^\]\n]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]\n]+)\]\([^)]+\)/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/~~([^~\n]+)~~/g, '$1')
+    .replace(/(\*\*|__)([\s\S]*?)\1/g, '$2')
+    .replace(/(^|[\s([{])([*_])([^*_\n]+)\2(?=[$\s\]).,;:!?}])/g, '$1$3')
+    .replace(/\\([\\`*_{}\[\]()#+\-.!|>])/g, '$1');
+}
+
+function removeRanges(value, ranges = []) {
+  const source = String(value || '');
+  if (!ranges.length) return source;
+  let out = '';
+  let cursor = 0;
+  for (const [start, end] of ranges.slice().sort((a, b) => a[0] - b[0])) {
+    if (start > cursor) out += source.slice(cursor, start);
+    cursor = Math.max(cursor, end);
+  }
+  return out + source.slice(cursor);
+}
+
 function stripNonRenderedHtml(value) {
   return String(value || '')
     .replace(/<!--[\s\S]*?-->/g, '')
@@ -948,6 +1023,12 @@ function hasHiddenHtmlAttribute(attrs) {
   if (/(^|\s)hidden(?:\s|=|$)/i.test(value)) return true;
   if (/(^|\s)inert(?:\s|=|$)/i.test(value)) return true;
   if (/\baria-hidden\s*=\s*["']?true["']?/i.test(value)) return true;
+  const classMatch = value.match(/\bclass\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+  const classes = String((classMatch && (classMatch[1] || classMatch[2] || classMatch[3])) || '')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (classes.some((name) => ['hidden', 'invisible', 'collapse', 'sr-only'].includes(name))) return true;
   const styleMatch = value.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
   const style = String((styleMatch && (styleMatch[1] || styleMatch[2] || styleMatch[3])) || '').toLowerCase();
   if (/(^|;)\s*display\s*:\s*none\b/.test(style)) return true;
@@ -1022,6 +1103,7 @@ module.exports._internals = {
   parsePrNumber,
   liveUrlForTask,
   htmlContainsCrawlableLink,
+  htmlContainsVisibleText,
   stripNonRenderedHtml,
   hiddenElementRanges,
   hasHiddenHtmlAttribute,
