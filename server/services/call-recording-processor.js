@@ -1544,11 +1544,11 @@ const CallRecordingProcessor = {
           }
         }
       } catch (err) {
-        // Fail closed (soft): block appointment + triage, keep customer/lead.
-        logger.error(`[call-proc-v2] Routing gate error for ${callSid}: ${err.message} — failing closed`);
+        // Fail closed (soft): hold only the appointment for triage. No TCPA/DNC
+        // decision was made here, so do NOT suppress SMS/email follow-up — the
+        // call may be a real lead and email/newsletter should still proceed.
+        logger.error(`[call-proc-v2] Routing gate error for ${callSid}: ${err.message} — failing closed (appointment only)`);
         v2RoutingBlocked = true;
-        v2SmsBlocked = true;
-        v2EmailBlocked = true;
         try {
           const failTriageItem = buildTriageItem({
             callLogId: call.id,
