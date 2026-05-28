@@ -274,3 +274,48 @@ describe('evaluate (full gate)', () => {
     expect(() => evaluate({ body: 'x' }, null)).toThrow();
   });
 });
+
+describe('boilerplate-aware similarity', () => {
+  const { stripBoilerplate } = require('../services/content/uniqueness-gate')._internals;
+
+  test('stripBoilerplate removes shared CTA / disclaimer lines', () => {
+    const body = [
+      'Sarasota homes near the bay face heavy drywood termite pressure.',
+      'Call us today for a free inspection!',
+      'Use our pest-control-calculator for instant pricing.',
+      'Our money-back guarantee means no risk.',
+    ].join('\n');
+    const stripped = stripBoilerplate(body);
+    expect(stripped).toContain('drywood termite pressure');
+    expect(stripped).not.toMatch(/call us today/i);
+    expect(stripped).not.toMatch(/calculator/i);
+    expect(stripped).not.toMatch(/money-back guarantee/i);
+  });
+
+  test('two city pages sharing only CTAs are not flagged as template swaps', () => {
+    const sharedCta = [
+      'Call us today for a free quote!',
+      'Schedule online or text us anytime.',
+      'Backed by our money-back guarantee — no contract.',
+    ].join('\n');
+    const draft = {
+      url: '/termite-control-venice-fl/',
+      body: `Venice barrier-island homes near Roberts Bay see drywood termites in older wood-frame cottages along the Intracoastal.\n${sharedCta}`,
+    };
+    const sibling = {
+      url: '/termite-control-sarasota-fl/',
+      body: `Sarasota historic neighborhoods like Laurel Park face subterranean termite swarms each spring in 1920s wood-frame stock.\n${sharedCta}`,
+    };
+    const r = checkNotTemplateSwap(draft, brief(), [sibling]);
+    expect(r.ok).toBe(true); // differentiated bodies; shared CTA stripped out
+  });
+
+  test('genuine template swaps (same body, city swapped) still fail', () => {
+    const tmpl = (city) => `Our ${city} pest control team treats ants roaches and rodents with the same quarterly plan and the same products in every home across ${city}.`;
+    const draft = { url: '/pest-control-venice-fl/', body: tmpl('Venice') };
+    const sibling = { url: '/pest-control-sarasota-fl/', body: tmpl('Sarasota') };
+    const r = checkNotTemplateSwap(draft, brief(), [sibling]);
+    expect(r.ok).toBe(false);
+    expect(r.similarity).toBeGreaterThan(0.55);
+  });
+});

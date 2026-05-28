@@ -62,6 +62,11 @@ const getInternalLinkExecutor = lazy('internal-link-pr-executor', './internal-li
 const getSitemap = lazy('sitemap-manager', '../seo/sitemap-manager');
 const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', './post-publish-visibility-worker');
 const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gate');
+const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
+const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
+const getProtectedPages = lazy('protected-pages', './protected-pages');
+const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
+const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -118,6 +123,40 @@ class AutonomousRunner {
     run.shadow_mode = isShadow(opp.action_type);
     const claimToken = opp.claimed_at;
 
+    // 1a. Protected-page guard. Money pages, high-traffic pages, and manually
+    // protected URLs are never auto-optimized — regardless of facts. This runs
+    // FIRST so e.g. /pest-control-sarasota-fl/ is blocked even though
+    // "sarasota × pest-control" passes facts sufficiency.
+    const initialProtected = await this._checkProtectedPage(opp);
+    if (initialProtected?.protected) {
+      const finalized = await finalize(run, t0, protectedPagePatch(initialProtected));
+      await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
+      return finalized;
+    }
+    if (initialProtected) run.protected_check = initialProtected;
+
+    // 1a.2 Auto-pause guard. A bucket that has accrued repeated regressions
+    // (per the impact tracker's diff-in-diff verdicts) is paused — stop
+    // drafting that action type until a human reviews the losses.
+    const impactTracker = getImpactTracker();
+    if (impactTracker?.pausedBuckets && opp.bucket) {
+      let paused = [];
+      try { paused = await impactTracker.pausedBuckets({ db }); } catch { paused = []; }
+      if (paused.some((p) => p.bucket === opp.bucket)) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: `bucket_paused:${opp.bucket}`,
+          reviewer_notes: `Bucket "${opp.bucket}" auto-paused after repeated regressions — review impact verdicts before resuming.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `bucket_paused:${opp.bucket}`, { claimToken });
+        return finalized;
+      }
+    }
+
+    // (Facts-sufficiency runs AFTER brief composition — the decision-router can
+    // change the final action_type, so the gate must key on brief.action_type,
+    // not the claimed opp.action_type. See step 2b below.)
+
     // 2. Compose brief.
     const briefBuilder = getBriefBuilder();
     if (!briefBuilder) {
@@ -140,6 +179,42 @@ class AutonomousRunner {
     run.page_type = brief.page_type;
     run.action_type = brief.action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
+
+    const finalProtected = await this._checkProtectedPage(opp, brief);
+    if (finalProtected?.protected) {
+      run.protected_check = finalProtected;
+      const finalized = await finalize(run, t0, protectedPagePatch(finalProtected));
+      await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
+      return finalized;
+    }
+    if (finalProtected) run.protected_check = finalProtected;
+
+    // 2b. Facts-sufficiency gate. Keyed on the FINAL (router-decided)
+    // action_type — for content-generating city×service actions, refuse to
+    // draft unless the facts-bank has verified local facts to ground the
+    // claims. Sets run.facts_sufficiency, which the claims-ledger gate (after
+    // dispatch) keys on. Insufficient → human review. Fail-closed by design.
+    const factsSufficiency = getFactsSufficiency();
+    if (factsSufficiency) {
+      const finalOpp = { ...opp, action_type: brief.action_type, city: brief.city || opp.city, service: brief.service || opp.service };
+      let factsCheck;
+      try {
+        factsCheck = await factsSufficiency.check(finalOpp);
+      } catch (err) {
+        logger.warn(`[autonomous-runner] facts-sufficiency check threw: ${err.message}`);
+        factsCheck = { applicable: true, sufficient: false, reason: 'facts_check_error', gap_codes: [`threw:${err.message}`], notes: `facts check threw: ${err.message}` };
+      }
+      run.facts_sufficiency = factsCheck;
+      if (factsCheck.applicable && !factsCheck.sufficient) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: factsCheck.reason || 'facts_insufficient',
+          reviewer_notes: factsCheck.notes,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken });
+        return finalized;
+      }
+    }
 
     // 2a. Router blocked the action — record + skip.
     if (brief.action_type === 'do_not_publish') {
@@ -248,6 +323,100 @@ class AutonomousRunner {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || result.notes, { claimToken });
       }
       return finalized;
+    }
+
+    // 3b. Claims-ledger validation. For facts-gated content actions that
+    // passed the facts-sufficiency pre-gate, verify every local claim in the
+    // draft traces to a real fact and does not overreach. P0/P1 findings
+    // (hallucinated fact citation, missing ledger when required) route to
+    // human review rather than publishing ungrounded local copy.
+    const factsCtx = run.facts_sufficiency;
+    if (factsCtx && factsCtx.applicable && factsCtx.sufficient && draft) {
+      const claimsValidator = getClaimsLedgerValidator();
+      if (claimsValidator) {
+        let claimsResult;
+        try {
+          claimsResult = await claimsValidator.validate(draft, {
+            city: factsCtx.city_id,
+            service: factsCtx.service_id,
+            county: factsCtx.county,
+          }, {
+            // Facts were sufficient (a facts_pack was supplied and the agent
+            // was told to emit a ledger), so a MISSING ledger is a real
+            // failure here — block it regardless of the global default.
+            options: { missingLedgerSeverity: 'P1' },
+          });
+        } catch (err) {
+          logger.warn(`[autonomous-runner] claims-ledger validation threw: ${err.message}`);
+          claimsResult = { pass: false, findings: [{ severity: 'P1', code: 'CLAIMS_LEDGER_ERROR', message: err.message }] };
+        }
+        run.claims_ledger_result = claimsResult;
+        if (!claimsResult.pass) {
+          const blocking = claimsResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+          const notes = `Claims-ledger validation failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+          const finalized = await finalize(run, t0, {
+            outcome: 'skipped_gate_fail',
+            skip_reason: 'claims_ledger_failed',
+            reviewer_notes: notes,
+          });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_failed', { claimToken });
+          return finalized;
+        }
+      }
+    }
+
+    // 3c. Content guardrails — page-policy checks on the drafted body
+    // (hardcoded price on any page type, brand-token leak on multi-domain
+    // pages, FAQ on a policy-blocked service, keyword stuffing). Applies to
+    // every body-content action. P0/P1 → human review.
+    const contentGuardrails = getContentGuardrails();
+    if (contentGuardrails && draft) {
+      // For a refresh, the draft carries only editable meta — the live page's
+      // domains are frozen by publishRefresh. Hydrate them so the brand-token
+      // check enforces against the page that will actually be written. If we
+      // CAN'T read the live page (null/throw), fail CLOSED: route to review
+      // rather than silently treating it as hub-only and skipping the guard
+      // (which would let a literal-brand draft leak onto a spoke domain).
+      let liveDomains = null;
+      if (brief.action_type === 'refresh_existing_page') {
+        const publisher = getAstroPublisher();
+        if (publisher?.getLiveFrontmatter) {
+          let liveFm;
+          try {
+            liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
+          } catch (err) {
+            logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
+            liveFm = null;
+          }
+          if (liveFm == null) {
+            const finalized = await finalize(run, t0, {
+              outcome: 'skipped_gate_fail',
+              skip_reason: 'refresh_domains_load_failed',
+              reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
+            });
+            await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
+            return finalized;
+          }
+          liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
+        }
+      }
+      const guardResult = contentGuardrails.evaluate(draft, {
+        service: opp.service || brief.service || null,
+        primaryKeyword: brief.target_keyword || null,
+        domains: liveDomains,
+      });
+      run.content_guardrails_result = guardResult;
+      if (!guardResult.pass) {
+        const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+        const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'content_guardrails_failed',
+          reviewer_notes: notes,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_failed', { claimToken });
+        return finalized;
+      }
     }
 
     // 4. Uniqueness gate (only applies to certain page types).
@@ -436,6 +605,32 @@ class AutonomousRunner {
     }
 
     Object.assign(run, publishOutcome);
+
+    // No-op refresh: the live page already matched the draft, so nothing was
+    // published. Complete the queue item (don't park it for a PR that doesn't
+    // exist) with a distinct outcome that has no published_url — so it is not
+    // impact-tracked and does not count toward trust-build.
+    if (publishOutcome.publish_status === 'no_changes') {
+      let finalized;
+      try {
+        finalized = await finalize(run, t0, {
+          outcome: 'completed_no_changes',
+          skip_reason: 'publish_no_changes',
+          published_url: null,
+          reviewer_notes: 'Refresh matched the live page byte-for-meaning; no PR opened and nothing to publish or track.',
+        });
+      } catch (err) {
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'no_changes_audit_failed', { claimToken }, err);
+        throw err;
+      }
+      try {
+        await this._completeClaimOrThrow(queue, opp.id, { notes: 'no_changes', claimToken });
+      } catch (err) {
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'no_changes_queue_complete_failed', { claimToken }, err);
+      }
+      return finalized;
+    }
+
     if (!publishOutcome.published_url) {
       const reason = 'astro_pr_pending_merge';
       const notes = publishOutcome.astro_pr_url
@@ -566,6 +761,21 @@ class AutonomousRunner {
   async _releaseClaimOrThrow(queue, opportunityId, payload) {
     const ok = await queue.release(opportunityId, payload);
     if (!ok) throw new Error('queue_release_failed_or_stale_claim');
+  }
+
+  async _checkProtectedPage(opp = {}, brief = null) {
+    const protectedPages = getProtectedPages();
+    if (!protectedPages?.isProtected) return null;
+    const target = protectedPageCandidateUrl(opp, brief);
+    if (!target) return null;
+    let prot;
+    try {
+      prot = await protectedPages.isProtected(target, { db });
+    } catch (err) {
+      logger.warn(`[autonomous-runner] protected-page check threw: ${err.message}`);
+      prot = { protected: true, reason: 'protected_check_error', detail: err.message };
+    }
+    return { ...prot, checked_url: target };
   }
 
   async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
@@ -740,13 +950,16 @@ class AutonomousRunner {
     run.publish_ms = Date.now() - t;
 
     if (publishResult.status === 'no_changes') {
+      // No-op: nothing republished. Mirror the refresh no-op — distinct outcome
+      // with no published_url, so it isn't impact-tracked or counted toward
+      // trust-build.
       return {
         queue: 'complete',
         notes: 'metadata_no_changes',
         patch: {
-          outcome: 'completed_published',
+          outcome: 'completed_no_changes',
           skip_reason: 'metadata_no_changes',
-          published_url: publishResult.url || null,
+          published_url: null,
           publish_status: publishResult.status,
           reviewer_notes: 'Metadata rewrite matched existing frontmatter; no Astro PR was needed.',
         },
@@ -889,6 +1102,11 @@ class AutonomousRunner {
 
   _hasDraftBriefPublisher(draft, brief) {
     const publisher = getAstroPublisher();
+    // Refresh of an existing page uses the freeze-preserving publishRefresh path.
+    if (brief.action_type === 'refresh_existing_page') {
+      return !!(publisher?.publishRefresh
+        && (typeof publisher.canPublishRefresh !== 'function' || publisher.canPublishRefresh(draft, brief)));
+    }
     if (!publisher?.publishOrUpdatePage) return false;
     if (typeof publisher.canPublishDraftBrief === 'function') return publisher.canPublishDraftBrief(draft, brief);
     return true;
@@ -976,8 +1194,29 @@ class AutonomousRunner {
     // main based on its own configuration. The astro-publisher service
     // pre-dates this engine and handles the PR open/merge state machine.
     const t1 = Date.now();
-    if (publisher?.publishOrUpdatePage) {
-      const r = await publisher.publishOrUpdatePage(draft, brief);
+    // Refresh of an existing page uses publishRefresh (freezes canonical /
+    // slug / schema / tracking / domains; swaps only body + meta + freshness).
+    // New pages use publishOrUpdatePage.
+    const usePublish = (brief.action_type === 'refresh_existing_page' && publisher?.publishRefresh)
+      ? publisher.publishRefresh.bind(publisher)
+      : publisher?.publishOrUpdatePage?.bind(publisher);
+    if (usePublish) {
+      const r = await usePublish(draft, brief);
+      // A refresh whose body + editable meta already match the live page is a
+      // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
+      // commit, nothing republished). Leave published_url UNSET so the impact
+      // sweep (whereNotNull('published_url')) and trust-build counting both
+      // skip it — an unchanged page must not earn a baseline/14d/21d verdict or
+      // count toward shadow graduation. The caller completes it as a no-op
+      // rather than parking it for a non-existent PR.
+      if (r?.status === 'no_changes') {
+        out.published_url = null;
+        out.pending_url = null;
+        out.publish_status = 'no_changes';
+        out.astro_pr_url = null;
+        run.publish_ms = Date.now() - t1;
+        return out;
+      }
       const isLive = r?.live === true || r?.status === 'live' || r?.merged === true;
       out.published_url = isLive ? (r?.url || draft.url || null) : null;
       out.pending_url = isLive ? null : (r?.url || draft.url || null);
@@ -1143,6 +1382,8 @@ function isDeterministicPublishError(err) {
     /^unsupported metadata rewrite for Astro publish:/,
     /^could not resolve metadata rewrite target:/,
     /^Astro file not found for metadata rewrite:/,
+    /^could not resolve refresh target:/,
+    /^Astro file not found for refresh:/,
     /^autonomous draft missing safe frontmatter slug$/,
     /^autonomous draft canonical is not a valid URL$/,
     /^autonomous draft canonical must match slug /,
@@ -1180,6 +1421,71 @@ function normalizeContentPath(url) {
     .replace(/[?#].*$/, '')
     .replace(/^\/+|\/+$/g, '')
     .toLowerCase();
+}
+
+function protectedPageCandidateUrl(opp = {}, brief = null) {
+  return opp.page_url
+    || protectedBriefTargetUrl(opp, brief)
+    || protectedDerivedCityServicePath(opp, brief)
+    || null;
+}
+
+function protectedBriefTargetUrl(opp = {}, brief = null) {
+  if (!brief || !protectedCityServiceGuardApplies(opp, brief)) return null;
+  return brief.target_url || brief.page_url || null;
+}
+
+function protectedPagePatch(prot = {}) {
+  return {
+    outcome: 'skipped_gate_fail',
+    skip_reason: `protected_page:${prot.reason}`,
+    reviewer_notes: `Protected page (${prot.reason}${prot.source ? `, ${prot.source}` : ''})${prot.checked_url ? `, ${prot.checked_url}` : ''})${prot.detail ? `: ${prot.detail}` : ''} — not auto-optimized.`,
+  };
+}
+
+function cityServicePath(service, city) {
+  const serviceSlug = servicePathSlug(service);
+  const citySlug = slugifyPathPart(city);
+  if (!serviceSlug || !citySlug) return null;
+  return `/${serviceSlug}-${citySlug}-fl/`;
+}
+
+function protectedDerivedCityServicePath(opp = {}, brief = null) {
+  if (!protectedCityServiceGuardApplies(opp, brief)) return null;
+  return cityServicePath(brief?.service || opp.service, brief?.city || opp.city);
+}
+
+function protectedCityServiceGuardApplies(opp = {}, brief = null) {
+  const actionType = brief?.action_type || opp.action_type;
+  const pageType = brief?.page_type || opp.page_type;
+  return actionType === 'create_or_refresh_city_service_page'
+    || pageType === 'city-service';
+}
+
+function servicePathSlug(value) {
+  const slug = slugifyPathPart(value);
+  const map = {
+    pest: 'pest-control',
+    lawn: 'lawn-care',
+    mosquito: 'mosquito-control',
+    termite: 'termite-control',
+    rodent: 'rodent-control',
+    'bed-bug': 'bed-bug-control',
+    bedbug: 'bed-bug-control',
+    commercial: 'commercial-pest-control',
+    quote: 'pest-control-quote',
+    inspection: 'termite-inspection',
+  };
+  return map[slug] || slug || null;
+}
+
+function slugifyPathPart(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 function extractFrontmatterScalar(body, key) {
@@ -1262,6 +1568,12 @@ module.exports._internals = {
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
   normalizeContentPath,
+  protectedPageCandidateUrl,
+  cityServicePath,
+  servicePathSlug,
+  protectedDerivedCityServicePath,
+  protectedBriefTargetUrl,
+  protectedCityServiceGuardApplies,
   extractFrontmatterScalar,
   startOfEtDay,
   startOfEtWeek,

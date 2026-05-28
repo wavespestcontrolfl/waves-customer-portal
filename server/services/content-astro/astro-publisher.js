@@ -505,6 +505,97 @@ async function publishMetadataRewrite(draft, brief = {}) {
   };
 }
 
+// Frontmatter fields the refresh agent is allowed to change. Everything else
+// (canonical, slug, schema, domains, trackingNumberKey, cityPhone, city,
+// pageType, category, robots, ogImage, …) is FROZEN to the live page's values
+// so a refresh draft can never silently re-point a canonical, change a slug,
+// or strip a tracking number. The freshness field (modified/updated) is bumped
+// programmatically, only when the body actually changed.
+const REFRESH_EDITABLE_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
+
+async function publishRefresh(draft, brief = {}) {
+  if (!canPublishRefresh(draft, brief)) {
+    throw new Error(`unsupported refresh for Astro publish: ${brief.action_type || 'unknown'}`);
+  }
+
+  const targetUrl = brief.target_url || brief.page_url || draft.page_url;
+  const filePath = draft.file_path || urlToAstroPath(targetUrl);
+  if (!filePath) throw new Error(`could not resolve refresh target: ${targetUrl || 'missing target_url'}`);
+
+  const existing = await gh.getFile(filePath);
+  if (!existing) throw new Error(`Astro file not found for refresh: ${filePath}`);
+
+  const parsed = fm.parse(existing.content);
+  const currentFrontmatter = parsed.data || {};
+  const draftFm = draft.frontmatter || {};
+
+  // FREEZE: start from the live frontmatter; override only the editable meta
+  // fields, and only those that already exist on the live page (so we don't
+  // introduce a title field a service page doesn't use, etc.).
+  const nextFrontmatter = { ...currentFrontmatter };
+  for (const field of REFRESH_EDITABLE_META_FIELDS) {
+    if (currentFrontmatter[field] !== undefined && draftFm[field] !== undefined && String(draftFm[field]).trim()) {
+      nextFrontmatter[field] = String(draftFm[field]).trim();
+    }
+  }
+
+  const newBody = String(draft.body || '').trim();
+  if (!newBody) throw new Error('refresh draft has empty body');
+  const oldBody = String(parsed.content || '').trim();
+  const bodyChanged = newBody !== oldBody;
+  const metaChanged = REFRESH_EDITABLE_META_FIELDS.some((f) => nextFrontmatter[f] !== currentFrontmatter[f]);
+
+  // Semantic no-op check (a parse→stringify round-trip rarely reproduces the
+  // source byte-for-byte, so compare meaning, not text).
+  if (!bodyChanged && !metaChanged) {
+    return {
+      url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
+      status: 'no_changes', live: false, pr_number: null, pr_url: null, branch: null, preview_url: null, commit_sha: null,
+    };
+  }
+
+  // Conditional freshness bump — only the field the live page already uses
+  // (services: `modified`; blog v2: `updated`). Prevents fake-freshness churn.
+  const today = dateOnly(new Date());
+  if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
+  else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
+
+  const markdown = fm.stringify(nextFrontmatter, `${newBody}\n`);
+
+  const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
+  const branch = `content/refresh-${branchSlug}-${shortId()}`;
+  await gh.createBranch(branch);
+  const fileCommit = await gh.putFile({
+    path: filePath,
+    content: markdown,
+    message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
+    branch,
+    sha: existing.sha,
+  });
+
+  const pr = await gh.createPr({
+    head: branch,
+    title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
+    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody, brief }),
+  });
+  await requestCodexReview({
+    pr,
+    headSha: pr.head?.sha || fileCommit?.commit?.sha,
+    context: `Autonomous refresh for \`${filePath}\``,
+  });
+
+  return {
+    url: canonicalForExistingPage(targetUrl, nextFrontmatter, filePath),
+    status: 'pr_open',
+    live: false,
+    pr_number: pr.number,
+    pr_url: pr.html_url,
+    branch,
+    preview_url: cloudflarePreviewUrl(branch),
+    commit_sha: fileCommit?.commit?.sha || null,
+  };
+}
+
 function canPublishDraftBrief(draft, brief = {}) {
   const actionType = String(brief.action_type || '').trim();
   return !!(
@@ -524,6 +615,36 @@ function canPublishMetadataRewrite(draft, brief = {}) {
     && String(draft.title || '').trim()
     && String(draft.meta_description || '').trim()
     && actionType === 'rewrite_title_meta'
+  );
+}
+
+/**
+ * Read the LIVE page's frontmatter from the Astro repo. Used by guardrails to
+ * enforce brand-token / multi-domain rules against the real page being
+ * refreshed (the refresh draft carries only editable meta).
+ *
+ * Returns the parsed frontmatter object on success (possibly {} for a found
+ * page with empty frontmatter — a legitimate hub-only page). Returns NULL when
+ * the target can't be resolved or the file can't be read, so callers can tell
+ * "this page has no domains" from "we couldn't check" and fail closed on the
+ * latter.
+ */
+async function getLiveFrontmatter(targetUrlOrPath) {
+  const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (!filePath) return null;
+  const existing = await gh.getFile(filePath);
+  if (!existing) return null;
+  return fm.parse(existing.content).data || {};
+}
+
+function canPublishRefresh(draft, brief = {}) {
+  const actionType = String(brief.action_type || '').trim();
+  return !!(
+    draft
+    && draft.type === 'draft'
+    && String(draft.body || '').trim()
+    && (brief.target_url || brief.page_url || draft.page_url)
+    && actionType === 'refresh_existing_page'
   );
 }
 
@@ -758,6 +879,35 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
     `| meta_description | ${markdownTableCell(before.meta_description)} | ${markdownTableCell(after.meta_description)} |`,
     ``,
     `Body, slug, canonical, and schema are intentionally unchanged.`,
+    ``,
+    `Generated by waves-customer-portal autonomous runner. Merge after review.`,
+    ``,
+    `Branch: \`${branch}\``,
+  ].join('\n');
+}
+
+function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = {}, oldBody = '', newBody = '', brief = {} }) {
+  const oldWords = String(oldBody).split(/\s+/).filter(Boolean).length;
+  const newWords = String(newBody).split(/\s+/).filter(Boolean).length;
+  const titleField = after.metaTitle !== undefined ? 'metaTitle' : 'title';
+  const metaField = after.metaDescription !== undefined ? 'metaDescription' : 'meta_description';
+  return [
+    `**Autonomous page refresh**`,
+    ``,
+    `- File: \`${filePath}\``,
+    `- URL: ${targetUrl || canonicalForExistingPage(null, after, filePath)}`,
+    `- Action type: ${brief.action_type || 'refresh_existing_page'}`,
+    `- City/service: ${(brief.city || '—')} / ${(brief.service || '—')}`,
+    `- Body: ${oldWords} → ${newWords} words`,
+    ``,
+    `## Editable frontmatter changes`,
+    ``,
+    `| Field | Before | After |`,
+    `| --- | --- | --- |`,
+    `| ${titleField} | ${markdownTableCell(before[titleField])} | ${markdownTableCell(after[titleField])} |`,
+    `| ${metaField} | ${markdownTableCell(before[metaField])} | ${markdownTableCell(after[metaField])} |`,
+    ``,
+    `**Frozen (unchanged):** canonical, slug, schema, domains, trackingNumberKey, cityPhone, pageType, category, robots, ogImage — all preserved from the live page. Only body + meta + freshness date changed.`,
     ``,
     `Generated by waves-customer-portal autonomous runner. Merge after review.`,
     ``,
@@ -1038,8 +1188,11 @@ module.exports = {
   publishAstro,
   publishOrUpdatePage,
   publishMetadataRewrite,
+  publishRefresh,
+  getLiveFrontmatter,
   canPublishDraftBrief,
   canPublishMetadataRewrite,
+  canPublishRefresh,
   mergeAstro,
   unpublishAstro,
   buildFrontmatter,

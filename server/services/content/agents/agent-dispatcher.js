@@ -95,7 +95,7 @@ function buildInputPayload(brief) {
   // representation of the brief plus an explicit instruction to start
   // with get_content_brief() for the full row.
   return {
-    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.`,
+    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.${brief.facts_pack ? ' This brief includes a facts_pack: every local claim in your body must be grounded in one of its fact ids, and you must emit a claims_ledger.' : ''}`,
     brief_summary: {
       opportunity_id: brief.opportunity_id,
       action_type: brief.action_type,
@@ -108,6 +108,7 @@ function buildInputPayload(brief) {
       seo_requirements: brief.seo_requirements || null,
       human_review_required: !!brief.human_review_required,
       router_notes: brief.router_notes || null,
+      facts_pack: brief.facts_pack || null,
     },
   };
 }

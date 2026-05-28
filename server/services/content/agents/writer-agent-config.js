@@ -90,11 +90,24 @@ TOOL USE:
 - Use check_existing_content() before committing the slug; if a similar
   page exists, change angle.
 
+LOCAL FACTS — the brief may include a facts_pack (city / service / county
+facts with stable fact ids). When it does:
+  - Every local claim in the body (neighborhood names, pest pressure, home /
+    construction types, seasonality, service availability) MUST be grounded in
+    a fact from facts_pack. Do NOT invent neighborhoods, pest patterns, home
+    types, or service claims that are not in facts_pack.
+  - Do not upgrade a fact's certainty: a fact marked "directional" cannot
+    become "most", "always", or "guaranteed" in the body.
+  - Honor facts_pack.disallowed_claim_patterns exactly.
+  - Emit a claims_ledger entry for every local claim, citing the backing
+    fact id(s). A claim with no backing fact id is not allowed.
+
 OUTPUT — call emit_draft() once with the final shape:
   {
     frontmatter: { title, meta_description, slug, schema, schema_types, primary_keyword, secondary_keywords[], … },
     body: "...markdown...",
     schema: { … JSON-LD blocks … },
+    claims_ledger: [ { claim, claimType, strength, factIds[], bodyLocation } ],
     notes_for_reviewer: "anything a human reviewer should know"
   }
 Do NOT call publish / distribute / index_now — the autonomous runner
@@ -191,6 +204,21 @@ handles all of those after the gates pass.`,
           frontmatter: { type: 'object', description: 'Astro frontmatter — must satisfy packages/blog-schema/schema.json for blog posts' },
           body: { type: 'string', description: 'Markdown body' },
           schema: { type: 'object', description: 'JSON-LD schema block (LocalBusiness/Service/Article/etc. per page_type)' },
+          claims_ledger: {
+            type: 'array',
+            description: 'REQUIRED when the brief has a facts_pack. One entry per local claim (neighborhood, pest pressure, home type, seasonality, service availability) made in the body. Each claim MUST cite fact_ids from the brief facts_pack. Do not assert local facts that are not in facts_pack.',
+            items: {
+              type: 'object',
+              required: ['claim', 'factIds'],
+              properties: {
+                claim: { type: 'string', description: 'The sentence/assertion as it appears in the body' },
+                claimType: { type: 'string', description: 'neighborhood | pest_pressure | home_type | seasonality | service_availability | regulation' },
+                strength: { type: 'string', description: 'verified | partially_verified | directional — must not exceed the strongest backing fact' },
+                factIds: { type: 'array', items: { type: 'string' }, description: 'fact ids from facts_pack that back this claim' },
+                bodyLocation: { type: 'string', description: 'where in the body the claim appears (e.g. "section: Termite pressure in Venice")' },
+              },
+            },
+          },
           notes_for_reviewer: { type: 'string', description: 'Anything a human reviewer should know if the gate flags this for review' },
         },
       },

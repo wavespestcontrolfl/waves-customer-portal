@@ -425,6 +425,8 @@ describe('countsTowardTrustBuild', () => {
       trust_build_approved_at: new Date(),
     })).toBe(false);
     expect(countsTowardTrustBuild({ outcome: 'failed_agent' })).toBe(false);
+    // A no-op refresh published nothing — it must not build trust.
+    expect(countsTowardTrustBuild({ outcome: 'completed_no_changes' })).toBe(false);
   });
 });
 
@@ -436,6 +438,11 @@ describe('isDeterministicPublishError', () => {
     expect(isDeterministicPublishError(frontmatterError)).toBe(true);
     expect(isDeterministicPublishError(new Error('autonomous draft canonical must match slug /x/'))).toBe(true);
     expect(isDeterministicPublishError(new Error('GitHub PUT https://api.github.com/repos/x/y -> 502'))).toBe(false);
+  });
+
+  test('unresolvable/missing refresh targets are deterministic (park for review, not retry)', () => {
+    expect(isDeterministicPublishError(new Error('could not resolve refresh target: missing target_url'))).toBe(true);
+    expect(isDeterministicPublishError(new Error('Astro file not found for refresh: src/content/services/x.md'))).toBe(true);
   });
 });
 
@@ -500,6 +507,7 @@ function loadRunnerWith({
   indexNow = null,
   linkPlanner = null,
   internalLinkExecutor = null,
+  protectedPages = null,
 }) {
   jest.resetModules();
   const dbMock = jest.fn(() => {
@@ -522,6 +530,7 @@ function loadRunnerWith({
   if (indexNow) jest.doMock('../services/seo/indexnow-submit', () => indexNow);
   if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);
   if (internalLinkExecutor) jest.doMock('../services/content/internal-link-pr-executor', () => internalLinkExecutor);
+  if (protectedPages) jest.doMock('../services/content/protected-pages', () => protectedPages);
   return require('../services/content/autonomous-runner');
 }
 
@@ -585,6 +594,45 @@ describe('runNext dry-run behavior', () => {
     expect(queue.release).not.toHaveBeenCalled();
     expect(queue.skip).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
+  });
+});
+
+describe('protected-page guard', () => {
+  test('blocks derived city-service money pages even when opportunity page_url is absent', async () => {
+    const claimedAt = new Date('2026-05-28T13:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_protected_city_service',
+        action_type: 'create_or_refresh_city_service_page',
+        page_url: null,
+        service: 'pest',
+        city: 'Sarasota',
+        claimed_at: claimedAt,
+      }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = { compose: jest.fn() };
+    const dispatcher = { runWithBrief: jest.fn() };
+    const protectedPages = {
+      isProtected: jest.fn().mockResolvedValue({
+        protected: true,
+        reason: 'money_page',
+        source: 'pattern',
+        detail: 'pest-control city hub',
+      }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, protectedPages });
+
+    const result = await runner.runNext();
+
+    expect(protectedPages.isProtected).toHaveBeenCalledWith('/pest-control-sarasota-fl/', { db: expect.any(Function) });
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('protected_page:money_page');
+    expect(result.reviewer_notes).toContain('/pest-control-sarasota-fl/');
+    expect(briefBuilder.compose).not.toHaveBeenCalled();
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_protected_city_service', 'protected_page:money_page', { claimToken: claimedAt });
   });
 });
 
@@ -1358,6 +1406,50 @@ describe('runNext post-publish bookkeeping', () => {
       });
       expect(queue.pendingReview).toHaveBeenCalledWith('opp_publish_1', 'published_queue_complete_failed', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('completes a no_changes publish as a no-op (no PR, no published_url, not tracked) instead of parking it', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_noop_1', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({ id: 'brief_noop_1', action_type: 'new_supporting_blog', page_type: 'blog', human_review_required: false }),
+      };
+      const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { url: '/blog/noop/', title: 'No-op' } }) };
+      const uniquenessGate = { evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }) };
+      const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80 }) };
+      const publisher = {
+        publishOrUpdatePage: jest.fn().mockResolvedValue({ url: '/blog/noop/', status: 'no_changes', live: false }),
+      };
+      const indexNow = { submit: jest.fn().mockResolvedValue({ ok: true, status: 'ok' }) };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, uniquenessGate, qualityGate, publisher, indexNow, linkPlanner: {} });
+
+      const result = await runner.runNext();
+
+      // Distinct no-op outcome with NO published_url → impact sweep
+      // (whereNotNull('published_url')) and trust-build counting both skip it.
+      expect(result.outcome).toBe('completed_no_changes');
+      expect(result.published_url == null).toBe(true);
+      expect(queue.complete).toHaveBeenCalledWith('opp_noop_1', { notes: 'no_changes', claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
+      // No real change → no distribution.
+      expect(indexNow.submit).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
       else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
