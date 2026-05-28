@@ -437,6 +437,11 @@ describe('isDeterministicPublishError', () => {
     expect(isDeterministicPublishError(new Error('autonomous draft canonical must match slug /x/'))).toBe(true);
     expect(isDeterministicPublishError(new Error('GitHub PUT https://api.github.com/repos/x/y -> 502'))).toBe(false);
   });
+
+  test('unresolvable/missing refresh targets are deterministic (park for review, not retry)', () => {
+    expect(isDeterministicPublishError(new Error('could not resolve refresh target: missing target_url'))).toBe(true);
+    expect(isDeterministicPublishError(new Error('Astro file not found for refresh: src/content/services/x.md'))).toBe(true);
+  });
 });
 
 describe('DEFAULT_MIN_SCORE', () => {

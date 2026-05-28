@@ -1327,6 +1327,8 @@ function isDeterministicPublishError(err) {
     /^unsupported metadata rewrite for Astro publish:/,
     /^could not resolve metadata rewrite target:/,
     /^Astro file not found for metadata rewrite:/,
+    /^could not resolve refresh target:/,
+    /^Astro file not found for refresh:/,
     /^autonomous draft missing safe frontmatter slug$/,
     /^autonomous draft canonical is not a valid URL$/,
     /^autonomous draft canonical must match slug /,
