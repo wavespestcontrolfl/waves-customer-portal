@@ -1,0 +1,448 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wavespestcontrol.com/schemas/call-extraction.model-output.v1.json",
+  "title": "Waves Call Extraction — Model Output",
+  "description": "Schema for the JSON output Gemini produces from a call transcript. Excludes server-owned metadata fields (call_id, schema_version, extracted_at, extraction_model) which are injected after model response.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "meta",
+    "caller",
+    "consent",
+    "property",
+    "service_request",
+    "customer_history",
+    "sentiment_and_lead",
+    "confidence",
+    "triage_flags"
+  ],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["is_voicemail", "is_spam", "transcript_word_count", "call_summary"],
+      "properties": {
+        "is_voicemail": {
+          "type": "boolean",
+          "description": "True if the recording is a voicemail message rather than a two-party conversation."
+        },
+        "is_spam": {
+          "type": "boolean",
+          "description": "True if the call is spam, solicitation, robocall, or wrong number."
+        },
+        "transcript_word_count": { "type": "integer", "minimum": 0 },
+        "transcript_duration_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "call_summary": {
+          "type": "string",
+          "description": "2-3 sentence summary of the call for quick triage."
+        }
+      }
+    },
+
+    "caller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relationship_to_property", "on_site_authorization", "decision_maker_present", "phone_source"],
+      "properties": {
+        "name_full": {
+          "type": ["string", "null"],
+          "description": "Full name as spoken. Do not split or reformat."
+        },
+        "first_name": {
+          "type": ["string", "null"],
+          "description": "First/given name if clearly identifiable. null if ambiguous or not stated."
+        },
+        "last_name": {
+          "type": ["string", "null"],
+          "description": "Last/family name if clearly identifiable. Do not invent from caller ID, address, or context."
+        },
+        "organization_name": {
+          "type": ["string", "null"],
+          "description": "Business or HOA name if caller is representing an organization."
+        },
+        "name_confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confidence that name extraction is correct. Low when spelled out ambiguously or only partially heard."
+        },
+        "phone_e164": {
+          "type": ["string", "null"],
+          "pattern": "^\\+[1-9]\\d{1,14}$",
+          "description": "Best callback number stated by caller. May differ from Twilio ANI."
+        },
+        "phone_raw_spoken": {
+          "type": ["string", "null"],
+          "description": "Phone number as spoken in transcript, verbatim. e.g. 'five five five, one two three, four five six seven'."
+        },
+        "phone_source": {
+          "type": "string",
+          "enum": ["caller_id", "spoken", "both", "unknown"],
+          "description": "How the phone number was obtained. 'caller_id' = from Twilio ANI only, 'spoken' = caller stated it, 'both' = matches ANI and spoken."
+        },
+        "email": { "type": ["string", "null"], "format": "email" },
+        "relationship_to_property": {
+          "type": "string",
+          "enum": ["owner", "tenant", "spouse_partner", "property_manager", "hoa_board_member", "employee", "other", "unknown"]
+        },
+        "on_site_authorization": {
+          "type": "boolean",
+          "description": "Caller has affirmed authority to authorize service at the property. MUST be true to clear auto-appointment gate when caller != owner."
+        },
+        "decision_maker_present": {
+          "type": "boolean",
+          "description": "Caller can commit to service/pricing without consulting another party."
+        },
+        "preferred_contact_method": {
+          "type": ["string", "null"],
+          "enum": ["phone", "sms", "email", "unspecified", null]
+        }
+      }
+    },
+
+    "consent": {
+      "type": "object",
+      "description": "TCPA-relevant consent capture. SMS dispatch MUST check sms_consent_given=true and do_not_contact_request=false before firing.",
+      "additionalProperties": false,
+      "required": ["sms_consent_given", "call_recording_disclosed", "do_not_contact_request"],
+      "properties": {
+        "sms_consent_given": { "type": "boolean" },
+        "sms_consent_quote": {
+          "type": ["string", "null"],
+          "description": "Verbatim transcript span where consent was given."
+        },
+        "call_recording_disclosed": { "type": "boolean" },
+        "do_not_contact_request": {
+          "type": "boolean",
+          "description": "Caller explicitly asked not to be contacted further."
+        }
+      }
+    },
+
+    "property": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_address", "property_type", "hoa_community_flag", "hoa_common_area_service"],
+      "properties": {
+        "service_address": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "raw_text": {
+              "type": ["string", "null"],
+              "description": "Address as spoken by the caller, verbatim. Preserved for re-extraction and audit."
+            },
+            "street_line_1": { "type": ["string", "null"] },
+            "street_line_2": { "type": ["string", "null"] },
+            "city": { "type": ["string", "null"] },
+            "state": { "type": ["string", "null"], "enum": ["FL", null] },
+            "postal_code": {
+              "type": ["string", "null"],
+              "pattern": "^\\d{5}(-\\d{4})?$"
+            },
+            "county": {
+              "type": ["string", "null"],
+              "enum": ["Manatee", "Sarasota", "Charlotte", "DeSoto", null],
+              "description": "Service area constraint. If present and not one of these, set triage_flag=out_of_service_area."
+            },
+            "subdivision_or_community": {
+              "type": ["string", "null"],
+              "description": "e.g. 'Lakewood Ranch', 'Heritage Harbor', 'Boca Royale'."
+            },
+            "normalization_status": {
+              "type": "string",
+              "enum": ["complete", "partial", "failed", "inferred", "not_attempted"],
+              "description": "Set by server after normalization pass. Model should output 'not_attempted'."
+            }
+          }
+        },
+        "property_type": {
+          "type": "string",
+          "enum": [
+            "single_family", "condo", "townhouse", "mobile_home",
+            "multi_family", "hoa_common_area", "commercial",
+            "vacant_lot", "unknown"
+          ]
+        },
+        "hoa_community_flag": {
+          "type": "boolean",
+          "description": "Property sits within an HOA community. Not the same as HOA common-area service."
+        },
+        "hoa_common_area_service": {
+          "type": "boolean",
+          "description": "Service is for HOA-owned common areas. Triggers commercial pricing + admin-approval hold."
+        },
+        "commercial_subtype": {
+          "type": ["string", "null"],
+          "enum": [
+            "restaurant", "office", "retail", "warehouse",
+            "medical", "multi_unit_residential", "hospitality",
+            "industrial", "agricultural", "other", null
+          ]
+        },
+        "approximate_lot_size_acres": { "type": ["number", "null"], "minimum": 0 },
+        "approximate_living_sqft": { "type": ["integer", "null"], "minimum": 0 },
+        "pets_on_property": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["present"],
+          "properties": {
+            "present": { "type": "boolean" },
+            "species_notes": {
+              "type": ["string", "null"],
+              "description": "Free text: 'two dogs in yard', 'indoor cat', 'koi pond'."
+            }
+          }
+        },
+        "access_notes": {
+          "type": ["string", "null"],
+          "description": "Gate code, side gate locked, dogs in back, lockbox info."
+        }
+      }
+    },
+
+    "service_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary_service_category", "service_intent", "urgency", "pests_observed", "pests_observed_status"],
+      "properties": {
+        "primary_service_category": {
+          "type": "string",
+          "enum": [
+            "pest_general", "termite", "rodent", "mosquito",
+            "stinging_insect", "lawn_care", "palm_injection",
+            "exclusion", "inspection_only", "bundled_waveguard", "other"
+          ]
+        },
+        "secondary_categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "pest_general", "termite", "rodent", "mosquito",
+              "stinging_insect", "lawn_care", "palm_injection",
+              "exclusion", "inspection_only", "bundled_waveguard", "other"
+            ]
+          }
+        },
+        "pests_observed_status": {
+          "type": "string",
+          "enum": ["observed", "not_observed_preventative", "not_observed_inquiry", "not_discussed"],
+          "description": "Semantic status. 'observed' = pests_observed has items. 'not_observed_preventative' = wants prevention, no active pest. 'not_observed_inquiry' = quote/info call. 'not_discussed' = call topic didn't involve pest identification."
+        },
+        "pests_observed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pest_type", "severity_signal"],
+            "properties": {
+              "pest_type": {
+                "type": "string",
+                "enum": [
+                  "ants_general", "ants_fire", "ants_carpenter",
+                  "roaches_german", "roaches_palmetto", "roaches_smokybrown",
+                  "rodents_rats", "rodents_mice", "rodents_squirrels",
+                  "termites_subterranean", "termites_drywood",
+                  "mosquitoes",
+                  "wasps", "yellow_jackets", "hornets", "bees_honey", "bees_carpenter",
+                  "spiders_general", "spiders_widow", "spiders_recluse",
+                  "fleas", "ticks", "bed_bugs",
+                  "silverfish", "earwigs", "millipedes", "centipedes",
+                  "chinch_bugs", "sod_webworms", "armyworms", "mole_crickets", "grubs", "fire_ants_lawn",
+                  "palm_weevils", "scale_insects", "whiteflies",
+                  "iguanas", "snakes", "other_wildlife",
+                  "unspecified", "other"
+                ]
+              },
+              "location_on_property": { "type": ["string", "null"] },
+              "severity_signal": {
+                "type": "string",
+                "enum": [
+                  "sighting_single", "sighting_multiple", "active_infestation",
+                  "structural_damage_visible", "lawn_damage_visible",
+                  "person_stung_or_bitten", "unknown"
+                ]
+              },
+              "first_observed": { "type": ["string", "null"] },
+              "prior_treatment_attempts": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "service_intent": {
+          "type": "string",
+          "enum": [
+            "active_infestation_treatment", "preventative_one_time",
+            "recurring_membership_inquiry", "inspection_only",
+            "quote_only", "follow_up_existing_service",
+            "complaint_or_callback", "cancellation_request"
+          ]
+        },
+        "urgency": {
+          "type": "string",
+          "enum": [
+            "emergency_same_day", "within_48_hours", "within_one_week",
+            "scheduling_flexible", "no_appointment_needed"
+          ]
+        },
+        "waveguard_tier_mentioned": {
+          "type": ["string", "null"],
+          "enum": ["bronze", "silver", "gold", "platinum", null]
+        }
+      }
+    },
+
+    "customer_history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "prior_complaint_mentioned"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "new_customer", "current_active", "former_lapsed",
+            "switching_from_competitor", "referred", "unknown"
+          ]
+        },
+        "competitor_name": { "type": ["string", "null"] },
+        "referral_source": { "type": ["string", "null"] },
+        "prior_complaint_mentioned": { "type": "boolean" }
+      }
+    },
+
+    "scheduling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["none", "requested", "offered", "confirmed", "reschedule_requested", "canceled", "ambiguous"],
+          "description": "Only 'confirmed' maps to legacy appointment_confirmed=true. 'requested'/'offered' do NOT create appointments."
+        },
+        "confirmed_start_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO 8601 datetime in Eastern Time when appointment is confirmed. Only set when status='confirmed' AND both specific date AND specific time agreed."
+        },
+        "requested_date_range_start": { "type": ["string", "null"], "format": "date" },
+        "requested_date_range_end": { "type": ["string", "null"], "format": "date" },
+        "preferred_time_of_day": {
+          "type": ["string", "null"],
+          "enum": ["morning", "afternoon", "evening", "any", "unspecified", null]
+        },
+        "callback_window_start": { "type": ["string", "null"], "format": "time" },
+        "callback_window_end": { "type": ["string", "null"], "format": "time" },
+        "blackout_dates": {
+          "type": "array",
+          "items": { "type": "string", "format": "date" }
+        },
+        "scheduling_notes_raw": { "type": ["string", "null"] }
+      }
+    },
+
+    "commercial_signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "business_name": { "type": ["string", "null"] },
+        "decision_authority_confirmed": { "type": "boolean" },
+        "procurement_process_mentioned": { "type": "boolean" },
+        "annual_contract_interest": { "type": "boolean" },
+        "competing_quotes_mentioned": { "type": "boolean" },
+        "budget_signal": { "type": ["string", "null"] },
+        "insurance_or_compliance_requirements": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+
+    "sentiment_and_lead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sentiment", "lead_quality"],
+      "properties": {
+        "sentiment": {
+          "type": "string",
+          "enum": ["positive", "neutral", "frustrated", "angry", "urgent_distress", "confused"]
+        },
+        "lead_quality": {
+          "type": "string",
+          "enum": [
+            "hot", "warm", "cold", "tire_kicker",
+            "wrong_number", "spam_or_solicitation", "out_of_service_area"
+          ]
+        },
+        "objections_raised": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "buying_signals": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+
+    "evidence": {
+      "type": "array",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field_path", "quote", "speaker"],
+        "properties": {
+          "field_path": { "type": "string" },
+          "quote": { "type": "string" },
+          "speaker": { "type": "string", "enum": ["caller", "agent"] },
+          "transcript_offset_ms": { "type": ["integer", "null"], "minimum": 0 }
+        }
+      }
+    },
+
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["overall", "service_address", "primary_service_category", "urgency", "consent_capture"],
+      "properties": {
+        "caller_identity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "service_address": { "type": "number", "minimum": 0, "maximum": 1 },
+        "property_type": { "type": "number", "minimum": 0, "maximum": 1 },
+        "primary_service_category": { "type": "number", "minimum": 0, "maximum": 1 },
+        "urgency": { "type": "number", "minimum": 0, "maximum": 1 },
+        "scheduling_window": { "type": "number", "minimum": 0, "maximum": 1 },
+        "consent_capture": { "type": "number", "minimum": 0, "maximum": 1 },
+        "overall": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+
+    "triage_flags": {
+      "type": "array",
+      "description": "Model-suggested reasons the call should not auto-route. Server also computes deterministic flags after extraction — final gate uses the union.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "out_of_service_area",
+          "hoa_common_area_requires_approval",
+          "commercial_requires_quote",
+          "caller_not_authorized",
+          "no_sms_consent_captured",
+          "do_not_contact_requested",
+          "address_unverifiable",
+          "competing_quotes_active",
+          "prior_complaint_unresolved",
+          "low_extraction_confidence",
+          "ambiguous_pest_or_service",
+          "spam_or_wrong_number",
+          "after_hours_emergency",
+          "cancellation_request",
+          "manual_review_requested",
+          "ambiguous_scheduling",
+          "reschedule_or_cancel"
+        ]
+      },
+      "uniqueItems": true
+    }
+  }
+}
