@@ -582,8 +582,8 @@ class AutonomousRunner {
   }
 
   async _handleMetadataRewriteAction(brief, draft, run) {
-    const gate = getTitleMetaSpamGate();
-    if (!gate?.evaluateTitleMetaSpam) {
+    const spamGate = getTitleMetaSpamGate();
+    if (!spamGate?.evaluateTitleMetaSpam) {
       return {
         notes: 'title_meta_spam_gate_unavailable',
         patch: {
@@ -595,7 +595,7 @@ class AutonomousRunner {
       };
     }
 
-    const gateResult = gate.evaluateTitleMetaSpam({
+    const gateResult = spamGate.evaluateTitleMetaSpam({
       title: draft.title,
       meta_description: draft.meta_description,
       city: brief.city,
@@ -616,6 +616,62 @@ class AutonomousRunner {
           outcome: 'completed_pending_review',
           skip_reason: 'metadata_gate_fail',
           reviewer_notes: `Title/meta spam gate blocked PR creation: ${(gateResult.hard_failures || []).map((f) => f.code || f.reason).join(', ') || 'failed'}.`,
+        },
+      };
+    }
+
+    const qualityGate = getQualityGate();
+    if (!qualityGate?.evaluate) {
+      return {
+        notes: 'metadata_quality_gate_unavailable',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'metadata_quality_gate_unavailable',
+          reviewer_notes: 'Content quality gate was unavailable; route this metadata rewrite manually.',
+        },
+      };
+    }
+
+    const metadataDraft = {
+      ...draft,
+      url: brief.target_url || brief.page_url || draft.page_url || null,
+      canonical: brief.target_url || brief.page_url || draft.page_url || null,
+      // Metadata-only rewrites intentionally do not alter schema/body, but
+      // the shared quality gate expects a schema-shaped draft for common checks.
+      schema: draft.schema || {},
+      frontmatter: {
+        ...(draft.frontmatter || {}),
+        title: draft.title,
+        meta_description: draft.meta_description,
+      },
+    };
+    const metadataBrief = { ...brief, page_type: 'metadata' };
+    const qualityContext = {
+      siblingTitles: await this._loadSiblingTitlesForMetadata(brief, draft),
+      previewBuildSuccess: true,
+      sitemapHasUrl: true,
+    };
+    let qualityResult;
+    try {
+      qualityResult = qualityGate.evaluate(metadataDraft, metadataBrief, qualityContext);
+    } catch (err) {
+      qualityResult = { ok: false, error: err.message, hard_failures: [{ name: 'metadata_quality_gate_error', reason: err.message }], soft_failures: [] };
+    }
+    run.quality_gate_result = {
+      ...qualityResult,
+      spam_gate: gateResult,
+      gate: 'metadata_quality',
+    };
+
+    if (!qualityResult.ok) {
+      const hard = (qualityResult.hard_failures || []).map((f) => `${f.name}:${f.reason}`).join(', ');
+      const soft = (qualityResult.soft_failures || []).slice(0, 4).map((f) => `${f.name}:${f.reason}`).join(', ');
+      return {
+        notes: 'metadata_quality_gate_fail',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'metadata_quality_gate_fail',
+          reviewer_notes: `Metadata quality gate blocked PR creation: hard=${hard || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score ?? 'n/a'}/${qualityResult.min_total_score ?? 'n/a'}.`,
         },
       };
     }
@@ -689,6 +745,23 @@ class AutonomousRunner {
           : 'Metadata publisher completed without an Astro PR URL; route manually.',
       },
     };
+  }
+
+  async _loadSiblingTitlesForMetadata(brief, draft) {
+    const titles = new Set();
+    let corpus = [];
+    try {
+      corpus = await this._loadAstroCorpus({ collections: ['blog', 'services', 'locations'], required: false });
+    } catch {
+      return titles;
+    }
+    const targetUrl = normalizeContentPath(brief.target_url || brief.page_url || draft.page_url || '');
+    for (const page of corpus || []) {
+      if (targetUrl && normalizeContentPath(page.url || '') === targetUrl) continue;
+      const title = extractFrontmatterScalar(page.body, 'title');
+      if (title) titles.add(title.toLowerCase());
+    }
+    return titles;
   }
 
   async _handleInternalLinksAction(brief, run) {
@@ -1015,6 +1088,28 @@ function envInt(key, defaultValue = null) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
 }
 
+function normalizeContentPath(url) {
+  return String(url || '')
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .replace(/[?#].*$/, '')
+    .replace(/^\/+|\/+$/g, '')
+    .toLowerCase();
+}
+
+function extractFrontmatterScalar(body, key) {
+  const text = String(body || '');
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!match) return null;
+  const escaped = String(key || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const line = match[1].match(new RegExp(`^\\s*${escaped}\\s*:\\s*(.+?)\\s*$`, 'm'));
+  if (!line) return null;
+  let value = line[1].trim().replace(/\s+#.*$/, '').trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value.trim() || null;
+}
+
 function startOfEtDay(date = new Date()) {
   return parseETDateTime(`${etDateString(date)}T00:00`);
 }
@@ -1033,6 +1128,8 @@ module.exports._internals = {
   isDeterministicPublishError,
   envBool,
   envInt,
+  normalizeContentPath,
+  extractFrontmatterScalar,
   startOfEtDay,
   startOfEtWeek,
 };
