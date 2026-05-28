@@ -51,9 +51,17 @@ TOOLS:
 - emit_draft — submit the updated {frontmatter, body, schema}. The
   runner replaces the existing page atomically once gates pass.
 
-OUTPUT — call emit_draft() once. Include notes_for_reviewer listing
-specifically what changed (new sections / updated proof / refreshed
-CTAs) so a human can diff-review efficiently.`,
+LOCAL FACTS — when the brief includes a facts_pack, any local claim you add
+or keep (neighborhoods, pest pressure, home types, seasonality, service
+availability) MUST be grounded in a fact id from facts_pack. Do not invent
+local specifics, do not upgrade a "directional" fact into an absolute claim,
+and honor facts_pack.disallowed_claim_patterns. Emit a claims_ledger entry for
+every local claim, citing its backing fact id(s).
+
+OUTPUT — call emit_draft() once with { frontmatter, body, schema,
+claims_ledger, notes_for_reviewer }. Include notes_for_reviewer listing
+specifically what changed (new sections / updated proof / refreshed CTAs) so a
+human can diff-review efficiently.`,
 
   tools: [
     {
@@ -143,6 +151,21 @@ CTAs) so a human can diff-review efficiently.`,
           frontmatter: { type: 'object' },
           body: { type: 'string' },
           schema: { type: 'object' },
+          claims_ledger: {
+            type: 'array',
+            description: 'REQUIRED when the brief has a facts_pack. One entry per local claim in the body, each citing fact_ids from facts_pack.',
+            items: {
+              type: 'object',
+              required: ['claim', 'factIds'],
+              properties: {
+                claim: { type: 'string' },
+                claimType: { type: 'string' },
+                strength: { type: 'string' },
+                factIds: { type: 'array', items: { type: 'string' } },
+                bodyLocation: { type: 'string' },
+              },
+            },
+          },
           notes_for_reviewer: { type: 'string', description: 'Required for refresh — list what changed' },
         },
       },

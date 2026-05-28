@@ -79,7 +79,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           'score_breakdown', 'serp_signal', 'gsc_signal',
           'customer_signal', 'conversion_signal',
           'required_sections', 'schema_types', 'internal_links_to_add',
-          'voice_constraints',
+          'voice_constraints', 'facts_pack',
         ]);
         brief.seo_requirements = buildSeoRequirements(brief);
         return brief;
@@ -222,17 +222,18 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
 
     case 'emit_draft': {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
-      const { frontmatter, body, schema, notes_for_reviewer } = input || {};
+      const { frontmatter, body, schema, claims_ledger, notes_for_reviewer } = input || {};
       if (!frontmatter || !body) return { error: 'frontmatter and body required' };
       sessionDrafts.set(sessionId, {
         type: 'draft',
         frontmatter,
         body,
         schema: schema || null,
+        claims_ledger: Array.isArray(claims_ledger) ? claims_ledger : [],
         notes_for_reviewer: notes_for_reviewer || null,
         captured_at: new Date(),
       });
-      return { ok: true, captured: true, body_chars: body.length };
+      return { ok: true, captured: true, body_chars: body.length, claims: Array.isArray(claims_ledger) ? claims_ledger.length : 0 };
     }
 
     case 'emit_metadata_only': {

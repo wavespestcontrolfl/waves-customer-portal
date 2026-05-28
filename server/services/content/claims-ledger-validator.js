@@ -218,7 +218,7 @@ async function validate(draft, { city, service, county = null }, opts = {}) {
   }
 
   return validateLedger({
-    claimsLedger: draft?.claimsLedger,
+    claimsLedger: draft?.claimsLedger || draft?.claims_ledger,
     body: draft?.body || draft?.content || '',
     factsById,
     disallowedPatterns: disallowed,

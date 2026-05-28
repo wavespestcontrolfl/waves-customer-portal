@@ -21,6 +21,8 @@ const { buildSeoRequirements } = require('./blog-seo-contract');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
+const factsSufficiency = require('./facts-sufficiency');
+const factsLoader = require('../content-astro/facts-bank-loader');
 
 // ── keyword overlap helpers for customer-cluster topic match ────────
 
@@ -192,7 +194,14 @@ class ContentBriefBuilder {
 
     const decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
 
-    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions });
+    // Facts pack — the verified facts-bank facts the writer agent may cite.
+    // Only assembled for facts-gated content actions with a city × service.
+    const factsPack = await this._loadFactsPack(opp, decision).catch((err) => {
+      logger.warn(`[brief-builder] facts pack load failed: ${err.message}`);
+      return null;
+    });
+
+    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack });
     if (persist) brief.id = await this._persist(brief);
     return brief;
   }
@@ -318,10 +327,55 @@ class ContentBriefBuilder {
     }
   }
 
-  _composeBrief({ opportunity, signals, decision, existingBriefVersions }) {
+  /**
+   * Assemble the facts pack for a facts-gated city × service action. Returns
+   * null when the action isn't facts-gated or the city/service can't be
+   * mapped. Only prompt-usable facts are included (loader filters out
+   * internal_only / expired / unverified); the agent may cite ONLY these
+   * fact ids in its claims ledger.
+   */
+  async _loadFactsPack(opportunity, decision) {
+    const actionType = decision?.action_type || opportunity.action_type;
+    if (!factsSufficiency.FACTS_GATED_ACTIONS.has(actionType)) return null;
+
+    const cityId = factsSufficiency.normalizeCityId(opportunity.city);
+    const serviceId = factsSufficiency.normalizeServiceId(opportunity.service);
+    if (!cityId || !serviceId) return null;
+
+    const cityFile = await factsLoader.loadCity(cityId);
+    const serviceFile = await factsLoader.loadService(serviceId);
+    const countyId = cityFile?.county || null;
+    const countyFile = countyId ? await factsLoader.loadCounty(countyId) : null;
+
+    const pack = (file, id) => {
+      if (!file || file.ok === false) return { id, facts: [] };
+      const facts = factsLoader.usableFacts(file, { purpose: 'prompt' })
+        .map((f) => ({ id: f.id, type: f.type, value: f.value, evidence_strength: f.evidence_strength, allowed_contexts: f.allowed_contexts || [] }));
+      return { id, facts, internal_links: file.internal_links || {} };
+    };
+
+    const allowed = [];
+    const disallowed = [];
+    for (const file of [cityFile, serviceFile, countyFile]) {
+      if (!file || file.ok === false) continue;
+      for (const p of file.allowed_claim_patterns || []) allowed.push(p);
+      for (const p of file.disallowed_claim_patterns || []) disallowed.push(p);
+    }
+
+    return {
+      city: pack(cityFile, cityId),
+      service: pack(serviceFile, serviceId),
+      county: countyFile ? pack(countyFile, countyId) : null,
+      allowed_claim_patterns: allowed,
+      disallowed_claim_patterns: disallowed,
+    };
+  }
+
+  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null }) {
     const pageType = decision.page_type;
 
     return {
+      facts_pack: factsPack,
       opportunity_id: opportunity.id,
       version: existingBriefVersions + 1,
       action_type: decision.action_type,
@@ -450,6 +504,7 @@ class ContentBriefBuilder {
           required_sections: JSON.stringify(brief.required_sections),
           schema_types: JSON.stringify(brief.schema_types),
           internal_links_to_add: JSON.stringify(brief.internal_links_to_add),
+          facts_pack: brief.facts_pack ? JSON.stringify(brief.facts_pack) : null,
           word_count_target: brief.word_count_target,
           voice_constraints: JSON.stringify(brief.voice_constraints),
           publish_window: brief.publish_window,
