@@ -741,18 +741,31 @@ describe('hasNameEmailMismatch', () => {
   test('correct name for the Gennett call → no mismatch (both tokens present)', () => {
     expect(hasNameEmailMismatch({ first_name: 'Ryan', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(false);
   });
-  test('wrong first name with a correct surname still flags (Codex P2 — surname match must not bless the whole name)', () => {
-    // "gennett" corroborates the surname, but the residual "ryan" is a first
-    // name we did not extract → the extracted "Jeanette" is contradicted.
-    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(true);
-    // Surname matches, residual is a different name → still a contradiction.
-    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Johnson', email: 'johnsonryan@x.com' })).toBe(true);
+  test('separator-delimited segment names a different person → mismatch', () => {
+    // Surname "smith" matches, but the delimited "john" segment is a first name
+    // that contradicts the extracted "Bob".
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'john.smith@x.com' })).toBe(true);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Rodriguez', email: 'maria_rodriguez@x.com' })).toBe(true);
   });
-  test('partial match with only a short residual → no mismatch (initials / first-name-only emails)', () => {
-    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mariar@gmail.com' })).toBe(false); // residual "r"
-    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmith@x.com' })).toBe(false);          // residual "j"
-    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'johnnyc@x.com' })).toBe(false);         // residual "nyc" (<4)
-    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: null, email: 'bobfitness@x.com' })).toBe(false);          // single token present, no missing token
+  test('common first-initial + surname + affix mailboxes do NOT false-flag (Codex P2)', () => {
+    // jsmithhome / jsmithwork / mrodriguezfamily: surname is a substring of a
+    // separator-less segment → not mined; "home"/"work"/"family" are not names.
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmithhome@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmithwork@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mrodriguezfamily@x.com' })).toBe(false);
+    // Affix as an explicit delimited segment is also ignored.
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmith.home@x.com' })).toBe(false);
+  });
+  test('concatenated surname+other-name is intentionally NOT mined (no dictionary; caught by rule 1 when wholly wrong)', () => {
+    // Surname extracted correctly, first name wrong, no separator → we accept
+    // the miss rather than over-triage mailbox variants. Documented tradeoff.
+    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(false);
+  });
+  test('first-initial / first-name-only emails → no mismatch', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mariar@gmail.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmith@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'johnnyc@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: null, email: 'bobfitness@x.com' })).toBe(false);
   });
   test('generic/role mailbox → never a mismatch', () => {
     expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'info@company.com' })).toBe(false);

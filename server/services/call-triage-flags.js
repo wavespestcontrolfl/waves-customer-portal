@@ -16,6 +16,13 @@ const GENERIC_EMAIL_LOCALPARTS = new Set([
   'billing', 'accounts', 'accounting', 'hello', 'noreply', 'mail', 'email',
 ]);
 
+// Common, non-name mailbox affixes. A delimited segment that is one of these
+// is NOT evidence of a different person (jsmith.home@, maria.work@).
+const NON_NAME_EMAIL_AFFIXES = new Set([
+  'home', 'work', 'family', 'personal', 'official', 'real', 'team', 'group',
+  'online', 'here', 'only', 'usa', 'dev', 'biz', 'llc', 'inc', 'mail', 'email',
+]);
+
 // Detects when the extracted caller name is NOT corroborated by the email's
 // local-part — e.g. spoken "Jeanette" with email gennettryan@ (really Ryan
 // Gennett). We do NOT guess the right name (email-based inference is
@@ -26,7 +33,8 @@ function hasNameEmailMismatch(caller = {}) {
   const email = String(caller.email || '').toLowerCase();
   const at = email.indexOf('@');
   if (at < 1) return false;
-  const local = email.slice(0, at).replace(/[^a-z]/g, '');
+  const localRaw = email.slice(0, at);              // keep separators for (2)
+  const local = localRaw.replace(/[^a-z]/g, '');
   if (local.length < 4) return false;            // too short to reason about
   if (GENERIC_EMAIL_LOCALPARTS.has(local)) return false;
   const tokens = [...new Set(
@@ -40,22 +48,27 @@ function hasNameEmailMismatch(caller = {}) {
 
   const present = tokens.filter((t) => local.includes(t));
 
-  // (1) No extracted token appears at all → the name is uncorroborated.
+  // (1) Not one extracted name token appears anywhere → uncorroborated name.
+  // This is what caught the real incident (spoken "Jeanette", surname extracted
+  // as null, email gennettryan@ — "jeanette" appears nowhere).
   if (present.length === 0) return true;
 
-  // (2) Partial corroboration with a contradiction. A matching surname is NOT
-  // enough to bless the whole name: "Jeanette Gennett" / gennettryan@ matches
-  // on "gennett" but the email's residual "ryan" is a different first name we
-  // failed to extract. So when SOME tokens match but at least one is missing,
-  // strip every matched token and flag if what remains still holds a
-  // name-length (>=4) alpha run — that residual is a name the email encodes and
-  // we didn't capture. Short residuals (a first initial in "jsmith", the "r" in
-  // "mariar") are not names, so first-initial / first-name-only emails don't
-  // false-flag.
+  // (2) A separator-delimited segment names someone else. Only act on EXPLICIT
+  // boundaries (john.smith@, j_smith@, maria-rodriguez@): a delimited segment of
+  // name length (>=4) that matches no extracted token — and isn't a known
+  // mailbox affix (home/work/family/...) — while an extracted token is still
+  // missing means the email encodes a different name than we captured.
+  // We deliberately do NOT mine separator-less concatenations (jsmithhome,
+  // gennettryan): once a token is a substring, "home" vs "ryan" can't be told
+  // apart from an affix without a name dictionary, and over-triaging common
+  // first-initial+surname+suffix mailboxes costs more than missing a rare
+  // concatenated typo — a wholly wrong name is already caught by (1).
   if (present.length < tokens.length) {
-    let residual = local;
-    for (const t of present) residual = residual.split(t).join(' ');
-    if (residual.split(/[^a-z]+/).some((run) => run.length >= 4)) return true;
+    const foreignSegment = localRaw
+      .split(/[^a-z]+/)
+      .filter((seg) => seg.length >= 4 && !NON_NAME_EMAIL_AFFIXES.has(seg))
+      .some((seg) => !tokens.some((t) => seg.includes(t) || t.includes(seg)));
+    if (foreignSegment) return true;
   }
   return false;
 }
