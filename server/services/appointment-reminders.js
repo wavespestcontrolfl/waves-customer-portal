@@ -564,16 +564,6 @@ const AppointmentReminders = {
             continue;
           }
 
-          // Skip if booked less than 24h before appointment
-          if (hoursFromBookingToAppt < 24) {
-            logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — booked < 24h before`);
-            results.skipped++;
-            await db('appointment_reminders')
-              .where({ id: r.id })
-              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
-            continue;
-          }
-
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
             if (!customer) { results.skipped++; continue; }
