@@ -136,7 +136,10 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     }
   }
 
-  return flags;
+  // A decisive AV acceptance is authoritative for the address + service area —
+  // drop any address flags reached above (incl. a lead_quality-sourced
+  // out_of_service_area) so a verified in-area address is not held.
+  return suppressAddressFlagsForAV(flags, opts.addressValidation);
 }
 
 const SMS_ONLY_FLAGS = new Set([
@@ -160,6 +163,25 @@ function hasCanonicalWriteBlock(flags) {
   return (flags || []).some((f) => CANONICAL_WRITE_BLOCKING_FLAGS.has(f));
 }
 
+// Address/service-area flags that a decisive AV acceptance overrides. These can
+// be emitted by the MODEL (extraction.triage_flags) as well as deterministically,
+// so when AV affirmatively accepts/corrects an in-area premise they must be
+// stripped from BOTH sources — otherwise a stale model `out_of_service_area`
+// would still hard-veto an address AV just verified.
+const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
+  'missing_service_address',
+  'low_confidence_address',
+  'out_of_service_area',
+  'address_unverified',
+  'address_validation_unavailable',
+]);
+
+function suppressAddressFlagsForAV(flags, addressValidation) {
+  const s = addressValidation?.status;
+  if (s !== 'validated_accept' && s !== 'corrected') return flags || [];
+  return (flags || []).filter((f) => !ADDRESS_FLAGS_SUPERSEDED_BY_AV.has(f));
+}
+
 function mergeTriageFlags(modelFlags, deterministicFlags) {
   return [...new Set([...(modelFlags || []), ...(deterministicFlags || [])])];
 }
@@ -167,7 +189,7 @@ function mergeTriageFlags(modelFlags, deterministicFlags) {
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
-  const modelFlags = extraction.triage_flags || [];
+  const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
   const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f));
@@ -202,6 +224,7 @@ function canAutoRoute(extraction, opts = {}) {
 module.exports = {
   computeDeterministicTriageFlags,
   mergeTriageFlags,
+  suppressAddressFlagsForAV,
   canAutoRoute,
   SMS_ONLY_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

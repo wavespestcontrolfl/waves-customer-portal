@@ -1,6 +1,7 @@
 const {
   computeDeterministicTriageFlags,
   mergeTriageFlags,
+  suppressAddressFlagsForAV,
   canAutoRoute,
   SERVICE_AREA_COUNTIES,
   normalizeCounty,
@@ -217,6 +218,30 @@ describe('computeDeterministicTriageFlags', () => {
       const e = validV2Extraction();
       const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
       expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(true);
+    });
+
+    test('AV acceptance strips a stale MODEL address flag so it does not block (Codex P2)', () => {
+      const e = validV2Extraction();
+      e.triage_flags = ['low_confidence_address']; // model emitted it
+      const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+      expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(true);
+    });
+
+    test('AV acceptance clears a stale MODEL out_of_service_area hard-veto', () => {
+      const e = validV2Extraction();
+      e.triage_flags = ['out_of_service_area']; // model wrongly thought out-of-area
+      const av = { status: 'corrected', inServiceArea: true, county: 'Manatee County' };
+      const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av });
+      expect(r.allowed).toBe(true);
+      expect(suppressAddressFlagsForAV(e.triage_flags, av)).not.toContain('out_of_service_area');
+    });
+
+    test('without AV acceptance, a model address flag still blocks (no suppression)', () => {
+      const e = validV2Extraction();
+      e.triage_flags = ['low_confidence_address'];
+      const av = { status: 'confirm_needed' };
+      expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(false);
+      expect(suppressAddressFlagsForAV(e.triage_flags, av)).toContain('low_confidence_address');
     });
   });
 

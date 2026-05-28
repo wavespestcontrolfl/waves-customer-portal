@@ -38,7 +38,7 @@ const modelOutputSchema = require('../schemas/call-extraction.model-output.schem
 const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 'true';
 const CALL_EXTRACTION_V2_DRIVES_ROUTING = process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true';
 const CALL_TRANSCRIPT_DIARIZATION_ENABLED = process.env.CALL_TRANSCRIPT_DIARIZATION_ENABLED === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, canAutoRoute, hasCanonicalWriteBlock } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -1588,7 +1588,10 @@ const CallRecordingProcessor = {
           const addressValidation = v2AddressValidation;
           const routingResult = canAutoRoute(v2Extraction, { contactPhone, addressValidation });
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
-          const finalFlags = mergeTriageFlags(v2Extraction.triage_flags, deterministicFlags);
+          // Strip model address flags too when AV accepted/corrected — otherwise
+          // a stale model out_of_service_area would hard-veto a verified address.
+          const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
+          const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
           const tcpa = checkTcpaConsent(v2Extraction);
           v2SmsBlocked = !tcpa.canSms;
           v2EmailBlocked = !tcpa.canEmail;
