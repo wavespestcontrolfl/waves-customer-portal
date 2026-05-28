@@ -1746,6 +1746,7 @@ const CallRecordingProcessor = {
     // ── V2 routing gate (when enabled, evaluates v2 extraction for auto-route eligibility) ──
     let v2RoutingBlocked = false;
     let v2SmsBlocked = false;
+    let v2EmailBlocked = false;
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Row = await db('call_log')
@@ -1797,9 +1798,26 @@ const CallRecordingProcessor = {
             v2SmsBlocked = true;
             logger.info(`[call-proc-v2] SMS blocked by TCPA gate for ${callSid}: ${tcpa.reason}`);
           }
+          if (!tcpa.canEmail) {
+            v2EmailBlocked = true;
+            logger.info(`[call-proc-v2] Email blocked by TCPA gate for ${callSid}: ${tcpa.reason}`);
+          }
         }
       } catch (err) {
-        logger.error(`[call-proc-v2] Routing gate error for ${callSid}: ${err.message}`);
+        logger.error(`[call-proc-v2] Routing gate error for ${callSid}: ${err.message} — failing closed`);
+        v2RoutingBlocked = true;
+        v2SmsBlocked = true;
+        v2EmailBlocked = true;
+        try {
+          const failTriageItem = buildTriageItem({
+            callLogId: call.id,
+            flag: 'v2_gate_exception',
+            extraction: { meta: { call_summary: `V2 routing gate threw exception: ${err.message}` } },
+          });
+          await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+        } catch (triageErr) {
+          logger.error(`[call-proc-v2] Triage insert also failed for ${callSid}: ${triageErr.message}`);
+        }
       }
     }
 
@@ -2208,7 +2226,9 @@ const CallRecordingProcessor = {
       }
     }
 
-    if (newsletterCandidate) {
+    if (newsletterCandidate && v2EmailBlocked) {
+      logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
+    } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
