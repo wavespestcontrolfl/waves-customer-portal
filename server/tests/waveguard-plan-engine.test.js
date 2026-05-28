@@ -4,12 +4,16 @@ const {
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   calculateProductAmount,
+  classifyProtocolLine,
+  effectiveAreaFactor,
   findNutrientProductsMissingRates,
   findNutrientProductsMissingConversions,
   isConditionalSelected,
   isDateInWindow,
   matchCatalogProduct,
   parseProtocolLines,
+  resolveProtocolItems,
+  selectedMayFertilizerBranch,
   summarizeCalibration,
   summarizeAnnualN,
   summarizeOrdinanceStatus,
@@ -233,6 +237,30 @@ describe('waveguard-plan-engine helpers', () => {
     expect(product.name).toBe('LESCO 24-0-11');
   });
 
+  test('matchCatalogProduct prefers priced canonical inventory rows over needs-price duplicates', () => {
+    const product = matchCatalogProduct(
+      { raw: 'LESCO 24-0-11 fert ($8.68)' },
+      [
+        { id: 'generic', name: 'LESCO 24-0-11', needs_pricing: true },
+        { id: 'canonical', name: 'LESCO 24-0-11', best_price: 33.79, needs_pricing: false },
+      ]
+    );
+
+    expect(product.id).toBe('canonical');
+  });
+
+  test('matchCatalogProduct keeps exact NPK match above priced sibling fertilizers', () => {
+    const product = matchCatalogProduct(
+      { raw: 'LESCO 24-0-11 fert ($8.68)' },
+      [
+        { id: 'phosphorus', name: 'LESCO 24-2-11', best_price: 40.48, needs_pricing: false },
+        { id: 'zero-p', name: 'LESCO 24-0-11', needs_pricing: true },
+      ]
+    );
+
+    expect(product.id).toBe('zero-p');
+  });
+
   test('calculateProductAmount uses lawn area and carrier calibration', () => {
     const result = calculateProductAmount({
       product: {
@@ -246,6 +274,155 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.amount).toBe(8.625);
     expect(result.amountUnit).toBe('fl_oz');
     expect(result.carrierGallons).toBe(37.5);
+  });
+
+  test('calculateProductAmount applies protocol area factor for spot allowances', () => {
+    const result = calculateProductAmount({
+      product: {
+        default_rate_per_1000: 0.113,
+        rate_unit: 'oz',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 1,
+      areaFactor: 0.25,
+    });
+
+    expect(result.treatedSqft).toBe(2500);
+    expect(result.amount).toBe(0.283);
+    expect(result.carrierGallons).toBe(2.5);
+  });
+
+  test('classifyProtocolLine marks Celsius as spot allowance and May fertilizers as one-of branch', () => {
+    const celsius = classifyProtocolLine('Celsius WG + NIS broadleaf ($3.84)', 'base');
+    const branch = classifyProtocolLine('★ IF P index ≥80: LESCO 24-0-11 ($8.68)', 'base');
+    const abbreviatedBranch = classifyProtocolLine('★ IF P ≥80: LESCO 24-0-11 ($8.68)', 'base');
+
+    expect(celsius.scope).toBe('SPOT_ALLOWANCE');
+    expect(celsius.areaFactorDefault).toBe(0.25);
+    expect(effectiveAreaFactor(celsius, { weedPressure: 'CLEAN' })).toBe(0.125);
+    expect(branch).toMatchObject({
+      scope: 'BRANCH_ONE_OF',
+      branchGroupId: 'MAY_P_INDEX_FERTILIZER',
+      conditionFlag: 'soil_p_index',
+    });
+    expect(abbreviatedBranch.scope).toBe('BRANCH_ONE_OF');
+  });
+
+  test('resolveProtocolItems selects only one May fertilizer branch and defaults missing soil test to 24-0-11', () => {
+    const lines = parseProtocolLines(
+      '★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus ($1.52)',
+      'base'
+    );
+    const products = [
+      { id: 'low-p', name: 'LESCO 24-2-11' },
+      { id: 'zero-p', name: 'LESCO 24-0-11' },
+      { id: 'carbon', name: 'CarbonPro-L' },
+      { id: 'iron', name: 'LESCO 12-0-0 Chelated Iron Plus' },
+    ];
+
+    const defaultItems = resolveProtocolItems(lines, products);
+    const lowPItems = resolveProtocolItems(lines, products, { soilPIndex: 62 });
+
+    expect(selectedMayFertilizerBranch({ soilPIndex: null }).branchKey).toBe('LESCO_24_0_11');
+    expect(defaultItems.filter((item) => item.selected).map((item) => item.product?.name)).toEqual([
+      'LESCO 24-0-11',
+      'CarbonPro-L',
+      'LESCO 12-0-0 Chelated Iron Plus',
+    ]);
+    expect(lowPItems.filter((item) => item.selected).map((item) => item.product?.name)).toEqual([
+      'LESCO 24-2-11',
+      'CarbonPro-L',
+      'LESCO 12-0-0 Chelated Iron Plus',
+    ]);
+  });
+
+  test('resolveProtocolItems lets explicit selection override default May fertilizer branch', () => {
+    const lines = parseProtocolLines(
+      '★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)',
+      'base'
+    );
+    const products = [
+      { id: 'low-p', name: 'LESCO 24-2-11' },
+      { id: 'zero-p', name: 'LESCO 24-0-11' },
+    ];
+
+    const items = resolveProtocolItems(lines, products, { selectedConditionalProductIds: 'low-p' });
+
+    expect(items.map((item) => [item.product?.id, item.selected, item.selectionReason])).toEqual([
+      ['low-p', true, 'explicit_branch_selection'],
+      ['zero-p', false, 'mutually_exclusive_branch_not_selected'],
+    ]);
+  });
+
+  test('effectiveAreaFactor accepts stored lowercase premium tier for premium-only lines', () => {
+    const line = classifyProtocolLine('Premium: Hydretain ($10.59)', 'base');
+
+    expect(line.scope).toBe('PREMIUM_ONLY');
+    expect(effectiveAreaFactor(line, { plan: 'premium' })).toBe(1);
+    expect(effectiveAreaFactor(line, { plan: 'Platinum' })).toBe(1);
+    expect(effectiveAreaFactor(line, { plan: 'standard' })).toBe(0);
+  });
+
+  test('resolveProtocolItems preserves premium-only lines from service context tier', () => {
+    const lines = parseProtocolLines('Premium: Hydretain ($10.59)', 'base');
+    const products = [{ id: 'hydr', name: 'Hydretain' }];
+
+    const premiumItems = resolveProtocolItems(lines, products, {}, { service: { waveguard_tier: 'Platinum' } });
+    const standardItems = resolveProtocolItems(lines, products, {}, { service: { waveguard_tier: 'standard' } });
+
+    expect(premiumItems[0].selected).toBe(true);
+    expect(standardItems[0].selected).toBe(false);
+  });
+
+  test('resolveProtocolItems selects premium-only secondary lines for eligible tier', () => {
+    const lines = parseProtocolLines('Hydretain drought prep Premium ($10.59)', 'conditional');
+    const products = [{ id: 'hydr', name: 'Hydretain' }];
+
+    const premiumItems = resolveProtocolItems(lines, products, {}, { service: { waveguard_tier: 'Platinum' } });
+    const standardItems = resolveProtocolItems(lines, products, {}, { service: { waveguard_tier: 'Silver' } });
+
+    expect(premiumItems[0]).toMatchObject({
+      conditional: true,
+      selected: true,
+      selectionReason: 'premium_or_drought_prep_selected',
+    });
+    expect(standardItems[0].selected).toBe(false);
+  });
+
+  test('resolveProtocolItems selects drought-prep premium lines from normalized drought flags', () => {
+    const lines = parseProtocolLines('Hydretain drought prep Premium ($10.59)', 'conditional');
+    const products = [{ id: 'hydr', name: 'Hydretain' }];
+
+    const conditionFlagItems = resolveProtocolItems(lines, products, { conditionFlags: 'drought_stress' }, { service: { waveguard_tier: 'Silver' } });
+    const propertyFlagItems = resolveProtocolItems(lines, products, { propertyFlags: 'drought_prep' }, { service: { waveguard_tier: 'Silver' } });
+    const mergedFlagItems = resolveProtocolItems(lines, products, {
+      conditionFlags: 'heat_stress',
+      propertyFlags: 'drought_prep',
+    }, { service: { waveguard_tier: 'Silver' } });
+    const storedStressItems = resolveProtocolItems(lines, products, {}, {
+      service: { waveguard_tier: 'Silver' },
+      stressFlags: { drought_stress: true, heat_stress: false },
+    });
+
+    expect(conditionFlagItems[0]).toMatchObject({
+      selected: true,
+      selectionReason: 'premium_or_drought_prep_selected',
+    });
+    expect(propertyFlagItems[0].selected).toBe(true);
+    expect(mergedFlagItems[0].selected).toBe(true);
+    expect(storedStressItems[0].selected).toBe(true);
+    expect(effectiveAreaFactor(conditionFlagItems[0], { conditionFlags: 'drought_stress' })).toBe(1);
+    expect(effectiveAreaFactor(propertyFlagItems[0], { propertyFlags: 'drought_prep' })).toBe(1);
+    expect(effectiveAreaFactor(propertyFlagItems[0], { includePremiumOnly: true })).toBe(1);
+    expect(effectiveAreaFactor(storedStressItems[0], { stressFlags: { drought_stress: true } })).toBe(1);
+  });
+
+  test('effectiveAreaFactor honors explicit conditional rescue selections without condition flags', () => {
+    const [line] = parseProtocolLines('Talstar P curative if threshold met ($3.82)', 'conditional');
+
+    expect(line.scope).toBe('CONDITIONAL_RESCUE');
+    expect(effectiveAreaFactor({ ...line, selected: false }, {})).toBe(0);
+    expect(effectiveAreaFactor({ ...line, selected: true }, {})).toBe(1);
   });
 
   test('calculateNutrientLedgerFromRows normalizes historical totals to per-1000 units', () => {

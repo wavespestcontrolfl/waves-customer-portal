@@ -6,9 +6,10 @@ const { etParts } = require('../utils/datetime-et');
 const {
   buildMixOrder,
   calculateProductAmount,
+  effectiveAreaFactor,
   matchCatalogProduct,
   parseProtocolLines,
-  isConditionalSelected,
+  resolveProtocolItems,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 
@@ -122,6 +123,7 @@ async function getProtocolProducts() {
       'frac_group', 'irac_group', 'hrac_group',
       'analysis_n', 'analysis_p', 'analysis_k',
       'default_rate_per_1000', 'rate_unit',
+      'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at', 'rainfast_minutes', 'rei_hours',
       'labeled_turf_species', 'excluded_turf_species',
@@ -275,16 +277,31 @@ router.get('/lawn-mix', async (req, res, next) => {
     const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
     const allLines = [...baseLines, ...conditionalLines];
 
-    const items = allLines.map((line) => {
-      const product = matchCatalogProduct(line, products);
-      const selected = isConditionalSelected({ ...line, product }, {
-        selectedConditionalProductIds: req.query.selectedConditionalProductIds,
-        selectedConditionalProductNames: req.query.selectedConditionalProductNames,
-        selectedConditionalRaw: req.query.selectedConditionalRaw,
-      });
+    const resolvedLines = resolveProtocolItems(allLines, products, {
+      selectedConditionalProductIds: req.query.selectedConditionalProductIds,
+      selectedConditionalProductNames: req.query.selectedConditionalProductNames,
+      selectedConditionalRaw: req.query.selectedConditionalRaw,
+      soilPIndex: req.query.soilPIndex,
+      plan: req.query.plan,
+      conditionFlags: req.query.conditionFlags,
+      propertyFlags: req.query.propertyFlags,
+      includePremiumOnly: req.query.includePremiumOnly === 'true',
+    });
+
+    const items = resolvedLines.map((line) => {
+      const product = line.product;
+      const selected = line.selected;
       const carrier = calibrationExpired ? 0 : Number(calibration?.carrier_gal_per_1000 || 0);
+      const areaFactor = effectiveAreaFactor(line, {
+        plan: req.query.plan,
+        weedPressure: req.query.weedPressure,
+        conditionFlags: req.query.conditionFlags,
+        propertyFlags: req.query.propertyFlags,
+        includePremiumOnly: req.query.includePremiumOnly === 'true',
+        isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
+      });
       const jobMix = selected && product && carrier
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier })
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor })
         : null;
       const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
       const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
@@ -296,6 +313,15 @@ router.get('/lawn-mix', async (req, res, next) => {
         raw: line.raw,
         role: line.role,
         conditional: line.conditional,
+        scope: line.scope,
+        conditionFlag: line.conditionFlag,
+        branchGroupId: line.branchGroupId,
+        branch: line.branch || null,
+        areaFactorDefault: line.areaFactorDefault,
+        areaFactorClean: line.areaFactorClean,
+        areaFactorHeavy: line.areaFactorHeavy,
+        areaFactorBroadcast: line.areaFactorBroadcast,
+        selectionReason: line.selectionReason,
         selected,
         matched: !!product,
         product: product ? {
@@ -310,6 +336,11 @@ router.get('/lawn-mix', async (req, res, next) => {
             hrac: product.hrac_group || null,
           },
           labelVerifiedAt: product.label_verified_at || null,
+          bestPrice: product.best_price != null ? Number(product.best_price) : null,
+          costPerUnit: product.cost_per_unit != null ? Number(product.cost_per_unit) : null,
+          costUnit: product.cost_unit || null,
+          containerSize: product.container_size || null,
+          needsPricing: product.needs_pricing === true,
           rainfastMinutes: product.rainfast_minutes || null,
           reiHours: product.rei_hours || null,
           labeledTurfSpecies: product.labeled_turf_species || [],

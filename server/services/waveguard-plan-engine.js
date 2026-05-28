@@ -13,6 +13,30 @@ const TRACK_BY_GRASS = {
   bahia: 'bahia',
 };
 
+const PROTOCOL_LINE_SCOPES = new Set([
+  'BROADCAST_FULL',
+  'SPOT_ALLOWANCE',
+  'CONDITIONAL_SPOT',
+  'CONDITIONAL_RESCUE',
+  'PREMIUM_ONLY',
+  'INSPECTION_ONLY',
+  'BRANCH_ONE_OF',
+  'FIRST_YEAR_ONLY',
+  'HISTORY_RISK_ONLY',
+]);
+
+const MAY_FERTILIZER_BRANCH = {
+  branchGroupId: 'MAY_P_INDEX_FERTILIZER',
+  mutuallyExclusive: true,
+  selectionRule: {
+    if: 'soilPIndex < 80',
+    use: 'LESCO_24_2_11',
+    elseUse: 'LESCO_24_0_11',
+  },
+  defaultWhenNoSoilTest: 'LESCO_24_0_11',
+  pricingModeWhenUnknown: 'MAX_BRANCH_COST_FOR_MARGIN_SAFETY',
+};
+
 function toServiceDate(value, fallback = new Date()) {
   const dateOnly = value
     ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10)
@@ -99,24 +123,35 @@ function parseProtocolLines(text, role) {
       role,
       conditional: role !== 'base' || /^if\b/i.test(raw) || /\bif\b/i.test(raw),
       product: null,
+      ...classifyProtocolLine(raw, role),
     }));
 }
 
 function matchCatalogProduct(line, products) {
   const normalizedLine = normalizeProtocolProductText(line.raw);
   if (!normalizedLine) return null;
+  const lineNpk = parseNpkFromText(line.raw);
 
   const candidates = products
     .map((product) => {
       const name = normalizeText(product.name);
       if (!name) return null;
+      const productNpk = parseNpkFromText(product.name);
       const aliases = productAliases(product);
       const direct = aliases.some((alias) => normalizedLine.includes(alias));
       const reverse = aliases.some((alias) => alias.includes(normalizedLine));
       const firstTwo = name.split(' ').slice(0, 2).join(' ');
       const tokenMatch = firstTwo.length > 5 && normalizedLine.includes(firstTwo);
       if (!direct && !reverse && !tokenMatch) return null;
-      return { product, score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) };
+      const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
+      const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
+      const npkScore = lineNpk && productNpk
+        ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
+        : 0;
+      return {
+        product,
+        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore,
+      };
     })
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
@@ -183,6 +218,87 @@ function normalizeOptionList(value) {
     .filter(Boolean);
 }
 
+function classifyProtocolLine(raw, role) {
+  const text = normalizeText(raw);
+  const scope = (() => {
+    if (text.includes('if p') && (text.includes('24 2 11') || text.includes('24 0 11'))) {
+      return 'BRANCH_ONE_OF';
+    }
+    if (text.includes('soil sample')) return 'FIRST_YEAR_ONLY';
+    if (text.includes('drive by scout') || text.includes('scout') || text.includes('audit') || text.includes('wellness touchpoint') || text.includes('annual report')) {
+      return 'INSPECTION_ONLY';
+    }
+    if (text.includes('premium only') || text.startsWith('premium ') || text.includes(' premium ')) {
+      return 'PREMIUM_ONLY';
+    }
+    if (text.includes('if sedge') || text.includes('dismiss') || text.includes('sedgehammer')) {
+      return 'CONDITIONAL_SPOT';
+    }
+    if (text.includes('if threshold') || text.includes('curative') || text.includes('rescue') || text.includes('if active') || text.includes('if large patch') || text.includes('if severe')) {
+      return 'CONDITIONAL_RESCUE';
+    }
+    if (text.includes('celsius') || text.includes('speedzone') || text.includes('three way') || text.includes('atrazine')) {
+      return 'SPOT_ALLOWANCE';
+    }
+    if (text.includes('history')) return 'HISTORY_RISK_ONLY';
+    return role === 'conditional' ? 'CONDITIONAL_RESCUE' : 'BROADCAST_FULL';
+  })();
+
+  const conditionFlag = (() => {
+    if (scope === 'BRANCH_ONE_OF') return 'soil_p_index';
+    if (scope === 'CONDITIONAL_SPOT' && (text.includes('sedge') || text.includes('dismiss'))) return 'sedge_present';
+    if (text.includes('large patch')) return text.includes('active') ? 'active_disease' : 'large_patch_history';
+    if (text.includes('chinch')) return 'chinch_threshold_met';
+    if (text.includes('armyworm')) return 'armyworm_threshold_met';
+    if (text.includes('mole cricket')) return 'mole_cricket_threshold_met';
+    if (text.includes('hydretain') || text.includes('moisture') || text.includes('drought')) return 'drought_stress';
+    if (scope === 'PREMIUM_ONLY') return 'premium_plan';
+    if (scope === 'FIRST_YEAR_ONLY') return 'first_year';
+    if (scope === 'SPOT_ALLOWANCE') return 'weed_pressure';
+    return 'none';
+  })();
+
+  const areaFactors = (() => {
+    if (text.includes('celsius')) {
+      return {
+        areaFactorDefault: 0.25,
+        areaFactorClean: 0.125,
+        areaFactorHeavy: 0.35,
+        areaFactorBroadcast: 1,
+      };
+    }
+    if (text.includes('dismiss') || text.includes('sedgehammer')) {
+      return {
+        areaFactorDefault: 0.1,
+        areaFactorClean: 0.05,
+        areaFactorHeavy: 0.2,
+        areaFactorBroadcast: 1,
+      };
+    }
+    if (scope === 'SPOT_ALLOWANCE') {
+      return {
+        areaFactorDefault: 0.25,
+        areaFactorClean: 0.125,
+        areaFactorHeavy: 0.35,
+        areaFactorBroadcast: 1,
+      };
+    }
+    return {
+      areaFactorDefault: scope === 'INSPECTION_ONLY' ? 0 : 1,
+      areaFactorClean: scope === 'INSPECTION_ONLY' ? 0 : 1,
+      areaFactorHeavy: scope === 'INSPECTION_ONLY' ? 0 : 1,
+      areaFactorBroadcast: scope === 'INSPECTION_ONLY' ? 0 : 1,
+    };
+  })();
+
+  return {
+    scope: PROTOCOL_LINE_SCOPES.has(scope) ? scope : 'BROADCAST_FULL',
+    conditionFlag,
+    branchGroupId: scope === 'BRANCH_ONE_OF' ? MAY_FERTILIZER_BRANCH.branchGroupId : null,
+    ...areaFactors,
+  };
+}
+
 function isConditionalSelected(item, options = {}) {
   if (!item.conditional) return true;
   const selectedIds = new Set(normalizeOptionList(options.selectedConditionalProductIds));
@@ -193,8 +309,163 @@ function isConditionalSelected(item, options = {}) {
     || selectedRaw.has(normalizeText(item.raw));
 }
 
-function calculateProductAmount({ product, lawnSqft, carrierGalPer1000 }) {
-  const treatedUnits = Number(lawnSqft || 0) / 1000;
+function productBranchKey(item) {
+  const text = normalizeText(`${item.raw || ''} ${item.product?.name || ''}`);
+  if (text.includes('24 2 11')) return 'LESCO_24_2_11';
+  if (text.includes('24 0 11')) return 'LESCO_24_0_11';
+  return null;
+}
+
+function soilPIndexFromContext(context = {}) {
+  const candidates = [
+    context.soilPIndex,
+    context.soil_p_index,
+    context.soilPhosphorusIndex,
+    context.soil_phosphorus_index,
+    context.profile?.soil_p_index,
+    context.profile?.soilPIndex,
+    context.profile?.soil_phosphorus_index,
+  ];
+  for (const value of candidates) {
+    if (value === '' || value == null) continue;
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function selectedMayFertilizerBranch(context = {}) {
+  const soilPIndex = soilPIndexFromContext(context);
+  if (soilPIndex == null) return {
+    branchKey: MAY_FERTILIZER_BRANCH.defaultWhenNoSoilTest,
+    soilPIndex: null,
+    reason: 'default_no_soil_test',
+  };
+  return soilPIndex < 80
+    ? { branchKey: MAY_FERTILIZER_BRANCH.selectionRule.use, soilPIndex, reason: 'soil_p_index_below_80' }
+    : { branchKey: MAY_FERTILIZER_BRANCH.selectionRule.elseUse, soilPIndex, reason: 'soil_p_index_80_or_above' };
+}
+
+function normalizeFlagValues(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => normalizeFlagValues(item));
+  if (typeof value === 'object') {
+    return Object.entries(value)
+      .filter(([, enabled]) => !!enabled)
+      .map(([key]) => key);
+  }
+  return normalizeOptionList(value);
+}
+
+function normalizedFlagSet(...values) {
+  return new Set(values.flatMap((value) => normalizeFlagValues(value)).map(normalizeText));
+}
+
+function isPremiumOrDroughtPrep(options = {}) {
+  const flags = normalizedFlagSet(
+    options.conditionFlags,
+    options.condition_flags,
+    options.propertyFlags,
+    options.property_flags,
+    options.stressFlags,
+    options.stress_flags,
+  );
+  const plan = normalizeText(options.plan || options.serviceTier || options.waveguardTier);
+  return plan === 'premium'
+    || plan === 'premium 12'
+    || plan === 'platinum'
+    || options.includePremiumOnly === true
+    || flags.has('drought stress')
+    || flags.has('drought prep');
+}
+
+function resolveProtocolItems(lines, products, options = {}, context = {}) {
+  const branchSelection = selectedMayFertilizerBranch({ ...context, ...options });
+  const selectionContext = {
+    ...context,
+    ...options,
+    plan: options.plan || context.plan || context.service?.waveguard_tier || context.serviceTier || context.waveguardTier,
+  };
+  const matchedItems = lines.map((line) => ({
+    ...line,
+    product: matchCatalogProduct(line, products),
+  }));
+  const explicitBranchSelection = matchedItems.find((item) => (
+    item.scope === 'BRANCH_ONE_OF'
+    && item.branchGroupId === MAY_FERTILIZER_BRANCH.branchGroupId
+    && isConditionalSelected(item, options)
+  ));
+  const effectiveBranchSelection = explicitBranchSelection
+    ? {
+        branchKey: productBranchKey(explicitBranchSelection),
+        soilPIndex: branchSelection.soilPIndex,
+        reason: 'explicit_branch_selection',
+      }
+    : branchSelection;
+
+  return matchedItems.map((item) => {
+    let selected = isConditionalSelected(item, options);
+    let selectionReason = selected ? 'base_or_explicit_selection' : 'conditional_not_selected';
+
+    if (item.scope === 'BRANCH_ONE_OF' && item.branchGroupId === MAY_FERTILIZER_BRANCH.branchGroupId) {
+      const branchKey = productBranchKey(item);
+      selected = branchKey === effectiveBranchSelection.branchKey;
+      selectionReason = selected ? effectiveBranchSelection.reason : 'mutually_exclusive_branch_not_selected';
+      item.branch = {
+        ...MAY_FERTILIZER_BRANCH,
+        selectedBranchKey: effectiveBranchSelection.branchKey,
+        productBranchKey: branchKey,
+        soilPIndex: effectiveBranchSelection.soilPIndex,
+      };
+    }
+
+    if (item.scope === 'PREMIUM_ONLY') {
+      const premiumEligible = isPremiumOrDroughtPrep(selectionContext);
+      if (premiumEligible) {
+        selected = true;
+        selectionReason = 'premium_or_drought_prep_selected';
+      } else {
+        selected = false;
+        selectionReason = 'premium_or_drought_prep_not_selected';
+      }
+    }
+
+    return {
+      ...item,
+      selected,
+      selectionReason,
+    };
+  });
+}
+
+function effectiveAreaFactor(line, property = {}) {
+  if (line?.scope === 'BROADCAST_FULL' || line?.scope === 'BRANCH_ONE_OF') return 1;
+  if (line?.scope === 'INSPECTION_ONLY') return 0;
+  if (line?.scope === 'FIRST_YEAR_ONLY' && property.isFirstYear === false) return 0;
+  if (line?.scope === 'PREMIUM_ONLY' && !isPremiumOrDroughtPrep(property)) return 0;
+  if (line?.scope === 'FIRST_YEAR_ONLY' || line?.scope === 'PREMIUM_ONLY') return 1;
+
+  if (line?.scope === 'SPOT_ALLOWANCE' || line?.scope === 'CONDITIONAL_SPOT') {
+    const pressure = normalizeText(property.weedPressure || property.weed_pressure);
+    if (pressure === 'clean') return Number(line.areaFactorClean ?? 0.125);
+    if (pressure === 'heavy') return Number(line.areaFactorHeavy ?? 0.35);
+    if (pressure === 'broadcast' || pressure === 'uniform') return Number(line.areaFactorBroadcast ?? 1);
+    return Number(line.areaFactorDefault ?? 0.25);
+  }
+
+  if (line?.scope === 'CONDITIONAL_RESCUE' || line?.scope === 'HISTORY_RISK_ONLY') {
+    const flags = normalizedFlagSet(property.conditionFlags, property.condition_flags, property.propertyFlags, property.property_flags, property.stressFlags, property.stress_flags);
+    const flag = normalizeText(line.conditionFlag);
+    if (line.selected === true) return 1;
+    return flag && flags.has(flag) ? 1 : 0;
+  }
+
+  return 0;
+}
+
+function calculateProductAmount({ product, lawnSqft, carrierGalPer1000, areaFactor = 1 }) {
+  const factor = Math.max(0, Number(areaFactor ?? 1));
+  const treatedUnits = (Number(lawnSqft || 0) * factor) / 1000;
   const rate = Number(product?.default_rate_per_1000 || 0);
   const unit = product?.rate_unit || null;
   const amount = treatedUnits > 0 && rate > 0 ? Number((treatedUnits * rate).toFixed(3)) : null;
@@ -204,6 +475,8 @@ function calculateProductAmount({ product, lawnSqft, carrierGalPer1000 }) {
   return {
     ratePer1000: rate || null,
     rateUnit: unit,
+    areaFactor: factor,
+    treatedSqft: Number(lawnSqft || 0) && factor ? Number((Number(lawnSqft || 0) * factor).toFixed(2)) : null,
     amount,
     amountUnit: unit,
     carrierGallons,
@@ -472,6 +745,7 @@ async function getProducts(knex) {
       'frac_group', 'irac_group', 'hrac_group',
       'analysis_n', 'analysis_p', 'analysis_k',
       'default_rate_per_1000', 'rate_unit',
+      'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at',
     )
@@ -644,6 +918,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .catch(() => null);
   const products = await getProducts(knex);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
+  const stressFlags = latestAssessment?.stress_flags || {};
   const ordinances = await getApplicableOrdinances(knex, profile);
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId,
@@ -654,13 +929,10 @@ async function buildPlanForService(serviceId, options = {}) {
   const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate);
   const baseLines = parseProtocolLines(visit?.primary, 'base');
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
-  const candidateItems = [...baseLines, ...conditionalLines].map((line) => {
-    const product = matchCatalogProduct(line, products);
-    const item = { ...line, product };
-    return {
-      ...item,
-      selected: isConditionalSelected(item, options),
-    };
+  const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
+    profile,
+    service,
+    stressFlags,
   });
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
@@ -672,6 +944,15 @@ async function buildPlanForService(serviceId, options = {}) {
     raw: item.raw,
     role: item.role,
     conditional: item.conditional,
+    scope: item.scope,
+    conditionFlag: item.conditionFlag,
+    branchGroupId: item.branchGroupId,
+    branch: item.branch || null,
+    areaFactorDefault: item.areaFactorDefault,
+    areaFactorClean: item.areaFactorClean,
+    areaFactorHeavy: item.areaFactorHeavy,
+    areaFactorBroadcast: item.areaFactorBroadcast,
+    selectionReason: item.selectionReason,
     selected: item.selected,
     matched: !!item.product,
     product: item.product ? {
@@ -684,6 +965,11 @@ async function buildPlanForService(serviceId, options = {}) {
       analysis_n: item.product.analysis_n,
       analysis_p: item.product.analysis_p,
       analysis_k: item.product.analysis_k,
+      bestPrice: item.product.best_price != null ? Number(item.product.best_price) : null,
+      costPerUnit: item.product.cost_per_unit != null ? Number(item.product.cost_per_unit) : null,
+      costUnit: item.product.cost_unit || null,
+      containerSize: item.product.container_size || null,
+      needsPricing: item.product.needs_pricing === true,
       mixing_order_category: item.product.mixing_order_category,
       mixing_instructions: item.product.mixing_instructions,
     } : null,
@@ -691,6 +977,14 @@ async function buildPlanForService(serviceId, options = {}) {
       product: item.product,
       lawnSqft,
       carrierGalPer1000: carrier,
+      areaFactor: effectiveAreaFactor(item, {
+        plan: options.plan || service.waveguard_tier,
+        weedPressure: options.weedPressure,
+        conditionFlags: options.conditionFlags,
+        propertyFlags: options.propertyFlags,
+        stressFlags,
+        isFirstYear: options.isFirstYear,
+      }),
     }) : null,
   }));
   const plannedItems = planItems.filter((item) => item.selected);
@@ -757,7 +1051,6 @@ async function buildPlanForService(serviceId, options = {}) {
     });
   }
 
-  const stressFlags = latestAssessment?.stress_flags || {};
   if (
     (stressFlags.drought_stress || stressFlags.heat_stress || stressFlags.recent_scalp)
     && plannedCandidateItems.some((item) => itemIsPgr(item))
@@ -875,6 +1168,7 @@ async function buildPlanForService(serviceId, options = {}) {
 module.exports = {
   buildPlanForService,
   calculateProductAmount,
+  effectiveAreaFactor,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,
@@ -884,7 +1178,11 @@ module.exports = {
   isDateInWindow,
   matchCatalogProduct,
   amountToPounds,
+  classifyProtocolLine,
   parseProtocolLines,
+  resolveProtocolItems,
+  selectedMayFertilizerBranch,
+  MAY_FERTILIZER_BRANCH,
   isConditionalSelected,
   summarizeCalibration,
   summarizeOrdinanceStatus,
