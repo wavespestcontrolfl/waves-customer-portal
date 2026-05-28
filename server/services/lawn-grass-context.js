@@ -28,6 +28,20 @@ function grassTypeLabel(grassType) {
   return GRASS_TYPE_LABELS[grassType] || grassType;
 }
 
+// The turf-profile irrigation_type is a 4-value enum; some sinks (e.g.
+// treatment_outcomes.irrigation_system) are a boolean "has an automatic
+// irrigation system". Map the unambiguous cases; null for ambiguous/missing.
+const IRRIGATION_HAS_SYSTEM = {
+  in_ground: true,
+  mixed: true,
+  manual: false,
+  none: false,
+};
+
+function irrigationTypeHasSystem(irrigationType) {
+  return IRRIGATION_HAS_SYSTEM[irrigationType] ?? null;
+}
+
 function emptyContext() {
   return {
     grassType: null,
@@ -68,4 +82,4 @@ async function loadCustomerGrassContext(customerId, knex = db) {
   };
 }
 
-module.exports = { GRASS_TYPE_LABELS, grassTypeLabel, loadCustomerGrassContext };
+module.exports = { GRASS_TYPE_LABELS, grassTypeLabel, irrigationTypeHasSystem, loadCustomerGrassContext };

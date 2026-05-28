@@ -1,6 +1,7 @@
 const {
   GRASS_TYPE_LABELS,
   grassTypeLabel,
+  irrigationTypeHasSystem,
   loadCustomerGrassContext,
 } = require('../services/lawn-grass-context');
 
@@ -73,6 +74,18 @@ describe('lawn-grass-context', () => {
       irrigationSystem: null,
       propertySqft: null,
     });
+  });
+
+  test('irrigationTypeHasSystem maps the enum to a boolean column safely', () => {
+    expect(irrigationTypeHasSystem('in_ground')).toBe(true);
+    expect(irrigationTypeHasSystem('mixed')).toBe(true);
+    expect(irrigationTypeHasSystem('manual')).toBe(false);
+    expect(irrigationTypeHasSystem('none')).toBe(false);
+    // Ambiguous / missing / unknown must be null, never a non-boolean that
+    // would break the boolean treatment_outcomes.irrigation_system column.
+    expect(irrigationTypeHasSystem(null)).toBe(null);
+    expect(irrigationTypeHasSystem(undefined)).toBe(null);
+    expect(irrigationTypeHasSystem('garden_hose')).toBe(null);
   });
 
   test('profile grass_type wins over customers.lawn_type', async () => {

@@ -8,7 +8,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { loadCustomerGrassContext } = require('./lawn-grass-context');
+const { loadCustomerGrassContext, irrigationTypeHasSystem } = require('./lawn-grass-context');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -167,6 +167,10 @@ const AgronomicWiki = {
       const customer = await db('customers').where({ id: customerId }).first();
       const grassContext = await loadCustomerGrassContext(customerId);
 
+      // treatment_outcomes.irrigation_system is a boolean ("has an automatic
+      // irrigation system"); the turf-profile source is a 4-value enum.
+      const irrigationHasSystem = irrigationTypeHasSystem(grassContext.irrigationSystem);
+
       // 6. Calculate deltas
       const pre = preAssessment || {};
       const post = postAssessment;
@@ -223,7 +227,7 @@ const AgronomicWiki = {
         sun_exposure: grassContext.sunExposure || null,
         // No canonical source for near-water yet (not on turf profile).
         near_water: null,
-        irrigation_system: grassContext.irrigationSystem || null,
+        irrigation_system: irrigationHasSystem,
 
         satisfaction_rating: null,
       }).returning('*');
