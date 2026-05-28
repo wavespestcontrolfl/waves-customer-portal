@@ -1774,12 +1774,13 @@ const CallRecordingProcessor = {
           await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode']).ignore();
 
           if (!routingResult.allowed) {
-            for (const flag of finalFlags.slice(0, 10)) {
+            const triageReasons = finalFlags.length > 0 ? finalFlags : [routingResult.reason || 'routing_rejected'];
+            for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
             }
             v2RoutingBlocked = true;
-            logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${finalFlags.join(', ')}`);
+            logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}`);
           } else if (!tcpa.canSms) {
             v2SmsBlocked = true;
             logger.info(`[call-proc-v2] SMS blocked by TCPA gate for ${callSid}: ${tcpa.reason}`);

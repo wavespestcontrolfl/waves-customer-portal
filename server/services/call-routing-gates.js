@@ -66,7 +66,7 @@ function buildRouteDecision({
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')
       : 'needs_review',
     final_action_taken: action,
-    blocked_reasons: JSON.stringify(finalTriageFlags.length > 0 ? finalTriageFlags : []),
+    blocked_reasons: JSON.stringify(finalTriageFlags.length > 0 ? finalTriageFlags : (routingResult?.reason ? [routingResult.reason] : [])),
     allowed_reasons: JSON.stringify(routingResult?.allowed ? ['all_gates_passed'] : []),
     ai_validation_model: extraction?.meta?.extraction_model || null,
     ai_validation_prompt_version: extraction?.meta?.extraction_prompt_version || null,
