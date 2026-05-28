@@ -130,13 +130,22 @@ function blockersFromMatrix(entry) {
 // ── DB-backed wrapper ───────────────────────────────────────────────
 
 /**
- * build({ db, minValue, opts }) → { worklist[], summary, generated_at }
+ * build({ db, opts, source, miner, periodDays }) → { worklist[], summary, generated_at }
  *
- * Joins the facts-bank readiness matrix with opportunity_queue: for each
- * facts-gated opportunity blocked by insufficient facts, attributes its score
- * + impressions to the blocking files, then ranks.
+ * Joins the facts-bank readiness matrix with facts-gated opportunities: for
+ * each one blocked by insufficient facts, attributes its score + impressions
+ * to the blocking files, then ranks.
+ *
+ * `source` chooses where the opportunities come from:
+ *   - 'queue' (default): the persisted opportunity_queue. Only holds rows that
+ *     cleared minScoreToAct, so the worklist under-reports sub-threshold demand.
+ *   - 'mine': a fresh, NON-persisting mine (miner.mineAll({persist:false})),
+ *     whose return exposes EVERY candidate including the sub-threshold ones the
+ *     queue drops. Use this for facts-population planning — it surfaces the full
+ *     demand (e.g. cities whose pages score below the act threshold today but
+ *     would be worth optimizing once facts exist). Read-only against gsc_*.
  */
-async function build({ db, opts = {} } = {}) {
+async function build({ db, opts = {}, source = 'queue', miner = null, periodDays = 28 } = {}) {
   if (!db) throw new Error('facts-population-worklist.build: db required');
 
   // 1. Readiness matrix → lookup by `${city}|${service}`.
@@ -146,15 +155,32 @@ async function build({ db, opts = {} } = {}) {
     matrixByCombo.set(`${entry.city}|${entry.service}`, entry);
   }
 
-  // 2. Facts-gated opportunities from the queue.
+  // 2. Facts-gated opportunities — from a fresh mine (all candidates, incl.
+  //    sub-minScoreToAct) or the persisted (threshold-gated) queue.
   let rows = [];
   try {
-    rows = await db('opportunity_queue')
-      .whereIn('action_type', [...FACTS_GATED_ACTIONS])
-      .whereIn('status', ['pending', 'claimed', 'pending_review'])
-      .select('city', 'service', 'action_type', 'score', 'page_url', 'signal_metadata', 'status');
+    if (source === 'mine') {
+      const m = miner || require('../seo/gsc-opportunity-miner');
+      const mined = await m.mineAll({ periodDays, persist: false });
+      rows = (mined.opportunities || [])
+        .filter((o) => FACTS_GATED_ACTIONS.has(o.action_type))
+        .map((o) => ({
+          city: o.city,
+          service: o.service,
+          action_type: o.action_type,
+          score: o.score,
+          page_url: o.page_url,
+          signal_metadata: o.signal_metadata,
+          status: 'mined',
+        }));
+    } else {
+      rows = await db('opportunity_queue')
+        .whereIn('action_type', [...FACTS_GATED_ACTIONS])
+        .whereIn('status', ['pending', 'claimed', 'pending_review'])
+        .select('city', 'service', 'action_type', 'score', 'page_url', 'signal_metadata', 'status');
+    }
   } catch (err) {
-    logger.warn(`[facts-population-worklist] queue read failed: ${err.message}`);
+    logger.warn(`[facts-population-worklist] ${source} read failed: ${err.message}`);
     return { worklist: [], summary: { error: err.message }, generated_at: new Date().toISOString() };
   }
 
@@ -185,6 +211,7 @@ async function build({ db, opts = {} } = {}) {
     generated_at: new Date().toISOString(),
     worklist,
     summary: {
+      source,
       opportunities_scanned: rows.length,
       blocked_facts_gated: matchedRows,
       files_in_worklist: worklist.length,
