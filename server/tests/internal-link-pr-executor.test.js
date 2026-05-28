@@ -89,7 +89,7 @@ describe('internal-link dry-run executor pure evaluation', () => {
   test('skips anchors inside headings and paragraphs that already contain links', () => {
     const headingBody = sourceBody.replace(
       'A termite inspection in Florida helps confirm whether the swarmers came from an active colony.',
-      '## termite inspection in Florida'
+      '   ## termite inspection in Florida'
     );
     expect(evaluateDryRunTask({
       source_file: 'src/content/blog/termite-swarmers-bathroom.md',

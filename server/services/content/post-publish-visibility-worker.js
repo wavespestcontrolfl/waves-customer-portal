@@ -158,7 +158,7 @@ async function countPendingInboundLinks(url) {
   const variants = [url, normalized, `https://${normalized}`, `https://${normalized}/`];
   const row = await db('content_internal_link_tasks')
     .whereIn('target_url', variants)
-    .whereIn('status', ['pending', 'approved', 'applied'])
+    .whereIn('status', ['pending', 'queued', 'patch_candidate', 'approved', 'applied'])
     .count('id as count')
     .first();
   return Number(row?.count || 0);

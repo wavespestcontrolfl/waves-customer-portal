@@ -76,5 +76,9 @@ describe('post-publish-visibility-worker', () => {
       expect.objectContaining({ table: 'content_index_status', op: 'insert' }),
       expect.objectContaining({ table: 'content_registry', op: 'update' }),
     ]));
+    const linkTaskQuery = db.mock.results
+      .map((result) => result.value)
+      .find((chain) => chain.table === 'content_internal_link_tasks');
+    expect(linkTaskQuery.whereIn).toHaveBeenCalledWith('status', ['pending', 'queued', 'patch_candidate', 'approved', 'applied']);
   });
 });

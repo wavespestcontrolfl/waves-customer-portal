@@ -315,7 +315,7 @@ function robotsNoindex(frontmatter = {}) {
 
 function isHeadingOccurrence(body, index) {
   const lineStart = String(body || '').lastIndexOf('\n', Math.max(0, index - 1)) + 1;
-  return /^#{1,6}\s/.test(String(body || '').slice(lineStart, index + 1));
+  return /^[ \t]{0,3}#{1,6}\s/.test(String(body || '').slice(lineStart, index + 1));
 }
 
 function paragraphAround(body, index) {
