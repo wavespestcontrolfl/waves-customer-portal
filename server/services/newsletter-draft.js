@@ -290,7 +290,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     const parts = [];
     for (const key of sectionOrder) {
       let html = draft.sections[key];
-      if (!html) continue;
+      if (!html || typeof html !== 'string') continue;
 
       // Strip Claude's raw h2 tags (we add our own styled ones)
       html = html.replace(/<h2[^>]*>[\s\S]*?<\/h2>/gi, '');
