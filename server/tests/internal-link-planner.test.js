@@ -11,8 +11,13 @@ const path = require('path');
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/content-astro/github-client', () => ({
+  listDir: jest.fn(),
+  getFile: jest.fn(),
+}));
 
 const planner = require('../services/content/internal-link-planner');
+const GitHubClient = require('../services/content-astro/github-client');
 const {
   anchorCandidates,
   maskExcludedRegions,
@@ -373,6 +378,34 @@ Body`;
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+  test('loadAstroCorpusFromGitHub recurses through Astro content directories', async () => {
+    GitHubClient.listDir.mockImplementation(async (dir) => {
+      if (dir === 'src/content/blog') return [{ type: 'dir', path: 'src/content/blog/ants', name: 'ants' }];
+      if (dir === 'src/content/blog/ants') return [{ type: 'file', path: 'src/content/blog/ants/ghost-ants.md', name: 'ghost-ants.md' }];
+      if (dir === 'src/content/services') return [{ type: 'file', path: 'src/content/services/pest-control-bradenton-fl.md', name: 'pest-control-bradenton-fl.md' }];
+      return [];
+    });
+    GitHubClient.getFile.mockImplementation(async (file) => ({
+      path: file,
+      content: file.includes('ghost-ants')
+        ? '---\nslug: /pest-control/ghost-ants/\n---\nGhost ant body'
+        : 'Pest control Bradenton body',
+    }));
+
+    const corpus = await planner.loadAstroCorpusFromGitHub({ collections: ['blog', 'services'] });
+
+    expect(corpus).toEqual([
+      expect.objectContaining({
+        file: 'src/content/blog/ants/ghost-ants.md',
+        url: '/pest-control/ghost-ants/',
+        body: expect.stringContaining('Ghost ant body'),
+      }),
+      expect.objectContaining({
+        file: 'src/content/services/pest-control-bradenton-fl.md',
+        url: '/pest-control-bradenton-fl/',
+      }),
+    ]);
   });
 });
 

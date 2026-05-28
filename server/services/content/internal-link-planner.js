@@ -22,6 +22,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const GitHubClient = require('../content-astro/github-client');
 const { CITIES } = require('./scoring-config');
 
 const DEFAULT_LINK_CAP = 5; // per planning run
@@ -324,6 +325,42 @@ class InternalLinkPlanner {
     }
     return out;
   }
+
+  /**
+   * Load Astro pages from the configured GitHub Astro repo. This is the
+   * production fallback for Railway, where the portal container does not
+   * have a local sibling checkout available at ASTRO_REPO_DIR.
+   */
+  async loadAstroCorpusFromGitHub({ collections = ['blog', 'services', 'locations'], ref = null } = {}) {
+    const out = [];
+    for (const collection of collections) {
+      const root = `src/content/${collection}`;
+      const files = await listMarkdownFilesFromGitHub(root, ref);
+      for (const file of files) {
+        const loaded = await GitHubClient.getFile(file.path, ref);
+        if (!loaded?.content) continue;
+        out.push({
+          file: loaded.path || file.path,
+          body: loaded.content,
+          url: deriveUrlFromSourceFile(loaded.path || file.path, loaded.content),
+        });
+      }
+    }
+    return out;
+  }
+}
+
+async function listMarkdownFilesFromGitHub(root, ref = null) {
+  const out = [];
+  const entries = await GitHubClient.listDir(root, ref);
+  for (const entry of entries || []) {
+    if (entry.type === 'dir') {
+      out.push(...await listMarkdownFilesFromGitHub(entry.path, ref));
+    } else if (entry.type === 'file' && /\.mdx?$/.test(entry.name || entry.path || '')) {
+      out.push({ path: entry.path });
+    }
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path));
 }
 
 // ── url helpers ─────────────────────────────────────────────────────
@@ -435,5 +472,6 @@ module.exports._internals = {
   deriveUrlFromFile,
   deriveUrlFromSourceFile,
   walkMarkdownFiles,
+  listMarkdownFilesFromGitHub,
   extractFrontmatterSlug,
 };
