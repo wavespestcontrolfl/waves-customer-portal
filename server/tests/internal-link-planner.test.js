@@ -33,6 +33,7 @@ const {
   deriveUrlFromFile,
   deriveUrlFromSourceFile,
   extractFrontmatterSlug,
+  serviceAnchorPhrase,
 } = planner._internals;
 
 // ── anchorCandidates ────────────────────────────────────────────────
@@ -52,6 +53,20 @@ describe('anchorCandidates', () => {
       'pest control in Bradenton',
       'Bradenton pest control',
     ]));
+  });
+  test('expands service aliases before generating city anchors', () => {
+    const out = anchorCandidates({
+      url: '/pest-control-bradenton-fl/',
+      city: 'Bradenton',
+      service: 'pest',
+    });
+    expect(out.map((c) => c.phrase)).toEqual([
+      'pest control in Bradenton',
+      'Bradenton pest control',
+    ]);
+    expect(out.map((c) => c.phrase)).not.toContain('Bradenton pest');
+    expect(serviceAnchorPhrase('lawn')).toBe('lawn care');
+    expect(serviceAnchorPhrase('tree-shrub')).toBe('tree and shrub care');
   });
   test('de-dupes case-insensitively', () => {
     const out = anchorCandidates({ keyword: 'Pest Control', title: 'pest control' });
@@ -469,6 +484,22 @@ describe('planForTarget', () => {
     }));
     const tasks = planner.planForTarget(target, { corpus: big, cap: 3 });
     expect(tasks.length).toBe(3);
+  });
+  test('uses service alias anchors instead of partial service fragments', () => {
+    const tasks = planner.planForTarget({
+      url: '/pest-control-bradenton-fl/',
+      city: 'Bradenton',
+      service: 'pest',
+    }, {
+      corpus: [{
+        file: 'src/content/services/pest-control-quote-bradenton-fl.md',
+        body: 'Call for your free Bradenton pest control quote today.',
+        url: '/pest-control-quote-bradenton-fl/',
+      }],
+    });
+
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].anchor_text).toBe('Bradenton pest control');
   });
   test('never links page to itself', () => {
     const c = [{ file: 'src/content/services/pest-control-bradenton-fl.md', body: 'pest control bradenton here', url: '/pest-control-bradenton-fl/' }];

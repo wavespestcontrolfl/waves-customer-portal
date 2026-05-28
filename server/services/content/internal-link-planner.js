@@ -29,6 +29,16 @@ const DEFAULT_LINK_CAP = 5; // per planning run
 const DEFAULT_PER_PAGE_CAP = 1; // per source file per target URL
 const ALLOWED_SITE_HOSTS = new Set(['www.wavespestcontrol.com', 'wavespestcontrol.com']);
 const INLINE_MARKDOWN_LINK_RE = /\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|(?:[^\s()\n]+|\([^()\n]*\))*)(?:\s+[^)]*)?\)/g;
+const SERVICE_ANCHOR_ALIASES = {
+  pest: 'pest control',
+  termite: 'termite control',
+  mosquito: 'mosquito control',
+  rodent: 'rodent control',
+  lawn: 'lawn care',
+  tree_shrub: 'tree and shrub care',
+  'tree-shrub': 'tree and shrub care',
+  specialty: 'pest control',
+};
 
 // ── anchor candidates (pure) ─────────────────────────────────────────
 
@@ -46,7 +56,7 @@ function anchorCandidates(target) {
   if (target.keyword) out.push({ phrase: target.keyword, priority: 10 });
   if (target.city && target.service) {
     const city = target.city;
-    const service = target.service;
+    const service = serviceAnchorPhrase(target.service);
     out.push({ phrase: `${service} in ${city}`, priority: 9 });
     out.push({ phrase: `${city} ${service}`, priority: 8 });
   }
@@ -59,6 +69,11 @@ function anchorCandidates(target) {
     seen.add(k);
     return true;
   });
+}
+
+function serviceAnchorPhrase(service) {
+  const normalized = String(service || '').trim().toLowerCase().replace(/\s+/g, '_');
+  return SERVICE_ANCHOR_ALIASES[normalized] || String(service || '').trim();
 }
 
 // ── corpus scanner ──────────────────────────────────────────────────
@@ -459,8 +474,10 @@ module.exports._internals = {
   DEFAULT_LINK_CAP,
   DEFAULT_PER_PAGE_CAP,
   ALLOWED_SITE_HOSTS,
+  SERVICE_ANCHOR_ALIASES,
   INLINE_MARKDOWN_LINK_RE,
   anchorCandidates,
+  serviceAnchorPhrase,
   maskExcludedRegions,
   maskNonContentRegions,
   blankRegion,
