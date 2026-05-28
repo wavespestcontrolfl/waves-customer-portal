@@ -19,6 +19,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { loadCustomerGrassContext } = require('./lawn-grass-context');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -344,9 +345,12 @@ const KnowledgeBridge = {
 
       const customer = await db('customers').where({ id: assessment.customer_id }).first();
 
-      // Get customer's grass type context
-      const grassTrack = customer?.grass_track || 'A'; // default St. Augustine Track A
-      const grassType = customer?.grass_type || 'St. Augustine';
+      // Grass context lives on customer_turf_profiles, not customers.
+      // track_key is the protocol track id (e.g. 'st_augustine'); it may be
+      // null when the customer has no turf profile yet.
+      const grassContext = await loadCustomerGrassContext(assessment.customer_id);
+      const grassType = grassContext.grassTypeLabel || 'St. Augustine';
+      const grassTrack = grassContext.trackKey || null;
 
       // Pull relevant Claudeopedia entries (protocols, product info)
       const protocolEntries = await db('knowledge_base')
@@ -354,8 +358,8 @@ const KnowledgeBridge = {
         .where({ status: 'active' })
         .where(function () {
           this.where('content', 'ilike', `%${grassType}%`)
-            .orWhere('content', 'ilike', `%track ${grassTrack}%`)
             .orWhere('category', 'seasonal');
+          if (grassTrack) this.orWhere('content', 'ilike', `%track ${grassTrack}%`);
         })
         .select('title', 'content', 'category')
         .limit(10);
@@ -363,8 +367,12 @@ const KnowledgeBridge = {
       // Pull relevant wiki outcome data (what's actually worked)
       const outcomeEntries = await db('knowledge_entries')
         .where(function () {
-          this.where('category', 'track').where('slug', 'ilike', `%${slugify(grassTrack)}%`)
-            .orWhere('category', 'seasonal');
+          this.where('category', 'seasonal');
+          if (grassTrack) {
+            this.orWhere(function () {
+              this.where('category', 'track').where('slug', 'ilike', `%${slugify(grassTrack)}%`);
+            });
+          }
         })
         .select('title', 'summary', 'data_point_count', 'confidence')
         .limit(5);
@@ -388,7 +396,7 @@ const KnowledgeBridge = {
       const userPrompt = `Generate lawn care recommendations for this assessment:
 
 Customer: ${customer?.first_name} ${customer?.last_name}
-Grass Type: ${grassType} (Track ${grassTrack})
+Grass Type: ${grassType} (Track ${grassTrack || 'unspecified'})
 Month: ${monthName} (Season: ${assessment.season})
 
 Current Scores:

@@ -8,6 +8,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { loadCustomerGrassContext, irrigationTypeHasSystem } = require('./lawn-grass-context');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -161,8 +162,14 @@ const AgronomicWiki = {
         }));
       } catch { /* service_products table may not exist */ }
 
-      // 5. Gather property context
+      // 5. Gather property context. Grass type / track / sun / irrigation
+      // live on customer_turf_profiles, not customers.
       const customer = await db('customers').where({ id: customerId }).first();
+      const grassContext = await loadCustomerGrassContext(customerId);
+
+      // treatment_outcomes.irrigation_system is a boolean ("has an automatic
+      // irrigation system"); the turf-profile source is a 4-value enum.
+      const irrigationHasSystem = irrigationTypeHasSystem(grassContext.irrigationSystem);
 
       // 6. Calculate deltas
       const pre = preAssessment || {};
@@ -186,7 +193,7 @@ const AgronomicWiki = {
         service_record_id: serviceRecordId,
         treatment_date: treatmentDate,
         service_type: sr.service_type || null,
-        grass_track: sr.grass_track || customer?.grass_track || null,
+        grass_track: grassContext.trackKey || null,
         visit_number: sr.visit_number || null,
         products_applied: JSON.stringify(productsApplied),
 
@@ -215,11 +222,12 @@ const AgronomicWiki = {
         days_between_assessments: daysBetween,
         season: getSeason(month),
 
-        grass_type: customer?.grass_type || null,
-        property_sqft: customer?.property_sqft || null,
-        sun_exposure: customer?.sun_exposure || null,
-        near_water: customer?.near_water || null,
-        irrigation_system: customer?.irrigation_system || null,
+        grass_type: grassContext.grassType || null,
+        property_sqft: grassContext.propertySqft || null,
+        sun_exposure: grassContext.sunExposure || null,
+        // No canonical source for near-water yet (not on turf profile).
+        near_water: null,
+        irrigation_system: irrigationHasSystem,
 
         satisfaction_rating: null,
       }).returning('*');
