@@ -338,6 +338,11 @@ class AutonomousRunner {
             city: factsCtx.city_id,
             service: factsCtx.service_id,
             county: factsCtx.county,
+          }, {
+            // Facts were sufficient (a facts_pack was supplied and the agent
+            // was told to emit a ledger), so a MISSING ledger is a real
+            // failure here — block it regardless of the global default.
+            options: { missingLedgerSeverity: 'P1' },
           });
         } catch (err) {
           logger.warn(`[autonomous-runner] claims-ledger validation threw: ${err.message}`);

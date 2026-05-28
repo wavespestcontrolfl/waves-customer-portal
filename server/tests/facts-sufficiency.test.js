@@ -134,8 +134,17 @@ describe('facts-sufficiency.check', () => {
     expect(r.gap_codes.some((g) => g.includes('template'))).toBe(true);
   });
 
-  test('unmappable service → not applicable (no city/service anchor)', async () => {
-    const r = await factsSufficiency.check({ action_type: 'new_supporting_blog', city: 'Sarasota', service: 'specialty' });
+  test('facts-gated action with city+service but unmappable service → fail closed', async () => {
+    // Has both a city and a service, but "specialty" maps to no facts-bank
+    // entity. Must NOT slip through — fail closed to human review.
+    const r = await factsSufficiency.check({ action_type: 'create_or_refresh_city_service_page', city: 'Sarasota', service: 'specialty' });
+    expect(r.applicable).toBe(true);
+    expect(r.sufficient).toBe(false);
+    expect(r.reason).toBe('facts_unmappable');
+  });
+
+  test('facts-gated action with no city/service anchor → not applicable', async () => {
+    const r = await factsSufficiency.check({ action_type: 'new_supporting_blog', city: null, service: null });
     expect(r.applicable).toBe(false);
     expect(r.sufficient).toBe(true);
   });

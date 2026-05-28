@@ -85,20 +85,38 @@ async function check(opportunity, opts = {}) {
     return { applicable: false, sufficient: true, reason: null, gap_codes: [], notes: 'action not facts-gated' };
   }
 
-  const cityId = normalizeCityId(opportunity.city);
-  const serviceId = normalizeServiceId(opportunity.service);
+  const hasCity = !!(opportunity.city && String(opportunity.city).trim());
+  const hasService = !!(opportunity.service && String(opportunity.service).trim());
 
-  // No city or service to anchor a facts-bank lookup → the action isn't a
-  // city×service local-claim page; let it through (e.g. a general blog).
-  if (!cityId || !serviceId) {
+  // No city or service at all → not a city×service local-claim page (e.g. a
+  // general blog); the facts gate genuinely doesn't apply.
+  if (!hasCity || !hasService) {
     return {
       applicable: false,
       sufficient: true,
       reason: null,
       gap_codes: [],
+      city_id: null,
+      service_id: null,
+      notes: `no city/service anchor (city=${opportunity.city || '∅'}, service=${opportunity.service || '∅'}) — facts gate not applicable`,
+    };
+  }
+
+  const cityId = normalizeCityId(opportunity.city);
+  const serviceId = normalizeServiceId(opportunity.service);
+
+  // Has a city AND a service, but one can't be mapped to a facts-bank entity
+  // (typo / new category). FAIL CLOSED — do not let it draft local content
+  // without a facts audit, facts_pack, or claims-ledger.
+  if (!cityId || !serviceId) {
+    return {
+      applicable: true,
+      sufficient: false,
+      reason: 'facts_unmappable',
       city_id: cityId,
       service_id: serviceId,
-      notes: `no city/service anchor (city=${opportunity.city || '∅'}, service=${opportunity.service || '∅'}) — facts gate not applicable`,
+      gap_codes: [`unmappable:city=${opportunity.city}/service=${opportunity.service}`],
+      notes: `Facts-gated action on city="${opportunity.city}" service="${opportunity.service}" but ${!cityId ? 'city' : 'service'} has no facts-bank entity — routed to human review (fail-closed).`,
     };
   }
 
