@@ -29,7 +29,6 @@
 import { X, ChevronRight } from 'lucide-react';
 import { useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
-import { computeCardTotal } from '../../lib/cardSurcharge';
 import MobileManualCardSheet from './MobileManualCardSheet';
 import MobileCashTenderSheet from './MobileCashTenderSheet';
 import MobileCheckTenderSheet from './MobileCheckTenderSheet';
@@ -79,8 +78,6 @@ export default function MobilePaymentSheet({
       setSendingInvoice(false);
     }
   }
-
-  const { total: surcharge } = computeCardTotal(amount);
 
   async function handleTapToPay() {
     if (charging) return;

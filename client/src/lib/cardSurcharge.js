@@ -9,9 +9,18 @@ export function shouldSurcharge(funding) {
   return funding === 'credit';
 }
 
-export function computeCardTotal(amountDollars, rate = DEFAULT_CARD_SURCHARGE_RATE) {
-  const base = Math.round(Number(amountDollars) * 100) / 100;
-  const surcharge = Math.round(base * rate * 100) / 100;
-  const total = Math.round((base + surcharge) * 100) / 100;
-  return { base, surcharge, total };
+export function computeCardTotal(amountDollars, options = {}) {
+  const opts = typeof options === 'number' ? { rate: options, funding: 'credit' } : options;
+  const rate = opts.rate ?? DEFAULT_CARD_SURCHARGE_RATE;
+  const baseCents = Math.round(Number(amountDollars || 0) * 100);
+  const surchargeCents = shouldSurcharge(opts.funding)
+    ? Math.floor(baseCents * rate)
+    : 0;
+  const totalCents = baseCents + surchargeCents;
+
+  return {
+    base: baseCents / 100,
+    surcharge: surchargeCents / 100,
+    total: totalCents / 100,
+  };
 }
