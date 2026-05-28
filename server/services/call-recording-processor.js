@@ -1950,6 +1950,7 @@ const CallRecordingProcessor = {
       // the flat fields the customer/appointment writers read.
       if (v2Flat.address_line1) extracted.address_line1 = v2Flat.address_line1;
       if (v2Flat.city) extracted.city = v2Flat.city;
+      if (v2Flat.state) extracted.state = v2Flat.state;
       if (v2Flat.zip) extracted.zip = v2Flat.zip;
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
     }
