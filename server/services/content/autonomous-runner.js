@@ -663,15 +663,29 @@ class AutonomousRunner {
       gate: 'metadata_quality',
     };
 
-    if (!qualityResult.ok) {
+    const keywordCheckFailed = qualityResult?.checks?.primary_keyword_in_title?.ok === false;
+    if (!qualityResult.ok || keywordCheckFailed) {
+      const forcedHardFailures = keywordCheckFailed
+        ? [{ name: 'primary_keyword_in_title', reason: qualityResult.checks.primary_keyword_in_title.reason || 'failed' }]
+        : [];
+      if (forcedHardFailures.length) {
+        run.quality_gate_result = {
+          ...run.quality_gate_result,
+          hard_failures: [
+            ...(Array.isArray(run.quality_gate_result.hard_failures) ? run.quality_gate_result.hard_failures : []),
+            ...forcedHardFailures,
+          ],
+        };
+      }
       const hard = (qualityResult.hard_failures || []).map((f) => `${f.name}:${f.reason}`).join(', ');
       const soft = (qualityResult.soft_failures || []).slice(0, 4).map((f) => `${f.name}:${f.reason}`).join(', ');
+      const forced = forcedHardFailures.map((f) => `${f.name}:${f.reason}`).join(', ');
       return {
         notes: 'metadata_quality_gate_fail',
         patch: {
           outcome: 'completed_pending_review',
           skip_reason: 'metadata_quality_gate_fail',
-          reviewer_notes: `Metadata quality gate blocked PR creation: hard=${hard || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score ?? 'n/a'}/${qualityResult.min_total_score ?? 'n/a'}.`,
+          reviewer_notes: `Metadata quality gate blocked PR creation: hard=${[hard, forced].filter(Boolean).join(', ') || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score ?? 'n/a'}/${qualityResult.min_total_score ?? 'n/a'}.`,
         },
       };
     }
