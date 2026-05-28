@@ -27,7 +27,12 @@ const MONEY_PAGE_PATTERNS = [
   { re: /^pest-control-[a-z0-9-]+-fl$/, label: 'pest-control city hub' },
 ];
 
-const DEFAULT_IMPRESSION_THRESHOLD = 5000; // 28-day impressions → auto high_traffic
+// 28-day impressions → auto high_traffic. Set to 500 (not 5000) because the
+// current GSC window is thin: high-traffic service spokes like
+// /rodent-control-sarasota-fl/ (~770 imp/28d) must be protected from
+// auto-optimization even though they're below the original threshold. Money
+// pages are protected by the pattern layer regardless. Tunable via --threshold.
+const DEFAULT_IMPRESSION_THRESHOLD = 500;
 
 // Normalize a URL or path to a bare lowercase path: strip protocol+host,
 // query/hash, and leading/trailing slashes.

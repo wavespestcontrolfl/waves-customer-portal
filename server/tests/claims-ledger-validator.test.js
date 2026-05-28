@@ -71,14 +71,15 @@ describe('claims-ledger-validator (pure core)', () => {
     expect(r.findings.some((f) => f.code === 'CLAIM_NOT_IN_BODY')).toBe(true);
   });
 
-  test('disallowed phrase heuristic flags body content', () => {
+  test('disallowed phrase in body BLOCKS (P1) — forbidden claim cannot auto-publish', () => {
     const r = v.validateLedger({
       claimsLedger: [{ claim: 'Laurel Park homes often need termite monitoring', factIds: ['city_sarasota_neighborhood_laurel_park_01'] }],
       body: 'Older homes in Laurel Park often need termite monitoring. We offer same-day availability for every customer.',
       factsById: FACTS,
       disallowedPatterns: ['Do not claim same-day availability'],
     });
-    expect(r.findings.some((f) => f.code === 'DISALLOWED_PHRASE_SUSPECTED')).toBe(true);
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_PHRASE_SUSPECTED' && f.severity === 'P1')).toBe(true);
+    expect(r.pass).toBe(false);
   });
 });
 

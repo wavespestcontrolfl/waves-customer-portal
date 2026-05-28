@@ -147,12 +147,15 @@ function validateLedger({ claimsLedger, body, factsById = {}, disallowedPatterns
     }
   }
 
-  // 6. Disallowed phrases in body (heuristic, review-only).
+  // 6. Disallowed phrases in body. BLOCKING (P1): the facts-bank explicitly
+  // forbids these claims, so a match must route to human review rather than
+  // auto-publish. The trigger match is heuristic, so a false positive only
+  // costs a human review — the safe direction.
   for (const pattern of disallowedPatterns) {
     for (const trigger of disallowedTriggers(pattern)) {
       if (bodyNorm.includes(trigger)) {
-        findings.push(finding('P2', 'DISALLOWED_PHRASE_SUSPECTED',
-          `Body may contain a disallowed claim ("${trigger}") — facts-bank rule: "${truncate(pattern)}"`,
+        findings.push(finding('P1', 'DISALLOWED_PHRASE_SUSPECTED',
+          `Body contains a disallowed claim ("${trigger}") — facts-bank rule: "${truncate(pattern)}"`,
           { trigger }));
       }
     }
