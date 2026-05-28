@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   CheckCircle2,
@@ -42,6 +42,19 @@ function adminFetch(path, options = {}) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   });
+}
+
+function formatMoney(value, decimals = 2) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "—";
+  return `$${numeric.toFixed(decimals)}`;
+}
+
+function formatUnitCost(value, unit) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || !unit) return "—";
+  const decimals = numeric >= 10 ? 2 : 4;
+  return `${formatMoney(numeric, decimals)}/${unit}`;
 }
 
 const sCard = {
@@ -100,6 +113,7 @@ export default function InventoryPage() {
   const [searchParams] = useSearchParams();
   const initialTab = [
     "products",
+    "price-sync",
     "vendors",
     "approvals",
     "protocols",
@@ -128,6 +142,7 @@ export default function InventoryPage() {
 
   const tabs = [
     { key: "products", label: "Products", Icon: Package },
+    { key: "price-sync", label: "Price Sync", Icon: Store },
     { key: "vendors", label: "Vendors", Icon: Store },
     {
       key: "approvals",
@@ -153,7 +168,7 @@ export default function InventoryPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Inventory section"
-        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-8"
         action={
           tab === "products"
             ? {
@@ -270,6 +285,7 @@ export default function InventoryPage() {
           setShowAddForm={setShowAddForm}
         />
       )}
+      {tab === "price-sync" && <PriceSyncTab showToast={showToast} />}
       {tab === "registry" && <RegistryTab showToast={showToast} />}
       {tab === "vendors" && <VendorsTab showToast={showToast} />}
       {tab === "approvals" && (
@@ -313,6 +329,458 @@ export default function InventoryPage() {
         <span style={{ color: D.green }}></span>
         <span style={{ color: D.text }}>{toast}</span>{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// PRICE SYNC TAB — control layer shell, no connector execution
+// ══════════════════════════════════════════════════════════════
+function PriceSyncTab({ showToast }) {
+  const [view, setView] = useState("vendors");
+  const [vendors, setVendors] = useState([]);
+  const [needsMapping, setNeedsMapping] = useState([]);
+  const [reviewQueue, setReviewQueue] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [csvPreview, setCsvPreview] = useState("");
+  const [csvName, setCsvName] = useState("");
+  const [mappingImportCsv, setMappingImportCsv] = useState("");
+  const [importResult, setImportResult] = useState(null);
+  const showToastRef = useRef(showToast);
+
+  useEffect(() => {
+    showToastRef.current = showToast;
+  }, [showToast]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [vendorData, mappingData, reviewData] = await Promise.all([
+        adminFetch("/admin/inventory/price-sync/vendors"),
+        adminFetch("/admin/inventory/price-sync/needs-mapping"),
+        adminFetch("/admin/inventory/price-sync/review-queue"),
+      ]);
+      setVendors(vendorData.vendors || []);
+      setNeedsMapping(mappingData.products || []);
+      setReviewQueue(reviewData.approvals || []);
+    } catch (e) {
+      showToastRef.current?.(`Price Sync failed: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const loadCsv = async (type) => {
+    try {
+      const path =
+        type === "manual_seed"
+          ? "/admin/inventory/price-sync/manual-seed-template"
+          : `/admin/inventory/price-sync/mappings/export?mode=${type}`;
+      const data = await adminFetch(path);
+      setCsvPreview(data.csv || "");
+      setCsvName(data.filename || "price-sync.csv");
+      showToast?.("CSV template loaded");
+    } catch (e) {
+      showToast?.(`CSV failed: ${e.message}`);
+    }
+  };
+
+  const copyCsv = async () => {
+    if (!csvPreview) return;
+    await navigator.clipboard.writeText(csvPreview);
+    showToast?.(`${csvName} copied`);
+  };
+
+  const importMappings = async () => {
+    if (!mappingImportCsv.trim()) {
+      showToast?.("Paste mapping CSV first");
+      return;
+    }
+    try {
+      const result = await adminFetch(
+        "/admin/inventory/price-sync/mappings/import",
+        {
+          method: "POST",
+          body: JSON.stringify({ csv: mappingImportCsv }),
+        },
+      );
+      setImportResult(result);
+      showToast?.(result.message || "Mapping import finished");
+      await load();
+    } catch (e) {
+      showToast?.(`Import failed: ${e.message}`);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+        Loading price sync...
+      </div>
+    );
+  }
+
+  const totalConnections = vendors.reduce(
+    (sum, vendor) => sum + (vendor.connections?.length || 0),
+    0,
+  );
+  const verifiedMappings = vendors.reduce(
+    (sum, vendor) => sum + (vendor.verifiedMappings || 0),
+    0,
+  );
+  const currentPrices = vendors.reduce(
+    (sum, vendor) => sum + (vendor.currentPrices || 0),
+    0,
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {[
+          { label: "Vendors", value: vendors.length },
+          { label: "Connections", value: totalConnections },
+          { label: "Needs Mapping", value: needsMapping.length },
+          { label: "Verified Maps", value: verifiedMappings },
+          { label: "Current Prices", value: currentPrices },
+          { label: "Pending Review", value: reviewQueue.length },
+        ].map((item) => (
+          <div
+            key={item.label}
+            style={{
+              ...sCard,
+              flex: "1 1 130px",
+              minWidth: 130,
+              marginBottom: 12,
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 22,
+                fontWeight: 700,
+                color: item.value ? D.heading : D.muted,
+              }}
+            >
+              {item.value}
+            </div>
+            <div
+              style={{
+                fontSize: 9,
+                color: D.muted,
+                textTransform: "uppercase",
+                letterSpacing: 1,
+                marginTop: 2,
+              }}
+            >
+              {item.label}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        {[
+          { key: "vendors", label: "Vendor Sync Status" },
+          { key: "mapping", label: "Needs Mapping" },
+          { key: "csv", label: "CSV Import / Export" },
+          { key: "review", label: "Price Review Queue" },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setView(tab.key)}
+            style={{
+              padding: "7px 14px",
+              borderRadius: 20,
+              border: "none",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              background: view === tab.key ? D.teal : D.card,
+              color: view === tab.key ? D.white : D.muted,
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {view === "vendors" && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {[
+                  "Vendor",
+                  "Connections",
+                  "Mapped",
+                  "Verified",
+                  "Current",
+                  "Best",
+                  "Pending",
+                  "Next Action",
+                ].map((h) => (
+                  <th key={h} style={thS}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {vendors.map((vendor) => (
+                <tr key={vendor.id}>
+                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
+                    {vendor.name}
+                  </td>
+                  <td style={tdS}>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      {(vendor.connections || []).map((connection) => (
+                        <span
+                          key={connection.id}
+                          style={sBadge(
+                            connection.credentialStatus === "missing"
+                              ? `${D.amber}22`
+                              : `${D.green}22`,
+                            connection.credentialStatus === "missing"
+                              ? D.amber
+                              : D.green,
+                          )}
+                          title={`${connection.approvalStatus} / ${connection.credentialStatus}`}
+                        >
+                          {connection.type}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td style={tdS}>{vendor.mappedProducts}</td>
+                  <td style={tdS}>{vendor.verifiedMappings}</td>
+                  <td style={tdS}>{vendor.currentPrices}</td>
+                  <td style={tdS}>{vendor.bestPrices}</td>
+                  <td style={tdS}>{vendor.pendingApprovals}</td>
+                  <td style={{ ...tdS, color: D.muted }}>{vendor.nextAction}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {view === "mapping" && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {[
+                  "Product",
+                  "Category",
+                  "SKU",
+                  "Package",
+                  "Status",
+                  "Mapped",
+                  "Verified",
+                  "Package Maps",
+                ].map((h) => (
+                  <th key={h} style={thS}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {needsMapping.map((product) => (
+                <tr key={product.id}>
+                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
+                    {product.name}
+                  </td>
+                  <td style={tdS}>{product.category || "—"}</td>
+                  <td style={tdS}>{product.sku || "—"}</td>
+                  <td style={tdS}>{product.containerSize || "—"}</td>
+                  <td style={tdS}>
+                    <span style={sBadge(`${D.amber}22`, D.amber)}>
+                      {product.bestPriceStatus || "needs_mapping"}
+                    </span>
+                  </td>
+                  <td style={tdS}>{product.mappedVendors}</td>
+                  <td style={tdS}>{product.verifiedMappings}</td>
+                  <td style={tdS}>{product.completePackageMaps}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {needsMapping.length === 0 && (
+            <div style={{ ...sCard, color: D.muted, textAlign: "center" }}>
+              All active products have verified mappings.
+            </div>
+          )}
+        </div>
+      )}
+
+      {view === "csv" && (
+        <div style={sCard}>
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              flexWrap: "wrap",
+              marginBottom: 12,
+            }}
+          >
+            <button onClick={() => loadCsv("needs_mapping")} style={sBtn(D.teal, D.white)}>
+              Needs Mapping Export
+            </button>
+            <button onClick={() => loadCsv("existing")} style={sBtn(D.teal, D.white)}>
+              Existing Mappings Export
+            </button>
+            <button onClick={() => loadCsv("manual_seed")} style={sBtn(D.teal, D.white)}>
+              Manual Seed Template
+            </button>
+            <button
+              onClick={copyCsv}
+              disabled={!csvPreview}
+              style={sBtn(csvPreview ? D.green : D.card, csvPreview ? D.white : D.muted)}
+            >
+              Copy CSV
+            </button>
+          </div>
+          <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>
+            Mapping import writes verified product mappings only. Manual seed
+            price import remains disabled until the pricing approval worker is
+            built.
+          </div>
+          <textarea
+            readOnly
+            value={csvPreview}
+            placeholder="Choose an export/template..."
+            style={{
+              ...sInput,
+              width: "100%",
+              minHeight: 260,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 11,
+            }}
+          />
+          <div
+            style={{
+              marginTop: 16,
+              borderTop: `1px solid ${D.border}`,
+              paddingTop: 14,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 11,
+                color: D.muted,
+                textTransform: "uppercase",
+                letterSpacing: 1,
+                marginBottom: 8,
+              }}
+            >
+              Mapping Import
+            </div>
+            <textarea
+              value={mappingImportCsv}
+              onChange={(e) => setMappingImportCsv(e.target.value)}
+              placeholder="Paste mapping CSV here..."
+              style={{
+                ...sInput,
+                width: "100%",
+                minHeight: 180,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 11,
+              }}
+            />
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={importMappings} style={sBtn(D.green, D.white)}>
+                Import Mappings
+              </button>
+              <button
+                onClick={() => {
+                  setMappingImportCsv("");
+                  setImportResult(null);
+                }}
+                style={sBtn(D.card, D.muted)}
+              >
+                Clear
+              </button>
+            </div>
+            {importResult && (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 10,
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 8,
+                  fontSize: 12,
+                  color: D.text,
+                  background: D.input,
+                }}
+              >
+                <div>
+                  Imported {importResult.imported || 0} of{" "}
+                  {importResult.rowsReceived || 0} rows.
+                </div>
+                {(importResult.rowErrors || []).slice(0, 8).map((err) => (
+                  <div key={err.row} style={{ color: D.red, marginTop: 4 }}>
+                    Row {err.row}: {(err.errors || []).join("; ")}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {view === "review" && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {[
+                  "Product",
+                  "Vendor",
+                  "Old",
+                  "New",
+                  "Change",
+                  "Source",
+                  "Confidence",
+                  "Reason",
+                  "Captured",
+                ].map((h) => (
+                  <th key={h} style={thS}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {reviewQueue.map((approval) => (
+                <tr key={approval.id}>
+                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
+                    {approval.productName}
+                  </td>
+                  <td style={tdS}>{approval.vendorName}</td>
+                  <td style={tdS}>{approval.oldPrice != null ? `$${approval.oldPrice.toFixed(2)}` : "—"}</td>
+                  <td style={tdS}>{approval.newPrice != null ? `$${approval.newPrice.toFixed(2)}` : "—"}</td>
+                  <td style={tdS}>{approval.changePercent != null ? `${approval.changePercent.toFixed(1)}%` : "—"}</td>
+                  <td style={tdS}>{approval.sourceType || "—"}</td>
+                  <td style={tdS}>{approval.confidence != null ? `${Math.round(approval.confidence * 100)}%` : "—"}</td>
+                  <td style={{ ...tdS, color: D.muted }}>{approval.approvalReason || "—"}</td>
+                  <td style={tdS}>{approval.capturedAt ? new Date(approval.capturedAt).toLocaleDateString() : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {reviewQueue.length === 0 && (
+            <div style={{ ...sCard, color: D.muted, textAlign: "center" }}>
+              No pending price approvals.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -380,7 +848,13 @@ function ProductsTab({
     try {
       await adminFetch(`/admin/inventory/${productId}/pricing`, {
         method: "PUT",
-        body: JSON.stringify({ vendorId, price: parseFloat(price), quantity }),
+        body: JSON.stringify({
+          vendorId,
+          price: parseFloat(price),
+          quantity,
+          sourceType: "manual",
+          confidenceScore: 0.8,
+        }),
       });
       showToast("Price saved");
       load();
@@ -701,6 +1175,7 @@ function ProductsTab({
                 "Size",
                 "Stock",
                 "Best Price",
+                "Unit Cost",
                 "Vendor",
                 "Status",
                 "",
@@ -888,9 +1363,18 @@ function ProductsTab({
                       ...tdS,
                       fontFamily: "'JetBrains Mono', monospace",
                       color: p.bestPrice ? D.green : D.muted,
+                  }}
+                >
+                    {formatMoney(p.bestPrice)}
+                  </td>{" "}
+                  <td
+                    style={{
+                      ...tdS,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      color: p.costPerUnit ? D.text : D.muted,
                     }}
                   >
-                    {p.bestPrice ? `$${p.bestPrice.toFixed(2)}` : "—"}
+                    {formatUnitCost(p.costPerUnit, p.costUnit)}
                   </td>{" "}
                   <td style={{ ...tdS, fontSize: 12 }}>
                     {p.bestVendor || "—"}
@@ -1190,6 +1674,21 @@ function ExpandedProduct({
     }
   };
 
+  const queueRefresh = async (vendorPricing) => {
+    try {
+      const data = await adminFetch(
+        `/admin/inventory/${product.id}/pricing/refresh`,
+        {
+          method: "POST",
+          body: JSON.stringify({ vendorId: vendorPricing.vendorId }),
+        },
+      );
+      showToast?.(data.message || "Refresh queued");
+    } catch (e) {
+      showToast?.(`Refresh failed: ${e.message}`);
+    }
+  };
+
   return (
     <div style={{ padding: 12 }}>
       {" "}
@@ -1281,7 +1780,7 @@ function ExpandedProduct({
                 {vp.quantity && (
                   <span style={{ color: D.muted }}>{vp.quantity}</span>
                 )}
-                {vp.pricePerOz && (
+                {vp.normalizedUnitPrice != null && vp.normalizedUnit && (
                   <span
                     style={{
                       color: D.muted,
@@ -1289,7 +1788,27 @@ function ExpandedProduct({
                       fontSize: 11,
                     }}
                   >
-                    ${vp.pricePerOz}/oz
+                    {formatUnitCost(vp.normalizedUnitPrice, vp.normalizedUnit)}
+                  </span>
+                )}
+                {vp.sourceType && (
+                  <span style={sBadge(`${D.teal}14`, D.muted)}>
+                    {String(vp.sourceType).replace(/_/g, " ")}
+                  </span>
+                )}
+                {vp.availability && (
+                  <span style={{ color: D.muted, fontSize: 11 }}>
+                    {vp.availability}
+                  </span>
+                )}
+                {vp.branchLocation && (
+                  <span style={{ color: D.muted, fontSize: 11 }}>
+                    {vp.branchLocation}
+                  </span>
+                )}
+                {vp.confidenceScore != null && (
+                  <span style={{ color: D.muted, fontSize: 10 }}>
+                    {Math.round(vp.confidenceScore * 100)}% conf
                   </span>
                 )}
                 {vp.isBest && (
@@ -1310,6 +1829,21 @@ function ExpandedProduct({
                     {new Date(vp.lastChecked).toLocaleDateString()}
                   </span>
                 )}
+                <button
+                  onClick={() => queueRefresh(vp)}
+                  style={{
+                    marginLeft: "auto",
+                    fontSize: 10,
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    border: `1px solid ${D.border}`,
+                    background: D.card,
+                    color: D.teal,
+                    cursor: "pointer",
+                  }}
+                >
+                  Refresh
+                </button>
               </div>
             ))}
           </div>{" "}

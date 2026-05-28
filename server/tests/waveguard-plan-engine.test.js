@@ -220,6 +220,19 @@ describe('waveguard-plan-engine helpers', () => {
     expect(product.name).toBe('LESCO 12-0-0 Chelated Iron Plus');
   });
 
+  test('matchCatalogProduct uses configured catalog aliases', () => {
+    const product = matchCatalogProduct(
+      { raw: 'LESCO 24-0-11 75% PolyPlus fert ($8.68)' },
+      [{
+        id: '1',
+        name: 'LESCO 24-0-11',
+        aliases: ['LESCO 24-0-11 75% PolyPlus OPTI'],
+      }]
+    );
+
+    expect(product.name).toBe('LESCO 24-0-11');
+  });
+
   test('calculateProductAmount uses lawn area and carrier calibration', () => {
     const result = calculateProductAmount({
       product: {
