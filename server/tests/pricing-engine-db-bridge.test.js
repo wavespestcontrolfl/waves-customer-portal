@@ -204,11 +204,8 @@ describe('pricing engine DB bridge', () => {
     ]));
   });
 
-  test('rejects economically-unsafe pest config (base<floor, out-of-range freq discount, OT keys)', () => {
+  test('rejects out-of-range pest frequency discounts and invalid one-time keys', () => {
     const snapshot = JSON.parse(JSON.stringify(constants));
-    snapshot.PEST.base = 50;          // below floor
-    snapshot.PEST.floor = 89;
-    snapshot.PEST.frequencyDiscounts.v1.monthly = 0.3;   // too deep (still >0 but breaks margin model? allowed range is (0,1], 0.3 IS in range)
     snapshot.PEST.frequencyDiscounts.v1.bimonthly = 1.5; // >1, invalid
     snapshot.PEST.frequencyDiscounts.v2.monthly = 0;     // 0, invalid
     snapshot.PEST.frequencyDiscounts.v2.quarterly = -0.2; // negative, invalid
@@ -219,13 +216,19 @@ describe('pricing engine DB bridge', () => {
 
     expect(result.valid).toBe(false);
     expect(result.errors).toEqual(expect.arrayContaining([
-      'PEST.base must be >= PEST.floor',
       'PEST.frequencyDiscounts.v1.bimonthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.monthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.quarterly must be in (0, 1]',
       'ONE_TIME.pest.premiumMultiplier must be positive',
       'ONE_TIME.pest.setupEquivalent must be non-negative',
     ]));
+  });
+
+  test('allows pest floor above base (raise-the-minimum config is valid)', () => {
+    const snapshot = JSON.parse(JSON.stringify(constants));
+    snapshot.PEST.base = 117;
+    snapshot.PEST.floor = 130; // floor > base: large/adjusted homes still exceed it
+    expect(validatePestPricingConfig(snapshot)).toEqual(expect.objectContaining({ valid: true }));
   });
 
   test('restores all constants when pest config validation fails', async () => {

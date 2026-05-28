@@ -111,11 +111,10 @@ function validatePestPricingConfig(snapshot = constants) {
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
-  // Economic sanity: base must clear the floor, otherwise the floor silently
-  // binds for every quote and the bracket/adjustment model is dead weight.
-  if (isPositiveNumber(PEST.base) && isPositiveNumber(PEST.floor) && Number(PEST.base) < Number(PEST.floor)) {
-    errors.push('PEST.base must be >= PEST.floor');
-  }
+  // NOTE: floor > base is intentionally allowed. The price is
+  // `max(floor, base + adjustments)`, so a floor above base just raises the
+  // minimum quote for small/low-adjustment properties while larger/adjusted
+  // homes still exceed it — a valid "raise the minimum" config, not an error.
   if (!isNonNegativeNumber(PEST.initialFee)) errors.push('PEST.initialFee must be non-negative');
   validateSortedBrackets(errors, 'PEST.footprintBrackets', PEST.footprintBrackets, 'sqft', 'adj');
 
