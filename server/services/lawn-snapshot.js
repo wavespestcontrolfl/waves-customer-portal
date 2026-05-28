@@ -343,10 +343,16 @@ async function getSnapshotInputs({ assessmentId }) {
   };
 }
 
+// Card statuses that mean "not yet reviewed by an admin". Anything else
+// (dismissed, accepted, approved, customer_visible, …) is a recorded admin
+// decision and must never be deleted by the supersede path.
+const PRE_REVIEW_CARD_STATUSES = ['needs_admin_review', 'draft'];
+
 // Remove prior PRE-REVIEW snapshots (and their pre-review cards) for an
 // assessment so repeated confirms / regenerations don't stack duplicates.
-// A snapshot is left untouched if it has been approved, made customer-visible,
-// or has any card that was approved / made customer-visible. Cards have no FK
+// A snapshot is left untouched if it (or any of its cards) has been approved,
+// made customer-visible, OR carries a reviewed status such as 'dismissed' —
+// preserving the admin decision and its event history. Cards have no FK
 // cascade to snapshots, so they're deleted explicitly; snapshot evidence
 // cascades on snapshot delete.
 async function supersedePriorSnapshots(assessmentId) {
@@ -359,7 +365,9 @@ async function supersedePriorSnapshots(assessmentId) {
   const lockedIds = await db('property_recommendation_cards')
     .whereIn('snapshot_id', priorIds)
     .where(function () {
-      this.where('customer_visible', true).orWhereNotNull('approved_at');
+      this.where('customer_visible', true)
+        .orWhereNotNull('approved_at')
+        .orWhereNotIn('status', PRE_REVIEW_CARD_STATUSES);
     })
     .distinct('snapshot_id')
     .pluck('snapshot_id');
@@ -367,7 +375,14 @@ async function supersedePriorSnapshots(assessmentId) {
   const removableIds = priorIds.filter((id) => !lockedIds.includes(id));
   if (!removableIds.length) return;
 
-  await db('property_recommendation_cards').whereIn('snapshot_id', removableIds).del();
+  // Delete only the still-pre-review cards on these snapshots (by definition
+  // all of their cards are pre-review, but scope it defensively).
+  await db('property_recommendation_cards')
+    .whereIn('snapshot_id', removableIds)
+    .where('customer_visible', false)
+    .whereNull('approved_at')
+    .whereIn('status', PRE_REVIEW_CARD_STATUSES)
+    .del();
   await db('property_health_snapshots').whereIn('id', removableIds).del();
 }
 
