@@ -330,9 +330,14 @@ class ContentBriefBuilder {
   /**
    * Assemble the facts pack for a facts-gated city × service action. Returns
    * null when the action isn't facts-gated or the city/service can't be
-   * mapped. Only prompt-usable facts are included (loader filters out
-   * internal_only / expired / unverified); the agent may cite ONLY these
-   * fact ids in its claims ledger.
+   * mapped.
+   *
+   * The pack contains ONLY copy-usable facts (public, public_copy_allowed,
+   * copy-safe evidence, in-TTL). This MUST match what claims-ledger-validator
+   * indexes (also `purpose: 'copy'`): the agent is told it may cite only
+   * facts_pack ids, so handing it prompt-only / internal facts would invite
+   * citations the validator then rejects, and risk non-public facts reaching
+   * body copy. Prompt-only context facts are intentionally excluded.
    */
   async _loadFactsPack(opportunity, decision) {
     const actionType = decision?.action_type || opportunity.action_type;
@@ -349,7 +354,9 @@ class ContentBriefBuilder {
 
     const pack = (file, id) => {
       if (!file || file.ok === false) return { id, facts: [] };
-      const facts = factsLoader.usableFacts(file, { purpose: 'prompt' })
+      // purpose:'copy' — citeable, publishable facts only (aligns with the
+      // claims-ledger validator's index).
+      const facts = factsLoader.usableFacts(file, { purpose: 'copy' })
         .map((f) => ({ id: f.id, type: f.type, value: f.value, evidence_strength: f.evidence_strength, allowed_contexts: f.allowed_contexts || [] }));
       return { id, facts, internal_links: file.internal_links || {} };
     };

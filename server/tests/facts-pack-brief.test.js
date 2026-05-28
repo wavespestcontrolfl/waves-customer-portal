@@ -37,6 +37,7 @@ generation_allowed: true
 facts:
   - { id: city_sarasota_pub_01, type: neighborhood, value: "Laurel Park", visibility: public, prompt_use_allowed: true, public_copy_allowed: true, evidence_strength: verified, last_verified: ${TODAY}, ttl_days: 365 }
   - { id: city_sarasota_internal_01, type: operations, value: "route note", visibility: internal_only, prompt_use_allowed: false, public_copy_allowed: false, evidence_strength: verified, last_verified: ${TODAY}, ttl_days: 30 }
+  - { id: city_sarasota_promptonly_01, type: differentiation, value: "positioning note", visibility: public, prompt_use_allowed: true, public_copy_allowed: false, evidence_strength: verified, last_verified: ${TODAY}, ttl_days: 365 }
 disallowed_claim_patterns: ["Do not claim same-day availability"]
 internal_links: { quote: "/q/", calculator: "/pest-control-calculator/" }
 ---
@@ -102,6 +103,9 @@ describe('content-brief-builder._loadFactsPack', () => {
     const cityIds = pack.city.facts.map((f) => f.id);
     expect(cityIds).toContain('city_sarasota_pub_01');
     expect(cityIds).not.toContain('city_sarasota_internal_01');
+    // Citeable pack is copy-safe only: a prompt-only (public_copy_allowed:false)
+    // fact must NOT be handed to the agent to cite (it would fail the validator).
+    expect(cityIds).not.toContain('city_sarasota_promptonly_01');
     // Disallowed patterns merged from all three files.
     expect(pack.disallowed_claim_patterns).toEqual(
       expect.arrayContaining(['Do not claim same-day availability', 'Do not guarantee elimination']),
