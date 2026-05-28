@@ -37,6 +37,15 @@ function hasNameEmailMismatch(caller = {}) {
   const local = localRaw.replace(/[^a-z]/g, '');
   if (local.length < 4) return false;            // too short to reason about
   if (GENERIC_EMAIL_LOCALPARTS.has(local)) return false;
+  // Multi-segment role mailbox with no personal name at all (office.sales@,
+  // sales.support@): every delimited segment is a role/affix word. The collapsed
+  // form ("officesales") isn't an exact generic match, so guard it here before
+  // the zero-token check below would wrongly flag a clean shared-mailbox booking.
+  const localSegments = localRaw.split(/[^a-z]+/).filter((s) => s.length >= 2);
+  if (localSegments.length > 0
+    && localSegments.every((s) => GENERIC_EMAIL_LOCALPARTS.has(s) || NON_NAME_EMAIL_AFFIXES.has(s))) {
+    return false;
+  }
   const tokens = [...new Set(
     [caller.first_name, caller.last_name, caller.name_full]
       .filter(Boolean)

@@ -775,6 +775,11 @@ describe('hasNameEmailMismatch', () => {
     expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'info@company.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'office@x.com' })).toBe(false);
   });
+  test('multi-segment role mailbox with no personal name → no mismatch (Codex P2 — office.sales@)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'office.sales@company.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Jones', email: 'sales.support@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Lee', email: 'billing.office@x.com' })).toBe(false);
+  });
   test('no usable signal → no mismatch (null email, null name, short local-part)', () => {
     expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: null })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: null, last_name: null, email: 'gennettryan@yahoo.com' })).toBe(false);
