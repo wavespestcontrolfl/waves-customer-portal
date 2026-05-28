@@ -503,6 +503,11 @@ if (config.nodeEnv === 'production') {
     }
   }
 
+  function isMissingStaticAssetRequest(reqPath) {
+    const lastSegment = path.basename(reqPath || '');
+    return /\.[A-Za-z0-9]{1,12}$/.test(lastSegment);
+  }
+
   // Never cache sw.js or index.html — ensures deploys are picked up immediately
   app.get('/sw.js', (req, res) => {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -533,6 +538,7 @@ if (config.nodeEnv === 'production') {
   // their own PWAs.
   app.get('*', (req, res, next) => {
     if (!req.path.startsWith('/api')) {
+      if (isMissingStaticAssetRequest(req.path)) return next();
       return sendSpaHtml(req, res, next);
     }
     return next();
@@ -693,8 +699,18 @@ function shutdown(signal) {
   logger.info(`[shutdown] ${signal} received, draining sockets + closing server`);
   io.close(() => {
     logger.info('[shutdown] Socket.io closed');
-    httpServer.close(() => {
+    httpServer.close(async () => {
       logger.info('[shutdown] HTTP server closed, exiting');
+      try {
+        const db = require('./models/db');
+        await Promise.race([
+          db.destroy(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+        ]);
+        logger.info('[shutdown] DB pool closed');
+      } catch (err) {
+        logger.warn(`[shutdown] DB pool close skipped/failed: ${err.message}`);
+      }
       process.exit(0);
     });
   });

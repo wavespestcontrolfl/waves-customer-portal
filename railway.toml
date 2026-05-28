@@ -15,7 +15,7 @@ buildCommand = "npm run build && npx playwright install --with-deps chromium"
 # config-as-code schema. Initial draft of this PR used `releaseCommand`
 # which Railway silently ignores; Codex caught it on PR #294 review.
 preDeployCommand = ["npm run db:migrate"]
-startCommand = "npm start"
+startCommand = "node server/index.js"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
