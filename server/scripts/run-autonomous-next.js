@@ -69,6 +69,7 @@ function redactCli(value) {
     if (typeof result.internal_link_verify_count === 'number') {
       console.log(`Link PR verify:    ${result.internal_link_verified_count || 0} verified / ${result.internal_link_verify_failed_count || 0} failed / ${result.internal_link_verify_count} checked`);
     }
+    if (result.internal_link_verify_error) console.log(`Link PR verify:    skipped (${redactCli(result.internal_link_verify_error)})`);
     console.log(`Trust-build:       ${result.trust_build_count_after}`);
 
     console.log('');

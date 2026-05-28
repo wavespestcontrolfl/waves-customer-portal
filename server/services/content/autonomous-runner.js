@@ -864,9 +864,14 @@ class AutonomousRunner {
     if (!executor?.runPostMergeVerification) return null;
     const t = Date.now();
     try {
-      const result = await executor.runPostMergeVerification({
-        limit: envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_LIMIT', 10),
-      });
+      const timeoutMs = envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS', 15000);
+      const result = await withTimeout(
+        executor.runPostMergeVerification({
+          limit: envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_LIMIT', 10),
+        }),
+        timeoutMs,
+        `internal_link_verify_timeout_${timeoutMs}ms`
+      );
       const rows = Array.isArray(result?.results) ? result.results : [];
       run.internal_link_verify_ms = Date.now() - t;
       run.internal_link_verify_count = Number(result?.count || rows.length || 0);
@@ -1157,6 +1162,16 @@ function envInt(key, defaultValue = null) {
   if (raw == null || raw === '') return defaultValue;
   const parsed = parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  const ms = Number(timeoutMs);
+  if (!Number.isFinite(ms) || ms <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message || `timeout_${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function normalizeContentPath(url) {

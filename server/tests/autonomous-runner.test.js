@@ -677,6 +677,33 @@ describe('runNext internal-link post-merge verification', () => {
       else process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = previousVerify;
     }
   });
+
+  test('verification timeouts do not block opportunity claiming', async () => {
+    const previousVerify = process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+    const previousTimeout = process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS;
+    process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = 'true';
+    process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS = '1';
+    try {
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue(null),
+      };
+      const internalLinkExecutor = {
+        runPostMergeVerification: jest.fn(() => new Promise(() => {})),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder: {}, internalLinkExecutor });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('skipped_no_opportunity');
+      expect(result.internal_link_verify_error).toBe('internal_link_verify_timeout_1ms');
+      expect(queue.claimNext).toHaveBeenCalled();
+    } finally {
+      if (previousVerify === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = previousVerify;
+      if (previousTimeout === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS = previousTimeout;
+    }
+  });
 });
 
 describe('runNext Astro corpus loading', () => {
