@@ -215,6 +215,17 @@ facts:
     });
   });
 
+  test('unverified facts are excluded from copy and prompt', () => {
+    const file = {
+      facts: [
+        { id: 'v', type: 'neighborhood', visibility: 'public', prompt_use_allowed: true, public_copy_allowed: true, evidence_strength: 'verified', last_verified: TODAY, ttl_days: 365 },
+        { id: 'u', type: 'neighborhood', visibility: 'public', prompt_use_allowed: true, public_copy_allowed: true, evidence_strength: 'unverified', last_verified: TODAY, ttl_days: 365 },
+      ],
+    };
+    expect(loader.usableFacts(file, { purpose: 'copy' }).map((f) => f.id)).toEqual(['v']);
+    expect(loader.usableFacts(file, { purpose: 'prompt' }).map((f) => f.id)).toEqual(['v']);
+  });
+
   test('context gating filters facts whose allowed_contexts excludes the context', () => {
     const file = {
       facts: [
