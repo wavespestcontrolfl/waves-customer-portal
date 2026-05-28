@@ -44,6 +44,14 @@ function dateColumnKey(value) {
   return match ? match[1] : text;
 }
 
+function publicBlogImageUrl(blog) {
+  const raw = blog.featured_image_url || blog.image_url || blog.og_image;
+  if (!raw) return undefined;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith('/')) return `https://www.wavespestcontrol.com${raw}`;
+  return undefined;
+}
+
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
 
@@ -66,6 +74,7 @@ async function sharePublishedBlog(blog) {
       link,
       guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
+      imageUrl: publicBlogImageUrl(blog),
     });
     if (result?.dryRun) {
       logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);

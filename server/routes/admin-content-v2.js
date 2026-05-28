@@ -78,6 +78,14 @@ function operationalBadRequest(message) {
   return err;
 }
 
+function publicBlogImageUrl(post) {
+  const raw = post.featured_image_url || post.image_url || post.og_image;
+  if (!raw) return undefined;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith('/')) return `https://www.wavespestcontrol.com${raw}`;
+  return undefined;
+}
+
 function parseBoundedInt(value, { defaultValue, min, max, name }) {
   const raw = value == null || value === '' ? defaultValue : value;
   const parsed = Number(raw);
@@ -518,7 +526,7 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
     const post = await db('blog_posts').where({ id: req.params.id }).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
 
-    const link = post.url || `https://www.wavespestcontrol.com/${post.slug}`;
+    const link = post.astro_live_url || post.url || `https://www.wavespestcontrol.com/${post.slug}`;
     const title = post.title;
     const description = post.meta_description || (post.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300);
 
@@ -527,6 +535,7 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
       title, description, link,
       guid: `blog_${post.id}`,
       source: 'blog',
+      imageUrl: publicBlogImageUrl(post),
     });
 
     // Mark post as shared
