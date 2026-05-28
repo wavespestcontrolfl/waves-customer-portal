@@ -1620,6 +1620,10 @@ const CallRecordingProcessor = {
             // Google's normalized address (e.g. the corrected zip), not the
             // caller's raw input. The gate already cleared the address flags;
             // this makes the appointment use the address the gate trusted.
+            // CRITICAL: also write the corrected address into `extracted` HERE,
+            // before the customer/lead upsert below reads extracted.* — otherwise
+            // the saved customer record keeps the uncorrected address even though
+            // the gate auto-routed on the corrected one.
             if (addressValidation?.normalized
               && (addressValidation.status === 'validated_accept' || addressValidation.status === 'corrected')) {
               const n = addressValidation.normalized;
@@ -1632,6 +1636,10 @@ const CallRecordingProcessor = {
                 ...(n.postal_code ? { postal_code: n.postal_code } : {}),
                 ...(addressValidation.county ? { county: addressValidation.county } : {}),
               };
+              if (n.street_line_1) extracted.address_line1 = n.street_line_1;
+              if (n.city) extracted.city = n.city;
+              if (n.state) extracted.state = n.state;
+              if (n.postal_code) extracted.zip = n.postal_code;
             }
             v2ApprovedExtraction = v2Extraction;
           }
@@ -1949,12 +1957,8 @@ const CallRecordingProcessor = {
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
       if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
-      // Address was AV-normalized above when accepted/corrected; carry it into
-      // the flat fields the customer/appointment writers read.
-      if (v2Flat.address_line1) extracted.address_line1 = v2Flat.address_line1;
-      if (v2Flat.city) extracted.city = v2Flat.city;
-      if (v2Flat.state) extracted.state = v2Flat.state;
-      if (v2Flat.zip) extracted.zip = v2Flat.zip;
+      // (AV-normalized address was already written into `extracted` at the gate
+      // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
     }
 
