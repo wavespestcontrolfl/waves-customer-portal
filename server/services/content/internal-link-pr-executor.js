@@ -481,7 +481,7 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   if (!targetPage?.body) return skipped(base, 'target_body_missing');
 
   const targetUrl = policy.normalizeInternalUrl(task.target_url || targetPage.url || targetPage.canonical_url);
-  const sourceUrl = policy.normalizeInternalUrl(task.source_url || sourcePage.url || sourcePage.canonical_url);
+  const sourceUrl = policy.normalizeInternalUrl(sourcePage.url || task.source_url || sourcePage.canonical_url);
   if (!targetUrl) return skipped(base, 'target_url_invalid');
   if (!sourceUrl) return skipped(base, 'source_url_invalid');
   if (sourceUrl === targetUrl) return skipped(base, 'self_link');
@@ -589,11 +589,11 @@ function pageFromAstroFile(file, body, { fallbackUrl = null } = {}) {
   const parsed = frontmatter.parse(body || '');
   const data = parsed.data || {};
   const url = firstValidInternalUrl(
+    deriveUrlFromFile(file),
     slugToInternalUrl(data.slug),
     data.canonical,
     data.canonical_url,
-    fallbackUrl,
-    deriveUrlFromFile(file)
+    fallbackUrl
   );
   const canonicalUrl = canonicalUrlFromFrontmatter(data, url);
   return {
@@ -657,7 +657,6 @@ function deriveUrlFromFile(file) {
   const normalized = String(file || '').replace(/\\/g, '/');
   const match = normalized.match(/src\/content\/(blog|services|locations)\/(.+?)\.mdx?$/);
   if (!match) return null;
-  if (match[1] === 'blog') return `/blog/${match[2]}/`;
   return `/${match[2]}/`;
 }
 
