@@ -78,7 +78,7 @@
           "month": "May",
           "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P index ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus ($1.52)",
           "secondary": "Dismiss if sedge ($4.36)\nHydretain drought prep Premium ($10.59)",
-          "material_cost": "23.19",
+          "material_cost": "24.44",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -282,7 +282,7 @@
           "month": "May",
           "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nPrimo Maxx PGR ($1.91)",
           "secondary": "Chelated Iron Plus ($1.52)\nDismiss if sedge ($4.36)\n★ Document PGR response — adjust rate if needed",
-          "material_cost": "23.58",
+          "material_cost": "24.83",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -479,7 +479,7 @@
           "month": "May",
           "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus ($1.52)",
           "secondary": "Dismiss if sedge ($4.36)\nPrimo Maxx PGR conservative ($1.91)\n★ Document PGR response",
-          "material_cost": "23.19",
+          "material_cost": "24.44",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
