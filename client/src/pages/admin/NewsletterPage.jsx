@@ -821,19 +821,24 @@ function EventInboxView({ onDraftFromEvent }) {
     fetchEvents();
   };
 
-  // Merge duplicates: the FIRST selected row is kept as the primary; the rest
-  // are rejected + merged into it (and any planned calendars repointed).
+  // Merge duplicates. The survivor is chosen by a visible, deterministic rule
+  // (most complete — has image, then has link — ties broken by table order),
+  // NOT by click order, and the confirm names it so the admin can cancel if
+  // it's not the one they meant to keep.
   const mergeSelected = async () => {
     if (selected.size < 2) return;
-    const ids = [...selected];
-    const primaryId = ids[0];
-    const duplicateIds = ids.slice(1);
-    const primaryTitle =
-      events.find((e) => e.id === primaryId)?.title || "the first selected event";
+    // events is in displayed table order; filter preserves it. Stable sort
+    // keeps table order for equally-complete rows.
+    const chosen = events.filter((e) => selected.has(e.id));
+    const completeness = (e) => (e.imageUrl ? 2 : 0) + (e.eventUrl ? 1 : 0);
+    const primary = [...chosen].sort((a, b) => completeness(b) - completeness(a))[0];
+    if (!primary) return;
+    const primaryId = primary.id;
+    const duplicateIds = chosen.filter((e) => e.id !== primaryId).map((e) => e.id);
     if (
       !confirm(
-        `Merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into "${primaryTitle}"?\n\n` +
-          `The duplicates will be rejected (removed from the queue) and any planned calendars repointed to the primary.`,
+        `Keep "${primary.title}" and merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into it?\n\n` +
+          `Kept because it's the most complete (image / link). The others will be rejected (removed from the queue) and any planned calendars repointed to the kept event.`,
       )
     )
       return;
@@ -1028,10 +1033,10 @@ function EventInboxView({ onDraftFromEvent }) {
                 size="sm"
                 variant="ghost"
                 onClick={mergeSelected}
-                title="Merge duplicates — the first selected event is kept; the rest are merged into it"
+                title="Merge duplicates — the most complete event (image/link) is kept; the confirm names it"
               >
                 <GitMerge size={12} className="mr-1" />
-                Merge {selected.size} (1st = primary)
+                Merge {selected.size}
               </Button>
             )}
           </div>
