@@ -93,8 +93,29 @@ async function consumeGoogleOAuthState(rawState) {
 // Google Business Profile OAuth — per-location authorization
 // =========================================================================
 
+// GET /api/admin/settings/google/auth-url?location=sarasota
+// SPA-friendly variant: returns the Google consent URL as JSON. The admin
+// SPA calls this WITH its bearer token, then navigates the browser to the
+// returned url. A top-level redirect to /google/auth can't carry the
+// Authorization header (admin auth is bearer-only), so the SPA must fetch
+// the url here and redirect itself. Mirrors the Gmail /oauth/auth-url flow.
+router.get('/google/auth-url', adminAuthenticate, requireAdmin, async (req, res) => {
+  try {
+    const locationId = String(req.query.location || '');
+    if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) {
+      return res.status(400).json({ error: 'Unknown location. Use: lakewood-ranch, parrish, sarasota, or venice' });
+    }
+    const state = await createGoogleOAuthState(locationId, req.technicianId);
+    const url = gbp.getAuthUrl(locationId, state);
+    res.json({ url });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/settings/google/auth?location=sarasota
-// Redirects to Google OAuth consent screen for that location's account
+// Redirects to Google OAuth consent screen. Kept for manual/non-SPA use, but
+// requires a bearer header — the SPA uses /google/auth-url above instead.
 router.get('/google/auth', adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const locationId = String(req.query.location || '');
