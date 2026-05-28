@@ -35,7 +35,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime, etWeekStart } = require('../../utils/datetime-et');
 const { THRESHOLDS } = require('./scoring-config');
 
 // Lazy loaders — keeps the runner usable on any branch in the stack.
@@ -59,6 +59,7 @@ const getAstroPublisher = lazy('astro-publisher', '../content-astro/astro-publis
 const getIndexNow = lazy('indexnow', '../seo/indexnow-submit');
 const getLinkPlanner = lazy('internal-link-planner', './internal-link-planner');
 const getSitemap = lazy('sitemap-manager', '../seo/sitemap-manager');
+const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', './post-publish-visibility-worker');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -376,6 +377,17 @@ class AutonomousRunner {
       return finalized;
     }
 
+    const publishingGuards = await this._evaluatePublishingGuards(run, brief, seoCompletionResult);
+    if (!publishingGuards.ok) {
+      const finalized = await finalize(run, t0, {
+        outcome: 'completed_pending_review',
+        skip_reason: publishingGuards.reason,
+        reviewer_notes: publishingGuards.notes,
+      });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, publishingGuards.reason, { claimToken });
+      return finalized;
+    }
+
     // 8. Publish + index + plan links.
     let publishOutcome;
     try {
@@ -613,6 +625,77 @@ class AutonomousRunner {
     return true;
   }
 
+  async _evaluatePublishingGuards(run, brief, seoCompletionResult) {
+    const actionType = run.action_type || brief.action_type;
+    if (!envBool('AUTONOMOUS_CONTENT_ENABLE_CANARY_GUARDS', actionType === 'new_supporting_blog')) {
+      return { ok: true };
+    }
+
+    if (envBool('AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0', false) && Number(seoCompletionResult?.summary?.p0 || 0) > 0) {
+      return { ok: false, reason: 'canary_p0_findings', notes: 'Canary guard blocked publish because SEO completion has P0 findings.' };
+    }
+
+    const maxP1 = envInt('AUTONOMOUS_CONTENT_MAX_P1_FINDINGS', null);
+    if (maxP1 != null && Number(seoCompletionResult?.summary?.p1 || 0) > maxP1) {
+      return {
+        ok: false,
+        reason: 'canary_p1_findings',
+        notes: `Canary guard blocked publish because SEO completion has ${seoCompletionResult.summary.p1} P1 finding(s), above max ${maxP1}.`,
+      };
+    }
+
+    if (envBool('AUTONOMOUS_CONTENT_REQUIRE_INTERNAL_LINK_PLAN', false)) {
+      const planner = getLinkPlanner();
+      if (!planner?.planForTarget) {
+        return { ok: false, reason: 'canary_internal_link_planner_unavailable', notes: 'Canary guard requires internal-link planning before publish.' };
+      }
+    }
+
+    if (envBool('AUTONOMOUS_CONTENT_REQUIRE_POST_PUBLISH_CHECK', false)) {
+      const worker = getPostPublishVisibilityWorker();
+      if (!worker?.runForPost && !worker?.runForUrl) {
+        return { ok: false, reason: 'canary_post_publish_visibility_unavailable', notes: 'Canary guard requires post-publish visibility worker before publish.' };
+      }
+    }
+
+    const maxPerDay = envInt('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY', null);
+    if (maxPerDay != null) {
+      const count = await this._countPublishedSince(actionType, startOfEtDay(new Date()));
+      if (count >= maxPerDay) {
+        return {
+          ok: false,
+          reason: 'canary_daily_publish_cap',
+          notes: `Canary guard blocked publish because ${count} ${actionType} publish(es) already completed today, max ${maxPerDay}.`,
+        };
+      }
+    }
+
+    const maxPerWeek = envInt('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK', null);
+    if (maxPerWeek != null) {
+      const count = await this._countPublishedSince(actionType, startOfEtWeek(new Date()));
+      if (count >= maxPerWeek) {
+        return {
+          ok: false,
+          reason: 'canary_weekly_publish_cap',
+          notes: `Canary guard blocked publish because ${count} ${actionType} publish(es) already completed this ET week, max ${maxPerWeek}.`,
+        };
+      }
+    }
+
+    return { ok: true };
+  }
+
+  async _countPublishedSince(actionType, since) {
+    const row = await db('autonomous_runs')
+      .where('action_type', actionType)
+      .where('shadow_mode', false)
+      .where('outcome', 'completed_published')
+      .where('completed_at', '>=', since)
+      .count('id as count')
+      .first();
+    return Number(row?.count || 0);
+  }
+
   async _publishAndDistribute(draft, brief, run) {
     const out = {};
     const publisher = getAstroPublisher();
@@ -769,6 +852,29 @@ function isDeterministicPublishError(err) {
   ].some((pattern) => pattern.test(message));
 }
 
+function envBool(key, defaultValue = false) {
+  const value = process.env[key];
+  if (value == null || value === '') return defaultValue;
+  if (/^(1|true|yes|on)$/i.test(value)) return true;
+  if (/^(0|false|no|off)$/i.test(value)) return false;
+  return defaultValue;
+}
+
+function envInt(key, defaultValue = null) {
+  const raw = process.env[key];
+  if (raw == null || raw === '') return defaultValue;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
+}
+
+function startOfEtDay(date = new Date()) {
+  return parseETDateTime(`${etDateString(date)}T00:00`);
+}
+
+function startOfEtWeek(date = new Date()) {
+  return parseETDateTime(`${etWeekStart(date)}T00:00`);
+}
+
 module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
@@ -777,4 +883,8 @@ module.exports._internals = {
   DEFAULT_MIN_SCORE,
   countsTowardTrustBuild,
   isDeterministicPublishError,
+  envBool,
+  envInt,
+  startOfEtDay,
+  startOfEtWeek,
 };

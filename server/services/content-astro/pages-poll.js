@@ -184,10 +184,20 @@ async function pollLivePost(post) {
     };
 
     await db('blog_posts').where({ id: post.id }).update(updates);
+    await runPostPublishVisibility({ ...post, ...updates, astro_live_url: url });
     return { live: true, url, deployment_url: deploy.url || null };
   } catch (err) {
     logger.warn(`[pages-poll] live check failed for ${url}: ${err.message}`);
     return { pending: true, url, error: err.message };
+  }
+}
+
+async function runPostPublishVisibility(post) {
+  try {
+    const worker = require('../content/post-publish-visibility-worker');
+    if (worker?.runForPost) await worker.runForPost(post);
+  } catch (err) {
+    logger.warn(`[pages-poll] post-publish visibility check failed for ${post.slug || post.id}: ${err.message}`);
   }
 }
 
@@ -245,4 +255,5 @@ module.exports = {
   pollLivePost,
   liveUrlResponds,
   deploymentMatchesMergedPost,
+  runPostPublishVisibility,
 };

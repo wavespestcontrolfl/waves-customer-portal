@@ -16,6 +16,8 @@ const {
   DEFAULT_MIN_SCORE,
   countsTowardTrustBuild,
   isDeterministicPublishError,
+  envBool,
+  envInt,
 } = _internals;
 
 const ORIGINAL_ENV = { ...process.env };
@@ -117,6 +119,27 @@ describe('DEFAULT_MIN_SCORE', () => {
   test('matches scoring-config.THRESHOLDS.minScoreToAct', () => {
     const { THRESHOLDS } = require('../services/content/scoring-config');
     expect(DEFAULT_MIN_SCORE).toBe(THRESHOLDS.minScoreToAct);
+  });
+});
+
+describe('canary guard env parsing', () => {
+  afterEach(() => {
+    delete process.env.AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0;
+    delete process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS;
+  });
+
+  test('envBool accepts common true/false forms', () => {
+    process.env.AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0 = 'true';
+    expect(envBool('AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0')).toBe(true);
+    process.env.AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0 = 'off';
+    expect(envBool('AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0', true)).toBe(false);
+  });
+
+  test('envInt parses non-negative integer caps', () => {
+    process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS = '2';
+    expect(envInt('AUTONOMOUS_CONTENT_MAX_P1_FINDINGS')).toBe(2);
+    process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS = '-1';
+    expect(envInt('AUTONOMOUS_CONTENT_MAX_P1_FINDINGS', 3)).toBe(3);
   });
 });
 
