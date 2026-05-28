@@ -3567,6 +3567,12 @@ function priceOneTimePest(property, options = {}) {
   let base;
   let baseSource;
   let baselinePest = null;
+  // `base` is always the QUARTERLY per-app rate. Callers passing
+  // `recurringPestPerApp` MUST pass the quarterly per-app (== pest line
+  // `basePrice`), never a discounted bimonthly/monthly per-app — otherwise the
+  // one-time anchor is understated. `basePrice` is frequency-independent
+  // (quarterly freqMult is 1.0, so quarterly perApp === basePrice), which is
+  // why the estimate engine hands us `basePrice`.
   const recurringPerApp = Number(recurringPestPerApp);
   if (Number.isFinite(recurringPerApp) && recurringPerApp > 0) {
     const roachMod = PEST.roachModifier[roachMeta.roachType] || 0;
@@ -3581,7 +3587,17 @@ function priceOneTimePest(property, options = {}) {
     baseSource = 'computed_quarterly_baseline';
   }
 
-  const multipliedPrice = Math.round(base * ONE_TIME.pest.multiplier);
+  // One-time = (quarterly per-app + setup-equivalent) × premium markup. This
+  // keeps a one-off visit strictly above what a recurring customer pays on
+  // visit 1 ($99 setup + quarterly rate), preserving the incentive to commit.
+  const setupEquivalent = Number.isFinite(Number(ONE_TIME.pest.setupEquivalent))
+    ? Number(ONE_TIME.pest.setupEquivalent)
+    : (PEST.initialFee || 0);
+  const premiumMultiplier = Number.isFinite(Number(ONE_TIME.pest.premiumMultiplier)) && Number(ONE_TIME.pest.premiumMultiplier) > 0
+    ? Number(ONE_TIME.pest.premiumMultiplier)
+    : 1;
+  const recurringEntryCost = Math.round((base + setupEquivalent) * 100) / 100;
+  const multipliedPrice = Math.round(recurringEntryCost * premiumMultiplier);
   const preUrgencyPrice = applyOneTimeFloor(
     multipliedPrice,
     ONE_TIME.pest.floor
@@ -3598,6 +3614,10 @@ function priceOneTimePest(property, options = {}) {
     afterHours,
     isRecurringCustomer,
     basePrice: Math.round(base * 100) / 100,
+    quarterlyPerApp: Math.round(base * 100) / 100,
+    setupEquivalent,
+    premiumMultiplier,
+    recurringEntryCost,
     baseSource,
     baselinePestBasePrice: baselinePest?.basePrice ?? null,
     selectedFloor: ONE_TIME.pest.floor,

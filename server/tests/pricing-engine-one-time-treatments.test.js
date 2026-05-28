@@ -7,7 +7,15 @@ const {
   priceOneTimePest,
   pricePestControl,
   priceFoamDrill,
+  constants,
 } = require('../services/pricing-engine');
+
+// One-time pest = max(floor, (quarterlyPerApp + setupEquivalent) × premiumMultiplier).
+// Keeps a one-off visit strictly above what a recurring customer pays on visit 1.
+function expectedOneTimePest(quarterlyPerApp) {
+  const { setupEquivalent, premiumMultiplier, floor } = constants.ONE_TIME.pest;
+  return Math.max(floor, Math.round((quarterlyPerApp + setupEquivalent) * premiumMultiplier));
+}
 
 function property(overrides = {}) {
   return calculatePropertyProfile({
@@ -35,13 +43,18 @@ function estimateInput(overrides = {}) {
 }
 
 describe('pricing engine one-time treatment rules', () => {
-  test('one-time pest preserves quarterly baseline, 1.75 multiplier, floor, and no zone multiplier', () => {
+  test('one-time pest = (quarterly baseline + setup) × premium, floor, and no zone multiplier', () => {
     const p = property();
     const recurringBase = pricePestControl(p, { frequency: 'quarterly', roachType: 'none' }).basePrice;
     const result = priceOneTimePest(p, { urgency: 'NONE', afterHours: false, isRecurringCustomer: false });
 
     expect(recurringBase).toBe(117);
-    expect(result.price).toBe(Math.max(199, Math.round(recurringBase * 1.75)));
+    expect(result.quarterlyPerApp).toBe(117);
+    expect(result.setupEquivalent).toBe(constants.PEST.initialFee);
+    expect(result.recurringEntryCost).toBe(recurringBase + constants.ONE_TIME.pest.setupEquivalent);
+    expect(result.price).toBe(expectedOneTimePest(recurringBase));
+    // One-time must cost strictly more than recurring visit 1 ($99 setup + quarterly rate).
+    expect(result.price).toBeGreaterThan(recurringBase + constants.PEST.initialFee);
     expect(result.discount?.appliedDiscounts || []).not.toContainEqual(expect.objectContaining({ type: 'waveguard' }));
 
     const zoneA = generateEstimate(estimateInput({ zone: 'A', services: { oneTimePest: { urgency: 'NONE' } } }));
@@ -53,11 +66,11 @@ describe('pricing engine one-time treatment rules', () => {
 
   test('one-time pest applies urgency but not WaveGuard tier discount', () => {
     const p = property();
-    const base = Math.max(199, Math.round(pricePestControl(p, { frequency: 'quarterly' }).basePrice * 1.75));
+    const base = expectedOneTimePest(pricePestControl(p, { frequency: 'quarterly' }).basePrice);
     const result = priceOneTimePest(p, { urgency: 'URGENT', afterHours: true, isRecurringCustomer: false });
 
     expect(result.urgencyMultiplier).toBe(2);
-    expect(result.price).toBe(Math.max(199, Math.round(base * 2)));
+    expect(result.price).toBe(Math.max(constants.ONE_TIME.pest.floor, Math.round(base * 2)));
   });
 
   test('one-time pest recurring-customer perk is 15% and is not applied twice', () => {
@@ -67,8 +80,8 @@ describe('pricing engine one-time treatment rules', () => {
       features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', nearWater: true, largeDriveway: true },
     });
     const recurringBase = pricePestControl(p, { frequency: 'quarterly' }).basePrice;
-    const preDiscount = Math.max(199, Math.round(recurringBase * 1.75));
-    const expected = Math.max(199, Math.round(preDiscount * 0.85));
+    const preDiscount = expectedOneTimePest(recurringBase);
+    const expected = Math.max(constants.ONE_TIME.pest.floor, Math.round(preDiscount * 0.85));
     const direct = priceOneTimePest(p, { urgency: 'NONE', isRecurringCustomer: true });
 
     expect(direct.recurringCustomerDiscountRate).toBe(0.15);

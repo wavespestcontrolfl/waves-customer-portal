@@ -328,18 +328,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 410,
+      "total": 518,
       "tmInstall": 0,
       "items": [
         {
           "name": "One-Time Pest",
-          "price": 410
+          "price": 518
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 410,
+      "year1": 518,
       "year2": 0
     }
   },
@@ -361,18 +361,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 199,
+      "total": 220,
       "tmInstall": 0,
       "items": [
         {
           "name": "One-Time Pest",
-          "price": 199
+          "price": 220
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 199,
+      "year1": 220,
       "year2": 0
     }
   },
