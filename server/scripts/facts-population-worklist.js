@@ -11,11 +11,17 @@
  *   ASTRO_REPO_DIR=/path/to/wavespestcontrol-astro \
  *     node server/scripts/facts-population-worklist.js
  *   node server/scripts/facts-population-worklist.js --json
+ *   node server/scripts/facts-population-worklist.js --fresh-mine   # see sub-threshold demand
  *
- * For prod data (run the miner first so the queue is populated):
+ * --fresh-mine ranks against a fresh, non-persisting mine instead of the
+ * persisted opportunity_queue. The queue only holds rows above minScoreToAct,
+ * so the default view under-reports facts gaps for cities whose pages don't yet
+ * clear the act threshold. Use --fresh-mine for facts-population planning.
+ *
+ * For prod data:
  *   railway run -s Postgres -- bash -c '
  *     DATABASE_URL=$DATABASE_PUBLIC_URL \
- *       node server/scripts/facts-population-worklist.js
+ *       node server/scripts/facts-population-worklist.js --fresh-mine
  *   '
  */
 
@@ -23,12 +29,13 @@ const db = require('../models/db');
 const worklist = require('../services/content/facts-population-worklist');
 
 function parseArgs(argv) {
-  return { json: argv.slice(2).includes('--json') };
+  const flags = argv.slice(2);
+  return { json: flags.includes('--json'), freshMine: flags.includes('--fresh-mine') };
 }
 
 async function main() {
   const args = parseArgs(process.argv);
-  const result = await worklist.build({ db });
+  const result = await worklist.build({ db, source: args.freshMine ? 'mine' : 'queue' });
 
   if (args.json) {
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
@@ -42,6 +49,7 @@ async function main() {
     console.log(`ERROR: ${s.error}`);
     return;
   }
+  console.log(`Source:                   ${s.source}${s.source === 'mine' ? ' (fresh mine — incl. sub-threshold)' : ' (persisted queue)'}`);
   console.log(`Opportunities scanned:    ${s.opportunities_scanned}`);
   console.log(`Blocked (facts-gated):    ${s.blocked_facts_gated}`);
   console.log(`Sufficient combinations:  ${s.combinations_sufficient}/${s.combinations_total}`);

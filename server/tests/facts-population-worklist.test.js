@@ -1,3 +1,5 @@
+jest.mock('../services/content-astro/facts-bank-auditor', () => ({ auditAll: jest.fn() }));
+const auditor = require('../services/content-astro/facts-bank-auditor');
 const wl = require('../services/content/facts-population-worklist');
 
 describe('facts-population-worklist rankGaps', () => {
@@ -61,5 +63,56 @@ describe('blockersFromMatrix', () => {
       gap_codes: ['city:city_file_template', 'county:invalid_schema'],
     });
     expect(blockers.map((b) => b.type).sort()).toEqual(['city', 'county']);
+  });
+});
+
+describe('build({ source: "mine" }) — ranks against a fresh mine, not the gated queue', () => {
+  test('surfaces sub-threshold facts-gated demand the persisted queue would drop', async () => {
+    auditor.auditAll.mockResolvedValue({
+      matrix: [
+        { city: 'parrish', service: 'pest-control', county: 'manatee-county', sufficient: false, gap_codes: ['city:city_file_template'] },
+        { city: 'sarasota', service: 'pest-control', county: 'sarasota-county', sufficient: true, gap_codes: [] },
+      ],
+      summary: { combinations_sufficient: 1, combinations_total: 2 },
+    });
+    // Fresh mine exposes every candidate, including ones below minScoreToAct
+    // (65 < 75) that the queue never persists.
+    const miner = {
+      mineAll: jest.fn().mockResolvedValue({
+        opportunities: [
+          { action_type: 'refresh_existing_page', city: 'parrish', service: 'pest', score: 65, page_url: '/pest-control-parrish-fl/', signal_metadata: { impressions: 200 } },
+          { action_type: 'create_or_refresh_city_service_page', city: 'sarasota', service: 'pest', score: 60, signal_metadata: { impressions: 100 } },
+          { action_type: 'add_internal_links', city: 'parrish', service: 'pest', score: 90 }, // not facts-gated → ignored
+        ],
+      }),
+    };
+    const fakeDb = () => { throw new Error('queue must not be read in mine mode'); };
+
+    const result = await wl.build({ db: fakeDb, source: 'mine', miner });
+
+    expect(miner.mineAll).toHaveBeenCalledWith(expect.objectContaining({ persist: false }));
+    expect(result.summary.source).toBe('mine');
+    // 2 facts-gated mined opps scanned (add_internal_links excluded).
+    expect(result.summary.opportunities_scanned).toBe(2);
+    // parrish×pest-control is blocked → parrish ranks; sarasota is sufficient → excluded.
+    const parrish = result.worklist.find((f) => f.file_id === 'parrish');
+    expect(parrish).toBeTruthy();
+    expect(parrish.sole_unlock_value).toBe(65);
+    expect(result.worklist.find((f) => f.file_id === 'sarasota')).toBeUndefined();
+  });
+
+  test('queue mode (default) still reads opportunity_queue', async () => {
+    auditor.auditAll.mockResolvedValue({
+      matrix: [{ city: 'parrish', service: 'pest-control', county: 'manatee-county', sufficient: false, gap_codes: ['city:city_file_template'] }],
+      summary: { combinations_sufficient: 0, combinations_total: 1 },
+    });
+    // Minimal knex-ish stub for the queue read chain.
+    const rows = [{ city: 'parrish', service: 'pest', action_type: 'refresh_existing_page', score: 80, page_url: '/x/', signal_metadata: { impressions: 50 }, status: 'pending' }];
+    const builder = { whereIn() { return this; }, select() { return Promise.resolve(rows); } };
+    const fakeDb = () => builder;
+
+    const result = await wl.build({ db: fakeDb, source: 'queue' });
+    expect(result.summary.source).toBe('queue');
+    expect(result.worklist.find((f) => f.file_id === 'parrish')).toBeTruthy();
   });
 });
