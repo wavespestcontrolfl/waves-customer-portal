@@ -78,6 +78,11 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   return flags;
 }
 
+const SMS_ONLY_FLAGS = new Set([
+  'no_sms_consent_captured',
+  'sms_consent_missing',
+]);
+
 function mergeTriageFlags(modelFlags, deterministicFlags) {
   return [...new Set([...(modelFlags || []), ...(deterministicFlags || [])])];
 }
@@ -88,9 +93,10 @@ function canAutoRoute(extraction, opts = {}) {
   const modelFlags = extraction.triage_flags || [];
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+  const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f));
 
-  if (finalFlags.length > 0) {
-    return { allowed: false, reason: 'triage_flags', flags: finalFlags };
+  if (appointmentBlockingFlags.length > 0) {
+    return { allowed: false, reason: 'triage_flags', flags: finalFlags, appointmentBlockingFlags };
   }
 
   const confidence = extraction.confidence || {};
@@ -116,6 +122,7 @@ module.exports = {
   computeDeterministicTriageFlags,
   mergeTriageFlags,
   canAutoRoute,
+  SMS_ONLY_FLAGS,
   SERVICE_AREA_COUNTIES,
   DEFAULT_CONFIDENCE_THRESHOLD,
   DEFAULT_ADDRESS_CONFIDENCE_THRESHOLD,

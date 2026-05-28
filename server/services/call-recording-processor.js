@@ -1745,6 +1745,7 @@ const CallRecordingProcessor = {
 
     // ── V2 routing gate (when enabled, evaluates v2 extraction for auto-route eligibility) ──
     let v2RoutingBlocked = false;
+    let v2SmsBlocked = false;
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Row = await db('call_log')
@@ -1780,6 +1781,7 @@ const CallRecordingProcessor = {
             v2RoutingBlocked = true;
             logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${finalFlags.join(', ')}`);
           } else if (!tcpa.canSms) {
+            v2SmsBlocked = true;
             logger.info(`[call-proc-v2] SMS blocked by TCPA gate for ${callSid}: ${tcpa.reason}`);
           }
         }
@@ -2041,8 +2043,11 @@ const CallRecordingProcessor = {
             appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
           }
 
-          // Only send the confirmation SMS if the schedule row landed.
-          if (scheduledServiceId) {
+          // Only send the confirmation SMS if the schedule row landed and TCPA gate allows it.
+          if (scheduledServiceId && v2SmsBlocked) {
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
+            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
+          } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
               appointmentResult = {

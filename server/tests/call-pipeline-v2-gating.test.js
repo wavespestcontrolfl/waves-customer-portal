@@ -293,6 +293,22 @@ describe('canAutoRoute', () => {
     expect(result.reason).toBe('not_confirmed');
   });
 
+  test('model no_sms_consent_captured flag does NOT block appointment', () => {
+    const e = validV2Extraction();
+    e.triage_flags = ['no_sms_consent_captured'];
+    const result = canAutoRoute(e);
+    expect(result.allowed).toBe(true);
+  });
+
+  test('model no_sms_consent_captured combined with real flag still blocks', () => {
+    const e = validV2Extraction();
+    e.triage_flags = ['no_sms_consent_captured', 'out_of_service_area'];
+    const result = canAutoRoute(e);
+    expect(result.allowed).toBe(false);
+    expect(result.appointmentBlockingFlags).toContain('out_of_service_area');
+    expect(result.appointmentBlockingFlags).not.toContain('no_sms_consent_captured');
+  });
+
   test('blocked when scheduling is offered', () => {
     const e = validV2Extraction();
     e.scheduling.status = 'offered';
