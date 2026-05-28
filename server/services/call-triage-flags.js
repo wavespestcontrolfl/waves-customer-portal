@@ -1,4 +1,4 @@
-const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte']);
+const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
 const DEFAULT_ADDRESS_CONFIDENCE_THRESHOLD = 0.6;
