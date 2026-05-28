@@ -24,7 +24,7 @@
 // Helpers under test are pure — no DB, no Stripe SDK, no Twilio. Each
 // lives in its own *-helpers / *-pricing module to keep the test
 // runtime fast and free of side-effect imports.
-const { computeChargeAmount, isCardMethodType, CARD_SURCHARGE_RATE, shouldSurcharge, computeRefundSurcharge, SURCHARGE_POLICY_VERSION } = require('../services/stripe-pricing');
+const { computeChargeAmount, isCardMethodType, CARD_SURCHARGE_RATE, shouldSurcharge, computeRefundSurcharge, buildSurchargeAmountDetails, SURCHARGE_POLICY_VERSION } = require('../services/stripe-pricing');
 const { isBillingDayMatch } = require('../services/billing-helpers');
 const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
@@ -135,6 +135,22 @@ describe('shouldSurcharge', () => {
     expect(shouldSurcharge('card', undefined)).toBe(false);
     expect(shouldSurcharge('us_bank_account', 'credit')).toBe(false);
     expect(shouldSurcharge('ach', 'credit')).toBe(false);
+  });
+});
+
+describe('buildSurchargeAmountDetails', () => {
+  test('uses Stripe preview boolean enforce_validation for positive surcharges', () => {
+    expect(buildSurchargeAmountDetails(300)).toEqual({
+      surcharge: {
+        amount: 300,
+        enforce_validation: true,
+      },
+    });
+  });
+
+  test('omits amount_details when no surcharge applies', () => {
+    expect(buildSurchargeAmountDetails(0)).toBeNull();
+    expect(buildSurchargeAmountDetails(null)).toBeNull();
   });
 });
 
