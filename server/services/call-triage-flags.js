@@ -248,11 +248,12 @@ function hasCanonicalWriteBlock(flags) {
 // stripped from BOTH sources — otherwise a stale model `out_of_service_area`
 // would still hard-veto an address AV just verified.
 const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
-  'missing_service_address',
-  'low_confidence_address',
-  'out_of_service_area',
-  'address_unverified',
-  'address_validation_unavailable',
+  'missing_service_address',         // deterministic
+  'low_confidence_address',          // deterministic
+  'address_unverified',              // deterministic (AV confirm_needed/missing/ambiguous)
+  'address_validation_unavailable',  // deterministic (AV api error)
+  'out_of_service_area',             // model + deterministic
+  'address_unverifiable',            // MODEL flag (schema enum / prompt). The model marks nearly every call address_unverifiable; AV accept/correct authoritatively resolves the address, so this must clear too or clean addresses never auto-route.
 ]);
 
 function suppressAddressFlagsForAV(flags, addressValidation) {
