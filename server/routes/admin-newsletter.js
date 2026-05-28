@@ -1307,6 +1307,23 @@ router.post('/events/merge', async (req, res, next) => {
     let merged = 0;
     let calendarsUpdated = 0;
     await db.transaction(async (trx) => {
+      // Lock + revalidate the primary inside the txn. A concurrent merge could
+      // have used THIS primary as its own duplicate after our preflight check;
+      // FOR UPDATE serializes against that, and the re-read rolls us back if
+      // the primary was already merged away (else we'd repoint calendars to a
+      // non-survivor and create a chained merge).
+      const lockedPrimary = await trx('events_raw')
+        .select('id', 'merged_into')
+        .where({ id: primaryId })
+        .forUpdate()
+        .first();
+      if (!lockedPrimary) {
+        throw new Error('merge conflict: primary event no longer exists — rolled back');
+      }
+      if (lockedPrimary.merged_into) {
+        throw new Error('merge conflict: primary was concurrently merged into another event — rolled back');
+      }
+
       // Conditional on merged_into IS NULL — if a concurrent merge claimed any
       // row between our SELECT and here, fewer rows update and we roll back
       // rather than clobber the other merge.
