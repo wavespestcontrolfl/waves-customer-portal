@@ -37,8 +37,8 @@ async function main() {
     return;
   }
 
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.GEMINI_API_KEY) {
-    console.error('GEMINI_API_KEY not present in env — run under the app service.');
+  if (!process.env.GEMINI_API_KEY) {
+    console.error('GEMINI_API_KEY not present — v2 extraction uses Gemini; run under the app service. Aborting (would otherwise report not_run for every call).');
     process.exit(1);
   }
 
@@ -62,8 +62,10 @@ async function main() {
       const e = res.extraction;
       const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e));
       const route = canAutoRoute(e);
+      // No customer PII (names/addresses) in logs — non-PII signals only.
+      const hasName = !!(e.caller.first_name || e.caller.last_name);
       console.log(`[${i + 1}] ${r.id}  status=valid (${ms}ms)`);
-      console.log(`     name=${e.caller.first_name || '—'} ${e.caller.last_name || ''} | county=${e.property.service_address.county || '—'} | service=${e.service_request.primary_service_category}`);
+      console.log(`     name_extracted=${hasName} | county=${e.property.service_address.county || '—'} | service=${e.service_request.primary_service_category}`);
       console.log(`     scheduling=${e.scheduling?.status || 'none'} | confidence=${e.confidence.overall} | sms_consent=${e.consent.sms_consent_given}`);
       console.log(`     would_auto_route=${route.allowed}${route.allowed ? '' : ' (' + (route.reason || '') + ')'} | flags=[${flags.join(', ')}]`);
     } else {
