@@ -27,17 +27,35 @@ const HALLUCINATED_CLAIM_PATTERNS = [
   { pattern: /\bEPA[-\s]approved\b/i, label: '"EPA-approved" claim' },
 ];
 
+// Decode the HTML entities a claim could hide behind so they can't slip
+// past the regexes — e.g. "Tickets are &#36;15" or "admission&nbsp;is&nbsp;free"
+// render to customers as the literal claim. Mirrors decodeHtmlEntities in
+// ai-property-lookup.js; numeric/named decoders run after &amp; so a
+// double-encoded "&amp;#36;" collapses to "$" too.
+function decodeEntities(text) {
+  return String(text ?? '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&dollar;/gi, '$')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
+}
+
 /**
  * Scan customer-facing body copy (HTML and/or plain text) for
  * AI-hallucinated factual claims the draft pipeline can't substantiate
  * from the DB. Returns one error string per distinct claim type detected
  * (deduped on label so a draft mentioning "$10" three times doesn't
- * produce three error rows). HTML tags are stripped before matching;
- * plain text passes through unchanged.
+ * produce three error rows). HTML tags are stripped and entities decoded
+ * before matching; plain text passes through unchanged.
  */
 function findHallucinatedClaims(body) {
   if (!body) return [];
-  const bodyText = body.replace(/<[^>]+>/g, ' ');
+  const bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ');
   const seen = new Set();
   const errors = [];
   for (const { pattern, label } of HALLUCINATED_CLAIM_PATTERNS) {

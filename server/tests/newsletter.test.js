@@ -705,6 +705,14 @@ describe('newsletter findHallucinatedClaims', () => {
     expect(errors).toHaveLength(1);
   });
 
+  test('decodes HTML entities before matching (Codex P2)', () => {
+    expect(findHallucinatedClaims('<p>Tickets are &#36;15 at the door</p>').length).toBeGreaterThan(0); // numeric &#36;
+    expect(findHallucinatedClaims('<p>Cover is &#x24;20</p>').length).toBeGreaterThan(0); // hex &#x24;
+    expect(findHallucinatedClaims('<p>Cover is &dollar;20</p>').length).toBeGreaterThan(0); // named &dollar;
+    expect(findHallucinatedClaims('<p>admission&nbsp;is&nbsp;free</p>').length).toBeGreaterThan(0); // &nbsp; word-break
+    expect(findHallucinatedClaims('<p>Tickets are &amp;#36;15</p>').length).toBeGreaterThan(0); // double-encoded
+  });
+
   test('returns empty for clean body', () => {
     const clean = '<h2>Bradenton Blues</h2><p>Live music on the riverwalk Saturday night — bring a chair.</p>';
     expect(findHallucinatedClaims(clean)).toEqual([]);
