@@ -41,6 +41,7 @@ const CALL_TRANSCRIPT_DIARIZATION_ENABLED = process.env.CALL_TRANSCRIPT_DIARIZAT
 const { computeDeterministicTriageFlags, mergeTriageFlags, canAutoRoute, hasCanonicalWriteBlock } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
+const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1478,15 +1479,31 @@ const CallRecordingProcessor = {
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
+    let v2AddressValidation = null;
     if (CALL_EXTRACTION_V2_ENABLED) {
       try {
         v2Result = await extractCallDataV2(transcription, contactPhone, {
           callStartedAt: call.created_at,
           callId: call.id,
         });
+        // Address validation runs in shadow on every valid extraction (no-ops
+        // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
+        // recorded for the promotion-readiness gate and reused by the routing
+        // gate below without a second API call.
+        if (v2Result?.status === 'valid' && v2Result.extraction) {
+          try {
+            v2AddressValidation = await validateAddress({
+              addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
+            });
+          } catch (avErr) {
+            logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
+            v2AddressValidation = { status: 'api_unavailable', error: avErr.message };
+          }
+        }
         const v2Update = {
           ai_extraction_enriched: v2Result.extraction ? JSON.stringify(v2Result.extraction) : null,
           ai_extraction_validation_errors: v2Result.errors ? JSON.stringify(v2Result.errors) : null,
+          ai_address_validation: v2AddressValidation ? JSON.stringify(v2AddressValidation) : null,
           v2_extraction_status: v2Result.status,
           ai_extraction_model: GEMINI_EXTRACTION_MODEL,
           ai_extraction_prompt_version: PROMPT_HASH,
@@ -1568,8 +1585,9 @@ const CallRecordingProcessor = {
           await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
-          const routingResult = canAutoRoute(v2Extraction, { contactPhone });
-          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone });
+          const addressValidation = v2AddressValidation;
+          const routingResult = canAutoRoute(v2Extraction, { contactPhone, addressValidation });
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
           const finalFlags = mergeTriageFlags(v2Extraction.triage_flags, deterministicFlags);
           const tcpa = checkTcpaConsent(v2Extraction);
           v2SmsBlocked = !tcpa.canSms;
@@ -1595,6 +1613,23 @@ const CallRecordingProcessor = {
             v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
             logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}${v2CanonicalWriteBlocked ? ' (canonical-write veto)' : ''}`);
           } else {
+            // Approved. When AV accepted or corrected the address, dispatch on
+            // Google's normalized address (e.g. the corrected zip), not the
+            // caller's raw input. The gate already cleared the address flags;
+            // this makes the appointment use the address the gate trusted.
+            if (addressValidation?.normalized
+              && (addressValidation.status === 'validated_accept' || addressValidation.status === 'corrected')) {
+              const n = addressValidation.normalized;
+              v2Extraction.property = v2Extraction.property || {};
+              v2Extraction.property.service_address = {
+                ...(v2Extraction.property.service_address || {}),
+                ...(n.street_line_1 ? { street_line_1: n.street_line_1 } : {}),
+                ...(n.city ? { city: n.city } : {}),
+                ...(n.state ? { state: n.state } : {}),
+                ...(n.postal_code ? { postal_code: n.postal_code } : {}),
+                ...(addressValidation.county ? { county: addressValidation.county } : {}),
+              };
+            }
             v2ApprovedExtraction = v2Extraction;
           }
         }
@@ -1911,6 +1946,11 @@ const CallRecordingProcessor = {
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
       if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
+      // Address was AV-normalized above when accepted/corrected; carry it into
+      // the flat fields the customer/appointment writers read.
+      if (v2Flat.address_line1) extracted.address_line1 = v2Flat.address_line1;
+      if (v2Flat.city) extracted.city = v2Flat.city;
+      if (v2Flat.zip) extracted.zip = v2Flat.zip;
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
     }
 

@@ -159,4 +159,15 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
   }
 }
 
-module.exports = { validateAddress, deriveStatus, STATUSES, VERSION };
+// Build Google AV `addressLines` from the extraction's nested service_address.
+// Two lines (street, then "city ST zip") so AV parses locality/postal cleanly.
+// Returns [] when there's no street AND no city — nothing worth validating.
+function buildAddressLines(serviceAddress) {
+  const sa = serviceAddress || {};
+  const line1 = [sa.street_line_1, sa.street_line_2].filter(Boolean).join(' ').trim();
+  const line2 = [sa.city, sa.state, sa.postal_code].filter(Boolean).join(' ').trim();
+  if (!line1 && !sa.city) return [];
+  return [line1, line2].filter(Boolean);
+}
+
+module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION };

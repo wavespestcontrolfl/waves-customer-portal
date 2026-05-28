@@ -49,16 +49,38 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   if (extraction.meta.is_voicemail) flags.push('voicemail');
   if (extraction.meta.is_spam) flags.push('spam_or_wrong_number');
 
-  if (!addr.street_line_1 && !addr.city && !addr.postal_code) {
-    flags.push('missing_service_address');
-  }
+  // Address flags. When Google Address Validation produced a decisive verdict
+  // (opts.addressValidation), it is authoritative for both address validity and
+  // service area — it supersedes the model's confidence guess and county string.
+  // Otherwise (validation disabled, no address to check, or the API errored) we
+  // fall back to the model/confidence signals.
+  const av = opts.addressValidation || null;
+  const avStatus = av?.status || null;
+  const avDecisive = avStatus && avStatus !== 'not_attempted' && avStatus !== 'api_unavailable';
 
-  if (typeof confidence.service_address === 'number' && confidence.service_address < addressThreshold) {
-    flags.push('low_confidence_address');
-  }
-
-  if (addr.county && !isInServiceAreaCounty(addr.county)) {
-    flags.push('out_of_service_area');
+  if (avDecisive) {
+    if (avStatus === 'out_of_service_area') {
+      flags.push('out_of_service_area');
+    } else if (avStatus === 'confirm_needed' || avStatus === 'missing_component' || avStatus === 'ambiguous') {
+      flags.push('address_unverified');
+    }
+    // validated_accept / corrected → clean, no address flag (the whole point:
+    // a corrected bad zip clears triage instead of holding the call).
+  } else {
+    if (!addr.street_line_1 && !addr.city && !addr.postal_code) {
+      flags.push('missing_service_address');
+    }
+    if (typeof confidence.service_address === 'number' && confidence.service_address < addressThreshold) {
+      flags.push('low_confidence_address');
+    }
+    if (addr.county && !isInServiceAreaCounty(addr.county)) {
+      flags.push('out_of_service_area');
+    }
+    // Validation was attempted with a real address but the API was unreachable.
+    // Don't silently auto-route an address we couldn't verify — hold for review.
+    if (avStatus === 'api_unavailable') {
+      flags.push('address_validation_unavailable');
+    }
   }
 
   if (scheduling.status === 'ambiguous') {
