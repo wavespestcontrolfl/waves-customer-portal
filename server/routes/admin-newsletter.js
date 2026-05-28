@@ -24,6 +24,7 @@ const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday,
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { createNewsletterDraft } = require('../services/newsletter-draft');
+const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 let Anthropic;
@@ -729,18 +730,31 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     // DB-locked event facts — AI-supplied dates/venues/URLs are overwritten
     // from events_raw, not trusted from the model.
     if (isFlagshipType(newsletterType)) {
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      let resolvedEventIds;
       if (Array.isArray(eventIds) && eventIds.length > 0) {
-        const validIds = eventIds.filter(
-          (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id),
-        );
-        if (validIds.length === 0) {
+        resolvedEventIds = eventIds.filter((id) => typeof id === 'string' && UUID_RE.test(id));
+        if (resolvedEventIds.length === 0) {
           return res.status(400).json({ error: 'eventIds must be valid UUIDs' });
         }
+      } else {
+        // One-click "Draft With AI" sends no events. Auto-source this week's
+        // approved/eligible events (same query the autopilot uses) so the
+        // flagship draft stays DB-locked instead of inviting the model to
+        // invent events.
+        const { scored } = await buildDigestPlan();
+        resolvedEventIds = scored.slice(0, 12).map((ev) => ev.id);
+      }
+
+      if (resolvedEventIds.length === 0) {
+        return res.status(400).json({
+          error: 'No approved events available for this week. Approve events in the Events tab or build a plan in the Digest Planner before drafting a flagship newsletter.',
+        });
       }
 
       const { draft } = await createNewsletterDraft({
         prompt,
-        eventIds,
+        eventIds: resolvedEventIds,
         newsletterType,
         audience,
         tone,
