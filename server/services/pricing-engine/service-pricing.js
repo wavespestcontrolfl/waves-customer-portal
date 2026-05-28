@@ -2,7 +2,7 @@
 // service-pricing.js — All service line pricing calculations
 // ============================================================
 const {
-  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_FREQS,
+  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
@@ -1656,25 +1656,29 @@ function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
   return { monthly: brackets[brackets.length - 1][tierIndex + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
 }
 
-function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options = {}) {
+function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, options = {}) {
   const turfK = lawnSqFt / 1000;
   const materialCostPerK = Number.isFinite(Number(options.lawnMaterialCostPerK))
     ? Math.max(0, Number(options.lawnMaterialCostPerK))
     : 8;
   const laborMinutesBase = Number.isFinite(Number(options.lawnLaborMinutesBase))
     ? Math.max(0, Number(options.lawnLaborMinutesBase))
-    : 12;
+    : LAWN_PRICING_V2.laborMinutesBase;
   const laborMinutesPerK = Number.isFinite(Number(options.lawnLaborMinutesPerK))
     ? Math.max(0, Number(options.lawnLaborMinutesPerK))
-    : 2.5;
+    : LAWN_PRICING_V2.laborMinutesPer1000Sqft;
+  const routeDensity = String(options.routeDensity || property.routeDensity || LAWN_PRICING_V2.defaultRouteDensity)
+    .toUpperCase();
   const routeDriveMinutes = Number.isFinite(Number(options.routeDriveMinutes))
     ? Math.max(0, Number(options.routeDriveMinutes))
-    : (Number(property.routeDriveMinutes) || GLOBAL.DRIVE_TIME);
+    : (Number.isFinite(Number(property.routeDriveMinutes))
+      ? Math.max(0, Number(property.routeDriveMinutes))
+      : (LAWN_PRICING_V2.routeDensityMinutes[routeDensity] ?? LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity]));
   const targetGrossMargin = Number.isFinite(Number(options.targetLawnGrossMargin))
     && Number(options.targetLawnGrossMargin) > 0
     && Number(options.targetLawnGrossMargin) < 1
     ? Number(options.targetLawnGrossMargin)
-    : 0.55;
+    : LAWN_PRICING_V2.targetCollectedMarginFloor;
   const features = property.features || {};
   const complexity = String(features.complexity || property.landscapeComplexity || '').toLowerCase();
   const shrubs = String(features.shrubs || property.shrubDensity || '').toLowerCase();
@@ -1686,7 +1690,7 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
     (shrubs === 'heavy' ? 5 : 0) +
     ((property.fenceType || features.gate || features.accessDifficulty || '').toString().toLowerCase().includes('privacy') || features.largeDriveway ? 5 : 0);
   const callbackReservePerVisit =
-    2 +
+    LAWN_PRICING_V2.callbackReservePerVisitDefault +
     (['POOR', 'DEFERRED'].includes(maintenance) ? 5 : 0) +
     (['HIGH', 'SEVERE', 'VERY_HIGH'].includes(pressure) ? 5 : 0);
 
@@ -1697,12 +1701,41 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
     ? (annualMaterialBudget * (lawnSqFt / 4500)) / visits
     : turfK * materialCostPerK;
   const laborMinutesPerVisit = laborMinutesBase + turfK * laborMinutesPerK + complexityMinutes;
-  const laborCostPerVisit = GLOBAL.LABOR_RATE * laborMinutesPerVisit / 60;
-  const driveCostPerVisit = GLOBAL.LABOR_RATE * routeDriveMinutes / 60;
-  const equipmentCostPerVisit = 4;
+  const laborRate = LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE;
+  const laborCostPerVisit = laborRate * laborMinutesPerVisit / 60;
+  const driveCostPerVisit = laborRate * routeDriveMinutes / 60;
+  const equipmentCostPerVisit = LAWN_PRICING_V2.equipmentReservePerVisit;
   const perVisitCost = materialCostPerVisit + laborCostPerVisit + driveCostPerVisit + equipmentCostPerVisit + callbackReservePerVisit;
-  const annualCost = visits * perVisitCost + GLOBAL.ADMIN_ANNUAL;
-  return Math.round((annualCost / (1 - targetGrossMargin)) * 100) / 100;
+  const annualMaterial = materialCostPerVisit * visits;
+  const annualLabor = laborCostPerVisit * visits;
+  const annualDrive = driveCostPerVisit * visits;
+  const annualEquipment = equipmentCostPerVisit * visits;
+  const annualCallbackReserve = callbackReservePerVisit * visits;
+  const annualAdmin = Number.isFinite(Number(options.adminAnnual))
+    ? Math.max(0, Number(options.adminAnnual))
+    : LAWN_PRICING_V2.adminAnnualDefault;
+  const annualCost = annualMaterial + annualLabor + annualDrive + annualEquipment + annualCallbackReserve + annualAdmin;
+  const minimumCollectedAnnualPriceFor55 = Math.round((annualCost / (1 - targetGrossMargin)) * 100) / 100;
+  return {
+    annualMaterial: roundMoney(annualMaterial),
+    annualLabor: roundMoney(annualLabor),
+    annualDrive: roundMoney(annualDrive),
+    annualEquipment: roundMoney(annualEquipment),
+    annualCallbackReserve: roundMoney(annualCallbackReserve),
+    annualAdmin: roundMoney(annualAdmin),
+    annualCost: roundMoney(annualCost),
+    minimumCollectedAnnualPriceFor55,
+    laborMinutesPerVisit: roundMoney(laborMinutesPerVisit),
+    routeDriveMinutes,
+    routeDensity,
+    targetCollectedMarginFloor: targetGrossMargin,
+    pricingMode: LAWN_PRICING_V2.pricingMode,
+    pricingVersion: LAWN_PRICING_V2.pricingVersion,
+  };
+}
+
+function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options = {}) {
+  return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPriceFor55;
 }
 
 function priceLawnCare(property, options = {}) {
@@ -1770,25 +1803,31 @@ function priceLawnCare(property, options = {}) {
     if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
       costFloorOpts.annualMaterialBudget = tierAnnualBudget;
     }
-    const costFloorAnnual = calcLawnAnnualCostFloor(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
-    const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
-    const ann = costFloorApplied ? costFloorAnnual : marketAnnual;
+    const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
+    const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPriceFor55;
+    const costFloorApplied = !!useLawnCostFloor;
+    const perApp = costFloorApplied
+      ? Math.ceil(costFloorAnnual / tc.freq)
+      : Math.round(marketAnnual / tc.freq * 100) / 100;
+    const ann = costFloorApplied ? perApp * tc.freq : marketAnnual;
     return {
       tier: t,
       index: tc.index,
       visits: tc.freq,
       freq: tc.freq,
-      perApp: Math.round(ann / tc.freq * 100) / 100,
+      perApp,
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       label: tc.label,
       recommended: t === selectedTier,
-      pricingBasis: market.pricingBasis,
+      pricingBasis: costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis,
       pricingSource: costFloorApplied ? 'COST_FLOOR' : market.pricingSource,
       marketMonthly,
       marketAnnual,
       costFloorAnnual,
       costFloorApplied,
+      costFloorDetails,
+      minimumCollectedAnnualPriceFor55: costFloorAnnual,
     };
   }).filter(Boolean);
   const tiers = includeHiddenTiers
@@ -1798,7 +1837,9 @@ function priceLawnCare(property, options = {}) {
   const monthly = selected.monthly;
   const annual = selected.annual;
   const perApp = selected.perApp;
-  const margin = annual > 0 ? (annual - annualCost) / annual : 0;
+  const selectedCosts = selected.costFloorDetails || {};
+  const selectedAnnualCost = Number.isFinite(Number(selectedCosts.annualCost)) ? Number(selectedCosts.annualCost) : annualCost;
+  const margin = annual > 0 ? (annual - selectedAnnualCost) / annual : 0;
   const customQuoteFlag = lawnSqFt > LAWN_TABLE_MAX_SQFT;
   const display = LAWN_TRACK_DISPLAY[normalizedTrack] || LAWN_TRACK_DISPLAY.st_augustine;
 
@@ -1820,7 +1861,7 @@ function priceLawnCare(property, options = {}) {
     selected,
     recommended: selected,
     wgMonthly: selected.monthly,
-    pricingBasis: selected.costFloorApplied ? 'COST_FLOOR_OVER_MARKET_TABLE' : selected.pricingBasis,
+    pricingBasis: selected.pricingBasis,
     pricingSource: selected.pricingSource,
     customQuoteFlag,
     notes: customQuoteFlag
@@ -1830,7 +1871,18 @@ function priceLawnCare(property, options = {}) {
     marketAnnual: selected.marketAnnual,
     costFloorAnnual: selected.costFloorAnnual,
     costFloorApplied: selected.costFloorApplied,
-    costs: { annualMaterial: scaledMaterial, annualLabor: Math.round(annualLabor), annualAdmin: GLOBAL.ADMIN_ANNUAL, total: Math.round(annualCost) },
+    costs: {
+      annualMaterial: roundMoney(selectedCosts.annualMaterial ?? scaledMaterial),
+      annualLabor: roundMoney(selectedCosts.annualLabor ?? annualLabor),
+      annualDrive: roundMoney(selectedCosts.annualDrive ?? 0),
+      annualEquipment: roundMoney(selectedCosts.annualEquipment ?? 0),
+      annualCallbackReserve: roundMoney(selectedCosts.annualCallbackReserve ?? 0),
+      annualAdmin: roundMoney(selectedCosts.annualAdmin ?? GLOBAL.ADMIN_ANNUAL),
+      total: roundMoney(selectedAnnualCost),
+    },
+    minimumCollectedAnnualPriceFor55: selected.minimumCollectedAnnualPriceFor55,
+    pricingMode: selectedCosts.pricingMode || (selected.costFloorApplied ? LAWN_PRICING_V2.pricingMode : undefined),
+    pricingVersion: selectedCosts.pricingVersion || (selected.costFloorApplied ? LAWN_PRICING_V2.pricingVersion : undefined),
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
   };

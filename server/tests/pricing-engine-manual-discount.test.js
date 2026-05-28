@@ -164,6 +164,34 @@ describe('pricing engine manual recurring discount', () => {
     expect(estimate.summary.oneTimeTotal).toBe(0);
   });
 
+  test('service-specific credits skip non-discountable Lawn V2 net floor lines', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+      serviceSpecificDiscounts: [{
+        source: 'catalog_preset',
+        presetKey: 'lawn_credit',
+        catalogName: 'Lawn Credit',
+        catalogCategory: 'service_specific_credit',
+        discountType: 'fixed_amount',
+        service: 'lawn_care',
+        requestedAmount: 50,
+        label: 'Lawn Credit',
+      }],
+    }));
+    const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
+    const credit = estimate.summary.serviceSpecificDiscounts.find((row) => row.service === 'lawn_care');
+
+    expect(lawn.annualAfterDiscount).toBe(lawn.annual);
+    expect(credit).toEqual(expect.objectContaining({
+      amount: 0,
+      capReason: 'non_discountable_service',
+    }));
+    expect(credit.warnings).toContain('service_specific_discount_service_not_discountable');
+  });
+
   test('manual eligibility-gated discounts require confirmation', () => {
     expect(() => generateEstimate(baseInput({
       manualDiscount: {

@@ -40,13 +40,17 @@ function roundCurrency(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
-// Tier discount applies only to lawn, pest, tree & shrub, mosquito, and
-// termite bait station. lawn_care_enhanced / lawn_care_premium are tier
-// variants of lawn_care that resolveDiscountKey emits.
-const TIER_DISCOUNT_ELIGIBLE = new Set([
-  ...WAVEGUARD.qualifyingServices,
+const LAWN_V2_NET_PRICE_SERVICES = new Set([
+  'lawn_care',
   'lawn_care_enhanced',
   'lawn_care_premium',
+]);
+
+// Tier discount applies to qualifying recurring services except Lawn V2.
+// Lawn still counts toward WaveGuard tier qualification, but its price is
+// already the net 55% collected-margin floor.
+const TIER_DISCOUNT_ELIGIBLE = new Set([
+  ...WAVEGUARD.qualifyingServices.filter(service => service !== 'lawn_care'),
 ]);
 
 function isTierDiscountEligible(serviceKey) {
@@ -79,7 +83,20 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
     appliedDiscounts: [],
     effectiveDiscount: 0,
     totalDiscount: 0,
+    discountable: true,
   };
+
+  if (LAWN_V2_NET_PRICE_SERVICES.has(serviceKey)) {
+    result.discountable = false;
+    result.requestedDiscountPercent = waveGuardTier.discount || 0;
+    result.appliedDiscountPercent = 0;
+    result.policy = 'LAWN_V2_NET_55_FLOOR_PRICE';
+    result.appliedDiscounts.push({
+      type: 'policy_exclusion',
+      reason: 'Lawn V2 price is already the net 55% collected-margin floor',
+    });
+    return result;
+  }
 
   // ── Excluded from % discount entirely ──
   if (WAVEGUARD.excludedFromPercentDiscount[serviceKey]) {
@@ -154,6 +171,8 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
   }
 
   result.totalDiscount = result.effectiveDiscount;
+  result.appliedDiscountPercent = result.effectiveDiscount;
+  result.requestedDiscountPercent = result.effectiveDiscount;
   return result;
 }
 
@@ -239,32 +258,10 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   };
 }
 
-// ── Validate discount for a full estimate (margin floor check) ─
-// Kept for Session 10 (COGS-based margin validation). Fires when
-// item.costs.total is populated.
+// Discount margin validation is retired. Final prices are computed by each
+// service pricer; discounts should not create margin warnings or blockers.
 function validateEstimateDiscounts(lineItems, waveGuardTier) {
-  const warnings = [];
-  for (const item of lineItems) {
-    if (item.discount && item.discount.effectiveDiscount > 0 && item.costs && item.costs.total) {
-      const basePrice = item.price ?? item.annual;
-      if (!Number.isFinite(basePrice) || basePrice <= 0) continue;
-      const discountedPrice = item.annualAfterDiscount
-        ?? item.priceAfterDiscount
-        ?? item.totalAfterDiscount
-        ?? (basePrice * (1 - item.discount.effectiveDiscount));
-      const margin = (discountedPrice - item.costs.total) / discountedPrice;
-      if (margin < GLOBAL.MARGIN_FLOOR) {
-        warnings.push({
-          service: item.service,
-          margin: Math.round(margin * 1000) / 1000,
-          discountedPrice: Math.round(discountedPrice),
-          cost: item.costs.total,
-          message: `${item.service} margin ${(margin * 100).toFixed(1)}% below ${(GLOBAL.MARGIN_FLOOR * 100).toFixed(0)}% floor after ${(item.discount.effectiveDiscount * 100).toFixed(0)}% discount`,
-        });
-      }
-    }
-  }
-  return warnings;
+  return [];
 }
 
 module.exports = {

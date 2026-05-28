@@ -101,7 +101,7 @@ function recurringServiceKey(svc = {}) {
 }
 
 function serviceCountsTowardWaveGuardTier(svc = {}) {
-  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
+  if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
   return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
 }
 
@@ -121,6 +121,41 @@ function hasWaveGuardSetupService(services = []) {
 
 function calculateAnnualPrepayAmount(monthlyRate) {
   return Math.round((parseFloat(monthlyRate || 0) || 0) * 12 * 100) / 100;
+}
+
+function normalizeEstimateData(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try { return JSON.parse(value) || {}; } catch { return {}; }
+  }
+  return value;
+}
+
+function estimateLineItemsFromData(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  return data.lineItems
+    || data.result?.lineItems
+    || data.engineResult?.lineItems
+    || data.estimate?.lineItems
+    || [];
+}
+
+function isNonDiscountableRecurringLine(item = {}) {
+  const annual = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
+  return annual > 0 && (
+    item.discountable === false ||
+    item.discount?.discountable === false ||
+    item.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE'
+  );
+}
+
+function nonDiscountableRecurringAnnualFloor(estimateData = {}) {
+  return Math.round(estimateLineItemsFromData(estimateData)
+    .filter(isNonDiscountableRecurringLine)
+    .reduce((sum, item) => {
+      const amount = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
+      return sum + (Number.isFinite(amount) && amount > 0 ? amount : 0);
+    }, 0) * 100) / 100;
 }
 
 function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, monthlyRate } = {}) {
@@ -304,11 +339,15 @@ const EstimateConverter = {
     let draftInvoiceId = null;
     let draftInvoiceAmount = null;
     try {
-      const annualPrepayAmount = resolveAnnualPrepayDraftAmount({
+      const annualPrepayAmountRaw = resolveAnnualPrepayDraftAmount({
         prepayInvoiceAmount: opts.prepayInvoiceAmount,
         annualTotal: estimate.annual_total,
         monthlyRate,
       });
+      const nonDiscountableFloor = nonDiscountableRecurringAnnualFloor(estimateData);
+      const annualPrepayAmount = billingTerm === 'prepay_annual'
+        ? Math.max(annualPrepayAmountRaw, nonDiscountableFloor)
+        : annualPrepayAmountRaw;
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
         : monthlyRate > 0;
@@ -407,6 +446,7 @@ module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
 module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
 module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
+module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;

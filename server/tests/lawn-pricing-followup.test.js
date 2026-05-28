@@ -448,7 +448,8 @@ describe('lawn pricing production follow-up', () => {
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
     expect(lawn.customQuoteFlag).toBe(true);
-    expect(lawn.pricingBasis).toBe('EXTRAPOLATED_ABOVE_TABLE_MAX');
+    expect(lawn.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
+    expect(lawn.marketAnnual).toBeGreaterThan(0);
     expect(estimate.notes).toContainEqual({
       type: 'LAWN_CUSTOM_QUOTE',
       text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
@@ -534,17 +535,73 @@ describe('lawn pricing production follow-up', () => {
     const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9 });
     const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9 });
 
-    // St. Augustine enhanced at 4,492 sqft ≈ $117/app
-    expect(stAug.selected.perApp).toBeGreaterThanOrEqual(116);
-    expect(stAug.selected.perApp).toBeLessThanOrEqual(118);
+    // St. Augustine enhanced at 4,492 sqft uses the 55% collected-margin floor.
+    expect(stAug.selected.perApp).toBe(89);
 
-    // Bermuda enhanced at 4,492 sqft ≈ $117/app
-    expect(bermuda.selected.perApp).toBeGreaterThanOrEqual(116);
-    expect(bermuda.selected.perApp).toBeLessThanOrEqual(118);
+    // Bermuda enhanced at 4,492 sqft uses the 55% collected-margin floor.
+    expect(bermuda.selected.perApp).toBe(89);
 
-    // Zoysia enhanced at 4,492 sqft ≈ $119/app
-    expect(zoysia.selected.perApp).toBeGreaterThanOrEqual(118);
-    expect(zoysia.selected.perApp).toBeLessThanOrEqual(120);
+    // Zoysia enhanced at 4,492 sqft has a slightly higher material budget.
+    expect(zoysia.selected.perApp).toBe(91);
+  });
+
+  test('dense route St. Augustine enhanced quote uses 55% floor as final customer price', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4250 }));
+    const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+
+    expect(lawn.selected.perApp).toBe(86);
+    expect(lawn.annual).toBe(774);
+    expect(lawn.monthly).toBe(64.5);
+    expect(lawn.costs.total).toBeGreaterThanOrEqual(347);
+    expect(lawn.costs.total).toBeLessThan(348);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(771);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(772);
+    expect(lawn.margin).toBeGreaterThanOrEqual(0.55);
+    expect(lawn.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
+    expect(lawn.selected.marketAnnual).toBeGreaterThan(lawn.annual);
+  });
+
+  test('Lawn V2 is net floor pricing and does not receive WaveGuard percent discounts', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 4250,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(estimate.waveGuard).toMatchObject({
+      tier: 'silver',
+      qualifyingCount: 2,
+      activeServices: ['pest_control', 'lawn_care'],
+    });
+    expect(lawn.annual).toBe(774);
+    expect(lawn.annualAfterDiscount).toBe(774);
+    expect(lawn.discount).toMatchObject({
+      discountable: false,
+      requestedDiscountPercent: 0.10,
+      appliedDiscountPercent: 0,
+      effectiveDiscount: 0,
+      policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+    });
+  });
+
+  test('manual recurring discounts exclude Lawn V2 net floor pricing', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 4250,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+      manualDiscount: { type: 'PERCENT', value: 10 },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.annualAfterDiscount).toBe(774);
+    expect(estimate.summary.manualDiscount.discountableBase).toBe(421.2);
+    expect(estimate.summary.manualDiscount.amount).toBe(42.12);
+    expect(estimate.summary.manualDiscount.excludedServices).toContain('lawn_care_enhanced');
   });
 
   test('requesting hidden tier without includeHiddenTiers falls back to enhanced', () => {

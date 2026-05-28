@@ -86,9 +86,6 @@ function attachPalmCountMetadata(result, resolution) {
 
 const MANUAL_RECURRING_DISCOUNT_ELIGIBLE = new Set([
   'pest_control',
-  'lawn_care',
-  'lawn_care_enhanced',
-  'lawn_care_premium',
   'mosquito',
   'tree_shrub',
 ]);
@@ -185,6 +182,27 @@ function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = 
         capped: true,
         capReason: 'duplicate_service_line_credit',
         warnings: uniqueStrings([...warnings, 'service_specific_discount_duplicate_skipped']),
+      });
+      continue;
+    }
+
+    if (target.discountable === false || target.discount?.discountable === false) {
+      applied.push({
+        source: credit.source || 'catalog_preset',
+        presetId: credit.presetId || null,
+        presetKey: credit.presetKey || null,
+        catalogName: credit.catalogName || credit.name || null,
+        catalogCategory: 'service_specific_credit',
+        discountType: credit.discountType || credit.discount_type || 'free_service',
+        service: target.service,
+        serviceLineId: target.id || target.service,
+        requestedAmount: roundMoney(credit.requestedAmount ?? 0),
+        amount: 0,
+        label: credit.label || credit.catalogName || credit.name || 'Service credit',
+        eligibility: credit.eligibility || null,
+        capped: true,
+        capReason: 'non_discountable_service',
+        warnings: uniqueStrings([...warnings, 'service_specific_discount_service_not_discountable']),
       });
       continue;
     }
