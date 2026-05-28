@@ -685,6 +685,32 @@ describe('newsletter lockEventFactsFromDb', () => {
     // The DB-locked eventUrl is untouched and authoritative
     expect(ev.eventUrl).toBe('https://example.com/blues');
   });
+
+  test('strips URLs when highlights is a single string, not an array (Codex P2)', () => {
+    const { locked } = lockEventFactsFromDb(
+      [{ eventId: id1, title: 'Bradenton Blues', highlights: 'Buy tickets at https://fake.example' }],
+      [dbRow()],
+    );
+    const ev = locked[0];
+    expect(ev.highlights).not.toMatch(/https?:\/\//i);
+    expect(ev.highlights).toBe('Buy tickets');
+  });
+
+  test('nulls a URL-only string highlight so no blank bullet renders (Codex P3)', () => {
+    const { locked } = lockEventFactsFromDb(
+      [{ eventId: id1, title: 'Bradenton Blues', highlights: 'at https://fake.example' }],
+      [dbRow()],
+    );
+    expect(locked[0].highlights).toBeNull();
+  });
+
+  test('drops URL-only items from an array of highlights', () => {
+    const { locked } = lockEventFactsFromDb(
+      [{ eventId: id1, title: 'Bradenton Blues', highlights: ['at https://fake.example', 'Live music all night'] }],
+      [dbRow()],
+    );
+    expect(locked[0].highlights).toEqual(['Live music all night']);
+  });
 });
 
 // ── Hallucinated-claim hard-block scanner ────────────────────────────

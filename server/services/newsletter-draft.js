@@ -260,7 +260,17 @@ function sanitizeCommentaryFields(ev) {
     if (typeof out[k] === 'string') out[k] = stripCommentaryUrls(out[k]);
   }
   if (Array.isArray(out.highlights)) {
-    out.highlights = out.highlights.map((h) => (typeof h === 'string' ? stripCommentaryUrls(h) : h));
+    // Strip URLs, then drop any bullet that's now empty (a URL-only item
+    // strips to '' and would render as a blank bullet).
+    out.highlights = out.highlights
+      .map((h) => (typeof h === 'string' ? stripCommentaryUrls(h) : h))
+      .filter((h) => !(typeof h === 'string' && h.trim() === ''));
+  } else if (typeof out.highlights === 'string') {
+    // assembleBeehiivNewsletter wraps a string highlights into an array and
+    // renders it. A URL-only string strips to '' — null it out so the
+    // "What to expect" block isn't rendered with a single blank bullet.
+    const stripped = stripCommentaryUrls(out.highlights);
+    out.highlights = stripped.trim() === '' ? null : stripped;
   }
   return out;
 }
