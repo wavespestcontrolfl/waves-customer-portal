@@ -62,6 +62,7 @@ const getInternalLinkExecutor = lazy('internal-link-pr-executor', './internal-li
 const getSitemap = lazy('sitemap-manager', '../seo/sitemap-manager');
 const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', './post-publish-visibility-worker');
 const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gate');
+const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -117,6 +118,31 @@ class AutonomousRunner {
     run.action_type = opp.action_type;
     run.shadow_mode = isShadow(opp.action_type);
     const claimToken = opp.claimed_at;
+
+    // 1a. Facts-sufficiency pre-gate. For content-generating city×service
+    // actions, refuse to draft unless the facts-bank has verified local facts
+    // to ground the claims. Insufficient → route to human review with gap
+    // codes so the facts can be populated. Fail-closed by design.
+    const factsSufficiency = getFactsSufficiency();
+    if (factsSufficiency) {
+      let factsCheck;
+      try {
+        factsCheck = await factsSufficiency.check(opp);
+      } catch (err) {
+        logger.warn(`[autonomous-runner] facts-sufficiency check threw: ${err.message}`);
+        factsCheck = { applicable: true, sufficient: false, reason: 'facts_check_error', gap_codes: [`threw:${err.message}`], notes: `facts check threw: ${err.message}` };
+      }
+      run.facts_sufficiency = factsCheck;
+      if (factsCheck.applicable && !factsCheck.sufficient) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: factsCheck.reason || 'facts_insufficient',
+          reviewer_notes: factsCheck.notes,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken });
+        return finalized;
+      }
+    }
 
     // 2. Compose brief.
     const briefBuilder = getBriefBuilder();
