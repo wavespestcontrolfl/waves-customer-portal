@@ -152,15 +152,17 @@ async function main() {
   }
 
   if (disagreements.length) {
-    console.log('\n── v1↔v2 DISAGREEMENTS (manual review) ──');
-    for (const d of disagreements.slice(0, 50)) {
+    // Criterion 6 requires EVERY mismatch be reviewable before promotion — print
+    // them all, never a truncated subset. (In the regime where the report could
+    // still pass, disagreements are ≤5% of the sample, so volume stays bounded.)
+    console.log(`\n── v1↔v2 DISAGREEMENTS (${disagreements.length} — review all before promoting) ──`);
+    for (const d of disagreements) {
       console.log(`  ${d.id}  v2_would_create=${d.v2WouldCreate} v1_did_create=${d.v1DidCreate} (${d.reason})`);
     }
-    if (disagreements.length > 50) console.log(`  …and ${disagreements.length - 50} more`);
   }
   if (phantomRisks.length) {
-    console.log('\n── PHANTOM-APPOINTMENT RISKS (should be empty) ──');
-    for (const p of phantomRisks.slice(0, 50)) {
+    console.log(`\n── PHANTOM-APPOINTMENT RISKS (${phantomRisks.length} — should be empty) ──`);
+    for (const p of phantomRisks) {
       console.log(`  ${p.id}  hasStreet=${p.street} overall=${p.overall} county=${p.county}`);
     }
   }
