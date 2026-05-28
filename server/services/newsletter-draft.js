@@ -204,6 +204,15 @@ async function searchGiphy(term) {
   } catch { return null; }
 }
 
+function safeImageUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString().replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  } catch { return null; }
+}
+
 function slugify(text) {
   return (text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 }
@@ -283,12 +292,13 @@ async function assembleBeehiivNewsletter(draft) {
     parts.push(`<h2 id="${anchorId}" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${ev.emoji || '🎯'} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
 
     // Event thumbnail (from events_raw.image_url) or GIF
-    if (ev.imageUrl) {
+    const thumbUrl = safeImageUrl(ev.imageUrl);
+    if (thumbUrl) {
       parts.push(`<div style="text-align:center;margin:8px 0 12px 0;">
-<img src="${ev.imageUrl}" alt="${(ev.title || '').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+<img src="${thumbUrl}" alt="${(ev.title || '').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
 </div>`);
     }
-    if (!ev.imageUrl) {
+    if (!thumbUrl) {
       const eventGif = await searchGiphy(ev.gifSearchTerm);
       if (eventGif) parts.push(gifBlock(eventGif, ev.gifCaption));
     }
