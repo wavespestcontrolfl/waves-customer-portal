@@ -140,6 +140,19 @@ function mergeServiceLabels(existingLabel, nextLabel) {
     : `${existing} & ${next}`;
 }
 
+function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
+  const apptTime = appointmentTime instanceof Date ? appointmentTime : new Date(appointmentTime);
+  const msUntil = apptTime.getTime() - now.getTime();
+  const hoursUntil = msUntil / 3600000;
+  const apptDateET = etDateString(apptTime);
+  const tomorrowET = etDateString(addETDays(now, 1));
+
+  return {
+    alreadyInside72hWindow: hoursUntil > 0 && hoursUntil <= 72.25,
+    alreadyInside24hWindow: hoursUntil > 0 && hoursUntil <= 24.25 && apptDateET === tomorrowET,
+  };
+}
+
 // ── Landline detection ──
 
 async function isLandline(customerId, phone) {
@@ -622,7 +635,9 @@ const AppointmentReminders = {
         return null;
       }
 
-      // Reset reminder flags
+      // Reset reminder flags. If we successfully send a reschedule notice
+      // below, we mark any already-due reminder windows as sent so cron does
+      // not immediately repeat the same appointment details.
       await db('appointment_reminders')
         .where({ id: record.id })
         .update({
@@ -648,7 +663,7 @@ const AppointmentReminders = {
         const time = formatTime(newApptTime);
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
-        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const sent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = contact.name || customer?.first_name || 'there';
           return renderRequiredTemplate('appointment_rescheduled', {
             first_name: firstName,
@@ -662,12 +677,49 @@ const AppointmentReminders = {
             entity_id: scheduledServiceId,
           });
         }, 'appointment_rescheduled', 'appointment_confirmation');
-        logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+        if (sent) {
+          await this.markRescheduleNoticeSent(scheduledServiceId);
+          logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+        }
       }
 
       return record;
     } catch (err) {
       logger.error(`[appt-remind] handleReschedule failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  async markRescheduleNoticeSent(scheduledServiceIds) {
+    try {
+      const ids = Array.isArray(scheduledServiceIds)
+        ? [...new Set(scheduledServiceIds.filter(Boolean))]
+        : [scheduledServiceIds].filter(Boolean);
+      if (!ids.length) return { updated: 0 };
+
+      const records = await db('appointment_reminders')
+        .whereIn('scheduled_service_id', ids)
+        .select('id', 'appointment_time');
+
+      const now = new Date();
+      let updated = 0;
+      for (const record of records || []) {
+        const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(record.appointment_time, now);
+        await db('appointment_reminders')
+          .where({ id: record.id })
+          .update({
+            reminder_72h_sent: alreadyInside72hWindow,
+            reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
+            reminder_24h_sent: alreadyInside24hWindow,
+            reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
+            updated_at: new Date(),
+          });
+        updated++;
+      }
+
+      return { updated };
+    } catch (err) {
+      logger.error(`[appt-remind] markRescheduleNoticeSent failed: ${err.message}`);
       return null;
     }
   },

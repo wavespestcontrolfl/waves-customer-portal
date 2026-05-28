@@ -3087,6 +3087,16 @@ async function syncRescheduleReminder(serviceId, date, window) {
   }
 }
 
+async function markRescheduleReminderNotified(serviceIds) {
+  try {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    await AppointmentReminders.markRescheduleNoticeSent(serviceIds);
+  } catch (err) {
+    const count = Array.isArray(serviceIds) ? serviceIds.length : 1;
+    logger.warn(`[dispatch] Reschedule SMS sent for ${count} appointment(s), but reminder notice sync failed: ${err.message}`);
+  }
+}
+
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
@@ -3155,6 +3165,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
             });
             notificationSent = !(msg?.blocked || msg?.sent === false);
             if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
+            if (notificationSent) {
+              await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
+            }
           } catch (err) {
             notificationError = err.message;
             logger.warn(`[dispatch] Series reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
@@ -3224,6 +3237,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           });
           notificationSent = !(msg?.blocked || msg?.sent === false);
           if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
+          if (notificationSent) {
+            await markRescheduleReminderNotified(req.params.serviceId);
+          }
         } catch (err) {
           notificationError = err.message;
           logger.warn(`[dispatch] Reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);

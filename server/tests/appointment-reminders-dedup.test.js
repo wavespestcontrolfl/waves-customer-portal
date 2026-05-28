@@ -13,12 +13,16 @@ jest.mock('../routes/admin-sms-templates', () => ({
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 function chain(overrides = {}) {
   return {
     where: jest.fn().mockReturnThis(),
+    whereIn: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    leftJoin: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
     first: jest.fn(),
     pluck: jest.fn(),
     update: jest.fn().mockResolvedValue(1),
@@ -175,5 +179,180 @@ describe('appointment reminder registration deduplication', () => {
     expect(sanitizeLookupError(
       'GET https://lookups.twilio.com/v2/PhoneNumbers/%2B19415551212 failed for +19415551212'
     )).toBe('GET https://lookups.twilio.com/v2/PhoneNumbers/[phone] failed for [phone]');
+  });
+});
+
+describe('appointment reminder reschedule windows', () => {
+  const fixedNow = new Date('2026-05-06T14:00:00.000Z'); // 10:00 AM ET
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    jest.useFakeTimers().setSystemTime(fixedNow);
+    db.raw = jest.fn().mockResolvedValue();
+    db.transaction = jest.fn(async (callback) => callback(db));
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function mockRescheduleRecord({ customer, sendResult } = {}) {
+    const reminder = {
+      id: 'reminder-reschedule',
+      scheduled_service_id: 'svc-reschedule',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-12T14:00:00.000Z'),
+      service_type: 'Pest Control',
+      reminder_72h_sent: true,
+      reminder_24h_sent: true,
+    };
+    const lookupReminder = chain({
+      first: jest.fn().mockResolvedValue(reminder),
+    });
+    const updateReminder = chain();
+    const finalReminderLookup = chain({
+      select: jest.fn().mockResolvedValue([{
+        id: reminder.id,
+        appointment_time: new Date('2026-05-07T13:00:00.000Z'),
+      }]),
+    });
+    const finalReminderUpdate = chain();
+    const reminderQueries = [lookupReminder, updateReminder, finalReminderLookup, finalReminderUpdate];
+
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue(customer || null),
+    });
+    const techQuery = chain({
+      first: jest.fn().mockResolvedValue({ tech_name: 'Sam' }),
+    });
+    const prefsQuery = chain({
+      first: jest.fn().mockResolvedValue({}),
+    });
+    const landlineQuery = chain({
+      first: jest.fn().mockResolvedValue(customer || null),
+    });
+    const customerQueries = [customerQuery, landlineQuery];
+    const scheduledServiceQueries = [techQuery];
+    const notificationPrefsQueries = [prefsQuery];
+
+    if (sendResult) {
+      sendCustomerMessage.mockResolvedValue(sendResult);
+      smsTemplatesRouter.getTemplate.mockResolvedValue('Rescheduled appointment');
+    }
+
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (table === 'customers') return customerQueries.shift();
+      if (table === 'scheduled_services') return scheduledServiceQueries.shift();
+      if (table === 'notification_prefs') return notificationPrefsQueries.shift();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    return { reminder, updateReminder, finalReminderUpdate };
+  }
+
+  test('silent reschedule inside the 24h window resets both reminder windows', async () => {
+    const { updateReminder } = mockRescheduleRecord();
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+      { sendNotification: false },
+    );
+
+    expect(updateReminder.where).toHaveBeenCalledWith({ id: 'reminder-reschedule' });
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('silent reschedule about 48h out resets both reminder windows', async () => {
+    const { updateReminder } = mockRescheduleRecord();
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-08T10:00',
+      { sendNotification: false },
+    );
+
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('reschedule outside 72h resets both reminder windows', async () => {
+    const { updateReminder } = mockRescheduleRecord();
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-10T10:00',
+      { sendNotification: false },
+    );
+
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('sent reschedule notice inside the 24h window marks both reminder windows sent', async () => {
+    const { finalReminderUpdate } = mockRescheduleRecord({
+      customer: {
+        id: 'customer-1',
+        first_name: 'Ada',
+        phone: '+19415551212',
+      },
+      sendResult: { sent: true },
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+    );
+
+    expect(finalReminderUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: expect.any(Date),
+      reminder_24h_sent: true,
+      reminder_24h_sent_at: expect.any(Date),
+    }));
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  test('failed reschedule notice leaves reminder windows pending', async () => {
+    const { updateReminder, finalReminderUpdate } = mockRescheduleRecord({
+      customer: {
+        id: 'customer-1',
+        first_name: 'Ada',
+        phone: '+19415551212',
+      },
+      sendResult: { sent: false, code: 'blocked' },
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+    );
+
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
+    }));
+    expect(finalReminderUpdate.update).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalled();
   });
 });
