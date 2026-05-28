@@ -1282,20 +1282,46 @@ router.post('/events/merge', async (req, res, next) => {
       return res.status(404).json({ error: 'no duplicate events found' });
     }
 
+    // A duplicate already merged into a DIFFERENT primary (stale UI / concurrent
+    // request) must not be silently re-pointed — that would corrupt provenance
+    // and leave already-rewritten calendars inconsistent. Reject the request.
+    const conflicts = presentDups.filter((id) => {
+      const mi = byId.get(id).merged_into;
+      return mi && mi !== primaryId;
+    });
+    if (conflicts.length > 0) {
+      return res.status(409).json({
+        error: 'some events are already merged into a different primary',
+        conflicts,
+      });
+    }
+    // Duplicates already merged into THIS primary are a no-op (idempotent).
+    const toMerge = presentDups.filter((id) => byId.get(id).merged_into !== primaryId);
+    if (toMerge.length === 0) {
+      return res.json({ success: true, primaryId, merged: 0, calendarsUpdated: 0, alreadyMerged: presentDups.length });
+    }
+
     const { rewriteCalendarEventIds } = require('../services/event-duplicates');
-    const mergeMap = new Map(presentDups.map((id) => [id, primaryId]));
+    const mergeMap = new Map(toMerge.map((id) => [id, primaryId]));
 
     let merged = 0;
     let calendarsUpdated = 0;
     await db.transaction(async (trx) => {
+      // Conditional on merged_into IS NULL — if a concurrent merge claimed any
+      // row between our SELECT and here, fewer rows update and we roll back
+      // rather than clobber the other merge.
       merged = await trx('events_raw')
-        .whereIn('id', presentDups)
+        .whereIn('id', toMerge)
+        .whereNull('merged_into')
         .update({
           admin_status: 'rejected',
           merged_into: primaryId,
           suppression_reason: `merged into ${primaryId}`,
           updated_at: new Date(),
         });
+      if (merged !== toMerge.length) {
+        throw new Error('merge conflict: a duplicate was concurrently merged — rolled back');
+      }
 
       // Rewrite any planned calendars that reference a merged id.
       const calendars = await trx('newsletter_calendar').select('id', 'event_ids');
