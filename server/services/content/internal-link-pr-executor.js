@@ -829,9 +829,11 @@ function htmlContainsCrawlableLink(html, targetUrl, anchorText) {
   const anchor = normalizeHtmlText(anchorText);
   if (!target || !anchor) return false;
   const renderedHtml = stripNonRenderedHtml(html);
+  const hiddenRanges = hiddenElementRanges(renderedHtml);
   const linkRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
   let match;
   while ((match = linkRe.exec(renderedHtml)) !== null) {
+    if (isIndexInRanges(match.index, hiddenRanges) || hasHiddenHtmlAttribute(match[1])) continue;
     const href = extractHref(match[1]);
     if (policy.normalizeInternalUrl(href) !== target) continue;
     if (normalizeHtmlText(stripTags(match[2])) === anchor) return true;
@@ -846,6 +848,70 @@ function stripNonRenderedHtml(value) {
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, '')
     .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '');
+}
+
+const VOID_HTML_TAGS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
+
+function hiddenElementRanges(html) {
+  const ranges = [];
+  const stack = [];
+  const tagRe = /<\s*(\/)?\s*([a-zA-Z][\w:-]*)([^>]*)>/g;
+  let match;
+  while ((match = tagRe.exec(String(html || ''))) !== null) {
+    const closing = Boolean(match[1]);
+    const tag = String(match[2] || '').toLowerCase();
+    const attrs = match[3] || '';
+    if (!tag) continue;
+    if (closing) {
+      const index = stack.map((item) => item.tag).lastIndexOf(tag);
+      if (index !== -1) {
+        const hiddenItems = stack.splice(index).filter((item) => item.hidden);
+        for (const item of hiddenItems) ranges.push([item.start, tagRe.lastIndex]);
+      }
+      continue;
+    }
+
+    const hidden = hasHiddenHtmlAttribute(attrs);
+    const selfClosing = /\/\s*$/.test(attrs) || VOID_HTML_TAGS.has(tag);
+    if (hidden && selfClosing) ranges.push([match.index, tagRe.lastIndex]);
+    if (!selfClosing) stack.push({ tag, hidden, start: match.index });
+  }
+  for (const item of stack.filter((entry) => entry.hidden)) {
+    ranges.push([item.start, String(html || '').length]);
+  }
+  return ranges;
+}
+
+function hasHiddenHtmlAttribute(attrs) {
+  const value = String(attrs || '');
+  if (/(^|\s)hidden(?:\s|=|$)/i.test(value)) return true;
+  if (/(^|\s)inert(?:\s|=|$)/i.test(value)) return true;
+  if (/\baria-hidden\s*=\s*["']?true["']?/i.test(value)) return true;
+  const styleMatch = value.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+  const style = String((styleMatch && (styleMatch[1] || styleMatch[2] || styleMatch[3])) || '').toLowerCase();
+  if (/(^|;)\s*display\s*:\s*none\b/.test(style)) return true;
+  if (/(^|;)\s*visibility\s*:\s*hidden\b/.test(style)) return true;
+  if (/(^|;)\s*content-visibility\s*:\s*hidden\b/.test(style)) return true;
+  return false;
+}
+
+function isIndexInRanges(index, ranges = []) {
+  return ranges.some(([start, end]) => index >= start && index < end);
 }
 
 function extractHref(attrs) {
@@ -911,4 +977,6 @@ module.exports._internals = {
   liveUrlForTask,
   htmlContainsCrawlableLink,
   stripNonRenderedHtml,
+  hiddenElementRanges,
+  hasHiddenHtmlAttribute,
 };

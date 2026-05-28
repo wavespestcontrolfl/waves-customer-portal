@@ -27,6 +27,8 @@ const {
   liveUrlForTask,
   htmlContainsCrawlableLink,
   stripNonRenderedHtml,
+  hiddenElementRanges,
+  hasHiddenHtmlAttribute,
 } = executor._internals;
 
 beforeEach(() => {
@@ -510,6 +512,33 @@ describe('internal-link dry-run executor helpers', () => {
       `${hidden}<p><a href="/pest-control-bradenton-fl/">Bradenton pest control</a></p>`,
       '/pest-control-bradenton-fl/',
       'Bradenton pest control'
+    )).toBe(true);
+  });
+
+  test('ignores anchors hidden by attributes or hidden ancestors during live verification', () => {
+    const target = '/pest-control-bradenton-fl/';
+    const anchor = 'Bradenton pest control';
+    const hiddenCases = [
+      `<a hidden href="${target}">${anchor}</a>`,
+      `<a inert href="${target}">${anchor}</a>`,
+      `<a aria-hidden="true" href="${target}">${anchor}</a>`,
+      `<a style="display:none" href="${target}">${anchor}</a>`,
+      `<a style="visibility: hidden" href="${target}">${anchor}</a>`,
+      `<div hidden><a href="${target}">${anchor}</a></div>`,
+      `<section style="display: none"><p><a href="${target}">${anchor}</a></p></section>`,
+      `<div aria-hidden="true"><span><a href="${target}">${anchor}</a></span></div>`,
+    ];
+
+    expect(hasHiddenHtmlAttribute('data-hidden="true"')).toBe(false);
+    expect(hasHiddenHtmlAttribute(' hidden')).toBe(true);
+    expect(hiddenElementRanges(`<div hidden><a href="${target}">${anchor}</a></div>`)).toHaveLength(1);
+    for (const html of hiddenCases) {
+      expect(htmlContainsCrawlableLink(html, target, anchor)).toBe(false);
+    }
+    expect(htmlContainsCrawlableLink(
+      `<div data-hidden="true"><a href="${target}">${anchor}</a></div>`,
+      target,
+      anchor
     )).toBe(true);
   });
 
