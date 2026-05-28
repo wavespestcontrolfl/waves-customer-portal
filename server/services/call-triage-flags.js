@@ -9,6 +9,35 @@ function isDialablePhone(value) {
   return String(value).replace(/\D/g, '').length >= 10;
 }
 
+// Role/shared mailboxes whose local-part legitimately won't contain a person's
+// name — don't treat these as a name↔email mismatch.
+const GENERIC_EMAIL_LOCALPARTS = new Set([
+  'info', 'office', 'sales', 'admin', 'contact', 'support', 'service',
+  'billing', 'accounts', 'accounting', 'hello', 'noreply', 'mail', 'email',
+]);
+
+// Detects when the extracted caller name is NOT corroborated by the email's
+// local-part — e.g. spoken "Jeanette" with email gennettryan@ (really Ryan
+// Gennett). We do NOT guess the right name (email-based inference is
+// unreliable); we only flag the contradiction so it routes to name_review
+// instead of auto-booking a name we can't corroborate. Conservative: skips
+// when there's no usable name, no name-shaped email, or a generic mailbox.
+function hasNameEmailMismatch(caller = {}) {
+  const email = String(caller.email || '').toLowerCase();
+  const at = email.indexOf('@');
+  if (at < 1) return false;
+  const local = email.slice(0, at).replace(/[^a-z]/g, '');
+  if (local.length < 4) return false;            // too short to reason about
+  if (GENERIC_EMAIL_LOCALPARTS.has(local)) return false;
+  const tokens = [caller.first_name, caller.last_name, caller.name_full]
+    .filter(Boolean)
+    .flatMap((n) => String(n).toLowerCase().split(/\s+/))
+    .map((t) => t.replace(/[^a-z]/g, ''))
+    .filter((t) => t.length >= 3);
+  if (tokens.length === 0) return false;          // no usable name to check
+  return !tokens.some((t) => local.includes(t));  // mismatch if none appear
+}
+
 // Normalized lookup: lowercase, " county" suffix stripped, whitespace collapsed.
 const SERVICE_AREA_COUNTIES_NORMALIZED = new Set(
   [...SERVICE_AREA_COUNTIES].map((c) => normalizeCounty(c))
@@ -82,6 +111,10 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // in, this fired on nearly every inbound call and sent everything to triage.
   if (!caller.phone_e164 && !isDialablePhone(opts.contactPhone)) {
     flags.push('caller_phone_missing');
+  }
+
+  if (hasNameEmailMismatch(caller)) {
+    flags.push('name_email_mismatch');
   }
 
   if (sentiment.lead_quality === 'spam_or_solicitation' || sentiment.lead_quality === 'wrong_number') {
@@ -184,6 +217,8 @@ module.exports = {
   SMS_ONLY_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   hasCanonicalWriteBlock,
+  hasNameEmailMismatch,
+  isDialablePhone,
   SERVICE_AREA_COUNTIES,
   normalizeCounty,
   isInServiceAreaCounty,

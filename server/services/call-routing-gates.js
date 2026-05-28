@@ -96,6 +96,7 @@ function buildTriageItem({
     spam_or_wrong_number: 'service_unknown',
     caller_phone_missing: 'customer_field_conflict',
     do_not_contact_requested: 'customer_field_conflict',
+    name_email_mismatch: 'name_review',
     voicemail: 'service_unknown',
   };
 

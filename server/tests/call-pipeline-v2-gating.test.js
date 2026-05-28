@@ -7,6 +7,7 @@ const {
   isInServiceAreaCounty,
   hasCanonicalWriteBlock,
   CANONICAL_WRITE_BLOCKING_FLAGS,
+  hasNameEmailMismatch,
 } = require('../services/call-triage-flags');
 
 const {
@@ -721,5 +722,58 @@ describe('side-effect guards', () => {
     const e = validV2Extraction();
     e.property.service_address.county = 'Lee';
     expect(canAutoRoute(e).allowed).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════
+// Name ↔ Email reconciliation (name_review)
+// ═══════════════════════════════════════════════════
+
+describe('hasNameEmailMismatch', () => {
+  test('spoken name not corroborated by email → mismatch (Jeanette vs gennettryan@)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'gennettryan@yahoo.com' })).toBe(true);
+  });
+  test('name corroborated by email → no mismatch', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mariar@gmail.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'bsmith@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Doe', email: 'john.doe@x.com' })).toBe(false);
+  });
+  test('correct name for the Gennett call → no mismatch (both tokens present)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Ryan', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(false);
+  });
+  test('generic/role mailbox → never a mismatch', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'info@company.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'office@x.com' })).toBe(false);
+  });
+  test('no usable signal → no mismatch (null email, null name, short local-part)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: null })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: null, last_name: null, email: 'gennettryan@yahoo.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Al', last_name: null, email: 'xy@x.com' })).toBe(false);
+  });
+});
+
+describe('name_email_mismatch in routing', () => {
+  test('flags name_email_mismatch and blocks auto-route', () => {
+    const e = validV2Extraction();
+    e.caller.first_name = 'Jeanette';
+    e.caller.last_name = null;
+    e.caller.email = 'gennettryan@yahoo.com';
+    const flags = computeDeterministicTriageFlags(e, { contactPhone: '+19415551234' });
+    expect(flags).toContain('name_email_mismatch');
+    expect(canAutoRoute(e, { contactPhone: '+19415551234' }).allowed).toBe(false);
+  });
+
+  test('name_email_mismatch is appointment-blocking, not SMS-only', () => {
+    const e = validV2Extraction();
+    e.caller.first_name = 'Jeanette';
+    e.caller.last_name = null;
+    e.caller.email = 'gennettryan@yahoo.com';
+    const r = canAutoRoute(e, { contactPhone: '+19415551234' });
+    expect(r.appointmentBlockingFlags).toContain('name_email_mismatch');
+  });
+
+  test('maps to name_review triage category', () => {
+    const item = buildTriageItem({ callLogId: 'x', flag: 'name_email_mismatch', extraction: { meta: { call_summary: 's' } } });
+    expect(item.category).toBe('name_review');
   });
 });
