@@ -360,6 +360,7 @@ app.use('/api/admin/gbp', require('./routes/admin-gbp'));
 app.use('/api/admin/automations', require('./routes/admin-automations'));
 app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
+app.use('/api/admin/triage', require('./routes/admin-triage'));
 
 app.use('/api/admin/contracts', require('./routes/admin-contracts'));
 app.use('/api/admin/invoices', require('./routes/admin-invoices'));
