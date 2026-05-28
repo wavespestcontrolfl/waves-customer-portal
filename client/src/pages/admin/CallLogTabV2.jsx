@@ -73,10 +73,6 @@ function parseAiExtraction(call) {
   }
 }
 
-function namePartsMatch(a, b) {
-  return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
-}
-
 function getCallDisplayName(call) {
   const linkedName = call.first_name
     ? `${call.first_name} ${call.last_name || ""}`.trim()
@@ -85,15 +81,6 @@ function getCallDisplayName(call) {
   const extractedName = extraction?.first_name
     ? `${extraction.first_name} ${extraction.last_name || ""}`.trim()
     : "";
-
-  if (
-    call.direction === "outbound" &&
-    linkedName &&
-    extractedName &&
-    !namePartsMatch(extraction.first_name, call.first_name)
-  ) {
-    return `${extractedName} (${linkedName})`;
-  }
 
   if (linkedName) return linkedName;
   if (extractedName) return extractedName;
