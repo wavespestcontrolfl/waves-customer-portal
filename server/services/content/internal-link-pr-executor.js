@@ -103,32 +103,51 @@ class InternalLinkPrExecutor {
     if (!selected.length) return { status: 'no_candidates', count: 0, results: [] };
 
     const branch = internalLinkBranchName(selected);
-    await GitHubClient.createBranch(branch);
-    const commits = [];
-    for (const item of selected) {
-      const commit = await GitHubClient.putFile({
-        path: item.task.source_file,
-        content: item.patchedContent,
-        message: `chore(seo): add internal link to ${item.targetUrl}`,
-        branch,
-        sha: item.source.sha,
+    const reserved = await this._reserveTasksForPr(selected, { branch });
+    if (!reserved) return { status: 'reservation_conflict', count: 0, results: [] };
+
+    let pr = null;
+    let headSha = null;
+    try {
+      await GitHubClient.createBranch(branch);
+      const commits = [];
+      for (const item of selected) {
+        const commit = await GitHubClient.putFile({
+          path: item.task.source_file,
+          content: item.patchedContent,
+          message: `chore(seo): add internal link to ${item.targetUrl}`,
+          branch,
+          sha: item.source.sha,
+        });
+        commits.push(commit);
+      }
+
+      pr = await GitHubClient.createPr({
+        head: branch,
+        title: internalLinkPrTitle(selected),
+        body: buildInternalLinkPrBody({ branch, selected }),
       });
-      commits.push(commit);
+      headSha = pr?.head?.sha || commits.map((commit) => commit?.commit?.sha).filter(Boolean).at(-1) || null;
+      await requestCodexReview(pr, headSha, selected);
+
+      await this._markTasksPrOpen(selected, {
+        pr,
+        branch,
+        commitSha: headSha,
+      });
+    } catch (err) {
+      if (pr?.html_url) {
+        await this._markTasksPrOpen(selected, {
+          pr,
+          branch,
+          commitSha: headSha,
+          reviewerNotes: `Astro internal-link PR opened but follow-up failed: ${err.message}. Confirm Codex review manually before merge.`,
+        });
+      } else {
+        await this._markReservedTasksFailed(selected, err);
+      }
+      throw err;
     }
-
-    const pr = await GitHubClient.createPr({
-      head: branch,
-      title: internalLinkPrTitle(selected),
-      body: buildInternalLinkPrBody({ branch, selected }),
-    });
-    const headSha = pr?.head?.sha || commits.map((commit) => commit?.commit?.sha).filter(Boolean).at(-1) || null;
-    await requestCodexReview(pr, headSha, selected);
-
-    await this._markTasksPrOpen(selected, {
-      pr,
-      branch,
-      commitSha: headSha,
-    });
 
     return {
       status: 'pr_open',
@@ -211,19 +230,47 @@ class InternalLinkPrExecutor {
     await db('content_internal_link_tasks').where({ id: taskId }).update(patch);
   }
 
-  async _markTasksPrOpen(selected, { pr, branch, commitSha }) {
+  async _reserveTasksForPr(selected, { branch }) {
+    const ids = selected.map((item) => item.task.id).filter(Boolean);
+    if (!ids.length) return false;
+    const updated = await db('content_internal_link_tasks')
+      .whereIn('id', ids)
+      .where('status', 'patch_candidate')
+      .update({
+        status: 'pr_reserved',
+        pr_branch: branch,
+        executor_version: PR_EXECUTOR_VERSION,
+        updated_at: new Date(),
+      });
+    return Number(updated || 0) === ids.length;
+  }
+
+  async _markTasksPrOpen(selected, { pr, branch, commitSha, reviewerNotes = null }) {
     const ids = selected.map((item) => item.task.id).filter(Boolean);
     if (!ids.length) return;
     await db('content_internal_link_tasks')
       .whereIn('id', ids)
-      .where('status', 'patch_candidate')
+      .where('status', 'pr_reserved')
       .update({
         status: 'pr_open',
         astro_pr_url: pr?.html_url || null,
         pr_branch: branch,
         pr_commit_sha: commitSha || null,
         executor_version: PR_EXECUTOR_VERSION,
-        reviewer_notes: `Astro internal-link PR opened: ${pr?.html_url || 'unknown'}. Merge only after Codex and editorial review.`,
+        reviewer_notes: reviewerNotes || `Astro internal-link PR opened: ${pr?.html_url || 'unknown'}. Merge only after Codex and editorial review.`,
+        updated_at: new Date(),
+      });
+  }
+
+  async _markReservedTasksFailed(selected, err) {
+    const ids = selected.map((item) => item.task.id).filter(Boolean);
+    if (!ids.length) return;
+    await db('content_internal_link_tasks')
+      .whereIn('id', ids)
+      .where('status', 'pr_reserved')
+      .update({
+        status: 'failed',
+        failure_reason: `internal_link_pr_open_failed:${String(err?.message || err).slice(0, 500)}`,
         updated_at: new Date(),
       });
   }
@@ -603,7 +650,11 @@ async function requestCodexReview(pr, headSha, selected) {
     '',
     `Tasks: ${selected.map((item) => item.task.id).filter(Boolean).join(', ') || 'n/a'}`,
   ].join('\n');
-  await GitHubClient.createIssueComment(pr.number, body);
+  try {
+    await GitHubClient.createIssueComment(pr.number, body);
+  } catch (err) {
+    logger.warn(`[internal-link-pr-executor] failed to request Codex review for PR #${pr.number}: ${err.message}`);
+  }
 }
 
 module.exports = new InternalLinkPrExecutor();
