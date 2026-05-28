@@ -1,0 +1,87 @@
+const {
+  GRASS_TYPE_LABELS,
+  grassTypeLabel,
+  loadCustomerGrassContext,
+} = require('../services/lawn-grass-context');
+
+// Minimal knex stub: knex(table).where(...).first() resolves to the
+// configured row (or null) for that table.
+function fakeKnex(rows) {
+  return (table) => ({
+    where() { return this; },
+    first() { return Promise.resolve(Object.prototype.hasOwnProperty.call(rows, table) ? rows[table] : null); },
+  });
+}
+
+describe('lawn-grass-context', () => {
+  test('grassTypeLabel maps canonical keys and passes through unknowns', () => {
+    expect(grassTypeLabel('st_augustine')).toBe('St. Augustine');
+    expect(grassTypeLabel('bermuda')).toBe('Bermuda');
+    expect(grassTypeLabel('zoysia')).toBe('Zoysia');
+    expect(grassTypeLabel('bahia')).toBe('Bahia');
+    expect(grassTypeLabel(null)).toBe(null);
+    expect(grassTypeLabel('weird_value')).toBe('weird_value');
+    expect(GRASS_TYPE_LABELS.unknown).toBe('Unknown');
+  });
+
+  test('reads the active turf profile as the canonical source', async () => {
+    const knex = fakeKnex({
+      customer_turf_profiles: {
+        grass_type: 'bermuda',
+        track_key: 'bermuda',
+        sun_exposure: 'full_sun',
+        irrigation_type: 'in_ground',
+        lawn_sqft: 8200,
+      },
+      customers: { lawn_type: 'St. Augustine', property_sqft: 5000 },
+    });
+
+    const ctx = await loadCustomerGrassContext('cust-1', knex);
+    expect(ctx).toEqual({
+      grassType: 'bermuda',
+      grassTypeLabel: 'Bermuda',
+      trackKey: 'bermuda',
+      sunExposure: 'full_sun',
+      irrigationSystem: 'in_ground',
+      propertySqft: 8200,
+    });
+  });
+
+  test('falls back to customers.lawn_type / property_sqft when no profile', async () => {
+    const knex = fakeKnex({
+      customer_turf_profiles: null,
+      customers: { lawn_type: 'zoysia', property_sqft: 6400 },
+    });
+
+    const ctx = await loadCustomerGrassContext('cust-2', knex);
+    expect(ctx.grassType).toBe('zoysia');
+    expect(ctx.grassTypeLabel).toBe('Zoysia');
+    expect(ctx.trackKey).toBe(null);
+    expect(ctx.sunExposure).toBe(null);
+    expect(ctx.irrigationSystem).toBe(null);
+    expect(ctx.propertySqft).toBe(6400);
+  });
+
+  test('returns an all-null context for a missing customerId', async () => {
+    const knex = fakeKnex({});
+    const ctx = await loadCustomerGrassContext(null, knex);
+    expect(ctx).toEqual({
+      grassType: null,
+      grassTypeLabel: null,
+      trackKey: null,
+      sunExposure: null,
+      irrigationSystem: null,
+      propertySqft: null,
+    });
+  });
+
+  test('profile grass_type wins over customers.lawn_type', async () => {
+    const knex = fakeKnex({
+      customer_turf_profiles: { grass_type: 'bahia', track_key: 'bahia' },
+      customers: { lawn_type: 'st_augustine', property_sqft: 3000 },
+    });
+    const ctx = await loadCustomerGrassContext('cust-3', knex);
+    expect(ctx.grassType).toBe('bahia');
+    expect(ctx.propertySqft).toBe(3000); // falls back to customers when profile has no lawn_sqft
+  });
+});

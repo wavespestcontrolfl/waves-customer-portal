@@ -15,6 +15,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { loadCustomerGrassContext } = require('./lawn-grass-context');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -508,18 +509,23 @@ async function computeNeighborhoodBenchmarks() {
   const stats = { segments: 0 };
 
   try {
-    // Get all assessed customers with address info
+    // Get all assessed customers with address info. Grass type lives on
+    // customer_turf_profiles, so left-join it rather than reading a
+    // non-existent customers.grass_type column.
     const customers = await db('customers as c')
       .join('lawn_assessments as la', 'c.id', 'la.customer_id')
+      .leftJoin('customer_turf_profiles as tp', function () {
+        this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
+      })
       .where({ 'la.confirmed_by_tech': true })
-      .select('c.id', 'c.zip', 'c.city', 'c.grass_type', 'la.overall_score', 'la.is_baseline', 'la.service_date')
+      .select('c.id', 'c.zip', 'c.city', 'tp.grass_type', 'la.overall_score', 'la.is_baseline', 'la.service_date')
       .orderBy('la.service_date', 'asc');
 
     // Segment by zip + grass_type
     const segments = {};
     for (const c of customers) {
       const zip = c.zip || 'unknown';
-      const grass = c.grass_type || 'St. Augustine';
+      const grass = c.grass_type || 'unknown';
       const key = `${zip}|${slugify(grass)}`;
 
       if (!segments[key]) {
@@ -593,8 +599,9 @@ async function getCustomerBenchmark(customerId) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return null;
 
+    const grassContext = await loadCustomerGrassContext(customerId);
     const zip = customer.zip || 'unknown';
-    const grass = customer.grass_type || 'St. Augustine';
+    const grass = grassContext.grassType || 'unknown';
     const key = `${zip}|${slugify(grass)}`;
 
     const benchmark = await db('neighborhood_benchmarks').where({ segment_key: key }).first();
@@ -790,6 +797,8 @@ async function getTechFieldContext(customerId) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return null;
 
+    const grassContext = await loadCustomerGrassContext(customerId);
+
     // Recent assessments for this customer
     const recentAssessments = await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
@@ -798,9 +807,12 @@ async function getTechFieldContext(customerId) {
       .select('service_date', 'overall_score', 'turf_density', 'weed_suppression', 'color_health',
         'fungus_control', 'thatch_level', 'observations', 'ai_summary', 'season');
 
-    // Protocol context from wiki
-    const track = customer.grass_track || 'A';
-    const protocol = await db('protocol_performance').where({ grass_track: track }).first();
+    // Protocol context from wiki. track_key is the protocol track id; may be
+    // null when the customer has no turf profile.
+    const track = grassContext.trackKey || null;
+    const protocol = track
+      ? await db('protocol_performance').where({ grass_track: track }).first()
+      : null;
 
     // Relevant product efficacy for products likely to be used
     const topProducts = await db('product_efficacy')
@@ -825,7 +837,7 @@ async function getTechFieldContext(customerId) {
     } catch { /* ignore */ }
 
     return {
-      customer: { name: `${customer.first_name} ${customer.last_name}`, grassTrack: track, grassType: customer.grass_type },
+      customer: { name: `${customer.first_name} ${customer.last_name}`, grassTrack: track, grassType: grassContext.grassTypeLabel },
       recentAssessments: recentAssessments.map(a => ({
         date: a.service_date, overallScore: a.overall_score, summary: a.ai_summary,
         observations: a.observations, season: a.season,
