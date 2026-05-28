@@ -618,6 +618,20 @@ function canPublishMetadataRewrite(draft, brief = {}) {
   );
 }
 
+/**
+ * Read the LIVE page's frontmatter from the Astro repo. Used by guardrails to
+ * enforce brand-token / multi-domain rules against the real page being
+ * refreshed (the refresh draft carries only editable meta). Returns {} if the
+ * target can't be resolved or read.
+ */
+async function getLiveFrontmatter(targetUrlOrPath) {
+  const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (!filePath) return {};
+  const existing = await gh.getFile(filePath);
+  if (!existing) return {};
+  return fm.parse(existing.content).data || {};
+}
+
 function canPublishRefresh(draft, brief = {}) {
   const actionType = String(brief.action_type || '').trim();
   return !!(
@@ -1170,6 +1184,7 @@ module.exports = {
   publishOrUpdatePage,
   publishMetadataRewrite,
   publishRefresh,
+  getLiveFrontmatter,
   canPublishDraftBrief,
   canPublishMetadataRewrite,
   canPublishRefresh,

@@ -166,30 +166,9 @@ class AutonomousRunner {
       }
     }
 
-    // 1b. Facts-sufficiency pre-gate. For content-generating city×service
-    // actions, refuse to draft unless the facts-bank has verified local facts
-    // to ground the claims. Insufficient → route to human review with gap
-    // codes so the facts can be populated. Fail-closed by design.
-    const factsSufficiency = getFactsSufficiency();
-    if (factsSufficiency) {
-      let factsCheck;
-      try {
-        factsCheck = await factsSufficiency.check(opp);
-      } catch (err) {
-        logger.warn(`[autonomous-runner] facts-sufficiency check threw: ${err.message}`);
-        factsCheck = { applicable: true, sufficient: false, reason: 'facts_check_error', gap_codes: [`threw:${err.message}`], notes: `facts check threw: ${err.message}` };
-      }
-      run.facts_sufficiency = factsCheck;
-      if (factsCheck.applicable && !factsCheck.sufficient) {
-        const finalized = await finalize(run, t0, {
-          outcome: 'skipped_gate_fail',
-          skip_reason: factsCheck.reason || 'facts_insufficient',
-          reviewer_notes: factsCheck.notes,
-        });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken });
-        return finalized;
-      }
-    }
+    // (Facts-sufficiency runs AFTER brief composition — the decision-router can
+    // change the final action_type, so the gate must key on brief.action_type,
+    // not the claimed opp.action_type. See step 2b below.)
 
     // 2. Compose brief.
     const briefBuilder = getBriefBuilder();
@@ -213,6 +192,33 @@ class AutonomousRunner {
     run.page_type = brief.page_type;
     run.action_type = brief.action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
+
+    // 2b. Facts-sufficiency gate. Keyed on the FINAL (router-decided)
+    // action_type — for content-generating city×service actions, refuse to
+    // draft unless the facts-bank has verified local facts to ground the
+    // claims. Sets run.facts_sufficiency, which the claims-ledger gate (after
+    // dispatch) keys on. Insufficient → human review. Fail-closed by design.
+    const factsSufficiency = getFactsSufficiency();
+    if (factsSufficiency) {
+      const finalOpp = { ...opp, action_type: brief.action_type, city: brief.city || opp.city, service: brief.service || opp.service };
+      let factsCheck;
+      try {
+        factsCheck = await factsSufficiency.check(finalOpp);
+      } catch (err) {
+        logger.warn(`[autonomous-runner] facts-sufficiency check threw: ${err.message}`);
+        factsCheck = { applicable: true, sufficient: false, reason: 'facts_check_error', gap_codes: [`threw:${err.message}`], notes: `facts check threw: ${err.message}` };
+      }
+      run.facts_sufficiency = factsCheck;
+      if (factsCheck.applicable && !factsCheck.sufficient) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: factsCheck.reason || 'facts_insufficient',
+          reviewer_notes: factsCheck.notes,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken });
+        return finalized;
+      }
+    }
 
     // 2a. Router blocked the action — record + skip.
     if (brief.action_type === 'do_not_publish') {
@@ -369,9 +375,26 @@ class AutonomousRunner {
     // every body-content action. P0/P1 → human review.
     const contentGuardrails = getContentGuardrails();
     if (contentGuardrails && draft) {
+      // For a refresh, the draft carries only editable meta — the live page's
+      // domains are frozen by publishRefresh. Hydrate them so the brand-token
+      // check enforces against the page that will actually be written.
+      let liveDomains = null;
+      if (brief.action_type === 'refresh_existing_page') {
+        try {
+          const publisher = getAstroPublisher();
+          const liveFm = publisher?.getLiveFrontmatter
+            ? await publisher.getLiveFrontmatter(brief.target_url || opp.page_url)
+            : {};
+          liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
+        } catch (err) {
+          logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
+          liveDomains = [];
+        }
+      }
       const guardResult = contentGuardrails.evaluate(draft, {
         service: opp.service || brief.service || null,
         primaryKeyword: brief.target_keyword || null,
+        domains: liveDomains,
       });
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {

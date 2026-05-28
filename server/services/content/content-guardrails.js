@@ -53,9 +53,9 @@ function priceFinding(body) {
   return null;
 }
 
-function brandTokenFinding(body, frontmatter) {
-  const domains = frontmatter && Array.isArray(frontmatter.domains) ? frontmatter.domains : [];
-  if (domains.length === 0) return null; // hub-only page — literal brand is fine
+function brandTokenFinding(body, domains) {
+  const list = Array.isArray(domains) ? domains : [];
+  if (list.length === 0) return null; // hub-only page — literal brand is fine
   if (/\bWaves\s+Pest\s+Control\b/.test(String(body || ''))) {
     return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" instead of the {{brandName}} token — brand leaks across spoke domains.');
   }
@@ -89,20 +89,25 @@ function keywordStuffingFinding(body, primaryKeyword) {
 }
 
 /**
- * evaluate(draft, { service, primaryKeyword }) → { pass, findings }
+ * evaluate(draft, { service, primaryKeyword, domains }) → { pass, findings }
  *
  * draft: { body, frontmatter } (the captured agent draft)
  * service: opportunity/brief service id or category
  * primaryKeyword: from the brief/frontmatter (optional)
+ * domains: the multi-domain list to enforce the brand-token check against.
+ *   For NEW pages this is the draft's own frontmatter.domains; for REFRESH the
+ *   caller MUST pass the LIVE page's domains, because the refresh draft carries
+ *   only editable meta and publishRefresh freezes domains from the live page.
  */
-function evaluate(draft, { service = null, primaryKeyword = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
+  const effectiveDomains = Array.isArray(domains) ? domains : (Array.isArray(frontmatter.domains) ? frontmatter.domains : []);
 
   const findings = [
     priceFinding(body),
-    brandTokenFinding(body, frontmatter),
+    brandTokenFinding(body, effectiveDomains),
     faqBlockedFinding(body, service),
     keywordStuffingFinding(body, kw),
   ].filter(Boolean);

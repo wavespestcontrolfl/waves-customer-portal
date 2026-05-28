@@ -28,6 +28,16 @@ describe('content-guardrails', () => {
     expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK')).toBe(false);
   });
 
+  test('refresh: live domains passed via opts catch a leak the draft frontmatter hides', () => {
+    // Refresh draft carries no domains (frozen from live page); caller passes
+    // the live page's domains explicitly.
+    const r = guardrails.evaluate(
+      { body: 'Waves Pest Control keeps your home pest-free.', frontmatter: {} },
+      { domains: ['bradentonflpestcontrol.com'] },
+    );
+    expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK' && f.severity === 'P0')).toBe(true);
+  });
+
   test('FAQ section on a blocked service is P0', () => {
     const r = guardrails.evaluate({ body: '## FAQ\nQ: Do you handle rats?' }, { service: 'rodent' });
     expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
