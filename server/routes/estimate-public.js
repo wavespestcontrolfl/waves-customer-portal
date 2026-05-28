@@ -1182,7 +1182,14 @@ function recurringServiceKey(svc = {}) {
 
 function recurringServiceReceivesTierDiscount(svc = {}) {
   const key = recurringServiceKey(svc);
-  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
+  if (
+    svc.discountable === false ||
+    svc.discount?.discountable === false ||
+    svc.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE' ||
+    svc.waveGuardDiscountEligible === false ||
+    svc.discountEligible === false ||
+    svc.excludeFromPctDiscount === true
+  ) return false;
   if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
   return true;
 }
@@ -1197,8 +1204,8 @@ function recurringServiceReceivesManualDiscount(svc = {}) {
 
 function recurringServiceCountsTowardTier(svc = {}) {
   const key = recurringServiceKey(svc);
-  return recurringServiceReceivesTierDiscount(svc)
-    && PRICING_WAVEGUARD.qualifyingServices.includes(key);
+  if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
+  return PRICING_WAVEGUARD.qualifyingServices.includes(key);
 }
 
 function recurringServiceDisplayName(key) {
@@ -1393,6 +1400,14 @@ function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
       'cadenceLabel',
       'detail',
       'waveGuardDiscountEligible',
+      'waveGuardTierEligible',
+      'countsTowardWaveGuardTier',
+      'discountable',
+      'discountEligible',
+      'excludeFromPctDiscount',
+      'discount',
+      'pricingVersion',
+      'pricingSource',
       'tierLabel',
     ].includes(key);
     if (currentMissing || shouldPreferSupplement) {
@@ -1422,6 +1437,36 @@ function recurringServicesWithSupplements(estResult = {}) {
     services.push(row);
     indexByKey.set(key, services.length - 1);
   };
+
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait']);
+  if (Array.isArray(estResult.lineItems)) {
+    estResult.lineItems.forEach((item) => {
+      const key = recurringServiceKey(item);
+      if (!RECURRING_LINE_SERVICES.has(key)) return;
+      const annual = firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
+      const monthly = firstPositiveNumber(item.monthlyAfterDiscount, item.monthlyAfterCredits, item.monthly, item.mo, annual ? annual / 12 : null);
+      if (!(annual > 0 || monthly > 0)) return;
+      upsertSupplement(key, {
+        service: key,
+        name: item.displayName || item.label || recurringServiceDisplayName(key),
+        displayName: item.displayName || item.label || recurringServiceDisplayName(key),
+        mo: monthly || null,
+        monthly: monthly || null,
+        annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
+        perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
+        visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
+        waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(item),
+        waveGuardTierEligible: item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false,
+        countsTowardWaveGuardTier: item.countsTowardWaveGuardTier !== false,
+        discountable: item.discountable ?? item.discount?.discountable,
+        discountEligible: item.discountEligible,
+        excludeFromPctDiscount: item.excludeFromPctDiscount,
+        discount: item.discount,
+        pricingVersion: item.pricingVersion,
+        pricingSource: item.pricingSource,
+      });
+    });
+  }
 
   const palmMonthly = firstPositiveNumber(
     recurring.palmInjectionMo,

@@ -101,7 +101,7 @@ function recurringServiceKey(svc = {}) {
 }
 
 function serviceCountsTowardWaveGuardTier(svc = {}) {
-  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
+  if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
   return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
 }
 
@@ -135,12 +135,14 @@ function estimateLineItemsFromData(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data.lineItems
     || data.result?.lineItems
+    || data.engineResult?.lineItems
     || data.estimate?.lineItems
     || [];
 }
 
 function isNonDiscountableRecurringLine(item = {}) {
-  return !!item.annual && (
+  const annual = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
+  return annual > 0 && (
     item.discountable === false ||
     item.discount?.discountable === false ||
     item.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE'
@@ -151,7 +153,7 @@ function nonDiscountableRecurringAnnualFloor(estimateData = {}) {
   return Math.round(estimateLineItemsFromData(estimateData)
     .filter(isNonDiscountableRecurringLine)
     .reduce((sum, item) => {
-      const amount = Number(item.annualAfterDiscount ?? item.annual ?? 0);
+      const amount = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
       return sum + (Number.isFinite(amount) && amount > 0 ? amount : 0);
     }, 0) * 100) / 100;
 }

@@ -558,7 +558,23 @@ function mapV1ToLegacyShape(v1Result) {
     const visitsPerYear = Number(li.visitsPerYear ?? li.visits ?? li.frequency ?? 0) || null;
     services.push({ name, mo, monthly: mo, perTreatment, visitsPerYear, ...measurementMetadataFields(li), ...extra });
   };
-  svcAdd('Lawn Care', lawnLI, { service: 'lawn_care' });
+  svcAdd('Lawn Care', lawnLI, {
+    service: 'lawn_care',
+    discountable: false,
+    discountEligible: false,
+    waveGuardDiscountEligible: false,
+    waveGuardTierEligible: true,
+    countsTowardWaveGuardTier: true,
+    discount: {
+      discountable: false,
+      requestedDiscountPercent: lawnLI?.discount?.requestedDiscountPercent ?? 0,
+      appliedDiscountPercent: 0,
+      effectiveDiscount: 0,
+      policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+    },
+    pricingVersion: lawnLI?.pricingVersion,
+    pricingSource: lawnLI?.pricingSource,
+  });
   svcAdd('Pest Control', pestLI, { service: 'pest_control' });
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {

@@ -1596,7 +1596,27 @@ export function calculateEstimate(inputs) {
       });
     });
     const selectedLawn = R.lawn.find(t => t.recommended) || R.lawn.find(t => t.v === 9) || R.lawn[1];
-    wgServices.push({ name: 'Lawn Care', service: 'lawn_care', mo: selectedLawn.mo, perTreatment: selectedLawn.pa, visitsPerYear: selectedLawn.v });
+    wgServices.push({
+      name: 'Lawn Care',
+      service: 'lawn_care',
+      mo: selectedLawn.mo,
+      perTreatment: selectedLawn.pa,
+      visitsPerYear: selectedLawn.v,
+      discountable: false,
+      discountEligible: false,
+      waveGuardDiscountEligible: false,
+      waveGuardTierEligible: true,
+      countsTowardWaveGuardTier: true,
+      discount: {
+        discountable: false,
+        requestedDiscountPercent: 0,
+        appliedDiscountPercent: 0,
+        effectiveDiscount: 0,
+        policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+      },
+      pricingVersion: selectedLawn.costs?.pricingVersion || LAWN_PRICING_V2.pricingVersion,
+      pricingSource: selectedLawn.pricingSource,
+    });
     const customQuoteFlag = lsf > LAWN_TABLE_MAX_SQFT;
     if (customQuoteFlag) {
       addLawnCustomQuoteNote();

@@ -41,7 +41,7 @@ describe('estimate converter annual prepay amount', () => {
       { service: 'pest_control', name: 'Pest Control' },
       { service: 'palm_injection', name: 'Palm Injection', waveGuardDiscountEligible: false },
       { service: 'rodent_bait', name: 'Rodent Bait Stations', waveGuardDiscountEligible: false },
-      { service: 'lawn_care', name: 'Lawn Care' },
+      { service: 'lawn_care', name: 'Lawn Care', discountable: false, discountEligible: false },
       { service: 'lawn_care', name: 'Duplicate Lawn Care' },
     ]);
 
@@ -95,6 +95,30 @@ describe('estimate converter annual prepay amount', () => {
           discount: { discountable: true },
         },
       ],
+    };
+
+    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(774);
+  });
+
+  test('annual prepay floor reads public quote engineResult line items and annual aliases', () => {
+    const estimateData = {
+      engineResult: {
+        lineItems: [
+          {
+            service: 'lawn_care',
+            ann: 774,
+            discount: {
+              discountable: false,
+              policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+            },
+          },
+          {
+            service: 'pest_control',
+            annual: 468,
+            discount: { discountable: true },
+          },
+        ],
+      },
     };
 
     expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(774);

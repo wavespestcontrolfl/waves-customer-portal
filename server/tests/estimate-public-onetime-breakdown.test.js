@@ -4109,6 +4109,88 @@ describe('public estimate one-time breakdown', () => {
     expect(monthlyForRecurringParts(parts, 'Silver', 13.34)).toBe(225.66);
   });
 
+  test('Lawn V2 recurring rows count for tier but do not receive public percent discounts', () => {
+    const parts = resolveRecurringMonthlyParts({
+      monthly_total: 110.3,
+      waveguard_tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { service: 'pest_control', name: 'Pest Control', mo: 50 },
+            {
+              service: 'lawn_care',
+              name: 'Lawn Care',
+              mo: 64.5,
+              discountable: false,
+              discountEligible: false,
+              waveGuardDiscountEligible: false,
+              waveGuardTierEligible: true,
+              countsTowardWaveGuardTier: true,
+              discount: {
+                discountable: false,
+                policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(parts).toEqual(expect.objectContaining({
+      baseMonthly: 114.5,
+      discountableBaseMonthly: 50,
+      nonDiscountableMonthly: 64.5,
+      source: 'summed',
+    }));
+    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(109.5);
+  });
+
+  test('public recurring services inherit Lawn V2 discount exclusion from engine line items', () => {
+    const supplemented = withSupplementedRecurringServices({
+      result: {
+        lineItems: [
+          {
+            service: 'lawn_care',
+            label: 'Lawn Care',
+            annual: 774,
+            monthly: 64.5,
+            perApp: 86,
+            visitsPerYear: 9,
+            discount: {
+              discountable: false,
+              policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+            },
+          },
+          {
+            service: 'pest_control',
+            label: 'Pest Control',
+            annual: 600,
+            monthly: 50,
+          },
+        ],
+        recurring: {
+          services: [
+            { service: 'lawn_care', name: 'Lawn Care', mo: 64.5 },
+            { service: 'pest_control', name: 'Pest Control', mo: 50 },
+          ],
+        },
+      },
+    });
+
+    const lawn = supplemented.result.recurring.services.find((svc) => svc.service === 'lawn_care');
+    expect(lawn).toMatchObject({
+      discountable: false,
+      waveGuardDiscountEligible: false,
+      waveGuardTierEligible: true,
+      countsTowardWaveGuardTier: true,
+    });
+    expect(lawn.discount).toMatchObject({
+      discountable: false,
+      policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+    });
+  });
+
   test('preference recalculation combines supplemented services with saved base when service rows are missing', () => {
     const engineParts = resolveRecurringMonthlyParts({
       monthly_total: 145,
