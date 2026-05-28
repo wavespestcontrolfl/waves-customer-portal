@@ -60,8 +60,8 @@ async function main() {
     if (res.status === 'valid') {
       valid++;
       const e = res.extraction;
-      const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e));
-      const route = canAutoRoute(e);
+      const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone }));
+      const route = canAutoRoute(e, { contactPhone });
       // No customer PII (names/addresses) in logs — non-PII signals only.
       const hasName = !!(e.caller.first_name || e.caller.last_name);
       console.log(`[${i + 1}] ${r.id}  status=valid (${ms}ms)`);

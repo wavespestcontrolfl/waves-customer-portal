@@ -1,5 +1,14 @@
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
 
+// A reachable number, not a withheld-caller-ID placeholder. Twilio delivers
+// blocked/unavailable caller ID as text ("anonymous", "unknown", "restricted",
+// "unavailable") rather than a dialable E.164, so "truthy" is not enough — we
+// require at least 10 digits before treating an ANI as a real callback number.
+function isDialablePhone(value) {
+  if (!value) return false;
+  return String(value).replace(/\D/g, '').length >= 10;
+}
+
 // Normalized lookup: lowercase, " county" suffix stripped, whitespace collapsed.
 const SERVICE_AREA_COUNTIES_NORMALIZED = new Set(
   [...SERVICE_AREA_COUNTIES].map((c) => normalizeCounty(c))
@@ -64,7 +73,14 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('do_not_contact_requested');
   }
 
-  if (!caller.phone_e164) {
+  // caller.phone_e164 is the SPOKEN callback number — usually null because the
+  // caller doesn't re-state their number. We almost always have the Twilio ANI
+  // (passed as opts.contactPhone), so only flag when there's genuinely no way to
+  // reach them. The ANI must be a DIALABLE number — a withheld caller ID arrives
+  // as "anonymous"/"unknown" text, which must NOT count as reachable (else we'd
+  // auto-route a customer we can't call or text back). Without the ANI threaded
+  // in, this fired on nearly every inbound call and sent everything to triage.
+  if (!caller.phone_e164 && !isDialablePhone(opts.contactPhone)) {
     flags.push('caller_phone_missing');
   }
 

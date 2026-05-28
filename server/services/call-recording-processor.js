@@ -1568,8 +1568,8 @@ const CallRecordingProcessor = {
           await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
-          const routingResult = canAutoRoute(v2Extraction);
-          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction);
+          const routingResult = canAutoRoute(v2Extraction, { contactPhone });
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone });
           const finalFlags = mergeTriageFlags(v2Extraction.triage_flags, deterministicFlags);
           const tcpa = checkTcpaConsent(v2Extraction);
           v2SmsBlocked = !tcpa.canSms;
