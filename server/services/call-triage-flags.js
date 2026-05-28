@@ -41,10 +41,6 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('reschedule_or_cancel');
   }
 
-  if (consent.sms_consent_given !== true) {
-    flags.push('sms_consent_missing');
-  }
-
   if (consent.do_not_contact_request === true) {
     flags.push('do_not_contact_requested');
   }

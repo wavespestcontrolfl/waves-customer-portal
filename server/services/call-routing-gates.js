@@ -68,8 +68,8 @@ function buildRouteDecision({
     final_action_taken: action,
     blocked_reasons: JSON.stringify(finalTriageFlags.length > 0 ? finalTriageFlags : []),
     allowed_reasons: JSON.stringify(routingResult?.allowed ? ['all_gates_passed'] : []),
-    ai_extraction_model: extraction?.meta?.extraction_model || null,
-    ai_extraction_prompt_version: extraction?.meta?.extraction_prompt_version || null,
+    ai_validation_model: extraction?.meta?.extraction_model || null,
+    ai_validation_prompt_version: extraction?.meta?.extraction_prompt_version || null,
     ai_validation_schema_version: extraction?.meta?.schema_version || null,
     created_at: new Date(),
   };

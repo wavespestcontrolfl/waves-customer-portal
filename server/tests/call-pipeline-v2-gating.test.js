@@ -148,10 +148,16 @@ describe('computeDeterministicTriageFlags', () => {
     expect(computeDeterministicTriageFlags(e)).toContain('reschedule_or_cancel');
   });
 
-  test('no SMS consent', () => {
+  test('no SMS consent does NOT block routing (handled by TCPA gate downstream)', () => {
     const e = validV2Extraction();
     e.consent.sms_consent_given = false;
-    expect(computeDeterministicTriageFlags(e)).toContain('sms_consent_missing');
+    expect(computeDeterministicTriageFlags(e)).not.toContain('sms_consent_missing');
+  });
+
+  test('no SMS consent still allows appointment creation', () => {
+    const e = validV2Extraction();
+    e.consent.sms_consent_given = false;
+    expect(canAutoRoute(e).allowed).toBe(true);
   });
 
   test('do not contact', () => {
