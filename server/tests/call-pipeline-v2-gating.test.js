@@ -228,6 +228,20 @@ describe('computeDeterministicTriageFlags', () => {
       expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(true);
     });
 
+    test('AV acceptance clears the model address_unverifiable flag (the model marks nearly every call)', () => {
+      // The model emits `address_unverifiable` (schema enum / prompt) on most
+      // calls; if AV acceptance does not clear it, no clean address ever routes.
+      const e = validV2Extraction();
+      e.triage_flags = ['address_unverifiable'];
+      const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+      expect(suppressAddressFlagsForAV(e.triage_flags, av)).not.toContain('address_unverifiable');
+      expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(true);
+      // corrected (bad zip rewritten) clears it too
+      expect(suppressAddressFlagsForAV(['address_unverifiable'], { status: 'corrected' })).not.toContain('address_unverifiable');
+      // but a non-accepting verdict leaves it in place
+      expect(suppressAddressFlagsForAV(['address_unverifiable'], { status: 'confirm_needed' })).toContain('address_unverifiable');
+    });
+
     test('AV acceptance clears a stale MODEL out_of_service_area hard-veto', () => {
       const e = validV2Extraction();
       e.triage_flags = ['out_of_service_area']; // model wrongly thought out-of-area
