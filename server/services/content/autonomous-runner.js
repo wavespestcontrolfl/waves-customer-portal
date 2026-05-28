@@ -64,6 +64,7 @@ const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', '.
 const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gate');
 const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
+const getProtectedPages = lazy('protected-pages', './protected-pages');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -120,7 +121,32 @@ class AutonomousRunner {
     run.shadow_mode = isShadow(opp.action_type);
     const claimToken = opp.claimed_at;
 
-    // 1a. Facts-sufficiency pre-gate. For content-generating city×service
+    // 1a. Protected-page guard. Money pages, high-traffic pages, and manually
+    // protected URLs are never auto-optimized — regardless of facts. This runs
+    // FIRST so e.g. /pest-control-sarasota-fl/ is blocked even though
+    // "sarasota × pest-control" passes facts sufficiency.
+    const protectedPages = getProtectedPages();
+    if (protectedPages && opp.page_url) {
+      let prot;
+      try {
+        prot = await protectedPages.isProtected(opp.page_url, { db });
+      } catch (err) {
+        logger.warn(`[autonomous-runner] protected-page check threw: ${err.message}`);
+        prot = { protected: true, reason: 'protected_check_error', detail: err.message };
+      }
+      run.protected_check = prot;
+      if (prot.protected) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: `protected_page:${prot.reason}`,
+          reviewer_notes: `Protected page (${prot.reason}${prot.source ? `, ${prot.source}` : ''})${prot.detail ? `: ${prot.detail}` : ''} — not auto-optimized.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${prot.reason}`, { claimToken });
+        return finalized;
+      }
+    }
+
+    // 1b. Facts-sufficiency pre-gate. For content-generating city×service
     // actions, refuse to draft unless the facts-bank has verified local facts
     // to ground the claims. Insufficient → route to human review with gap
     // codes so the facts can be populated. Fail-closed by design.
