@@ -161,6 +161,98 @@ class InternalLinkPrExecutor {
     };
   }
 
+  async runPostMergeVerification({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_LIMIT', 10), taskIds = null } = {}) {
+    const tasks = await this._loadPrOpenTasks({ limit, taskIds });
+    const results = [];
+    for (const task of tasks) {
+      let result;
+      try {
+        result = await this.verifyMergedTask(task);
+      } catch (err) {
+        logger.warn(`[internal-link-pr-executor] verification failed for ${task.id}: ${err.message}`);
+        result = {
+          task_id: task.id,
+          status: 'failed',
+          failure_reason: `internal_link_verify_error:${err.message}`,
+        };
+        await this._markTaskVerificationFailed(task.id, result.failure_reason);
+      }
+      results.push(result);
+    }
+    return { count: results.length, results };
+  }
+
+  async verifyMergedTask(task, { html = null, pr = null } = {}) {
+    if (!task?.id) throw new Error('internal link task id required');
+    const prNumber = task.astro_pr_number || parsePrNumber(task.astro_pr_url);
+    if (!prNumber && !pr) {
+      const reason = 'internal_link_verify_missing_pr_number';
+      await this._markTaskVerificationFailed(task.id, reason);
+      return { task_id: task.id, status: 'failed', failure_reason: reason };
+    }
+
+    const prInfo = pr || await GitHubClient.getPr(prNumber);
+    if (!prInfo) {
+      const reason = 'internal_link_verify_pr_not_found';
+      await this._markTaskVerificationFailed(task.id, reason);
+      return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: prNumber };
+    }
+    const resolvedPrNumber = prNumber || prInfo.number || null;
+    if (!prInfo?.merged) {
+      return { task_id: task.id, status: task.status, skipped: 'pr_not_merged', pr_number: resolvedPrNumber };
+    }
+
+    const mergedAt = prInfo.merged_at ? new Date(prInfo.merged_at) : new Date();
+    await this._markTaskMerged(task.id, {
+      mergedAt,
+      commitSha: prInfo.merge_commit_sha || task.pr_commit_sha || null,
+    });
+
+    const liveUrl = liveUrlForTask(task);
+    if (!liveUrl) {
+      const reason = 'internal_link_verify_missing_source_url';
+      await this._markTaskVerificationFailed(task.id, reason, { status: 'merged' });
+      return { task_id: task.id, status: 'merged', failure_reason: reason, pr_number: resolvedPrNumber };
+    }
+
+    let renderedHtml;
+    try {
+      renderedHtml = html == null ? await fetchLiveHtml(liveUrl) : String(html);
+    } catch (err) {
+      const reason = `internal_link_verify_live_fetch_failed:${String(err?.message || err).slice(0, 200)}`;
+      await this._markTaskVerificationFailed(task.id, reason, { status: 'merged' });
+      return { task_id: task.id, status: 'merged', failure_reason: reason, pr_number: resolvedPrNumber, live_url: liveUrl };
+    }
+    const deployedAt = new Date();
+    if (!renderedHtml) {
+      const reason = 'internal_link_verify_empty_live_html';
+      await this._markTaskVerificationFailed(task.id, reason, { status: 'merged' });
+      return { task_id: task.id, status: 'merged', failure_reason: reason, pr_number: resolvedPrNumber, live_url: liveUrl };
+    }
+
+    if (!htmlContainsCrawlableLink(renderedHtml, task.target_url, task.anchor_text)) {
+      const reason = 'internal_link_verify_link_missing';
+      await this._markTaskVerificationFailed(task.id, reason, { status: 'deployed', deployedAt });
+      return { task_id: task.id, status: 'deployed', failure_reason: reason, pr_number: resolvedPrNumber, live_url: liveUrl };
+    }
+
+    const verifiedAt = new Date();
+    await this._markTaskVerified(task.id, {
+      mergedAt,
+      deployedAt,
+      verifiedAt,
+      commitSha: prInfo.merge_commit_sha || task.pr_commit_sha || null,
+      liveUrl,
+    });
+    return {
+      task_id: task.id,
+      status: 'verified',
+      pr_number: resolvedPrNumber,
+      live_url: liveUrl,
+      verified_at: verifiedAt.toISOString(),
+    };
+  }
+
   async _loadQueuedTasks({ limit, taskIds }) {
     let query = db(TABLE)
       .whereIn('status', ['pending', 'queued'])
@@ -175,6 +267,15 @@ class InternalLinkPrExecutor {
     let query = db(TABLE)
       .where('status', 'patch_candidate')
       .orderByRaw('COALESCE(target_priority, 0) DESC')
+      .orderBy('updated_at', 'asc')
+      .limit(limit);
+    if (Array.isArray(taskIds) && taskIds.length) query = query.whereIn('id', taskIds);
+    return query.select('*');
+  }
+
+  async _loadPrOpenTasks({ limit, taskIds }) {
+    let query = db(TABLE)
+      .whereIn('status', ['pr_open', 'merged', 'deployed'])
       .orderBy('updated_at', 'asc')
       .limit(limit);
     if (Array.isArray(taskIds) && taskIds.length) query = query.whereIn('id', taskIds);
@@ -292,6 +393,48 @@ class InternalLinkPrExecutor {
         failure_reason: `internal_link_pr_open_failed:${String(err?.message || err).slice(0, 500)}`,
         updated_at: new Date(),
       });
+  }
+
+  async _markTaskMerged(taskId, { mergedAt, commitSha }) {
+    await db(TABLE)
+      .where({ id: taskId })
+      .whereIn('status', ['pr_open', 'merged', 'deployed'])
+      .update({
+        status: 'merged',
+        merged_at: mergedAt,
+        pr_commit_sha: commitSha || null,
+        failure_reason: null,
+        updated_at: new Date(),
+      });
+  }
+
+  async _markTaskVerified(taskId, { mergedAt, deployedAt, verifiedAt, commitSha, liveUrl }) {
+    await db(TABLE)
+      .where({ id: taskId })
+      .whereIn('status', ['pr_open', 'merged', 'deployed'])
+      .update({
+        status: 'verified',
+        merged_at: mergedAt,
+        deployed_at: deployedAt,
+        verified_at: verifiedAt,
+        pr_commit_sha: commitSha || null,
+        failure_reason: null,
+        reviewer_notes: `Verified live rendered internal link on ${liveUrl}.`,
+        updated_at: new Date(),
+      });
+  }
+
+  async _markTaskVerificationFailed(taskId, reason, { status = 'failed', deployedAt = null } = {}) {
+    const patch = {
+      status,
+      failure_reason: reason,
+      updated_at: new Date(),
+    };
+    if (deployedAt) patch.deployed_at = deployedAt;
+    await db(TABLE)
+      .where({ id: taskId })
+      .whereIn('status', ['pr_open', 'merged', 'deployed'])
+      .update(patch);
   }
 }
 
@@ -658,6 +801,184 @@ function frontmatterBlock(body) {
   return match ? match[0] : '';
 }
 
+function parsePrNumber(url) {
+  const match = String(url || '').match(/\/pull\/(\d+)(?:\D|$)/);
+  return match ? Number(match[1]) : null;
+}
+
+function liveUrlForTask(task = {}) {
+  const source = policy.normalizeInternalUrl(task.source_url || task.source_canonical_url || task.source_path);
+  if (!source) return null;
+  const origin = String(process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+  return `${origin}${source}`;
+}
+
+async function fetchLiveHtml(url) {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'waves-internal-link-verifier/1.0',
+      Accept: 'text/html,application/xhtml+xml',
+    },
+  });
+  if (!res.ok) throw new Error(`live_http_${res.status}`);
+  return res.text();
+}
+
+function htmlContainsCrawlableLink(html, targetUrl, anchorText) {
+  const target = policy.normalizeInternalUrl(targetUrl);
+  const anchor = normalizeHtmlText(anchorText);
+  if (!target || !anchor) return false;
+  const renderedHtml = stripNonRenderedHtml(html);
+  const hiddenRanges = hiddenElementRanges(renderedHtml);
+  const linkRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = linkRe.exec(renderedHtml)) !== null) {
+    if (isIndexInRanges(match.index, hiddenRanges) || hasHiddenHtmlAttribute(match[1])) continue;
+    const href = extractHref(match[1]);
+    if (policy.normalizeInternalUrl(href) !== target) continue;
+    if (normalizeHtmlText(stripTags(match[2])) === anchor) return true;
+  }
+  return false;
+}
+
+function stripNonRenderedHtml(value) {
+  return String(value || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, '')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '');
+}
+
+const VOID_HTML_TAGS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
+
+function hiddenElementRanges(html) {
+  const ranges = [];
+  const stack = [];
+  for (const token of scanHtmlTags(html)) {
+    const closing = token.closing;
+    const tag = token.tag;
+    const attrs = token.attrs || '';
+    if (!tag) continue;
+    if (closing) {
+      const index = stack.map((item) => item.tag).lastIndexOf(tag);
+      if (index !== -1) {
+        const hiddenItems = stack.splice(index).filter((item) => item.hidden);
+        for (const item of hiddenItems) ranges.push([item.start, token.end]);
+      }
+      continue;
+    }
+
+    const hidden = hasHiddenHtmlAttribute(attrs);
+    const selfClosing = /\/\s*$/.test(attrs) || VOID_HTML_TAGS.has(tag);
+    if (hidden && selfClosing) ranges.push([token.start, token.end]);
+    if (!selfClosing) stack.push({ tag, hidden, start: token.start });
+  }
+  for (const item of stack.filter((entry) => entry.hidden)) {
+    ranges.push([item.start, String(html || '').length]);
+  }
+  return ranges;
+}
+
+function scanHtmlTags(html) {
+  const text = String(html || '');
+  const tokens = [];
+  let index = 0;
+  while (index < text.length) {
+    const start = text.indexOf('<', index);
+    if (start === -1) break;
+    const next = text[start + 1] || '';
+    if (!/[A-Za-z/]/.test(next)) {
+      index = start + 1;
+      continue;
+    }
+
+    let quote = null;
+    let end = -1;
+    for (let i = start + 1; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        continue;
+      }
+      if (ch === '>') {
+        end = i + 1;
+        break;
+      }
+    }
+    if (end === -1) break;
+
+    const inside = text.slice(start + 1, end - 1).trim();
+    const match = inside.match(/^(\/)?\s*([a-zA-Z][\w:-]*)([\s\S]*)$/);
+    if (match) {
+      tokens.push({
+        start,
+        end,
+        closing: Boolean(match[1]),
+        tag: String(match[2] || '').toLowerCase(),
+        attrs: match[3] || '',
+      });
+    }
+    index = end;
+  }
+  return tokens;
+}
+
+function hasHiddenHtmlAttribute(attrs) {
+  const value = String(attrs || '');
+  if (/(^|\s)hidden(?:\s|=|$)/i.test(value)) return true;
+  if (/(^|\s)inert(?:\s|=|$)/i.test(value)) return true;
+  if (/\baria-hidden\s*=\s*["']?true["']?/i.test(value)) return true;
+  const styleMatch = value.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+  const style = String((styleMatch && (styleMatch[1] || styleMatch[2] || styleMatch[3])) || '').toLowerCase();
+  if (/(^|;)\s*display\s*:\s*none\b/.test(style)) return true;
+  if (/(^|;)\s*visibility\s*:\s*hidden\b/.test(style)) return true;
+  if (/(^|;)\s*content-visibility\s*:\s*hidden\b/.test(style)) return true;
+  return false;
+}
+
+function isIndexInRanges(index, ranges = []) {
+  return ranges.some(([start, end]) => index >= start && index < end);
+}
+
+function extractHref(attrs) {
+  const match = String(attrs || '').match(/\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+  return match ? (match[1] || match[2] || match[3] || '') : '';
+}
+
+function stripTags(value) {
+  return String(value || '').replace(/<[^>]*>/g, ' ');
+}
+
+function normalizeHtmlText(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function requestCodexReview(pr, headSha, selected) {
   if (!pr?.number || typeof GitHubClient.createIssueComment !== 'function') return;
   const body = [
@@ -698,4 +1019,11 @@ module.exports._internals = {
   buildInternalLinkPrBody,
   patchContainsCrawlableMarkdownLink,
   frontmatterUnchanged,
+  parsePrNumber,
+  liveUrlForTask,
+  htmlContainsCrawlableLink,
+  stripNonRenderedHtml,
+  hiddenElementRanges,
+  hasHiddenHtmlAttribute,
+  scanHtmlTags,
 };
