@@ -80,11 +80,13 @@ async function buildDigestPlan() {
  *   - fewer than `minCityDiversity` distinct cities/zones
  *   - image coverage below `minImageCoverage`
  *
- * @param {{ scored: Array }} plan - output of buildDigestPlan()
+ * @param {Array|{ scored: Array }} lineup - the resolved draft lineup (event
+ *   objects), or a plan `{ scored }` for convenience. Preflight runs on the
+ *   events that will actually be drafted, not the raw score order.
  * @param {Object} reqs - sourceRequirements from the flagship type config
  * @returns {{ pass: boolean, hardFailures: string[], warnings: string[], stats: Object, thresholds: Object }}
  */
-function preflightDigest(plan, reqs = {}) {
+function preflightDigest(lineupOrPlan, reqs = {}) {
   const {
     minVerifiedFreshEvents = 5,
     minSourceDiversity = 2,
@@ -92,9 +94,11 @@ function preflightDigest(plan, reqs = {}) {
     minImageCoverage = 0.5,
   } = reqs;
 
-  const scored = Array.isArray(plan?.scored) ? plan.scored : [];
-  const eligibleCount = scored.length;
-  const lineup = scored.slice(0, LINEUP_CAP);
+  const events = Array.isArray(lineupOrPlan)
+    ? lineupOrPlan
+    : (Array.isArray(lineupOrPlan?.scored) ? lineupOrPlan.scored : []);
+  const eligibleCount = events.length;
+  const lineup = events.slice(0, LINEUP_CAP);
 
   const sources = new Set(lineup.map((e) => e.source_id || e.source_name).filter(Boolean));
   const cities = new Set(
@@ -199,13 +203,41 @@ async function autoDraftFlagship() {
   const plan = await buildDigestPlan();
   const { scored } = plan;
 
-  // 5. Preflight gate — enforce the flagship type's declared quality
-  //    contract. Hard-fail (skip) on too few events or too few sources;
-  //    city diversity + image coverage are soft warnings carried onto the
-  //    draft for now. Thresholds come from the type config so they tune in
-  //    one place.
+  // 5. Resolve the lineup the draft will actually use — calendar-curated
+  //    event_ids (intersected with the eligible pool) take precedence over
+  //    raw score order, padded with top-scored events to fill the slate.
+  //    The preflight MUST run on this lineup, not the raw score order, or an
+  //    operator-planned diverse week could be wrongly skipped because the
+  //    automatic top-12 happened to be single-source.
+  const topic = calendarEntry?.topic;
+  const homeownerMinuteTopic = calendarEntry?.homeowner_minute_topic;
+  const preferredEventIds = Array.isArray(calendarEntry?.event_ids) ? calendarEntry.event_ids : [];
+
+  const topEvents = scored.slice(0, 12);
+  const byId = new Map(scored.map((ev) => [ev.id, ev]));
+  const eligiblePreferred = preferredEventIds.filter((id) => byId.has(id));
+
+  let lineupEvents;
+  if (eligiblePreferred.length >= 5) {
+    // Calendar picks are all eligible — use them, in the operator's order
+    lineupEvents = eligiblePreferred.map((id) => byId.get(id));
+  } else if (eligiblePreferred.length > 0) {
+    // Some calendar picks are eligible — supplement with top-scored
+    const preferredSet = new Set(eligiblePreferred);
+    const supplement = topEvents.filter((ev) => !preferredSet.has(ev.id));
+    lineupEvents = [...eligiblePreferred.map((id) => byId.get(id)), ...supplement].slice(0, 12);
+  } else {
+    // No calendar picks are eligible — use top-scored
+    lineupEvents = topEvents;
+  }
+
+  // 6. Preflight gate — enforce the flagship type's declared quality
+  //    contract against the RESOLVED lineup. Hard-fail (skip) on too few
+  //    events or too few sources; city diversity + image coverage are soft
+  //    warnings carried onto the draft for now. Thresholds come from the
+  //    type config so they tune in one place.
   const reqs = getFlagshipType()?.sourceRequirements || {};
-  const preflight = preflightDigest(plan, reqs);
+  const preflight = preflightDigest(lineupEvents, reqs);
   if (!preflight.pass) {
     const reason = preflight.hardFailures.join('; ');
     logger.info(`[newsletter-autopilot] Preflight skip: ${reason}`);
@@ -229,36 +261,13 @@ async function autoDraftFlagship() {
     logger.info(`[newsletter-autopilot] Preflight warnings: ${preflight.warnings.join('; ')}`);
   }
 
-  // 6. Build prompt incorporating calendar data
-  const topic = calendarEntry?.topic;
-  const homeownerMinuteTopic = calendarEntry?.homeowner_minute_topic;
-  const preferredEventIds = Array.isArray(calendarEntry?.event_ids) ? calendarEntry.event_ids : [];
-
+  // 7. Build prompt incorporating calendar data + derive event IDs from the
+  //    resolved lineup (same set the preflight just validated).
   const prompt = topic
     ? `This week's theme: ${topic}. Fresh events from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`
     : `Fresh events this week from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`;
 
-  // Use calendar event IDs if specified, otherwise fall back to scored digest plan (top 12).
-  // Calendar IDs are intersected with the eligible pool so rejected/expired/out-of-window
-  // events never slip through just because they were pre-planned on the calendar.
-  const topEvents = scored.slice(0, 12);
-  const eligibleIds = new Set(scored.map((ev) => ev.id));
-  const eligiblePreferred = preferredEventIds.filter((id) => eligibleIds.has(id));
-
-  let eventIds;
-  if (eligiblePreferred.length >= 5) {
-    // Calendar picks are all eligible — use them
-    eventIds = eligiblePreferred;
-  } else if (eligiblePreferred.length > 0) {
-    // Some calendar picks are eligible — supplement with top-scored
-    const supplementIds = topEvents
-      .map((ev) => ev.id)
-      .filter((id) => !eligiblePreferred.includes(id));
-    eventIds = [...eligiblePreferred, ...supplementIds].slice(0, 12);
-  } else {
-    // No calendar picks are eligible — use top-scored
-    eventIds = topEvents.map((ev) => ev.id);
-  }
+  const eventIds = lineupEvents.map((ev) => ev.id);
 
   // Sanitize event IDs — calendar event_ids come from JSONB and may contain
   // malformed values that would cause Postgres uuid type errors in whereIn.
