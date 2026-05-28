@@ -50,6 +50,7 @@ function formatEventBlock(events) {
       if (ev.venue_name) parts.push(`   Venue: ${ev.venue_name}`);
       if (ev.venue_address) parts.push(`   Address: ${ev.venue_address}`);
       if (ev.event_url) parts.push(`   URL: ${ev.event_url}`);
+      if (ev.image_url) parts.push(`   Image: ${ev.image_url}`);
       if (ev.source_name) parts.push(`   Source: ${ev.source_name}`);
       if (ev.description) parts.push(`   Details: ${ev.description.slice(0, 200)}`);
       return parts.join('\n');
@@ -132,6 +133,7 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
       "address": "string or null (street address)",
       "admission": "string or null (price/ticket info)",
       "eventUrl": "string or null",
+      "imageUrl": "string or null (copy from the event's Image field if provided)",
       "highlights": ["string"] or null,
       "proTip": "string or null",
       "closingLine": "string (punchy wrap-up)"
@@ -163,6 +165,27 @@ const COLORS = {
 };
 
 const WAVES_DIVIDER_GIF = 'https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/952b11dc-99a2-4de3-8def-481a1c34f8d7/giphy.gif';
+
+async function generateHeroImage(subject) {
+  try {
+    const imageGenerator = require('./content/image-generator');
+    const result = await imageGenerator.generate({
+      title: `Newsletter hero banner: ${subject}. SWFL local events guide — vibrant, fun, Florida coastal energy. No text overlay.`,
+      mode: 'blog-hero',
+    });
+    const match = /^data:([^;]+);base64,(.+)$/.exec(result.dataUrl || '');
+    if (!match) return null;
+
+    const { uploadImageToS3 } = require('./social-media');
+    const filename = `newsletter-hero-${Date.now()}.jpg`;
+    const cdnUrl = await uploadImageToS3(match[2], filename);
+    if (cdnUrl) logger.info(`[newsletter-draft] hero image uploaded: ${cdnUrl}`);
+    return cdnUrl;
+  } catch (err) {
+    logger.warn(`[newsletter-draft] hero image generation failed: ${err.message}`);
+    return null;
+  }
+}
 async function searchGiphy(term) {
   if (!term) return null;
   const apiKey = process.env.GIPHY_API_KEY;
@@ -212,6 +235,13 @@ async function assembleBeehiivNewsletter(draft) {
   const parts = [];
   const events = draft.events || [];
 
+  // ── Hero Image ──
+  if (draft.heroImageUrl) {
+    parts.push(`<div style="margin:0 0 20px 0;text-align:center;">
+<img src="${draft.heroImageUrl}" alt="${(draft.selectedSubject || 'Fresh This Week').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
+</div>`);
+  }
+
   // ── Table of Contents ──
   const tocItems = events.map(ev =>
     `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${ev.emoji || '🎯'} ${markdownToHtml(ev.title)}</a></li>`
@@ -248,9 +278,14 @@ async function assembleBeehiivNewsletter(draft) {
     const anchorId = `evt-${slugify(ev.title)}`;
     parts.push(`<h2 id="${anchorId}" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${ev.emoji || '🎯'} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
 
-    // GIF + caption
+    // Event thumbnail (from events_raw.image_url) or GIF
+    if (ev.imageUrl) {
+      parts.push(`<div style="text-align:center;margin:8px 0 12px 0;">
+<img src="${ev.imageUrl}" alt="${(ev.title || '').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+</div>`);
+    }
     const eventGif = await searchGiphy(ev.gifSearchTerm);
-    if (eventGif) parts.push(gifBlock(eventGif, ev.gifCaption));
+    if (eventGif && !ev.imageUrl) parts.push(gifBlock(eventGif, ev.gifCaption));
 
     // Description
     if (ev.description) {
@@ -385,7 +420,7 @@ async function createNewsletterDraft({
         .select(
           'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
           'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
-          'e.categories', 's.name as source_name',
+          'e.image_url', 'e.categories', 's.name as source_name',
         )
         .whereIn('e.id', safeIds)
         .orderByRaw('e.freshness_score DESC NULLS LAST');
@@ -449,7 +484,12 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     draft = JSON.parse(repairedJson);
   }
 
-  // 4b. Assemble Beehiiv-quality HTML from structured event data + Giphy GIFs
+  // 4b. Generate hero image (runs in parallel with nothing — fire and await)
+  if (draft.events?.length && !draft.heroImageUrl) {
+    draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Fresh This Week');
+  }
+
+  // 4c. Assemble Beehiiv-quality HTML from structured event data + Giphy GIFs
   if (draft.events?.length) {
     draft.htmlBody = await assembleBeehiivNewsletter(draft);
   } else if (draft.sections) {
