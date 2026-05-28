@@ -53,6 +53,10 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     if (!flags.includes('spam_or_wrong_number')) flags.push('spam_or_wrong_number');
   }
 
+  if (sentiment.lead_quality === 'out_of_service_area') {
+    if (!flags.includes('out_of_service_area')) flags.push('out_of_service_area');
+  }
+
   if (property.hoa_common_area_service === true) {
     flags.push('hoa_common_area_requires_approval');
   }

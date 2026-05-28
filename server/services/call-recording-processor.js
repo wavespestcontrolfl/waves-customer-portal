@@ -1756,7 +1756,19 @@ const CallRecordingProcessor = {
           ? (typeof v2Row.ai_extraction_enriched === 'string' ? JSON.parse(v2Row.ai_extraction_enriched) : v2Row.ai_extraction_enriched)
           : null;
 
-        if (v2Extraction && isV2Extraction(v2Extraction) && v2Row.v2_extraction_status === 'valid') {
+        const v2Valid = v2Extraction && isV2Extraction(v2Extraction) && v2Row?.v2_extraction_status === 'valid';
+
+        if (!v2Valid) {
+          v2RoutingBlocked = true;
+          const failReason = v2Row?.v2_extraction_status || 'not_run';
+          const failTriageItem = buildTriageItem({
+            callLogId: call.id,
+            flag: `v2_extraction_${failReason}`,
+            extraction: v2Extraction || { meta: { call_summary: 'V2 extraction unavailable; fail-closed to triage' } },
+          });
+          await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+          logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
+        } else if (v2Valid) {
           const routingResult = canAutoRoute(v2Extraction);
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction);
           const finalFlags = mergeTriageFlags(v2Extraction.triage_flags, deterministicFlags);

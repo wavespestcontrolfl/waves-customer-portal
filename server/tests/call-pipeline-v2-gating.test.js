@@ -179,6 +179,12 @@ describe('computeDeterministicTriageFlags', () => {
     expect(computeDeterministicTriageFlags(e)).toContain('spam_or_wrong_number');
   });
 
+  test('lead_quality = out_of_service_area flags out_of_service_area', () => {
+    const e = validV2Extraction();
+    e.sentiment_and_lead.lead_quality = 'out_of_service_area';
+    expect(computeDeterministicTriageFlags(e)).toContain('out_of_service_area');
+  });
+
   test('HOA common area', () => {
     const e = validV2Extraction();
     e.property.hoa_common_area_service = true;
