@@ -9,6 +9,81 @@ function isDialablePhone(value) {
   return String(value).replace(/\D/g, '').length >= 10;
 }
 
+// Role/shared mailboxes whose local-part legitimately won't contain a person's
+// name — don't treat these as a name↔email mismatch.
+const GENERIC_EMAIL_LOCALPARTS = new Set([
+  'info', 'office', 'sales', 'admin', 'contact', 'support', 'service',
+  'billing', 'accounts', 'accounting', 'hello', 'noreply', 'mail', 'email',
+]);
+
+// Common, non-name mailbox affixes. A delimited segment that is one of these
+// is NOT evidence of a different person (jsmith.home@, maria.work@).
+const NON_NAME_EMAIL_AFFIXES = new Set([
+  'home', 'work', 'family', 'personal', 'official', 'real', 'team', 'group',
+  'online', 'here', 'only', 'usa', 'dev', 'biz', 'llc', 'inc', 'mail', 'email',
+]);
+
+// Detects when the extracted caller name is NOT corroborated by the email's
+// local-part — e.g. spoken "Jeanette" with email gennettryan@ (really Ryan
+// Gennett). We do NOT guess the right name (email-based inference is
+// unreliable); we only flag the contradiction so it routes to name_review
+// instead of auto-booking a name we can't corroborate. Conservative: skips
+// when there's no usable name, no name-shaped email, or a generic mailbox.
+function hasNameEmailMismatch(caller = {}) {
+  const email = String(caller.email || '').toLowerCase();
+  const at = email.indexOf('@');
+  if (at < 1) return false;
+  const localRaw = email.slice(0, at);              // keep separators for (2)
+  const local = localRaw.replace(/[^a-z]/g, '');
+  if (local.length < 4) return false;            // too short to reason about
+  if (GENERIC_EMAIL_LOCALPARTS.has(local)) return false;
+  // Multi-segment role mailbox with no personal name at all (office.sales@,
+  // sales.support@): every delimited segment is a role/affix word. The collapsed
+  // form ("officesales") isn't an exact generic match, so guard it here before
+  // the zero-token check below would wrongly flag a clean shared-mailbox booking.
+  const localSegments = localRaw.split(/[^a-z]+/).filter((s) => s.length >= 2);
+  if (localSegments.length > 0
+    && localSegments.every((s) => GENERIC_EMAIL_LOCALPARTS.has(s) || NON_NAME_EMAIL_AFFIXES.has(s))) {
+    return false;
+  }
+  const tokens = [...new Set(
+    [caller.first_name, caller.last_name, caller.name_full]
+      .filter(Boolean)
+      .flatMap((n) => String(n).toLowerCase().split(/\s+/))
+      .map((t) => t.replace(/[^a-z]/g, ''))
+      .filter((t) => t.length >= 3)
+  )];
+  if (tokens.length === 0) return false;          // no usable name to check
+
+  const present = tokens.filter((t) => local.includes(t));
+
+  // (1) Not one extracted name token appears anywhere → uncorroborated name.
+  // This is what caught the real incident (spoken "Jeanette", surname extracted
+  // as null, email gennettryan@ — "jeanette" appears nowhere).
+  if (present.length === 0) return true;
+
+  // (2) A separator-delimited segment names someone else. Only act on EXPLICIT
+  // boundaries (john.smith@, j_smith@, maria-rodriguez@): a delimited segment of
+  // name length (>=4) that matches no extracted token — and isn't a known
+  // mailbox affix (home/work/family/...) — while an extracted token is still
+  // missing means the email encodes a different name than we captured.
+  // We deliberately do NOT mine separator-less concatenations (jsmithhome,
+  // gennettryan): once a token is a substring, "home" vs "ryan" can't be told
+  // apart from an affix without a name dictionary, and over-triaging common
+  // first-initial+surname+suffix mailboxes costs more than missing a rare
+  // concatenated typo — a wholly wrong name is already caught by (1).
+  if (present.length < tokens.length) {
+    const foreignSegment = localRaw
+      .split(/[^a-z]+/)
+      .filter((seg) => seg.length >= 4
+        && !NON_NAME_EMAIL_AFFIXES.has(seg)
+        && !GENERIC_EMAIL_LOCALPARTS.has(seg)) // a delimited role mailbox (office.john@) is not a name
+      .some((seg) => !tokens.some((t) => seg.includes(t) || t.includes(seg)));
+    if (foreignSegment) return true;
+  }
+  return false;
+}
+
 // Normalized lookup: lowercase, " county" suffix stripped, whitespace collapsed.
 const SERVICE_AREA_COUNTIES_NORMALIZED = new Set(
   [...SERVICE_AREA_COUNTIES].map((c) => normalizeCounty(c))
@@ -82,6 +157,10 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // in, this fired on nearly every inbound call and sent everything to triage.
   if (!caller.phone_e164 && !isDialablePhone(opts.contactPhone)) {
     flags.push('caller_phone_missing');
+  }
+
+  if (hasNameEmailMismatch(caller)) {
+    flags.push('name_email_mismatch');
   }
 
   if (sentiment.lead_quality === 'spam_or_solicitation' || sentiment.lead_quality === 'wrong_number') {
@@ -184,6 +263,8 @@ module.exports = {
   SMS_ONLY_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   hasCanonicalWriteBlock,
+  hasNameEmailMismatch,
+  isDialablePhone,
   SERVICE_AREA_COUNTIES,
   normalizeCounty,
   isInServiceAreaCounty,

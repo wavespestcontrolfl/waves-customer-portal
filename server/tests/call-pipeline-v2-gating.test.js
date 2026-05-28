@@ -7,6 +7,7 @@ const {
   isInServiceAreaCounty,
   hasCanonicalWriteBlock,
   CANONICAL_WRITE_BLOCKING_FLAGS,
+  hasNameEmailMismatch,
 } = require('../services/call-triage-flags');
 
 const {
@@ -721,5 +722,93 @@ describe('side-effect guards', () => {
     const e = validV2Extraction();
     e.property.service_address.county = 'Lee';
     expect(canAutoRoute(e).allowed).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════
+// Name ↔ Email reconciliation (name_review)
+// ═══════════════════════════════════════════════════
+
+describe('hasNameEmailMismatch', () => {
+  test('spoken name not corroborated by email → mismatch (Jeanette vs gennettryan@)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'gennettryan@yahoo.com' })).toBe(true);
+  });
+  test('name corroborated by email → no mismatch', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mariar@gmail.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'bsmith@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Doe', email: 'john.doe@x.com' })).toBe(false);
+  });
+  test('correct name for the Gennett call → no mismatch (both tokens present)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Ryan', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(false);
+  });
+  test('separator-delimited segment names a different person → mismatch', () => {
+    // Surname "smith" matches, but the delimited "john" segment is a first name
+    // that contradicts the extracted "Bob".
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'john.smith@x.com' })).toBe(true);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Rodriguez', email: 'maria_rodriguez@x.com' })).toBe(true);
+  });
+  test('common first-initial + surname + affix mailboxes do NOT false-flag (Codex P2)', () => {
+    // jsmithhome / jsmithwork / mrodriguezfamily: surname is a substring of a
+    // separator-less segment → not mined; "home"/"work"/"family" are not names.
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmithhome@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmithwork@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mrodriguezfamily@x.com' })).toBe(false);
+    // Affix as an explicit delimited segment is also ignored.
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmith.home@x.com' })).toBe(false);
+  });
+  test('concatenated surname+other-name is intentionally NOT mined (no dictionary; caught by rule 1 when wholly wrong)', () => {
+    // Surname extracted correctly, first name wrong, no separator → we accept
+    // the miss rather than over-triage mailbox variants. Documented tradeoff.
+    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(false);
+  });
+  test('first-initial / first-name-only emails → no mismatch', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mariar@gmail.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmith@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'johnnyc@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: null, email: 'bobfitness@x.com' })).toBe(false);
+  });
+  test('delimited role-mailbox segment is not a foreign name (Codex P2 — office.john@)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'office.john@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'sales.maria@x.com' })).toBe(false);
+  });
+  test('generic/role mailbox → never a mismatch', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'info@company.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'office@x.com' })).toBe(false);
+  });
+  test('multi-segment role mailbox with no personal name → no mismatch (Codex P2 — office.sales@)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'office.sales@company.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Jones', email: 'sales.support@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Lee', email: 'billing.office@x.com' })).toBe(false);
+  });
+  test('no usable signal → no mismatch (null email, null name, short local-part)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: null })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: null, last_name: null, email: 'gennettryan@yahoo.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Al', last_name: null, email: 'xy@x.com' })).toBe(false);
+  });
+});
+
+describe('name_email_mismatch in routing', () => {
+  test('flags name_email_mismatch and blocks auto-route', () => {
+    const e = validV2Extraction();
+    e.caller.first_name = 'Jeanette';
+    e.caller.last_name = null;
+    e.caller.email = 'gennettryan@yahoo.com';
+    const flags = computeDeterministicTriageFlags(e, { contactPhone: '+19415551234' });
+    expect(flags).toContain('name_email_mismatch');
+    expect(canAutoRoute(e, { contactPhone: '+19415551234' }).allowed).toBe(false);
+  });
+
+  test('name_email_mismatch is appointment-blocking, not SMS-only', () => {
+    const e = validV2Extraction();
+    e.caller.first_name = 'Jeanette';
+    e.caller.last_name = null;
+    e.caller.email = 'gennettryan@yahoo.com';
+    const r = canAutoRoute(e, { contactPhone: '+19415551234' });
+    expect(r.appointmentBlockingFlags).toContain('name_email_mismatch');
+  });
+
+  test('maps to name_review triage category', () => {
+    const item = buildTriageItem({ callLogId: 'x', flag: 'name_email_mismatch', extraction: { meta: { call_summary: 's' } } });
+    expect(item.category).toBe('name_review');
   });
 });
