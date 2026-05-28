@@ -889,4 +889,14 @@ describe('newsletter preflightDigest', () => {
     expect(r.pass).toBe(false);
     expect(r.hardFailures).toHaveLength(2);
   });
+
+  test('dedupes by event id — duplicate ids do not inflate the gate (Codex P2)', () => {
+    // [A, B, A, B, A] — 5 entries but only 2 distinct events / 2 sources.
+    const a = ev(0, { source: 's0', city: 'c0' });
+    const b = ev(1, { source: 's1', city: 'c1' });
+    const r = preflightDigest([a, b, a, b, a]);
+    expect(r.stats.eligibleCount).toBe(2); // not 5
+    expect(r.pass).toBe(false); // 2 distinct < 5 required
+    expect(r.hardFailures.some((f) => /Eligible fresh approved events: 2 \/ required 5/.test(f))).toBe(true);
+  });
 });

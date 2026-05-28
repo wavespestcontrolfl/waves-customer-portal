@@ -94,9 +94,24 @@ function preflightDigest(lineupOrPlan, reqs = {}) {
     minImageCoverage = 0.5,
   } = reqs;
 
-  const events = Array.isArray(lineupOrPlan)
+  const rawEvents = Array.isArray(lineupOrPlan)
     ? lineupOrPlan
     : (Array.isArray(lineupOrPlan?.scored) ? lineupOrPlan.scored : []);
+
+  // Dedupe by event id — a planned calendar row can carry duplicate
+  // event_ids (admin save validates UUID/length, not uniqueness). Counting
+  // duplicates would let a thin lineup like [A,B,A,B,A] pass the 5-event /
+  // 2-source gate even though createNewsletterDraft() fetches only the
+  // distinct rows. Events without an id can't be deduped, so keep them.
+  const seenIds = new Set();
+  const events = rawEvents.filter((e) => {
+    const id = e && e.id != null ? String(e.id) : null;
+    if (id === null) return true;
+    if (seenIds.has(id)) return false;
+    seenIds.add(id);
+    return true;
+  });
+
   const eligibleCount = events.length;
   const lineup = events.slice(0, LINEUP_CAP);
 
@@ -215,7 +230,9 @@ async function autoDraftFlagship() {
 
   const topEvents = scored.slice(0, 12);
   const byId = new Map(scored.map((ev) => [ev.id, ev]));
-  const eligiblePreferred = preferredEventIds.filter((id) => byId.has(id));
+  // Dedupe preferred ids — a calendar row may carry duplicates (admin save
+  // validates UUID/length, not uniqueness); dupes would inflate the lineup.
+  const eligiblePreferred = [...new Set(preferredEventIds.filter((id) => byId.has(id)))];
 
   let lineupEvents;
   if (eligiblePreferred.length >= 5) {
