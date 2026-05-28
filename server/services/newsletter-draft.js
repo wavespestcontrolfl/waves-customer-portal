@@ -168,7 +168,7 @@ const COLORS = {
 const WAVES_DIVIDER_GIF = 'https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/952b11dc-99a2-4de3-8def-481a1c34f8d7/giphy.gif';
 
 async function generateHeroImage(subject) {
-  const s3Ready = config.s3.accessKeyId && config.s3.bucket && process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+  const s3Ready = config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket && process.env.SOCIAL_MEDIA_CDN_DOMAIN;
   if (!s3Ready) return null;
 
   try {
@@ -288,8 +288,10 @@ async function assembleBeehiivNewsletter(draft) {
 <img src="${ev.imageUrl}" alt="${(ev.title || '').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
 </div>`);
     }
-    const eventGif = await searchGiphy(ev.gifSearchTerm);
-    if (eventGif && !ev.imageUrl) parts.push(gifBlock(eventGif, ev.gifCaption));
+    if (!ev.imageUrl) {
+      const eventGif = await searchGiphy(ev.gifSearchTerm);
+      if (eventGif) parts.push(gifBlock(eventGif, ev.gifCaption));
+    }
 
     // Description
     if (ev.description) {
