@@ -14,6 +14,7 @@
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
+ *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -60,9 +61,13 @@ const gates = {
   // default in prod until verified; admin-click bridge is unaffected.
   leadAutoBridge: isProd ? process.env.GATE_LEAD_AUTO_BRIDGE === 'true' : true,
 
+  // Lead Estimate Automation — generates priced draft estimates from new
+  // lead-webhook submissions. Explicit opt-in everywhere so leads can keep
+  // flowing while quoting stays manual.
+  leadEstimateAutomation: process.env.GATE_LEAD_ESTIMATE_AUTOMATION === 'true',
+
   // Lead Estimate Auto-Send — sends generated lead-webhook draft estimates
-  // after a delay. Production default is OFF; the draft generation/review UI
-  // remains active without this gate.
+  // after a delay. Requires leadEstimateAutomation in the scheduler too.
   leadEstimateAutoSend: process.env.GATE_LEAD_ESTIMATE_AUTO_SEND === 'true',
 
   // Email Template Automations — executes trigger-mapped template sends from
