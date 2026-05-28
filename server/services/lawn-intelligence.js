@@ -34,28 +34,22 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 // ══════════════════════════════════════════════════════════════
 
 async function fetchFawnWeather() {
-  try {
-    const res = await fetch('https://fawn.ifas.ufl.edu/controller.php/lastObservation/summary/');
-    if (!res.ok) return null;
-    const data = await res.json();
-    const station = (data || []).find(s =>
-      (s.StationName || '').toLowerCase().includes('manatee') ||
-      (s.StationName || '').toLowerCase().includes('myakka') ||
-      (s.StationName || '').toLowerCase().includes('sarasota')
-    ) || data?.[0];
-    if (!station) return null;
-    return {
-      temp_f: parseFloat(station.AirTemp_Avg || station.t2m_avg || 0),
-      humidity_pct: parseFloat(station.RelHum_Avg || station.rh_avg || 0),
-      rainfall_in: parseFloat(station.Rain_Tot || station.rain_sum || 0),
-      soil_temp_f: parseFloat(station.SoilTemp4_Avg || station.ts4_avg || 0),
-      station: station.StationName || 'FAWN SWFL',
-      timestamp: new Date().toISOString(),
-    };
-  } catch (err) {
-    logger.error(`[lawn-intel] FAWN fetch failed: ${err.message}`);
-    return null;
-  }
+  // Delegate to the canonical FAWN service (cached, station-selected, and
+  // null-safe). The previous local fetcher coerced missing readings to 0 via
+  // `parseFloat(x || 0)`, which persisted 0°F / 0in into lawn_assessments and
+  // polluted downstream efficacy/seasonal aggregation. getCurrent() uses
+  // numberOrNull, so absent fields stay null.
+  const FawnWeather = require('./fawn-weather');
+  const snapshot = await FawnWeather.getCurrent();
+  if (!snapshot || snapshot.station === 'unavailable') return null;
+  return {
+    temp_f: snapshot.temp_f,
+    humidity_pct: snapshot.humidity_pct,
+    rainfall_in: snapshot.rainfall_in,
+    soil_temp_f: snapshot.soil_temp_f,
+    station: snapshot.station,
+    timestamp: snapshot.timestamp,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════

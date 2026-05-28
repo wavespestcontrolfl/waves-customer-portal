@@ -177,20 +177,6 @@ const FawnWeather = {
   },
 
   /**
-   * Get weather snapshot formatted for lawn_assessments columns.
-   */
-  async getAssessmentWeather() {
-    const w = await FawnWeather.getCurrent();
-    return {
-      fawn_temp_f: w.temp_f,
-      fawn_humidity_pct: w.humidity_pct,
-      fawn_rainfall_7d: w.rainfall_in, // FAWN returns daily total; will be enhanced with 7-day accumulation later
-      fawn_soil_temp_f: w.soil_temp_f,
-      fawn_station: w.station,
-    };
-  },
-
-  /**
    * Get seasonal context for customer-facing display.
    * Returns human-readable explanation of current conditions.
    */
@@ -248,7 +234,7 @@ const FawnWeather = {
     if (m >= 6 && m <= 9) signals.push({ type: 'gray_leaf_spot', level: 'high', note: 'Gray leaf spot risk elevated with humidity >80%' });
     if (m >= 5 && m <= 8) signals.push({ type: 'large_patch', level: 'moderate', note: 'Large patch (Rhizoctonia) may appear in shaded areas' });
     if (m >= 3 && m <= 5) signals.push({ type: 'dollar_weed', level: 'high', note: 'Dollar weed spreading — pre/post emergent window' });
-    if (m >= 10 && m <= 2) signals.push({ type: 'annual_bluegrass', level: 'high', note: 'Poa annua germination — pre-emergent critical' });
+    if (m >= 10 || m <= 2) signals.push({ type: 'annual_bluegrass', level: 'high', note: 'Poa annua germination — pre-emergent critical' });
     if (m >= 5 && m <= 8) signals.push({ type: 'nitrogen_blackout', level: 'regulatory', note: 'Sarasota/Manatee county nitrogen blackout in effect' });
 
     return signals;
