@@ -19,6 +19,7 @@ const {
   isDeterministicPublishError,
   envBool,
   envInt,
+  dailyBatchLimit,
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
 } = _internals;
@@ -472,6 +473,17 @@ describe('canary guard env parsing', () => {
     process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS = '-1';
     expect(envInt('AUTONOMOUS_CONTENT_MAX_P1_FINDINGS', 3)).toBe(3);
   });
+
+  test('dailyBatchLimit defaults to 5 and caps at 10', () => {
+    delete process.env.AUTONOMOUS_CONTENT_DAILY_BATCH_SIZE;
+    expect(dailyBatchLimit()).toBe(5);
+    process.env.AUTONOMOUS_CONTENT_DAILY_BATCH_SIZE = '8';
+    expect(dailyBatchLimit()).toBe(8);
+    process.env.AUTONOMOUS_CONTENT_DAILY_BATCH_SIZE = '50';
+    expect(dailyBatchLimit()).toBe(10);
+    expect(dailyBatchLimit(0)).toBe(5);
+    expect(dailyBatchLimit(3)).toBe(3);
+  });
 });
 
 // ── Module exports surface ──────────────────────────────────────────
@@ -482,6 +494,49 @@ describe('module exports', () => {
     expect(typeof mod.runNext).toBe('function');
     expect(typeof mod.runDaily).toBe('function');
     expect(typeof mod.AutonomousRunner).toBe('function');
+  });
+});
+
+describe('runDaily batching', () => {
+  test('claims best remaining opportunities until limit or empty queue', async () => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner.runNext = jest.fn()
+      .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'new_supporting_blog' })
+      .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'rewrite_title_meta' })
+      .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    expect(runner.runNext).toHaveBeenCalledTimes(3);
+    expect(runner._appendToDailyDigest).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({
+      outcome: 'skipped_no_opportunity',
+      count: 3,
+      limit: 5,
+    });
+  });
+
+  test.each(['failed', 'failed_agent', 'failed_publish'])(
+    'stops the batch on retryable %s outcomes to avoid reclaiming the same top opportunity',
+    async (outcome) => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner.runNext = jest.fn().mockResolvedValue({
+      outcome,
+      failure_message: 'brief_compose:temporary dependency unavailable',
+    });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    expect(runner.runNext).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      outcome,
+      count: 1,
+      limit: 5,
+    });
   });
 });
 

@@ -207,6 +207,15 @@ async function runContentRegistryMaintenance({
   };
 }
 
+async function runAutonomousOpportunityMining({
+  miner = require('./seo/gsc-opportunity-miner'),
+} = {}) {
+  const periodDays = parsePositiveEnvInt(process.env.AUTONOMOUS_OPPORTUNITY_MINE_PERIOD_DAYS, 28);
+  const result = await miner.mineAll({ periodDays, persist: true });
+  logger.info(`[autonomous-opportunity-miner] mined period=${periodDays}d persisted=${result.persisted || 0}`);
+  return result;
+}
+
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
@@ -311,6 +320,17 @@ function initScheduledJobs() {
       const Cannibalization = require('./seo/cannibalization');
       await Cannibalization.detect();
     } catch (err) { logger.error(`Content decay/cannibalization failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // MON–FRI 7:30AM ET — Mine fresh GSC opportunities before the 9AM runner.
+  // Writes only opportunity_queue rows. The runner still chooses by score and
+  // per-lane shadow/canary guards decide whether anything can publish.
+  cron.schedule('30 7 * * 1-5', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    logger.info('Running: Autonomous Content Opportunity Miner');
+    try {
+      await runAutonomousOpportunityMining();
+    } catch (err) { logger.error(`Autonomous opportunity miner failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // MON–FRI 9AM ET — Autonomous Content Engine daily run.
@@ -1750,6 +1770,7 @@ module.exports = {
   initBankingSync,
   purposeForScheduledMessageType,
   runContentRegistryMaintenance,
+  runAutonomousOpportunityMining,
   parseListEnv,
   parsePositiveEnvInt,
   claimDueScheduledEstimates,
