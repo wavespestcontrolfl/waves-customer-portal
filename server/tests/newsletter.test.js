@@ -681,7 +681,15 @@ describe('newsletter findHallucinatedClaims', () => {
 
   test('blocks "no cost" / "complimentary" admission language', () => {
     expect(findHallucinatedClaims('<p>complimentary entry for kids</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>free of charge for everyone</p>').length).toBeGreaterThan(0);
+  });
+
+  test('blocks inverted "X is free" phrasing (Codex P2)', () => {
     expect(findHallucinatedClaims('<p>Show up — admission is free.</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>tickets are free this year</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>entry is free for members</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>the event is free to attend</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>parking is free downtown</p>').length).toBeGreaterThan(0);
   });
 
   test('blocks pest-control efficacy and safety guarantee phrases', () => {

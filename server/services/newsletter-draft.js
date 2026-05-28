@@ -428,6 +428,7 @@ async function createNewsletterDraft({
   tone,
   includeCTA,
   trx,
+  persist = true,
 }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API not configured');
@@ -577,6 +578,14 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 
   // Map flagship output to legacy shape
   draft.subject = draft.selectedSubject || draft.subjectVariants?.[0] || '';
+
+  // persist=false: the interactive Compose flow (/draft-ai) reuses this
+  // locked generator for a preview, then saves via the normal /sends
+  // route after the operator reviews. Skip the DB insert and return the
+  // draft only — facts are still locked at this point.
+  if (!persist) {
+    return { send: null, draft };
+  }
 
   // 6. Generate slug
   const slug = generateSlug(draft.subject);

@@ -15,7 +15,9 @@ const HALLUCINATED_CLAIM_PATTERNS = [
   // model can't substantiate any specific cost claim.
   { pattern: /\$\s?\d/, label: 'dollar amount in body' },
   { pattern: /\bfree\s+(?:admission|entry|event|tickets?|to\s+attend|to\s+enter|for\s+kids?|for\s+children)\b/i, label: '"free" admission claim' },
-  { pattern: /\b(?:no\s+cost|no\s+charge|complimentary|admission\s+is\s+free)\b/i, label: 'admission/no-cost claim' },
+  // Inverted phrasing — "admission is free", "tickets are free", "entry is free", "the event is free".
+  { pattern: /\b(?:admission|entry|tickets?|the\s+event|this\s+event|the\s+show|parking)\s+(?:is|are|'?s)\s+free\b/i, label: 'inverted free claim' },
+  { pattern: /\b(?:no\s+cost|no\s+charge|complimentary|free\s+of\s+charge)\b/i, label: 'admission/no-cost claim' },
   { pattern: /\b(?:tickets?\s+(?:are|cost|start|begin)\s+(?:at\s+)?\$?\d)/i, label: 'ticket pricing claim' },
   // Pest-control efficacy / safety guarantees — legal/EPA risk in any
   // customer-facing AI copy, even in an events newsletter.
