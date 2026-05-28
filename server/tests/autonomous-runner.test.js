@@ -30,6 +30,243 @@ afterEach(() => {
   }
 });
 
+describe('rewrite_title_meta live adapter', () => {
+  test('opens a metadata PR after title/meta spam gate passes', async () => {
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_meta_1',
+          action_type: 'rewrite_title_meta',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const brief = {
+        id: 'brief_meta_1',
+        opportunity_id: 'opp_meta_1',
+        action_type: 'rewrite_title_meta',
+        page_type: 'metadata',
+        target_url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+        target_keyword: 'pest control lakewood ranch fl',
+        city: 'Lakewood Ranch',
+        service: 'pest',
+        serp_signal: { dominant_intent: 'service' },
+        gsc_signal: { impressions: 1168 },
+        human_review_required: false,
+      };
+      const briefBuilder = { compose: jest.fn().mockResolvedValue(brief) };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: {
+            type: 'metadata',
+            title: 'Pest Control in Lakewood Ranch, FL | Waves',
+            meta_description: 'Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.',
+          },
+          agent_id: 'agent_meta',
+          session_id: 'session_meta',
+        }),
+      };
+      const publisher = {
+        publishMetadataRewrite: jest.fn().mockResolvedValue({
+          status: 'pr_open',
+          live: false,
+          url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+          pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55',
+        }),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('metadata_pr_pending_merge');
+      expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55');
+      expect(publisher.publishMetadataRewrite).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'metadata',
+      }), brief);
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_1', 'metadata_pr_pending_merge', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.complete).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+
+  test('parks spammy metadata without opening a PR', async () => {
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_meta_spam',
+          action_type: 'rewrite_title_meta',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_meta_spam',
+          action_type: 'rewrite_title_meta',
+          page_type: 'metadata',
+          target_keyword: 'pest control lakewood ranch fl',
+          city: 'Lakewood Ranch',
+          service: 'pest',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: {
+            type: 'metadata',
+            title: 'Best Cheap Top-Rated Pest Control Near Me Lakewood Ranch',
+            meta_description: 'Call Waves for pest control in Lakewood Ranch.',
+          },
+        }),
+      };
+      const publisher = { publishMetadataRewrite: jest.fn() };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('metadata_gate_fail');
+      expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_spam', 'metadata_gate_fail', { claimToken: claimedAt });
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+
+  test('parks metadata that fails the shared metadata quality gate', async () => {
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_meta_short',
+          action_type: 'rewrite_title_meta',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_meta_short',
+          action_type: 'rewrite_title_meta',
+          page_type: 'metadata',
+          target_url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+          target_keyword: 'pest control lakewood ranch fl',
+          city: 'Lakewood Ranch',
+          service: 'pest',
+          serp_signal: { dominant_intent: 'service' },
+          gsc_signal: { impressions: 1168 },
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: {
+            type: 'metadata',
+            title: 'Pest Control in Lakewood Ranch, FL | Waves',
+            meta_description: 'Too short.',
+          },
+        }),
+      };
+      const publisher = { publishMetadataRewrite: jest.fn() };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('metadata_quality_gate_fail');
+      expect(result.quality_gate_result.hard_failures).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'meta_length_in_bounds' }),
+      ]));
+      expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_short', 'metadata_quality_gate_fail', { claimToken: claimedAt });
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+
+  test('parks metadata when target keyword is missing from title even if score passes', async () => {
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_meta_keyword',
+          action_type: 'rewrite_title_meta',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_meta_keyword',
+          action_type: 'rewrite_title_meta',
+          page_type: 'metadata',
+          target_url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+          target_keyword: 'pest control lakewood ranch fl',
+          city: 'Lakewood Ranch',
+          service: 'pest',
+          serp_signal: { dominant_intent: 'service' },
+          gsc_signal: { impressions: 1168 },
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: {
+            type: 'metadata',
+            title: 'Bug Help for Homes in Lakewood Ranch | Waves',
+            meta_description: 'Protect your Lakewood Ranch home from common Southwest Florida bugs with Waves guidance on prevention, treatment timing, and when to call for help.',
+          },
+        }),
+      };
+      const publisher = { publishMetadataRewrite: jest.fn() };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('metadata_quality_gate_fail');
+      expect(result.quality_gate_result.ok).toBe(false);
+      expect(result.quality_gate_result.checks.primary_keyword_in_title.ok).toBe(false);
+      expect(result.quality_gate_result.hard_failures).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'primary_keyword_in_title' }),
+      ]));
+      expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_keyword', 'metadata_quality_gate_fail', { claimToken: claimedAt });
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+});
+
 // ── isShadow per-action env mapping ─────────────────────────────────
 
 describe('isShadow', () => {
