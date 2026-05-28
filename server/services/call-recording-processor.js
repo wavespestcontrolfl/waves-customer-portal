@@ -806,10 +806,13 @@ function normalizeOpenAITranscript(data) {
 }
 
 // Normalize OpenAI diarized_json segments into a stable, storable shape:
-// { id, speaker, start_ms, end_ms, text }. OpenAI reports segment start/end in
-// SECONDS (float) — converted to integer ms here. Keeps the RAW diarization
-// speaker label (A/B/speaker_0); the human Agent/Caller labels live on the text
-// transcript, which is produced by a separate labeling pass.
+// { id, index, speaker, start_ms, end_ms, text }. OpenAI reports segment
+// start/end in SECONDS (float) — converted to integer ms here. `id` preserves
+// the provider's stable identifier verbatim (gpt-4o-transcribe-diarize returns
+// a STRING like "seg_001"), so a stored segment can be reconciled with the raw
+// API payload; `index` is our positional fallback for ordering. Keeps the RAW
+// diarization speaker label (A/B/speaker_0); the human Agent/Caller labels live
+// on the text transcript, produced by a separate labeling pass.
 function normalizeOpenAISegments(data) {
   if (!data || !Array.isArray(data.segments)) return null;
   const segments = data.segments
@@ -819,7 +822,8 @@ function normalizeOpenAISegments(data) {
       const start = Number(seg.start);
       const end = Number(seg.end);
       return {
-        id: Number.isInteger(seg.id) ? seg.id : i,
+        id: seg.id != null ? seg.id : null,
+        index: i,
         speaker: seg.speaker || seg.speaker_id || seg.speaker_label || null,
         start_ms: Number.isFinite(start) ? Math.round(start * 1000) : null,
         end_ms: Number.isFinite(end) ? Math.round(end * 1000) : null,

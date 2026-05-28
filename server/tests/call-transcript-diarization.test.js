@@ -3,16 +3,16 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 describe('normalizeOpenAISegments (diarized_json → stored shape)', () => {
   const { normalizeOpenAISegments } = CallRecordingProcessor._test;
 
-  test('maps diarized_json segments to { id, speaker, start_ms, end_ms, text }', () => {
+  test('maps diarized_json segments to { id, index, speaker, start_ms, end_ms, text }', () => {
     const data = {
       segments: [
-        { id: 0, speaker: 'A', start: 0, end: 3.2, text: 'Waves Pest Control.' },
-        { id: 1, speaker: 'B', start: 3.5, end: 7.0, text: 'Hi, I have roaches.' },
+        { id: 'seg_001', speaker: 'A', start: 0, end: 3.2, text: 'Waves Pest Control.' },
+        { id: 'seg_002', speaker: 'B', start: 3.5, end: 7.0, text: 'Hi, I have roaches.' },
       ],
     };
     expect(normalizeOpenAISegments(data)).toEqual([
-      { id: 0, speaker: 'A', start_ms: 0, end_ms: 3200, text: 'Waves Pest Control.' },
-      { id: 1, speaker: 'B', start_ms: 3500, end_ms: 7000, text: 'Hi, I have roaches.' },
+      { id: 'seg_001', index: 0, speaker: 'A', start_ms: 0, end_ms: 3200, text: 'Waves Pest Control.' },
+      { id: 'seg_002', index: 1, speaker: 'B', start_ms: 3500, end_ms: 7000, text: 'Hi, I have roaches.' },
     ]);
   });
 
@@ -23,11 +23,21 @@ describe('normalizeOpenAISegments (diarized_json → stored shape)', () => {
     expect(seg.end_ms).toBe(2679);
   });
 
-  test('falls back to array index when id missing', () => {
-    const data = { segments: [{ speaker: 'A', start: 0, end: 1, text: 'a' }, { speaker: 'B', start: 1, end: 2, text: 'b' }] };
+  test('preserves provider string ids verbatim; index is positional', () => {
+    const data = { segments: [{ id: 'seg_042', speaker: 'A', start: 0, end: 1, text: 'a' }, { id: 'seg_043', speaker: 'B', start: 1, end: 2, text: 'b' }] };
     const out = normalizeOpenAISegments(data);
-    expect(out[0].id).toBe(0);
-    expect(out[1].id).toBe(1);
+    expect(out[0].id).toBe('seg_042');
+    expect(out[0].index).toBe(0);
+    expect(out[1].id).toBe('seg_043');
+    expect(out[1].index).toBe(1);
+  });
+
+  test('id is null when provider omits it; index still set', () => {
+    const out = normalizeOpenAISegments({ segments: [{ speaker: 'A', start: 0, end: 1, text: 'a' }, { speaker: 'B', start: 1, end: 2, text: 'b' }] });
+    expect(out[0].id).toBeNull();
+    expect(out[0].index).toBe(0);
+    expect(out[1].id).toBeNull();
+    expect(out[1].index).toBe(1);
   });
 
   test('accepts alternate speaker key names', () => {
