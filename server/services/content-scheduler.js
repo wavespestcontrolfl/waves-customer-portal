@@ -44,11 +44,46 @@ function dateColumnKey(value) {
   return match ? match[1] : text;
 }
 
+function slugify(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 80);
+}
+
+function imageExtFromMime(mime) {
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
+  if (mime === 'image/webp') return 'webp';
+  return null;
+}
+
+function imageExtFromSource(value) {
+  const dataMatch = String(value || '').match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+  return imageExtFromMime(dataMatch?.[1]?.toLowerCase()) || 'webp';
+}
+
+function blogSlug(post) {
+  return String(post.slug || slugify(post.title)).replace(/^\/+|\/+$/g, '');
+}
+
+function hasPublishedAstroHero(post) {
+  return post.astro_status === 'live';
+}
+
 function publicBlogImageUrl(blog) {
-  const raw = blog.featured_image_url || blog.image_url || blog.og_image;
-  if (!raw) return undefined;
-  if (/^https?:\/\//i.test(raw)) return raw;
-  if (raw.startsWith('/')) return `https://www.wavespestcontrol.com${raw}`;
+  for (const raw of [blog.featured_image_url, blog.image_url, blog.og_image]) {
+    if (!raw) continue;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (raw.startsWith('/')) return `https://www.wavespestcontrol.com${raw}`;
+    if (/^data:image\//i.test(raw) && hasPublishedAstroHero(blog)) {
+      const slug = blogSlug(blog);
+      if (slug) return `https://www.wavespestcontrol.com/images/blog/${slug}/hero.${imageExtFromSource(raw)}`;
+    }
+  }
   return undefined;
 }
 
