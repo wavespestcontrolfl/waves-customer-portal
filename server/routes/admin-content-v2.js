@@ -10,6 +10,7 @@ const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { normalizeSpokeSites, invalidSpokeSites } = require('../services/content-astro/spoke-sites');
 const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
+const internalLinkReviewQueue = require('../services/content/internal-link-review-queue');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -233,6 +234,40 @@ router.post('/autonomous/review/:id/decision', async (req, res, next) => {
       reviewer: req.technicianId || 'admin',
     });
     if (!item) return res.status(404).json({ error: 'Review item not found' });
+    res.json({ success: true, item });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/content/internal-links?status=patch_candidate&limit=100
+router.get('/internal-links', async (req, res, next) => {
+  try {
+    const review = await internalLinkReviewQueue.listTasks({
+      status: req.query.status,
+      limit: req.query.limit,
+    });
+    res.json(review);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/content/internal-links/:id
+router.get('/internal-links/:id', async (req, res, next) => {
+  try {
+    const item = await internalLinkReviewQueue.getTask(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Internal-link task not found' });
+    res.json({ item });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/content/internal-links/:id/decision
+// Body: { decision: "requeue" | "dismiss" | "verify_now", note?: string }
+router.post('/internal-links/:id/decision', async (req, res, next) => {
+  try {
+    const item = await internalLinkReviewQueue.decideTask(req.params.id, {
+      decision: req.body?.decision,
+      note: req.body?.note,
+      reviewer: req.technicianId || 'admin',
+    });
+    if (!item) return res.status(404).json({ error: 'Internal-link task not found' });
     res.json({ success: true, item });
   } catch (err) { next(err); }
 });
