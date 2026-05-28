@@ -7,7 +7,7 @@ const gmailClient = require('../services/email/gmail-client');
 const { syncEmails } = require('../services/email/email-sync');
 const { classifyEmail } = require('../services/email/email-classifier');
 const { executeAutoAction } = require('../services/email/email-actions');
-const { unblockSender } = require('../services/email/spam-blocker');
+const { unblockSender, isProtectedDomain } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 
@@ -532,6 +532,9 @@ router.post('/block', async (req, res) => {
     if (!blockEmail && !blockDomain) return res.status(400).json({ error: 'email_address or domain required' });
     if (blockEmail && !EMAIL_RE.test(blockEmail)) return res.status(400).json({ error: 'Invalid email address' });
     if (blockDomain && !DOMAIN_RE.test(blockDomain)) return res.status(400).json({ error: 'Invalid domain' });
+    if (blockDomain && isProtectedDomain(blockDomain)) {
+      return res.status(400).json({ error: 'Protected domains cannot be blocked domain-wide. Block a specific sender address instead.' });
+    }
     const filterFrom = blockEmail || `@${blockDomain}`;
 
     // Create Gmail filter
