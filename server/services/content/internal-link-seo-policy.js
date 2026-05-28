@@ -110,6 +110,9 @@ function validateAnchorPolicy(anchorText, context = {}) {
   if (GENERIC_ANCHOR_PREFIX_RE.test(anchor)) {
     issues.push(issue('anchor_generic_cta_prefix', 'Anchor starts with a generic CTA phrase.'));
   }
+  if (splitsServicePhrase(anchor, context.surroundingText)) {
+    issues.push(issue('anchor_splits_service_phrase', 'Anchor splits a service phrase instead of linking the complete phrase.'));
+  }
   if (anchor.length > 80 || words.length > 8) issues.push(issue('anchor_too_long', 'Anchor text is too long.'));
   if (/[.!?]$/.test(anchor)) issues.push(issue('anchor_sentence', 'Anchor should not include sentence punctuation.'));
   if (/\b(click|tap)\b/i.test(anchor)) issues.push(issue('anchor_ui_action', 'Anchor should describe the destination, not a UI action.'));
@@ -130,6 +133,28 @@ function validateAnchorPolicy(anchorText, context = {}) {
     anchor_type: anchorType,
     issues,
   };
+}
+
+function splitsServicePhrase(anchorText, surroundingText) {
+  const anchor = clean(anchorText).toLowerCase();
+  const text = clean(surroundingText).toLowerCase();
+  if (!anchor || !text) return false;
+
+  const anchorStart = text.indexOf(anchor);
+  if (anchorStart === -1) return false;
+  const anchorEnd = anchorStart + anchor.length;
+
+  for (const phrase of COMMERCIAL_TERMS) {
+    let phraseStart = text.indexOf(phrase);
+    while (phraseStart !== -1) {
+      const phraseEnd = phraseStart + phrase.length;
+      const overlaps = anchorStart < phraseEnd && anchorEnd > phraseStart;
+      const fullyCovers = anchorStart <= phraseStart && anchorEnd >= phraseEnd;
+      if (overlaps && !fullyCovers) return true;
+      phraseStart = text.indexOf(phrase, phraseStart + 1);
+    }
+  }
+  return false;
 }
 
 function scoreTopicalRelevance(source = {}, target = {}) {
@@ -208,6 +233,7 @@ function evaluateLinkOpportunity({ source = {}, target = {}, anchor_text = '', c
     existingExactMatchAnchorsForTarget: context.existingExactMatchAnchorsForTarget,
     sameAnchorCountForTarget: context.sameAnchorCountForTarget,
     maxExactMatchAnchorsPerTarget: options.maxExactMatchAnchorsPerTarget,
+    surroundingText: context.surroundingText,
   });
 
   const issues = [...pair.issues, ...anchor.issues];
@@ -293,6 +319,7 @@ module.exports = {
     clean,
     meaningfulTokens,
     keywordTokenCoverage,
+    splitsServicePhrase,
     withinDays,
   },
 };
