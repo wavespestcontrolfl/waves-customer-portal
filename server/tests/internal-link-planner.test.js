@@ -23,6 +23,7 @@ const {
   maskExcludedRegions,
   maskNonContentRegions,
   findFirstUnlinkedOccurrence,
+  isInsideMarkdownHeading,
   isInsideLink,
   snippetAround,
   pageAlreadyLinksTo,
@@ -218,6 +219,12 @@ describe('findFirstUnlinkedOccurrence', () => {
     const r = findFirstUnlinkedOccurrence(t, 'Do termites fly?');
     expect(r.index).toBe(0);
     expect(r.length).toBe('Do termites fly?'.length);
+  });
+  test('skips heading occurrences and finds body text', () => {
+    const t = '  ## Bradenton Pest Concerns\n\nBody copy mentions Bradenton pest pressure after rain.';
+    const r = findFirstUnlinkedOccurrence(t, 'Bradenton pest');
+    expect(r.index).toBe(t.indexOf('Bradenton pest pressure'));
+    expect(isInsideMarkdownHeading(t, t.indexOf('Bradenton Pest Concerns'))).toBe(true);
   });
 });
 

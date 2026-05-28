@@ -41,7 +41,7 @@ const STOPWORDS = new Set([
 ]);
 
 function normalizeInternalUrl(value, { allowExternal = false } = {}) {
-  const raw = String(value || '').trim();
+  const raw = expandTemplatedSiteUrl(String(value || '').trim());
   if (!raw || /[\u0000-\u001F\\]/.test(raw)) return null;
 
   let pathname;
@@ -68,6 +68,10 @@ function normalizeInternalUrl(value, { allowExternal = false } = {}) {
   if (!clean || !clean.startsWith('/')) return null;
   if (!/^\/[a-z0-9/_~.%+-]+$/.test(clean)) return null;
   return `${clean}/`;
+}
+
+function expandTemplatedSiteUrl(value) {
+  return String(value || '').replace(/\{\{\s*siteUrl\s*\}\}/gi, 'https://www.wavespestcontrol.com');
 }
 
 function urlsEquivalent(a, b) {
@@ -284,6 +288,7 @@ module.exports = {
   validateSourceTargetPair,
   evaluateLinkOpportunity,
   paragraphHash,
+  expandTemplatedSiteUrl,
   _internals: {
     clean,
     meaningfulTokens,

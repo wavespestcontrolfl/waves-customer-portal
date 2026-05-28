@@ -11,6 +11,8 @@ const {
   pageFromAstroFile,
   resolveAstroFileForUrl,
   countInternalLinks,
+  firstValidInternalUrl,
+  slugToInternalUrl,
 } = executor._internals;
 
 function page(file, body, extra = {}) {
@@ -58,7 +60,7 @@ describe('internal-link dry-run executor pure evaluation', () => {
 
     expect(result.status).toBe('patch_candidate');
     expect(result.source_url).toBe('/blog/termite-swarmers-bathroom/');
-    expect(result.target_canonical_url).toBe('https://www.wavespestcontrol.com/termite-inspection/');
+    expect(result.target_canonical_url).toBe('/termite-inspection/');
     expect(result.anchor_type).toBe('partial_match');
     expect(result.topical_relevance_score).toBeGreaterThanOrEqual(0.75);
     expect(result.link_context_before).toContain('termite inspection in Florida');
@@ -98,7 +100,7 @@ describe('internal-link dry-run executor pure evaluation', () => {
     }, {
       sourcePage: page('src/content/blog/termite-swarmers-bathroom.md', headingBody),
       targetPage: page('src/content/services/termite-inspection.md', targetBody),
-    }).skip_reason).toBe('anchor_in_heading');
+    }).skip_reason).toBe('anchor_not_found');
 
     const linkedParagraph = sourceBody.replace(
       'A termite inspection in Florida helps confirm whether the swarmers came from an active colony.',
@@ -148,6 +150,23 @@ describe('internal-link dry-run executor pure evaluation', () => {
 });
 
 describe('internal-link dry-run executor helpers', () => {
+  test('normalizes bare Astro slugs and templated canonicals', () => {
+    const loaded = pageFromAstroFile('src/content/services/pest-control-bradenton-fl.md', [
+      '---',
+      'title: Pest Control in Bradenton',
+      'slug: "pest-control-bradenton-fl"',
+      'canonical: "{{siteUrl}}/pest-control-bradenton-fl/"',
+      'category: pest',
+      '---',
+      'Bradenton pest control body.',
+    ].join('\n'));
+
+    expect(loaded.url).toBe('/pest-control-bradenton-fl/');
+    expect(loaded.canonical_url).toBe('/pest-control-bradenton-fl/');
+    expect(firstValidInternalUrl('{{siteUrl}}/pest-control-bradenton-fl/')).toBe('/pest-control-bradenton-fl/');
+    expect(slugToInternalUrl('pest-control-bradenton-fl')).toBe('/pest-control-bradenton-fl/');
+  });
+
   test('resolves Astro file paths from target URLs', () => {
     expect(resolveAstroFileForUrl('/blog/ghost-ants/')).toBe('src/content/blog/ghost-ants.md');
     expect(resolveAstroFileForUrl('/pest-control-bradenton-fl/')).toBe('src/content/services/pest-control-bradenton-fl.md');
