@@ -5,6 +5,48 @@
 const { getNewsletterType, isFlagshipType } = require('../config/newsletter-types');
 const { validateVoice } = require('../config/voice-profiles');
 
+// Phrases the flagship draft is NOT allowed to make up. The events_raw
+// table doesn't store admission, and the newsletter is an events guide
+// (not a service pitch), so any pricing or pest-control efficacy claim
+// in AI-generated commentary is a hallucination. These match against
+// the rendered body text and hard-block the send.
+const HALLUCINATED_CLAIM_PATTERNS = [
+  // Pricing / admission language — admission isn't in our DB, so the
+  // model can't substantiate any specific cost claim.
+  { pattern: /\$\s?\d/, label: 'dollar amount in body' },
+  { pattern: /\bfree\s+(?:admission|entry|event|tickets?|to\s+attend|to\s+enter|for\s+kids?|for\s+children)\b/i, label: '"free" admission claim' },
+  { pattern: /\b(?:no\s+cost|no\s+charge|complimentary|admission\s+is\s+free)\b/i, label: 'admission/no-cost claim' },
+  { pattern: /\b(?:tickets?\s+(?:are|cost|start|begin)\s+(?:at\s+)?\$?\d)/i, label: 'ticket pricing claim' },
+  // Pest-control efficacy / safety guarantees — legal/EPA risk in any
+  // customer-facing AI copy, even in an events newsletter.
+  { pattern: /\b(?:guaranteed|100\s*%)\s+(?:safe|effective|results?|kill|elimination)\b/i, label: 'efficacy guarantee' },
+  { pattern: /\bpet[-\s]safe\b/i, label: '"pet-safe" claim' },
+  { pattern: /\bchild[-\s]safe\b/i, label: '"child-safe" claim' },
+  { pattern: /\bEPA[-\s]approved\b/i, label: '"EPA-approved" claim' },
+];
+
+/**
+ * Scan the rendered HTML body for AI-hallucinated factual claims that
+ * the draft pipeline can't substantiate from the DB. Returns one error
+ * string per distinct claim type detected (deduped on label so a draft
+ * mentioning "$10" three times doesn't produce three error rows).
+ */
+function findHallucinatedClaims(htmlBody) {
+  if (!htmlBody) return [];
+  const bodyText = htmlBody.replace(/<[^>]+>/g, ' ');
+  const seen = new Set();
+  const errors = [];
+  for (const { pattern, label } of HALLUCINATED_CLAIM_PATTERNS) {
+    const match = bodyText.match(pattern);
+    if (match && !seen.has(label)) {
+      seen.add(label);
+      const sample = (match[0] || '').trim().slice(0, 80);
+      errors.push(`Hallucinated claim (${label}): "${sample}" — facts are locked from DB; AI cannot make this claim`);
+    }
+  }
+  return errors;
+}
+
 function validateNewsletterDraft(send, opts = {}) {
   const errors = [];
   const warnings = [];
@@ -43,9 +85,10 @@ function validateNewsletterDraft(send, opts = {}) {
     if (!send.html_body.includes('<h2>') && !send.html_body.includes('<strong>')) {
       warnings.push('No event structure detected');
     }
+    errors.push(...findHallucinatedClaims(send.html_body));
   }
 
   return { errors, warnings };
 }
 
-module.exports = { validateNewsletterDraft };
+module.exports = { validateNewsletterDraft, findHallucinatedClaims };
