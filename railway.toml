@@ -1,8 +1,6 @@
 [build]
 builder = "nixpacks"
-
-[build.nixpacks]
-buildCmd = "npm run build && npx playwright install --with-deps chromium"
+buildCommand = "npm run build && npx playwright install --with-deps chromium"
 
 [deploy]
 # Migrations run as the pre-deploy command — once per deploy, between
