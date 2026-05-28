@@ -39,6 +39,28 @@ const ENTITY_DIRS = {
 const COPY_SAFE_EVIDENCE = new Set(['verified', 'partially_verified', 'directional']);
 const PROMPT_SAFE_EVIDENCE = new Set(['verified', 'partially_verified', 'directional']);
 
+// Contexts a published city/service optimization page may cover. A copy fact
+// whose allowed_contexts fall entirely outside this set (e.g. operational
+// `route_language`, or any future/unknown context) is excluded from the
+// citeable facts_pack AND from claims-ledger validation — so a fact tagged
+// only for a non-page context can't be cited and accepted in published copy.
+// Defined once and shared by the brief builder, the claims-ledger validator,
+// and the sufficiency auditor so the three index the identical citeable set
+// and cannot drift. Service-specific topics (lawn_pattern, etc.) are already
+// scoped by which service file the pack loads; this only gates cross-context
+// leakage. Excludes `route_language` (internal route phrasing, not customer copy).
+const PAGE_COPY_CONTEXTS = Object.freeze([
+  'service_area',
+  'local_examples',
+  'pest_pressure',
+  'seasonality',
+  'home_type',
+  'lawn_pattern',
+  'treatment_protocol',
+  'differentiation',
+  'regulation',
+]);
+
 // ── source resolution (mirrors content-registry) ───────────────────
 
 function resolveSource(astroSource, astroRoot) {
@@ -127,11 +149,15 @@ function isFactExpired(fact, now = new Date()) {
  *     public_copy_allowed === true, visibility === 'public', and acceptable
  *     evidence strength.
  *
- * Always excludes expired facts (per-fact TTL) and, when `context` is
- * provided, facts whose allowed_contexts excludes that context. A fact with
- * no allowed_contexts is considered context-agnostic (usable anywhere).
+ * Always excludes expired facts (per-fact TTL). Context gating: pass a single
+ * `context` string or a `contexts` array of the contexts the target page/section
+ * may cover. A fact passes the gate if it is context-agnostic (no
+ * allowed_contexts) OR its allowed_contexts intersect the permitted set. A fact
+ * tagged only for contexts outside the permitted set (e.g. operational
+ * `route_language`, or any future/unknown context) is excluded — fail-closed.
  */
-function usableFacts(file, { purpose = 'prompt', context = null, now = new Date() } = {}) {
+function usableFacts(file, { purpose = 'prompt', context = null, contexts = null, now = new Date() } = {}) {
+  const permitted = Array.isArray(contexts) ? contexts : (context ? [context] : null);
   const facts = Array.isArray(file?.facts) ? file.facts : [];
   return facts.filter((fact) => {
     if (!fact || !fact.id) return false;
@@ -150,10 +176,10 @@ function usableFacts(file, { purpose = 'prompt', context = null, now = new Date(
     // Freshness.
     if (isFactExpired(fact, now)) return false;
 
-    // Context gating.
-    if (context) {
+    // Context gating (intersection; agnostic facts pass).
+    if (permitted && permitted.length > 0) {
       const ctxs = Array.isArray(fact.allowed_contexts) ? fact.allowed_contexts : [];
-      if (ctxs.length > 0 && !ctxs.includes(context)) return false;
+      if (ctxs.length > 0 && !ctxs.some((c) => permitted.includes(c))) return false;
     }
 
     return true;
@@ -288,6 +314,7 @@ module.exports = {
   // constants for the auditor / gate
   SUPPORTED_SCHEMA_VERSION,
   COPY_SAFE_EVIDENCE,
+  PAGE_COPY_CONTEXTS,
   ENTITY_DIRS,
   FACTS_BANK_DIR,
 };

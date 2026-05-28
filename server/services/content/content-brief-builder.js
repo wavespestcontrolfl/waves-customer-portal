@@ -354,9 +354,10 @@ class ContentBriefBuilder {
 
     const pack = (file, id) => {
       if (!file || file.ok === false) return { id, facts: [] };
-      // purpose:'copy' — citeable, publishable facts only (aligns with the
-      // claims-ledger validator's index).
-      const facts = factsLoader.usableFacts(file, { purpose: 'copy' })
+      // purpose:'copy' + PAGE_COPY_CONTEXTS — citeable, publishable facts
+      // scoped to contexts a city/service page covers (aligns exactly with the
+      // claims-ledger validator's index, via the shared constant).
+      const facts = factsLoader.usableFacts(file, { purpose: 'copy', contexts: factsLoader.PAGE_COPY_CONTEXTS })
         .map((f) => ({ id: f.id, type: f.type, value: f.value, evidence_strength: f.evidence_strength, allowed_contexts: f.allowed_contexts || [] }));
       return { id, facts, internal_links: file.internal_links || {} };
     };

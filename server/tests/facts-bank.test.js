@@ -238,6 +238,25 @@ facts:
     expect(inContext.map((f) => f.id)).toEqual(['b']);
   });
 
+  test('contexts array gates by intersection; agnostic facts always pass', () => {
+    const file = {
+      facts: [
+        // intersects permitted set (service_area) → included
+        { id: 'a', type: 'landmark', visibility: 'public', prompt_use_allowed: true, public_copy_allowed: true, evidence_strength: 'verified', last_verified: TODAY, ttl_days: 365, allowed_contexts: ['service_area', 'route_language'] },
+        // entirely outside permitted set → excluded (fail-closed)
+        { id: 'b', type: 'operations', visibility: 'public', prompt_use_allowed: true, public_copy_allowed: true, evidence_strength: 'verified', last_verified: TODAY, ttl_days: 365, allowed_contexts: ['route_language'] },
+        // unknown future context, no overlap → excluded (fail-closed)
+        { id: 'c', type: 'misc', visibility: 'public', prompt_use_allowed: true, public_copy_allowed: true, evidence_strength: 'verified', last_verified: TODAY, ttl_days: 365, allowed_contexts: ['some_future_context'] },
+        // agnostic → always included
+        { id: 'd', type: 'neighborhood', visibility: 'public', prompt_use_allowed: true, public_copy_allowed: true, evidence_strength: 'verified', last_verified: TODAY, ttl_days: 365, allowed_contexts: [] },
+      ],
+    };
+    const ids = loader.usableFacts(file, { purpose: 'copy', contexts: loader.PAGE_COPY_CONTEXTS }).map((f) => f.id);
+    expect(ids).toEqual(['a', 'd']);
+    // PAGE_COPY_CONTEXTS deliberately excludes operational route_language.
+    expect(loader.PAGE_COPY_CONTEXTS).not.toContain('route_language');
+  });
+
   test('returns null for missing file and parse_error for invalid schema', async () => {
     const root = makeFactsBank({ 'cities/testville.md': verifiedCity() });
     expect(await loader.loadCity('does-not-exist', OPTS(root))).toBeNull();

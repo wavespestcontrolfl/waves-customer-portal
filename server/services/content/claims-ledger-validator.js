@@ -211,15 +211,16 @@ async function validate(draft, { city, service, county = null }, opts = {}) {
   const countyFile = countyId ? await loader.loadCounty(countyId, opts) : null;
 
   // Index ONLY copy-usable facts (public, public_copy_allowed, copy-safe
-  // evidence, not expired). A claim citing an internal_only / prompt-only /
-  // expired fact id must fail as CLAIM_CITES_UNKNOWN_FACT — published copy may
-  // only assert facts that are safe for published copy, matching the facts_pack
-  // guarantee the agent was given.
+  // evidence, not expired) scoped to PAGE_COPY_CONTEXTS. A claim citing an
+  // internal_only / prompt-only / expired / wrong-context fact id must fail as
+  // CLAIM_CITES_UNKNOWN_FACT — published copy may only assert facts that are
+  // safe AND context-appropriate for this page, matching the facts_pack
+  // guarantee the agent was given (same constant, so the two cannot drift).
   const factsById = {};
   const disallowed = [];
   for (const file of [cityFile, serviceFile, countyFile]) {
     if (!file || file.ok === false) continue;
-    for (const fact of loader.usableFacts(file, { purpose: 'copy' })) {
+    for (const fact of loader.usableFacts(file, { purpose: 'copy', contexts: loader.PAGE_COPY_CONTEXTS })) {
       if (fact?.id) factsById[fact.id] = fact;
     }
     for (const p of file.disallowed_claim_patterns || []) disallowed.push(p);
