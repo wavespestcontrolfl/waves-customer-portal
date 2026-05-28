@@ -61,12 +61,15 @@ async function main() {
   }
 
   // Which calls did the legacy v1 pipeline actually create an appointment for?
-  // v1 marks scheduled_services.notes with "Call SID: <sid>".
+  // v1 marks scheduled_services.notes with "Call SID: <sid>". Count the row
+  // regardless of current status — a later cancel/reschedule is a post-hoc
+  // lifecycle change, not evidence that v1 declined to auto-create at the time.
+  // Filtering those out would falsely read as "v1 didn't create" and skew the
+  // v1↔v2 routing-decision agreement metric.
   const sids = rows.map((r) => r.twilio_call_sid).filter(Boolean);
   const appts = sids.length
     ? await db('scheduled_services')
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
-        .andWhere((q) => sids.forEach((s) => q.orWhere('notes', 'like', `%Call SID: ${s}%`)))
+        .where((q) => sids.forEach((s) => q.orWhere('notes', 'like', `%Call SID: ${s}%`)))
         .select('notes')
     : [];
   const v1CreatedSid = new Set();
