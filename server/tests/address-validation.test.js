@@ -1,4 +1,23 @@
-const { deriveStatus, STATUSES } = require('../services/address-validation');
+const { deriveStatus, buildAddressLines, STATUSES } = require('../services/address-validation');
+
+describe('buildAddressLines', () => {
+  test('street + city/state/zip → two lines', () => {
+    expect(buildAddressLines({ street_line_1: '17451 State Road 62', city: 'Parrish', state: 'FL', postal_code: '34219' }))
+      .toEqual(['17451 State Road 62', 'Parrish FL 34219']);
+  });
+  test('includes street_line_2 on line 1', () => {
+    expect(buildAddressLines({ street_line_1: '100 Main St', street_line_2: 'Apt 4', city: 'Bradenton', state: 'FL' }))
+      .toEqual(['100 Main St Apt 4', 'Bradenton FL']);
+  });
+  test('city only (no street) still validates (locality-level)', () => {
+    expect(buildAddressLines({ city: 'Sarasota', state: 'FL' })).toEqual(['Sarasota FL']);
+  });
+  test('nothing usable → [] (validateAddress will no-op to not_attempted)', () => {
+    expect(buildAddressLines({ street_line_1: null, city: null, postal_code: null })).toEqual([]);
+    expect(buildAddressLines(null)).toEqual([]);
+    expect(buildAddressLines({ postal_code: '34219' })).toEqual([]); // zip alone isn't worth an API call
+  });
+});
 
 // Minimal Google AV `result` shapes for the pure status mapper.
 function result({ complete = true, granularity = 'PREMISE', inferred = false, replaced = false, unconfirmed = false } = {}) {

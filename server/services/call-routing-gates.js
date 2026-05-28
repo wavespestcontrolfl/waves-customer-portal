@@ -85,6 +85,8 @@ function buildTriageItem({
     out_of_service_area: 'out_of_service_area',
     missing_service_address: 'address_review',
     low_confidence_address: 'address_review',
+    address_unverified: 'address_review',
+    address_validation_unavailable: 'address_review',
     ambiguous_scheduling: 'time_ambiguous',
     reschedule_or_cancel: 'time_ambiguous',
     caller_not_authorized: 'customer_field_conflict',

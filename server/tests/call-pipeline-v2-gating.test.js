@@ -1,6 +1,7 @@
 const {
   computeDeterministicTriageFlags,
   mergeTriageFlags,
+  suppressAddressFlagsForAV,
   canAutoRoute,
   SERVICE_AREA_COUNTIES,
   normalizeCounty,
@@ -157,6 +158,92 @@ describe('computeDeterministicTriageFlags', () => {
     const e = validV2Extraction();
     e.property.service_address.county = 'lee county';
     expect(computeDeterministicTriageFlags(e)).toContain('out_of_service_area');
+  });
+
+  describe('address validation overrides model address signals', () => {
+    test('validated_accept clears low-confidence + county flags (clean auto-route)', () => {
+      const e = validV2Extraction();
+      e.confidence.service_address = 0.3;       // model unsure
+      e.property.service_address.county = 'Lee'; // model has wrong/out-of-area county string
+      const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: av });
+      expect(flags).not.toContain('low_confidence_address');
+      expect(flags).not.toContain('out_of_service_area');
+      expect(flags).not.toContain('address_unverified');
+    });
+
+    test('corrected (bad zip rewritten) clears address triage — the Parrish case', () => {
+      const e = validV2Extraction();
+      e.confidence.service_address = 0.4;
+      const av = { status: 'corrected', inServiceArea: true, county: 'Manatee County', normalized: { postal_code: '34219' } };
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: av });
+      expect(flags).not.toContain('low_confidence_address');
+      expect(flags).not.toContain('address_unverified');
+    });
+
+    test('out_of_service_area verdict flags out_of_service_area regardless of model county', () => {
+      const e = validV2Extraction();
+      e.property.service_address.county = 'Manatee'; // model thinks in-area
+      const av = { status: 'out_of_service_area', inServiceArea: false, county: 'Fulton County' };
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: av });
+      expect(flags).toContain('out_of_service_area');
+    });
+
+    test('confirm_needed / missing_component / ambiguous → address_unverified', () => {
+      for (const status of ['confirm_needed', 'missing_component', 'ambiguous']) {
+        const e = validV2Extraction();
+        const flags = computeDeterministicTriageFlags(e, { addressValidation: { status } });
+        expect(flags).toContain('address_unverified');
+      }
+    });
+
+    test('api_unavailable holds for review (address_validation_unavailable) and still applies model signals', () => {
+      const e = validV2Extraction();
+      e.confidence.service_address = 0.3;
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: { status: 'api_unavailable' } });
+      expect(flags).toContain('address_validation_unavailable');
+      expect(flags).toContain('low_confidence_address'); // fell back to model signal
+    });
+
+    test('not_attempted (validation disabled) falls back to model signals exactly as before', () => {
+      const e = validV2Extraction();
+      e.confidence.service_address = 0.3;
+      e.property.service_address.county = 'Lee';
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: { status: 'not_attempted' } });
+      expect(flags).toContain('low_confidence_address');
+      expect(flags).toContain('out_of_service_area');
+      expect(flags).not.toContain('address_unverified');
+    });
+
+    test('clean validated address allows auto-route (no address flags block it)', () => {
+      const e = validV2Extraction();
+      const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+      expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(true);
+    });
+
+    test('AV acceptance strips a stale MODEL address flag so it does not block (Codex P2)', () => {
+      const e = validV2Extraction();
+      e.triage_flags = ['low_confidence_address']; // model emitted it
+      const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+      expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(true);
+    });
+
+    test('AV acceptance clears a stale MODEL out_of_service_area hard-veto', () => {
+      const e = validV2Extraction();
+      e.triage_flags = ['out_of_service_area']; // model wrongly thought out-of-area
+      const av = { status: 'corrected', inServiceArea: true, county: 'Manatee County' };
+      const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av });
+      expect(r.allowed).toBe(true);
+      expect(suppressAddressFlagsForAV(e.triage_flags, av)).not.toContain('out_of_service_area');
+    });
+
+    test('without AV acceptance, a model address flag still blocks (no suppression)', () => {
+      const e = validV2Extraction();
+      e.triage_flags = ['low_confidence_address'];
+      const av = { status: 'confirm_needed' };
+      expect(canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av }).allowed).toBe(false);
+      expect(suppressAddressFlagsForAV(e.triage_flags, av)).toContain('low_confidence_address');
+    });
   });
 
   test('ambiguous scheduling', () => {
