@@ -3,7 +3,10 @@ import {
   AlertTriangle,
   Bot,
   CheckCircle2,
+  ExternalLink,
   FileText,
+  GitPullRequest,
+  Link2,
   RefreshCw,
   RotateCcw,
   Search,
@@ -111,14 +114,22 @@ function gateTone(summary) {
 }
 
 export default function AutonomousContentReviewPage() {
+  const [view, setView] = useState("content");
   const [data, setData] = useState(null);
+  const [linkData, setLinkData] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedLinkId, setSelectedLinkId] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [linkDetail, setLinkDetail] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [linkLoading, setLinkLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [linkDetailLoading, setLinkDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const [reviewNote, setReviewNote] = useState("");
+  const [linkReviewNote, setLinkReviewNote] = useState("");
   const [actionPending, setActionPending] = useState("");
+  const [linkActionPending, setLinkActionPending] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -134,8 +145,23 @@ export default function AutonomousContentReviewPage() {
     }
   };
 
+  const loadLinks = async () => {
+    setLinkLoading(true);
+    setError("");
+    try {
+      const next = await adminFetch("/admin/content/internal-links?status=all&limit=100");
+      setLinkData(next);
+      setSelectedLinkId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLinkLoading(false);
+    }
+  };
+
   useEffect(() => {
     load();
+    loadLinks();
   }, []);
 
   useEffect(() => {
@@ -153,6 +179,22 @@ export default function AutonomousContentReviewPage() {
       .catch((err) => setError(err.message))
       .finally(() => setDetailLoading(false));
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedLinkId) {
+      setLinkDetail(null);
+      return;
+    }
+    setLinkDetail(null);
+    setLinkDetailLoading(true);
+    adminFetch(`/admin/content/internal-links/${selectedLinkId}`)
+      .then((next) => {
+        setLinkDetail(next.item);
+        setLinkReviewNote("");
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLinkDetailLoading(false));
+  }, [selectedLinkId]);
 
   const submitDecision = async (decision) => {
     if (!selectedId || actionPending) return;
@@ -173,9 +215,31 @@ export default function AutonomousContentReviewPage() {
     }
   };
 
+  const submitLinkDecision = async (decision) => {
+    if (!selectedLinkId || linkActionPending) return;
+    setLinkActionPending(decision);
+    setError("");
+    try {
+      const next = await adminFetch(`/admin/content/internal-links/${selectedLinkId}/decision`, {
+        method: "POST",
+        body: { decision, note: linkReviewNote },
+      });
+      setLinkDetail(next.item);
+      setLinkReviewNote("");
+      await loadLinks();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLinkActionPending("");
+    }
+  };
+
   const items = data?.items || [];
+  const linkItems = linkData?.items || [];
   const selected = detail || items.find((item) => item.id === selectedId) || null;
+  const selectedLink = linkDetail || linkItems.find((item) => item.id === selectedLinkId) || null;
   const counts = data?.counts || {};
+  const linkCounts = linkData?.counts || {};
   const gateSummary = selected?.run?.gate_summary;
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
@@ -192,7 +256,7 @@ export default function AutonomousContentReviewPage() {
       <AdminCommandHeader
         title="Autonomous Content Review"
         icon={Bot}
-        actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: load, disabled: loading, variant: "secondary" }]}
+        actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: () => { load(); loadLinks(); }, disabled: loading || linkLoading, variant: "secondary" }]}
       />
 
       {error && (
@@ -202,14 +266,21 @@ export default function AutonomousContentReviewPage() {
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
-        <Kpi label="Pending Review" value={pendingCount} tone={pendingCount > 0 ? "amber" : "green"} />
-        <Kpi label="Shadow Rows" value={shadowCount} />
-        <Kpi label="Done" value={counts.done || 0} tone="green" />
-        <Kpi label="Skipped" value={counts.skipped || 0} />
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+        <TabButton active={view === "content"} icon={Bot} label="Content Queue" onClick={() => setView("content")} />
+        <TabButton active={view === "links"} icon={Link2} label="Internal Links" onClick={() => setView("links")} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(360px, 100%), 1fr))", gap: 16, alignItems: "start" }}>
+      {view === "content" ? (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+            <Kpi label="Pending Review" value={pendingCount} tone={pendingCount > 0 ? "amber" : "green"} />
+            <Kpi label="Shadow Rows" value={shadowCount} />
+            <Kpi label="Done" value={counts.done || 0} tone="green" />
+            <Kpi label="Skipped" value={counts.skipped || 0} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(360px, 100%), 1fr))", gap: 16, alignItems: "start" }}>
         <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
           <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
             <Search size={16} strokeWidth={2} />
@@ -406,7 +477,193 @@ export default function AutonomousContentReviewPage() {
           )}
         </aside>
       </div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+            <Kpi label="Candidates" value={linkCounts.patch_candidate || 0} tone={(linkCounts.patch_candidate || 0) > 0 ? "amber" : "green"} />
+            <Kpi label="PR Open" value={linkCounts.pr_open || 0} tone={(linkCounts.pr_open || 0) > 0 ? "amber" : "green"} />
+            <Kpi label="Merged/Deployed" value={(linkCounts.merged || 0) + (linkCounts.deployed || 0)} tone={(linkCounts.merged || 0) + (linkCounts.deployed || 0) > 0 ? "amber" : "green"} />
+            <Kpi label="Verified" value={linkCounts.verified || 0} tone="green" />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(min(700px, 100%), 1.4fr) minmax(min(420px, 100%), 0.9fr)", gap: 16, alignItems: "start" }}>
+            <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
+                <Link2 size={16} strokeWidth={2} />
+                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Internal-Link Tasks</div>
+              </div>
+              {linkLoading ? (
+                <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>Loading...</div>
+              ) : linkItems.length === 0 ? (
+                <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>No internal-link tasks.</div>
+              ) : (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
+                    <thead>
+                      <tr>
+                        {["Status", "Anchor", "Source", "Target", "PR", "Updated"].map((h) => (
+                          <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 800, borderBottom: `1px solid ${D.border}` }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {linkItems.map((item) => {
+                        const active = item.id === selectedLinkId;
+                        return (
+                          <tr
+                            key={item.id}
+                            onClick={() => setSelectedLinkId(item.id)}
+                            style={{ cursor: "pointer", background: active ? "#F8FAFC" : D.card }}
+                          >
+                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
+                              <Chip tone={linkStatusTone(item.status)}>{item.status}</Chip>
+                            </td>
+                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
+                              <div style={{ color: D.heading, fontWeight: 800, fontSize: 13 }}>{item.anchor_text || "—"}</div>
+                              <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>{[item.anchor_type, scorePercent(item.topical_relevance_score)].filter(Boolean).join(" / ")}</div>
+                            </td>
+                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.text, fontSize: 12, verticalAlign: "top" }}>{item.source_url || item.source_file || "—"}</td>
+                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.text, fontSize: 12, verticalAlign: "top" }}>{item.target_url || "—"}</td>
+                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
+                              {item.astro_pr_url ? <ExternalAnchor href={item.astro_pr_url} label="PR" /> : <span style={{ color: D.muted }}>—</span>}
+                            </td>
+                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12, verticalAlign: "top" }}>{formatDate(item.updated_at || item.planned_at)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            <aside style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
+                <GitPullRequest size={16} strokeWidth={2} />
+                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Link Detail</div>
+              </div>
+              {!selectedLink ? (
+                <div style={{ padding: 24, color: D.muted, textAlign: "center" }}>Select a task.</div>
+              ) : (
+                <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14, opacity: linkDetailLoading ? 0.65 : 1 }}>
+                  <div>
+                    <div style={{ fontSize: 17, fontWeight: 850, color: D.heading, lineHeight: 1.25 }}>{selectedLink.anchor_text || "Untitled link"}</div>
+                    <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      <Chip tone={linkStatusTone(selectedLink.status)}>{selectedLink.status}</Chip>
+                      {selectedLink.anchor_type && <Chip>{selectedLink.anchor_type}</Chip>}
+                      {selectedLink.topic_cluster && <Chip>{selectedLink.topic_cluster}</Chip>}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
+                    <Row label="Source" value={selectedLink.source_url || selectedLink.source_file || "—"} />
+                    <Row label="Target" value={selectedLink.target_url || "—"} />
+                    <Row label="Source file" value={selectedLink.source_file || "—"} />
+                    <Row label="Target file" value={selectedLink.target_file || "—"} />
+                    <Row label="Reason" value={selectedLink.failure_reason || selectedLink.skip_reason || selectedLink.dismissed_reason || "—"} />
+                    <Row label="Verified" value={formatDate(selectedLink.verified_at)} />
+                  </div>
+
+                  {selectedLink.astro_pr_url && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      <ExternalAnchor href={selectedLink.astro_pr_url} label="Open Astro PR" />
+                    </div>
+                  )}
+
+                  <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, display: "grid", gap: 10 }}>
+                    <textarea
+                      value={linkReviewNote}
+                      onChange={(e) => setLinkReviewNote(e.target.value)}
+                      placeholder="Reviewer note"
+                      rows={3}
+                      style={{
+                        width: "100%",
+                        resize: "vertical",
+                        border: `1px solid ${D.border}`,
+                        borderRadius: 8,
+                        padding: 10,
+                        fontSize: 13,
+                        color: D.text,
+                        boxSizing: "border-box",
+                      }}
+                    />
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      <ActionButton
+                        icon={RotateCcw}
+                        label="Requeue"
+                        disabled={!selectedLink.review_actions?.can_requeue || !!linkActionPending}
+                        pending={linkActionPending === "requeue"}
+                        onClick={() => submitLinkDecision("requeue")}
+                      />
+                      <ActionButton
+                        icon={CheckCircle2}
+                        label="Verify"
+                        tone="green"
+                        disabled={!selectedLink.review_actions?.can_verify_now || !!linkActionPending}
+                        pending={linkActionPending === "verify_now"}
+                        onClick={() => submitLinkDecision("verify_now")}
+                      />
+                      <ActionButton
+                        icon={XCircle}
+                        label="Dismiss"
+                        tone="red"
+                        disabled={!selectedLink.review_actions?.can_dismiss || !!linkActionPending}
+                        pending={linkActionPending === "dismiss"}
+                        onClick={() => submitLinkDecision("dismiss")}
+                      />
+                    </div>
+                  </div>
+
+                  <LinkContext title="Before" value={selectedLink.link_context_before || selectedLink.context_snippet} />
+                  <LinkContext title="After" value={selectedLink.link_context_after} />
+
+                  <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, display: "grid", gap: 8, fontSize: 12, color: D.text }}>
+                    <div style={{ color: D.muted, fontWeight: 800 }}>Validation</div>
+                    <div>Target: HTTP {selectedLink.target_http_status ?? "—"} · indexable {yesNo(selectedLink.target_indexable)} · canonical {yesNo(selectedLink.target_canonical_matches)}</div>
+                    <div>Source: HTTP {selectedLink.source_http_status ?? "—"} · indexable {yesNo(selectedLink.source_indexable)} · canonical {yesNo(selectedLink.source_canonical_matches)}</div>
+                    <div>Links: source {selectedLink.source_existing_internal_links_count ?? "—"} · target inlinks {selectedLink.target_existing_inlinks_count ?? "—"}</div>
+                  </div>
+
+                  {selectedLink.reviewer_notes && (
+                    <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
+                      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, marginBottom: 4 }}>Reviewer Notes</div>
+                      <div style={{ fontSize: 12, color: D.text, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{selectedLink.reviewer_notes}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </aside>
+          </div>
+        </>
+      )}
     </div>
+  );
+}
+
+function TabButton({ active, icon: Icon, label, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        minHeight: 38,
+        border: `1px solid ${active ? D.accent : D.border}`,
+        borderRadius: 8,
+        background: active ? D.accent : D.card,
+        color: active ? "#FFFFFF" : D.text,
+        padding: "0 12px",
+        fontSize: 13,
+        fontWeight: 800,
+        cursor: "pointer",
+      }}
+    >
+      <Icon size={15} strokeWidth={2} />
+      {label}
+    </button>
   );
 }
 
@@ -445,4 +702,51 @@ function Row({ label, value }) {
       <div style={{ color: D.text, wordBreak: "break-word" }}>{value}</div>
     </div>
   );
+}
+
+function ExternalAnchor({ href, label }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => event.stopPropagation()}
+      style={{ display: "inline-flex", alignItems: "center", gap: 5, color: D.accent, fontSize: 12, fontWeight: 800, textDecoration: "none" }}
+    >
+      <ExternalLink size={13} strokeWidth={2} />
+      {label}
+    </a>
+  );
+}
+
+function LinkContext({ title, value }) {
+  if (!value) return null;
+  return (
+    <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
+      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, marginBottom: 4 }}>{title}</div>
+      <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: "#FAFAFA" }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function linkStatusTone(status) {
+  if (status === "verified" || status === "applied") return "green";
+  if (status === "failed" || status === "dismissed") return "red";
+  if (["patch_candidate", "pr_open", "merged", "deployed"].includes(status)) return "amber";
+  return "neutral";
+}
+
+function scorePercent(value) {
+  if (value == null) return "";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  return `${Math.round(n * 100)}% relevance`;
+}
+
+function yesNo(value) {
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  return "—";
 }
