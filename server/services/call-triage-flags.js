@@ -66,7 +66,9 @@ function hasNameEmailMismatch(caller = {}) {
   if (present.length < tokens.length) {
     const foreignSegment = localRaw
       .split(/[^a-z]+/)
-      .filter((seg) => seg.length >= 4 && !NON_NAME_EMAIL_AFFIXES.has(seg))
+      .filter((seg) => seg.length >= 4
+        && !NON_NAME_EMAIL_AFFIXES.has(seg)
+        && !GENERIC_EMAIL_LOCALPARTS.has(seg)) // a delimited role mailbox (office.john@) is not a name
       .some((seg) => !tokens.some((t) => seg.includes(t) || t.includes(seg)));
     if (foreignSegment) return true;
   }

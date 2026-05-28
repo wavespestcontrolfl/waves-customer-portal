@@ -767,6 +767,10 @@ describe('hasNameEmailMismatch', () => {
     expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'johnnyc@x.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: null, email: 'bobfitness@x.com' })).toBe(false);
   });
+  test('delimited role-mailbox segment is not a foreign name (Codex P2 — office.john@)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'office.john@x.com' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'sales.maria@x.com' })).toBe(false);
+  });
   test('generic/role mailbox → never a mismatch', () => {
     expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'info@company.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'office@x.com' })).toBe(false);
