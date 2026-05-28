@@ -65,6 +65,7 @@ const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gat
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
+const INTERNAL_LINK_RETRYABLE_STATUSES = ['pending', 'queued', 'patch_candidate', 'skipped', 'failed'];
 
 // Per-action-type shadow mode. Reads env var SHADOW_MODE_<ACTION_TYPE>
 // (uppercase, dots/dashes → underscores). Unset → shadow ON. Set to
@@ -802,29 +803,19 @@ class AutonomousRunner {
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
       { corpus, opportunityId: run.opportunity_id }
     );
-    let insertedCount = 0;
-    const insertedTaskIds = [];
+    const taskIds = [];
     for (const task of tasks) {
-      const inserted = await db('content_internal_link_tasks')
-        .insert(task)
-        .onConflict(['source_file', 'target_url', 'anchor_text'])
-        .ignore()
-        .returning('id');
-      const rows = Array.isArray(inserted) ? inserted : (inserted ? [inserted] : []);
-      insertedCount += rows.length;
-      for (const row of rows) {
-        const id = typeof row === 'object' ? row.id : row;
-        if (id) insertedTaskIds.push(id);
-      }
+      const queued = await queueInternalLinkTaskForDryRun(task, run.opportunity_id);
+      if (queued?.id) taskIds.push(queued.id);
     }
     run.link_plan_ms = Date.now() - t;
     const executor = getInternalLinkExecutor();
     let dryRunResult = null;
-    if (executor?.runDryRun && insertedTaskIds.length) {
+    if (executor?.runDryRun && taskIds.length) {
       const t2 = Date.now();
       dryRunResult = await executor.runDryRun({
-        taskIds: insertedTaskIds,
-        limit: envInt('AUTONOMOUS_INTERNAL_LINK_DRY_RUN_LIMIT', insertedTaskIds.length),
+        taskIds,
+        limit: envInt('AUTONOMOUS_INTERNAL_LINK_DRY_RUN_LIMIT', taskIds.length),
       });
       run.link_execute_ms = Date.now() - t2;
     }
@@ -833,12 +824,12 @@ class AutonomousRunner {
     const failed = Number((dryRunResult?.results || []).filter((result) => result.status === 'failed').length);
     const reason = run.shadow_mode ? 'internal_links_dry_run_shadow' : 'internal_links_dry_run';
     return {
-      notes: `${reason}:queued=${insertedCount}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`,
+      notes: `${reason}:queued=${taskIds.length}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`,
       patch: {
         outcome: 'completed_pending_review',
         skip_reason: reason,
-        link_tasks_queued: insertedCount,
-        reviewer_notes: `Queued ${insertedCount} internal-link task(s); dry-run produced ${candidates} patch candidate(s), ${skipped} skipped, and ${failed} failed.`,
+        link_tasks_queued: taskIds.length,
+        reviewer_notes: `Queued ${taskIds.length} internal-link task(s); dry-run produced ${candidates} patch candidate(s), ${skipped} skipped, and ${failed} failed.`,
       },
     };
   }
@@ -1150,6 +1141,48 @@ function startOfEtWeek(date = new Date()) {
   return parseETDateTime(`${etWeekStart(date)}T00:00`);
 }
 
+async function queueInternalLinkTaskForDryRun(task, opportunityId) {
+  const inserted = await db('content_internal_link_tasks')
+    .insert(task)
+    .onConflict(['source_file', 'target_url', 'anchor_text'])
+    .ignore()
+    .returning('id');
+  const insertedId = firstReturnedId(inserted);
+  if (insertedId) return { id: insertedId, inserted: true };
+
+  const existing = await db('content_internal_link_tasks')
+    .select('id', 'status')
+    .where({
+      source_file: task.source_file,
+      target_url: task.target_url,
+      anchor_text: task.anchor_text,
+    })
+    .whereIn('status', INTERNAL_LINK_RETRYABLE_STATUSES)
+    .first();
+  if (!existing?.id) return null;
+
+  await db('content_internal_link_tasks')
+    .where({ id: existing.id })
+    .update({
+      status: 'queued',
+      opportunity_id: opportunityId || task.opportunity_id || null,
+      skip_reason: null,
+      failure_reason: null,
+      updated_at: new Date(),
+    });
+
+  return { id: existing.id, inserted: false, refreshed: true };
+}
+
+function firstReturnedId(rows) {
+  const list = Array.isArray(rows) ? rows : (rows ? [rows] : []);
+  for (const row of list) {
+    const id = typeof row === 'object' ? row.id : row;
+    if (id) return id;
+  }
+  return null;
+}
+
 module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
@@ -1160,6 +1193,9 @@ module.exports._internals = {
   isDeterministicPublishError,
   envBool,
   envInt,
+  INTERNAL_LINK_RETRYABLE_STATUSES,
+  firstReturnedId,
+  queueInternalLinkTaskForDryRun,
   normalizeContentPath,
   extractFrontmatterScalar,
   startOfEtDay,

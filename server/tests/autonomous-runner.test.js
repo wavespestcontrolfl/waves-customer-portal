@@ -9,6 +9,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+const db = require('../models/db');
 const { _internals } = require('../services/content/autonomous-runner');
 const {
   isShadow,
@@ -18,16 +19,67 @@ const {
   isDeterministicPublishError,
   envBool,
   envInt,
+  firstReturnedId,
+  queueInternalLinkTaskForDryRun,
 } = _internals;
 
 const ORIGINAL_ENV = { ...process.env };
 afterEach(() => {
+  jest.clearAllMocks();
   for (const k of Object.keys(process.env)) {
     if (k.startsWith('SHADOW_MODE_')) delete process.env[k];
   }
   for (const k of Object.keys(ORIGINAL_ENV)) {
     if (k.startsWith('SHADOW_MODE_')) process.env[k] = ORIGINAL_ENV[k];
   }
+});
+
+describe('internal-link dry-run queue helpers', () => {
+  test('extracts returned ids from knex insert shapes', () => {
+    expect(firstReturnedId([{ id: 'task_1' }])).toBe('task_1');
+    expect(firstReturnedId(['task_2'])).toBe('task_2');
+    expect(firstReturnedId([])).toBeNull();
+  });
+
+  test('refreshes retryable duplicate internal-link tasks for dry-run revalidation', async () => {
+    const insertReturning = jest.fn().mockResolvedValue([]);
+    const insertChain = {
+      insert: jest.fn(() => ({
+        onConflict: jest.fn(() => ({
+          ignore: jest.fn(() => ({ returning: insertReturning })),
+        })),
+      })),
+    };
+    const lookupChain = {
+      select: jest.fn(() => lookupChain),
+      where: jest.fn(() => lookupChain),
+      whereIn: jest.fn(() => lookupChain),
+      first: jest.fn().mockResolvedValue({ id: 'task_existing', status: 'skipped' }),
+    };
+    const updateChain = {
+      where: jest.fn(() => updateChain),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    db
+      .mockImplementationOnce(() => insertChain)
+      .mockImplementationOnce(() => lookupChain)
+      .mockImplementationOnce(() => updateChain);
+
+    const result = await queueInternalLinkTaskForDryRun({
+      source_file: 'src/content/blog/source.md',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+    }, 'opp_new');
+
+    expect(result).toEqual({ id: 'task_existing', inserted: false, refreshed: true });
+    expect(lookupChain.whereIn).toHaveBeenCalledWith('status', expect.arrayContaining(['skipped', 'failed', 'patch_candidate']));
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued',
+      opportunity_id: 'opp_new',
+      skip_reason: null,
+      failure_reason: null,
+    }));
+  });
 });
 
 describe('rewrite_title_meta live adapter', () => {
