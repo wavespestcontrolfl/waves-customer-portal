@@ -37,7 +37,11 @@ const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extractio
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
 
 const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 'true';
+const CALL_EXTRACTION_V2_DRIVES_ROUTING = process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true';
 const CALL_TRANSCRIPT_DIARIZATION_ENABLED = process.env.CALL_TRANSCRIPT_DIARIZATION_ENABLED === 'true';
+const { computeDeterministicTriageFlags, mergeTriageFlags, canAutoRoute } = require('./call-triage-flags');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
+const { isV2Extraction } = require('../utils/extraction-compat');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1739,6 +1743,51 @@ const CallRecordingProcessor = {
       }
     }
 
+    // ── V2 routing gate (when enabled, evaluates v2 extraction for auto-route eligibility) ──
+    let v2RoutingBlocked = false;
+    if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
+      try {
+        const v2Row = await db('call_log')
+          .where({ id: call.id })
+          .select('ai_extraction_enriched', 'v2_extraction_status')
+          .first();
+        const v2Extraction = v2Row?.ai_extraction_enriched
+          ? (typeof v2Row.ai_extraction_enriched === 'string' ? JSON.parse(v2Row.ai_extraction_enriched) : v2Row.ai_extraction_enriched)
+          : null;
+
+        if (v2Extraction && isV2Extraction(v2Extraction) && v2Row.v2_extraction_status === 'valid') {
+          const routingResult = canAutoRoute(v2Extraction);
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction);
+          const finalFlags = mergeTriageFlags(v2Extraction.triage_flags, deterministicFlags);
+          const tcpa = checkTcpaConsent(v2Extraction);
+
+          const routeDecision = buildRouteDecision({
+            callLogId: call.id,
+            extraction: v2Extraction,
+            finalTriageFlags: finalFlags,
+            routingResult,
+            action: routingResult.allowed ? 'auto_route' : 'triage_review',
+            mode: 'enforce',
+          });
+
+          await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode']).ignore();
+
+          if (!routingResult.allowed) {
+            for (const flag of finalFlags.slice(0, 10)) {
+              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
+              await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+            }
+            v2RoutingBlocked = true;
+            logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${finalFlags.join(', ')}`);
+          } else if (!tcpa.canSms) {
+            logger.info(`[call-proc-v2] SMS blocked by TCPA gate for ${callSid}: ${tcpa.reason}`);
+          }
+        }
+      } catch (err) {
+        logger.error(`[call-proc-v2] Routing gate error for ${callSid}: ${err.message}`);
+      }
+    }
+
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
     // Guard: reject vague date/time (must contain an actual time like "10 AM", "2:30 PM", "noon")
     let appointmentResult = null;
@@ -1761,7 +1810,16 @@ const CallRecordingProcessor = {
         `${appointmentResult.skippedReason} (direction=${call.direction || 'unknown'}, service=${appointmentResult.service || 'none'})`
       );
     }
-    if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+    if (v2RoutingBlocked) {
+      appointmentResult = {
+        service: extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: 'v2_routing_blocked',
+      };
+      logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
+    } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
@@ -1939,8 +1997,21 @@ const CallRecordingProcessor = {
                     extracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   booking_source: 'phone_call',
+                  source_call_log_id: call.id,
+                  source_action: 'ai_call_pipeline',
+                  idempotency_key: computeAppointmentIdempotencyKey({
+                    callLogId: call.id,
+                    schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
+                    confirmedStartAt: extracted.preferred_date_time,
+                    primaryServiceCategory: serviceType,
+                    addressHash: computeAddressHash({ street_line_1: customer.street_address, city: customer.city, postal_code: customer.zip }),
+                  }),
                 };
-                const [created] = await trx('scheduled_services').insert(insertData).returning('*');
+                const [created] = await trx('scheduled_services')
+                  .insert(insertData)
+                  .onConflict('idempotency_key')
+                  .ignore()
+                  .returning('*');
                 return created;
               });
               if (reusedExistingSchedule) {
