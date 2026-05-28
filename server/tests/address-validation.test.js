@@ -30,17 +30,23 @@ describe('deriveStatus (Google AV → provider-neutral status)', () => {
     expect(r.normalized.postal_code).toBe('34219');
   });
 
-  test('inferred-only (e.g. missing zip filled) in-area → validated_accept', () => {
+  test('inferred-only (benign normalization / missing zip filled) in-area → validated_accept', () => {
+    // Google sets hasInferred on nearly every clean address (expands abbreviations,
+    // fills a missing zip). That is NOT a correction — it stays validated_accept.
     expect(deriveStatus(result({ inferred: true }), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
   });
 
-  test('replaced material (bad zip rewritten) → confirm_needed', () => {
+  test('replaced material (bad zip rewritten) in-area → corrected (trust the correction)', () => {
     const r = deriveStatus(result({ replaced: true }), 'Manatee County');
-    expect(r.status).toBe(STATUSES.CONFIRM_NEEDED);
+    expect(r.status).toBe(STATUSES.CORRECTED);
   });
 
-  test('unconfirmed material → confirm_needed', () => {
+  test('unconfirmed material → confirm_needed (genuinely unverified, never auto-route)', () => {
     expect(deriveStatus(result({ unconfirmed: true }), 'Charlotte County').status).toBe(STATUSES.CONFIRM_NEEDED);
+  });
+
+  test('replaced AND unconfirmed → confirm_needed (uncertainty dominates a correction)', () => {
+    expect(deriveStatus(result({ replaced: true, unconfirmed: true }), 'Manatee County').status).toBe(STATUSES.CONFIRM_NEEDED);
   });
 
   test('in-area unknown county (null) → confirm_needed, never accept', () => {

@@ -34,8 +34,9 @@ const ENABLED = () => process.env.ADDRESS_VALIDATION_ENABLED === 'true';
 
 const STATUSES = {
   NOT_ATTEMPTED: 'not_attempted',       // flag off / no key / no address
-  VALIDATED_ACCEPT: 'validated_accept', // PREMISE/SUB_PREMISE, in-area, no material inference/replacement
-  CONFIRM_NEEDED: 'confirm_needed',     // resolved but unconfirmed/inferred/replaced material component
+  VALIDATED_ACCEPT: 'validated_accept', // PREMISE/SUB_PREMISE, in-area, no caller value overridden (benign normalization/fill ok) — auto-routable
+  CORRECTED: 'corrected',               // PREMISE/SUB_PREMISE, in-area, Google OVERRODE a caller-given value (e.g. bad zip) — trust the correction, auto-routable
+  CONFIRM_NEEDED: 'confirm_needed',     // resolved but a component is UNCONFIRMED, or county is unknown — needs a human
   MISSING_COMPONENT: 'missing_component', // street_number/route/postal missing, can't resolve to premise
   OUT_OF_SERVICE_AREA: 'out_of_service_area',
   AMBIGUOUS: 'ambiguous',
@@ -109,10 +110,18 @@ function deriveStatus(result, county) {
     return { status: premiseLevel ? STATUSES.AMBIGUOUS : STATUSES.MISSING_COMPONENT, ...base };
   }
   if (inServiceArea === false) return { status: STATUSES.OUT_OF_SERVICE_AREA, ...base };
-  // Premise-level + in-area required for accept. Replaced/unconfirmed material
-  // (Google rewrote the caller's input) OR unknown county → human confirm.
-  if (verdict.hasReplacedComponents || verdict.hasUnconfirmedComponents || inServiceArea !== true) {
+  // Genuinely unverifiable: Google couldn't confirm a component, or we can't
+  // establish the county. Never auto-route these — hand to a human.
+  if (verdict.hasUnconfirmedComponents || inServiceArea !== true) {
     return { status: STATUSES.CONFIRM_NEEDED, ...base };
+  }
+  // hasReplaced = Google OVERRODE a value the caller gave (e.g. bad zip 61419 →
+  // 34219). That's a real correction — policy is to trust it and auto-route on
+  // the normalized address, but the status records that the input was rewritten.
+  // (hasInferred alone is benign: Google expands "Ave W"→"Avenue West" and fills
+  // a missing zip on essentially every address — that stays validated_accept.)
+  if (verdict.hasReplacedComponents) {
+    return { status: STATUSES.CORRECTED, ...base };
   }
   return { status: STATUSES.VALIDATED_ACCEPT, ...base };
 }
