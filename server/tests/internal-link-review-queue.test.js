@@ -51,6 +51,37 @@ describe('internal-link review queue helpers', () => {
     });
   });
 
+  test('does not expose requeue or dismiss for post-PR verification failures', () => {
+    const prePrFailure = reviewQueue.buildTaskItem({
+      id: 'task-pre-pr-failed',
+      status: 'failed',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+      failure_reason: 'target_canonical_mismatch',
+    });
+    expect(prePrFailure.review_actions).toMatchObject({
+      can_requeue: true,
+      can_dismiss: true,
+      can_verify_now: false,
+    });
+
+    const postPrFailure = reviewQueue.buildTaskItem({
+      id: 'task-post-pr-failed',
+      status: 'failed',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/172',
+      pr_branch: 'content/internal-link-target-abc123',
+      failure_reason: 'internal_link_verify_link_missing',
+    });
+    expect(reviewQueue.hasPrLifecycle(postPrFailure)).toBe(true);
+    expect(postPrFailure.review_actions).toMatchObject({
+      can_requeue: false,
+      can_dismiss: false,
+      can_verify_now: false,
+    });
+  });
+
   test('normalizes status, limits, and decisions conservatively', () => {
     expect(reviewQueue.normalizeStatus('patch_candidate')).toBe('patch_candidate');
     expect(reviewQueue.normalizeStatus('bad_status')).toBe('all');

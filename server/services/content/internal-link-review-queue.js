@@ -69,13 +69,15 @@ async function decideTask(taskId, { decision, note, reviewer } = {}) {
   }
 
   if (normalizedDecision === 'requeue') {
-    if (!RETRYABLE_STATUSES.has(task.status)) {
+    if (!canRequeue(task)) {
       const err = new Error(`Task is ${task.status} and cannot be requeued`);
       err.statusCode = 409;
       err.isOperational = true;
       throw err;
     }
-    await db(TABLE).where({ id: taskId }).whereIn('status', Array.from(RETRYABLE_STATUSES)).update({
+    await db(TABLE).where({ id: taskId }).whereIn('status', Array.from(RETRYABLE_STATUSES)).where((builder) => {
+      builder.whereNull('astro_pr_url').whereNull('pr_branch').whereNull('merged_at');
+    }).update({
       status: 'queued',
       skip_reason: null,
       failure_reason: null,
@@ -91,13 +93,15 @@ async function decideTask(taskId, { decision, note, reviewer } = {}) {
   }
 
   if (normalizedDecision === 'dismiss') {
-    if (!DISMISSABLE_STATUSES.has(task.status)) {
+    if (!canDismiss(task)) {
       const err = new Error(`Task is ${task.status} and cannot be dismissed`);
       err.statusCode = 409;
       err.isOperational = true;
       throw err;
     }
-    await db(TABLE).where({ id: taskId }).whereIn('status', Array.from(DISMISSABLE_STATUSES)).update({
+    await db(TABLE).where({ id: taskId }).whereIn('status', Array.from(DISMISSABLE_STATUSES)).where((builder) => {
+      builder.whereNull('astro_pr_url').whereNull('pr_branch').whereNull('merged_at');
+    }).update({
       status: 'dismissed',
       dismissed_reason: cleanNote || 'manual_dismiss',
       reviewer_notes: appendReviewerNote(task.reviewer_notes, {
@@ -192,11 +196,23 @@ function buildTaskItem(row = {}) {
     created_at: row.created_at,
     updated_at: row.updated_at,
     review_actions: {
-      can_requeue: RETRYABLE_STATUSES.has(row.status),
-      can_dismiss: DISMISSABLE_STATUSES.has(row.status),
+      can_requeue: canRequeue(row),
+      can_dismiss: canDismiss(row),
       can_verify_now: VERIFYABLE_STATUSES.has(row.status),
     },
   };
+}
+
+function hasPrLifecycle(row = {}) {
+  return Boolean(row.astro_pr_url || row.pr_branch || row.pr_commit_sha || row.merged_at || row.deployed_at || row.verified_at);
+}
+
+function canRequeue(row = {}) {
+  return RETRYABLE_STATUSES.has(row.status) && !hasPrLifecycle(row);
+}
+
+function canDismiss(row = {}) {
+  return DISMISSABLE_STATUSES.has(row.status) && !hasPrLifecycle(row);
 }
 
 function numberOrNull(value) {
@@ -250,4 +266,7 @@ module.exports = {
   normalizeLimit,
   normalizeDecision,
   appendReviewerNote,
+  hasPrLifecycle,
+  canRequeue,
+  canDismiss,
 };
