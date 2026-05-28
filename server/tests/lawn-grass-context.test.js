@@ -1,6 +1,7 @@
 const {
   GRASS_TYPE_LABELS,
   grassTypeLabel,
+  normalizeGrassType,
   irrigationTypeHasSystem,
   loadCustomerGrassContext,
 } = require('../services/lawn-grass-context');
@@ -48,15 +49,29 @@ describe('lawn-grass-context', () => {
     });
   });
 
-  test('falls back to customers.lawn_type / property_sqft when no profile', async () => {
+  test('normalizeGrassType maps legacy free-text lawn_type to canonical keys', () => {
+    expect(normalizeGrassType('st_augustine')).toBe('st_augustine');
+    expect(normalizeGrassType('St. Augustine')).toBe('st_augustine');
+    expect(normalizeGrassType('St. Augustine Full Sun')).toBe('st_augustine'); // exact Codex case
+    expect(normalizeGrassType('Floratam')).toBe('st_augustine');
+    expect(normalizeGrassType('Bermuda (Celebration)')).toBe('bermuda');
+    expect(normalizeGrassType('Empire Zoysia')).toBe('zoysia');
+    expect(normalizeGrassType('Argentine Bahia')).toBe('bahia');
+    expect(normalizeGrassType('Mixed turf')).toBe('mixed');
+    expect(normalizeGrassType('crabgrass jungle')).toBe(null);
+    expect(normalizeGrassType(null)).toBe(null);
+    expect(normalizeGrassType('')).toBe(null);
+  });
+
+  test('falls back to NORMALIZED customers.lawn_type / property_sqft when no profile', async () => {
     const knex = fakeKnex({
       customer_turf_profiles: null,
-      customers: { lawn_type: 'zoysia', property_sqft: 6400 },
+      customers: { lawn_type: 'St. Augustine Full Sun', property_sqft: 6400 },
     });
 
     const ctx = await loadCustomerGrassContext('cust-2', knex);
-    expect(ctx.grassType).toBe('zoysia');
-    expect(ctx.grassTypeLabel).toBe('Zoysia');
+    expect(ctx.grassType).toBe('st_augustine'); // normalized, not the raw free-text
+    expect(ctx.grassTypeLabel).toBe('St. Augustine'); // matches %St. Augustine% knowledge lookups
     expect(ctx.trackKey).toBe(null);
     expect(ctx.sunExposure).toBe(null);
     expect(ctx.irrigationSystem).toBe(null);

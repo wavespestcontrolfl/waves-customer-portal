@@ -28,6 +28,22 @@ function grassTypeLabel(grassType) {
   return GRASS_TYPE_LABELS[grassType] || grassType;
 }
 
+// Legacy `customers.lawn_type` is free text (e.g. "St. Augustine Full Sun",
+// "Floratam") rather than a canonical key. Normalize it to a GRASS_TYPE_LABELS
+// key so it matches protocol/knowledge lookups and segments consistently;
+// return null when no grass family is recognizable.
+function normalizeGrassType(raw) {
+  if (!raw) return null;
+  const key = String(raw).trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(GRASS_TYPE_LABELS, key)) return key;
+  if (/augustine|floratam|palmetto|seville|bitter\s*blue|citra\s*blue|provista|captiva/.test(key)) return 'st_augustine';
+  if (/bermuda|celebration|tifway|tifgrand|latitude\s*36/.test(key)) return 'bermuda';
+  if (/zoysia|empire|zeon|geo|jamur|palisades/.test(key)) return 'zoysia';
+  if (/bahia|argentine|pensacola/.test(key)) return 'bahia';
+  if (/\bmix(ed)?\b/.test(key)) return 'mixed';
+  return null;
+}
+
 // The turf-profile irrigation_type is a 4-value enum; some sinks (e.g.
 // treatment_outcomes.irrigation_system) are a boolean "has an automatic
 // irrigation system". Map the unambiguous cases; null for ambiguous/missing.
@@ -70,7 +86,7 @@ async function loadCustomerGrassContext(customerId, knex = db) {
     knex('customers').where({ id: customerId }).first().catch(() => null),
   ]);
 
-  const grassType = profile?.grass_type || customer?.lawn_type || null;
+  const grassType = profile?.grass_type || normalizeGrassType(customer?.lawn_type) || null;
 
   return {
     grassType,
@@ -82,4 +98,10 @@ async function loadCustomerGrassContext(customerId, knex = db) {
   };
 }
 
-module.exports = { GRASS_TYPE_LABELS, grassTypeLabel, irrigationTypeHasSystem, loadCustomerGrassContext };
+module.exports = {
+  GRASS_TYPE_LABELS,
+  grassTypeLabel,
+  normalizeGrassType,
+  irrigationTypeHasSystem,
+  loadCustomerGrassContext,
+};

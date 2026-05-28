@@ -15,7 +15,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { loadCustomerGrassContext } = require('./lawn-grass-context');
+const { loadCustomerGrassContext, normalizeGrassType } = require('./lawn-grass-context');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -528,7 +528,7 @@ async function computeNeighborhoodBenchmarks() {
     const segments = {};
     for (const c of customers) {
       const zip = c.zip || 'unknown';
-      const grass = c.grass_type || c.lawn_type || 'unknown';
+      const grass = c.grass_type || normalizeGrassType(c.lawn_type) || 'unknown';
       const key = `${zip}|${slugify(grass)}`;
 
       if (!segments[key]) {
