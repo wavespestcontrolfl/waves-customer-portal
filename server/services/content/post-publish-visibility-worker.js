@@ -154,14 +154,62 @@ async function fetchWithTimeout(url, fetchFn, options = {}) {
 }
 
 async function countPendingInboundLinks(url) {
-  const normalized = normalizeUrl(url);
-  const variants = [url, normalized, `https://${normalized}`, `https://${normalized}/`];
+  const variants = inboundLinkTargetVariants(url);
   const row = await db('content_internal_link_tasks')
     .whereIn('target_url', variants)
-    .whereIn('status', ['pending', 'approved', 'applied'])
+    .whereIn('status', ['pending', 'queued', 'patch_candidate', 'approved', 'applied'])
     .count('id as count')
     .first();
   return Number(row?.count || 0);
+}
+
+function inboundLinkTargetVariants(url) {
+  const raw = String(url || '').trim();
+  const normalized = normalizeUrl(raw);
+  const variants = new Set([raw, normalized].filter(Boolean));
+
+  if (normalized) {
+    variants.add(`https://${normalized}`);
+    variants.add(`https://${normalized}/`);
+  }
+
+  const rawHostPath = hostPathFromUrl(raw);
+  if (rawHostPath) {
+    variants.add(rawHostPath);
+    variants.add(rawHostPath.replace(/\/$/, ''));
+    variants.add(`https://${rawHostPath.replace(/\/$/, '')}`);
+    variants.add(`https://${rawHostPath.replace(/\/$/, '')}/`);
+  }
+
+  const relativePath = relativePathFromUrl(raw, normalized);
+  if (relativePath) {
+    variants.add(relativePath);
+    variants.add(relativePath.replace(/\/$/, '') || '/');
+    if (!relativePath.endsWith('/')) variants.add(`${relativePath}/`);
+  }
+
+  return [...variants].filter(Boolean);
+}
+
+function hostPathFromUrl(raw) {
+  try {
+    const parsed = new URL(String(raw || '').trim());
+    return `${parsed.host}${parsed.pathname || '/'}`;
+  } catch {
+    return null;
+  }
+}
+
+function relativePathFromUrl(raw, normalized) {
+  const value = String(raw || '').trim();
+  if (value.startsWith('/')) return value.split(/[?#]/)[0] || '/';
+  try {
+    const parsed = new URL(value);
+    return parsed.pathname || '/';
+  } catch {
+    const candidate = String(normalized || '').replace(/^[^/]*/, '') || '';
+    return candidate || null;
+  }
 }
 
 async function upsertContentIndexStatus(url, payload) {
@@ -257,6 +305,7 @@ module.exports = {
   _internals: {
     fetchHtml,
     fetchRobotsTxt,
+    inboundLinkTargetVariants,
     mergeRawInspection,
     parseJsonObject,
     updateContentRegistry,
