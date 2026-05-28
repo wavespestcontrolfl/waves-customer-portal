@@ -26,6 +26,7 @@ const {
   parsePrNumber,
   liveUrlForTask,
   htmlContainsCrawlableLink,
+  stripNonRenderedHtml,
 } = executor._internals;
 
 beforeEach(() => {
@@ -488,6 +489,28 @@ describe('internal-link dry-run executor helpers', () => {
       '/pest-control-bradenton-fl/',
       'Bradenton pest control'
     )).toBe(false);
+  });
+
+  test('ignores anchors inside non-rendered HTML blocks during live verification', () => {
+    const hidden = [
+      '<!-- <a href="/pest-control-bradenton-fl/">Bradenton pest control</a> -->',
+      '<script>const link = `<a href="/pest-control-bradenton-fl/">Bradenton pest control</a>`;</script>',
+      '<template><a href="/pest-control-bradenton-fl/">Bradenton pest control</a></template>',
+      '<noscript><a href="/pest-control-bradenton-fl/">Bradenton pest control</a></noscript>',
+      '<p>Call for your free Bradenton pest control quote.</p>',
+    ].join('\n');
+
+    expect(stripNonRenderedHtml(hidden)).not.toContain('<script>');
+    expect(htmlContainsCrawlableLink(
+      hidden,
+      '/pest-control-bradenton-fl/',
+      'Bradenton pest control'
+    )).toBe(false);
+    expect(htmlContainsCrawlableLink(
+      `${hidden}<p><a href="/pest-control-bradenton-fl/">Bradenton pest control</a></p>`,
+      '/pest-control-bradenton-fl/',
+      'Bradenton pest control'
+    )).toBe(true);
   });
 
   test('verifies merged PR tasks when live HTML contains the expected link', async () => {

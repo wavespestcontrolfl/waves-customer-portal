@@ -828,14 +828,24 @@ function htmlContainsCrawlableLink(html, targetUrl, anchorText) {
   const target = policy.normalizeInternalUrl(targetUrl);
   const anchor = normalizeHtmlText(anchorText);
   if (!target || !anchor) return false;
+  const renderedHtml = stripNonRenderedHtml(html);
   const linkRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
   let match;
-  while ((match = linkRe.exec(String(html || ''))) !== null) {
+  while ((match = linkRe.exec(renderedHtml)) !== null) {
     const href = extractHref(match[1]);
     if (policy.normalizeInternalUrl(href) !== target) continue;
     if (normalizeHtmlText(stripTags(match[2])) === anchor) return true;
   }
   return false;
+}
+
+function stripNonRenderedHtml(value) {
+  return String(value || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, '')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '');
 }
 
 function extractHref(attrs) {
@@ -900,4 +910,5 @@ module.exports._internals = {
   parsePrNumber,
   liveUrlForTask,
   htmlContainsCrawlableLink,
+  stripNonRenderedHtml,
 };
