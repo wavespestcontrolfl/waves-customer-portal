@@ -1,5 +1,24 @@
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
 
+// Normalized lookup: lowercase, " county" suffix stripped, whitespace collapsed.
+const SERVICE_AREA_COUNTIES_NORMALIZED = new Set(
+  [...SERVICE_AREA_COUNTIES].map((c) => normalizeCounty(c))
+);
+
+function normalizeCounty(value) {
+  if (!value) return null;
+  return String(value)
+    .toLowerCase()
+    .replace(/\s+county\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim() || null;
+}
+
+function isInServiceAreaCounty(county) {
+  const normalized = normalizeCounty(county);
+  return normalized !== null && SERVICE_AREA_COUNTIES_NORMALIZED.has(normalized);
+}
+
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
 const DEFAULT_ADDRESS_CONFIDENCE_THRESHOLD = 0.6;
 
@@ -29,7 +48,7 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('low_confidence_address');
   }
 
-  if (addr.county && !SERVICE_AREA_COUNTIES.has(addr.county)) {
+  if (addr.county && !isInServiceAreaCounty(addr.county)) {
     flags.push('out_of_service_area');
   }
 
@@ -132,6 +151,8 @@ module.exports = {
   canAutoRoute,
   SMS_ONLY_FLAGS,
   SERVICE_AREA_COUNTIES,
+  normalizeCounty,
+  isInServiceAreaCounty,
   DEFAULT_CONFIDENCE_THRESHOLD,
   DEFAULT_ADDRESS_CONFIDENCE_THRESHOLD,
 };

@@ -3,6 +3,8 @@ const {
   mergeTriageFlags,
   canAutoRoute,
   SERVICE_AREA_COUNTIES,
+  normalizeCounty,
+  isInServiceAreaCounty,
 } = require('../services/call-triage-flags');
 
 const {
@@ -128,6 +130,30 @@ describe('computeDeterministicTriageFlags', () => {
     const e = validV2Extraction();
     e.property.service_address.county = 'Sarasota';
     expect(computeDeterministicTriageFlags(e)).not.toContain('out_of_service_area');
+  });
+
+  test('in service area — lowercase county', () => {
+    const e = validV2Extraction();
+    e.property.service_address.county = 'sarasota';
+    expect(computeDeterministicTriageFlags(e)).not.toContain('out_of_service_area');
+  });
+
+  test('in service area — uppercase county', () => {
+    const e = validV2Extraction();
+    e.property.service_address.county = 'MANATEE';
+    expect(computeDeterministicTriageFlags(e)).not.toContain('out_of_service_area');
+  });
+
+  test('in service area — "County" suffix', () => {
+    const e = validV2Extraction();
+    e.property.service_address.county = 'Manatee County';
+    expect(computeDeterministicTriageFlags(e)).not.toContain('out_of_service_area');
+  });
+
+  test('out of service area — lowercase Lee', () => {
+    const e = validV2Extraction();
+    e.property.service_address.county = 'lee county';
+    expect(computeDeterministicTriageFlags(e)).toContain('out_of_service_area');
   });
 
   test('ambiguous scheduling', () => {
@@ -527,6 +553,50 @@ describe('idempotency migration', () => {
   test('exports up and down functions', () => {
     expect(typeof migration.up).toBe('function');
     expect(typeof migration.down).toBe('function');
+  });
+});
+
+// ═══════════════════════════════════════════════════
+// County Normalization
+// ═══════════════════════════════════════════════════
+
+describe('normalizeCounty', () => {
+  test('lowercases', () => {
+    expect(normalizeCounty('SARASOTA')).toBe('sarasota');
+  });
+  test('strips County suffix', () => {
+    expect(normalizeCounty('Manatee County')).toBe('manatee');
+  });
+  test('handles lowercase county suffix', () => {
+    expect(normalizeCounty('charlotte county')).toBe('charlotte');
+  });
+  test('null/empty returns null', () => {
+    expect(normalizeCounty(null)).toBeNull();
+    expect(normalizeCounty('')).toBeNull();
+  });
+});
+
+describe('isInServiceAreaCounty', () => {
+  test('matches exact display names', () => {
+    expect(isInServiceAreaCounty('Manatee')).toBe(true);
+    expect(isInServiceAreaCounty('DeSoto')).toBe(true);
+  });
+  test('matches case-insensitively', () => {
+    expect(isInServiceAreaCounty('sarasota')).toBe(true);
+    expect(isInServiceAreaCounty('MANATEE')).toBe(true);
+    expect(isInServiceAreaCounty('desoto')).toBe(true);
+  });
+  test('matches with County suffix', () => {
+    expect(isInServiceAreaCounty('Manatee County')).toBe(true);
+    expect(isInServiceAreaCounty('charlotte county')).toBe(true);
+  });
+  test('rejects out-of-area', () => {
+    expect(isInServiceAreaCounty('Lee')).toBe(false);
+    expect(isInServiceAreaCounty('lee county')).toBe(false);
+    expect(isInServiceAreaCounty('Hillsborough')).toBe(false);
+  });
+  test('null returns false', () => {
+    expect(isInServiceAreaCounty(null)).toBe(false);
   });
 });
 
