@@ -2149,7 +2149,10 @@ const CallRecordingProcessor = {
     // Variable name kept as `beehiivResult` for schema/log continuity;
     // carries the local enrollment result now.
     let beehiivResult = null;
-    if (customerId && extracted.email) {
+    if (customerId && extracted.email && v2EmailBlocked) {
+      logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
+      beehiivResult = { skipped: 'v2_tcpa_gate' };
+    } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
         const r = await AutomationRunner.enrollCustomer({
