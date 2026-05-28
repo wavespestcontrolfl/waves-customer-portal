@@ -3116,6 +3116,8 @@ function BillingTab({ customer }) {
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? autopay?.monthly_rate ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
+  const autopayBaseAmount = Number(autopay?.next_charge_base_amount ?? 0);
+  const autopaySurcharge = Number(autopay?.next_charge_surcharge_amount ?? 0);
   const dueDate = autopayState === 'active'
     ? (autopay?.next_charge_date ? parseDate(autopay.next_charge_date) : null)
     : nextCharge?.date ? parseDate(nextCharge.date) : balance?.dueDate ? parseDate(balance.dueDate) : null;
@@ -3178,7 +3180,9 @@ function BillingTab({ customer }) {
         : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
       detail: daysUntilDue === 0
         ? `Amount: ${money(amountDue)}`
-        : `Amount due ${money(amountDue)}${dueDate ? ` - due ${dueDateLabel}` : ''}`,
+        : autopaySurcharge > 0
+          ? `${money(autopayBaseAmount)} + ${money(autopaySurcharge)} credit card surcharge`
+          : `Amount due ${money(amountDue)}${dueDate ? ` - due ${dueDateLabel}` : ''}`,
     },
     paused: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'clock',

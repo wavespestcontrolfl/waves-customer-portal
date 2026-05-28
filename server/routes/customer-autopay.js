@@ -1,15 +1,55 @@
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const Stripe = require('stripe');
 const { authenticate } = require('../middleware/auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const stripeConfig = require('../config/stripe-config');
 const { logAutopay, getRecent } = require('../services/autopay-log');
 const { isChargeableAutopayMethod } = require('../services/autopay-eligibility');
-const { computeChargeAmount } = require('../services/stripe-pricing');
+const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
 router.use(authenticate);
+
+let _stripe;
+function getStripe() {
+  if (_stripe) return _stripe;
+  if (!stripeConfig.secretKey) return null;
+  _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia' });
+  return _stripe;
+}
+
+async function resolveAutopayCardFunding(paymentMethod) {
+  if (!paymentMethod
+    || paymentMethod.card_funding
+    || !paymentMethod.stripe_payment_method_id
+    || !isCardMethodType(paymentMethod.method_type)) {
+    return paymentMethod?.card_funding || null;
+  }
+
+  const stripe = getStripe();
+  if (!stripe) return null;
+
+  try {
+    const stripePaymentMethod = await stripe.paymentMethods.retrieve(paymentMethod.stripe_payment_method_id);
+    const funding = stripePaymentMethod?.card?.funding || null;
+    if (funding) {
+      paymentMethod.card_funding = funding;
+      await db('payment_methods')
+        .where({ id: paymentMethod.id })
+        .update({
+          card_funding: funding,
+          card_funding_checked_at: new Date().toISOString(),
+        });
+    }
+    return funding;
+  } catch (err) {
+    logger.warn(`[autopay] Funding lookup failed for payment method ${paymentMethod.id}: ${err.message}`);
+    return null;
+  }
+}
 
 // Throttle autopay mutations per authenticated customer to prevent rapid toggling
 // or accidental DoS of the billing pipeline.
@@ -59,11 +99,14 @@ router.get('/', async (req, res, next) => {
         is_default: true,
         autopay_enabled: true,
       })
-      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled');
+      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
     const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod);
     const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod;
+    const autopayFunding = customerAutopayEnabled
+      ? await resolveAutopayCardFunding(chargeableAutopayMethod)
+      : null;
     const nextCharge = customerAutopayEnabled
-      ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type)
+      ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type, { funding: autopayFunding })
       : null;
 
     let state = 'disabled';

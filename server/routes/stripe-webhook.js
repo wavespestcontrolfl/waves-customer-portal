@@ -98,6 +98,8 @@ async function paymentDetailsFromIntent(paymentIntent) {
     paymentMethod: paymentIntent.payment_method_types?.[0] || null,
     cardBrand: null,
     cardLastFour: null,
+    cardFunding: null,
+    isWallet: false,
     receiptUrl: null,
   };
   let resolvedFromStripeDetails = false;
@@ -113,6 +115,8 @@ async function paymentDetailsFromIntent(paymentIntent) {
           details.paymentMethod = 'card';
           details.cardBrand = pmd.card.brand?.toUpperCase() || null;
           details.cardLastFour = pmd.card.last4 || null;
+          details.cardFunding = pmd.card.funding || null;
+          details.isWallet = !!pmd.card.wallet;
           resolvedFromStripeDetails = true;
         } else if (pmd?.us_bank_account) {
           details.paymentMethod = 'us_bank_account';
@@ -140,6 +144,8 @@ async function paymentDetailsFromIntent(paymentIntent) {
       details.paymentMethod = 'card';
       details.cardBrand = pm.card.brand?.toUpperCase() || details.cardBrand;
       details.cardLastFour = pm.card.last4 || details.cardLastFour;
+      details.cardFunding = pm.card.funding || details.cardFunding;
+      details.isWallet = !!pm.card.wallet || details.isWallet;
     } else if (pm?.us_bank_account) {
       details.paymentMethod = 'us_bank_account';
       details.cardLastFour = pm.us_bank_account.last4 || details.cardLastFour;
@@ -209,6 +215,99 @@ async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason)
     logger.error(`[stripe-webhook] Failed to record orphan succeeded PI ${paymentIntent.id}: ${err.message}`);
     throw err;
   }
+}
+
+async function alertSurchargeBypass(paymentIntent, invoice, alertType, severity, title, description, metadata = {}) {
+  try {
+    await db('customer_health_alerts').insert({
+      customer_id: invoice?.customer_id || paymentIntent.metadata?.waves_customer_id || null,
+      alert_type: alertType,
+      severity,
+      title,
+      description,
+      metadata: JSON.stringify({
+        stripe_payment_intent_id: paymentIntent.id,
+        invoice_number: invoice?.invoice_number,
+        ...metadata,
+      }),
+    });
+  } catch (alertErr) {
+    logger.error(`[stripe-webhook] Surcharge alert failed for PI ${paymentIntent.id}: ${alertErr.message}`);
+  }
+}
+
+async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, invoice) {
+  const piMeta = paymentIntent.metadata || {};
+  if (piMeta.surcharge_policy_version || !paymentIntent.payment_method) return null;
+
+  const recordedSurchargeCents = Math.max(
+    Math.round(Number(piMeta.card_surcharge || 0) * 100),
+    Number(paymentIntent.amount_details?.surcharge?.amount || 0),
+  );
+  if (recordedSurchargeCents > 0) return null;
+
+  const methodTypes = paymentIntent.payment_method_types || [];
+  const isCardCandidate = details.paymentMethod === 'card' || methodTypes.includes('card');
+  if (!isCardCandidate) return null;
+
+  if (details.cardFunding) {
+    if (details.cardFunding === 'credit' && !details.isWallet) {
+      return {
+        reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
+        alertType: 'surcharge_under_collection_webhook',
+        severity: 'high',
+        title: `Surcharge under-collection (webhook) — invoice ${invoice?.invoice_number || 'unknown'}`,
+        description: `Credit card payment confirmed via webhook without surcharge finalization. PI: ${paymentIntent.id}. Charged base-only and was not settled locally.`,
+        metadata: { card_funding: details.cardFunding },
+      };
+    }
+    return null;
+  }
+
+  const stripe = getStripe();
+  if (!stripe) {
+    return {
+      reason: `Could not verify card funding for unfinalized PI ${paymentIntent.id}: Stripe is not configured`,
+      alertType: 'surcharge_bypass_unknown_funding_webhook',
+      severity: 'high',
+      title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
+      description: `Card payment succeeded without surcharge finalization and webhook funding verification could not run. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
+      metadata: { funding_lookup_error: 'stripe_not_configured' },
+    };
+  }
+
+  try {
+    const pmId = typeof paymentIntent.payment_method === 'string'
+      ? paymentIntent.payment_method
+      : paymentIntent.payment_method?.id;
+    if (!pmId) return null;
+
+    const pmObj = await stripe.paymentMethods.retrieve(pmId);
+    const funding = pmObj.card?.funding || null;
+    const isWallet = !!pmObj.card?.wallet;
+    if (funding === 'credit' && !isWallet) {
+      return {
+        reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
+        alertType: 'surcharge_under_collection_webhook',
+        severity: 'high',
+        title: `Surcharge under-collection (webhook) — invoice ${invoice?.invoice_number || 'unknown'}`,
+        description: `Credit card payment confirmed via webhook without surcharge finalization. PI: ${paymentIntent.id}. Charged base-only and was not settled locally.`,
+        metadata: { card_funding: funding },
+      };
+    }
+  } catch (pmErr) {
+    logger.error(`[stripe-webhook] Could not verify funding for unfinalized card PI ${paymentIntent.id}: ${pmErr.message}`);
+    return {
+      reason: `Could not verify card funding for unfinalized PI ${paymentIntent.id}: ${pmErr.message}`,
+      alertType: 'surcharge_bypass_unknown_funding_webhook',
+      severity: 'high',
+      title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
+      description: `Card payment succeeded without surcharge finalization and funding lookup failed. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
+      metadata: { funding_lookup_error: pmErr.message },
+    };
+  }
+
+  return null;
 }
 
 async function lockPaymentIntentPaymentRow(trx, piId) {
@@ -446,6 +545,32 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   const details = await paymentDetailsFromIntent(paymentIntent);
   const invoiceForTenderGuard = await findInvoiceForPaymentIntent(paymentIntent);
   const invoiceForTenderGuardStatus = String(invoiceForTenderGuard?.status || '').toLowerCase();
+  const surchargeQuarantine = await shouldQuarantineUnfinalizedCardPayment(
+    paymentIntent,
+    details,
+    invoiceForTenderGuard,
+  );
+  if (surchargeQuarantine
+    && invoiceForTenderGuard
+    && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)
+    && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
+    logger.error(`[stripe-webhook] Quarantining succeeded invoice PI ${piId}: ${surchargeQuarantine.reason}`);
+    await alertSurchargeBypass(
+      paymentIntent,
+      invoiceForTenderGuard,
+      surchargeQuarantine.alertType,
+      surchargeQuarantine.severity,
+      surchargeQuarantine.title,
+      surchargeQuarantine.description,
+      surchargeQuarantine.metadata,
+    );
+    await recordOrphanSucceededPaymentIntent(
+      paymentIntent,
+      chargedTotal ?? centsToDollars(paymentIntent.amount),
+      surchargeQuarantine.reason,
+    );
+    return;
+  }
   if (invoiceForTenderGuard
     && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)
     && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
@@ -560,12 +685,17 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         stripe_charge_id: paymentIntent.latest_charge || null,
         payment_date: etDateString(),
         amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
+        base_amount_cents: Math.round(Number(paymentIntent.metadata?.base_amount || invoice.total) * 100),
+        surcharge_amount_cents: Math.round(Number(paymentIntent.metadata?.card_surcharge || 0) * 100),
+        surcharge_rate_bps: Number(paymentIntent.metadata?.surcharge_rate_bps || 0),
+        surcharge_policy_version: paymentIntent.metadata?.surcharge_policy_version || null,
+        card_funding: paymentIntent.metadata?.card_funding || null,
+        card_brand: details.cardBrand || null,
         status: 'paid',
         description: metadataCardSurcharge > 0
           ? `Invoice ${invoice.invoice_number} (includes $${metadataCardSurcharge.toFixed(2)} card processing fee)`
           : `Invoice ${invoice.invoice_number}`,
         receipt_url: details.receiptUrl || null,
-        card_brand: details.cardBrand || null,
         card_last_four: details.cardLastFour || null,
         metadata: JSON.stringify({
           invoice_id: invoice.id,
@@ -1438,6 +1568,12 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         stripe_payment_intent_id: piId,
         payment_date: etDateString(),
         amount,
+        base_amount_cents: Math.round(Number(paymentIntent.metadata?.base_amount || invoice.total) * 100),
+        surcharge_amount_cents: Math.round(Number(paymentIntent.metadata?.card_surcharge || 0) * 100),
+        surcharge_rate_bps: Number(paymentIntent.metadata?.surcharge_rate_bps || 0),
+        surcharge_policy_version: paymentIntent.metadata?.surcharge_policy_version || null,
+        card_funding: paymentIntent.metadata?.card_funding || null,
+        card_brand: null,
         status: 'processing',
         description: `Invoice ${invoice.invoice_number} (bank payment pending)`,
         metadata: paymentMetadata,

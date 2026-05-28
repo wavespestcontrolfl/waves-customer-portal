@@ -1,7 +1,7 @@
 // client/src/pages/PayPageV2.jsx
 //
 // Customer-facing pay page (V2). Renders the Stripe Payment Element,
-// 3.99% credit-card surcharge preview, save-card consent, and on success
+// credit-card surcharge (up to 3%) disclosure, save-card consent, and on success
 // redirects to /receipt/:token. The single most security-and-money-
 // critical page in the customer-facing portal.
 //
@@ -32,10 +32,9 @@
 // - Stripe SDK loaded once, cached in module scope. Confirm subsequent
 //   page mounts don't re-load the script (would re-prompt user agents
 //   and slow first-paint).
-// - 3.99% surcharge preview client-side vs authoritative server-side
-//   computeChargeAmount. The two MUST agree on every payment method
-//   (card / apple_pay / google_pay = 3.99%; ACH = 0%). Drift = customer
-//   sees one number and gets charged another.
+// - Surcharge disclosure: two-step quote/finalize flow ensures the customer
+//   sees the exact surcharge before payment. Credit cards = up to 3%.
+//   Debit/prepaid/ACH = 0%. Server is authoritative for surcharge calculation.
 // - Confirm button single-flight: Stripe Payment Intent confirm is
 //   slow (~2-5s). Double-click must not double-confirm. Standard
 //   pattern is disable-on-submit + idempotency key.
@@ -59,10 +58,9 @@
 // - Idempotency table (stripe_webhook_events): event.id must be
 //   recorded BEFORE processing. If the table write happens after,
 //   a Stripe retry races and we double-credit the invoice.
-// - computeChargeAmount: 3.99% surcharge logic for card / apple_pay /
-//   google_pay; 0% for ACH. Any other method (Cash App, Klarna)
-//   needs an explicit branch — silently defaulting to 0% loses
-//   money on every transaction.
+// - computeChargeAmount: credit-card surcharge (up to 3%) for confirmed
+//   credit cards; 0% for debit/prepaid/unknown/ACH. Server-side
+//   quoteInvoiceSurcharge determines the exact amount based on PM funding.
 // - ensureStripeCustomer: customer-stripe linking. Confirm we don't
 //   accidentally create a NEW Stripe Customer for an existing
 //   customer (= duplicated card on file, broken autopay).
@@ -239,10 +237,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // Initial fallback uses the same two-step rounding as server
   // computeChargeAmount so the customer's first paint matches the
   // PaymentIntent total even if the /update-amount sync fails.
-  const initialCharge = computeCardTotal(amount, cardSurchargeRate || 0.0399);
+  // Phase 1: PI starts at base amount — surcharge added at /finalize after PM inspection.
   const [displayedBase, setDisplayedBase] = useState(amount);
-  const [displayedSurcharge, setDisplayedSurcharge] = useState(initialCharge.surcharge);
-  const [displayedTotal, setDisplayedTotal] = useState(initialCharge.total);
+  const [displayedSurcharge, setDisplayedSurcharge] = useState(0);
+  const [displayedTotal, setDisplayedTotal] = useState(amount);
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
   const selectedMethodRef = useRef('card');
@@ -300,7 +298,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // mandate wording switches between one-time and recurring on the
   // setup_future_usage change.
   useEffect(() => {
-    if (!paymentIntentId) return;
+    if (!paymentIntentId || awaitingConfirm) return;
     syncAmountForMethod(selectedMethod, !!saveCard);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveCard]);
@@ -366,10 +364,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // surface, shown when the customer has a saved card in Google
         // Pay and our domain is registered with Stripe.
         //
-        // We pre-apply the card-family surcharge on mount so the wallet
-        // sheet displays the correct total ($X + 3.99%) — wallets are
-        // always card-family, and updating the PI from inside the click
-        // handler has too tight a deadline (1s).
+        // Phase 1: no surcharge on Express Checkout (wallets).
+        // PI stays at base amount — wallet sheet shows the quoted price.
         const express = elements.create('expressCheckout', {
           buttonTheme: { applePay: 'black', googlePay: 'black' },
           buttonType:  { applePay: 'buy',   googlePay: 'buy' },
@@ -380,10 +376,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
         express.on('ready', async () => {
           if (cancelled) return;
-          // Surcharge wallets = card-family × 1.0399. Pre-apply now so the
-          // wallet sheet shows the right total instead of the base amount.
-          if (selectedMethodRef.current !== 'card') return;
-          try { await syncAmountForMethod('card', saveCard); } catch { /* non-fatal */ }
+          // Phase 1: No surcharge on Express Checkout (wallets).
+          // PI stays at base amount — wallet sheet shows the quoted amount.
         });
 
         express.on('confirm', async () => {
@@ -429,12 +423,18 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
         paymentElement.on('change', (event) => {
           if (cancelled) return;
+          // Clear pending surcharge quote on any element change — the customer
+          // may have edited card details, making the old PM stale.
+          setAwaitingConfirm(false);
+          setQuoteData(null);
           setElementError(event.error?.message || null);
           const nextMethod = event.value?.type || null;
           if (nextMethod && nextMethod !== selectedMethodRef.current) {
             if (nextMethod !== 'us_bank_account') setAmountSyncError(false);
             selectedMethodRef.current = nextMethod;
             setSelectedMethod(nextMethod);
+            setAwaitingConfirm(false);
+            setQuoteData(null);
             syncAmountForMethod(nextMethod);
           }
         });
@@ -450,52 +450,120 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   }, [publishableKey, clientSecret]);
 
   const isCardFamily = selectedMethod !== 'us_bank_account';
-  const pct = (((cardSurchargeRate || 0.0399) * 100).toFixed(2)).replace(/\.?0+$/, '');
-  const buttonAmount = isCardFamily ? displayedTotal : displayedBase;
+  const pct = '3';
+  const buttonAmount = displayedTotal;
 
   const selectPaymentMethod = (methodCategory) => {
     if (!ready || processing || syncingAmount || syncingAmountRef.current || methodCategory === selectedMethod) return;
+    // Clear any pending card quote when switching methods
+    setAwaitingConfirm(false);
+    setQuoteData(null);
     selectedMethodRef.current = methodCategory;
     setSelectedMethod(methodCategory);
     syncAmountForMethod(methodCategory);
   };
+
+  // Two-step surcharge disclosure: createPaymentMethod → quote → confirm → finalize.
+  // ACH payments skip the quote step and go straight to confirmPayment.
+  const [quoteData, setQuoteData] = useState(null);
+  const [awaitingConfirm, setAwaitingConfirm] = useState(false);
 
   const handleSubmit = async () => {
     if (!stripeRef.current || !elementsRef.current || processing) return;
     setProcessing(true);
     setElementError(null);
 
+    // ACH: use the existing confirmPayment flow (no surcharge)
+    if (selectedMethodRef.current === 'us_bank_account') {
+      try {
+        const { error, paymentIntent: pi } = await stripeRef.current.confirmPayment({
+          elements: elementsRef.current,
+          confirmParams: { return_url: window.location.href },
+          redirect: 'if_required',
+        });
+        if (error) { setElementError(error.message); setProcessing(false); return; }
+        if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) onSuccess?.(pi);
+        else if (pi?.status === 'requires_action') { setElementError('Additional verification required.'); setProcessing(false); }
+        else onSuccess?.(pi);
+      } catch (err) { setElementError(err.message || 'Payment failed'); setProcessing(false); }
+      return;
+    }
+
+    // Card: Step 1 — create PaymentMethod from Elements, then get surcharge quote
     try {
-      const { error, paymentIntent } = await stripeRef.current.confirmPayment({
-        elements: elementsRef.current,
-        confirmParams: { return_url: window.location.href },
-        redirect: 'if_required',
+      const { error: submitError } = await elementsRef.current.submit();
+      if (submitError) { setElementError(submitError.message); setProcessing(false); return; }
+
+      const { error: pmError, paymentMethod } = await stripeRef.current.createPaymentMethod({ elements: elementsRef.current });
+      if (pmError) { setElementError(pmError.message); setProcessing(false); return; }
+
+      const quoteRes = await fetch(`${API_BASE}/pay/${token}/quote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentMethodId: paymentMethod.id }),
       });
+      const quote = await quoteRes.json().catch(() => ({}));
+      if (!quoteRes.ok) throw new Error(quote.error || 'Could not get surcharge quote');
 
-      if (error) {
-        setElementError(error.message);
-        setProcessing(false);
-        return;
-      }
-
-      if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-        onSuccess?.(paymentIntent);
-      } else if (paymentIntent && paymentIntent.status === 'requires_action') {
-        setElementError('Additional verification required. Please follow the prompts.');
-        setProcessing(false);
-      } else {
-        onSuccess?.(paymentIntent);
-      }
+      // Show the surcharge confirmation UI
+      setDisplayedBase(quote.base);
+      setDisplayedSurcharge(quote.surcharge);
+      setDisplayedTotal(quote.total);
+      setQuoteData({ ...quote, paymentMethodId: paymentMethod.id });
+      setAwaitingConfirm(true);
+      setProcessing(false);
     } catch (err) {
       setElementError(err.message || 'Payment failed');
       setProcessing(false);
     }
   };
 
+  const handleFinalizePayment = async () => {
+    if (!quoteData || processing) return;
+    setProcessing(true);
+    setElementError(null);
+
+    try {
+      const finalRes = await fetch(`${API_BASE}/pay/${token}/finalize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quoteToken: quoteData.quoteToken, saveCard: !!saveCard }),
+      });
+      const result = await finalRes.json().catch(() => ({}));
+      if (!finalRes.ok) throw new Error(result.error || 'Payment failed');
+
+      if (result.requiresAction && result.clientSecret) {
+        const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });
+        if (actionError) { setElementError(actionError.message); setProcessing(false); return; }
+        if (actionPI && (actionPI.status === 'succeeded' || actionPI.status === 'processing')) {
+          onSuccess?.({ id: actionPI.id, status: actionPI.status, payment_method: actionPI.payment_method });
+          return;
+        }
+        setElementError('Payment could not be completed. Please try again.');
+        setProcessing(false);
+        return;
+      }
+
+      if (result.status === 'succeeded' || result.status === 'processing') {
+        onSuccess?.({ id: result.paymentIntentId, status: result.status, payment_method: result.paymentMethodId });
+      } else {
+        setElementError('Payment was not completed. Please try again or use a different payment method.');
+        setProcessing(false);
+        setAwaitingConfirm(false);
+        setQuoteData(null);
+      }
+    } catch (err) {
+      setElementError(err.message || 'Payment failed');
+      setProcessing(false);
+      setAwaitingConfirm(false);
+      setQuoteData(null);
+    }
+  };
+
   const disabled = !ready || processing || syncingAmount || amountSyncError;
   const methodControlsDisabled = !ready || processing || syncingAmount;
   const methodOptions = [
-    { value: 'card', title: 'Card or wallet', detail: `${pct}% processing fee`, icon: 'card' },
+    { value: 'card', title: 'Card or wallet', detail: 'Up to 3% credit card surcharge', icon: 'card' },
     { value: 'us_bank_account', title: 'Bank account', detail: 'No added fee', icon: 'building' },
   ];
 
@@ -528,8 +596,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <Icon name="card" size={17} strokeWidth={2} />
         </span>
         <span>
-          A {pct}% processing fee is added to credit/debit card and wallet payments.
-          Bank transfers (ACH) pay the quoted amount with no added fee.
+          A credit card surcharge of up to 3% may apply. The exact surcharge and total will be shown before payment.
+          Debit cards, prepaid cards, and bank transfers have no added card surcharge.
         </span>
       </div>
 
@@ -627,9 +695,17 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         {isCardFamily && displayedSurcharge > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
             <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
-              Card processing fee ({pct}%)
+              Credit card surcharge ({pct}%)
             </span>
             <span style={{ color: 'var(--text)' }}>+ {fmtCurrency(displayedSurcharge)}</span>
+          </div>
+        )}
+        {isCardFamily && quoteData && quoteData.funding !== 'credit' && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+            <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
+              No card surcharge ({quoteData.funding || 'debit'} card)
+            </span>
+            <span style={{ color: 'var(--text)' }}>$0.00</span>
           </div>
         )}
         <div style={{
@@ -657,7 +733,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      <BrandButton variant="primary" fullWidth onClick={handleSubmit} disabled={disabled}>
+      <BrandButton variant="primary" fullWidth onClick={awaitingConfirm ? handleFinalizePayment : handleSubmit} disabled={disabled}>
         {processing
           ? 'Processing…'
           : !ready
@@ -666,7 +742,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               ? 'Updating total…'
               : amountSyncError
                 ? 'Update total to continue'
-                : `Pay ${fmtCurrency(buttonAmount)}`}
+                : awaitingConfirm
+                  ? `Confirm & Pay ${fmtCurrency(displayedTotal)}`
+                  : isCardFamily
+                    ? 'Continue to review'
+                    : `Pay ${fmtCurrency(buttonAmount)}`}
       </BrandButton>
 
       <div style={{
@@ -738,7 +818,7 @@ export default function PayPageV2() {
           clientSecret: setup.clientSecret,
           paymentIntentId: setup.paymentIntentId,
           baseAmount: setup.baseAmount ?? setup.amount,
-          cardSurchargeRate: setup.cardSurchargeRate ?? 0.0399,
+          cardSurchargeRate: setup.cardSurchargeRate ?? 0.03,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
         });
         setPaymentState('ready');

@@ -23,15 +23,22 @@ function getStripe() {
 
 // ═══════════════════════════════════════════════════════════════
 // Credit card processing surcharge
-// ACH pays the quoted amount; cards / wallets pay base × 1.0399.
+// Debit/prepaid/unknown/ACH pay the quoted amount with no surcharge.
 // Pure helpers live in ./stripe-pricing so they can be unit-tested
 // without the Stripe SDK; one source of truth for surcharge math.
 // ═══════════════════════════════════════════════════════════════
 const {
   CARD_SURCHARGE_RATE,
+  SURCHARGE_API_VERSION,
+  SURCHARGE_POLICY_VERSION,
+  CONFIGURED_COST_BPS,
   isCardMethodType,
+  shouldSurcharge,
   computeChargeAmount,
+  buildSurchargeAmountDetails,
+  computeRefundSurcharge,
 } = require('./stripe-pricing');
+const { surchargeAllowed } = require('./surcharge-jurisdiction');
 const {
   assertInvoicePaymentIntentTenderMatches,
   invoicePaymentStatusForIntent,
@@ -205,6 +212,8 @@ const StripeService = {
       if (pm.type === 'card' && pm.card) {
         record.method_type = 'card';
         record.card_brand = pm.card.brand ? pm.card.brand.toUpperCase() : null;
+        record.card_funding = pm.card.funding || null;
+        record.card_funding_checked_at = new Date();
         record.last_four = pm.card.last4;
         record.exp_month = String(pm.card.exp_month).padStart(2, '0');
         record.exp_year = String(pm.card.exp_year);
@@ -333,11 +342,32 @@ const StripeService = {
 
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
 
-    // Apply 3.99% processing surcharge when the stored autopay method is card-family.
-    // ACH methods are charged the quoted amount with no surcharge.
-    const { base: baseAmount, surcharge: surchargeAmount, total: totalAmount } =
-      computeChargeAmount(amountDollars, card.method_type);
-    const amountCents = Math.round(totalAmount * 100);
+    // Apply credit card surcharge when funding is confirmed as 'credit'.
+    // Debit/prepaid/unknown-funding/ACH pay the quoted amount with no surcharge.
+    if (card.method_type === 'card' && !card.card_funding && card.stripe_payment_method_id) {
+      try {
+        const pmObj = await stripe.paymentMethods.retrieve(card.stripe_payment_method_id);
+        const fetchedFunding = pmObj.card?.funding || null;
+        if (fetchedFunding) {
+          card.card_funding = fetchedFunding;
+          await db('payment_methods').where({ id: card.id }).update({
+            card_funding: fetchedFunding,
+            card_funding_checked_at: new Date(),
+          });
+          logger.info(`[stripe] Backfilled card_funding=${fetchedFunding} for card ${card.id}`);
+        }
+      } catch (fetchErr) {
+        logger.warn(`[stripe] Could not fetch funding for card ${card.id}: ${fetchErr.message}`);
+      }
+    }
+    const chargeInfo = computeChargeAmount(amountDollars, card.method_type, { funding: card.card_funding });
+    const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
+    const baseAmount = baseCents / 100;
+    const surchargeAmount = surchargeCents / 100;
+    const totalAmount = totalCents / 100;
+
+    // Build Stripe surcharge amount_details (null when no surcharge)
+    const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
 
     // Step 1: Charge via Stripe. Expand latest_charge so we can read
     // receipt_url off it directly (the prior `paymentIntent.charges.data`
@@ -345,8 +375,8 @@ const StripeService = {
     // supported replacement and survives future API bumps).
     let paymentIntent;
     try {
-      paymentIntent = await stripe.paymentIntents.create({
-        amount: amountCents,
+      const piParams = {
+        amount: totalCents,
         currency: 'usd',
         customer: stripeCustomerId,
         payment_method: card.stripe_payment_method_id,
@@ -354,15 +384,22 @@ const StripeService = {
         confirm: true,
         expand: ['latest_charge'],
         description: surchargeAmount > 0
-          ? `${description} (includes $${surchargeAmount.toFixed(2)} card processing fee)`
+          ? `${description} (includes $${surchargeAmount.toFixed(2)} credit card surcharge)`
           : description,
         metadata: {
           waves_customer_id: customerId,
           base_amount: String(baseAmount),
           card_surcharge: String(surchargeAmount),
+          surcharge_rate_bps: String(rateBps),
+          surcharge_policy_version: policyVersion,
           ...metadata,
         },
-      });
+      };
+      if (surchargeDetails) piParams.amount_details = surchargeDetails;
+      paymentIntent = await stripe.paymentIntents.create(
+        piParams,
+        surchargeDetails ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+      );
     } catch (err) {
       // Stripe charge failed — record the failure
       logger.error(`[stripe] Charge failed for ${customerId}: ${err.message}`);
@@ -432,14 +469,22 @@ const StripeService = {
         stripe_charge_id: stripeChargeId,
         payment_date: etDateString(),
         amount: totalAmount,
+        base_amount_cents: baseCents,
+        surcharge_amount_cents: surchargeCents,
+        surcharge_rate_bps: rateBps,
+        surcharge_policy_version: policyVersion,
+        card_funding: card.card_funding || null,
+        card_brand: card.card_brand || null,
         status,
         description: surchargeAmount > 0
-          ? `${description} (includes $${surchargeAmount.toFixed(2)} card processing fee)`
+          ? `${description} (includes $${surchargeAmount.toFixed(2)} credit card surcharge)`
           : description,
         metadata: JSON.stringify({
           stripe_receipt_url: stripeReceiptUrl,
           base_amount: baseAmount,
           card_surcharge: surchargeAmount,
+          surcharge_rate_bps: rateBps,
+          surcharge_policy_version: policyVersion,
         }),
       }).returning('*');
 
@@ -598,11 +643,31 @@ const StripeService = {
           }
         }
 
-        const charge = computeChargeAmount(parseFloat(lockedInvoice.total), card.method_type);
-        base = charge.base;
-        surcharge = charge.surcharge;
-        total = charge.total;
-        const amountCents = Math.round(total * 100);
+        // On-demand funding fetch for legacy cards missing card_funding
+        if (card.method_type === 'card' && !card.card_funding && card.stripe_payment_method_id) {
+          try {
+            const pmObj = await stripe.paymentMethods.retrieve(card.stripe_payment_method_id);
+            const fetchedFunding = pmObj.card?.funding || null;
+            if (fetchedFunding) {
+              card.card_funding = fetchedFunding;
+              await trx('payment_methods').where({ id: card.id }).update({
+                card_funding: fetchedFunding,
+                card_funding_checked_at: new Date(),
+              });
+              logger.info(`[stripe] Backfilled card_funding=${fetchedFunding} for card ${card.id}`);
+            }
+          } catch (fetchErr) {
+            logger.warn(`[stripe] Could not fetch funding for card ${card.id}: ${fetchErr.message}`);
+          }
+        }
+
+        const chargeInfo = computeChargeAmount(parseFloat(lockedInvoice.total), card.method_type, { funding: card.card_funding });
+        const { baseCents: invBaseCents, surchargeCents: invSurchargeCents, totalCents: invTotalCents, rateBps: invRateBps, policyVersion: invPolicyVersion } = chargeInfo;
+        base = invBaseCents / 100;
+        surcharge = invSurchargeCents / 100;
+        total = invTotalCents / 100;
+
+        const invSurchargeDetails = buildSurchargeAmountDetails(invSurchargeCents);
 
         // Idempotency-Key bound to invoice + amount + pm + 60-second
         // bucket. The bucket dedupes a double-click within the same
@@ -615,9 +680,9 @@ const StripeService = {
         // components mean re-totaling the invoice or switching cards
         // also yields a fresh key as expected.
         const minuteBucket = Math.floor(Date.now() / 60_000);
-        const idempotencyKey = `inv_card_on_file_${invoiceId}_${amountCents}_${card.id}_${minuteBucket}`;
-        paymentIntent = await stripe.paymentIntents.create({
-          amount: amountCents,
+        const idempotencyKey = `inv_card_on_file_${invoiceId}_${invTotalCents}_${card.id}_${minuteBucket}`;
+        const invPiParams = {
+          amount: invTotalCents,
           currency: 'usd',
           customer: stripeCustomerId,
           payment_method: card.stripe_payment_method_id,
@@ -630,9 +695,18 @@ const StripeService = {
             waves_customer_id: invoice.customer_id,
             base_amount: String(base),
             card_surcharge: String(surcharge),
+            surcharge_rate_bps: String(invRateBps),
+            surcharge_policy_version: invPolicyVersion,
             source: 'admin_card_on_file',
           },
-        }, { idempotencyKey });
+        };
+        if (invSurchargeDetails) invPiParams.amount_details = invSurchargeDetails;
+        paymentIntent = await stripe.paymentIntents.create(
+          invPiParams,
+          invSurchargeDetails
+            ? { idempotencyKey, apiVersion: SURCHARGE_API_VERSION }
+            : { idempotencyKey },
+        );
 
         status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
 
@@ -660,13 +734,21 @@ const StripeService = {
           stripe_charge_id: paymentIntent.latest_charge || null,
           payment_date: etDateString(),
           amount: total,
+          base_amount_cents: invBaseCents,
+          surcharge_amount_cents: invSurchargeCents,
+          surcharge_rate_bps: invRateBps,
+          surcharge_policy_version: invPolicyVersion,
+          card_funding: card.card_funding || null,
+          card_brand: card.card_brand || null,
           status,
           description: surcharge > 0
-            ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} fee)`
+            ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} credit card surcharge)`
             : `Invoice ${invoice.invoice_number} — card on file`,
           metadata: JSON.stringify({
             base_amount: base,
             card_surcharge: surcharge,
+            surcharge_rate_bps: invRateBps,
+            surcharge_policy_version: invPolicyVersion,
             source: 'admin_card_on_file',
           }),
         }).returning('*');
@@ -902,25 +984,28 @@ const StripeService = {
         assertInvoiceCollectible(lockedInvoice.status);
 
         baseAmount = parseFloat(lockedInvoice.total);
-        // The pay page defaults to card/wallet, so the PI starts locked to
-        // card-family with the surcharge applied. ACH selection calls
-        // /update-amount and reprices the same bound PI to ACH-only.
-        const cardCharge = computeChargeAmount(baseAmount, 'card');
-        const cardBase = cardCharge.base;
-        cardSurcharge = cardCharge.surcharge;
-        cardTotal = cardCharge.total;
-        const amountCents = Math.round(cardTotal * 100);
+        // PI starts at BASE amount only — no surcharge at setup time.
+        // Card payments: surcharge is applied via the /quote → /finalize two-step flow.
+        // Express Checkout (wallets): intentionally base-only in phase 1 (no surcharge).
+        // ACH: no surcharge by design.
+        // The legacy setup→confirmPayment→/confirm path charges whatever the PI
+        // amount is at confirm time — if a card payment bypasses /quote+/finalize,
+        // it would charge base-only (under-collect). The PayPageV2 UI prevents
+        // this by routing all card submissions through the two-step flow.
+        cardSurcharge = 0;
+        cardTotal = baseAmount;
+        const baseCents = Math.round(baseAmount * 100);
 
         const piParams = {
-          amount: amountCents,
+          amount: baseCents,
           currency: 'usd',
           description: `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
           metadata: {
             waves_invoice_id: invoiceId,
             invoice_number: lockedInvoice.invoice_number,
             waves_customer_id: lockedInvoice.customer_id,
-            base_amount: String(cardBase),
-            card_surcharge: String(cardSurcharge),
+            base_amount: String(baseAmount),
+            card_surcharge: '0',
             save_card_opt_in: saveCard ? 'true' : 'false',
             selected_method_category: 'card',
           },
@@ -977,7 +1062,7 @@ const StripeService = {
         // Include the currently stored PI id in the key so a replacement
         // setup cannot replay an older canceled intent for this invoice.
         const sourceIntent = lockedInvoice.stripe_payment_intent_id || 'new';
-        const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}`;
+        const idempotencyKey = `invoice_pi_${invoiceId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}`;
         paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
         if (paymentIntent.status === 'canceled') {
@@ -1006,7 +1091,8 @@ const StripeService = {
         paymentIntentId: paymentIntent.id,
         amount: baseAmount,
         baseAmount,
-        cardSurchargeRate: CARD_SURCHARGE_RATE,
+        cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
+        surchargeRateBps: CONFIGURED_COST_BPS,
       };
     } catch (err) {
       if (err.statusCode) {
@@ -1029,11 +1115,11 @@ const StripeService = {
   },
 
   /**
-   * Update an open invoice PaymentIntent's amount based on the payment method
-   * the customer picked on the Payment Element.
+   * Update an open invoice PaymentIntent's method category.
    *
-   * - Card / Apple Pay / Google Pay / Link → base × 1.0399
-   * - us_bank_account (ACH) → base × 1.00
+   * Both card and ACH keep the PI at base amount — no surcharge at this stage.
+   * Surcharge is calculated at /quote and applied at /finalize after PM funding
+   * is confirmed.
    *
    * @param {string} invoiceId
    * @param {string} paymentIntentId
@@ -1054,8 +1140,8 @@ const StripeService = {
 
     const saveCard = !!opts.saveCard;
     const selectedMethodCategory = methodCategory || 'card';
-    const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), selectedMethodCategory);
-    const amountCents = Math.round(total * 100);
+    const base = parseFloat(invoice.total);
+    const baseCents = Math.round(base * 100);
 
     // Lock the PI to the selected tender family before Stripe can confirm.
     // The pay page exposes Card/ACH with its own selector; Stripe Elements
@@ -1065,13 +1151,13 @@ const StripeService = {
       : ['us_bank_account'];
 
     const updateParams = {
-      amount: amountCents,
+      amount: baseCents,
       payment_method_types: paymentMethodTypes,
       metadata: {
         waves_invoice_id: invoiceId,
         invoice_number: invoice.invoice_number,
         base_amount: String(base),
-        card_surcharge: String(surcharge),
+        card_surcharge: '0',
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
       },
@@ -1090,17 +1176,185 @@ const StripeService = {
 
     try {
       const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
-      logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=$${surcharge} total=$${total} (method=${selectedMethodCategory})`);
+      logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
       return {
         paymentIntentId: paymentIntent.id,
         base,
-        surcharge,
-        total,
-        cardSurchargeRate: CARD_SURCHARGE_RATE,
+        surcharge: 0,
+        total: base,
+        cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
+        surchargeRateBps: CONFIGURED_COST_BPS,
       };
     } catch (err) {
       logger.error(`[stripe] PI update failed for ${paymentIntentId}: ${err.message}`);
       throw new Error(`Failed to update payment amount: ${err.message}`);
+    }
+  },
+
+  /**
+   * Quote the surcharge for a specific payment method on an invoice.
+   * Returns the breakdown and a quoteToken for /finalize.
+   */
+  async quoteInvoiceSurcharge(invoiceId, paymentMethodId) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    const invoice = await db('invoices').where({ id: invoiceId }).first();
+    if (!invoice) throw new Error('Invoice not found');
+    assertInvoiceCollectible(invoice.status);
+
+    // Retrieve the PM from Stripe to get real-time funding type
+    let pm;
+    try {
+      pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+    } catch (err) {
+      throw new Error(`Could not retrieve payment method: ${err.message}`);
+    }
+
+    const methodType = pm.type || 'card';
+    const funding = pm.card?.funding || null;
+    const baseAmount = parseFloat(invoice.total);
+
+    const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
+    const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
+
+    // Create an HMAC-signed quote token for /finalize
+    const crypto = require('crypto');
+    const hmacSecret = process.env.JWT_SECRET;
+    if (!hmacSecret) throw new Error('JWT_SECRET is required for surcharge quote signing');
+    const payloadJson = JSON.stringify({
+      invoiceId,
+      paymentMethodId,
+      invoiceTotal: baseAmount,
+      quotedAt: Date.now(),
+    });
+    const signature = crypto.createHmac('sha256', hmacSecret).update(payloadJson).digest('base64url');
+    const quoteToken = `${Buffer.from(payloadJson).toString('base64url')}.${signature}`;
+
+    return {
+      quoteToken,
+      base: baseCents / 100,
+      surcharge: surchargeCents / 100,
+      total: totalCents / 100,
+      rateBps,
+      funding,
+      methodType,
+    };
+  },
+
+  /**
+   * Finalize an invoice payment with the surcharge from a prior /quote.
+   * Updates the PI amount to include surcharge, then confirms.
+   */
+  async finalizeInvoicePayment(invoiceId, quoteToken, opts = {}) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    // Decode and verify the HMAC-signed quote token
+    const crypto = require('crypto');
+    const hmacSecret = process.env.JWT_SECRET;
+    if (!hmacSecret) throw new Error('JWT_SECRET is required for surcharge quote signing');
+    let quote;
+    try {
+      const [payloadPart, sigPart] = quoteToken.split('.');
+      if (!payloadPart || !sigPart) throw new Error('malformed');
+      const expectedSig = crypto.createHmac('sha256', hmacSecret).update(Buffer.from(payloadPart, 'base64url').toString()).digest('base64url');
+      if (sigPart !== expectedSig) throw new Error('signature mismatch');
+      quote = JSON.parse(Buffer.from(payloadPart, 'base64url').toString());
+    } catch {
+      throw new Error('Invalid or tampered quote token');
+    }
+
+    if (String(quote.invoiceId) !== String(invoiceId)) {
+      throw new Error('Quote token does not match this invoice');
+    }
+
+    // Quote tokens expire after 10 minutes
+    if (Date.now() - (quote.quotedAt || 0) > 10 * 60 * 1000) {
+      throw new Error('Quote expired — please try again');
+    }
+
+    const invoice = await db('invoices').where({ id: invoiceId }).first();
+    if (!invoice) throw new Error('Invoice not found');
+    assertInvoiceCollectible(invoice.status);
+
+    if (!invoice.stripe_payment_intent_id) {
+      throw new Error('Invoice has no active PaymentIntent');
+    }
+
+    // Re-derive charge from PM + invoice — never trust client-provided amounts
+    const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
+    const funding = pm.card?.funding || null;
+    const baseAmount = parseFloat(invoice.total);
+
+    if (quote.invoiceTotal != null && Math.abs(baseAmount - quote.invoiceTotal) > 0.01) {
+      throw new Error('Invoice total changed since quote was created. Please request a new quote.');
+    }
+
+    const chargeInfo = computeChargeAmount(baseAmount, pm.type || 'card', { funding });
+    const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
+
+    const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
+    const usePreview = !!surchargeDetails;
+    const saveCard = !!opts.saveCard;
+
+    // Update PI with final amount, attach PM, then confirm server-side
+    const updateParams = {
+      amount: totalCents,
+      payment_method: quote.paymentMethodId,
+      metadata: {
+        waves_invoice_id: invoiceId,
+        invoice_number: invoice.invoice_number,
+        waves_customer_id: invoice.customer_id,
+        base_amount: String(baseCents / 100),
+        card_surcharge: String(surchargeCents / 100),
+        surcharge_rate_bps: String(rateBps),
+        surcharge_policy_version: policyVersion,
+        card_funding: funding || 'unknown',
+        save_card_opt_in: saveCard ? 'true' : 'false',
+      },
+    };
+
+    if (surchargeDetails) updateParams.amount_details = surchargeDetails;
+
+    if (saveCard && invoice.customer_id) {
+      updateParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
+      updateParams.setup_future_usage = 'off_session';
+    } else {
+      updateParams.setup_future_usage = '';
+    }
+
+    try {
+      await stripe.paymentIntents.update(
+        invoice.stripe_payment_intent_id,
+        updateParams,
+        usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+      );
+
+      // Confirm the PI server-side (attaches PM + charges the card)
+      const confirmed = await stripe.paymentIntents.confirm(
+        invoice.stripe_payment_intent_id,
+        {},
+        usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+      );
+
+      logger.info(`[stripe] Finalized invoice ${invoice.invoice_number}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
+
+      return {
+        paymentIntentId: confirmed.id,
+        paymentMethodId: quote.paymentMethodId,
+        clientSecret: confirmed.client_secret,
+        status: confirmed.status,
+        requiresAction: confirmed.status === 'requires_action',
+        base: baseCents / 100,
+        surcharge: surchargeCents / 100,
+        total: totalCents / 100,
+        rateBps,
+        funding,
+      };
+    } catch (err) {
+      logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
+      throw new Error(`Failed to finalize payment: ${err.message}`);
     }
   },
 
@@ -1221,6 +1475,95 @@ const StripeService = {
         }
       }
 
+      // Check for card payments that bypassed the /quote+/finalize surcharge flow.
+      // Express Checkout (wallets) are allowed at base-only (phase 1).
+      // The surcharge_policy_version metadata is set by /finalize. Older
+      // already-surcharged PIs may lack that key, so allow a positive recorded
+      // surcharge before treating the payment as a bypass.
+      const isCardFamily = pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach';
+      const wasFinalized = pi.metadata?.surcharge_policy_version;
+      const recordedSurchargeCents = Math.max(
+        Math.round(Number(pi.metadata?.card_surcharge || 0) * 100),
+        Number(pi.amount_details?.surcharge?.amount || 0),
+      );
+      const surchargeAlreadyApplied = recordedSurchargeCents > 0;
+      if (isCardFamily && !wasFinalized && !surchargeAlreadyApplied) {
+        // Card payment without surcharge_policy_version = bypassed /finalize.
+        // Don't block (payment already succeeded at Stripe), but check if it's
+        // a credit card that should have been surcharged.
+        let pmFunding = null;
+        let isWalletPM = false;
+        let pmLookupFailed = false;
+        try {
+          const pmId = typeof pi.payment_method === 'string' ? pi.payment_method : pi.payment_method?.id;
+          if (pmId) {
+            const pmObj = await stripe.paymentMethods.retrieve(pmId);
+            pmFunding = pmObj.card?.funding || null;
+            isWalletPM = !!pmObj.card?.wallet;
+          }
+        } catch (pmErr) {
+          pmLookupFailed = true;
+          logger.error(`[stripe] PM lookup failed for bypass check on PI ${paymentIntentId}: ${pmErr.message}`);
+        }
+
+        if (pmFunding === 'credit' && !isWalletPM) {
+          logger.error(
+            `[stripe] Card payment on PI ${paymentIntentId} bypassed /finalize. ` +
+            `Invoice ${invoice.invoice_number}. Blocking confirm — customer must use /quote+/finalize.`,
+          );
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: invoice.customer_id,
+              alert_type: 'surcharge_bypass_blocked',
+              severity: 'medium',
+              title: `Surcharge bypass blocked — invoice ${invoice.invoice_number}`,
+              description: `Credit card confirm attempt without surcharge finalization. PI: ${paymentIntentId}. Customer redirected to retry.`,
+              metadata: JSON.stringify({
+                stripe_payment_intent_id: paymentIntentId,
+                card_funding: pmFunding,
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[stripe] Bypass-blocked alert insert failed: ${alertErr.message}`);
+          }
+          const err = new Error('Payment requires surcharge finalization. Please refresh and try again.');
+          err.code = 'SURCHARGE_NOT_FINALIZED';
+          throw err;
+        } else if (pmFunding === 'credit' && isWalletPM) {
+          logger.info(
+            `[stripe] Wallet credit card on PI ${paymentIntentId} confirmed at base-only ` +
+            `(Express Checkout, phase 1). Invoice ${invoice.invoice_number}.`,
+          );
+        } else if (pmLookupFailed) {
+          logger.error(
+            `[stripe] FAIL-CLOSED: Could not determine funding for unfinalized card PI ${paymentIntentId}. ` +
+            `Invoice ${invoice.invoice_number}. Blocking confirm — customer must retry through /quote+/finalize.`,
+          );
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: invoice.customer_id,
+              alert_type: 'surcharge_bypass_unknown_funding',
+              severity: 'high',
+              title: `Unknown funding on unfinalized card — invoice ${invoice.invoice_number}`,
+              description: `Card payment confirmed without /finalize and PM funding lookup failed. PI: ${paymentIntentId}. May be under-collected.`,
+              metadata: JSON.stringify({
+                stripe_payment_intent_id: paymentIntentId,
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[stripe] Unknown-funding alert insert failed: ${alertErr.message}`);
+          }
+          const err = new Error('Payment requires surcharge verification. Please refresh and try again.');
+          err.code = 'SURCHARGE_FUNDING_UNKNOWN';
+          throw err;
+        } else {
+          logger.info(
+            `[stripe] Non-credit card (${pmFunding || 'unknown'}) on PI ${paymentIntentId} ` +
+            `confirmed without /finalize — no surcharge expected. Invoice ${invoice.invoice_number}.`,
+          );
+        }
+      }
+
       const actualMethodType = pmdType || resolvedPaymentMethod;
       const invoiceBaseAmount = Number(invoice.total);
       assertInvoicePaymentIntentTenderMatches(pi, actualMethodType, invoiceBaseAmount);
@@ -1237,13 +1580,38 @@ const StripeService = {
       // and we can't unwind it cheaply. Log critical + create a health
       // alert so an operator can decide whether to follow up.
       if (paymentStatus === 'paid' && pmdType) {
-        const expected = computeChargeAmount(parseFloat(invoice.total), pmdType);
-        const expectedCents = Math.round(expected.total * 100);
+        // Compare against the surcharge policy stored on the PI at charge time,
+        // not a fresh recompute — the pay page may have intentionally charged
+        // differently (no surcharge for debit, base-only for express checkout).
+        const metaBase = Math.round(Number(pi.metadata?.base_amount || invoice.total) * 100);
+        const metaSurcharge = Math.round(Number(pi.metadata?.card_surcharge || 0) * 100);
+        // If metadata shows 0 surcharge but PM is credit card, re-derive expected
+        // surcharge — the PI may have bypassed /finalize.
+        let expectedSurcharge = metaSurcharge;
+        if (metaSurcharge === 0 && pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach') {
+          let pmFunding = pi.metadata?.card_funding || null;
+          let isWalletBypass = false;
+          if (!pmFunding) {
+            try {
+              const pmId = typeof pi.payment_method === 'string' ? pi.payment_method : pi.payment_method?.id;
+              if (pmId) {
+                const pmObj = await stripe.paymentMethods.retrieve(pmId);
+                pmFunding = pmObj.card?.funding || null;
+                isWalletBypass = !!pmObj.card?.wallet;
+              }
+            } catch { /* non-fatal */ }
+          }
+          if (pmFunding === 'credit' && !isWalletBypass) {
+            const { computeSurchargeCents } = require('./stripe-pricing');
+            expectedSurcharge = computeSurchargeCents(metaBase);
+          }
+        }
+        const expectedCents = metaBase + expectedSurcharge;
         const actualCents = Number(pi.amount) || 0;
         if (actualCents + 1 < expectedCents) {  // 1-cent tolerance for rounding
           logger.error(
             `[stripe] CRITICAL: Surcharge-bypass detected on PI ${paymentIntentId}. ` +
-            `Method=${pmdType}, expected=$${expected.total.toFixed(2)} (${expectedCents}c), ` +
+            `Method=${pmdType}, expected=$${(expectedCents / 100).toFixed(2)} (${expectedCents}c), ` +
             `actual=$${(actualCents / 100).toFixed(2)} (${actualCents}c). Invoice ${invoice.invoice_number}.`,
           );
           try {
@@ -1252,13 +1620,13 @@ const StripeService = {
               alert_type: 'stripe_surcharge_bypass',
               severity: 'high',
               title: `Surcharge bypass detected — invoice ${invoice.invoice_number}`,
-              description: `Customer paid $${(actualCents / 100).toFixed(2)} via ${pmdType}, expected $${expected.total.toFixed(2)} (3.99% card surcharge missing). PI: ${paymentIntentId}.`,
+              description: `Customer paid $${(actualCents / 100).toFixed(2)} via ${pmdType}, expected $${(expectedCents / 100).toFixed(2)} (surcharge shortfall). PI: ${paymentIntentId}.`,
               metadata: JSON.stringify({
                 stripe_payment_intent_id: paymentIntentId,
                 method: pmdType,
-                expected_total: expected.total,
+                expected_total: expectedCents / 100,
                 actual_total: actualCents / 100,
-                shortfall: expected.total - (actualCents / 100),
+                shortfall: (expectedCents - actualCents) / 100,
               }),
             });
           } catch (alertErr) {
@@ -1360,11 +1728,17 @@ const StripeService = {
           stripe_charge_id: typeof charge === 'string' ? charge : null,
           payment_date: etDateString(),
           amount: chargedTotal,
+          base_amount_cents: Math.round(Number(pi.metadata?.base_amount || invoice.total) * 100),
+          surcharge_amount_cents: Math.round(Number(pi.metadata?.card_surcharge || 0) * 100),
+          surcharge_rate_bps: Number(pi.metadata?.surcharge_rate_bps || 0),
+          surcharge_policy_version: pi.metadata?.surcharge_policy_version || null,
+          card_funding: pi.metadata?.card_funding || null,
+          card_brand: cardBrand || null,
           status: paymentStatus,
           description: paymentStatus === 'processing'
             ? `Invoice ${invoice.invoice_number} (bank payment pending)`
             : metadataCardSurcharge > 0
-            ? `Invoice ${invoice.invoice_number} (includes $${metadataCardSurcharge.toFixed(2)} card processing fee)`
+            ? `Invoice ${invoice.invoice_number} (includes $${metadataCardSurcharge.toFixed(2)} credit card surcharge)`
             : `Invoice ${invoice.invoice_number}`,
           metadata: JSON.stringify({
             invoice_id: invoiceId,
@@ -1378,7 +1752,6 @@ const StripeService = {
         };
 
         if (receiptUrl) paymentPayload.receipt_url = receiptUrl;
-        if (cardBrand) paymentPayload.card_brand = cardBrand;
         if (cardLastFour || bankLastFour) paymentPayload.card_last_four = cardLastFour || bankLastFour;
 
         const existingPayment = await trx('payments')

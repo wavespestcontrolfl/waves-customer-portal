@@ -83,6 +83,10 @@ router.get('/:token', async (req, res, next) => {
       payment: payment
         ? {
           amount: totalPaid,
+          baseAmountCents: payment.base_amount_cents ?? null,
+          surchargeAmountCents: payment.surcharge_amount_cents ?? 0,
+          surchargeRateBps: payment.surcharge_rate_bps ?? 0,
+          cardFunding: payment.card_funding ?? null,
           paymentDate: payment.payment_date,
           cardBrand: payment.card_brand || data.card_brand,
           cardLastFour: payment.card_last_four || data.card_last_four,

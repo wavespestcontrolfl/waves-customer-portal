@@ -224,6 +224,54 @@ function recommendationEventMetadata(card = {}, extra = {}) {
   };
 }
 
+function normalizeRecommendationEventRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    recommendation_id: row.recommendation_id || null,
+    snapshot_id: row.snapshot_id || null,
+    customer_id: row.customer_id || null,
+    event_type: row.event_type,
+    actor_type: row.actor_type,
+    actor_id: row.actor_id || null,
+    metadata: parseJsonObject(row.metadata),
+    created_at: row.created_at,
+  };
+}
+
+function summarizeRecommendationEvents(events = [], card = {}) {
+  const counts = {
+    generated: 0,
+    approved: 0,
+    shown: 0,
+    recommendation_shown: 0,
+    clicked: 0,
+    recommendation_clicked: 0,
+    follow_up_requested: 0,
+    accepted: 0,
+    dismissed: 0,
+  };
+  let latestEventAt = null;
+  for (const event of events || []) {
+    const type = String(event.event_type || '');
+    if (Object.prototype.hasOwnProperty.call(counts, type)) counts[type] += 1;
+    if (type === 'recommendation_clicked') counts.clicked += 1;
+    if (type === 'recommendation_shown') counts.shown += 1;
+    const createdAt = event.created_at ? new Date(event.created_at).toISOString() : null;
+    if (createdAt && (!latestEventAt || createdAt > latestEventAt)) latestEventAt = createdAt;
+  }
+  if (card.status === 'accepted') counts.accepted = Math.max(counts.accepted, 1);
+  if (card.status === 'dismissed') counts.dismissed = Math.max(counts.dismissed, 1);
+  if (card.approved_at) counts.approved = Math.max(counts.approved, 1);
+  const shown = counts.recommendation_shown || counts.shown;
+  const clicked = counts.recommendation_clicked || counts.clicked;
+  return {
+    counts,
+    latestEventAt,
+    clickThroughRate: shown > 0 ? Number((clicked / shown).toFixed(3)) : null,
+  };
+}
+
 async function logRecommendationEvent({ recommendationId, snapshotId, customerId, eventType, req, metadata = {} }) {
   await db('property_recommendation_events').insert({
     recommendation_id: recommendationId || null,
@@ -253,15 +301,108 @@ async function getSnapshotReviewPayload(assessmentId) {
       END
     `)
     .orderBy('created_at', 'asc');
+  const cardIds = cards.map((card) => card.id).filter(Boolean);
+  const events = cardIds.length
+    ? await db('property_recommendation_events')
+      .whereIn('recommendation_id', cardIds)
+      .orderBy('created_at', 'desc')
+      .catch(() => [])
+    : [];
+  const eventsByCard = events.reduce((acc, event) => {
+    const key = event.recommendation_id;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(event);
+    return acc;
+  }, {});
 
   return {
     snapshot: normalizeSnapshotRow(snapshot),
-    recommendationCards: cards.map(normalizeRecommendationRow),
+    recommendationCards: cards.map((card) => ({
+      ...normalizeRecommendationRow(card),
+      performance: summarizeRecommendationEvents(eventsByCard[card.id] || [], card),
+    })),
   };
 }
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
+
+// =========================================================================
+// GET /recommendation-performance — aggregate recommendation event performance
+// =========================================================================
+router.get('/recommendation-performance', async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(365, Number(req.query.days) || 90));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const customerId = String(req.query.customerId || '').trim();
+
+    const cardQuery = db('property_recommendation_cards')
+      .where({ domain: 'lawn' })
+      .where('created_at', '>=', since);
+    if (customerId) cardQuery.where({ customer_id: customerId });
+    const cards = await cardQuery.select(
+      'id',
+      'customer_id',
+      'snapshot_id',
+      'type',
+      'priority',
+      'status',
+      'customer_visible',
+      'approved_at',
+      'created_at',
+    );
+    const cardIds = cards.map((card) => card.id).filter(Boolean);
+    const events = cardIds.length
+      ? await db('property_recommendation_events')
+        .whereIn('recommendation_id', cardIds)
+        .where('created_at', '>=', since)
+        .orderBy('created_at', 'desc')
+      : [];
+    const eventsByCard = events.reduce((acc, event) => {
+      const key = event.recommendation_id;
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(event);
+      return acc;
+    }, {});
+    const cardsWithPerformance = cards.map((card) => ({
+      id: card.id,
+      customer_id: card.customer_id,
+      snapshot_id: card.snapshot_id,
+      type: card.type,
+      priority: card.priority,
+      status: card.status,
+      customer_visible: card.customer_visible === true,
+      approved_at: card.approved_at || null,
+      created_at: card.created_at,
+      performance: summarizeRecommendationEvents(eventsByCard[card.id] || [], card),
+    }));
+    const totals = cardsWithPerformance.reduce((acc, card) => {
+      acc.cards += 1;
+      for (const [key, value] of Object.entries(card.performance.counts)) {
+        acc.counts[key] = (acc.counts[key] || 0) + Number(value || 0);
+      }
+      if (card.status === 'approved' || card.status === 'customer_visible' || card.approved_at) acc.approvedCards += 1;
+      if (card.customer_visible) acc.visibleCards += 1;
+      if (card.performance.latestEventAt && (!acc.latestEventAt || card.performance.latestEventAt > acc.latestEventAt)) {
+        acc.latestEventAt = card.performance.latestEventAt;
+      }
+      return acc;
+    }, {
+      cards: 0,
+      approvedCards: 0,
+      visibleCards: 0,
+      counts: {},
+      latestEventAt: null,
+    });
+    const shown = totals.counts.recommendation_shown || totals.counts.shown || 0;
+    const clicked = totals.counts.recommendation_clicked || totals.counts.clicked || 0;
+    totals.clickThroughRate = shown > 0 ? Number((clicked / shown).toFixed(3)) : null;
+
+    res.json({ days, customerId: customerId || null, totals, cards: cardsWithPerformance });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // =========================================================================
 // GET /customers — list lawn care customers (active lawn service)
@@ -1024,6 +1165,32 @@ router.patch('/recommendations/:recommendationId', async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /recommendations/:recommendationId/events — read outcome event history
+// =========================================================================
+router.get('/recommendations/:recommendationId/events', async (req, res, next) => {
+  try {
+    const card = await db('property_recommendation_cards')
+      .where({ id: req.params.recommendationId, domain: 'lawn' })
+      .first();
+    if (!card) return res.status(404).json({ error: 'Recommendation not found' });
+
+    const events = await db('property_recommendation_events')
+      .where({ recommendation_id: card.id })
+      .orderBy('created_at', 'desc')
+      .limit(100)
+      .catch(() => []);
+
+    res.json({
+      recommendation: normalizeRecommendationRow(card),
+      performance: summarizeRecommendationEvents(events, card),
+      events: events.map(normalizeRecommendationEventRow).filter(Boolean),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
 // POST /recommendations/:recommendationId/events — append outcome event
 // =========================================================================
 router.post('/recommendations/:recommendationId/events', async (req, res, next) => {
@@ -1152,6 +1319,8 @@ router._test = {
   normalizeRecommendationRow,
   canShowRecommendationToCustomer,
   customerCopyViolation,
+  summarizeRecommendationEvents,
+  normalizeRecommendationEventRow,
 };
 
 module.exports = router;
