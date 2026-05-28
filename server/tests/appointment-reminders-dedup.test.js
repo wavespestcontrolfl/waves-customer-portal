@@ -356,3 +356,95 @@ describe('appointment reminder reschedule windows', () => {
     expect(sendCustomerMessage).toHaveBeenCalled();
   });
 });
+
+describe('appointment reminder cron delivery windows', () => {
+  const fixedNow = new Date('2026-05-06T14:00:00.000Z'); // 10:00 AM ET
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    jest.useFakeTimers().setSystemTime(fixedNow);
+    smsTemplatesRouter.getTemplate.mockResolvedValue('24-hour appointment reminder');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('sends tomorrow reminder even when appointment was booked less than 24 hours out', async () => {
+    const reminder = {
+      id: 'reminder-soon',
+      scheduled_service_id: 'svc-soon',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-07T13:00:00.000Z'), // 9:00 AM ET tomorrow
+      created_at: new Date('2026-05-06T13:45:00.000Z'),
+      service_type: 'Pest Control',
+      cancelled: false,
+      confirmation_sent: true,
+      reminder_72h_sent: true,
+      reminder_24h_sent: false,
+    };
+
+    const reminderList = chain({
+      select: jest.fn().mockResolvedValue([reminder]),
+    });
+    const prefsQuery = chain({
+      first: jest.fn().mockResolvedValue({ sms_enabled: true, service_reminder_24h: true }),
+    });
+    const customer = {
+      id: 'customer-1',
+      first_name: 'Ada',
+      phone: '+19415551212',
+    };
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue(customer),
+    });
+    const techQuery = chain({
+      first: jest.fn().mockResolvedValue({ tech_name: 'Sam' }),
+    });
+    const landlineQuery = chain({
+      first: jest.fn().mockResolvedValue(customer),
+    });
+    const markSent = chain();
+
+    const appointmentReminderQueries = [reminderList, markSent];
+    const customerQueries = [customerQuery, landlineQuery];
+
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return appointmentReminderQueries.shift();
+      if (table === 'notification_prefs') return prefsQuery;
+      if (table === 'customers') return customerQueries.shift();
+      if (table === 'scheduled_services') return techQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(result.sent24h).toBe(1);
+    expect(smsTemplatesRouter.getTemplate).toHaveBeenCalledWith(
+      'reminder_24h',
+      expect.objectContaining({
+        first_name: 'Ada',
+        service_type: 'Pest Control',
+        time: '9:00 AM',
+      }),
+      expect.objectContaining({
+        workflow: 'appointment_reminder_24h',
+        entity_type: 'scheduled_service',
+        entity_id: 'svc-soon',
+      }),
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415551212',
+      body: '24-hour appointment reminder',
+      purpose: 'appointment_reminder_24h',
+      customerId: 'customer-1',
+    }));
+    expect(markSent.where).toHaveBeenCalledWith({ id: 'reminder-soon' });
+    expect(markSent.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_24h_sent: true,
+      reminder_24h_sent_at: expect.any(Date),
+    }));
+  });
+});
