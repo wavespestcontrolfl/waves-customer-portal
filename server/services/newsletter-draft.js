@@ -249,9 +249,10 @@ async function assembleBeehiivNewsletter(draft) {
   const events = draft.events || [];
 
   // ── Hero Image ──
-  if (draft.heroImageUrl) {
+  const heroUrl = safeImageUrl(draft.heroImageUrl);
+  if (heroUrl) {
     parts.push(`<div style="margin:0 0 20px 0;text-align:center;">
-<img src="${draft.heroImageUrl}" alt="${(draft.selectedSubject || 'Fresh This Week').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
+<img src="${heroUrl}" alt="${(draft.selectedSubject || 'Fresh This Week').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
 </div>`);
   }
 
