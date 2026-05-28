@@ -31,7 +31,6 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
 const { normalizeCallExtraction } = require('../utils/intake-normalize');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
-const { toGeminiResponseSchema } = require('../utils/gemini-schema-adapter');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -57,6 +56,11 @@ const OPENAI_TRANSCRIPTION_PROMPT = `Transcribe this phone call recording for Wa
 Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and proper nouns exactly as spoken.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
 const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
+// v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
+// v1.0.0 schema (better structured-output adherence + fewer hallucinations than
+// Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
+// pins temp 0.2 for determinism). Env-overridable for instant rollback.
+const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
 
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
@@ -1122,13 +1126,22 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
 
   const callDateET = etDateString(opts.callStartedAt || new Date());
   const callId = opts.callId || null;
-  const prompt = buildExtractionPrompt(transcription, callerPhone, callDateET);
-  const geminiSchema = toGeminiResponseSchema(modelOutputSchema);
+  // The v1.0.0 schema is too deep/enum-heavy for Gemini's constrained-decoding
+  // response_schema ("too many states for serving"), so we use plain JSON mode
+  // and embed the schema as prompt guidance. Correctness is guaranteed by the
+  // two-pass ajv validation below (model-output + persisted), which fails closed
+  // to triage on any deviation — the model output is never trusted directly.
+  const prompt = buildExtractionPrompt(transcription, callerPhone, callDateET)
+    + '\n\n═══ OUTPUT CONTRACT ═══\n'
+    + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
+    + 'every required field present, every enum value exact, no extra fields, '
+    + 'use null for unknown nullable fields.\n'
+    + JSON.stringify(modelOutputSchema);
 
   let rawText;
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1136,7 +1149,6 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             response_mime_type: 'application/json',
-            response_schema: geminiSchema,
             temperature: 0.2,
           },
         }),
@@ -1179,7 +1191,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     call_id: callId,
     schema_version: SCHEMA_VERSION,
     extracted_at: new Date().toISOString(),
-    extraction_model: 'gemini-2.5-flash',
+    extraction_model: GEMINI_EXTRACTION_MODEL,
     extraction_prompt_version: PROMPT_HASH,
   };
 
@@ -1439,7 +1451,7 @@ const CallRecordingProcessor = {
           ai_extraction_enriched: v2Result.extraction ? JSON.stringify(v2Result.extraction) : null,
           ai_extraction_validation_errors: v2Result.errors ? JSON.stringify(v2Result.errors) : null,
           v2_extraction_status: v2Result.status,
-          ai_extraction_model: 'gemini-2.5-flash',
+          ai_extraction_model: GEMINI_EXTRACTION_MODEL,
           ai_extraction_prompt_version: PROMPT_HASH,
           updated_at: new Date(),
         };

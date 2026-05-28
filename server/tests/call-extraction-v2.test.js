@@ -1,8 +1,6 @@
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
-const { toGeminiResponseSchema, clearCache } = require('../utils/gemini-schema-adapter');
 const { normalizeExtractionV2, normalizePhone, normalizeZip, normalizeState, cleanValidEmail } = require('../utils/normalize-extraction-v2');
 const { isV2Extraction, flatView, mapServiceCategoryToLegacy } = require('../utils/extraction-compat');
-const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
 
 function validModelOutput() {
   return {
@@ -307,92 +305,6 @@ describe('schema validation', () => {
       const { valid } = validatePersisted(data);
       expect(valid).toBe(false);
     });
-  });
-});
-
-// ═══════════════════════════════════════════════════
-// Gemini Schema Adapter
-// ═══════════════════════════════════════════════════
-
-describe('gemini schema adapter', () => {
-  beforeEach(() => clearCache());
-
-  test('strips $schema and $id', () => {
-    const result = toGeminiResponseSchema(modelOutputSchema, { noCache: true });
-    expect(result.$schema).toBeUndefined();
-    expect(result.$id).toBeUndefined();
-  });
-
-  test('converts const to single-value enum', () => {
-    const schema = { const: '1.0.0' };
-    const result = toGeminiResponseSchema(schema, { noCache: true });
-    expect(result.enum).toEqual(['1.0.0']);
-    expect(result.const).toBeUndefined();
-  });
-
-  test('preserves type arrays (nullable)', () => {
-    const schema = { type: ['string', 'null'] };
-    const result = toGeminiResponseSchema(schema, { noCache: true });
-    expect(result.type).toEqual(['string', 'null']);
-    expect(result.nullable).toBeUndefined();
-  });
-
-  test('preserves additionalProperties', () => {
-    const schema = { type: 'object', additionalProperties: false, properties: {} };
-    const result = toGeminiResponseSchema(schema, { noCache: true });
-    expect(result.additionalProperties).toBe(false);
-  });
-
-  test('strips descriptions to reduce token overhead', () => {
-    const schema = {
-      type: 'object',
-      description: 'This should be stripped',
-      properties: {
-        name: { type: 'string', description: 'Also stripped' },
-      },
-    };
-    const result = toGeminiResponseSchema(schema, { noCache: true });
-    expect(result.description).toBeUndefined();
-    expect(result.properties.name.description).toBeUndefined();
-  });
-
-  test('preserves required arrays', () => {
-    const schema = { type: 'object', required: ['a', 'b'], properties: { a: { type: 'string' }, b: { type: 'number' } } };
-    const result = toGeminiResponseSchema(schema, { noCache: true });
-    expect(result.required).toEqual(['a', 'b']);
-  });
-
-  test('recursively transforms nested properties', () => {
-    const schema = {
-      type: 'object',
-      properties: {
-        inner: {
-          type: 'object',
-          description: 'stripped',
-          properties: {
-            val: { const: 'fixed' },
-          },
-        },
-      },
-    };
-    const result = toGeminiResponseSchema(schema, { noCache: true });
-    expect(result.properties.inner.description).toBeUndefined();
-    expect(result.properties.inner.properties.val.enum).toEqual(['fixed']);
-  });
-
-  test('full model-output schema transforms without error', () => {
-    const result = toGeminiResponseSchema(modelOutputSchema, { noCache: true });
-    expect(result).toBeDefined();
-    expect(result.type).toBe('object');
-    expect(result.properties.meta).toBeDefined();
-    expect(result.properties.caller).toBeDefined();
-    expect(result.properties.triage_flags).toBeDefined();
-  });
-
-  test('caches result by default', () => {
-    const a = toGeminiResponseSchema(modelOutputSchema);
-    const b = toGeminiResponseSchema(modelOutputSchema);
-    expect(a).toBe(b);
   });
 });
 
