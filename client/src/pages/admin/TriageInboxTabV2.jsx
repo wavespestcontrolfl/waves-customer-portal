@@ -284,7 +284,6 @@ export default function TriageInboxTabV2() {
                 const synopsis = item.lead_synopsis || item.call_summary || item.summary || "No summary available.";
                 const recId = item.recording_sid || item.call_log_id;
                 const busyKey = isTriage ? item.id : item.call_log_id;
-                const verdicted = !!item.feedback_verdict;
                 return (
                   <div
                     key={isTriage ? item.id : item.route_decision_id}
@@ -314,8 +313,11 @@ export default function TriageInboxTabV2() {
                         </div>
                       </div>
 
-                      {/* Actions: open triage items, or any non-verdicted call */}
-                      {(isOpenView || (!isTriage && !verdicted)) && (
+                      {/* Actions: open triage items, or ANY auto-routed call.
+                          Auto-routed rows keep both buttons even after a verdict
+                          so an accidental deny (or a changed mind) can be flipped
+                          back to accept — the verdict badge shows current state. */}
+                      {(isOpenView || !isTriage) && (
                         <div className="flex items-center gap-2 shrink-0">
                           {isOpenView && (
                             <Button
@@ -344,16 +346,6 @@ export default function TriageInboxTabV2() {
                             <ThumbsUp size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Accept
                           </Button>
                         </div>
-                      )}
-                      {!isTriage && verdicted && (
-                        <button
-                          type="button"
-                          className="text-12 text-ink-tertiary hover:text-ink-secondary underline shrink-0"
-                          disabled={actioning === busyKey}
-                          onClick={() => openDeny(item, "auto_routed")}
-                        >
-                          Re-review
-                        </button>
                       )}
                     </div>
 
