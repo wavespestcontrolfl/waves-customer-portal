@@ -273,9 +273,10 @@ async function assembleBeehiivNewsletter(draft) {
     }
 
     // Highlights / What to Expect
-    if (ev.highlights?.length) {
+    const hl = Array.isArray(ev.highlights) ? ev.highlights : (typeof ev.highlights === 'string' ? [ev.highlights] : []);
+    if (hl.length) {
       parts.push(`<p style="margin:0 0 6px 0;font-size:14px;font-weight:600;">What to expect:</p>`);
-      const bullets = ev.highlights.map(h =>
+      const bullets = hl.map(h =>
         `<li style="margin:0 0 6px 0;padding-left:4px;font-size:14px;line-height:1.6;">• <em>${markdownToHtml(h)}</em></li>`
       ).join('\n');
       parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${bullets}</ul>`);
