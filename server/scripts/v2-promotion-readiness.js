@@ -19,7 +19,7 @@
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags } = require('../services/call-triage-flags');
+const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 
@@ -43,12 +43,18 @@ function parseJson(v) {
 async function main() {
   const db = dbConn();
 
+  // Key off v2_extraction_status (set on EVERY shadow-processed call) — not
+  // ai_extraction_enriched, which is null on parse/schema failures. Otherwise
+  // failures drop out of the denominator and the validation rate looks ~100%.
+  // Exclude 'not_run' (extraction never attempted, e.g. no API key) from the
+  // attempted-denominator so it doesn't unfairly tank the rate.
   const rows = await db('call_log')
-    .whereNotNull('ai_extraction_enriched')
+    .whereNotNull('v2_extraction_status')
+    .whereNot('v2_extraction_status', 'not_run')
     .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at');
 
   if (rows.length === 0) {
-    console.log('No shadow v2 extractions yet (ai_extraction_enriched all null).');
+    console.log('No shadow v2 extractions attempted yet (v2_extraction_status all null/not_run).');
     console.log('Confirm CALL_EXTRACTION_V2_ENABLED=true and wait for inbound calls.');
     await db.destroy();
     return;
@@ -104,9 +110,13 @@ async function main() {
       if (tcpa.canSms && v2.consent?.sms_consent_given !== true) smsWithoutConsent++;
 
       // Criterion 5: phantom-appointment backstop — auto-route despite a risk signal.
+      // Use the SAME county normalization production uses (isInServiceAreaCounty),
+      // so "Sarasota County"/"sarasota" aren't flagged as phantom risks when the
+      // live gate would treat them as in-area.
       const addr = v2.property?.service_address || {};
       const conf = v2.confidence || {};
-      if (!addr.street_line_1 || (typeof conf.overall === 'number' && conf.overall < 0.7) || (addr.county && !['Manatee', 'Sarasota', 'Charlotte', 'DeSoto'].includes(addr.county))) {
+      const outOfArea = addr.county && !isInServiceAreaCounty(addr.county);
+      if (!addr.street_line_1 || (typeof conf.overall === 'number' && conf.overall < 0.7) || outOfArea) {
         phantomRisks.push({ id: r.id, street: !!addr.street_line_1, overall: conf.overall, county: addr.county });
       }
     } else {
