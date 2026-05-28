@@ -63,6 +63,7 @@ const getSitemap = lazy('sitemap-manager', '../seo/sitemap-manager');
 const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', './post-publish-visibility-worker');
 const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gate');
 const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
+const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -274,6 +275,41 @@ class AutonomousRunner {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || result.notes, { claimToken });
       }
       return finalized;
+    }
+
+    // 3b. Claims-ledger validation. For facts-gated content actions that
+    // passed the facts-sufficiency pre-gate, verify every local claim in the
+    // draft traces to a real fact and does not overreach. P0/P1 findings
+    // (hallucinated fact citation, missing ledger when required) route to
+    // human review rather than publishing ungrounded local copy.
+    const factsCtx = run.facts_sufficiency;
+    if (factsCtx && factsCtx.applicable && factsCtx.sufficient && draft) {
+      const claimsValidator = getClaimsLedgerValidator();
+      if (claimsValidator) {
+        let claimsResult;
+        try {
+          claimsResult = await claimsValidator.validate(draft, {
+            city: factsCtx.city_id,
+            service: factsCtx.service_id,
+            county: factsCtx.county,
+          });
+        } catch (err) {
+          logger.warn(`[autonomous-runner] claims-ledger validation threw: ${err.message}`);
+          claimsResult = { pass: false, findings: [{ severity: 'P1', code: 'CLAIMS_LEDGER_ERROR', message: err.message }] };
+        }
+        run.claims_ledger_result = claimsResult;
+        if (!claimsResult.pass) {
+          const blocking = claimsResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+          const notes = `Claims-ledger validation failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+          const finalized = await finalize(run, t0, {
+            outcome: 'skipped_gate_fail',
+            skip_reason: 'claims_ledger_failed',
+            reviewer_notes: notes,
+          });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_failed', { claimToken });
+          return finalized;
+        }
+      }
     }
 
     // 4. Uniqueness gate (only applies to certain page types).
