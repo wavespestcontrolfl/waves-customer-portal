@@ -115,6 +115,10 @@ function canAutoRoute(extraction, opts = {}) {
     return { allowed: false, reason: 'not_confirmed', schedulingStatus: scheduling.status };
   }
 
+  if (!scheduling.confirmed_start_at) {
+    return { allowed: false, reason: 'confirmed_without_start_time', schedulingStatus: scheduling.status };
+  }
+
   if (extraction.consent?.do_not_contact_request === true) {
     return { allowed: false, reason: 'do_not_contact' };
   }

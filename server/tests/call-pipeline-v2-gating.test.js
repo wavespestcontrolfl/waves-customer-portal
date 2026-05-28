@@ -299,6 +299,15 @@ describe('canAutoRoute', () => {
     expect(result.reason).toBe('not_confirmed');
   });
 
+  test('blocked when confirmed but no confirmed_start_at', () => {
+    const e = validV2Extraction();
+    e.scheduling.status = 'confirmed';
+    e.scheduling.confirmed_start_at = null;
+    const result = canAutoRoute(e);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe('confirmed_without_start_time');
+  });
+
   test('model no_sms_consent_captured flag does NOT block appointment', () => {
     const e = validV2Extraction();
     e.triage_flags = ['no_sms_consent_captured'];
