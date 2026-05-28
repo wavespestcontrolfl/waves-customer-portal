@@ -63,17 +63,23 @@ function chargeAmountCents(paymentIntent) {
 
 function expectedChargeCents(invoiceBaseAmount, actualMethodType, paymentIntent) {
   if (!actualMethodType || invoiceBaseAmount === undefined || invoiceBaseAmount === null) return null;
-  // When the PI has metadata with base_amount and card_surcharge, use those
-  // as the source of truth — they reflect what was actually set at charge time
-  // (including surcharge for credit cards, base-only for debit/ACH/express).
+  const amount = Number(invoiceBaseAmount);
+  if (!Number.isFinite(amount)) return null;
+  const currentBaseCents = Math.round(amount * 100);
+
+  // When the PI has metadata with base_amount and card_surcharge, only trust
+  // the surcharge snapshot if the base still matches the current invoice. If
+  // an admin retotaled the invoice after PI setup, stale metadata must not let
+  // ACH/express/legacy card payments settle for the old total.
   if (paymentIntent?.metadata?.base_amount != null) {
     const base = Math.round(Number(paymentIntent.metadata.base_amount) * 100);
+    if (!Number.isFinite(base) || Math.abs(base - currentBaseCents) > 1) {
+      return currentBaseCents;
+    }
     const surcharge = Math.round(Number(paymentIntent.metadata.card_surcharge || 0) * 100);
     return base + surcharge;
   }
-  const amount = Number(invoiceBaseAmount);
-  if (!Number.isFinite(amount)) return null;
-  return Math.round(amount * 100);
+  return currentBaseCents;
 }
 
 function assertInvoicePaymentIntentTenderMatches(paymentIntent, actualMethodType, invoiceBaseAmount) {

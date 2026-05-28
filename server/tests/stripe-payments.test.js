@@ -417,6 +417,22 @@ describe('stripe invoice ACH state helpers', () => {
     }, 'us_bank_account', 75)).not.toThrow();
   });
 
+  test('stale PaymentIntent metadata cannot settle after invoice retotal', () => {
+    expect(() => assertInvoicePaymentIntentTenderMatches({
+      amount_received: 7500,
+      payment_method_types: ['us_bank_account'],
+      metadata: { selected_method_category: 'us_bank_account', base_amount: '75', card_surcharge: '0' },
+    }, 'us_bank_account', 80)).toThrow(/Payment amount does not match/);
+  });
+
+  test('current invoice total still allows finalized credit-card surcharge metadata', () => {
+    expect(() => assertInvoicePaymentIntentTenderMatches({
+      amount_received: 10300,
+      payment_method_types: ['card'],
+      metadata: { selected_method_category: 'card', base_amount: '100', card_surcharge: '3' },
+    }, 'card', 100)).not.toThrow();
+  });
+
   test('Tap to Pay invoice PaymentIntents are identified as terminal-priced', () => {
     expect(isTerminalInvoicePaymentIntent({
       amount_received: 7500,
