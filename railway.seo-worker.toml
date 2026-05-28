@@ -1,8 +1,6 @@
 [build]
 builder = "nixpacks"
-
-[build.nixpacks]
-buildCmd = "npm run build"
+buildCommand = "npm run build"
 
 [deploy]
 startCommand = "node server/scripts/run-seo-pipeline-worker.js"
