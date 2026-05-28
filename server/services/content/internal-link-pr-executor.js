@@ -1,10 +1,10 @@
 /**
  * internal-link-pr-executor.js
  *
- * Dry-run foundation for turning queued internal-link tasks into safe,
- * SEO-aware patch candidates. This module does not open Astro PRs yet;
- * it validates tasks, independently constructs the would-be patch, and
- * records patch_candidate / skipped / failed outcomes for review.
+ * Conservative executor for turning queued internal-link tasks into safe,
+ * SEO-aware patch candidates and, when explicitly unshadowed, review-only
+ * Astro PRs. It validates tasks, independently constructs patches, and never
+ * auto-merges.
  */
 
 const db = require('../../models/db');
@@ -14,7 +14,9 @@ const frontmatter = require('../content-astro/frontmatter');
 const planner = require('./internal-link-planner');
 const policy = require('./internal-link-seo-policy');
 
+const TABLE = 'content_internal_link_tasks';
 const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
+const PR_EXECUTOR_VERSION = 'internal-link-pr-executor-v1';
 const DEFAULT_LIMIT = 10;
 
 class InternalLinkPrExecutor {
@@ -47,8 +49,120 @@ class InternalLinkPrExecutor {
     return evaluateDryRunTask(task, { sourcePage: source, targetPage: target });
   }
 
+  async runPrBatch({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3), taskIds = null } = {}) {
+    const tasks = await this._loadPatchCandidateTasks({ limit, taskIds });
+    const selected = [];
+    const sourceCounts = new Map();
+    const targetCounts = new Map();
+    // v1 writes one commit per source file from its current main SHA. Keep
+    // source edits capped at one until multi-link same-file patch combining
+    // has its own validation path.
+    const maxLinksPerSource = Math.min(envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_SOURCE', 1), 1);
+    const maxLinksPerTarget = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_TARGET_PER_PR', 2);
+
+    for (const task of tasks) {
+      const source = await this._loadSourcePage(task);
+      const target = await this._loadTargetPage(task);
+      const validation = evaluateDryRunTask(task, {
+        sourcePage: source,
+        targetPage: target,
+        options: {
+          targetNewLinksInPr: targetCounts.get(policy.normalizeInternalUrl(task.target_url)) || 0,
+        },
+      });
+      if (validation.status !== 'patch_candidate') {
+        await this._persistDryRunResult(task.id, validation);
+        continue;
+      }
+
+      const sourceCount = sourceCounts.get(task.source_file) || 0;
+      if (sourceCount >= maxLinksPerSource) continue;
+      const targetUrl = policy.normalizeInternalUrl(task.target_url || validation.target_canonical_url);
+      const targetCount = targetCounts.get(targetUrl) || 0;
+      if (targetCount >= maxLinksPerTarget) continue;
+
+      const patchedContent = planner.applyTaskToBody(source.body, { ...task, target_url: targetUrl });
+      if (patchedContent === source.body) {
+        await this._persistDryRunResult(task.id, { ...validation, status: 'skipped', skip_reason: 'patch_noop' });
+        continue;
+      }
+      if (!patchContainsCrawlableMarkdownLink(patchedContent, task.anchor_text, targetUrl)) {
+        await this._persistDryRunResult(task.id, { ...validation, status: 'failed', failure_reason: 'rendered_link_validation_failed' });
+        continue;
+      }
+      if (!frontmatterUnchanged(source.body, patchedContent)) {
+        await this._persistDryRunResult(task.id, { ...validation, status: 'failed', failure_reason: 'frontmatter_changed' });
+        continue;
+      }
+
+      selected.push({ task, source, target, validation, patchedContent, targetUrl });
+      sourceCounts.set(task.source_file, sourceCount + 1);
+      targetCounts.set(targetUrl, targetCount + 1);
+      if (selected.length >= limit) break;
+    }
+
+    if (!selected.length) return { status: 'no_candidates', count: 0, results: [] };
+
+    const branch = internalLinkBranchName(selected);
+    const reserved = await this._reserveTasksForPr(selected, { branch });
+    if (!reserved) return { status: 'reservation_conflict', count: 0, results: [] };
+
+    let pr = null;
+    let headSha = null;
+    try {
+      await GitHubClient.createBranch(branch);
+      const commits = [];
+      for (const item of selected) {
+        const commit = await GitHubClient.putFile({
+          path: item.task.source_file,
+          content: item.patchedContent,
+          message: `chore(seo): add internal link to ${item.targetUrl}`,
+          branch,
+          sha: item.source.sha,
+        });
+        commits.push(commit);
+      }
+
+      pr = await GitHubClient.createPr({
+        head: branch,
+        title: internalLinkPrTitle(selected),
+        body: buildInternalLinkPrBody({ branch, selected }),
+      });
+      headSha = pr?.head?.sha || commits.map((commit) => commit?.commit?.sha).filter(Boolean).at(-1) || null;
+      await requestCodexReview(pr, headSha, selected);
+
+      await this._markTasksPrOpen(selected, {
+        pr,
+        branch,
+        commitSha: headSha,
+      });
+    } catch (err) {
+      if (pr?.html_url) {
+        await this._markTasksPrOpen(selected, {
+          pr,
+          branch,
+          commitSha: headSha,
+          reviewerNotes: `Astro internal-link PR opened but follow-up failed: ${err.message}. Confirm Codex review manually before merge.`,
+        });
+      } else {
+        await this._markReservedTasksFailed(selected, err);
+      }
+      throw err;
+    }
+
+    return {
+      status: 'pr_open',
+      count: selected.length,
+      pr_number: pr.number,
+      pr_url: pr.html_url,
+      branch,
+      commit_sha: headSha,
+      results: selected.map((item) => ({ ...item.validation, status: 'pr_open', astro_pr_url: pr.html_url })),
+    };
+  }
+
   async _loadQueuedTasks({ limit, taskIds }) {
-    let query = db('content_internal_link_tasks')
+    let query = db(TABLE)
       .whereIn('status', ['pending', 'queued'])
       .orderByRaw('COALESCE(target_priority, 0) DESC')
       .orderBy('planned_at', 'asc')
@@ -57,10 +171,20 @@ class InternalLinkPrExecutor {
     return query.select('*');
   }
 
+  async _loadPatchCandidateTasks({ limit, taskIds }) {
+    let query = db(TABLE)
+      .where('status', 'patch_candidate')
+      .orderByRaw('COALESCE(target_priority, 0) DESC')
+      .orderBy('updated_at', 'asc')
+      .limit(limit);
+    if (Array.isArray(taskIds) && taskIds.length) query = query.whereIn('id', taskIds);
+    return query.select('*');
+  }
+
   async _loadSourcePage(task) {
     const file = await GitHubClient.getFile(task.source_file);
     if (!file?.content) throw new Error(`source_file_not_found:${task.source_file}`);
-    return pageFromAstroFile(task.source_file, file.content);
+    return { ...pageFromAstroFile(task.source_file, file.content), sha: file.sha || null };
   }
 
   async _loadTargetPage(task) {
@@ -68,7 +192,7 @@ class InternalLinkPrExecutor {
     if (!targetFile) throw new Error(`target_file_unresolved:${task.target_url}`);
     const file = await GitHubClient.getFile(targetFile);
     if (!file?.content) throw new Error(`target_file_not_found:${targetFile}`);
-    return pageFromAstroFile(targetFile, file.content, { fallbackUrl: task.target_url });
+    return { ...pageFromAstroFile(targetFile, file.content, { fallbackUrl: task.target_url }), sha: file.sha || null };
   }
 
   async _persistDryRunResult(taskId, result) {
@@ -104,7 +228,70 @@ class InternalLinkPrExecutor {
       failure_reason: result.failure_reason || null,
       updated_at: new Date(),
     };
-    await db('content_internal_link_tasks').where({ id: taskId }).update(patch);
+    await db(TABLE).where({ id: taskId }).update(patch);
+  }
+
+  async _reserveTasksForPr(selected, { branch }) {
+    const ids = selected.map((item) => item.task.id).filter(Boolean);
+    if (!ids.length) return false;
+    const reserve = async (knexLike) => {
+      const updated = await knexLike(TABLE)
+        .whereIn('id', ids)
+        .where('status', 'patch_candidate')
+        .update({
+          status: 'pr_reserved',
+          pr_branch: branch,
+          executor_version: PR_EXECUTOR_VERSION,
+          updated_at: new Date(),
+        });
+      if (Number(updated || 0) === ids.length) return true;
+      await knexLike(TABLE)
+        .whereIn('id', ids)
+        .where({
+          status: 'pr_reserved',
+          pr_branch: branch,
+        })
+        .update({
+          status: 'patch_candidate',
+          pr_branch: null,
+          updated_at: new Date(),
+        });
+      return false;
+    };
+    if (typeof db.transaction === 'function') {
+      return db.transaction((trx) => reserve(trx));
+    }
+    return reserve(db);
+  }
+
+  async _markTasksPrOpen(selected, { pr, branch, commitSha, reviewerNotes = null }) {
+    const ids = selected.map((item) => item.task.id).filter(Boolean);
+    if (!ids.length) return;
+    await db(TABLE)
+      .whereIn('id', ids)
+      .where('status', 'pr_reserved')
+      .update({
+        status: 'pr_open',
+        astro_pr_url: pr?.html_url || null,
+        pr_branch: branch,
+        pr_commit_sha: commitSha || null,
+        executor_version: PR_EXECUTOR_VERSION,
+        reviewer_notes: reviewerNotes || `Astro internal-link PR opened: ${pr?.html_url || 'unknown'}. Merge only after Codex and editorial review.`,
+        updated_at: new Date(),
+      });
+  }
+
+  async _markReservedTasksFailed(selected, err) {
+    const ids = selected.map((item) => item.task.id).filter(Boolean);
+    if (!ids.length) return;
+    await db(TABLE)
+      .whereIn('id', ids)
+      .where('status', 'pr_reserved')
+      .update({
+        status: 'failed',
+        failure_reason: `internal_link_pr_open_failed:${String(err?.message || err).slice(0, 500)}`,
+        updated_at: new Date(),
+      });
   }
 }
 
@@ -380,10 +567,120 @@ function countInternalLinks(body) {
   return count;
 }
 
+function envInt(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function shortId(n = 6) {
+  return Math.random().toString(36).slice(2, 2 + n);
+}
+
+function internalLinkBranchName(selected) {
+  const first = selected[0];
+  const slug = String(first?.targetUrl || first?.task?.target_url || 'internal-link')
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/[^a-z0-9-]+/gi, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 60) || 'internal-link';
+  return `content/internal-link-${slug}-${shortId()}`;
+}
+
+function internalLinkPrTitle(selected) {
+  const first = selected[0];
+  const target = String(first?.targetUrl || first?.task?.target_url || 'internal link');
+  const count = selected.length;
+  return `SEO links: ${count} internal link${count === 1 ? '' : 's'} to ${target}`.slice(0, 72);
+}
+
+function buildInternalLinkPrBody({ branch, selected }) {
+  const rows = selected.map((item, index) => [
+    `${index + 1}. \`${item.task.source_file}\``,
+    `   - Target: ${item.targetUrl}`,
+    `   - Anchor: \`${item.task.anchor_text}\` (${item.validation.anchor_type || 'unknown'})`,
+    `   - Relevance: ${item.validation.topical_relevance_score ?? 'n/a'}`,
+    `   - Before: ${inlineCodeBlock(item.validation.link_context_before)}`,
+    `   - After: ${inlineCodeBlock(item.validation.link_context_after)}`,
+  ].join('\n'));
+
+  return [
+    `**Autonomous internal-link PR**`,
+    ``,
+    `Adds ${selected.length} review-only internal link${selected.length === 1 ? '' : 's'} from validated \`patch_candidate\` tasks.`,
+    ``,
+    `## Safety Checks`,
+    ``,
+    `- Source and target were reloaded from the Astro repo before patching.`,
+    `- Target URL is canonical/indexable and not self-referential.`,
+    `- Patch is limited to Markdown body text; frontmatter is unchanged.`,
+    `- Paragraph did not already contain a link.`,
+    `- Anchor passed SEO policy, topical relevance, and context guards.`,
+    `- Markdown output contains the expected crawlable internal link.`,
+    ``,
+    `## Proposed Links`,
+    ``,
+    ...rows,
+    ``,
+    `## Review`,
+    ``,
+    `- [ ] Codex review completed`,
+    `- [ ] Human editorial review confirms each link is useful to readers`,
+    `- [ ] Preview page renders the expected crawlable link`,
+    `- [ ] Diff contains only intended internal-link insertions`,
+    ``,
+    `Generated by waves-customer-portal internal-link executor.`,
+    ``,
+    `Branch: \`${branch}\``,
+  ].join('\n');
+}
+
+function inlineCodeBlock(value) {
+  return `\`${String(value || '').replace(/`/g, '\\`').replace(/\s+/g, ' ').trim().slice(0, 500) || '—'}\``;
+}
+
+function patchContainsCrawlableMarkdownLink(content, anchorText, targetUrl) {
+  const escapedAnchor = escapeRegExp(String(anchorText || '').trim());
+  const escapedTarget = escapeRegExp(String(targetUrl || '').trim());
+  if (!escapedAnchor || !escapedTarget) return false;
+  return new RegExp(`\\[${escapedAnchor}\\]\\(${escapedTarget}\\)`).test(String(content || ''));
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function frontmatterUnchanged(before, after) {
+  return frontmatterBlock(before) === frontmatterBlock(after);
+}
+
+function frontmatterBlock(body) {
+  const match = /^---\r?\n[\s\S]*?\r?\n---/.exec(String(body || ''));
+  return match ? match[0] : '';
+}
+
+async function requestCodexReview(pr, headSha, selected) {
+  if (!pr?.number || typeof GitHubClient.createIssueComment !== 'function') return;
+  const body = [
+    '@codex review',
+    '',
+    `Please review this autonomous internal-link PR on head \`${headSha || 'unknown'}\`.`,
+    '',
+    'Focus on whether the diff only adds reader-useful crawlable internal links, preserves frontmatter/body outside the intended anchors, and avoids awkward or over-optimized anchor text.',
+    '',
+    `Tasks: ${selected.map((item) => item.task.id).filter(Boolean).join(', ') || 'n/a'}`,
+  ].join('\n');
+  try {
+    await GitHubClient.createIssueComment(pr.number, body);
+  } catch (err) {
+    logger.warn(`[internal-link-pr-executor] failed to request Codex review for PR #${pr.number}: ${err.message}`);
+  }
+}
+
 module.exports = new InternalLinkPrExecutor();
 module.exports.InternalLinkPrExecutor = InternalLinkPrExecutor;
 module.exports._internals = {
   EXECUTOR_VERSION,
+  PR_EXECUTOR_VERSION,
   evaluateDryRunTask,
   pageFromAstroFile,
   pageFacts,
@@ -398,4 +695,7 @@ module.exports._internals = {
   paragraphAround,
   paragraphHasLink,
   countInternalLinks,
+  buildInternalLinkPrBody,
+  patchContainsCrawlableMarkdownLink,
+  frontmatterUnchanged,
 };

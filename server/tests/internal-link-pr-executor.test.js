@@ -2,10 +2,16 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/content-astro/github-client', () => ({
   getFile: jest.fn(),
+  createBranch: jest.fn(),
+  putFile: jest.fn(),
+  createPr: jest.fn(),
+  createIssueComment: jest.fn(),
 }));
 
 const executor = require('../services/content/internal-link-pr-executor');
+const { InternalLinkPrExecutor } = executor;
 const GitHubClient = require('../services/content-astro/github-client');
+const db = require('../models/db');
 const {
   evaluateDryRunTask,
   pageFromAstroFile,
@@ -14,7 +20,14 @@ const {
   firstValidInternalUrl,
   canonicalUrlFromFrontmatter,
   slugToInternalUrl,
+  patchContainsCrawlableMarkdownLink,
+  frontmatterUnchanged,
 } = executor._internals;
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  delete db.transaction;
+});
 
 function page(file, body, extra = {}) {
   return {
@@ -261,6 +274,7 @@ describe('internal-link dry-run executor helpers', () => {
 
   test('loads source and target pages from GitHub for dryRunTask', async () => {
     GitHubClient.getFile.mockImplementation(async (file) => ({
+      sha: `${file}-sha`,
       content: file.includes('termite-swarmers') ? sourceBody : targetBody,
     }));
 
@@ -274,5 +288,184 @@ describe('internal-link dry-run executor helpers', () => {
     expect(GitHubClient.getFile).toHaveBeenCalledWith('src/content/blog/termite-swarmers-bathroom.md');
     expect(GitHubClient.getFile).toHaveBeenCalledWith('src/content/services/termite-inspection.md');
     expect(result.status).toBe('patch_candidate');
+  });
+
+  test('opens a review-only Astro PR for validated patch candidates', async () => {
+    GitHubClient.createBranch.mockResolvedValue({});
+    GitHubClient.putFile.mockResolvedValue({ commit: { sha: 'link-commit-sha' } });
+    GitHubClient.createPr.mockResolvedValue({
+      number: 77,
+      html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77',
+      head: { sha: 'link-head-sha' },
+    });
+    GitHubClient.createIssueComment.mockResolvedValue({});
+
+    const serviceSource = [
+      '---',
+      'title: Bradenton Pest Control Quote',
+      'slug: /pest-control-quote-bradenton-fl/',
+      'canonical: https://www.wavespestcontrol.com/pest-control-quote-bradenton-fl/',
+      'category: pest',
+      'primary_keyword: bradenton pest control quote',
+      '---',
+      'Call (941) 318-7612 for your free Bradenton pest control quote today.',
+    ].join('\n');
+    const serviceTarget = [
+      '---',
+      'title: Pest Control in Bradenton',
+      'slug: /pest-control-bradenton-fl/',
+      'canonical: https://www.wavespestcontrol.com/pest-control-bradenton-fl/',
+      'category: pest',
+      'primary_keyword: bradenton pest control',
+      '---',
+      'Bradenton pest control service body.',
+    ].join('\n');
+
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [{
+      id: 'task-bradenton',
+      source_file: 'src/content/services/pest-control-quote-bradenton-fl.md',
+      target_url: '/pest-control-bradenton-fl/',
+      anchor_text: 'Bradenton pest control',
+      status: 'patch_candidate',
+    }]);
+    instance._loadSourcePage = jest.fn(async () => ({
+      ...page('src/content/services/pest-control-quote-bradenton-fl.md', serviceSource),
+      sha: 'source-sha',
+    }));
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/pest-control-bradenton-fl.md', serviceTarget));
+    instance._reserveTasksForPr = jest.fn(async () => true);
+    instance._markTasksPrOpen = jest.fn(async () => {});
+
+    const result = await instance.runPrBatch({ limit: 1 });
+
+    expect(result.status).toBe('pr_open');
+    expect(result.count).toBe(1);
+    expect(GitHubClient.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/));
+    expect(GitHubClient.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/services/pest-control-quote-bradenton-fl.md',
+      sha: 'source-sha',
+      content: expect.stringContaining('[Bradenton pest control](/pest-control-bradenton-fl/) quote today.'),
+    }));
+    expect(GitHubClient.putFile.mock.calls[0][0].content).toContain('slug: /pest-control-quote-bradenton-fl/');
+    expect(GitHubClient.createPr).toHaveBeenCalledWith(expect.objectContaining({
+      head: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
+      title: expect.stringContaining('SEO links: 1 internal link'),
+      body: expect.stringContaining('Diff contains only intended internal-link insertions'),
+    }));
+    expect(GitHubClient.createIssueComment).toHaveBeenCalledWith(77, expect.stringContaining('@codex review'));
+    expect(instance._markTasksPrOpen).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({
+      branch: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
+      commitSha: 'link-head-sha',
+    }));
+  });
+
+  test('does not create GitHub side effects when patch candidate reservation conflicts', async () => {
+    const serviceSource = sourceBody;
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [{
+      id: 'task-race',
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/termite-inspection/',
+      anchor_text: 'termite inspection in Florida',
+      status: 'patch_candidate',
+    }]);
+    instance._loadSourcePage = jest.fn(async () => ({
+      ...page('src/content/blog/termite-swarmers-bathroom.md', serviceSource),
+      sha: 'source-sha',
+    }));
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
+    instance._reserveTasksForPr = jest.fn(async () => false);
+
+    const result = await instance.runPrBatch({ limit: 1 });
+
+    expect(result.status).toBe('reservation_conflict');
+    expect(GitHubClient.createBranch).not.toHaveBeenCalled();
+    expect(GitHubClient.putFile).not.toHaveBeenCalled();
+    expect(GitHubClient.createPr).not.toHaveBeenCalled();
+  });
+
+  test('rolls back partial patch-candidate reservations before aborting', async () => {
+    const reserveUpdate = jest.fn().mockResolvedValue(1);
+    const rollbackUpdate = jest.fn().mockResolvedValue(1);
+    const reserveChain = {
+      whereIn: jest.fn(() => reserveChain),
+      where: jest.fn(() => reserveChain),
+      update: reserveUpdate,
+    };
+    const rollbackChain = {
+      whereIn: jest.fn(() => rollbackChain),
+      where: jest.fn(() => rollbackChain),
+      update: rollbackUpdate,
+    };
+    const trx = jest.fn()
+      .mockReturnValueOnce(reserveChain)
+      .mockReturnValueOnce(rollbackChain);
+    db.transaction = jest.fn(async (fn) => fn(trx));
+
+    const instance = new InternalLinkPrExecutor();
+    const result = await instance._reserveTasksForPr([
+      { task: { id: 'task-1' } },
+      { task: { id: 'task-2' } },
+    ], { branch: 'content/internal-link-target-abc123' });
+
+    expect(result).toBe(false);
+    expect(db.transaction).toHaveBeenCalled();
+    expect(reserveChain.where).toHaveBeenCalledWith('status', 'patch_candidate');
+    expect(rollbackChain.where).toHaveBeenCalledWith({
+      status: 'pr_reserved',
+      pr_branch: 'content/internal-link-target-abc123',
+    });
+    expect(rollbackUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'patch_candidate',
+      pr_branch: null,
+    }));
+  });
+
+  test('records opened PRs even when Codex review comment fails', async () => {
+    GitHubClient.createBranch.mockResolvedValue({});
+    GitHubClient.putFile.mockResolvedValue({ commit: { sha: 'link-commit-sha' } });
+    GitHubClient.createPr.mockResolvedValue({
+      number: 78,
+      html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/78',
+      head: { sha: 'link-head-sha' },
+    });
+    GitHubClient.createIssueComment.mockRejectedValue(new Error('issues permission denied'));
+
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [{
+      id: 'task-comment-fail',
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/termite-inspection/',
+      anchor_text: 'termite inspection in Florida',
+      status: 'patch_candidate',
+    }]);
+    instance._loadSourcePage = jest.fn(async () => ({
+      ...page('src/content/blog/termite-swarmers-bathroom.md', sourceBody),
+      sha: 'source-sha',
+    }));
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
+    instance._reserveTasksForPr = jest.fn(async () => true);
+    instance._markTasksPrOpen = jest.fn(async () => {});
+
+    const result = await instance.runPrBatch({ limit: 1 });
+
+    expect(result.status).toBe('pr_open');
+    expect(GitHubClient.createIssueComment).toHaveBeenCalledWith(78, expect.stringContaining('@codex review'));
+    expect(instance._markTasksPrOpen).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({
+      pr: expect.objectContaining({ number: 78 }),
+      branch: expect.stringMatching(/^content\/internal-link-termite-inspection-/),
+      commitSha: 'link-head-sha',
+    }));
+  });
+
+  test('validates crawlable markdown link and unchanged frontmatter helpers', () => {
+    const patched = sourceBody.replace(
+      'termite inspection in Florida',
+      '[termite inspection in Florida](/termite-inspection/)'
+    );
+    expect(patchContainsCrawlableMarkdownLink(patched, 'termite inspection in Florida', '/termite-inspection/')).toBe(true);
+    expect(frontmatterUnchanged(sourceBody, patched)).toBe(true);
+    expect(frontmatterUnchanged(sourceBody, sourceBody.replace('title: Termite', 'title: Changed'))).toBe(false);
   });
 });
