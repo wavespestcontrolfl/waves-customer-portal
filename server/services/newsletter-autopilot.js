@@ -10,7 +10,8 @@
  *   3. Skip if calendar row already has a send_id or terminal status
  *   4. Generate a digest plan from approved events (same query pattern
  *      as POST /events/digest-plan in admin-newsletter.js)
- *   5. If fewer than 3 eligible events → skip with notification
+ *   5. Preflight gate — skip with an actionable notification if the week
+ *      fails the flagship quality contract (min events / source diversity)
  *   6. Build a prompt incorporating calendar topic / homeowner minute
  *   7. Delegate AI drafting to shared createNewsletterDraft() service
  *   8. Link the resulting send to the calendar entry (or create one)
@@ -22,9 +23,13 @@ const logger = require('./logger');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, defaultTargetSendAt } = require('./event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { createNewsletterDraft } = require('./newsletter-draft');
+const { getFlagshipType } = require('../config/newsletter-types');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
-const MIN_ELIGIBLE_EVENTS = 3;
+
+// Lineup cap — diversity/coverage stats are measured over the events that
+// would actually appear (top-N by score), matching the draft selection.
+const LINEUP_CAP = 12;
 
 /**
  * Build the digest plan — same query as POST /events/digest-plan
@@ -42,9 +47,9 @@ async function buildDigestPlan() {
     .leftJoin('event_sources as s', 's.id', 'e.source_id')
     .select(
       'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
-      'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
+      'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url', 'e.image_url',
       'e.event_type', 'e.freshness_status', 'e.freshness_score',
-      'e.admin_status', 'e.times_featured',
+      'e.admin_status', 'e.times_featured', 'e.source_id',
       'e.region_zone', 'e.family_friendly', 'e.is_free',
       's.name as source_name', 's.priority_tier as source_priority_tier',
     )
@@ -61,6 +66,88 @@ async function buildDigestPlan() {
     .sort((a, b) => b.compositeScore - a.compositeScore);
 
   return { rows, eligible, scored, startDate, endDate };
+}
+
+/**
+ * Preflight the weekly digest against the flagship type's declared quality
+ * contract. Pure function over a built plan — no DB calls.
+ *
+ * Hard failures (caller should SKIP the auto-draft):
+ *   - fewer than `minVerifiedFreshEvents` eligible events
+ *   - fewer than `minSourceDiversity` distinct sources in the lineup
+ *
+ * Soft warnings (draft proceeds, surfaced on the notification):
+ *   - fewer than `minCityDiversity` distinct cities/zones
+ *   - image coverage below `minImageCoverage`
+ *
+ * @param {{ scored: Array }} plan - output of buildDigestPlan()
+ * @param {Object} reqs - sourceRequirements from the flagship type config
+ * @returns {{ pass: boolean, hardFailures: string[], warnings: string[], stats: Object, thresholds: Object }}
+ */
+function preflightDigest(plan, reqs = {}) {
+  const {
+    minVerifiedFreshEvents = 5,
+    minSourceDiversity = 2,
+    minCityDiversity = 2,
+    minImageCoverage = 0.5,
+  } = reqs;
+
+  const scored = Array.isArray(plan?.scored) ? plan.scored : [];
+  const eligibleCount = scored.length;
+  const lineup = scored.slice(0, LINEUP_CAP);
+
+  const sources = new Set(lineup.map((e) => e.source_id || e.source_name).filter(Boolean));
+  const cities = new Set(
+    lineup.map((e) => (e.city || e.region_zone || '').trim().toLowerCase()).filter(Boolean),
+  );
+  const withImage = lineup.filter((e) => e.image_url).length;
+  const imageCoverage = lineup.length ? withImage / lineup.length : 0;
+
+  const stats = {
+    eligibleCount,
+    lineupSize: lineup.length,
+    sourceCount: sources.size,
+    cityCount: cities.size,
+    imageCoverage: Math.round(imageCoverage * 100) / 100,
+  };
+
+  const hardFailures = [];
+  if (eligibleCount < minVerifiedFreshEvents) {
+    hardFailures.push(`Eligible fresh approved events: ${eligibleCount} / required ${minVerifiedFreshEvents}`);
+  }
+  if (stats.sourceCount < minSourceDiversity) {
+    hardFailures.push(`Source diversity: ${stats.sourceCount} / required ${minSourceDiversity}`);
+  }
+
+  const warnings = [];
+  if (stats.cityCount < minCityDiversity) {
+    warnings.push(`City diversity: ${stats.cityCount} / recommended ${minCityDiversity}`);
+  }
+  if (imageCoverage < minImageCoverage) {
+    warnings.push(`Image coverage: ${Math.round(imageCoverage * 100)}% / recommended ${Math.round(minImageCoverage * 100)}%`);
+  }
+
+  return {
+    pass: hardFailures.length === 0,
+    hardFailures,
+    warnings,
+    stats,
+    thresholds: { minVerifiedFreshEvents, minSourceDiversity, minCityDiversity, minImageCoverage },
+  };
+}
+
+/**
+ * Render an actionable skip notification body from a preflight report.
+ */
+function formatPreflightReport(report, weekOf) {
+  const lines = [`Fresh This Week autopilot skipped (week of ${weekOf}).`, '', 'Reason:'];
+  for (const f of report.hardFailures) lines.push(`- ${f}`);
+  for (const w of report.warnings) lines.push(`- ${w} (warning)`);
+  lines.push('', 'Next actions:');
+  lines.push('- Approve more pending events for this Thu–Wed window');
+  lines.push('- Check failing ingestion sources (Events → Sources health)');
+  lines.push('- Add/repair event URLs where missing');
+  return lines.join('\n');
 }
 
 /**
@@ -110,25 +197,36 @@ async function autoDraftFlagship() {
 
   // 4. Build digest plan
   const plan = await buildDigestPlan();
-  const { eligible, scored } = plan;
+  const { scored } = plan;
 
-  // 5. Gate: minimum event count
-  if (eligible.length < MIN_ELIGIBLE_EVENTS) {
-    const reason = `Not enough approved events (${eligible.length} eligible)`;
-    logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
+  // 5. Preflight gate — enforce the flagship type's declared quality
+  //    contract. Hard-fail (skip) on too few events or too few sources;
+  //    city diversity + image coverage are soft warnings carried onto the
+  //    draft for now. Thresholds come from the type config so they tune in
+  //    one place.
+  const reqs = getFlagshipType()?.sourceRequirements || {};
+  const preflight = preflightDigest(plan, reqs);
+  if (!preflight.pass) {
+    const reason = preflight.hardFailures.join('; ');
+    logger.info(`[newsletter-autopilot] Preflight skip: ${reason}`);
 
-    // Notify admin about the skip
+    // Notify admin with an actionable report (exact counts + next actions).
     try {
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('newsletter_autopilot_skipped', {
-        eligible: eligible.length,
+        eligible: preflight.stats.eligibleCount,
         reason,
+        preflight: preflight.stats,
+        report: formatPreflightReport(preflight, weekOf),
       });
     } catch (e) {
       logger.warn(`[newsletter-autopilot] skip notification failed: ${e.message}`);
     }
 
-    return { skipped: true, reason };
+    return { skipped: true, reason, preflight: preflight.stats };
+  }
+  if (preflight.warnings.length) {
+    logger.info(`[newsletter-autopilot] Preflight warnings: ${preflight.warnings.join('; ')}`);
   }
 
   // 6. Build prompt incorporating calendar data
@@ -288,6 +386,7 @@ async function autoDraftFlagship() {
       eventCount: topEvents.length,
       calendarWeek: weekOf,
       hadCalendarEntry: !!calendarEntry,
+      preflightWarnings: preflight.warnings,
     });
   } catch (e) {
     logger.warn(`[newsletter-autopilot] draft notification failed: ${e.message}`);
@@ -296,4 +395,4 @@ async function autoDraftFlagship() {
   return { skipped: false, sendId: send.id, eventCount: topEvents.length };
 }
 
-module.exports = { autoDraftFlagship, buildDigestPlan };
+module.exports = { autoDraftFlagship, buildDigestPlan, preflightDigest, formatPreflightReport };

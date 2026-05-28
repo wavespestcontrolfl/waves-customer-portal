@@ -48,6 +48,10 @@ const NEWSLETTER_TYPES = {
     sourceRequirements: {
       minVerifiedFreshEvents: 5,
       minSourceDiversity: 2,
+      // Soft-warning thresholds — the autopilot preflight surfaces these on
+      // the draft/skip notification but does NOT hard-block on them yet.
+      minCityDiversity: 2,
+      minImageCoverage: 0.5,
       maxStaleRecurringEvents: 0,
       requiresEventSourceUrl: true,
       requiresDateTime: true,

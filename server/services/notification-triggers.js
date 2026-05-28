@@ -299,11 +299,16 @@ const TRIGGER_REGISTRY = {
     category: 'newsletter',
     priority: 'normal',
     group: 'Marketing',
-    build: (p) => ({
-      title: 'Weekly newsletter draft ready',
-      body: `Autopilot drafted "${p.subject || 'Untitled'}" from ${p.eventCount || 0} events. Review and send when ready.`,
-      link: '/admin/newsletter?tab=compose',
-    }),
+    build: (p) => {
+      const warn = Array.isArray(p.preflightWarnings) && p.preflightWarnings.length
+        ? ` Heads up: ${p.preflightWarnings.join('; ')}.`
+        : '';
+      return {
+        title: 'Weekly newsletter draft ready',
+        body: `Autopilot drafted "${p.subject || 'Untitled'}" from ${p.eventCount || 0} events.${warn} Review and send when ready.`,
+        link: '/admin/newsletter?tab=compose',
+      };
+    },
   },
   newsletter_autopilot_skipped: {
     label: 'Newsletter autopilot skipped (not enough events)',
@@ -312,7 +317,9 @@ const TRIGGER_REGISTRY = {
     group: 'Marketing',
     build: (p) => ({
       title: 'Newsletter autopilot skipped',
-      body: `${p.reason || 'Not enough approved events'}. Approve more events in the Event Inbox to enable next week's auto-draft.`,
+      // p.report is the actionable preflight breakdown (counts + next
+      // actions); fall back to the terse reason for legacy callers.
+      body: p.report || `${p.reason || 'Not enough approved events'}. Approve more events in the Event Inbox to enable next week's auto-draft.`,
       link: '/admin/newsletter?tab=dashboard',
     }),
   },

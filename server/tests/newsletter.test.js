@@ -21,6 +21,8 @@ const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
 const { lockEventFactsFromDb } = require('../services/newsletter-draft');
 const { findHallucinatedClaims, validateNewsletterDraft } = require('../services/newsletter-validator');
+const { preflightDigest } = require('../services/newsletter-autopilot');
+const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
 const {
   computeNewsletterEventUpdates,
@@ -802,5 +804,89 @@ describe('newsletter validateNewsletterDraft — hallucinated claims hard-block'
     };
     const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
     expect(errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
+  });
+});
+
+// ── Autopilot preflight gate ─────────────────────────────────────────
+//
+// preflightDigest enforces the flagship type's declared quality contract
+// before the Thursday auto-draft. Hard-fail (skip) on too few events or
+// too few sources; city diversity + image coverage are soft warnings.
+// A regression here either ships thin newsletters (gate too loose) or
+// silences the autopilot every week (gate too strict).
+
+describe('newsletter preflightDigest', () => {
+  // Minimal scored-event shape — only the fields preflight reads.
+  const ev = (i, { source = `s${i}`, city = `city${i}`, image = true } = {}) => ({
+    id: `e${i}`,
+    source_id: source,
+    city,
+    image_url: image ? `https://img/${i}.jpg` : null,
+  });
+  const plan = (events) => ({ scored: events });
+  // Default thresholds match the flagship config (5 / 2 / 2 / 0.5).
+
+  test('passes a healthy week (6 events, 3 sources, 3 cities, full images)', () => {
+    const events = [0, 1, 2, 3, 4, 5].map((i) => ev(i, { source: `s${i % 3}`, city: `c${i % 3}` }));
+    const r = preflightDigest(plan(events));
+    expect(r.pass).toBe(true);
+    expect(r.hardFailures).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(r.stats.eligibleCount).toBe(6);
+    expect(r.stats.sourceCount).toBe(3);
+  });
+
+  test('hard-fails when fewer than 5 eligible events', () => {
+    const events = [0, 1, 2, 3].map((i) => ev(i, { source: `s${i % 2}` }));
+    const r = preflightDigest(plan(events));
+    expect(r.pass).toBe(false);
+    expect(r.hardFailures.some((f) => /Eligible fresh approved events: 4 \/ required 5/.test(f))).toBe(true);
+  });
+
+  test('hard-fails when fewer than 2 distinct sources (single-source week)', () => {
+    const events = [0, 1, 2, 3, 4].map((i) => ev(i, { source: 'only-one' }));
+    const r = preflightDigest(plan(events));
+    expect(r.pass).toBe(false);
+    expect(r.hardFailures.some((f) => /Source diversity: 1 \/ required 2/.test(f))).toBe(true);
+  });
+
+  test('soft-warns on low city diversity but still passes', () => {
+    const events = [0, 1, 2, 3, 4].map((i) => ev(i, { source: `s${i % 2}`, city: 'sarasota' }));
+    const r = preflightDigest(plan(events));
+    expect(r.pass).toBe(true);
+    expect(r.hardFailures).toEqual([]);
+    expect(r.warnings.some((w) => /City diversity: 1 \/ recommended 2/.test(w))).toBe(true);
+  });
+
+  test('soft-warns on low image coverage but still passes', () => {
+    const events = [0, 1, 2, 3, 4].map((i) => ev(i, { source: `s${i % 2}`, city: `c${i % 3}`, image: i === 0 }));
+    const r = preflightDigest(plan(events));
+    expect(r.pass).toBe(true);
+    expect(r.warnings.some((w) => /Image coverage: 20% \/ recommended 50%/.test(w))).toBe(true);
+  });
+
+  test('measures diversity over the top-12 lineup, not the whole pool', () => {
+    // 20 events but only from 1 source → still a single-source lineup
+    const events = Array.from({ length: 20 }, (_, i) => ev(i, { source: 'mono' }));
+    const r = preflightDigest(plan(events));
+    expect(r.stats.eligibleCount).toBe(20);
+    expect(r.stats.lineupSize).toBe(12);
+    expect(r.pass).toBe(false); // source diversity 1 < 2
+  });
+
+  test('reads thresholds from the flagship type config', () => {
+    const reqs = getFlagshipType().sourceRequirements;
+    expect(reqs.minVerifiedFreshEvents).toBe(5);
+    expect(reqs.minSourceDiversity).toBe(2);
+    const events = [0, 1, 2, 3].map((i) => ev(i, { source: `s${i % 2}` })); // 4 events
+    const r = preflightDigest(plan(events), reqs);
+    expect(r.thresholds.minVerifiedFreshEvents).toBe(5);
+    expect(r.pass).toBe(false); // 4 < config's 5
+  });
+
+  test('empty plan hard-fails on both gates', () => {
+    const r = preflightDigest(plan([]));
+    expect(r.pass).toBe(false);
+    expect(r.hardFailures).toHaveLength(2);
   });
 });
