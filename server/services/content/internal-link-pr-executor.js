@@ -14,6 +14,7 @@ const frontmatter = require('../content-astro/frontmatter');
 const planner = require('./internal-link-planner');
 const policy = require('./internal-link-seo-policy');
 
+const TABLE = 'content_internal_link_tasks';
 const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
 const PR_EXECUTOR_VERSION = 'internal-link-pr-executor-v1';
 const DEFAULT_LIMIT = 10;
@@ -161,7 +162,7 @@ class InternalLinkPrExecutor {
   }
 
   async _loadQueuedTasks({ limit, taskIds }) {
-    let query = db('content_internal_link_tasks')
+    let query = db(TABLE)
       .whereIn('status', ['pending', 'queued'])
       .orderByRaw('COALESCE(target_priority, 0) DESC')
       .orderBy('planned_at', 'asc')
@@ -171,7 +172,7 @@ class InternalLinkPrExecutor {
   }
 
   async _loadPatchCandidateTasks({ limit, taskIds }) {
-    let query = db('content_internal_link_tasks')
+    let query = db(TABLE)
       .where('status', 'patch_candidate')
       .orderByRaw('COALESCE(target_priority, 0) DESC')
       .orderBy('updated_at', 'asc')
@@ -227,28 +228,46 @@ class InternalLinkPrExecutor {
       failure_reason: result.failure_reason || null,
       updated_at: new Date(),
     };
-    await db('content_internal_link_tasks').where({ id: taskId }).update(patch);
+    await db(TABLE).where({ id: taskId }).update(patch);
   }
 
   async _reserveTasksForPr(selected, { branch }) {
     const ids = selected.map((item) => item.task.id).filter(Boolean);
     if (!ids.length) return false;
-    const updated = await db('content_internal_link_tasks')
-      .whereIn('id', ids)
-      .where('status', 'patch_candidate')
-      .update({
-        status: 'pr_reserved',
-        pr_branch: branch,
-        executor_version: PR_EXECUTOR_VERSION,
-        updated_at: new Date(),
-      });
-    return Number(updated || 0) === ids.length;
+    const reserve = async (knexLike) => {
+      const updated = await knexLike(TABLE)
+        .whereIn('id', ids)
+        .where('status', 'patch_candidate')
+        .update({
+          status: 'pr_reserved',
+          pr_branch: branch,
+          executor_version: PR_EXECUTOR_VERSION,
+          updated_at: new Date(),
+        });
+      if (Number(updated || 0) === ids.length) return true;
+      await knexLike(TABLE)
+        .whereIn('id', ids)
+        .where({
+          status: 'pr_reserved',
+          pr_branch: branch,
+        })
+        .update({
+          status: 'patch_candidate',
+          pr_branch: null,
+          updated_at: new Date(),
+        });
+      return false;
+    };
+    if (typeof db.transaction === 'function') {
+      return db.transaction((trx) => reserve(trx));
+    }
+    return reserve(db);
   }
 
   async _markTasksPrOpen(selected, { pr, branch, commitSha, reviewerNotes = null }) {
     const ids = selected.map((item) => item.task.id).filter(Boolean);
     if (!ids.length) return;
-    await db('content_internal_link_tasks')
+    await db(TABLE)
       .whereIn('id', ids)
       .where('status', 'pr_reserved')
       .update({
@@ -265,7 +284,7 @@ class InternalLinkPrExecutor {
   async _markReservedTasksFailed(selected, err) {
     const ids = selected.map((item) => item.task.id).filter(Boolean);
     if (!ids.length) return;
-    await db('content_internal_link_tasks')
+    await db(TABLE)
       .whereIn('id', ids)
       .where('status', 'pr_reserved')
       .update({

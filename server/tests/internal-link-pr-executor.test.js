@@ -11,6 +11,7 @@ jest.mock('../services/content-astro/github-client', () => ({
 const executor = require('../services/content/internal-link-pr-executor');
 const { InternalLinkPrExecutor } = executor;
 const GitHubClient = require('../services/content-astro/github-client');
+const db = require('../models/db');
 const {
   evaluateDryRunTask,
   pageFromAstroFile,
@@ -25,6 +26,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  delete db.transaction;
 });
 
 function page(file, body, extra = {}) {
@@ -381,6 +383,43 @@ describe('internal-link dry-run executor helpers', () => {
     expect(GitHubClient.createBranch).not.toHaveBeenCalled();
     expect(GitHubClient.putFile).not.toHaveBeenCalled();
     expect(GitHubClient.createPr).not.toHaveBeenCalled();
+  });
+
+  test('rolls back partial patch-candidate reservations before aborting', async () => {
+    const reserveUpdate = jest.fn().mockResolvedValue(1);
+    const rollbackUpdate = jest.fn().mockResolvedValue(1);
+    const reserveChain = {
+      whereIn: jest.fn(() => reserveChain),
+      where: jest.fn(() => reserveChain),
+      update: reserveUpdate,
+    };
+    const rollbackChain = {
+      whereIn: jest.fn(() => rollbackChain),
+      where: jest.fn(() => rollbackChain),
+      update: rollbackUpdate,
+    };
+    const trx = jest.fn()
+      .mockReturnValueOnce(reserveChain)
+      .mockReturnValueOnce(rollbackChain);
+    db.transaction = jest.fn(async (fn) => fn(trx));
+
+    const instance = new InternalLinkPrExecutor();
+    const result = await instance._reserveTasksForPr([
+      { task: { id: 'task-1' } },
+      { task: { id: 'task-2' } },
+    ], { branch: 'content/internal-link-target-abc123' });
+
+    expect(result).toBe(false);
+    expect(db.transaction).toHaveBeenCalled();
+    expect(reserveChain.where).toHaveBeenCalledWith('status', 'patch_candidate');
+    expect(rollbackChain.where).toHaveBeenCalledWith({
+      status: 'pr_reserved',
+      pr_branch: 'content/internal-link-target-abc123',
+    });
+    expect(rollbackUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'patch_candidate',
+      pr_branch: null,
+    }));
   });
 
   test('records opened PRs even when Codex review comment fails', async () => {
