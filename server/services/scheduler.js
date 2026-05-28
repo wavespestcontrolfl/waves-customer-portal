@@ -322,10 +322,10 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Content decay/cannibalization failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
-  // MON–FRI 7:30AM ET — Mine fresh GSC opportunities before the 9AM runner.
+  // DAILY 7:30AM ET — Mine fresh GSC opportunities before the 9AM runner.
   // Writes only opportunity_queue rows. The runner still chooses by score and
   // per-lane shadow/canary guards decide whether anything can publish.
-  cron.schedule('30 7 * * 1-5', async () => {
+  cron.schedule('30 7 * * *', async () => {
     if (!isEnabled('autonomousContentEngine')) return;
     logger.info('Running: Autonomous Content Opportunity Miner');
     try {
@@ -333,12 +333,13 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Autonomous opportunity miner failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
-  // MON–FRI 9AM ET — Autonomous Content Engine daily run.
-  // Per v3.1 plan: 5 SEO actions/week, ET-pinned, shadow mode by default
-  // until SHADOW_MODE_<ACTION_TYPE>=false is set per action type.
+  // DAILY 9AM ET — Autonomous Content Engine daily run (7 days/week).
+  // Per v3.1 plan: ET-pinned, shadow mode by default until
+  // SHADOW_MODE_<ACTION_TYPE>=false is set per action type. Action types
+  // with AUTO_PUBLISH_<ACTION_TYPE>=true skip the human trust-build ramp.
   // Gated behind GATE_AUTONOMOUS_CONTENT so it stays inert in prod
   // until Adam explicitly enables it.
-  cron.schedule('0 9 * * 1-5', async () => {
+  cron.schedule('0 9 * * *', async () => {
     if (!isEnabled('autonomousContentEngine')) return;
     logger.info('Running: Autonomous Content Engine daily');
     try {
