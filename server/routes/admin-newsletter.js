@@ -1455,6 +1455,7 @@ router.get('/events/approved-ids', async (req, res, next) => {
     const rows = await db('events_raw')
       .select('id', 'admin_status', 'start_at', 'end_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')
       .whereIn('admin_status', ['approved', 'featured'])
+      .whereNull('merged_into')
       .where('start_at', '>=', todayET)
       .where('start_at', '<=', cutoffET)
       .whereNotNull('event_url')
@@ -1495,6 +1496,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
         's.name as source_name', 's.priority_tier as source_priority_tier',
       )
       .whereIn('e.admin_status', ['approved', 'featured'])
+      .whereNull('e.merged_into')
       .where('e.start_at', '>=', startDate)
       .where('e.start_at', '<=', endDate)
       .whereNotNull('e.event_url')

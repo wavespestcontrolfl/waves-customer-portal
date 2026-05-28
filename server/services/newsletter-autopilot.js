@@ -54,6 +54,7 @@ async function buildDigestPlan() {
       's.name as source_name', 's.priority_tier as source_priority_tier',
     )
     .whereIn('e.admin_status', ['approved', 'featured'])
+    .whereNull('e.merged_into')
     .where('e.start_at', '>=', startDate)
     .where('e.start_at', '<=', endDate)
     .whereNotNull('e.event_url')

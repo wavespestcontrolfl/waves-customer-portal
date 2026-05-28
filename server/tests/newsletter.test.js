@@ -25,6 +25,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
+const { isEligibleForFreshDigest } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
@@ -1160,5 +1161,32 @@ describe('event rewriteCalendarEventIds', () => {
   });
   test('accepts a Map merge map', () => {
     expect(rewriteCalendarEventIds(['a', 'b', 'd'], new Map([['b', 'a'], ['d', 'a']]))).toEqual(['a']);
+  });
+});
+
+// ── Merged-event durability ──────────────────────────────────────────
+//
+// A row merged into another event must stay out of newsletters forever,
+// even if an admin later re-approves it — calendars were already repointed
+// to the survivor. isEligibleForFreshDigest enforces this regardless of
+// admin_status (the digest/approved SQL also adds whereNull('merged_into')).
+
+describe('event isEligibleForFreshDigest — merged_into durability', () => {
+  // A row that would otherwise be fully eligible.
+  const base = () => ({
+    admin_status: 'approved',
+    event_url: 'https://example.com/e',
+    event_type: 'one_time',
+    freshness_status: 'fresh_one_time',
+    start_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
+  });
+
+  test('an eligible event passes when not merged', () => {
+    expect(isEligibleForFreshDigest({ ...base(), merged_into: null })).toBe(true);
+  });
+
+  test('a merged event is ineligible even when re-approved', () => {
+    expect(isEligibleForFreshDigest({ ...base(), admin_status: 'approved', merged_into: 'some-primary-uuid' })).toBe(false);
+    expect(isEligibleForFreshDigest({ ...base(), admin_status: 'featured', merged_into: 'some-primary-uuid' })).toBe(false);
   });
 });
