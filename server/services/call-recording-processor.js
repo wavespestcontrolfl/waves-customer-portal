@@ -1459,9 +1459,15 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc-v2] Shadow extraction stored for ${callSid}: status=${v2Result.status}`);
       } catch (err) {
         logger.error(`[call-proc-v2] Shadow extraction failed for ${callSid}: ${err.message}`);
+        // Stamp provenance even on a thrown exception so this failure is
+        // attributable to the current extractor — otherwise the promotion
+        // readiness gate (which scopes by model+prompt) silently drops
+        // current-deploy crashes from the schema-pass denominator.
         await db('call_log').where({ id: call.id }).update({
           v2_extraction_status: 'parse_failed',
           ai_extraction_validation_errors: JSON.stringify([{ message: err.message }]),
+          ai_extraction_model: GEMINI_EXTRACTION_MODEL,
+          ai_extraction_prompt_version: PROMPT_HASH,
           updated_at: new Date(),
         });
       }
