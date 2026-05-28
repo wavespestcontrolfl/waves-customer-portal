@@ -1002,6 +1002,11 @@ class AutonomousRunner {
 
   _hasDraftBriefPublisher(draft, brief) {
     const publisher = getAstroPublisher();
+    // Refresh of an existing page uses the freeze-preserving publishRefresh path.
+    if (brief.action_type === 'refresh_existing_page') {
+      return !!(publisher?.publishRefresh
+        && (typeof publisher.canPublishRefresh !== 'function' || publisher.canPublishRefresh(draft, brief)));
+    }
     if (!publisher?.publishOrUpdatePage) return false;
     if (typeof publisher.canPublishDraftBrief === 'function') return publisher.canPublishDraftBrief(draft, brief);
     return true;
@@ -1089,8 +1094,14 @@ class AutonomousRunner {
     // main based on its own configuration. The astro-publisher service
     // pre-dates this engine and handles the PR open/merge state machine.
     const t1 = Date.now();
-    if (publisher?.publishOrUpdatePage) {
-      const r = await publisher.publishOrUpdatePage(draft, brief);
+    // Refresh of an existing page uses publishRefresh (freezes canonical /
+    // slug / schema / tracking / domains; swaps only body + meta + freshness).
+    // New pages use publishOrUpdatePage.
+    const usePublish = (brief.action_type === 'refresh_existing_page' && publisher?.publishRefresh)
+      ? publisher.publishRefresh.bind(publisher)
+      : publisher?.publishOrUpdatePage?.bind(publisher);
+    if (usePublish) {
+      const r = await usePublish(draft, brief);
       const isLive = r?.live === true || r?.status === 'live' || r?.merged === true;
       out.published_url = isLive ? (r?.url || draft.url || null) : null;
       out.pending_url = isLive ? null : (r?.url || draft.url || null);
