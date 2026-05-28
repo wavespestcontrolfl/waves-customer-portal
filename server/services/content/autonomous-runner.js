@@ -1161,8 +1161,9 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
     .first();
   if (!existing?.id) return null;
 
-  await db('content_internal_link_tasks')
+  const refreshed = await db('content_internal_link_tasks')
     .where({ id: existing.id })
+    .whereIn('status', INTERNAL_LINK_RETRYABLE_STATUSES)
     .update({
       status: 'queued',
       opportunity_id: opportunityId || task.opportunity_id || null,
@@ -1170,6 +1171,7 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
       failure_reason: null,
       updated_at: new Date(),
     });
+  if (Number(refreshed || 0) < 1) return null;
 
   return { id: existing.id, inserted: false, refreshed: true };
 }

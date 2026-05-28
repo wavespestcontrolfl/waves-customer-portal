@@ -58,6 +58,7 @@ describe('internal-link dry-run queue helpers', () => {
     };
     const updateChain = {
       where: jest.fn(() => updateChain),
+      whereIn: jest.fn(() => updateChain),
       update: jest.fn().mockResolvedValue(1),
     };
     db
@@ -73,12 +74,46 @@ describe('internal-link dry-run queue helpers', () => {
 
     expect(result).toEqual({ id: 'task_existing', inserted: false, refreshed: true });
     expect(lookupChain.whereIn).toHaveBeenCalledWith('status', expect.arrayContaining(['skipped', 'failed', 'patch_candidate']));
+    expect(updateChain.whereIn).toHaveBeenCalledWith('status', expect.arrayContaining(['skipped', 'failed', 'patch_candidate']));
     expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'queued',
       opportunity_id: 'opp_new',
       skip_reason: null,
       failure_reason: null,
     }));
+  });
+
+  test('does not dry-run duplicates that leave retryable state before refresh update', async () => {
+    const insertReturning = jest.fn().mockResolvedValue([]);
+    const insertChain = {
+      insert: jest.fn(() => ({
+        onConflict: jest.fn(() => ({
+          ignore: jest.fn(() => ({ returning: insertReturning })),
+        })),
+      })),
+    };
+    const lookupChain = {
+      select: jest.fn(() => lookupChain),
+      where: jest.fn(() => lookupChain),
+      whereIn: jest.fn(() => lookupChain),
+      first: jest.fn().mockResolvedValue({ id: 'task_existing', status: 'skipped' }),
+    };
+    const updateChain = {
+      where: jest.fn(() => updateChain),
+      whereIn: jest.fn(() => updateChain),
+      update: jest.fn().mockResolvedValue(0),
+    };
+    db
+      .mockImplementationOnce(() => insertChain)
+      .mockImplementationOnce(() => lookupChain)
+      .mockImplementationOnce(() => updateChain);
+
+    await expect(queueInternalLinkTaskForDryRun({
+      source_file: 'src/content/blog/source.md',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+    }, 'opp_new')).resolves.toBeNull();
+    expect(updateChain.whereIn).toHaveBeenCalledWith('status', expect.arrayContaining(['skipped', 'failed', 'patch_candidate']));
   });
 });
 
