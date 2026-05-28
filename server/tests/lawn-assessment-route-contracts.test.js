@@ -58,6 +58,17 @@ describe('lawn assessment route contracts', () => {
     });
   });
 
+  test('accepts the follow_up_needed stress flag so the engine follow-up trigger can fire', () => {
+    const { errors, normalized } = adminLawnAssessmentRouter._test.normalizeStressFlags({ follow_up_needed: true });
+    expect(errors).toEqual([]);
+    expect(normalized).toEqual({ follow_up_needed: true });
+  });
+
+  test('still rejects unrecognized stress flags', () => {
+    const { errors } = adminLawnAssessmentRouter._test.normalizeStressFlags({ not_a_real_flag: true });
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
   test('customer snapshot contract strips internal fields from snapshot and cards', () => {
     const snapshot = lawnHealthRouter._test.formatCustomerSnapshot({
       id: 'snapshot-1',

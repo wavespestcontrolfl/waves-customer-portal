@@ -343,6 +343,34 @@ async function getSnapshotInputs({ assessmentId }) {
   };
 }
 
+// Remove prior PRE-REVIEW snapshots (and their pre-review cards) for an
+// assessment so repeated confirms / regenerations don't stack duplicates.
+// A snapshot is left untouched if it has been approved, made customer-visible,
+// or has any card that was approved / made customer-visible. Cards have no FK
+// cascade to snapshots, so they're deleted explicitly; snapshot evidence
+// cascades on snapshot delete.
+async function supersedePriorSnapshots(assessmentId) {
+  const priorIds = await db('property_health_snapshots')
+    .where({ assessment_id: assessmentId, domain: 'lawn', customer_visible: false })
+    .whereNull('approved_at')
+    .pluck('id');
+  if (!priorIds.length) return;
+
+  const lockedIds = await db('property_recommendation_cards')
+    .whereIn('snapshot_id', priorIds)
+    .where(function () {
+      this.where('customer_visible', true).orWhereNotNull('approved_at');
+    })
+    .distinct('snapshot_id')
+    .pluck('snapshot_id');
+
+  const removableIds = priorIds.filter((id) => !lockedIds.includes(id));
+  if (!removableIds.length) return;
+
+  await db('property_recommendation_cards').whereIn('snapshot_id', removableIds).del();
+  await db('property_health_snapshots').whereIn('id', removableIds).del();
+}
+
 async function buildLawnSnapshot({ assessmentId, serviceId = null, serviceRecordId = null, generatedBy = 'system' } = {}) {
   if (!assessmentId) throw new Error('assessmentId is required');
   const inputs = await getSnapshotInputs({ assessmentId });
@@ -377,6 +405,10 @@ async function buildLawnSnapshot({ assessmentId, serviceId = null, serviceRecord
   };
   draft.summary_customer = buildCustomerSummary(draft);
   draft.summary_internal = buildInternalSummary(draft);
+
+  // Idempotency: collapse repeated confirms / regenerations to a single
+  // pre-review snapshot before inserting the fresh one.
+  await supersedePriorSnapshots(assessment.id);
 
   const [snapshot] = await db('property_health_snapshots').insert({
     ...draft,
@@ -413,6 +445,7 @@ async function buildLawnSnapshot({ assessmentId, serviceId = null, serviceRecord
 module.exports = {
   SNAPSHOT_VERSION,
   buildLawnSnapshot,
+  supersedePriorSnapshots,
   getSnapshotInputs,
   deriveFindings,
   buildCustomerSummary,

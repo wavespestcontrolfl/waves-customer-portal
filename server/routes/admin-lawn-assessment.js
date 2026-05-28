@@ -788,6 +788,9 @@ const STRESS_FLAG_KEYS = [
   'disease_suspicion',
   'recent_scalp',
   'new_sod',
+  // Consumed by lawn-recommendation-engine.evaluateFollowUp to trigger a
+  // follow-up card; must be an accepted key or /confirm rejects it (400).
+  'follow_up_needed',
 ];
 
 function normalizeStressFlags(input) {
