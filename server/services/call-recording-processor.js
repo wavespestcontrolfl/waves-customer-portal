@@ -37,7 +37,11 @@ const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extractio
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
 
 const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 'true';
+const CALL_EXTRACTION_V2_DRIVES_ROUTING = process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true';
 const CALL_TRANSCRIPT_DIARIZATION_ENABLED = process.env.CALL_TRANSCRIPT_DIARIZATION_ENABLED === 'true';
+const { computeDeterministicTriageFlags, mergeTriageFlags, canAutoRoute, hasCanonicalWriteBlock } = require('./call-triage-flags');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
+const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1424,9 +1428,10 @@ const CallRecordingProcessor = {
     }
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
+    let v2Result = null;
     if (CALL_EXTRACTION_V2_ENABLED) {
       try {
-        const v2Result = await extractCallDataV2(transcription, contactPhone, {
+        v2Result = await extractCallDataV2(transcription, contactPhone, {
           callStartedAt: call.created_at,
           callId: call.id,
         });
@@ -1477,6 +1482,104 @@ const CallRecordingProcessor = {
       );
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
+    }
+
+    // ── V2 routing gate — evaluated BEFORE canonical customer/lead writes ──
+    // Hard vetoes (spam / out-of-area / do-not-contact) skip all canonical
+    // writes. Soft blocks (not_confirmed, ambiguous, hoa, etc.) are real
+    // prospects: customer + lead are still created, only the appointment is
+    // suppressed. Approved calls capture v2's validated scheduling fields so
+    // the appointment is created from the data the gate actually checked.
+    let v2RoutingBlocked = false;
+    let v2SmsBlocked = false;
+    let v2EmailBlocked = false;
+    let v2CanonicalWriteBlocked = false;
+    let v2ApprovedExtraction = null;
+    if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
+      try {
+        const v2Extraction = v2Result?.extraction || null;
+        const v2Valid = v2Result?.status === 'valid' && v2Extraction && isV2Extraction(v2Extraction);
+
+        if (!v2Valid) {
+          // Fail closed: block appointment + triage, but keep customer/lead
+          // (call may be a real lead the validator simply couldn't validate).
+          v2RoutingBlocked = true;
+          const failReason = v2Result?.status || 'not_run';
+          const failTriageItem = buildTriageItem({
+            callLogId: call.id,
+            flag: `v2_extraction_${failReason}`,
+            extraction: v2Extraction || { meta: { call_summary: 'V2 extraction unavailable; fail-closed to triage' } },
+          });
+          await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+          logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
+        } else {
+          const routingResult = canAutoRoute(v2Extraction);
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction);
+          const finalFlags = mergeTriageFlags(v2Extraction.triage_flags, deterministicFlags);
+          const tcpa = checkTcpaConsent(v2Extraction);
+          v2SmsBlocked = !tcpa.canSms;
+          v2EmailBlocked = !tcpa.canEmail;
+
+          const routeDecision = buildRouteDecision({
+            callLogId: call.id,
+            extraction: v2Extraction,
+            finalTriageFlags: finalFlags,
+            routingResult,
+            action: routingResult.allowed ? 'auto_route' : 'triage_review',
+            mode: 'enforce',
+          });
+          await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode']).ignore();
+
+          if (!routingResult.allowed) {
+            const triageReasons = finalFlags.length > 0 ? finalFlags : [routingResult.reason || 'routing_rejected'];
+            for (const flag of triageReasons.slice(0, 10)) {
+              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
+              await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+            }
+            v2RoutingBlocked = true;
+            v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
+            logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}${v2CanonicalWriteBlocked ? ' (canonical-write veto)' : ''}`);
+          } else {
+            v2ApprovedExtraction = v2Extraction;
+          }
+        }
+      } catch (err) {
+        // Fail closed (soft): hold only the appointment for triage. No TCPA/DNC
+        // decision was made here, so do NOT suppress SMS/email follow-up — the
+        // call may be a real lead and email/newsletter should still proceed.
+        logger.error(`[call-proc-v2] Routing gate error for ${callSid}: ${err.message} — failing closed (appointment only)`);
+        v2RoutingBlocked = true;
+        try {
+          const failTriageItem = buildTriageItem({
+            callLogId: call.id,
+            flag: 'v2_gate_exception',
+            extraction: { meta: { call_summary: `V2 routing gate threw exception: ${err.message}` } },
+          });
+          await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+        } catch (triageErr) {
+          logger.error(`[call-proc-v2] Triage insert also failed for ${callSid}: ${triageErr.message}`);
+        }
+      }
+    }
+
+    // Hard veto → record extraction for audit, skip all canonical writes
+    // (no customer, no lead, no appointment, no automation). Mirrors the
+    // spam/voicemail early-return below.
+    if (v2CanonicalWriteBlocked) {
+      await db('call_log').where({ id: call.id }).update({
+        ai_extraction: JSON.stringify(extracted),
+        call_summary: extracted.call_summary || null,
+        sentiment: extracted.sentiment || null,
+        lead_quality: extracted.lead_quality || null,
+        processing_status: extracted.is_spam ? 'spam' : 'processed',
+        review_status: 'open',
+        processing_token: null,
+        processing_started_at: null,
+        updated_at: new Date(),
+      });
+      await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
+      logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
+      return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
     }
 
     // Step 3: Create or update customer
@@ -1739,6 +1842,23 @@ const CallRecordingProcessor = {
       }
     }
 
+    // ── Finding 2: when V2 drives routing and approved, schedule from the
+    // V2-validated fields, not the unvalidated legacy extraction. canAutoRoute()
+    // checked v2's scheduling.confirmed_start_at + service; the appointment +
+    // confirmation SMS must use those same values. confirmed_start_at is ET with
+    // an explicit offset (e.g. ...T10:00:00-04:00); slice to the ET wall-clock
+    // "YYYY-MM-DDTHH:MM" the legacy parser expects.
+    if (v2ApprovedExtraction) {
+      const v2Flat = flatView(v2ApprovedExtraction);
+      if (v2Flat.preferred_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.preferred_date_time)) {
+        extracted.preferred_date_time = v2Flat.preferred_date_time.slice(0, 16);
+      }
+      extracted.appointment_confirmed = v2Flat.appointment_confirmed;
+      if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
+      if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
+      logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
+    }
+
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
     // Guard: reject vague date/time (must contain an actual time like "10 AM", "2:30 PM", "noon")
     let appointmentResult = null;
@@ -1761,7 +1881,16 @@ const CallRecordingProcessor = {
         `${appointmentResult.skippedReason} (direction=${call.direction || 'unknown'}, service=${appointmentResult.service || 'none'})`
       );
     }
-    if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+    if (v2RoutingBlocked) {
+      appointmentResult = {
+        service: extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: 'v2_routing_blocked',
+      };
+      logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
+    } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
@@ -1939,9 +2068,33 @@ const CallRecordingProcessor = {
                     extracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   booking_source: 'phone_call',
+                  source_call_log_id: call.id,
+                  source_action: 'ai_call_pipeline',
+                  idempotency_key: computeAppointmentIdempotencyKey({
+                    callLogId: call.id,
+                    schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
+                    confirmedStartAt: extracted.preferred_date_time,
+                    primaryServiceCategory: serviceType,
+                    addressHash: computeAddressHash({ street_line_1: customer.street_address, city: customer.city, postal_code: customer.zip }),
+                  }),
                 };
-                const [created] = await trx('scheduled_services').insert(insertData).returning('*');
-                return created;
+                const [created] = await trx('scheduled_services')
+                  .insert(insertData)
+                  .onConflict('idempotency_key')
+                  .ignore()
+                  .returning('*');
+                if (created) return created;
+                // Idempotency conflict: another writer already created a row with this key.
+                // Fetch it and mark as reused so downstream skips duplicate side effects.
+                const existingByKey = await trx('scheduled_services')
+                  .where({ idempotency_key: insertData.idempotency_key })
+                  .first();
+                if (existingByKey) {
+                  reusedExistingSchedule = true;
+                  logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
+                  return existingByKey;
+                }
+                throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
               });
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
@@ -1970,8 +2123,11 @@ const CallRecordingProcessor = {
             appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
           }
 
-          // Only send the confirmation SMS if the schedule row landed.
-          if (scheduledServiceId) {
+          // Only send the confirmation SMS if the schedule row landed and TCPA gate allows it.
+          if (scheduledServiceId && v2SmsBlocked) {
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
+            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
+          } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
               appointmentResult = {
@@ -2042,7 +2198,10 @@ const CallRecordingProcessor = {
     // Variable name kept as `beehiivResult` for schema/log continuity;
     // carries the local enrollment result now.
     let beehiivResult = null;
-    if (customerId && extracted.email) {
+    if (customerId && extracted.email && v2EmailBlocked) {
+      logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
+      beehiivResult = { skipped: 'v2_tcpa_gate' };
+    } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
         const r = await AutomationRunner.enrollCustomer({
@@ -2119,7 +2278,9 @@ const CallRecordingProcessor = {
       }
     }
 
-    if (newsletterCandidate) {
+    if (newsletterCandidate && v2EmailBlocked) {
+      logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
+    } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
