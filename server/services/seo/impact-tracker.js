@@ -22,7 +22,16 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+
+// Parse a stored date (a 'YYYY-MM-DD' string or a pg Date at UTC midnight) as
+// an ET calendar day anchored at noon. Without this, `new Date('2026-05-28')`
+// is UTC midnight = the prior ET evening, so addETDays/etDateString slip the
+// 14d/21d windows a day early. AGENTS.md requires ET helpers, not naive Date math.
+function etDayAnchor(value) {
+  const ymd = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+  return parseETDateTime(`${ymd}T12:00:00`);
+}
 
 const BASELINE_DAYS = 28;
 const DEPLOY_LAG_DAYS = 3;
@@ -238,7 +247,7 @@ async function sweepNewlyLive({ db: database = db, now = new Date() } = {}) {
 
 async function measureWindow(database, impactRow, days) {
   const start = impactRow.measurement_start;
-  const end = etDateString(addETDays(new Date(impactRow.measurement_start), days));
+  const end = etDateString(addETDays(etDayAnchor(impactRow.measurement_start), days));
   const page = await aggregatePageMetrics(database, impactRow.page_url, start, end);
 
   const controlUrls = impactRow.control_page_urls || [];
@@ -284,8 +293,8 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
 
   let checked = 0;
   for (const row of rows) {
-    const day14 = etDateString(addETDays(new Date(row.measurement_start), 14));
-    const day21 = etDateString(addETDays(new Date(row.measurement_start), 21));
+    const day14 = etDateString(addETDays(etDayAnchor(row.measurement_start), 14));
+    const day21 = etDateString(addETDays(etDayAnchor(row.measurement_start), 21));
     const patch = { updated_at: now };
 
     if (!row.checked_14d_at && today >= day14) {
@@ -352,7 +361,7 @@ module.exports = {
   // exposed for tests / reuse
   aggregatePageMetrics,
   selectControlPages,
-  _internals: { median, clicksPct, positionDelta, confidenceScore },
+  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,

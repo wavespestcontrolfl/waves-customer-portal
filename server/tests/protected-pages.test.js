@@ -52,9 +52,10 @@ describe('protected-pages registry layer', () => {
     expect(r.protected).toBe(false);
   });
 
-  test('registry read error fails open (pattern still applies, no crash)', async () => {
+  test('registry read error fails CLOSED (protect rather than expose)', async () => {
     const db = () => ({ whereRaw: () => ({ first: async () => { throw new Error('db down'); } }) });
     const r = await protectedPages.isProtected('/rodent-control-sarasota-fl/', { db });
-    expect(r.protected).toBe(false); // not a money page; registry errored → treated as not protected
+    expect(r.protected).toBe(true);
+    expect(r.reason).toBe('protected_check_error');
   });
 });

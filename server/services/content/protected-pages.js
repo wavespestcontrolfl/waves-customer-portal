@@ -56,10 +56,11 @@ function isProtectedByPattern(url) {
 
 /**
  * isProtected(url, { db }) → { protected, reason, source, detail }
- * Pattern check first (no DB), then the registry. Fails OPEN on a registry
- * read error (pattern protection still applies) — a transient DB blip should
- * not silently expose money pages, but it also shouldn't block the whole
- * engine; the pattern layer already covers the highest-risk URLs.
+ * Pattern check first (no DB), then the registry. Fails CLOSED on a registry
+ * read error: if we can't confirm a URL is unprotected, treat it as protected
+ * (reason protected_check_error) so a transient DB blip can never expose a
+ * manually- or high-traffic-protected page to auto-optimization. The runner
+ * routes protected_check_error opportunities to human review.
  */
 async function isProtected(url, { db } = {}) {
   const byPattern = isProtectedByPattern(url);
@@ -75,7 +76,8 @@ async function isProtected(url, { db } = {}) {
         return { protected: true, reason: row.reason, source: 'registry', detail: row.notes || null };
       }
     } catch (err) {
-      logger.warn(`[protected-pages] registry check failed for ${url}: ${err.message}`);
+      logger.warn(`[protected-pages] registry check failed for ${url}: ${err.message} — failing closed`);
+      return { protected: true, reason: 'protected_check_error', source: 'error', detail: err.message };
     }
   }
   return { protected: false };

@@ -2,8 +2,9 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const tracker = require('../services/seo/impact-tracker');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { computeVerdict } = tracker;
-const { median, clicksPct, positionDelta } = tracker._internals;
+const { median, clicksPct, positionDelta, etDayAnchor } = tracker._internals;
 
 describe('impact-tracker pure helpers', () => {
   test('median handles odd/even/empty', () => {
@@ -18,6 +19,20 @@ describe('impact-tracker pure helpers', () => {
   test('clicksPct', () => {
     expect(clicksPct(50, 80)).toBe(60);
     expect(clicksPct(0, 5)).toBe(500); // guards divide-by-zero with max(base,1)
+  });
+});
+
+describe('etDayAnchor — ET-safe window math', () => {
+  test('a date-only string stays on its ET calendar day after +14d (not slipped early)', () => {
+    // measurement_start stored as a plain calendar date.
+    const day14 = etDateString(addETDays(etDayAnchor('2026-05-28'), 14));
+    expect(day14).toBe('2026-06-11');
+  });
+  test('a pg Date at UTC midnight resolves to the intended ET calendar day', () => {
+    // node-pg returns `date` columns as a Date at UTC midnight.
+    const pgDate = new Date('2026-05-28T00:00:00.000Z');
+    const day21 = etDateString(addETDays(etDayAnchor(pgDate), 21));
+    expect(day21).toBe('2026-06-18');
   });
 });
 
