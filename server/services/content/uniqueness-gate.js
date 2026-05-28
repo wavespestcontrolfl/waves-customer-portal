@@ -60,6 +60,25 @@ function shingles(text, n = 3) {
   return out;
 }
 
+// Lines that are shared CTA / disclaimer / brand boilerplate across most
+// service pages. Stripping them before sibling-similarity comparison keeps
+// two genuinely-differentiated city pages from being flagged as duplicates
+// just because they share the same call-to-action and guarantee copy.
+const BOILERPLATE_LINE_RE = /\b(call us|call now|call today|get a (free )?(quote|estimate|inspection)|schedule (online|today|your)|free (quote|estimate|inspection)|money-back guarantee|no (12-month )?contract|cancel anytime|24-?hour|same-day|waveguard|pest-control-calculator|book (online|now)|text us)\b/i;
+
+function stripBoilerplate(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return false;
+      // Drop shared CTA/disclaimer/brand lines; keep explanatory content.
+      if (BOILERPLATE_LINE_RE.test(t)) return false;
+      return true;
+    })
+    .join('\n');
+}
+
 function jaccard(setA, setB) {
   if (!setA.size && !setB.size) return 0;
   let inter = 0;
@@ -181,12 +200,14 @@ function checkUniqueLocalProof(draft, brief) {
 
 function checkNotTemplateSwap(draft, brief, siblingPages) {
   if (!siblingPages || !siblingPages.length) return { ok: true, reason: 'no_siblings_to_compare' };
-  const draftShingles = shingles(draft.body || '');
+  // Compare on boilerplate-excluded text so shared CTAs/disclaimers don't
+  // inflate similarity between two genuinely-differentiated city pages.
+  const draftShingles = shingles(stripBoilerplate(draft.body || ''));
   let maxSimilarity = 0;
   let mostSimilarUrl = null;
   for (const sib of siblingPages) {
     if (sib.url === draft.url) continue; // skip self
-    const sim = jaccard(draftShingles, shingles(sib.body || ''));
+    const sim = jaccard(draftShingles, shingles(stripBoilerplate(sib.body || '')));
     if (sim > maxSimilarity) {
       maxSimilarity = sim;
       mostSimilarUrl = sib.url;
@@ -295,7 +316,7 @@ function evaluate(draft, brief, { siblingPages = [] } = {}) {
 
 module.exports = { evaluate };
 module.exports._internals = {
-  tokenize, shingles, jaccard, extractCtaUrls,
+  tokenize, shingles, jaccard, extractCtaUrls, stripBoilerplate,
   checkUniqueLocalProblem,
   checkUniqueCityContext,
   checkUniqueServiceSpecificContent,
