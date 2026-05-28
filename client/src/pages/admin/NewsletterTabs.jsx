@@ -1546,6 +1546,7 @@ function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }
 
 export function HistoryView() {
   const [sends, setSends] = useState([]);
+  const [aggregate, setAggregate] = useState(null);
   const [loading, setLoading] = useState(true);
   // Per-send variant breakdown (a vs b counts) — fetched lazily when the
   // operator expands an A/B row, then cached.
@@ -1555,8 +1556,14 @@ export function HistoryView() {
   const load = useCallback(() => {
     setLoading(true);
     adminFetch("/admin/newsletter/sends")
-      .then((d) => setSends(d.sends || []))
-      .catch(() => setSends([]))
+      .then((d) => {
+        setSends(d.sends || []);
+        setAggregate(d.aggregate || null);
+      })
+      .catch(() => {
+        setSends([]);
+        setAggregate(null);
+      })
       .finally(() => setLoading(false));
   }, []);
   useEffect(() => {
@@ -1611,6 +1618,30 @@ export function HistoryView() {
           {sends.length} campaign{sends.length === 1 ? "" : "s"}
         </span>{" "}
       </div>
+      {aggregate && aggregate.campaignCount > 0 && (
+        <div className="border-b border-hairline border-zinc-200">
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-px bg-zinc-200">
+            <AggStat label="Delivery" value={pctLabel(aggregate.rates.deliveryRate)} />
+            <AggStat label="Open" value={pctLabel(aggregate.rates.openRate)} />
+            <AggStat label="Click" value={pctLabel(aggregate.rates.clickRate)} />
+            <AggStat
+              label="Bounce"
+              value={pctLabel(aggregate.rates.bounceRate)}
+              alert={aggregate.rates.bounceRate > 0.02}
+            />
+            <AggStat label="Unsub" value={pctLabel(aggregate.rates.unsubscribeRate)} />
+            <AggStat
+              label="Complaint"
+              value={pctLabel(aggregate.rates.complaintRate)}
+              alert={aggregate.rates.complaintRate > 0.001}
+            />
+          </div>
+          <p className="text-11 text-ink-tertiary px-4 py-1.5 u-nums">
+            Pooled across {aggregate.campaignCount} sent campaign
+            {aggregate.campaignCount === 1 ? "" : "s"} · open/click over delivered, bounce over recipients
+          </p>
+        </div>
+      )}
       {loading ? (
         <div className="text-13 text-ink-secondary p-6 text-center">
           Loading…
@@ -1693,6 +1724,8 @@ export function HistoryView() {
                           label="Delivered"
                           value={`${s.delivered_count || 0} (${pct}%)`}
                         />{" "}
+                        <Stat label="Open" value={pctLabel(s.rates?.openRate)} />{" "}
+                        <Stat label="Click" value={pctLabel(s.rates?.clickRate)} />{" "}
                         <Stat
                           label="Bounced"
                           value={s.bounced_count || 0}
@@ -1835,6 +1868,30 @@ function Stat({ label, value, alert }) {
         {value}
       </div>{" "}
       <div className="text-11 text-ink-tertiary">{label}</div>{" "}
+    </div>
+  );
+}
+
+// Render a rate fraction (0..1) as a percentage, or "—" when null/undefined
+// (zero-denominator) so an unmeasured rate isn't shown as a misleading 0%.
+function pctLabel(rate) {
+  if (rate === null || rate === undefined) return "—";
+  return `${(rate * 100).toFixed(1)}%`;
+}
+
+// Centered tile for the History aggregate summary strip.
+function AggStat({ label, value, alert }) {
+  return (
+    <div className="bg-white px-3 py-2 text-center">
+      <div
+        className={cn(
+          "u-nums text-16 font-medium",
+          alert ? "text-alert-fg" : "text-zinc-900",
+        )}
+      >
+        {value}
+      </div>
+      <div className="text-11 text-ink-tertiary">{label}</div>
     </div>
   );
 }
