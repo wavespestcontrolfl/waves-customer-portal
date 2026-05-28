@@ -2045,7 +2045,18 @@ const CallRecordingProcessor = {
                   .onConflict('idempotency_key')
                   .ignore()
                   .returning('*');
-                return created;
+                if (created) return created;
+                // Idempotency conflict: another writer already created a row with this key.
+                // Fetch it and mark as reused so downstream skips duplicate side effects.
+                const existingByKey = await trx('scheduled_services')
+                  .where({ idempotency_key: insertData.idempotency_key })
+                  .first();
+                if (existingByKey) {
+                  reusedExistingSchedule = true;
+                  logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
+                  return existingByKey;
+                }
+                throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
               });
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
