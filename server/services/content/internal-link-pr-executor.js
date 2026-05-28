@@ -138,6 +138,7 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
       targetNewLinksInPr: Number(options.targetNewLinksInPr || 0),
       sameAnchorCountForTarget: Number(task.same_anchor_count_for_target || 0),
       existingExactMatchAnchorsForTarget: Number(task.existing_exact_match_anchors_for_target || 0),
+      surroundingText: paragraph,
     },
     options: {
       minTopicalRelevance: Number(options.minTopicalRelevance ?? process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE ?? 0.75),

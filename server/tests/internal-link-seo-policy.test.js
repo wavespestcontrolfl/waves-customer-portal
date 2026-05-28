@@ -52,6 +52,30 @@ describe('internal-link SEO policy anchor classification', () => {
     }).issues.map((i) => i.code)).toContain('anchor_too_long');
   });
 
+  test('blocks anchors that split service phrases in the surrounding sentence', () => {
+    const issues = policy.validateAnchorPolicy('Bradenton pest', {
+      targetKeyword: 'pest control bradenton fl',
+      surroundingText: 'Call for your free Bradenton pest control quote today.',
+    }).issues.map((i) => i.code);
+    expect(issues).toContain('anchor_splits_service_phrase');
+
+    expect(policy.validateAnchorPolicy('Bradenton pest control', {
+      targetKeyword: 'pest control bradenton fl',
+      surroundingText: 'Call for your free Bradenton pest control quote today.',
+    }).ok).toBe(true);
+  });
+
+  test('detects split service phrase helper only when anchor overlaps part of phrase', () => {
+    expect(policy._internals.splitsServicePhrase(
+      'termite',
+      'Ask about termite inspection options before closing.'
+    )).toBe(true);
+    expect(policy._internals.splitsServicePhrase(
+      'termite inspection',
+      'Ask about termite inspection options before closing.'
+    )).toBe(false);
+  });
+
   test('allows descriptive concise anchors', () => {
     const result = policy.validateAnchorPolicy('termite inspection checklist', { targetKeyword: 'termite inspection florida' });
     expect(result.ok).toBe(true);

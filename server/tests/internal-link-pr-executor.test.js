@@ -132,6 +132,36 @@ describe('internal-link dry-run executor pure evaluation', () => {
     expect(result.skip_reason).toContain('anchor_generic_cta_prefix');
   });
 
+  test('skips anchors that split a service phrase in context', () => {
+    const splitPhraseBody = sourceBody.replace(
+      'A termite inspection in Florida helps confirm whether the swarmers came from an active colony.',
+      'Call for your free Bradenton pest control quote today.'
+    );
+    const result = evaluateDryRunTask({
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/pest-control-bradenton-fl/',
+      anchor_text: 'Bradenton pest',
+    }, {
+      sourcePage: page('src/content/blog/termite-swarmers-bathroom.md', splitPhraseBody, {
+        topic: 'Bradenton pest control quote',
+        topic_cluster: 'pest',
+      }),
+      targetPage: page('src/content/services/pest-control-bradenton-fl.md', [
+        '---',
+        'title: Pest Control in Bradenton',
+        'slug: /pest-control-bradenton-fl/',
+        'canonical: https://www.wavespestcontrol.com/pest-control-bradenton-fl/',
+        'category: pest',
+        'primary_keyword: pest control bradenton fl',
+        '---',
+        'Bradenton pest control service body.',
+      ].join('\n')),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.skip_reason).toContain('anchor_splits_service_phrase');
+  });
+
   test('skips noncanonical or noindex targets', () => {
     const result = evaluateDryRunTask({
       source_file: 'src/content/blog/termite-swarmers-bathroom.md',
