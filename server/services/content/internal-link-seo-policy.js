@@ -24,6 +24,7 @@ const GENERIC_ANCHORS = new Set([
 const GENERIC_ANCHOR_PREFIX_RE = /^(?:click|tap|read|learn|see|view|find|get)\s+(?:more\s+)?(?:about|on|for|details|info|information)\b/i;
 const COMMERCIAL_TERMS = [
   'pest control',
+  'lawn pest control',
   'termite control',
   'termite inspection',
   'mosquito control',
@@ -113,6 +114,9 @@ function validateAnchorPolicy(anchorText, context = {}) {
   if (splitsServicePhrase(anchor, context.surroundingText)) {
     issues.push(issue('anchor_splits_service_phrase', 'Anchor splits a service phrase instead of linking the complete phrase.'));
   }
+  if (leavesDanglingGeoQualifier(anchor, context.surroundingText)) {
+    issues.push(issue('anchor_leaves_geo_qualifier', 'Anchor leaves a trailing geographic qualifier outside the link.'));
+  }
   if (anchor.length > 80 || words.length > 8) issues.push(issue('anchor_too_long', 'Anchor text is too long.'));
   if (/[.!?]$/.test(anchor)) issues.push(issue('anchor_sentence', 'Anchor should not include sentence punctuation.'));
   if (/\b(click|tap)\b/i.test(anchor)) issues.push(issue('anchor_ui_action', 'Anchor should describe the destination, not a UI action.'));
@@ -155,6 +159,17 @@ function splitsServicePhrase(anchorText, surroundingText) {
     }
   }
   return false;
+}
+
+function leavesDanglingGeoQualifier(anchorText, surroundingText) {
+  const anchor = clean(anchorText).toLowerCase();
+  const text = clean(surroundingText).toLowerCase();
+  if (!anchor || !text) return false;
+
+  const anchorStart = text.indexOf(anchor);
+  if (anchorStart === -1) return false;
+  const after = text.slice(anchorStart + anchor.length);
+  return /^\s*,\s*(?:fl|florida)\b/.test(after);
 }
 
 function scoreTopicalRelevance(source = {}, target = {}) {
@@ -320,6 +335,7 @@ module.exports = {
     meaningfulTokens,
     keywordTokenCoverage,
     splitsServicePhrase,
+    leavesDanglingGeoQualifier,
     withinDays,
   },
 };

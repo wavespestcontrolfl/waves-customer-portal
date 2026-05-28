@@ -63,6 +63,11 @@ describe('internal-link SEO policy anchor classification', () => {
       targetKeyword: 'pest control bradenton fl',
       surroundingText: 'Call for your free Bradenton pest control quote today.',
     }).ok).toBe(true);
+
+    expect(policy.validateAnchorPolicy('pest control in Bradenton', {
+      targetKeyword: 'pest control bradenton fl',
+      surroundingText: '**Lawn pest control in Bradenton, FL** has to account for that variation.',
+    }).issues.map((i) => i.code)).toContain('anchor_splits_service_phrase');
   });
 
   test('detects split service phrase helper only when anchor overlaps part of phrase', () => {
@@ -74,6 +79,21 @@ describe('internal-link SEO policy anchor classification', () => {
       'termite inspection',
       'Ask about termite inspection options before closing.'
     )).toBe(false);
+  });
+
+  test('blocks anchors that leave a dangling state qualifier outside the link', () => {
+    expect(policy.validateAnchorPolicy('pest control in Bradenton', {
+      targetKeyword: 'pest control bradenton fl',
+      surroundingText: 'Call for pest control in Bradenton, FL today.',
+    }).issues.map((i) => i.code)).toContain('anchor_leaves_geo_qualifier');
+    expect(policy.validateAnchorPolicy('pest control in Bradenton, FL', {
+      targetKeyword: 'pest control bradenton fl',
+      surroundingText: 'Call for pest control in Bradenton, FL today.',
+    }).issues.map((i) => i.code)).not.toContain('anchor_leaves_geo_qualifier');
+    expect(policy._internals.leavesDanglingGeoQualifier(
+      'pest control in Bradenton',
+      'Call for pest control in Bradenton, FL today.'
+    )).toBe(true);
   });
 
   test('allows descriptive concise anchors', () => {
