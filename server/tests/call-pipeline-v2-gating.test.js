@@ -213,6 +213,22 @@ describe('computeDeterministicTriageFlags', () => {
     expect(computeDeterministicTriageFlags(e)).toContain('caller_phone_missing');
   });
 
+  test('no spoken phone + withheld caller ID ("anonymous"/"unknown") → flagged (not dialable)', () => {
+    const e = validV2Extraction();
+    e.caller.phone_e164 = null;
+    for (const ani of ['anonymous', 'unknown', 'restricted', 'unavailable', '']) {
+      expect(computeDeterministicTriageFlags(e, { contactPhone: ani })).toContain('caller_phone_missing');
+    }
+  });
+
+  test('no spoken phone + dialable ANI variants → NOT flagged', () => {
+    const e = validV2Extraction();
+    e.caller.phone_e164 = null;
+    for (const ani of ['+19415551234', '9415551234', '(941) 555-1234']) {
+      expect(computeDeterministicTriageFlags(e, { contactPhone: ani })).not.toContain('caller_phone_missing');
+    }
+  });
+
   test('spam lead quality', () => {
     const e = validV2Extraction();
     e.sentiment_and_lead.lead_quality = 'spam_or_solicitation';
