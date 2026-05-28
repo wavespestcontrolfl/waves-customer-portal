@@ -412,11 +412,17 @@ function loadRunnerWith({
   publisher = null,
   indexNow = null,
   linkPlanner = null,
+  internalLinkExecutor = null,
 }) {
   jest.resetModules();
-  const dbMock = jest.fn(() => ({
-    insert: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })),
-  }));
+  const dbMock = jest.fn(() => {
+    const returning = jest.fn().mockResolvedValue([{ id: 'run_1' }]);
+    const ignore = jest.fn(() => ({ returning }));
+    const onConflict = jest.fn(() => ({ ignore }));
+    return {
+      insert: jest.fn(() => ({ returning, onConflict })),
+    };
+  });
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   jest.doMock('../services/content/opportunity-queue', () => queue);
@@ -428,6 +434,7 @@ function loadRunnerWith({
   if (publisher) jest.doMock('../services/content-astro/astro-publisher', () => publisher);
   if (indexNow) jest.doMock('../services/seo/indexnow-submit', () => indexNow);
   if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);
+  if (internalLinkExecutor) jest.doMock('../services/content/internal-link-pr-executor', () => internalLinkExecutor);
   return require('../services/content/autonomous-runner');
 }
 
@@ -616,13 +623,13 @@ describe('runNext Astro corpus loading', () => {
       const result = await runner.runNext();
 
       expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('internal_links_queued');
+      expect(result.skip_reason).toBe('internal_links_dry_run');
       expect(result.link_tasks_queued).toBe(0);
       expect(linkPlanner.planForTarget).toHaveBeenCalledWith(
         expect.objectContaining({ url: '/blog/ghost-ants/' }),
         { corpus: [], opportunityId: 'opp_links_optional_1' }
       );
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_queued', { claimToken: claimedAt });
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_dry_run', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
@@ -695,7 +702,7 @@ describe('runNext Astro corpus loading', () => {
 });
 
 describe('runNext internal-link shadow behavior', () => {
-  test('parks shadow internal-link claims so the queue can advance', async () => {
+  test('queues shadow internal-link tasks and runs dry-run validation so the queue can advance', async () => {
     const claimedAt = new Date('2026-05-23T05:00:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -712,15 +719,38 @@ describe('runNext internal-link shadow behavior', () => {
         id: 'brief_links_1',
         action_type: 'add_internal_links',
         page_type: 'internal-link',
+        target_url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+        target_keyword: 'ghost ants kitchen',
       }),
     };
-    const runner = loadRunnerWith({ queue, briefBuilder });
+    const linkPlanner = {
+      planForTarget: jest.fn().mockReturnValue([
+        {
+          source_file: 'src/content/blog/ants-after-rain.md',
+          target_url: '/blog/ghost-ants-kitchen-florida/',
+          anchor_text: 'ghost ants in kitchens',
+        },
+      ]),
+    };
+    const internalLinkExecutor = {
+      runDryRun: jest.fn().mockResolvedValue({
+        count: 1,
+        results: [{ task_id: 'run_1', status: 'patch_candidate' }],
+      }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
 
     const result = await runner.runNext();
 
-    expect(result.outcome).toBe('skipped_shadow_mode');
-    expect(result.skip_reason).toBe('shadow_internal_links');
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_1', 'shadow_internal_links', { claimToken: claimedAt });
+    expect(result.outcome).toBe('completed_pending_review');
+    expect(result.skip_reason).toBe('internal_links_dry_run_shadow');
+    expect(result.link_tasks_queued).toBe(1);
+    expect(linkPlanner.planForTarget).toHaveBeenCalledWith(expect.objectContaining({
+      url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+      keyword: 'ghost ants kitchen',
+    }), expect.objectContaining({ opportunityId: 'opp_links_1' }));
+    expect(internalLinkExecutor.runDryRun).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 1 });
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_1', 'internal_links_dry_run_shadow', { claimToken: claimedAt });
     expect(queue.complete).not.toHaveBeenCalled();
     expect(queue.release).not.toHaveBeenCalled();
   });

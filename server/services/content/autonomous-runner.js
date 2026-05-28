@@ -58,6 +58,7 @@ const getSeoCompletionGate = lazy('seo-completion-gate', './seo-completion-gate'
 const getAstroPublisher = lazy('astro-publisher', '../content-astro/astro-publisher');
 const getIndexNow = lazy('indexnow', '../seo/indexnow-submit');
 const getLinkPlanner = lazy('internal-link-planner', './internal-link-planner');
+const getInternalLinkExecutor = lazy('internal-link-pr-executor', './internal-link-pr-executor');
 const getSitemap = lazy('sitemap-manager', '../seo/sitemap-manager');
 const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', './post-publish-visibility-worker');
 const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gate');
@@ -780,13 +781,6 @@ class AutonomousRunner {
   }
 
   async _handleInternalLinksAction(brief, run) {
-    if (run.shadow_mode) {
-      return {
-        notes: 'shadow_internal_links',
-        patch: { outcome: 'skipped_shadow_mode', skip_reason: 'shadow_internal_links' },
-      };
-    }
-
     const planner = getLinkPlanner();
     if (!planner?.planForTarget) {
       return {
@@ -806,22 +800,42 @@ class AutonomousRunner {
       { corpus, opportunityId: run.opportunity_id }
     );
     let insertedCount = 0;
+    const insertedTaskIds = [];
     for (const task of tasks) {
       const inserted = await db('content_internal_link_tasks')
         .insert(task)
         .onConflict(['source_file', 'target_url', 'anchor_text'])
         .ignore()
         .returning('id');
-      insertedCount += Array.isArray(inserted) ? inserted.length : (inserted ? 1 : 0);
+      const rows = Array.isArray(inserted) ? inserted : (inserted ? [inserted] : []);
+      insertedCount += rows.length;
+      for (const row of rows) {
+        const id = typeof row === 'object' ? row.id : row;
+        if (id) insertedTaskIds.push(id);
+      }
     }
     run.link_plan_ms = Date.now() - t;
+    const executor = getInternalLinkExecutor();
+    let dryRunResult = null;
+    if (executor?.runDryRun && insertedTaskIds.length) {
+      const t2 = Date.now();
+      dryRunResult = await executor.runDryRun({
+        taskIds: insertedTaskIds,
+        limit: envInt('AUTONOMOUS_INTERNAL_LINK_DRY_RUN_LIMIT', insertedTaskIds.length),
+      });
+      run.link_execute_ms = Date.now() - t2;
+    }
+    const candidates = Number((dryRunResult?.results || []).filter((result) => result.status === 'patch_candidate').length);
+    const skipped = Number((dryRunResult?.results || []).filter((result) => result.status === 'skipped').length);
+    const failed = Number((dryRunResult?.results || []).filter((result) => result.status === 'failed').length);
+    const reason = run.shadow_mode ? 'internal_links_dry_run_shadow' : 'internal_links_dry_run';
     return {
-      notes: `internal_links_queued:${insertedCount}`,
+      notes: `${reason}:queued=${insertedCount}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`,
       patch: {
         outcome: 'completed_pending_review',
-        skip_reason: 'internal_links_queued',
+        skip_reason: reason,
         link_tasks_queued: insertedCount,
-        reviewer_notes: `Queued ${insertedCount} internal-link task(s) for manual/apply review.`,
+        reviewer_notes: `Queued ${insertedCount} internal-link task(s); dry-run produced ${candidates} patch candidate(s), ${skipped} skipped, and ${failed} failed.`,
       },
     };
   }
