@@ -63,6 +63,17 @@ const WAVES_ADMIN_PHONE = '+19413187612';
 // line used elsewhere for notifications; new leads should ring Adam directly.
 const ADAM_CELL = '+19415993489';
 
+function applyLeadEstimateAutomationGate(readiness = {}) {
+  if (isEnabled('leadEstimateAutomation')) return readiness;
+  return {
+    ...readiness,
+    status: 'disabled',
+    ready: false,
+    disabled: true,
+    disabledReason: 'lead_estimate_automation_gate_disabled',
+  };
+}
+
 // POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', async (req, res) => {
   try {
@@ -237,12 +248,12 @@ router.post('/', async (req, res) => {
       await LeadScorer.calculateScore(customer.id);
     }
 
-    estimateAutomationReadiness = evaluateLeadEstimateAutomationReadiness({
+    estimateAutomationReadiness = applyLeadEstimateAutomationGate(evaluateLeadEstimateAutomationReadiness({
       intake,
       customer,
       phone: phoneFormatted,
       serviceInterest,
-    });
+    }));
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
       // Customer record + interaction note are written above so we still have an
@@ -584,7 +595,7 @@ router.post('/', async (req, res) => {
               await db('leads').where('id', leadRecord.id).update(updates);
             }
             if (createdEstimateId && triageServiceInterestUpdate) {
-              const triageReadiness = evaluateLeadEstimateAutomationReadiness({
+              const triageReadiness = applyLeadEstimateAutomationGate(evaluateLeadEstimateAutomationReadiness({
                 intake: {
                   ...intake,
                   serviceInterest: triageServiceInterestUpdate,
@@ -592,7 +603,7 @@ router.post('/', async (req, res) => {
                 customer,
                 phone: phoneFormatted,
                 serviceInterest: triageServiceInterestUpdate,
-              });
+              }));
               const triageDraftEstimate = buildAutomatedLeadDraftEstimate({
                 intake: {
                   ...intake,
@@ -1092,4 +1103,5 @@ module.exports._test = {
   serviceInterestUpdateFromTriage,
   shouldApplyTriageServiceInterest,
   shouldRunLeadAcquisition,
+  applyLeadEstimateAutomationGate,
 };

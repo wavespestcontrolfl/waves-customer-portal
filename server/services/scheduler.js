@@ -678,12 +678,12 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 5 MINUTES — Auto-send generated lead-webhook estimates.
-  // Production gate defaults OFF. When enabled, this rechecks eligibility after
+  // Explicit gates default OFF. When enabled, this rechecks eligibility after
   // the configured delay and then uses the same sendEstimateNow path as manual
   // and scheduled sends.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
-    if (!isEnabled('leadEstimateAutoSend')) return;
+    if (!isEnabled('leadEstimateAutomation') || !isEnabled('leadEstimateAutoSend')) return;
     try {
       const {
         leadEstimateAutoSendConfigFromEnv,
