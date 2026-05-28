@@ -60,6 +60,7 @@ const getIndexNow = lazy('indexnow', '../seo/indexnow-submit');
 const getLinkPlanner = lazy('internal-link-planner', './internal-link-planner');
 const getSitemap = lazy('sitemap-manager', '../seo/sitemap-manager');
 const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', './post-publish-visibility-worker');
+const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gate');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -216,12 +217,29 @@ class AutonomousRunner {
     }
 
     if (brief.action_type === 'rewrite_title_meta') {
-      const finalized = await finalize(run, t0, {
-        outcome: 'completed_pending_review',
-        skip_reason: 'metadata_requires_existing_page_hydration',
-        reviewer_notes: 'Metadata-only agent output must be hydrated with the existing page before gates/publish; route manually until that adapter is wired.',
-      });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'metadata_requires_existing_page_hydration', { claimToken });
+      let result;
+      try {
+        result = await this._handleMetadataRewriteAction(brief, draft, run);
+      } catch (err) {
+        if (isDeterministicPublishError(err)) {
+          const finalized = await finalize(run, t0, {
+            outcome: 'completed_pending_review',
+            skip_reason: 'metadata_publish_validation_failed',
+            failure_message: err.message,
+            reviewer_notes: `Metadata publish validation failed before creating an Astro PR: ${err.message}`,
+          });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'metadata_publish_validation_failed', { claimToken });
+          return finalized;
+        }
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+        return finalize(run, t0, { outcome: 'failed_publish', failure_message: `metadata:${err.message}` });
+      }
+      const finalized = await finalize(run, t0, result.patch);
+      if (result.queue === 'complete') {
+        await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
+      } else {
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || result.notes, { claimToken });
+      }
       return finalized;
     }
 
@@ -563,6 +581,204 @@ class AutonomousRunner {
     } catch { return 0; }
   }
 
+  async _handleMetadataRewriteAction(brief, draft, run) {
+    const spamGate = getTitleMetaSpamGate();
+    if (!spamGate?.evaluateTitleMetaSpam) {
+      return {
+        notes: 'title_meta_spam_gate_unavailable',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'title_meta_spam_gate_unavailable',
+          reviewer_notes: 'Title/meta spam gate was unavailable; route this metadata rewrite manually.',
+          quality_gate_result: { ok: false, error: 'title_meta_spam_gate_unavailable' },
+        },
+      };
+    }
+
+    const gateResult = spamGate.evaluateTitleMetaSpam({
+      title: draft.title,
+      meta_description: draft.meta_description,
+      city: brief.city,
+      service: brief.service,
+      target_keyword: brief.target_keyword,
+    });
+    run.quality_gate_result = {
+      ok: gateResult.ok,
+      hard_failures: gateResult.hard_failures || [],
+      soft_failures: gateResult.soft_failures || [],
+      gate: 'title_meta_spam',
+    };
+
+    if (!gateResult.ok) {
+      return {
+        notes: 'metadata_gate_fail',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'metadata_gate_fail',
+          reviewer_notes: `Title/meta spam gate blocked PR creation: ${(gateResult.hard_failures || []).map((f) => f.code || f.reason).join(', ') || 'failed'}.`,
+        },
+      };
+    }
+
+    const qualityGate = getQualityGate();
+    if (!qualityGate?.evaluate) {
+      return {
+        notes: 'metadata_quality_gate_unavailable',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'metadata_quality_gate_unavailable',
+          reviewer_notes: 'Content quality gate was unavailable; route this metadata rewrite manually.',
+        },
+      };
+    }
+
+    const metadataDraft = {
+      ...draft,
+      url: brief.target_url || brief.page_url || draft.page_url || null,
+      canonical: brief.target_url || brief.page_url || draft.page_url || null,
+      // Metadata-only rewrites intentionally do not alter schema/body, but
+      // the shared quality gate expects a schema-shaped draft for common checks.
+      schema: draft.schema || {},
+      frontmatter: {
+        ...(draft.frontmatter || {}),
+        title: draft.title,
+        meta_description: draft.meta_description,
+      },
+    };
+    const metadataBrief = { ...brief, page_type: 'metadata' };
+    const qualityContext = {
+      siblingTitles: await this._loadSiblingTitlesForMetadata(brief, draft),
+      previewBuildSuccess: true,
+      sitemapHasUrl: true,
+    };
+    let qualityResult;
+    try {
+      qualityResult = qualityGate.evaluate(metadataDraft, metadataBrief, qualityContext);
+    } catch (err) {
+      qualityResult = { ok: false, error: err.message, hard_failures: [{ name: 'metadata_quality_gate_error', reason: err.message }], soft_failures: [] };
+    }
+    run.quality_gate_result = {
+      ...qualityResult,
+      spam_gate: gateResult,
+      gate: 'metadata_quality',
+    };
+
+    const keywordCheckFailed = qualityResult?.checks?.primary_keyword_in_title?.ok === false;
+    if (!qualityResult.ok || keywordCheckFailed) {
+      const forcedHardFailures = keywordCheckFailed
+        ? [{ name: 'primary_keyword_in_title', reason: qualityResult.checks.primary_keyword_in_title.reason || 'failed' }]
+        : [];
+      if (forcedHardFailures.length) {
+        run.quality_gate_result = {
+          ...run.quality_gate_result,
+          ok: false,
+          hard_failures: [
+            ...(Array.isArray(run.quality_gate_result.hard_failures) ? run.quality_gate_result.hard_failures : []),
+            ...forcedHardFailures,
+          ],
+        };
+      }
+      const hard = (qualityResult.hard_failures || []).map((f) => `${f.name}:${f.reason}`).join(', ');
+      const soft = (qualityResult.soft_failures || []).slice(0, 4).map((f) => `${f.name}:${f.reason}`).join(', ');
+      const forced = forcedHardFailures.map((f) => `${f.name}:${f.reason}`).join(', ');
+      return {
+        notes: 'metadata_quality_gate_fail',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'metadata_quality_gate_fail',
+          reviewer_notes: `Metadata quality gate blocked PR creation: hard=${[hard, forced].filter(Boolean).join(', ') || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score ?? 'n/a'}/${qualityResult.min_total_score ?? 'n/a'}.`,
+        },
+      };
+    }
+
+    const trustBuildCount = await this._getTrustBuildCount('rewrite_title_meta').catch(() => 0);
+    run.trust_build_count_after = trustBuildCount + 1;
+
+    if (run.shadow_mode) {
+      return {
+        notes: 'shadow_metadata_pr',
+        patch: {
+          outcome: 'skipped_shadow_mode',
+          skip_reason: 'shadow_would_metadata_pr',
+          reviewer_notes: 'Metadata rewrite passed the title/meta spam gate, but SHADOW_MODE_REWRITE_TITLE_META is still enabled.',
+        },
+      };
+    }
+
+    if (brief.human_review_required) {
+      return {
+        notes: 'brief_requires_human_review',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'brief_requires_human_review',
+          reviewer_notes: brief.human_review_reason || 'Decision router requires manual review before opening a metadata PR.',
+        },
+      };
+    }
+
+    const publisher = getAstroPublisher();
+    if (!publisher?.publishMetadataRewrite) {
+      return {
+        notes: 'metadata_publisher_adapter_unavailable',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'metadata_publisher_adapter_unavailable',
+          reviewer_notes: 'Astro metadata rewrite publisher adapter is unavailable; route this rewrite manually.',
+        },
+      };
+    }
+
+    const t = Date.now();
+    const publishResult = await publisher.publishMetadataRewrite(draft, brief);
+    run.publish_ms = Date.now() - t;
+
+    if (publishResult.status === 'no_changes') {
+      return {
+        queue: 'complete',
+        notes: 'metadata_no_changes',
+        patch: {
+          outcome: 'completed_published',
+          skip_reason: 'metadata_no_changes',
+          published_url: publishResult.url || null,
+          publish_status: publishResult.status,
+          reviewer_notes: 'Metadata rewrite matched existing frontmatter; no Astro PR was needed.',
+        },
+      };
+    }
+
+    return {
+      notes: 'metadata_pr_pending_merge',
+      patch: {
+        outcome: 'completed_pending_review',
+        skip_reason: 'metadata_pr_pending_merge',
+        published_url: null,
+        pending_url: publishResult.url || null,
+        publish_status: publishResult.status || 'pr_open',
+        astro_pr_url: publishResult.pr_url || null,
+        reviewer_notes: publishResult.pr_url
+          ? `Astro metadata PR opened: ${publishResult.pr_url}. Merge after Codex review and preview verification.`
+          : 'Metadata publisher completed without an Astro PR URL; route manually.',
+      },
+    };
+  }
+
+  async _loadSiblingTitlesForMetadata(brief, draft) {
+    const titles = new Set();
+    let corpus = [];
+    try {
+      corpus = await this._loadAstroCorpus({ collections: ['blog', 'services', 'locations'], required: false });
+    } catch {
+      return titles;
+    }
+    const targetUrl = normalizeContentPath(brief.target_url || brief.page_url || draft.page_url || '');
+    for (const page of corpus || []) {
+      if (targetUrl && normalizeContentPath(page.url || '') === targetUrl) continue;
+      const title = extractFrontmatterScalar(page.body, 'title');
+      if (title) titles.add(title.toLowerCase());
+    }
+    return titles;
+  }
+
   async _handleInternalLinksAction(brief, run) {
     if (run.shadow_mode) {
       return {
@@ -863,6 +1079,9 @@ function isDeterministicPublishError(err) {
   const message = String(err?.message || '');
   return [
     /^unsupported autonomous draft for Astro publish:/,
+    /^unsupported metadata rewrite for Astro publish:/,
+    /^could not resolve metadata rewrite target:/,
+    /^Astro file not found for metadata rewrite:/,
     /^autonomous draft missing safe frontmatter slug$/,
     /^autonomous draft canonical is not a valid URL$/,
     /^autonomous draft canonical must match slug /,
@@ -884,6 +1103,28 @@ function envInt(key, defaultValue = null) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
 }
 
+function normalizeContentPath(url) {
+  return String(url || '')
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .replace(/[?#].*$/, '')
+    .replace(/^\/+|\/+$/g, '')
+    .toLowerCase();
+}
+
+function extractFrontmatterScalar(body, key) {
+  const text = String(body || '');
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!match) return null;
+  const escaped = String(key || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const line = match[1].match(new RegExp(`^\\s*${escaped}\\s*:\\s*(.+?)\\s*$`, 'm'));
+  if (!line) return null;
+  let value = line[1].trim().replace(/\s+#.*$/, '').trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value.trim() || null;
+}
+
 function startOfEtDay(date = new Date()) {
   return parseETDateTime(`${etDateString(date)}T00:00`);
 }
@@ -902,6 +1143,8 @@ module.exports._internals = {
   isDeterministicPublishError,
   envBool,
   envInt,
+  normalizeContentPath,
+  extractFrontmatterScalar,
   startOfEtDay,
   startOfEtWeek,
 };

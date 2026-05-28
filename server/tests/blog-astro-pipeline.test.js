@@ -474,6 +474,64 @@ describe('Astro publisher autonomous draft adapter', () => {
       action_type: 'refresh_existing_page',
     })).toBe(false);
   });
+
+  test('opens a frontmatter-only Astro PR for metadata rewrites', async () => {
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue({
+      sha: 'existing-sha',
+      content: [
+        '---',
+        'title: Old Lakewood Ranch Title',
+        'slug: /pest-control-lakewood-ranch-fl/',
+        'meta_description: Old meta description.',
+        'canonical: https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+        '---',
+        '## Existing body',
+        '',
+        'Do not change this body.',
+      ].join('\n'),
+    });
+    gh.putFile.mockResolvedValue({ commit: { sha: 'metadata-sha' } });
+    gh.createPr.mockResolvedValue({
+      number: 55,
+      html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55',
+      head: { sha: 'metadata-head-sha' },
+    });
+    gh.createIssueComment.mockResolvedValue({});
+
+    const result = await AstroPublisher.publishMetadataRewrite({
+      type: 'metadata',
+      title: 'Pest Control in Lakewood Ranch, FL | Waves',
+      meta_description: 'Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.',
+    }, {
+      action_type: 'rewrite_title_meta',
+      target_url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+      target_keyword: 'pest control lakewood ranch fl',
+      city: 'Lakewood Ranch',
+      service: 'pest',
+    });
+
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/services/pest-control-lakewood-ranch-fl.md');
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/services/pest-control-lakewood-ranch-fl.md',
+      sha: 'existing-sha',
+      content: expect.stringContaining('title: Pest Control in Lakewood Ranch, FL | Waves'),
+    }));
+    expect(gh.putFile.mock.calls[0][0].branch).toEqual(expect.stringMatching(/^content\/meta-services-pest-control-lakewood-ranch-fl-/));
+    expect(gh.putFile.mock.calls[0][0].content).toContain('meta_description: Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.');
+    expect(gh.putFile.mock.calls[0][0].content).toContain('Do not change this body.');
+    expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'SEO metadata: Pest Control in Lakewood Ranch, FL | Waves',
+      body: expect.stringContaining('Body, slug, canonical, and schema are intentionally unchanged.'),
+    }));
+    expect(gh.createIssueComment).toHaveBeenCalledWith(55, expect.stringContaining('@codex review'));
+    expect(result).toMatchObject({
+      status: 'pr_open',
+      live: false,
+      pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55',
+      url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+    });
+  });
 });
 
 describe('Pages poll merged-to-live transition', () => {
