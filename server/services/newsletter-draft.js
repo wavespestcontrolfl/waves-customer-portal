@@ -57,100 +57,283 @@ function formatEventBlock(events) {
 }
 
 /**
- * Build the flagship system prompt. Copied verbatim from the /draft-ai
- * handler so this module is self-contained.
+ * Build the flagship system prompt. Produces structured JSON — each event
+ * is its own object so we can assemble Beehiiv-quality HTML with GIFs,
+ * styled metadata blocks, and per-event sections server-side.
  */
 function buildFlagshipSystemPrompt(voice, month) {
   return `You write the Waves weekly local events newsletter — "Fresh This Week from North Port to Tampa."
 
-This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide from North Port to Tampa, written like a friend texting "yo, here's what's actually worth doing."
-
-The newsletter leads with local events. Waves pest/lawn/homeowner content appears only as a short useful sidebar (Homeowner Minute) and a soft CTA at the end.
+This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide written like a friend texting "yo, here's what's actually worth doing."
 
 CURRENT MONTH: ${month}
 
 SWFL SEASONAL CONTEXT (pick what's relevant):
-- Local events & seasonal rhythms by month:
-  • Jan–Feb: snowbird season peak, cooler mornings, dry lawns, red tide drift
-  • Mar: spring break traffic, love bugs starting, citrus bloom
-  • Apr: Bradenton Blues Festival week, baseball spring training tail, lawn pre-emergents
-  • May: DeSoto Heritage Festival & Grand Parade (Bradenton), mosquito season ramp, no-see-um peak at dawn/dusk
-  • Jun: hurricane season begins (Jun 1), afternoon thunderstorms daily, nitrogen blackout begins on lawns (Jun–Sept by county ordinance)
-  • Jul: 4th of July on the waterfront, peak rainy season, German roach pressure, palmetto bugs indoors
-  • Aug: back-to-school in Manatee/Sarasota schools, peak hurricane risk month, chinch bug damage on St. Augustine
-  • Sep: hurricane peak, Siesta Key Crystal Classic (sand sculpture), subterranean termite swarms after storms
-  • Oct: snowbirds return, cooler nights, rodent season begins (mice seeking warmth), Halloween on the barrier islands
-  • Nov: Sarasota Season of Sculpture, turkey trots, last major hurricane risk tapers, winter annuals go in
-  • Dec: holidays, boat parades (Downtown Bradenton Riverwalk, Venice), cooler weather drives indoor pest activity
-- SWFL pests by season: subterranean termites (swarm after rain), German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs on St. Augustine, sod webworms
+- Jan–Feb: snowbird peak, dry lawns, red tide drift
+- Mar: spring break, love bugs, citrus bloom
+- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents
+- May: DeSoto Heritage Festival, mosquito ramp, no-see-um peak
+- Jun: hurricane season begins, daily thunderstorms, nitrogen blackout on lawns
+- Jul: 4th of July, peak rainy season, German roach pressure, palmetto bugs
+- Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine
+- Sep: hurricane peak, Siesta Key Crystal Classic, termite swarms after storms
+- Oct: snowbirds return, rodent season begins, Halloween on barrier islands
+- Nov: Sarasota Season of Sculpture, turkey trots, winter annuals
+- Dec: boat parades, cooler weather drives indoor pest activity
+- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms
 
 VOICE:
-- Irreverent but not mean
-- Energetic but not chaotic
-- Specific to this week's events
-- Conversational, like a local friend
-- Short, scannable, and useful
-- Never corporate
-- Owner-operator energy: "we", "our team", first names welcome
+- Irreverent but not mean. Energetic but not chaotic.
+- Specific to this week's events. Conversational — local friend energy.
+- Short, scannable, useful. Never corporate.
+- Formatting: use **bold** for key facts/venue names, _italic_ for flavor/asides.
+- Em-dashes and parenthetical asides add personality.
 
-SUBJECT LINES:
-- Punchy, max ${voice.subjectLineRules.maxLength} chars
-- FOMO-driven, specific to this week's event mix
-- Can be playful, emoji-led, or slightly ridiculous when appropriate
-- Never generic ("Monthly Newsletter", "Weekly Update")
-- Good examples: ${voice.subjectLineRules.examples.map(e => `"${e}"`).join(', ')}
+SUBJECT LINES: Punchy, max ${voice.subjectLineRules.maxLength} chars, FOMO-driven, specific to this week. Good examples: ${voice.subjectLineRules.examples.map(e => `"${e}"`).join(', ')}
 
-EVENT BLURBS:
-- Include city, date/day, venue/location when provided
-- Explain in one sentence why it is worth going
-- Do NOT invent events — use only the approved event records provided
-- Do NOT change dates, times, prices, venues, or URLs from the approved records
-- Do NOT include stale recurring events unless explicitly marked as fresh
+NEVER WRITE: ${voice.bannedCorporatePhrases.map(p => `"${p}"`).join(', ')}
 
-HOMEOWNER MINUTE:
-- One useful seasonal tip (pest, lawn, or home prep)
-- Max ~90 words
-- Genuinely useful, not salesy
-- No scare tactics, no hard pitch
-- Must stand on its own without selling Waves
+EVENT RULES:
+- Use ONLY the approved event records provided. Do NOT invent events.
+- Do NOT change dates, times, prices, venues, or URLs.
+- Each event gets a catchy/punny title (not just the raw event name).
+- Each event gets a unique thematic emoji (no repeats between events).
+- gifSearchTerm: 2-4 word Giphy search to find a mood-matching reaction GIF.
+- gifCaption: 1-sentence italic quip below the GIF (humorous, specific to the event).
+- description: 1-3 sentences, conversational, says WHY someone would actually go.
+- highlights: 3-5 bullet points of what to expect (optional — skip if event is simple).
+- proTip: insider tip prefixed with "Pro tip:" (optional — only if genuinely useful).
+- closingLine: punchy one-liner CTA to wrap the event (imperative, mix bold+italic).
 
-SIGN-OFF: Must end with "${voice.signoff}"
+HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, home prep). Max ~90 words. Genuinely useful, not salesy.
 
-NEVER WRITE:
-${voice.bannedCorporatePhrases.map(p => `- "${p}"`).join('\n')}
+SIGN-OFF: "${voice.signoff}"
 
-FORMAT: HTML body only (no <html>/<head>/<body> wrapper, no unsubscribe footer).
-Use <h2> for section headers, <p> for paragraphs, <strong> for emphasis, <ul><li> for lists.
+P.S. JOKE: "If you loved this, forward it to a friend who [humorous qualifier]. If you didn't... [funny punchline]." End with thematic emoji.
 
-REQUIRED SECTIONS (produce all of these):
-1. local_intro — 1-2 sentence casual hook for the week
-2. fresh_this_week — 4-6 top event picks (one-time, annual, opening weekends)
-3. just_starting — 1-2 new recurring series or seasonal launches
-4. weekend_picks — 2-3 Friday–Sunday highlights (can overlap with fresh_this_week)
-5. family_or_low_key_pick — one family-friendly or low-effort option
-6. road_trip_pick — one event worth the drive from outside the reader's immediate zone
-7. homeowner_minute — short seasonal tip from Waves
-8. waves_cta — soft call to action (book, call, reply)
-
-Return STRICT JSON with these keys:
+Return STRICT JSON (no HTML, no prose outside the JSON):
 {
   "subjectVariants": ["string", "string", "string"],
-  "selectedSubject": "string (your best pick from subjectVariants)",
-  "previewText": "string, 50-110 chars, complements subject without repeating",
-  "sections": {
-    "local_intro": "HTML string",
-    "fresh_this_week": "HTML string",
-    "just_starting": "HTML string",
-    "weekend_picks": "HTML string",
-    "family_or_low_key_pick": "HTML string",
-    "road_trip_pick": "HTML string",
-    "homeowner_minute": "HTML string",
-    "waves_cta": "HTML string"
-  },
-  "htmlBody": "string — all sections assembled into one HTML body",
-  "textBody": "string — plain-text version of the same content"
+  "selectedSubject": "string",
+  "previewText": "string, 50-110 chars",
+  "greeting": "string (e.g. 'Hey there!')",
+  "introText": "string (2-4 sentences setting the week's vibe, use **bold** and _italic_)",
+  "introGifTerm": "string (Giphy search for mood-setting intro GIF)",
+  "transitionLine": "string (bold rallying one-liner before events, e.g. 'Let's go exploring. 👇')",
+  "events": [
+    {
+      "emoji": "string (single thematic emoji)",
+      "title": "string (catchy/punny, not raw event name)",
+      "gifSearchTerm": "string (2-4 word Giphy search)",
+      "gifCaption": "string (1-sentence italic quip)",
+      "description": "string (1-3 sentences, conversational)",
+      "date": "string (e.g. 'Saturday, May 31 @ 7:00 PM')",
+      "location": "string (venue + city)",
+      "address": "string or null (street address)",
+      "admission": "string or null (price/ticket info)",
+      "eventUrl": "string or null",
+      "highlights": ["string"] or null,
+      "proTip": "string or null",
+      "closingLine": "string (punchy wrap-up)"
+    }
+  ],
+  "homeownerMinute": "string (the tip text, plain — no HTML)",
+  "closingEmoji": "string",
+  "closingHeading": "string (recap title)",
+  "closingText": "string (1-2 paragraphs wrapping the week)",
+  "signoff": "string",
+  "ps": "string or null"
+}`;
 }
-No prose outside the JSON.`;
+
+// ── Beehiiv-Quality Newsletter Assembly ──────────────────────────────
+//
+// Renders structured event JSON into styled email HTML matching the
+// visual quality of the Beehiiv "Fresh This Week" newsletters: per-event
+// GIFs, branded dividers, emoji metadata blocks, TOC with jump links.
+
+const COLORS = {
+  navy: '#1B2C5B',
+  blue: '#009CDE',
+  gold: '#FFD700',
+  muted: '#8B8680',
+  cardBg: '#FAFAF8',
+  homeownerBg: '#F0F7FA',
+  rule: '#E7E2D7',
+};
+
+const WAVES_DIVIDER_GIF = 'https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/952b11dc-99a2-4de3-8def-481a1c34f8d7/giphy.gif';
+async function searchGiphy(term) {
+  if (!term) return null;
+  const apiKey = process.env.GIPHY_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(term)}&limit=1&rating=pg`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const gif = data.data?.[0];
+    return gif?.images?.downsized_medium?.url || gif?.images?.original?.url || null;
+  } catch { return null; }
+}
+
+function slugify(text) {
+  return (text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+}
+
+function dividerHtml() {
+  return `<div style="text-align:center;margin:28px 0;">
+<a href="https://www.wavespestcontrol.com/" style="text-decoration:none;">
+<img src="${WAVES_DIVIDER_GIF}" alt="" width="100" style="width:100px;height:auto;display:inline-block;" />
+</a></div>`;
+}
+
+function gifBlock(url, caption) {
+  if (!url) return '';
+  let html = `<div style="text-align:center;margin:12px 0 8px 0;">
+<img src="${url}" alt="" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+</div>`;
+  if (caption) {
+    html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${caption}</p>`;
+  }
+  return html;
+}
+
+function markdownToHtml(text) {
+  if (!text) return '';
+  return text
+    .replace(/\*\*_([^_]+)_\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/_\*\*([^*]+)\*\*_/g, '<em><strong>$1</strong></em>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/_([^_]+)_/g, '<em>$1</em>');
+}
+
+async function assembleBeehiivNewsletter(draft) {
+  const parts = [];
+  const events = draft.events || [];
+
+  // ── Table of Contents ──
+  const tocItems = events.map(ev =>
+    `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${ev.emoji || '🎯'} ${markdownToHtml(ev.title)}</a></li>`
+  );
+  if (draft.homeownerMinute) {
+    tocItems.push(`<li style="margin:0 0 6px 0;"><a href="#homeowner-minute" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🏠 Homeowner Minute</a></li>`);
+  }
+  parts.push(`<div style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
+<p style="margin:0 0 10px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
+<ul style="list-style:none;padding:0;margin:0;font-size:14px;line-height:2;">${tocItems.join('\n')}</ul>
+</div>`);
+
+  // ── Intro GIF ──
+  const introGif = await searchGiphy(draft.introGifTerm);
+  if (introGif) parts.push(gifBlock(introGif));
+
+  // ── Greeting + Intro ──
+  if (draft.greeting) {
+    parts.push(`<p style="margin:0 0 4px 0;font-size:16px;line-height:1.6;">👋 <strong><em>${markdownToHtml(draft.greeting)}</em></strong></p>`);
+  }
+  if (draft.introText) {
+    parts.push(`<p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.introText)}</p>`);
+  }
+  if (draft.transitionLine) {
+    parts.push(`<p style="margin:0 0 8px 0;font-size:15px;line-height:1.6;"><strong>${markdownToHtml(draft.transitionLine)}</strong></p>`);
+  }
+
+  // ── Event Sections ──
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    parts.push(dividerHtml());
+
+    // Heading
+    const anchorId = `evt-${slugify(ev.title)}`;
+    parts.push(`<h2 id="${anchorId}" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${ev.emoji || '🎯'} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
+
+    // GIF + caption
+    const eventGif = await searchGiphy(ev.gifSearchTerm);
+    if (eventGif) parts.push(gifBlock(eventGif, ev.gifCaption));
+
+    // Description
+    if (ev.description) {
+      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(ev.description)}</p>`);
+    }
+
+    // Metadata block
+    const meta = [];
+    if (ev.date) meta.push(`📅 <strong>${ev.date}</strong>`);
+    if (ev.location) {
+      const loc = ev.address ? `${ev.location} (${ev.address})` : ev.location;
+      meta.push(`📍 <em>${loc}</em>`);
+    }
+    if (ev.admission) meta.push(`🎟️ ${markdownToHtml(ev.admission)}`);
+    if (ev.eventUrl) {
+      meta.push(`🔗 <a href="${ev.eventUrl}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">Tickets &amp; Info</a>`);
+    }
+    if (meta.length) {
+      parts.push(`<div style="margin:0 0 14px 0;padding:12px 16px;background:${COLORS.cardBg};border-radius:8px;font-size:14px;line-height:2;">\n${meta.join('<br/>\n')}\n</div>`);
+    }
+
+    // Highlights / What to Expect
+    const hl = Array.isArray(ev.highlights) ? ev.highlights : (typeof ev.highlights === 'string' ? [ev.highlights] : []);
+    if (hl.length) {
+      parts.push(`<p style="margin:0 0 6px 0;font-size:14px;font-weight:600;">What to expect:</p>`);
+      const bullets = hl.map(h =>
+        `<li style="margin:0 0 6px 0;padding-left:4px;font-size:14px;line-height:1.6;">• <em>${markdownToHtml(h)}</em></li>`
+      ).join('\n');
+      parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${bullets}</ul>`);
+    }
+
+    // Pro tip
+    if (ev.proTip) {
+      parts.push(`<p style="margin:0 0 14px 0;font-size:14px;line-height:1.5;">🚨 <strong>Pro tip:</strong> <em>${markdownToHtml(ev.proTip)}</em></p>`);
+    }
+
+    // Closing line
+    if (ev.closingLine) {
+      parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(ev.closingLine)}</p>`);
+    }
+  }
+
+  // ── Homeowner Minute ──
+  if (draft.homeownerMinute) {
+    parts.push(dividerHtml());
+    parts.push(`<h2 id="homeowner-minute" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
+    parts.push(`<div style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
+<p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
+</div>`);
+  }
+
+  // ── Closing ──
+  if (draft.closingHeading || draft.closingText) {
+    parts.push(dividerHtml());
+    if (draft.closingHeading) {
+      parts.push(`<h2 style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">${draft.closingEmoji || '📝'} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+    }
+    if (draft.closingText) {
+      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText)}</p>`);
+    }
+  }
+
+  // ── Sign-off ──
+  parts.push(`<p style="margin:20px 0 4px 0;font-size:15px;line-height:1.6;"><strong>Catch you out there this week.</strong></p>`);
+  const signoffText = draft.signoff || '— The Waves crew';
+  parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
+
+  // ── P.S. ──
+  if (draft.ps) {
+    parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(draft.ps)}</em></p>`);
+  }
+
+  // ── Share Banner ──
+  parts.push(`<div style="margin:28px 0 0 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;text-align:center;">
+<p style="margin:0 0 8px 0;font-size:13px;color:${COLORS.muted};">Know someone who'd dig this? Forward it or share the link 👇</p>
+<p style="margin:0;">
+<a href="https://www.facebook.com/wavespestcontrol" style="text-decoration:none;margin:0 8px;font-size:20px;">📘</a>
+<a href="https://www.instagram.com/wavespestcontrol" style="text-decoration:none;margin:0 8px;font-size:20px;">📸</a>
+<a href="https://www.youtube.com/@wavespestcontrol" style="text-decoration:none;margin:0 8px;font-size:20px;">▶️</a>
+</p>
+</div>`);
+
+  return parts.join('\n\n');
 }
 
 /**
@@ -227,7 +410,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   // 3. Call Claude API
   const response = await anthropic.messages.create({
     model: MODELS.WORKHORSE,
-    max_tokens: 3000,
+    max_tokens: 4096,
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   });
@@ -266,30 +449,17 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     draft = JSON.parse(repairedJson);
   }
 
-  // 4b. Assemble htmlBody from sections if missing (JSON repair may lose it)
-  if (!draft.htmlBody && draft.sections) {
-    const sectionOrder = [
-      'local_intro', 'fresh_this_week', 'just_starting', 'weekend_picks',
-      'family_or_low_key_pick', 'road_trip_pick', 'homeowner_minute', 'waves_cta',
-    ];
-    const sectionLabels = {
-      fresh_this_week: 'Fresh This Week',
-      just_starting: 'Just Starting',
-      weekend_picks: 'Weekend Picks',
-      family_or_low_key_pick: 'Family / Low-Key Pick',
-      road_trip_pick: 'Road Trip Pick',
-      homeowner_minute: 'Homeowner Minute',
-      waves_cta: '',
-    };
-    const parts = [];
-    for (const key of sectionOrder) {
-      const html = draft.sections[key];
-      if (!html) continue;
-      const label = sectionLabels[key];
-      if (label) parts.push(`<h2>${label}</h2>\n${html}`);
-      else parts.push(html);
-    }
-    draft.htmlBody = parts.join('\n\n');
+  // 4b. Assemble Beehiiv-quality HTML from structured event data + Giphy GIFs
+  if (draft.events?.length) {
+    draft.htmlBody = await assembleBeehiivNewsletter(draft);
+  } else if (draft.sections) {
+    // Fallback: old-style sections format
+    const keys = ['local_intro', 'fresh_this_week', 'just_starting', 'weekend_picks',
+      'family_or_low_key_pick', 'road_trip_pick', 'homeowner_minute', 'waves_cta'];
+    draft.htmlBody = keys.map(k => {
+      const v = draft.sections[k];
+      return (v && typeof v === 'string') ? v : null;
+    }).filter(Boolean).join('\n\n');
   }
 
   if (!draft.textBody && draft.htmlBody) {
