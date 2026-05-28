@@ -8,7 +8,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { evaluate } = require('../services/content/uniqueness-gate');
+const { evaluate, evaluateBlog } = require('../services/content/uniqueness-gate');
 const {
   tokenize, shingles, jaccard, extractCtaUrls,
   checkUniqueLocalProblem, checkUniqueCityContext,
@@ -317,5 +317,47 @@ describe('boilerplate-aware similarity', () => {
     const r = checkNotTemplateSwap(draft, brief(), [sibling]);
     expect(r.ok).toBe(false);
     expect(r.similarity).toBeGreaterThan(0.55);
+  });
+});
+
+describe('evaluateBlog (supporting-blog dedup)', () => {
+  const post = (city, bug) => ({
+    url: `/blog/${bug}-${city}/`,
+    body: `Spotting ${bug} in ${city} homes: seasonal pressure, where they nest, and the local treatment steps our ${city} technicians actually use this time of year.`,
+  });
+
+  test('passes when no blog siblings exist (nothing to dedup against)', () => {
+    const r = evaluateBlog(post('venice', 'roaches'), brief(), { siblingPages: [] });
+    expect(r.ok).toBe(true);
+    expect(r.skipped).toBe('no_blog_siblings_to_compare');
+  });
+
+  test('passes for a genuinely differentiated blog', () => {
+    const draft = post('venice', 'roaches');
+    const siblings = [post('bradenton', 'termites'), post('sarasota', 'fire ants')];
+    const r = evaluateBlog(draft, brief(), { siblingPages: siblings });
+    expect(r.ok).toBe(true);
+  });
+
+  test('flags a near-duplicate blog (only the topic city swapped)', () => {
+    const tmpl = (city) => `How to stop German cockroaches in ${city}: they breed behind the dishwasher and under the sink, and the same gel-bait plus sanitation routine clears them in every ${city} kitchen we treat.`;
+    const draft = { url: '/blog/roaches-venice/', body: tmpl('Venice') };
+    const sibling = { url: '/blog/roaches-sarasota/', body: tmpl('Sarasota') };
+    const r = evaluateBlog(draft, brief(), { siblingPages: [sibling] });
+    expect(r.ok).toBe(false);
+    expect(r.failed_reasons[0]).toMatch(/not_duplicate_blog/);
+  });
+
+  test('uses a stricter default threshold than city-service (0.45 vs 0.55)', () => {
+    const { BLOG_UNIQUENESS_JACCARD_MAX } = require('../services/content/uniqueness-gate');
+    expect(BLOG_UNIQUENESS_JACCARD_MAX).toBeLessThan(0.55);
+  });
+
+  test('honors a caller-supplied maxJaccard override', () => {
+    const draft = post('venice', 'roaches');
+    const sibling = post('bradenton', 'termites');
+    // An impossibly strict threshold flags even differentiated posts.
+    const strict = evaluateBlog(draft, brief(), { siblingPages: [sibling], maxJaccard: 0.001 });
+    expect(strict.ok).toBe(false);
   });
 });

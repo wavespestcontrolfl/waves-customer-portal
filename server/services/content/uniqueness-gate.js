@@ -198,7 +198,7 @@ function checkUniqueLocalProof(draft, brief) {
   return { ok: true };
 }
 
-function checkNotTemplateSwap(draft, brief, siblingPages) {
+function checkNotTemplateSwap(draft, brief, siblingPages, maxJaccard = THRESHOLDS.uniquenessJaccardMax) {
   if (!siblingPages || !siblingPages.length) return { ok: true, reason: 'no_siblings_to_compare' };
   // Compare on boilerplate-excluded text so shared CTAs/disclaimers don't
   // inflate similarity between two genuinely-differentiated city pages.
@@ -213,10 +213,10 @@ function checkNotTemplateSwap(draft, brief, siblingPages) {
       mostSimilarUrl = sib.url;
     }
   }
-  if (maxSimilarity > THRESHOLDS.uniquenessJaccardMax) {
+  if (maxSimilarity > maxJaccard) {
     return {
       ok: false,
-      reason: `jaccard_similarity_${maxSimilarity.toFixed(2)}_vs_${mostSimilarUrl}_exceeds_${THRESHOLDS.uniquenessJaccardMax}`,
+      reason: `jaccard_similarity_${maxSimilarity.toFixed(2)}_vs_${mostSimilarUrl}_exceeds_${maxJaccard}`,
       similarity: maxSimilarity,
       most_similar_url: mostSimilarUrl,
     };
@@ -314,7 +314,28 @@ function evaluate(draft, brief, { siblingPages = [] } = {}) {
   };
 }
 
-module.exports = { evaluate };
+// Supporting-blog uniqueness. Blogs are NOT landing pages, so they skip the
+// city/service-specific landing checks above; the real risk for an
+// auto-published blog is being a near-duplicate of something already in the
+// ~157-post corpus. Run ONLY the shingle-Jaccard dedup, with a stricter
+// threshold than city-service (blog corpus saturation is far higher, and
+// blogs share less mandatory boilerplate so genuine overlap reads higher).
+const BLOG_UNIQUENESS_JACCARD_MAX = Number(process.env.AUTONOMOUS_BLOG_JACCARD_MAX) || 0.45;
+
+function evaluateBlog(draft, brief, { siblingPages = [], maxJaccard = BLOG_UNIQUENESS_JACCARD_MAX } = {}) {
+  if (!draft) throw new Error('uniqueness-gate: draft required');
+  const dedup = checkNotTemplateSwap(draft, brief || {}, siblingPages, maxJaccard);
+  return {
+    ok: dedup.ok,
+    checks: { not_duplicate_blog: dedup },
+    failed_count: dedup.ok ? 0 : 1,
+    failed_reasons: dedup.ok ? [] : [`not_duplicate_blog: ${dedup.reason || 'failed'}`],
+    max_jaccard: maxJaccard,
+    skipped: siblingPages.length ? undefined : 'no_blog_siblings_to_compare',
+  };
+}
+
+module.exports = { evaluate, evaluateBlog, BLOG_UNIQUENESS_JACCARD_MAX };
 module.exports._internals = {
   tokenize, shingles, jaccard, extractCtaUrls, stripBoilerplate,
   checkUniqueLocalProblem,

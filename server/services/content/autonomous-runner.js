@@ -457,17 +457,33 @@ class AutonomousRunner {
       }
     }
 
-    // 4. Uniqueness gate (only applies to certain page types).
+    // 4. Uniqueness gate. City-service/customer-question run the full
+    //    landing-page uniqueness suite. Supporting blogs (opt-in via
+    //    AUTONOMOUS_CONTENT_BLOG_UNIQUENESS) run a dedup-only check vs the
+    //    blog corpus so an auto-published blog can't be a near-duplicate of
+    //    something already published.
     const uniquenessGate = getUniquenessGate();
     const needsUniquenessGate = brief.page_type === 'city-service' || brief.page_type === 'customer-question';
+    const needsBlogUniqueness = !needsUniquenessGate
+      && (brief.page_type === 'supporting-blog' || run.action_type === 'new_supporting_blog')
+      && envBool('AUTONOMOUS_CONTENT_BLOG_UNIQUENESS', false);
     let uniquenessResult = { ok: true, skipped: 'not_applicable' };
-    if (!uniquenessGate && needsUniquenessGate) {
+    if (!uniquenessGate && (needsUniquenessGate || needsBlogUniqueness)) {
       uniquenessResult = { ok: false, error: 'uniqueness_gate_unavailable' };
     } else if (uniquenessGate && needsUniquenessGate) {
       const t4 = Date.now();
       try {
         const siblingPages = await this._loadSiblingPages(brief, { required: true });
         uniquenessResult = uniquenessGate.evaluate(draft, brief, { siblingPages });
+      } catch (err) {
+        uniquenessResult = { ok: false, error: err.message };
+      }
+      run.uniqueness_gate_ms = Date.now() - t4;
+    } else if (uniquenessGate && needsBlogUniqueness) {
+      const t4 = Date.now();
+      try {
+        const siblingPages = await this._loadBlogCorpus({ required: true });
+        uniquenessResult = uniquenessGate.evaluateBlog(draft, brief, { siblingPages });
       } catch (err) {
         uniquenessResult = { ok: false, error: err.message };
       }
@@ -741,12 +757,54 @@ class AutonomousRunner {
       if (run.outcome === 'skipped_no_opportunity') break;
       if (String(run.outcome || '').startsWith('failed')) break;
     }
+    await this._sendDailyDigestSms(runs).catch((err) => {
+      logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
+    });
     return {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
       limit: batchLimit,
       runs,
     };
+  }
+
+  /**
+   * After the daily batch, text the operator a one-line summary so an
+   * unattended auto-publishing engine isn't a black box. Opt-in via
+   * AUTONOMOUS_CONTENT_DIGEST_SMS=true; routed as an internal_alert so it
+   * respects the OWNER_SMS_DISABLED kill switch. Stays silent on a
+   * nothing-happened day (all skipped_no_opportunity) to avoid noise.
+   */
+  async _sendDailyDigestSms(runs) {
+    if (!envBool('AUTONOMOUS_CONTENT_DIGEST_SMS', false)) return;
+    const real = (runs || []).filter((r) => r && r.outcome !== 'skipped_no_opportunity');
+    const published = real.filter((r) => r.outcome === 'completed_published').length;
+    const review = real.filter((r) => r.outcome === 'completed_pending_review').length;
+    const gated = real.filter((r) => r.outcome === 'skipped_gate_fail').length;
+    const failed = real.filter((r) => String(r.outcome || '').startsWith('failed')).length;
+    if (published + review + gated + failed === 0) return; // nothing notable today
+
+    const reasons = {};
+    for (const r of real) {
+      const key = r.skip_reason || r.failure_message;
+      if (key) reasons[key] = (reasons[key] || 0) + 1;
+    }
+    const topReasons = Object.entries(reasons)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([k, v]) => `${k}×${v}`)
+      .join(', ');
+    const liveUrls = real.map((r) => r.published_url).filter(Boolean);
+
+    const parts = [`Waves content engine: ${published} published, ${review} to review, ${gated} gated, ${failed} failed.`];
+    if (topReasons) parts.push(`Why: ${topReasons}.`);
+    if (liveUrls.length) parts.push(`Live: ${liveUrls.slice(0, 2).join(' ')}`);
+    const body = parts.join(' ');
+
+    const twilio = require('../twilio');
+    const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
   }
 
   // ── internals ────────────────────────────────────────────────────
@@ -803,6 +861,23 @@ class AutonomousRunner {
       const corpus = await this._loadAstroCorpus({ collections: ['services', 'locations'], required });
       const service = (brief.service || '').toLowerCase();
       return corpus.filter((p) => service && p.file.toLowerCase().includes(service));
+    } catch (err) {
+      if (required) throw err;
+      return [];
+    }
+  }
+
+  async _loadBlogCorpus({ required = false } = {}) {
+    // All published blog posts, for supporting-blog dedup. Fail-closed when
+    // required: an unverifiable corpus must not let a possible duplicate
+    // through (the run is skipped/parked and retried next cycle).
+    const planner = getLinkPlanner();
+    if (!planner?.loadAstroCorpus && !planner?.loadAstroCorpusFromGitHub) {
+      if (required) throw new Error('blog_corpus_loader_unavailable');
+      return [];
+    }
+    try {
+      return await this._loadAstroCorpus({ collections: ['blog'], required });
     } catch (err) {
       if (required) throw err;
       return [];
@@ -1413,6 +1488,12 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       failure_message: run.failure_message || null,
       uniqueness_gate_result: JSON.stringify(run.uniqueness_gate_result || {}),
       quality_gate_result: JSON.stringify(run.quality_gate_result || {}),
+      claims_ledger_result: JSON.stringify(run.claims_ledger_result || {}),
+      content_guardrails_result: JSON.stringify(run.content_guardrails_result || {}),
+      seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),
+      facts_sufficiency: JSON.stringify(run.facts_sufficiency || {}),
+      protected_check: JSON.stringify(run.protected_check || {}),
+      seo_completion_gate_ms: run.seo_completion_gate_ms || null,
       draft_payload: JSON.stringify(run.draft_payload || {}),
       agent_id: run.agent_id || null,
       agent_session_id: run.agent_session_id || null,
