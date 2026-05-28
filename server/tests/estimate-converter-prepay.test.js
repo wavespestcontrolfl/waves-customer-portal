@@ -3,6 +3,7 @@ const {
   countTierQualifyingRecurringServices,
   determineTier,
   hasWaveGuardSetupService,
+  nonDiscountableRecurringAnnualFloor,
   resolveAnnualPrepayDraftAmount,
   shouldCreateDraftInvoiceForRecurring,
 } = require('../services/estimate-converter');
@@ -73,5 +74,29 @@ describe('estimate converter annual prepay amount', () => {
       billingTerm: 'prepay_annual',
       recurringServices: lawnOnly,
     })).toBe(true);
+  });
+
+  test('annual prepay floor includes non-discountable Lawn V2 net floor lines', () => {
+    const estimateData = {
+      lineItems: [
+        {
+          service: 'lawn_care',
+          annual: 774,
+          annualAfterDiscount: 774,
+          discount: {
+            discountable: false,
+            policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+          },
+        },
+        {
+          service: 'pest_control',
+          annual: 468,
+          annualAfterDiscount: 421.2,
+          discount: { discountable: true },
+        },
+      ],
+    };
+
+    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(774);
   });
 });

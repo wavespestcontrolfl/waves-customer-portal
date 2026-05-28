@@ -37,6 +37,25 @@ function mergePlainObject(target, value) {
   Object.assign(target, value);
 }
 
+function deepMergePlainObject(target, value) {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  for (const [key, child] of Object.entries(value)) {
+    if (
+      target[key] &&
+      child &&
+      typeof target[key] === 'object' &&
+      typeof child === 'object' &&
+      !Array.isArray(target[key]) &&
+      !Array.isArray(child)
+    ) {
+      deepMergePlainObject(target[key], child);
+    } else {
+      target[key] = child;
+    }
+  }
+}
+
 function isFiniteNumber(value) {
   return Number.isFinite(Number(value));
 }
@@ -660,6 +679,10 @@ async function syncConstantsFromDB(dbInstance) {
       constants.TREE_SHRUB.directCostRatioTarget = config.global_margin_target_ts.value;
     }
     if (config.global_conditional_ceiling?.value) constants.GLOBAL.CONDITIONAL_CEILING = config.global_conditional_ceiling.value;
+
+    if (config.lawn_pricing_v2) {
+      deepMergePlainObject(constants.LAWN_PRICING_V2, config.lawn_pricing_v2);
+    }
 
     // ── Pest Control ─────────────────────────────────────────
     if (config.pest_base) {

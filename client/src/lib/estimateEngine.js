@@ -328,6 +328,24 @@ function hasAnySelectedFlag(input = {}, flags = []) {
 
 const LAWN_TABLE_MAX_SQFT = 20000;
 const LAWN_FREQS = [4, 6, 9, 12];
+const LAWN_PRICING_V2 = {
+  targetCollectedMarginFloor: 0.55,
+  pricingMode: 'FIFTY_FIVE_MARGIN_FLOOR',
+  laborRateLoaded: 35,
+  equipmentReservePerVisit: 0,
+  adminAnnualDefault: 51,
+  callbackReservePerVisitDefault: 2,
+  laborMinutesBase: 12,
+  laborMinutesPer1000Sqft: 2.5,
+  defaultRouteDensity: 'DENSE',
+  routeDensityMinutes: { DENSE: 5, NORMAL: 10, LOOSE: 15, SPARSE: 20 },
+};
+const LAWN_MATERIAL_BUDGETS = {
+  st_augustine: { 4: 64, 6: 83, 9: 141, 12: 205 },
+  bermuda: { 4: 55, 6: 79, 9: 140, 12: 215 },
+  zoysia: { 4: 60, 6: 82, 9: 148, 12: 178 },
+  bahia: { 4: 45, 6: 68, 9: 95, 12: 115 },
+};
 const LAWN_PRICES = {
   st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,39,52,76,100],[3000,39,52,76,100],[3500,41,55,80,106],[4000,43,57,84,111],[5000,47,63,92,123],[6000,51,68,100,135],[7000,54,73,109,146],[8000,58,78,117,158],[10000,65,88,133,182],[12000,73,98,150,205],[15000,84,113,175,240],[20000,102,138,216,298]] },
   bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,42,57,84,113],[4000,42,57,84,113],[5000,45,62,92,125],[6000,48,67,100,137],[7000,52,71,108,149],[8000,55,76,117,161],[10000,62,86,133,186],[12000,68,96,149,210],[15000,78,110,174,246],[20000,95,135,215,307]] },
@@ -1000,6 +1018,34 @@ function lawnLookup(lp, sf, freqIdx) {
   return { monthly: pts[pts.length - 1][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
 }
 
+function calcLawnFloorPrice(sf, grassType, visits) {
+  const turfK = Math.max(0, Number(sf) || 0) / 1000;
+  const budget = LAWN_MATERIAL_BUDGETS[grassType] || LAWN_MATERIAL_BUDGETS.st_augustine;
+  const annualMaterial = (budget[visits] || 100) * Math.max(0.6, Math.min(2.5, (Number(sf) || 0) / 4500));
+  const laborMinutesPerVisit = LAWN_PRICING_V2.laborMinutesBase + turfK * LAWN_PRICING_V2.laborMinutesPer1000Sqft;
+  const annualLabor = visits * LAWN_PRICING_V2.laborRateLoaded * laborMinutesPerVisit / 60;
+  const annualDrive = visits * LAWN_PRICING_V2.laborRateLoaded * LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity] / 60;
+  const annualCallbackReserve = visits * LAWN_PRICING_V2.callbackReservePerVisitDefault;
+  const annualCost = annualMaterial + annualLabor + annualDrive + annualCallbackReserve + LAWN_PRICING_V2.adminAnnualDefault;
+  const minimumCollectedAnnualPriceFor55 = Math.round((annualCost / (1 - LAWN_PRICING_V2.targetCollectedMarginFloor)) * 100) / 100;
+  const pa = Math.ceil(minimumCollectedAnnualPriceFor55 / visits);
+  const ann = pa * visits;
+  return {
+    pa,
+    ann,
+    mo: Math.round(ann / 12 * 100) / 100,
+    costFloorAnnual: minimumCollectedAnnualPriceFor55,
+    costs: {
+      annualMaterial: Math.round(annualMaterial * 100) / 100,
+      annualLabor: Math.round(annualLabor * 100) / 100,
+      annualDrive: Math.round(annualDrive * 100) / 100,
+      annualCallbackReserve: Math.round(annualCallbackReserve * 100) / 100,
+      annualAdmin: LAWN_PRICING_V2.adminAnnualDefault,
+      total: Math.round(annualCost * 100) / 100,
+    },
+  };
+}
+
 /* ── main engine ────────────────────────────────────────────── */
 
 export function calculateEstimate(inputs) {
@@ -1520,21 +1566,36 @@ export function calculateEstimate(inputs) {
     const selectedFreq = resolveLawnFreq(lawnFreq);
 
     const freqs = [
-      { name: '4 Apps', v: 4 },
-      { name: '6 Apps', v: 6 },
-      { name: '9 Apps', v: 9 },
-      { name: '12 Apps', v: 12 },
+      { name: 'Standard', v: 6 },
+      { name: 'Enhanced', v: 9 },
+      { name: 'Premium', v: 12 },
     ];
     R.lawn = [];
-    freqs.forEach((f, i) => {
-      const price = lawnLookup(lp, lsf, i);
-      const mo = price.monthly;
-      const ann = mo * 12;
-      const pa = Math.round(ann / f.v * 100) / 100;
+    freqs.forEach((f) => {
+      const freqIdx = LAWN_FREQS.indexOf(f.v);
+      const marketPrice = lawnLookup(lp, lsf, freqIdx);
+      const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v);
+      const mo = floorPrice.mo;
+      const ann = floorPrice.ann;
+      const pa = floorPrice.pa;
       const rec = f.v === selectedFreq, dim = !rec;
-      R.lawn.push({ pa, v: f.v, ann, mo, name: f.name, recommended: rec, dimmed: dim, pricingBasis: price.pricingBasis, pricingSource: price.pricingSource });
+      R.lawn.push({
+        pa,
+        v: f.v,
+        ann,
+        mo,
+        name: f.name,
+        recommended: rec,
+        dimmed: dim,
+        pricingBasis: LAWN_PRICING_V2.pricingMode,
+        pricingSource: 'COST_FLOOR',
+        marketMonthly: marketPrice.monthly,
+        marketAnnual: marketPrice.monthly * 12,
+        costFloorAnnual: floorPrice.costFloorAnnual,
+        costs: floorPrice.costs,
+      });
     });
-    const selectedLawn = R.lawn.find(t => t.recommended) || R.lawn[2];
+    const selectedLawn = R.lawn.find(t => t.recommended) || R.lawn.find(t => t.v === 9) || R.lawn[1];
     wgServices.push({ name: 'Lawn Care', service: 'lawn_care', mo: selectedLawn.mo, perTreatment: selectedLawn.pa, visitsPerYear: selectedLawn.v });
     const customQuoteFlag = lsf > LAWN_TABLE_MAX_SQFT;
     if (customQuoteFlag) {
@@ -2317,21 +2378,21 @@ export function calculateEstimate(inputs) {
   let ac = 0, ra = 0;
   // Track per-line revenue for margin check
   const lineItems = [];
-  const selectedRecurringLawn = R.lawn ? (R.lawn.find(t => t.recommended) || R.lawn[2]) : null;
-  if (selectedRecurringLawn) { ac++; ra += selectedRecurringLawn.ann; lineItems.push({ name: 'Lawn Care', ann: selectedRecurringLawn.ann }); }
-  if (R.pest) { ac++; ra += R.pest.ann; lineItems.push({ name: 'Pest Control', ann: R.pest.ann }); }
-  if (R.ts) { ac++; ra += R.ts[1].ann; lineItems.push({ name: 'Tree & Shrub', ann: R.ts[1].ann }); }
+  const selectedRecurringLawn = R.lawn ? (R.lawn.find(t => t.recommended) || R.lawn.find(t => t.v === 9) || R.lawn[1]) : null;
+  if (selectedRecurringLawn) { ac++; ra += selectedRecurringLawn.ann; lineItems.push({ name: 'Lawn Care', service: 'lawn_care', ann: selectedRecurringLawn.ann, discountable: false }); }
+  if (R.pest) { ac++; ra += R.pest.ann; lineItems.push({ name: 'Pest Control', service: 'pest_control', ann: R.pest.ann, discountable: true }); }
+  if (R.ts) { ac++; ra += R.ts[1].ann; lineItems.push({ name: 'Tree & Shrub', service: 'tree_shrub', ann: R.ts[1].ann, discountable: true }); }
   // Palm Injection intentionally excluded from WaveGuard tier count + discounted total —
   // not a qualifying service, not eligible for percent bundle discount.
   if (R.mq) {
     const ri = R.mqMeta?.ri ?? 1;
-    if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', ann: R.mq[ri].ann }); }
+    if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', service: 'mosquito', ann: R.mq[ri].ann, discountable: true }); }
   }
   if (R.tmBait && !R.tmBait.quoteRequired && !R.tmBait.requiresMeasurement) {
     const termiteMonthly = termiteMonitoringTier === 'premier' ? 65 : 35;
     ac++;
     ra += termiteMonthly * 12;
-    lineItems.push({ name: 'Termite Bait', ann: termiteMonthly * 12 });
+    lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
   }
 
   // WaveGuard tier discounts — must match server
@@ -2363,21 +2424,25 @@ export function calculateEstimate(inputs) {
       monthlyAfterCredits,
     };
   }
-  const da = Math.round(ra * wd * 100) / 100;
+  const waveGuardDiscountableAnnual = lineItems
+    .filter(li => li.discountable !== false)
+    .reduce((sum, li) => sum + li.ann, 0);
+  const da = Math.round(waveGuardDiscountableAnnual * wd * 100) / 100;
   const recurringAnnualAfterWaveGuard = Math.round((ra - da) * 100) / 100;
   const md = inputs.manualDiscount;
   let manualDiscountAmount = 0;
   let manualDiscountInfo = null;
+  const manualDiscountableRecurringAnnual = waveGuardDiscountableAnnual - da;
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
     if (md.type === 'PERCENT') {
       if (v > 100) throw new Error('Manual percentage discount cannot exceed 100');
-      manualDiscountAmount = Math.round(recurringAnnualAfterWaveGuard * (v / 100) * 100) / 100;
+      manualDiscountAmount = Math.round(manualDiscountableRecurringAnnual * (v / 100) * 100) / 100;
     } else {
       manualDiscountAmount = Math.round(v * 100) / 100;
     }
     const requestedAmount = manualDiscountAmount;
-    manualDiscountAmount = Math.min(manualDiscountAmount, recurringAnnualAfterWaveGuard);
+    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual);
     manualDiscountInfo = {
       ...md,
       type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
@@ -2385,7 +2450,7 @@ export function calculateEstimate(inputs) {
       requestedAmount,
       amount: manualDiscountAmount,
       label: md.label || (md.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
-      discountableBase: recurringAnnualAfterWaveGuard,
+      discountableBase: manualDiscountableRecurringAnnual,
       capped: requestedAmount > manualDiscountAmount,
       capReason: requestedAmount > manualDiscountAmount ? 'discountable_base' : null,
       scope: 'recurring_annual_after_waveguard',
@@ -2395,27 +2460,9 @@ export function calculateEstimate(inputs) {
   const ad = Math.round((recurringAnnualAfterWaveGuard - manualDiscountAmount) * 100) / 100;
   const mm = Math.round(ad / 12 * 100) / 100;
 
-  // Margin floor check - flag any line that drops below 35% margin at current tier discount
-  // Loaded labor rate ~$35/hr, typical service 45-60 min = ~$30-35 labor + $10-15 materials = ~$45 COGS floor
-  const MARGIN_FLOOR = 0.35;
+  // Discounts are reported as commercial terms only. They do not block or warn
+  // estimates based on a hypothetical after-discount margin.
   const marginWarnings = [];
-  if (wd > 0) {
-    lineItems.forEach(li => {
-      const discountedAnn = li.ann * (1 - wd);
-      // Estimate COGS at ~55% of pre-discount (conservative: labor + materials + drive)
-      const estimatedCOGS = li.ann * 0.55;
-      const margin = (discountedAnn - estimatedCOGS) / discountedAnn;
-      if (margin < MARGIN_FLOOR) {
-        marginWarnings.push({
-          service: li.name,
-          preDiscount: Math.round(li.ann),
-          afterDiscount: Math.round(discountedAnn),
-          estimatedMargin: Math.round(margin * 100),
-          tier: wt,
-        });
-      }
-    });
-  }
 
   let ot = 0;
   otItems.forEach(i => ot += i.price);
@@ -2470,7 +2517,7 @@ export function calculateEstimate(inputs) {
       // downstream billing should reconcile to the new tier rate retroactively for that period.
       // tierServiceMin: minimum services required to maintain this tier
       tierServiceMin: wt === 'Platinum' ? 4 : wt === 'Gold' ? 3 : wt === 'Silver' ? 2 : 1,
-      marginWarnings, // any lines below 35% margin at this tier discount
+      marginWarnings,
     },
     oneTime: {
       items: otItems,
