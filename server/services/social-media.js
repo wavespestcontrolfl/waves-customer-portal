@@ -458,7 +458,7 @@ async function postToFacebook(message, link, imageUrl) {
   const body = { message, access_token: token };
   if (link) body.link = link;
 
-  const res = await fetch(`https://graph.facebook.com/v21.0/${FACEBOOK_PAGE_ID}/feed`, {
+  const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/feed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -480,7 +480,7 @@ async function postToInstagram(caption, imageUrl) {
 
   // Step 1: Create media container
   const containerRes = await fetch(
-    `https://graph.facebook.com/v21.0/${INSTAGRAM_ACCOUNT_ID}/media`,
+    `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -495,7 +495,7 @@ async function postToInstagram(caption, imageUrl) {
 
   // Step 2: Publish
   const publishRes = await fetch(
-    `https://graph.facebook.com/v21.0/${INSTAGRAM_ACCOUNT_ID}/media_publish`,
+    `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media_publish`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
