@@ -189,8 +189,12 @@ router.put('/:id/dismiss', async (req, res) => {
 });
 
 // POST /api/admin/triage/:id/verdict  { verdict, wrong_fields?, note? }
-// Records the human verdict on a TRIAGED call and resolves the item. Accept =
-// the AI got it right; Deny = wrong, with wrong_fields saying what.
+// Records the human verdict on a TRIAGED call. The verdict is CALL-level
+// ("accept = the AI got this call right"), so it resolves EVERY open triage row
+// for the call, not just the clicked one — a call can have several flags
+// (address_review + name_review …) and the reviewer judges the call once. The
+// per-flag detail lives in wrong_fields. Resolving the whole call also avoids
+// orphaned sibling rows inheriting this verdict via the call_log_id join.
 router.post('/:id/verdict', async (req, res) => {
   try {
     const { id } = req.params;
@@ -201,16 +205,36 @@ router.post('/:id/verdict', async (req, res) => {
     const wrongFields = sanitizeWrongFields(req.body?.wrong_fields);
     const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
 
-    // Win the compare-and-swap FIRST. Only the reviewer who actually flips the
-    // item open→resolved gets to write the verdict — otherwise a concurrent
-    // loser could overwrite the winner's feedback and still receive a 409.
-    const result = await transitionCore({ id, nextStatus: 'resolved', note, assignedTo: req.technicianId });
-    if (result.outcome !== 'ok') {
-      return sendTransitionResult(res, result, id, 'resolved');
+    const item = await db('triage_items').where({ id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
     }
 
+    // Call-level compare-and-swap: resolve ALL open triage rows for this call in
+    // one update. The affected-row count is the win check — the first verdict
+    // closes the whole call and writes one call-level verdict; a concurrent
+    // reviewer sees 0 open rows, gets a 409, and writes no feedback.
+    const resolved = await db('triage_items')
+      .where({ call_log_id: item.call_log_id })
+      .whereIn('status', OPEN_STATES)
+      .update({
+        status: 'resolved',
+        resolution_note: note,
+        assigned_to: req.technicianId,
+        resolved_at: new Date(),
+        updated_at: new Date(),
+      });
+    if (resolved === 0) {
+      return res.status(409).json({ error: 'Call was just actioned by someone else' });
+    }
+
+    await db('call_log')
+      .where({ id: item.call_log_id })
+      .update({ review_status: 'resolved', updated_at: new Date() });
+
     await upsertFeedback({
-      callLogId: result.item.call_log_id,
+      callLogId: item.call_log_id,
       triageItemId: id,
       decisionKind: 'triaged',
       verdict,
@@ -219,7 +243,7 @@ router.post('/:id/verdict', async (req, res) => {
       reviewedBy: req.technicianId,
     });
 
-    return res.json({ ok: true, id, status: 'resolved', verdict });
+    return res.json({ ok: true, id, status: 'resolved', verdict, resolved_count: resolved });
   } catch (err) {
     logger.error(`[admin-triage] verdict failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });

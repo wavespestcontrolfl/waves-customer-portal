@@ -147,12 +147,15 @@ export default function TriageInboxTabV2() {
         setDenyFor(null);
         setDenyFields([]);
         if (kind === "triage") {
-          // Open item leaves the open bucket once verdicted (it's resolved).
-          setItems((prev) => prev.filter((i) => i.id !== item.id));
+          // A verdict is call-level: the server resolves every open flag for the
+          // call, so drop all sibling rows for this call_log_id, not just the
+          // clicked one, and move that many into the resolved bucket.
+          const removed = items.filter((i) => i.call_log_id === item.call_log_id).length || 1;
+          setItems((prev) => prev.filter((i) => i.call_log_id !== item.call_log_id));
           setCounts((prev) => {
             const c = { ...prev };
-            if (c[status] != null) c[status] = Math.max(0, c[status] - 1);
-            if (c.resolved != null) c.resolved += 1;
+            if (c[status] != null) c[status] = Math.max(0, c[status] - removed);
+            if (c.resolved != null) c.resolved += removed;
             return c;
           });
         } else {
