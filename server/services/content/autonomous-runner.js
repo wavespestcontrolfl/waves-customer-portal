@@ -822,7 +822,29 @@ class AutonomousRunner {
     const candidates = Number((dryRunResult?.results || []).filter((result) => result.status === 'patch_candidate').length);
     const skipped = Number((dryRunResult?.results || []).filter((result) => result.status === 'skipped').length);
     const failed = Number((dryRunResult?.results || []).filter((result) => result.status === 'failed').length);
+    let prResult = null;
+    if (!run.shadow_mode && candidates > 0 && executor?.runPrBatch) {
+      const t3 = Date.now();
+      prResult = await executor.runPrBatch({
+        taskIds,
+        limit: envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3),
+      });
+      run.publish_ms = Date.now() - t3;
+    }
     const reason = run.shadow_mode ? 'internal_links_dry_run_shadow' : 'internal_links_dry_run';
+    if (prResult?.status === 'pr_open') {
+      return {
+        notes: `internal_links_pr_pending_merge:queued=${taskIds.length}:pr_links=${prResult.count}`,
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'internal_links_pr_pending_merge',
+          link_tasks_queued: taskIds.length,
+          publish_status: 'pr_open',
+          astro_pr_url: prResult.pr_url || null,
+          reviewer_notes: `Astro internal-link PR opened with ${prResult.count} link(s): ${prResult.pr_url}. Merge only after Codex, editorial review, and preview verification.`,
+        },
+      };
+    }
     return {
       notes: `${reason}:queued=${taskIds.length}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`,
       patch: {

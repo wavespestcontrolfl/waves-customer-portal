@@ -845,6 +845,70 @@ describe('runNext internal-link shadow behavior', () => {
     expect(queue.complete).not.toHaveBeenCalled();
     expect(queue.release).not.toHaveBeenCalled();
   });
+
+  test('opens review-only internal-link PRs when the lane is unshadowed', async () => {
+    const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    try {
+      const claimedAt = new Date('2026-05-23T05:10:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_links_live_1',
+          action_type: 'add_internal_links',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_links_live_1',
+          action_type: 'add_internal_links',
+          page_type: 'internal-link',
+          target_url: 'https://www.wavespestcontrol.com/pest-control-bradenton-fl/',
+          target_keyword: 'pest control bradenton fl',
+          city: 'Bradenton',
+          service: 'pest',
+        }),
+      };
+      const linkPlanner = {
+        planForTarget: jest.fn().mockReturnValue([
+          {
+            source_file: 'src/content/services/pest-control-quote-bradenton-fl.md',
+            target_url: '/pest-control-bradenton-fl/',
+            anchor_text: 'Bradenton pest control',
+          },
+        ]),
+      };
+      const internalLinkExecutor = {
+        runDryRun: jest.fn().mockResolvedValue({
+          count: 1,
+          results: [{ task_id: 'run_1', status: 'patch_candidate' }],
+        }),
+        runPrBatch: jest.fn().mockResolvedValue({
+          status: 'pr_open',
+          count: 1,
+          pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88',
+        }),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('internal_links_pr_pending_merge');
+      expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88');
+      expect(internalLinkExecutor.runDryRun).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 1 });
+      expect(internalLinkExecutor.runPrBatch).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 3 });
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_live_1', 'internal_links_pr_pending_merge', { claimToken: claimedAt });
+      expect(queue.complete).not.toHaveBeenCalled();
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+      else process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = previousShadow;
+    }
+  });
 });
 
 describe('runNext general shadow behavior', () => {
