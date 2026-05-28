@@ -54,6 +54,7 @@ import {
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags } from "../hooks/useFeatureFlag";
+import { adminFetch } from "../utils/admin-fetch";
 import NotificationBell from "./NotificationBell";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
 
@@ -184,18 +185,14 @@ export default function AdminLayoutV2() {
     }
     const u = localStorage.getItem("waves_admin_user");
     if (u) setUser(JSON.parse(u));
-    fetch("/api/admin/auth/me", {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((r) => {
-        if (r.status === 401) {
-          localStorage.removeItem("waves_admin_token");
-          localStorage.removeItem("waves_admin_user");
-          refetchFlags();
-          navigate("/admin/login", { replace: true });
-        }
-      })
-      .catch(() => {});
+    adminFetch("/admin/auth/me").catch((err) => {
+      if (err?.status === 401) {
+        localStorage.removeItem("waves_admin_token");
+        localStorage.removeItem("waves_admin_user");
+        refetchFlags();
+        navigate("/admin/login", { replace: true });
+      }
+    });
   }, [navigate]);
 
   // Auto-close sidebar on route change (mobile) + when viewport grows to desktop.
