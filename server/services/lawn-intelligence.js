@@ -652,6 +652,7 @@ If no contradictions, return: { "contradictions": [] }`
         // Assessments created by this tech on that day
         const started = await db('lawn_assessments')
           .where({ technician_id: tech.id, service_date: trackingDate })
+          .whereNot('baseline_policy', 'excluded')
           .count('id as count').first();
 
         const confirmed = await db('lawn_assessments')
@@ -663,7 +664,8 @@ If no contradictions, return: { "contradictions": [] }`
 
         // Quality metrics
         const qualityData = await db('lawn_assessments')
-          .where({ technician_id: tech.id, service_date: trackingDate });
+          .where({ technician_id: tech.id, service_date: trackingDate })
+          .whereNot('baseline_policy', 'excluded');
 
         let avgPhotoCount = 0, avgQuality = 0, divergenceCount = 0, overrideCount = 0;
         if (qualityData.length) {

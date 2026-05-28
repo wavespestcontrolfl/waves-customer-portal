@@ -275,8 +275,11 @@ function getSeason(month) {
  * Get full assessment history for a customer, ordered by date.
  */
 async function getCustomerHistory(customerId) {
+  // Quick captures (baseline_policy='excluded') stay out of the official
+  // trend/history; they surface via the dedicated quick-assessment list.
   return db('lawn_assessments')
     .where({ customer_id: customerId })
+    .whereNot('baseline_policy', 'excluded')
     .orderBy('service_date', 'asc');
 }
 
@@ -300,6 +303,7 @@ async function resetBaseline(customerId, adminName, reason) {
   let newBaselineQuery = db('lawn_assessments')
     .where({ customer_id: customerId })
     .where('is_baseline', false)
+    .whereNot('baseline_policy', 'excluded') // never promote a quick capture into baseline
     .orderBy('service_date', 'asc');
 
   if (oldBaseline) {

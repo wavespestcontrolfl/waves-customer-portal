@@ -264,6 +264,7 @@ async function computeCompletionRates(dateFrom, dateTo) {
     const assessments = await db('lawn_assessments')
       .where('service_date', '>=', from)
       .where('service_date', '<=', to)
+      .whereNot('baseline_policy', 'excluded') // quick captures aren't scheduled assessments
       .select('service_date', 'technician_id', 'confirmed_by_tech');
 
     // Aggregate by date + tech

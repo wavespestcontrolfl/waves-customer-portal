@@ -605,9 +605,13 @@ router.post('/assess', async (req, res, next) => {
     const season = lawnAssessment.getSeason(month);
     const adjustedScores = lawnAssessment.applySeasonalAdjustment(displayScores, month);
 
-    // Check if this is the first assessment (baseline)
+    // Check if this is the first assessment (baseline). Quick-capture rows
+    // (baseline_policy='excluded') are intentionally NOT counted, so a casual
+    // spot-check never consumes a customer's baseline slot or blocks a later
+    // real assessment from becoming the baseline.
     const existingCount = await db('lawn_assessments')
       .where({ customer_id: customerId })
+      .whereIn('baseline_policy', ['eligible', 'promoted'])
       .count('id as cnt')
       .first();
     const isBaseline = parseInt(existingCount.cnt) === 0;
@@ -1303,6 +1307,7 @@ router.get('/latest/:customerId', async (req, res, next) => {
   try {
     const latest = await db('lawn_assessments')
       .where({ customer_id: req.params.customerId })
+      .whereNot('baseline_policy', 'excluded') // official latest only — not quick captures
       .orderBy('service_date', 'desc')
       .first();
 
