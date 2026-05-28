@@ -2,6 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/content-astro/github-client', () => ({
   getFile: jest.fn(),
+  getPr: jest.fn(),
   createBranch: jest.fn(),
   putFile: jest.fn(),
   createPr: jest.fn(),
@@ -22,6 +23,9 @@ const {
   slugToInternalUrl,
   patchContainsCrawlableMarkdownLink,
   frontmatterUnchanged,
+  parsePrNumber,
+  liveUrlForTask,
+  htmlContainsCrawlableLink,
 } = executor._internals;
 
 beforeEach(() => {
@@ -467,5 +471,162 @@ describe('internal-link dry-run executor helpers', () => {
     expect(patchContainsCrawlableMarkdownLink(patched, 'termite inspection in Florida', '/termite-inspection/')).toBe(true);
     expect(frontmatterUnchanged(sourceBody, patched)).toBe(true);
     expect(frontmatterUnchanged(sourceBody, sourceBody.replace('title: Termite', 'title: Changed'))).toBe(false);
+  });
+
+  test('parses PR numbers, builds live URLs, and detects crawlable rendered links', () => {
+    expect(parsePrNumber('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/172')).toBe(172);
+    expect(parsePrNumber('not-a-pr')).toBeNull();
+    expect(liveUrlForTask({ source_url: '/pest-control-quote-bradenton-fl/' }))
+      .toBe('https://www.wavespestcontrol.com/pest-control-quote-bradenton-fl/');
+    expect(htmlContainsCrawlableLink(
+      '<p>Call for your free <a href="/pest-control-bradenton-fl/">Bradenton pest control</a> quote.</p>',
+      '/pest-control-bradenton-fl/',
+      'Bradenton pest control'
+    )).toBe(true);
+    expect(htmlContainsCrawlableLink(
+      '<p>Call for your free <a href="/pest-control-bradenton-fl/">Bradenton termite control</a> quote.</p>',
+      '/pest-control-bradenton-fl/',
+      'Bradenton pest control'
+    )).toBe(false);
+  });
+
+  test('verifies merged PR tasks when live HTML contains the expected link', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn(async () => {});
+    instance._markTaskVerified = jest.fn(async () => {});
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    GitHubClient.getPr.mockResolvedValue({
+      number: 172,
+      merged: true,
+      merged_at: '2026-05-28T06:57:10Z',
+      merge_commit_sha: 'merge-sha',
+    });
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-verified',
+      status: 'pr_open',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/172',
+      source_url: '/pest-control-quote-bradenton-fl/',
+      target_url: '/pest-control-bradenton-fl/',
+      anchor_text: 'Bradenton pest control',
+    }, {
+      html: '<p>Call for your free <a href="/pest-control-bradenton-fl/">Bradenton pest control</a> quote.</p>',
+    });
+
+    expect(result.status).toBe('verified');
+    expect(GitHubClient.getPr).toHaveBeenCalledWith(172);
+    expect(instance._markTaskMerged).toHaveBeenCalledWith('task-verified', expect.objectContaining({
+      commitSha: 'merge-sha',
+    }));
+    expect(instance._markTaskVerified).toHaveBeenCalledWith('task-verified', expect.objectContaining({
+      commitSha: 'merge-sha',
+      liveUrl: 'https://www.wavespestcontrol.com/pest-control-quote-bradenton-fl/',
+    }));
+    expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
+  });
+
+  test('leaves unmerged PR tasks open', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn(async () => {});
+    GitHubClient.getPr.mockResolvedValue({ number: 172, merged: false });
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-open',
+      status: 'pr_open',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/172',
+    });
+
+    expect(result).toMatchObject({ status: 'pr_open', skipped: 'pr_not_merged' });
+    expect(instance._markTaskMerged).not.toHaveBeenCalled();
+  });
+
+  test('fails PR tasks when the stored Astro PR cannot be loaded', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    GitHubClient.getPr.mockResolvedValue(null);
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-missing-pr',
+      status: 'pr_open',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/999',
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      failure_reason: 'internal_link_verify_pr_not_found',
+      pr_number: 999,
+    });
+    expect(instance._markTaskVerificationFailed).toHaveBeenCalledWith(
+      'task-missing-pr',
+      'internal_link_verify_pr_not_found'
+    );
+  });
+
+  test('keeps merged PR tasks merged when live HTML is empty', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn(async () => {});
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-fetch-failed',
+      status: 'pr_open',
+      source_url: '/pest-control-quote-bradenton-fl/',
+      target_url: '/pest-control-bradenton-fl/',
+      anchor_text: 'Bradenton pest control',
+    }, {
+      pr: {
+        number: 172,
+        merged: true,
+        merged_at: '2026-05-28T06:57:10Z',
+        merge_commit_sha: 'merge-sha',
+      },
+      html: '',
+    });
+
+    expect(result).toMatchObject({
+      status: 'merged',
+      failure_reason: 'internal_link_verify_empty_live_html',
+      pr_number: 172,
+    });
+    expect(instance._markTaskVerificationFailed).toHaveBeenCalledWith(
+      'task-fetch-failed',
+      'internal_link_verify_empty_live_html',
+      expect.objectContaining({ status: 'merged' })
+    );
+  });
+
+  test('marks deployed tasks with failure when live HTML is missing the link', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn(async () => {});
+    instance._markTaskVerified = jest.fn(async () => {});
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    GitHubClient.getPr.mockResolvedValue({
+      number: 172,
+      merged: true,
+      merged_at: '2026-05-28T06:57:10Z',
+      merge_commit_sha: 'merge-sha',
+    });
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-missing-link',
+      status: 'pr_open',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/172',
+      source_url: '/pest-control-quote-bradenton-fl/',
+      target_url: '/pest-control-bradenton-fl/',
+      anchor_text: 'Bradenton pest control',
+    }, {
+      html: '<p>Call for your free Bradenton pest control quote.</p>',
+    });
+
+    expect(result).toMatchObject({
+      status: 'deployed',
+      failure_reason: 'internal_link_verify_link_missing',
+    });
+    expect(instance._markTaskVerified).not.toHaveBeenCalled();
+    expect(instance._markTaskVerificationFailed).toHaveBeenCalledWith(
+      'task-missing-link',
+      'internal_link_verify_link_missing',
+      expect.objectContaining({ status: 'deployed' })
+    );
   });
 });
