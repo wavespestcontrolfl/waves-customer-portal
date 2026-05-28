@@ -21,6 +21,7 @@ const GENERIC_ANCHORS = new Set([
   'more information',
   'details',
 ]);
+const GENERIC_ANCHOR_PREFIX_RE = /^(?:click|tap|read|learn|see|view|find|get)\s+(?:more\s+)?(?:about|on|for|details|info|information)\b/i;
 const COMMERCIAL_TERMS = [
   'pest control',
   'termite control',
@@ -102,6 +103,9 @@ function validateAnchorPolicy(anchorText, context = {}) {
 
   if (!anchor) issues.push(issue('anchor_missing', 'Anchor text is required.'));
   if (anchorType === 'generic') issues.push(issue('anchor_generic', 'Anchor text is generic.'));
+  if (GENERIC_ANCHOR_PREFIX_RE.test(anchor)) {
+    issues.push(issue('anchor_generic_cta_prefix', 'Anchor starts with a generic CTA phrase.'));
+  }
   if (anchor.length > 80 || words.length > 8) issues.push(issue('anchor_too_long', 'Anchor text is too long.'));
   if (/[.!?]$/.test(anchor)) issues.push(issue('anchor_sentence', 'Anchor should not include sentence punctuation.'));
   if (/\b(click|tap)\b/i.test(anchor)) issues.push(issue('anchor_ui_action', 'Anchor should describe the destination, not a UI action.'));

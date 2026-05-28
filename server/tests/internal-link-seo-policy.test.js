@@ -34,6 +34,12 @@ describe('internal-link SEO policy anchor classification', () => {
 
   test('blocks generic, overly long, UI action, and repeated exact-match anchors', () => {
     expect(policy.validateAnchorPolicy('read more', { targetKeyword: 'termite inspection' }).ok).toBe(false);
+    expect(policy.validateAnchorPolicy('learn more about termite inspection', { targetKeyword: 'termite inspection' }).issues.map((i) => i.code))
+      .toContain('anchor_generic_cta_prefix');
+    expect(policy.validateAnchorPolicy('read more about mosquito control', { targetKeyword: 'mosquito control' }).issues.map((i) => i.code))
+      .toContain('anchor_generic_cta_prefix');
+    expect(policy.validateAnchorPolicy('see information on lawn care', { targetKeyword: 'lawn care' }).issues.map((i) => i.code))
+      .toContain('anchor_generic_cta_prefix');
     expect(policy.validateAnchorPolicy('tap for termite inspection', { targetKeyword: 'termite inspection' }).issues.map((i) => i.code))
       .toContain('anchor_ui_action');
     expect(policy.validateAnchorPolicy('termite inspection', {
