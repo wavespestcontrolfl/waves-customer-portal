@@ -518,14 +518,17 @@ async function computeNeighborhoodBenchmarks() {
         this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
       })
       .where({ 'la.confirmed_by_tech': true })
-      .select('c.id', 'c.zip', 'c.city', 'tp.grass_type', 'la.overall_score', 'la.is_baseline', 'la.service_date')
+      .select('c.id', 'c.zip', 'c.city', 'tp.grass_type', 'c.lawn_type', 'la.overall_score', 'la.is_baseline', 'la.service_date')
       .orderBy('la.service_date', 'asc');
 
-    // Segment by zip + grass_type
+    // Segment by zip + grass_type. Mirror loadCustomerGrassContext's fallback
+    // (profile grass_type → customers.lawn_type) so the segment key written
+    // here matches the one getCustomerBenchmark() builds on the read path —
+    // otherwise legacy profile-less customers can't retrieve their benchmark.
     const segments = {};
     for (const c of customers) {
       const zip = c.zip || 'unknown';
-      const grass = c.grass_type || 'unknown';
+      const grass = c.grass_type || c.lawn_type || 'unknown';
       const key = `${zip}|${slugify(grass)}`;
 
       if (!segments[key]) {
