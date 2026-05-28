@@ -18,6 +18,41 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
 
+// Decision-support feedback (Phase 1). Captured from the triage inbox and the
+// auto-routed review list; nothing here changes routing automatically.
+const VERDICTS = ['accept', 'deny'];
+const WRONG_FIELDS = ['name', 'address', 'service', 'scheduling', 'consent', 'spam_status', 'routing'];
+const V2_DECISION_VERSION = 'v2-1.0.0';
+
+function sanitizeWrongFields(input) {
+  if (!Array.isArray(input)) return [];
+  return [...new Set(input.filter((f) => WRONG_FIELDS.includes(f)))];
+}
+
+// Upsert the single current verdict for a call (re-review overwrites). Links to
+// the enforce-mode route_decision when one exists so calibration can attribute
+// the verdict to the flags that drove the gate.
+async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy }) {
+  const decision = await db('route_decisions')
+    .where({ call_log_id: callLogId, mode: 'enforce' })
+    .orderBy('created_at', 'desc')
+    .first('id');
+  await db('route_feedback')
+    .insert({
+      call_log_id: callLogId,
+      route_decision_id: decision?.id || null,
+      triage_item_id: triageItemId,
+      decision_kind: decisionKind,
+      verdict,
+      wrong_fields: JSON.stringify(verdict === 'deny' ? wrongFields : []),
+      note: note || null,
+      reviewed_by: reviewedBy || null,
+      updated_at: new Date(),
+    })
+    .onConflict('call_log_id')
+    .merge(['route_decision_id', 'triage_item_id', 'decision_kind', 'verdict', 'wrong_fields', 'note', 'reviewed_by', 'updated_at']);
+}
+
 // GET /api/admin/triage?status=open  → list items + per-status counts
 router.get('/', async (req, res) => {
   try {
@@ -27,6 +62,7 @@ router.get('/', async (req, res) => {
     const items = await db('triage_items')
       .leftJoin('call_log', 'triage_items.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
+      .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .where('triage_items.status', status)
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
@@ -56,6 +92,8 @@ router.get('/', async (req, res) => {
         'customers.last_name',
         'customers.phone as customer_phone',
         'customers.email as customer_email',
+        'route_feedback.verdict as feedback_verdict',
+        'route_feedback.wrong_fields as feedback_wrong_fields',
       );
 
     const countRows = await db('triage_items')
@@ -138,4 +176,112 @@ router.put('/:id/dismiss', async (req, res) => {
   }
 });
 
+// POST /api/admin/triage/:id/verdict  { verdict, wrong_fields?, note? }
+// Records the human verdict on a TRIAGED call and resolves the item. Accept =
+// the AI got it right; Deny = wrong, with wrong_fields saying what.
+router.post('/:id/verdict', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const verdict = String(req.body?.verdict || '');
+    if (!VERDICTS.includes(verdict)) {
+      return res.status(400).json({ error: 'verdict must be accept or deny' });
+    }
+    const wrongFields = sanitizeWrongFields(req.body?.wrong_fields);
+    const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
+
+    const item = await db('triage_items').where({ id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
+    }
+
+    await upsertFeedback({
+      callLogId: item.call_log_id,
+      triageItemId: id,
+      decisionKind: 'triaged',
+      verdict,
+      wrongFields,
+      note,
+      reviewedBy: req.technicianId,
+    });
+
+    // Resolving captures the verdict; reuse the same CAS transition so two
+    // reviewers can't both win.
+    await transition(req, res, 'resolved');
+  } catch (err) {
+    logger.error(`[admin-triage] verdict failed: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });
+  }
+});
+
+// GET /api/admin/triage/auto-routed?limit=  → calls the gate AUTO-routed (these
+// never create triage_items), with any existing verdict, so a bad auto-book can
+// be caught and denied.
+router.get('/auto-routed', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const rows = await db('route_decisions')
+      .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
+      .leftJoin('customers', 'call_log.customer_id', 'customers.id')
+      .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
+      .where('route_decisions.decision_version', V2_DECISION_VERSION)
+      .where('route_decisions.mode', 'enforce')
+      .where('route_decisions.final_action_taken', 'auto_route')
+      .orderBy('route_decisions.created_at', 'desc')
+      .limit(limit)
+      .select(
+        'route_decisions.id as route_decision_id',
+        'route_decisions.call_log_id',
+        'route_decisions.created_scheduled_service_id',
+        'route_decisions.sms_enqueued',
+        'route_decisions.created_at',
+        'call_log.lead_synopsis',
+        'call_log.call_summary',
+        'call_log.from_phone',
+        'call_log.to_phone',
+        'call_log.recording_sid',
+        'call_log.recording_url',
+        'call_log.created_at as call_created_at',
+        'call_log.customer_id',
+        'customers.first_name',
+        'customers.last_name',
+        'customers.phone as customer_phone',
+        'customers.email as customer_email',
+        'route_feedback.verdict as feedback_verdict',
+        'route_feedback.wrong_fields as feedback_wrong_fields',
+      );
+    res.json({ items: rows });
+  } catch (err) {
+    logger.error(`[admin-triage] auto-routed list failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load auto-routed calls' });
+  }
+});
+
+// POST /api/admin/triage/auto-routed/:callLogId/verdict  { verdict, wrong_fields?, note? }
+router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
+  try {
+    const { callLogId } = req.params;
+    const verdict = String(req.body?.verdict || '');
+    if (!VERDICTS.includes(verdict)) {
+      return res.status(400).json({ error: 'verdict must be accept or deny' });
+    }
+    const call = await db('call_log').where({ id: callLogId }).first('id');
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+
+    await upsertFeedback({
+      callLogId,
+      decisionKind: 'auto_routed',
+      verdict,
+      wrongFields: sanitizeWrongFields(req.body?.wrong_fields),
+      note: typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null,
+      reviewedBy: req.technicianId,
+    });
+    res.json({ ok: true, call_log_id: callLogId, verdict });
+  } catch (err) {
+    logger.error(`[admin-triage] auto-routed verdict failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to record verdict' });
+  }
+});
+
 module.exports = router;
+module.exports.__private = { sanitizeWrongFields, WRONG_FIELDS, VERDICTS };
