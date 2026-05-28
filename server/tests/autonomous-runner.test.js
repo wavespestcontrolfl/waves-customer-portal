@@ -343,6 +343,118 @@ describe('runNext Astro corpus loading', () => {
       else process.env.ASTRO_REPO_DIR = previousAstroDir;
     }
   });
+
+  test('optional GitHub corpus load failures degrade to an empty corpus for internal-link runs', async () => {
+    const previousAstroDir = process.env.ASTRO_REPO_DIR;
+    const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+    delete process.env.ASTRO_REPO_DIR;
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+
+    try {
+      const claimedAt = new Date('2026-05-28T01:45:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_links_optional_1',
+          action_type: 'add_internal_links',
+          claimed_at: claimedAt,
+        }),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_links_optional_1',
+          action_type: 'add_internal_links',
+          page_type: 'internal-link',
+          target_url: '/blog/ghost-ants/',
+          target_keyword: 'ghost ants',
+        }),
+      };
+      const linkPlanner = {
+        loadAstroCorpusFromGitHub: jest.fn().mockRejectedValue(new Error('GitHub token missing')),
+        planForTarget: jest.fn().mockReturnValue([]),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('internal_links_queued');
+      expect(result.link_tasks_queued).toBe(0);
+      expect(linkPlanner.planForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({ url: '/blog/ghost-ants/' }),
+        { corpus: [], opportunityId: 'opp_links_optional_1' }
+      );
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_queued', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
+      else process.env.ASTRO_REPO_DIR = previousAstroDir;
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+      else process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = previousShadow;
+    }
+  });
+
+  test('required GitHub corpus load failures still fail closed for uniqueness gates', async () => {
+    const previousAstroDir = process.env.ASTRO_REPO_DIR;
+    const previousShadow = process.env.SHADOW_MODE_CREATE_CUSTOMER_QUESTION_PAGE;
+    delete process.env.ASTRO_REPO_DIR;
+    process.env.SHADOW_MODE_CREATE_CUSTOMER_QUESTION_PAGE = 'false';
+
+    try {
+      const claimedAt = new Date('2026-05-28T01:50:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_required_corpus_1',
+          action_type: 'create_customer_question_page',
+          claimed_at: claimedAt,
+        }),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_required_corpus_1',
+          action_type: 'create_customer_question_page',
+          page_type: 'customer-question',
+          service: 'pest',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { body: 'Customer question draft body.' },
+        }),
+      };
+      const uniquenessGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }),
+      };
+      const linkPlanner = {
+        loadAstroCorpusFromGitHub: jest.fn().mockRejectedValue(new Error('GitHub unavailable')),
+      };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        uniquenessGate,
+        linkPlanner,
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.uniqueness_gate_result).toMatchObject({ ok: false, error: 'GitHub unavailable' });
+      expect(uniquenessGate.evaluate).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_required_corpus_1', 'gate_fail', { claimToken: claimedAt });
+    } finally {
+      if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
+      else process.env.ASTRO_REPO_DIR = previousAstroDir;
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_CREATE_CUSTOMER_QUESTION_PAGE;
+      else process.env.SHADOW_MODE_CREATE_CUSTOMER_QUESTION_PAGE = previousShadow;
+    }
+  });
 });
 
 describe('runNext internal-link shadow behavior', () => {
