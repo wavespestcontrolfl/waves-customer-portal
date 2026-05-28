@@ -19,6 +19,8 @@
 const { buildSubscriberQuery } = require('../services/newsletter-sender');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
+const { lockEventFactsFromDb } = require('../services/newsletter-draft');
+const { findHallucinatedClaims, validateNewsletterDraft } = require('../services/newsletter-validator');
 const { EMAIL_RE, escapeHtml } = publicRouter;
 const {
   computeNewsletterEventUpdates,
@@ -550,5 +552,255 @@ describe('email template send history webhook updates', () => {
     expect(computeEmailMessageEventUpdates({ event: 'open' }, fresh({ opened_at: now }), now)).toBeNull();
     expect(computeEmailMessageEventUpdates({ event: 'click' }, fresh({ clicked_at: now }), now)).toBeNull();
     expect(computeEmailMessageEventUpdates({ event: 'spamreport' }, fresh({ complained_at: now }), now)).toBeNull();
+  });
+});
+
+// ── Factual locking on AI-generated event objects ────────────────────
+//
+// The flagship draft pipeline asks Claude for commentary keyed by an
+// eventId UUID, then re-locks date/venue/address/URL/image from the
+// events_raw row at render time. These tests cover the locker's three
+// drop paths (missing id, unknown id, duplicate id) and the DB-override
+// shape so a regression here can't silently let AI-fabricated dates or
+// admission strings reach a customer's inbox.
+
+describe('newsletter lockEventFactsFromDb', () => {
+  const id1 = '11111111-1111-1111-1111-111111111111';
+  const id2 = '22222222-2222-2222-2222-222222222222';
+
+  const dbRow = (overrides = {}) => ({
+    id: id1,
+    title: 'Bradenton Blues',
+    start_at: new Date('2026-05-30T23:00:00Z'), // Sat May 30 7pm ET
+    venue_name: 'Riverwalk Pavilion',
+    venue_address: '452 3rd Ave W, Bradenton, FL',
+    city: 'Bradenton',
+    event_url: 'https://example.com/blues',
+    image_url: 'https://cdn.example.com/blues.jpg',
+    ...overrides,
+  });
+
+  test('overrides AI date/venue/url with DB-sourced strings', () => {
+    const aiEvents = [{
+      eventId: id1,
+      title: 'AI rewrote this',
+      date: 'AI HALLUCINATED DATE',
+      location: 'AI HALLUCINATED VENUE',
+      address: 'AI HALLUCINATED ADDRESS',
+      admission: 'Free admission!', // hallucination — DB has no admission
+      eventUrl: 'https://malicious.example.com',
+      imageUrl: 'https://malicious.example.com/img.jpg',
+      description: 'AI-written vibe copy',
+    }];
+    const { locked, dropped } = lockEventFactsFromDb(aiEvents, [dbRow()]);
+    expect(dropped).toEqual([]);
+    expect(locked).toHaveLength(1);
+    expect(locked[0].address).toBe('452 3rd Ave W, Bradenton, FL');
+    expect(locked[0].eventUrl).toBe('https://example.com/blues');
+    expect(locked[0].imageUrl).toBe('https://cdn.example.com/blues.jpg');
+    expect(locked[0].location).toBe('Riverwalk Pavilion, Bradenton');
+    expect(locked[0].admission).toBeNull(); // admission is never trusted from AI
+    expect(locked[0].date).toMatch(/Saturday, May 30/);
+    expect(locked[0].description).toBe('AI-written vibe copy'); // commentary preserved
+  });
+
+  test('drops events with no eventId', () => {
+    const { locked, dropped } = lockEventFactsFromDb(
+      [{ title: 'Anonymous Event' }],
+      [dbRow()],
+    );
+    expect(locked).toHaveLength(0);
+    expect(dropped).toEqual([{ index: 0, reason: 'missing eventId', title: 'Anonymous Event' }]);
+  });
+
+  test('drops events whose eventId is not in the approved pool', () => {
+    const { locked, dropped } = lockEventFactsFromDb(
+      [{ eventId: '99999999-9999-9999-9999-999999999999', title: 'Hallucinated Event' }],
+      [dbRow()],
+    );
+    expect(locked).toHaveLength(0);
+    expect(dropped[0].reason).toBe('eventId not in approved list');
+  });
+
+  test('drops duplicate eventIds — keeps first, drops the rest', () => {
+    const { locked, dropped } = lockEventFactsFromDb(
+      [
+        { eventId: id1, title: 'First mention' },
+        { eventId: id1, title: 'Second mention' },
+      ],
+      [dbRow()],
+    );
+    expect(locked).toHaveLength(1);
+    expect(locked[0].title).toBe('First mention');
+    expect(dropped[0].reason).toBe('duplicate eventId in draft');
+  });
+
+  test('matches eventIds case-insensitively', () => {
+    const { locked, dropped } = lockEventFactsFromDb(
+      [{ eventId: id1.toUpperCase(), title: 'Uppercase id from model' }],
+      [dbRow()],
+    );
+    expect(dropped).toEqual([]);
+    expect(locked).toHaveLength(1);
+    expect(locked[0].eventId).toBe(id1);
+  });
+
+  test('handles a mix of valid and invalid events', () => {
+    const { locked, dropped } = lockEventFactsFromDb(
+      [
+        { eventId: id1, title: 'Valid' },
+        { eventId: 'bogus', title: 'Bad' },
+        { eventId: id2, title: 'Also valid' },
+      ],
+      [dbRow({ id: id1 }), dbRow({ id: id2, title: 'Sunday Market', city: 'Sarasota', venue_name: 'Bayfront Park' })],
+    );
+    expect(locked.map((e) => e.title)).toEqual(['Valid', 'Also valid']);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0].reason).toBe('eventId not in approved list');
+  });
+
+  test('strips URLs the model slips into commentary prose (Codex P2)', () => {
+    const { locked } = lockEventFactsFromDb(
+      [{
+        eventId: id1,
+        title: 'Bradenton Blues',
+        description: 'Grab tickets at https://scammy.example.com before they sell out.',
+        proTip: 'More info at www.evil.example.com',
+        highlights: ['Buy passes here: http://phish.example.com', 'Live music all night'],
+        closingLine: 'See the lineup at [the site](https://bad.example.com).',
+      }],
+      [dbRow()],
+    );
+    const ev = locked[0];
+    // No raw URLs survive in any commentary field
+    const blob = [ev.description, ev.proTip, ev.closingLine, ...ev.highlights].join(' ');
+    expect(blob).not.toMatch(/https?:\/\//i);
+    expect(blob).not.toMatch(/www\./i);
+    // Connector + URL strip cleanly (no dangling "at"/"here:")
+    expect(ev.description).toBe('Grab tickets before they sell out.');
+    // Markdown link keeps its label, drops the URL
+    expect(ev.closingLine).toContain('the site');
+    // Non-URL commentary is preserved
+    expect(ev.highlights).toContain('Live music all night');
+    // The DB-locked eventUrl is untouched and authoritative
+    expect(ev.eventUrl).toBe('https://example.com/blues');
+  });
+});
+
+// ── Hallucinated-claim hard-block scanner ────────────────────────────
+//
+// Encodes the contract that voice validation can warn about (advisory)
+// vs what newsletter-validator must hard-block (factual/legal risk).
+// Anything in this scanner is an error — the send route returns 400
+// instead of dispatching.
+
+describe('newsletter findHallucinatedClaims', () => {
+  test('blocks dollar amounts in body', () => {
+    const errors = findHallucinatedClaims('<p>Tickets are $15 at the door</p>');
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some((e) => e.includes('dollar amount'))).toBe(true);
+  });
+
+  test('blocks "free admission" / "free tickets" claims', () => {
+    expect(findHallucinatedClaims('<p>Free admission for all!</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>Grab your free tickets at the booth</p>').length).toBeGreaterThan(0);
+  });
+
+  test('blocks "no cost" / "complimentary" admission language', () => {
+    expect(findHallucinatedClaims('<p>complimentary entry for kids</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>free of charge for everyone</p>').length).toBeGreaterThan(0);
+  });
+
+  test('blocks inverted "X is free" phrasing (Codex P2)', () => {
+    expect(findHallucinatedClaims('<p>Show up — admission is free.</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>tickets are free this year</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>entry is free for members</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>the event is free to attend</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>parking is free downtown</p>').length).toBeGreaterThan(0);
+  });
+
+  test('blocks pest-control efficacy and safety guarantee phrases', () => {
+    expect(findHallucinatedClaims('<p>guaranteed safe for pets</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>100% effective</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>Our pet-safe formula</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>child-safe spray</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>EPA-approved blend</p>').length).toBeGreaterThan(0);
+  });
+
+  test('dedupes repeated patterns — one error per label', () => {
+    const errors = findHallucinatedClaims('<p>$5 here. $10 there. $20 everywhere.</p>');
+    expect(errors).toHaveLength(1);
+  });
+
+  test('decodes HTML entities before matching (Codex P2)', () => {
+    expect(findHallucinatedClaims('<p>Tickets are &#36;15 at the door</p>').length).toBeGreaterThan(0); // numeric &#36;
+    expect(findHallucinatedClaims('<p>Cover is &#x24;20</p>').length).toBeGreaterThan(0); // hex &#x24;
+    expect(findHallucinatedClaims('<p>Cover is &dollar;20</p>').length).toBeGreaterThan(0); // named &dollar;
+    expect(findHallucinatedClaims('<p>admission&nbsp;is&nbsp;free</p>').length).toBeGreaterThan(0); // &nbsp; word-break
+    expect(findHallucinatedClaims('<p>Tickets are &amp;#36;15</p>').length).toBeGreaterThan(0); // double-encoded
+  });
+
+  test('returns empty for clean body', () => {
+    const clean = '<h2>Bradenton Blues</h2><p>Live music on the riverwalk Saturday night — bring a chair.</p>';
+    expect(findHallucinatedClaims(clean)).toEqual([]);
+  });
+
+  test('returns empty for missing body', () => {
+    expect(findHallucinatedClaims('')).toEqual([]);
+    expect(findHallucinatedClaims(null)).toEqual([]);
+  });
+});
+
+describe('newsletter validateNewsletterDraft — hallucinated claims hard-block', () => {
+  const baseSend = {
+    subject: 'Weekend Lineup',
+    html_body: '<h2>Bradenton Blues</h2><p>Live music Saturday — schedule service via wavespestcontrol.com. Homeowner Minute: prep your lawn.</p>',
+    text_body: 'Weekend events',
+    preview_text: 'Live music + markets this weekend',
+    newsletter_type: 'local-weekly-fresh-events',
+  };
+
+  test('clean flagship body has no errors', () => {
+    const { errors } = validateNewsletterDraft(baseSend, { recipientCount: 100 });
+    expect(errors).toEqual([]);
+  });
+
+  test('dollar amount in flagship body produces an error', () => {
+    const send = { ...baseSend, html_body: baseSend.html_body + '<p>Tickets $15</p>' };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
+  });
+
+  test('non-flagship type skips the hallucination scan', () => {
+    const send = {
+      ...baseSend,
+      newsletter_type: 'service-promo',
+      html_body: '<p>Limited-time offer: $99 setup!</p>',
+    };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
+    // Non-flagship types intentionally allow pricing — service promos quote prices
+    expect(errors.filter((e) => e.includes('Hallucinated claim'))).toEqual([]);
+  });
+
+  test('hallucinated claim in plain-text fallback is blocked even when HTML is clean (Codex P2)', () => {
+    const send = {
+      ...baseSend,
+      // HTML body is clean; the text-only fallback SendGrid delivers is not
+      text_body: 'Bradenton Blues this Saturday. Tickets are $15 at the door.',
+    };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
+  });
+
+  test('flagship send with only a text body (no HTML) is still scanned', () => {
+    const send = {
+      subject: 'Weekend Lineup',
+      html_body: null,
+      text_body: 'Free admission for everyone this weekend!',
+      preview_text: 'Weekend',
+      newsletter_type: 'local-weekly-fresh-events',
+    };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
   });
 });

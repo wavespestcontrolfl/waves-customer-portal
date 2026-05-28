@@ -38,13 +38,16 @@ function generateSlug(subject) {
 
 /**
  * Build the event block string from an array of events_raw rows.
- * Copied from the flagship flow in admin-newsletter.js.
+ * Each event leads with its UUID so Claude can reference it back via
+ * the `eventId` field — facts (date/time/venue/address/URL) are then
+ * re-locked from the DB at render time, regardless of what the model
+ * echoes in its prose.
  */
 function formatEventBlock(events) {
   if (!events || events.length === 0) return '';
   return '\n\nAPPROVED EVENTS (use ONLY these — do not invent events):\n' +
     events.map((ev, i) => {
-      const parts = [`${i + 1}. ${ev.title}`];
+      const parts = [`${i + 1}. [eventId: ${ev.id}] ${ev.title}`];
       if (ev.city) parts.push(`   City: ${ev.city}`);
       if (ev.start_at) parts.push(`   Date: ${new Date(ev.start_at).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })}`);
       if (ev.start_at) parts.push(`   Time: ${new Date(ev.start_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })}`);
@@ -97,14 +100,16 @@ NEVER WRITE: ${voice.bannedCorporatePhrases.map(p => `"${p}"`).join(', ')}
 
 EVENT RULES:
 - Use ONLY the approved event records provided. Do NOT invent events.
-- Do NOT change dates, times, prices, venues, or URLs.
+- For every event you include, copy its [eventId: ...] UUID into the "eventId" field exactly. The renderer uses this to re-pull date, time, venue, address, and ticket URL straight from the database — anything you write for those fields will be IGNORED.
+- Do NOT mention specific dollar amounts, "free admission", "no cost", "complimentary", or any ticket-price phrasing in your commentary. We never store admission in the DB, so any pricing claim you make is unverifiable and will hard-block the send.
+- Do NOT make pest-control safety or efficacy claims ("pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved") — this is an events newsletter, not a service pitch.
 - Each event gets a catchy/punny title (not just the raw event name).
 - Each event gets a unique thematic emoji (no repeats between events).
 - gifSearchTerm: 2-4 word Giphy search to find a mood-matching reaction GIF.
 - gifCaption: 1-sentence italic quip below the GIF (humorous, specific to the event).
-- description: 1-3 sentences, conversational, says WHY someone would actually go.
-- highlights: 3-5 bullet points of what to expect (optional — skip if event is simple).
-- proTip: insider tip prefixed with "Pro tip:" (optional — only if genuinely useful).
+- description: 1-3 sentences, conversational, says WHY someone would actually go. Do NOT restate the date, venue, or URL — those render automatically.
+- highlights: 3-5 bullet points of what to expect (optional — skip if event is simple). Vibe-only; no logistics.
+- proTip: insider tip prefixed with "Pro tip:" (optional — only if genuinely useful, e.g. parking, what to wear). NOT pricing or ticket logistics.
 - closingLine: punchy one-liner CTA to wrap the event (imperative, mix bold+italic).
 
 HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, home prep). Max ~90 words. Genuinely useful, not salesy.
@@ -124,17 +129,12 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
   "transitionLine": "string (bold rallying one-liner before events, e.g. 'Let's go exploring. 👇')",
   "events": [
     {
+      "eventId": "string (REQUIRED — copy the [eventId: ...] UUID from the approved event verbatim)",
       "emoji": "string (single thematic emoji)",
       "title": "string (catchy/punny, not raw event name)",
       "gifSearchTerm": "string (2-4 word Giphy search)",
       "gifCaption": "string (1-sentence italic quip)",
-      "description": "string (1-3 sentences, conversational)",
-      "date": "string (e.g. 'Saturday, May 31 @ 7:00 PM')",
-      "location": "string (venue + city)",
-      "address": "string or null (street address)",
-      "admission": "string or null (price/ticket info)",
-      "eventUrl": "string or null",
-      "imageUrl": "string or null (copy from the event's Image field if provided)",
+      "description": "string (1-3 sentences, conversational — vibe only, no logistics)",
       "highlights": ["string"] or null,
       "proTip": "string or null",
       "closingLine": "string (punchy wrap-up)"
@@ -222,6 +222,102 @@ function dividerHtml() {
 <a href="https://www.wavespestcontrol.com/" style="text-decoration:none;">
 <img src="${WAVES_DIVIDER_GIF}" alt="" width="100" style="width:100px;height:auto;display:inline-block;" />
 </a></div>`;
+}
+
+/**
+ * Re-lock factual fields (date, time, location, address, ticket URL, image)
+ * onto AI-generated event objects using the corresponding events_raw rows.
+ *
+ * The model is instructed to never write these fields, but we override them
+ * anyway — defense in depth. Events without a matching DB row are dropped
+ * and surfaced to the caller as warnings (or, if every event drops, a hard
+ * error before assembly).
+ *
+ * @param {Array} aiEvents - The `events` array from Claude's JSON output
+ * @param {Array} dbEvents - The events_raw rows fetched by eventIds
+ * @returns {{ locked: Array, dropped: Array<{ index:number, reason:string, title?:string }> }}
+ */
+// Strip URLs (and bare www. / markdown links) from AI commentary prose.
+// The ONLY link that should reach the body is the DB-locked eventUrl,
+// rendered in the metadata block — a URL the model slipped into prose is
+// unverified and could be wrong or malicious. Leaves trailing connector
+// words like "at"/"here" dangling-free by tidying whitespace + stray
+// punctuation around the removed token.
+function stripCommentaryUrls(value) {
+  if (typeof value !== 'string' || !value) return value;
+  return value
+    .replace(/\[([^\]]*)\]\((?:https?:\/\/|www\.)[^)]*\)/gi, '$1')                       // markdown link → keep label
+    .replace(/\b(?:at|via|from|on|here)\b[\s:]*(?:https?:\/\/|www\.)[^\s)<>"']+/gi, '')   // connector + URL together
+    .replace(/\b(?:https?:\/\/|www\.)[^\s)<>"']+/gi, '')                                  // remaining bare URLs
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,!?;:])/g, '$1')
+    .trim();
+}
+
+function sanitizeCommentaryFields(ev) {
+  const out = { ...ev };
+  for (const k of ['title', 'description', 'proTip', 'closingLine', 'gifCaption']) {
+    if (typeof out[k] === 'string') out[k] = stripCommentaryUrls(out[k]);
+  }
+  if (Array.isArray(out.highlights)) {
+    out.highlights = out.highlights.map((h) => (typeof h === 'string' ? stripCommentaryUrls(h) : h));
+  }
+  return out;
+}
+
+function lockEventFactsFromDb(aiEvents, dbEvents) {
+  const dbById = new Map((dbEvents || []).map((r) => [String(r.id).toLowerCase(), r]));
+  const locked = [];
+  const dropped = [];
+  const seenIds = new Set();
+
+  (aiEvents || []).forEach((ev, index) => {
+    const rawId = ev && ev.eventId ? String(ev.eventId).toLowerCase() : '';
+    if (!rawId) {
+      dropped.push({ index, reason: 'missing eventId', title: ev?.title });
+      return;
+    }
+    const row = dbById.get(rawId);
+    if (!row) {
+      dropped.push({ index, reason: 'eventId not in approved list', title: ev?.title });
+      return;
+    }
+    if (seenIds.has(rawId)) {
+      dropped.push({ index, reason: 'duplicate eventId in draft', title: ev?.title });
+      return;
+    }
+    seenIds.add(rawId);
+
+    const startAt = row.start_at ? new Date(row.start_at) : null;
+    const dateStr = startAt
+      ? startAt.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })
+      : null;
+    const timeStr = startAt
+      ? startAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
+      : null;
+    const date = dateStr && timeStr ? `${dateStr} @ ${timeStr}` : (dateStr || null);
+    const venue = row.venue_name || null;
+    const city = row.city || null;
+    const location = venue && city ? `${venue}, ${city}` : (venue || city || null);
+
+    locked.push({
+      // Strip any URLs the model slipped into commentary prose before
+      // spreading — only the DB-locked eventUrl below may render as a link.
+      ...sanitizeCommentaryFields(ev),
+      eventId: row.id,
+      date,
+      location,
+      address: row.venue_address || null,
+      eventUrl: row.event_url || null,
+      imageUrl: row.image_url || null,
+      // admission deliberately omitted — events_raw does not store it,
+      // so any value the model produced was unverifiable. Free-vs-paid
+      // is signaled by row.is_free if a future render wants to use it.
+      admission: null,
+    });
+  });
+
+  return { locked, dropped };
 }
 
 function gifBlock(url, caption) {
@@ -413,6 +509,7 @@ async function createNewsletterDraft({
   tone,
   includeCTA,
   trx,
+  persist = true,
 }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API not configured');
@@ -424,15 +521,19 @@ async function createNewsletterDraft({
   const typeConfig = getNewsletterType(newsletterType);
   const voice = getVoiceProfile(typeConfig.voiceProfile);
 
-  // 1. Fetch events from events_raw by IDs (if provided)
+  // 1. Fetch events from events_raw by IDs (if provided). The fetched rows
+  //    are held for both the Claude prompt AND the post-draft factual lock —
+  //    the lock re-applies date/venue/URL from the DB regardless of what the
+  //    model echoes back.
   let eventBlock = '';
+  let approvedEvents = [];
   const MAX_EVENT_IDS = 12;
   if (Array.isArray(eventIds) && eventIds.length > 0) {
     const safeIds = eventIds.slice(0, MAX_EVENT_IDS).filter(
       (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id),
     );
     if (safeIds.length > 0) {
-      const events = await knex('events_raw as e')
+      approvedEvents = await knex('events_raw as e')
         .leftJoin('event_sources as s', 's.id', 'e.source_id')
         .select(
           'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
@@ -442,7 +543,7 @@ async function createNewsletterDraft({
         .whereIn('e.id', safeIds)
         .orderByRaw('e.freshness_score DESC NULLS LAST');
 
-      eventBlock = formatEventBlock(events);
+      eventBlock = formatEventBlock(approvedEvents);
     }
   }
 
@@ -501,6 +602,36 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     draft = JSON.parse(repairedJson);
   }
 
+  // 4a. Factual lock — overwrite AI-supplied date/venue/address/URL/image
+  //     with the values from events_raw, keyed by the eventId the model
+  //     copied from each [eventId: ...] tag in the prompt. Events the
+  //     model failed to anchor to a real eventId are dropped here so they
+  //     never reach the rendered HTML.
+  if (Array.isArray(draft.events) && draft.events.length > 0) {
+    if (approvedEvents.length === 0) {
+      // No DB pool to anchor against — every event is unverifiable.
+      throw new Error(
+        `Model returned ${draft.events.length} event(s) but no approved DB events were supplied. ` +
+        `Refusing to render unanchored event content.`
+      );
+    }
+    const { locked, dropped } = lockEventFactsFromDb(draft.events, approvedEvents);
+    if (dropped.length > 0) {
+      const summary = dropped.map((d) => `[${d.index}] ${d.title || '(no title)'} — ${d.reason}`).join('; ');
+      logger.warn(`[newsletter-draft] dropped ${dropped.length} event(s) without DB anchor: ${summary}`);
+      draft.factualLockingWarnings = dropped.map(
+        (d) => `Event dropped (${d.reason}): ${d.title || 'no title'}`
+      );
+    }
+    if (locked.length === 0) {
+      throw new Error(
+        `Factual locking dropped every event — model returned ${draft.events.length} event(s) ` +
+        `but none matched the approved eventIds. Refusing to render an empty newsletter.`
+      );
+    }
+    draft.events = locked;
+  }
+
   // 4b. Generate hero image (runs in parallel with nothing — fire and await)
   if (draft.events?.length && !draft.heroImageUrl) {
     draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Fresh This Week');
@@ -509,8 +640,18 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   // 4c. Assemble Beehiiv-quality HTML from structured event data + Giphy GIFs
   if (draft.events?.length) {
     draft.htmlBody = await assembleBeehiivNewsletter(draft);
+  } else if (typeConfig?.flagship) {
+    // Flagship drafts must come through the locked structured-events path.
+    // If the model returned no events (e.g. the legacy `sections` shape, or
+    // `events: []` + `sections`), refuse to fall back — rendering section
+    // HTML directly would let AI-generated dates/venues/URLs ship without a
+    // DB anchor, defeating the factual lock.
+    throw new Error(
+      'Flagship draft produced no structured events — refusing to render ' +
+      'unlocked sections output. The model must return events[] anchored by eventId.'
+    );
   } else if (draft.sections) {
-    // Fallback: old-style sections format
+    // Fallback: old-style sections format (non-flagship types only)
     const keys = ['local_intro', 'fresh_this_week', 'just_starting', 'weekend_picks',
       'family_or_low_key_pick', 'road_trip_pick', 'homeowner_minute', 'waves_cta'];
     draft.htmlBody = keys.map(k => {
@@ -533,6 +674,14 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 
   // Map flagship output to legacy shape
   draft.subject = draft.selectedSubject || draft.subjectVariants?.[0] || '';
+
+  // persist=false: the interactive Compose flow (/draft-ai) reuses this
+  // locked generator for a preview, then saves via the normal /sends
+  // route after the operator reviews. Skip the DB insert and return the
+  // draft only — facts are still locked at this point.
+  if (!persist) {
+    return { send: null, draft };
+  }
 
   // 6. Generate slug
   const slug = generateSlug(draft.subject);
@@ -560,4 +709,4 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   return { send, draft };
 }
 
-module.exports = { createNewsletterDraft };
+module.exports = { createNewsletterDraft, lockEventFactsFromDb };

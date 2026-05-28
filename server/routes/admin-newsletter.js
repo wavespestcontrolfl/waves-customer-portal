@@ -19,11 +19,12 @@ const NewsletterSender = require('../services/newsletter-sender');
 const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
-const { isFlagshipType, getNewsletterType } = require('../config/newsletter-types');
-const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
+const { isFlagshipType } = require('../config/newsletter-types');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
+const { createNewsletterDraft } = require('../services/newsletter-draft');
+const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 let Anthropic;
@@ -723,161 +724,43 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
 
     // ── Flagship flow: local-weekly-fresh-events ──────────────────────
+    // Delegates to the shared createNewsletterDraft() service (persist:false
+    // for a preview the operator reviews before saving). This is the SAME
+    // path the autopilot uses, so manual Compose drafts get the same
+    // DB-locked event facts — AI-supplied dates/venues/URLs are overwritten
+    // from events_raw, not trusted from the model.
     if (isFlagshipType(newsletterType)) {
-      const typeConfig = getNewsletterType(newsletterType);
-      const voice = getVoiceProfile(typeConfig.voiceProfile);
-
-      let eventBlock = '';
-      const MAX_EVENT_IDS = 12;
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      let resolvedEventIds;
       if (Array.isArray(eventIds) && eventIds.length > 0) {
-        const safeIds = eventIds.slice(0, MAX_EVENT_IDS).filter(
-          (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id),
-        );
-        if (safeIds.length === 0) {
+        resolvedEventIds = eventIds.filter((id) => typeof id === 'string' && UUID_RE.test(id));
+        if (resolvedEventIds.length === 0) {
           return res.status(400).json({ error: 'eventIds must be valid UUIDs' });
         }
-        const events = await db('events_raw as e')
-          .leftJoin('event_sources as s', 's.id', 'e.source_id')
-          .select(
-            'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
-            'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
-            'e.categories', 's.name as source_name',
-          )
-          .whereIn('e.id', safeIds);
-
-        if (events.length > 0) {
-          eventBlock = '\n\nAPPROVED EVENTS (use ONLY these — do not invent events):\n' +
-            events.map((ev, i) => {
-              const parts = [`${i + 1}. ${ev.title}`];
-              if (ev.city) parts.push(`   City: ${ev.city}`);
-              if (ev.start_at) parts.push(`   Date: ${new Date(ev.start_at).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })}`);
-              if (ev.start_at) parts.push(`   Time: ${new Date(ev.start_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })}`);
-              if (ev.venue_name) parts.push(`   Venue: ${ev.venue_name}`);
-              if (ev.venue_address) parts.push(`   Address: ${ev.venue_address}`);
-              if (ev.event_url) parts.push(`   URL: ${ev.event_url}`);
-              if (ev.source_name) parts.push(`   Source: ${ev.source_name}`);
-              if (ev.description) parts.push(`   Details: ${ev.description.slice(0, 200)}`);
-              return parts.join('\n');
-            }).join('\n\n');
-        }
+      } else {
+        // One-click "Draft With AI" sends no events. Auto-source this week's
+        // approved/eligible events (same query the autopilot uses) so the
+        // flagship draft stays DB-locked instead of inviting the model to
+        // invent events.
+        const { scored } = await buildDigestPlan();
+        resolvedEventIds = scored.slice(0, 12).map((ev) => ev.id);
       }
 
-      const flagshipSystemPrompt = `You write the Waves weekly local events newsletter — "Fresh This Week from North Port to Tampa."
+      if (resolvedEventIds.length === 0) {
+        return res.status(400).json({
+          error: 'No approved events available for this week. Approve events in the Events tab or build a plan in the Digest Planner before drafting a flagship newsletter.',
+        });
+      }
 
-This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide from North Port to Tampa, written like a friend texting "yo, here's what's actually worth doing."
-
-The newsletter leads with local events. Waves pest/lawn/homeowner content appears only as a short useful sidebar (Homeowner Minute) and a soft CTA at the end.
-
-CURRENT MONTH: ${month}
-
-SWFL SEASONAL CONTEXT (pick what's relevant):
-- Local events & seasonal rhythms by month:
-  • Jan–Feb: snowbird season peak, cooler mornings, dry lawns, red tide drift
-  • Mar: spring break traffic, love bugs starting, citrus bloom
-  • Apr: Bradenton Blues Festival week, baseball spring training tail, lawn pre-emergents
-  • May: DeSoto Heritage Festival & Grand Parade (Bradenton), mosquito season ramp, no-see-um peak at dawn/dusk
-  • Jun: hurricane season begins (Jun 1), afternoon thunderstorms daily, nitrogen blackout begins on lawns (Jun–Sept by county ordinance)
-  • Jul: 4th of July on the waterfront, peak rainy season, German roach pressure, palmetto bugs indoors
-  • Aug: back-to-school in Manatee/Sarasota schools, peak hurricane risk month, chinch bug damage on St. Augustine
-  • Sep: hurricane peak, Siesta Key Crystal Classic (sand sculpture), subterranean termite swarms after storms
-  • Oct: snowbirds return, cooler nights, rodent season begins (mice seeking warmth), Halloween on the barrier islands
-  • Nov: Sarasota Season of Sculpture, turkey trots, last major hurricane risk tapers, winter annuals go in
-  • Dec: holidays, boat parades (Downtown Bradenton Riverwalk, Venice), cooler weather drives indoor pest activity
-- SWFL pests by season: subterranean termites (swarm after rain), German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs on St. Augustine, sod webworms
-
-VOICE:
-- Irreverent but not mean
-- Energetic but not chaotic
-- Specific to this week's events
-- Conversational, like a local friend
-- Short, scannable, and useful
-- Never corporate
-- Owner-operator energy: "we", "our team", first names welcome
-
-SUBJECT LINES:
-- Punchy, max ${voice.subjectLineRules.maxLength} chars
-- FOMO-driven, specific to this week's event mix
-- Can be playful, emoji-led, or slightly ridiculous when appropriate
-- Never generic ("Monthly Newsletter", "Weekly Update")
-- Good examples: ${voice.subjectLineRules.examples.map(e => `"${e}"`).join(', ')}
-
-EVENT BLURBS:
-- Include city, date/day, venue/location when provided
-- Explain in one sentence why it is worth going
-- Do NOT invent events — use only the approved event records provided
-- Do NOT change dates, times, prices, venues, or URLs from the approved records
-- Do NOT include stale recurring events unless explicitly marked as fresh
-
-HOMEOWNER MINUTE:
-- One useful seasonal tip (pest, lawn, or home prep)
-- Max ~90 words
-- Genuinely useful, not salesy
-- No scare tactics, no hard pitch
-- Must stand on its own without selling Waves
-
-SIGN-OFF: Must end with "${voice.signoff}"
-
-NEVER WRITE:
-${voice.bannedCorporatePhrases.map(p => `- "${p}"`).join('\n')}
-
-FORMAT: HTML body only (no <html>/<head>/<body> wrapper, no unsubscribe footer).
-Use <h2> for section headers, <p> for paragraphs, <strong> for emphasis, <ul><li> for lists.
-
-REQUIRED SECTIONS (produce all of these):
-1. local_intro — 1-2 sentence casual hook for the week
-2. fresh_this_week — 4-6 top event picks (one-time, annual, opening weekends)
-3. just_starting — 1-2 new recurring series or seasonal launches
-4. weekend_picks — 2-3 Friday–Sunday highlights (can overlap with fresh_this_week)
-5. family_or_low_key_pick — one family-friendly or low-effort option
-6. road_trip_pick — one event worth the drive from outside the reader's immediate zone
-7. homeowner_minute — short seasonal tip from Waves
-8. waves_cta — soft call to action (book, call, reply)
-
-Return STRICT JSON with these keys:
-{
-  "subjectVariants": ["string", "string", "string"],
-  "selectedSubject": "string (your best pick from subjectVariants)",
-  "previewText": "string, 50-110 chars, complements subject without repeating",
-  "sections": {
-    "local_intro": "HTML string",
-    "fresh_this_week": "HTML string",
-    "just_starting": "HTML string",
-    "weekend_picks": "HTML string",
-    "family_or_low_key_pick": "HTML string",
-    "road_trip_pick": "HTML string",
-    "homeowner_minute": "HTML string",
-    "waves_cta": "HTML string"
-  },
-  "htmlBody": "string — all sections assembled into one HTML body",
-  "textBody": "string — plain-text version of the same content"
-}
-No prose outside the JSON.`;
-
-      const userPrompt = `Topic / prompt: ${prompt}
-${audience ? `Audience: ${audience}` : ''}
-${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
-
-      const response = await anthropic.messages.create({
-        model: MODELS.WORKHORSE,
-        max_tokens: 3000,
-        system: flagshipSystemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
+      const { draft } = await createNewsletterDraft({
+        prompt,
+        eventIds: resolvedEventIds,
+        newsletterType,
+        audience,
+        tone,
+        includeCTA,
+        persist: false,
       });
-
-      const text = response.content?.[0]?.text || '';
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('Claude did not return JSON');
-
-      const draft = JSON.parse(jsonMatch[0]);
-      const voiceCheck = validateVoice(
-        { subject: draft.selectedSubject || draft.subjectVariants?.[0], htmlBody: draft.htmlBody },
-        typeConfig.voiceProfile,
-      );
-      draft.voiceWarnings = voiceCheck.warnings;
-      draft.newsletterType = newsletterType;
-
-      // Map flagship output to legacy shape so the compose UI can consume it
-      draft.subject = draft.selectedSubject || draft.subjectVariants?.[0] || '';
       return res.json({ success: true, draft });
     }
 
@@ -1871,8 +1754,6 @@ router.patch('/calendar/:id', async (req, res, next) => {
 });
 
 // ── Calendar → Draft ────────────────────────────────────────────────
-
-const { createNewsletterDraft } = require('../services/newsletter-draft');
 
 router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, next) => {
   try {

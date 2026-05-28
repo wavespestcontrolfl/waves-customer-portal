@@ -296,4 +296,4 @@ async function autoDraftFlagship() {
   return { skipped: false, sendId: send.id, eventCount: topEvents.length };
 }
 
-module.exports = { autoDraftFlagship };
+module.exports = { autoDraftFlagship, buildDigestPlan };
