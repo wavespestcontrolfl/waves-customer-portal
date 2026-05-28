@@ -22,10 +22,19 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.e
 const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
+const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
 
 const MIN_CALLS = 100;
 const SCHEMA_PASS_THRESHOLD = 0.95;
 const AGREEMENT_THRESHOLD = 0.95;
+
+// The promotion gate must reflect ONLY the currently-deployed extractor.
+// Shadow rows from a prior model/prompt (e.g. the pre-Gemini-Pro/JSON-mode
+// extractor that 100% schema-failed) would otherwise dilute the metrics and
+// let a stale ≥95% sample green-light a freshly-changed extractor. Mirror the
+// processor's defaults; override via env if those change.
+const CURRENT_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
+const CURRENT_PROMPT_VERSION = PROMPT_HASH;
 
 function dbConn() {
   const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
@@ -48,14 +57,29 @@ async function main() {
   // failures drop out of the denominator and the validation rate looks ~100%.
   // Exclude 'not_run' (extraction never attempted, e.g. no API key) from the
   // attempted-denominator so it doesn't unfairly tank the rate.
-  const rows = await db('call_log')
+  //
+  // CRITICAL: scope to the CURRENT extractor (model + prompt version). Stale
+  // rows from a prior extractor must not feed the pass/fail gate.
+  const baseQuery = () => db('call_log')
     .whereNotNull('v2_extraction_status')
-    .whereNot('v2_extraction_status', 'not_run')
+    .whereNot('v2_extraction_status', 'not_run');
+
+  const totalAttempted = parseInt((await baseQuery().count('* as n').first())?.n || 0, 10);
+
+  const rows = await baseQuery()
+    .where('ai_extraction_model', CURRENT_MODEL)
+    .where('ai_extraction_prompt_version', CURRENT_PROMPT_VERSION)
     .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at');
 
+  const staleExcluded = totalAttempted - rows.length;
+  console.log(`Current extractor: model=${CURRENT_MODEL} prompt=${CURRENT_PROMPT_VERSION}`);
+  if (staleExcluded > 0) {
+    console.log(`Excluded ${staleExcluded} shadow row(s) from older extractor versions (not counted toward the gate).`);
+  }
+
   if (rows.length === 0) {
-    console.log('No shadow v2 extractions attempted yet (v2_extraction_status all null/not_run).');
-    console.log('Confirm CALL_EXTRACTION_V2_ENABLED=true and wait for inbound calls.');
+    console.log(`\nNo shadow extractions from the current extractor yet (${totalAttempted} total from older versions).`);
+    console.log('Confirm CALL_EXTRACTION_V2_ENABLED=true and wait for inbound calls on the deployed extractor.');
     await db.destroy();
     return;
   }
