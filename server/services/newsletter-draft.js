@@ -167,6 +167,9 @@ const COLORS = {
 const WAVES_DIVIDER_GIF = 'https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/952b11dc-99a2-4de3-8def-481a1c34f8d7/giphy.gif';
 
 async function generateHeroImage(subject) {
+  const s3Ready = config.s3.accessKeyId && config.s3.bucket && process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+  if (!s3Ready) return null;
+
   try {
     const imageGenerator = require('./content/image-generator');
     const result = await imageGenerator.generate({
