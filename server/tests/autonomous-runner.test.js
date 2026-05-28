@@ -253,6 +253,7 @@ describe('rewrite_title_meta live adapter', () => {
 
       expect(result.outcome).toBe('completed_pending_review');
       expect(result.skip_reason).toBe('metadata_quality_gate_fail');
+      expect(result.quality_gate_result.ok).toBe(false);
       expect(result.quality_gate_result.checks.primary_keyword_in_title.ok).toBe(false);
       expect(result.quality_gate_result.hard_failures).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: 'primary_keyword_in_title' }),

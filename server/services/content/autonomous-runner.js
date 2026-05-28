@@ -671,6 +671,7 @@ class AutonomousRunner {
       if (forcedHardFailures.length) {
         run.quality_gate_result = {
           ...run.quality_gate_result,
+          ok: false,
           hard_failures: [
             ...(Array.isArray(run.quality_gate_result.hard_failures) ? run.quality_gate_result.hard_failures : []),
             ...forcedHardFailures,
