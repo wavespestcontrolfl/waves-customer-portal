@@ -65,6 +65,7 @@ const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gat
 const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
 const getProtectedPages = lazy('protected-pages', './protected-pages');
+const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -335,6 +336,30 @@ class AutonomousRunner {
           await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_failed', { claimToken });
           return finalized;
         }
+      }
+    }
+
+    // 3c. Content guardrails — page-policy checks on the drafted body
+    // (hardcoded price on any page type, brand-token leak on multi-domain
+    // pages, FAQ on a policy-blocked service, keyword stuffing). Applies to
+    // every body-content action. P0/P1 → human review.
+    const contentGuardrails = getContentGuardrails();
+    if (contentGuardrails && draft) {
+      const guardResult = contentGuardrails.evaluate(draft, {
+        service: opp.service || brief.service || null,
+        primaryKeyword: brief.target_keyword || null,
+      });
+      run.content_guardrails_result = guardResult;
+      if (!guardResult.pass) {
+        const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+        const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'content_guardrails_failed',
+          reviewer_notes: notes,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_failed', { claimToken });
+        return finalized;
       }
     }
 
