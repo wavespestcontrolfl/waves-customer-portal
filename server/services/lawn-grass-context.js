@@ -13,6 +13,7 @@
  * so we do NOT synthesize legacy A/B/C1/C2/D codes here.
  */
 const db = require('./../models/db');
+const protocols = require('../config/protocols.json');
 
 const GRASS_TYPE_LABELS = {
   st_augustine: 'St. Augustine',
@@ -58,6 +59,17 @@ function irrigationTypeHasSystem(irrigationType) {
   return IRRIGATION_HAS_SYSTEM[irrigationType] ?? null;
 }
 
+// Resolve the protocol track id, mirroring waveguard-plan-engine.js: an
+// explicit track_key wins when it names a real protocols.lawn track;
+// otherwise the canonical grass type doubles as the track id
+// (st_augustine / bermuda / zoysia / bahia). 'mixed'/'unknown' — and any
+// value not present in protocols.lawn — have no track.
+function resolveTrackKey(trackKey, grassType) {
+  if (trackKey && protocols.lawn && protocols.lawn[trackKey]) return trackKey;
+  if (grassType && protocols.lawn && protocols.lawn[grassType]) return grassType;
+  return null;
+}
+
 function emptyContext() {
   return {
     grassType: null,
@@ -91,7 +103,7 @@ async function loadCustomerGrassContext(customerId, knex = db) {
   return {
     grassType,
     grassTypeLabel: grassTypeLabel(grassType),
-    trackKey: profile?.track_key || null,
+    trackKey: resolveTrackKey(profile?.track_key, grassType),
     sunExposure: profile?.sun_exposure || null,
     irrigationSystem: profile?.irrigation_type || null,
     propertySqft: profile?.lawn_sqft || customer?.property_sqft || null,
@@ -103,5 +115,6 @@ module.exports = {
   grassTypeLabel,
   normalizeGrassType,
   irrigationTypeHasSystem,
+  resolveTrackKey,
   loadCustomerGrassContext,
 };

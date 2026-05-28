@@ -3,6 +3,7 @@ const {
   grassTypeLabel,
   normalizeGrassType,
   irrigationTypeHasSystem,
+  resolveTrackKey,
   loadCustomerGrassContext,
 } = require('../services/lawn-grass-context');
 
@@ -72,10 +73,40 @@ describe('lawn-grass-context', () => {
     const ctx = await loadCustomerGrassContext('cust-2', knex);
     expect(ctx.grassType).toBe('st_augustine'); // normalized, not the raw free-text
     expect(ctx.grassTypeLabel).toBe('St. Augustine'); // matches %St. Augustine% knowledge lookups
-    expect(ctx.trackKey).toBe(null);
+    expect(ctx.trackKey).toBe('st_augustine'); // grass type doubles as the protocol track
     expect(ctx.sunExposure).toBe(null);
     expect(ctx.irrigationSystem).toBe(null);
     expect(ctx.propertySqft).toBe(6400);
+  });
+
+  test('resolveTrackKey: track_key wins, else grass type doubles as track', () => {
+    expect(resolveTrackKey('bermuda', 'st_augustine')).toBe('bermuda'); // explicit track_key wins
+    expect(resolveTrackKey(null, 'st_augustine')).toBe('st_augustine'); // fall back to grass type
+    expect(resolveTrackKey('', 'zoysia')).toBe('zoysia');
+    expect(resolveTrackKey(null, 'mixed')).toBe(null); // mixed/unknown have no protocol track
+    expect(resolveTrackKey(null, 'unknown')).toBe(null);
+    expect(resolveTrackKey('not_a_track', 'bahia')).toBe('bahia'); // invalid track_key → grass fallback
+    expect(resolveTrackKey(null, null)).toBe(null);
+  });
+
+  test('profiled customer with grass_type but no track_key still gets a track', async () => {
+    const knex = fakeKnex({
+      customer_turf_profiles: { grass_type: 'bermuda', track_key: null, lawn_sqft: 7000 },
+      customers: null,
+    });
+    const ctx = await loadCustomerGrassContext('cust-4', knex);
+    expect(ctx.grassType).toBe('bermuda');
+    expect(ctx.trackKey).toBe('bermuda'); // derived from grass_type, not dropped
+  });
+
+  test('profiled mixed-grass customer has no protocol track', async () => {
+    const knex = fakeKnex({
+      customer_turf_profiles: { grass_type: 'mixed', track_key: null },
+      customers: null,
+    });
+    const ctx = await loadCustomerGrassContext('cust-5', knex);
+    expect(ctx.grassType).toBe('mixed');
+    expect(ctx.trackKey).toBe(null);
   });
 
   test('returns an all-null context for a missing customerId', async () => {
