@@ -40,6 +40,7 @@ import {
   Star,
   Search,
   RefreshCw,
+  GitMerge,
 } from "lucide-react";
 import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
@@ -820,6 +821,39 @@ function EventInboxView({ onDraftFromEvent }) {
     fetchEvents();
   };
 
+  // Merge duplicates. The survivor is chosen by a visible, deterministic rule
+  // (most complete — has image, then has link — ties broken by table order),
+  // NOT by click order, and the confirm names it so the admin can cancel if
+  // it's not the one they meant to keep.
+  const mergeSelected = async () => {
+    if (selected.size < 2) return;
+    // events is in displayed table order; filter preserves it. Stable sort
+    // keeps table order for equally-complete rows.
+    const chosen = events.filter((e) => selected.has(e.id));
+    const completeness = (e) => (e.imageUrl ? 2 : 0) + (e.eventUrl ? 1 : 0);
+    const primary = [...chosen].sort((a, b) => completeness(b) - completeness(a))[0];
+    if (!primary) return;
+    const primaryId = primary.id;
+    const duplicateIds = chosen.filter((e) => e.id !== primaryId).map((e) => e.id);
+    if (
+      !confirm(
+        `Keep "${primary.title}" and merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into it?\n\n` +
+          `Kept because it's the most complete (image / link). The others will be rejected (removed from the queue) and any planned calendars repointed to the kept event.`,
+      )
+    )
+      return;
+    try {
+      await adminFetch("/admin/newsletter/events/merge", {
+        method: "POST",
+        body: JSON.stringify({ primaryId, duplicateIds }),
+      });
+      setSelected(new Set());
+      fetchEvents();
+    } catch (e) {
+      alert("Merge failed: " + e.message);
+    }
+  };
+
   const toggleSelect = (id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -994,6 +1028,17 @@ function EventInboxView({ onDraftFromEvent }) {
               <Star size={12} className="mr-1" />
               Feature
             </Button>
+            {selected.size >= 2 && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={mergeSelected}
+                title="Merge duplicates — the most complete event (image/link) is kept; the confirm names it"
+              >
+                <GitMerge size={12} className="mr-1" />
+                Merge {selected.size}
+              </Button>
+            )}
           </div>
         )}
       </div>

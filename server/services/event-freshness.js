@@ -137,6 +137,12 @@ function classifyFreshness(event) {
  */
 function isEligibleForFreshDigest(event) {
   if (event.admin_status === 'rejected') return false;
+  // A row merged into another event is permanently ineligible, regardless of
+  // any later admin_status change — keeps a merge durable (a re-approved
+  // duplicate must never re-enter a newsletter after calendars were repointed
+  // to the survivor). Callers must select merged_into for this to fire; the
+  // digest/approved queries also enforce it at the SQL level.
+  if (event.merged_into) return false;
   if (!event.event_url) return false;
 
   // Hard reject on terminal freshness states regardless of event_type
