@@ -69,7 +69,7 @@ async function main() {
   const rows = await baseQuery()
     .where('ai_extraction_model', CURRENT_MODEL)
     .where('ai_extraction_prompt_version', CURRENT_PROMPT_VERSION)
-    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at');
+    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction');
 
   const staleExcluded = totalAttempted - rows.length;
   console.log(`Current extractor: model=${CURRENT_MODEL} prompt=${CURRENT_PROMPT_VERSION}`);
@@ -118,7 +118,10 @@ async function main() {
     if (!(r.v2_extraction_status === 'valid' && v2 && isV2Extraction(v2))) continue;
     validCount++;
 
-    const routing = canAutoRoute(v2);
+    // Match production: pass the call's contact phone (ANI) so the
+    // caller_phone_missing gate behaves the same as the live routing path.
+    const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
+    const routing = canAutoRoute(v2, { contactPhone });
     const v2WouldCreate = routing.allowed;
     const v1DidCreate = v1CreatedSid.has(r.twilio_call_sid);
 
@@ -147,7 +150,7 @@ async function main() {
         phantomRisks.push({ id: r.id, street: !!addr.street_line_1, overall: conf.overall, county: addr.county });
       }
     } else {
-      const flags = mergeTriageFlags(v2.triage_flags, computeDeterministicTriageFlags(v2));
+      const flags = mergeTriageFlags(v2.triage_flags, computeDeterministicTriageFlags(v2, { contactPhone }));
       const reasons = flags.length ? flags : [routing.reason || 'routing_rejected'];
       for (const f of reasons) triageReasonCounts[f] = (triageReasonCounts[f] || 0) + 1;
     }

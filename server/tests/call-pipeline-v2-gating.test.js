@@ -195,7 +195,19 @@ describe('computeDeterministicTriageFlags', () => {
     expect(flags).toContain('do_not_contact_requested');
   });
 
-  test('missing phone', () => {
+  test('no spoken phone but ANI present → NOT flagged (we can still call back)', () => {
+    const e = validV2Extraction();
+    e.caller.phone_e164 = null;
+    expect(computeDeterministicTriageFlags(e, { contactPhone: '+19415551234' })).not.toContain('caller_phone_missing');
+  });
+
+  test('no spoken phone AND no ANI (blocked caller ID) → flagged', () => {
+    const e = validV2Extraction();
+    e.caller.phone_e164 = null;
+    expect(computeDeterministicTriageFlags(e, { contactPhone: null })).toContain('caller_phone_missing');
+  });
+
+  test('no spoken phone, no opts → flagged (conservative default)', () => {
     const e = validV2Extraction();
     e.caller.phone_e164 = null;
     expect(computeDeterministicTriageFlags(e)).toContain('caller_phone_missing');

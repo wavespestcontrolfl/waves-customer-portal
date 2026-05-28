@@ -64,7 +64,12 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('do_not_contact_requested');
   }
 
-  if (!caller.phone_e164) {
+  // caller.phone_e164 is the SPOKEN callback number — usually null because the
+  // caller doesn't re-state their number. We almost always have the Twilio ANI
+  // (passed as opts.contactPhone), so only flag when there's genuinely no way to
+  // reach them (e.g. blocked/withheld caller ID). Without the ANI threaded in,
+  // this fired on nearly every inbound call and sent everything to triage.
+  if (!caller.phone_e164 && !opts.contactPhone) {
     flags.push('caller_phone_missing');
   }
 
