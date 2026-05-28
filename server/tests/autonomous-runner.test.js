@@ -271,6 +271,80 @@ describe('runNext claim failures', () => {
   });
 });
 
+describe('runNext Astro corpus loading', () => {
+  test('loads uniqueness sibling pages from GitHub when ASTRO_REPO_DIR is unset', async () => {
+    const previousAstroDir = process.env.ASTRO_REPO_DIR;
+    delete process.env.ASTRO_REPO_DIR;
+
+    try {
+      const claimedAt = new Date('2026-05-28T01:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_customer_question_1',
+          action_type: 'create_customer_question_page',
+          claimed_at: claimedAt,
+        }),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_customer_question_1',
+          action_type: 'create_customer_question_page',
+          page_type: 'customer-question',
+          service: 'pest',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { body: 'Customer question draft body.' },
+        }),
+      };
+      const uniquenessGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({
+          ok: true,
+          hard_failures: [],
+          soft_failures: [],
+          total_score: 100,
+          min_total_score: 80,
+        }),
+      };
+      const linkPlanner = {
+        loadAstroCorpusFromGitHub: jest.fn().mockResolvedValue([
+          { file: 'src/content/services/pest-control-bradenton-fl.md', body: 'Sibling pest page body.', url: '/pest-control-bradenton-fl/' },
+          { file: 'src/content/services/lawn-care-bradenton-fl.md', body: 'Sibling lawn page body.', url: '/lawn-care-bradenton-fl/' },
+        ]),
+      };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        uniquenessGate,
+        qualityGate,
+        linkPlanner,
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('skipped_shadow_mode');
+      expect(linkPlanner.loadAstroCorpusFromGitHub).toHaveBeenCalledWith({ collections: ['services', 'locations'] });
+      expect(uniquenessGate.evaluate).toHaveBeenCalledWith(
+        expect.objectContaining({ body: 'Customer question draft body.' }),
+        expect.objectContaining({ page_type: 'customer-question' }),
+        { siblingPages: [expect.objectContaining({ file: 'src/content/services/pest-control-bradenton-fl.md' })] }
+      );
+    } finally {
+      if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
+      else process.env.ASTRO_REPO_DIR = previousAstroDir;
+    }
+  });
+});
+
 describe('runNext internal-link shadow behavior', () => {
   test('parks shadow internal-link claims so the queue can advance', async () => {
     const claimedAt = new Date('2026-05-23T05:00:00Z');

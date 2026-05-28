@@ -506,22 +506,15 @@ class AutonomousRunner {
 
   async _loadSiblingPages(brief, { required = false } = {}) {
     // For city-service and customer-question, load sibling pages
-    // matching the service for Jaccard comparison. For now we read
-    // from the local Astro corpus via the link planner's loader; in
-    // a future iteration this could pull from github-client directly.
+    // matching the service for Jaccard comparison.
     if (brief.page_type !== 'city-service' && brief.page_type !== 'customer-question') return [];
     const planner = getLinkPlanner();
-    if (!planner?.loadAstroCorpus) {
+    if (!planner?.loadAstroCorpus && !planner?.loadAstroCorpusFromGitHub) {
       if (required) throw new Error('sibling_corpus_loader_unavailable');
       return [];
     }
-    const astroDir = process.env.ASTRO_REPO_DIR;
-    if (!astroDir) {
-      if (required) throw new Error('ASTRO_REPO_DIR required for live uniqueness gate');
-      return [];
-    }
     try {
-      const corpus = planner.loadAstroCorpus(astroDir, { collections: ['services', 'locations'] });
+      const corpus = await this._loadAstroCorpus({ collections: ['services', 'locations'], required });
       const service = (brief.service || '').toLowerCase();
       return corpus.filter((p) => service && p.file.toLowerCase().includes(service));
     } catch (err) {
@@ -591,8 +584,7 @@ class AutonomousRunner {
     }
 
     const t = Date.now();
-    const astroDir = process.env.ASTRO_REPO_DIR;
-    const corpus = astroDir && planner.loadAstroCorpus ? planner.loadAstroCorpus(astroDir) : [];
+    const corpus = await this._loadAstroCorpus({ required: false });
     const tasks = planner.planForTarget(
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
       { corpus, opportunityId: run.opportunity_id }
@@ -737,8 +729,7 @@ class AutonomousRunner {
     if (planner?.planForTarget && out.published_url) {
       const t3 = Date.now();
       try {
-        const astroDir = process.env.ASTRO_REPO_DIR;
-        const corpus = astroDir ? planner.loadAstroCorpus(astroDir) : [];
+        const corpus = await this._loadAstroCorpus({ required: false });
         const tasks = planner.planForTarget(
           { url: out.published_url, keyword: brief.target_keyword, city: brief.city, service: brief.service },
           { corpus, opportunityId: run.opportunity_id }
@@ -754,6 +745,26 @@ class AutonomousRunner {
     }
 
     return out;
+  }
+
+  async _loadAstroCorpus({ collections = ['blog', 'services', 'locations'], required = false } = {}) {
+    const planner = getLinkPlanner();
+    if (!planner) {
+      if (required) throw new Error('astro_corpus_loader_unavailable');
+      return [];
+    }
+
+    const astroDir = process.env.ASTRO_REPO_DIR;
+    if (astroDir && planner.loadAstroCorpus) {
+      return planner.loadAstroCorpus(astroDir, { collections });
+    }
+
+    if (planner.loadAstroCorpusFromGitHub) {
+      return planner.loadAstroCorpusFromGitHub({ collections });
+    }
+
+    if (required) throw new Error('ASTRO_REPO_DIR or GitHub Astro corpus loader required');
+    return [];
   }
 
   _summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief) {
