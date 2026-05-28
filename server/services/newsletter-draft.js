@@ -610,8 +610,18 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   // 4c. Assemble Beehiiv-quality HTML from structured event data + Giphy GIFs
   if (draft.events?.length) {
     draft.htmlBody = await assembleBeehiivNewsletter(draft);
+  } else if (typeConfig?.flagship) {
+    // Flagship drafts must come through the locked structured-events path.
+    // If the model returned no events (e.g. the legacy `sections` shape, or
+    // `events: []` + `sections`), refuse to fall back — rendering section
+    // HTML directly would let AI-generated dates/venues/URLs ship without a
+    // DB anchor, defeating the factual lock.
+    throw new Error(
+      'Flagship draft produced no structured events — refusing to render ' +
+      'unlocked sections output. The model must return events[] anchored by eventId.'
+    );
   } else if (draft.sections) {
-    // Fallback: old-style sections format
+    // Fallback: old-style sections format (non-flagship types only)
     const keys = ['local_intro', 'fresh_this_week', 'just_starting', 'weekend_picks',
       'family_or_low_key_pick', 'road_trip_pick', 'homeowner_minute', 'waves_cta'];
     draft.htmlBody = keys.map(k => {
