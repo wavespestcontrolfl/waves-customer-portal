@@ -457,17 +457,33 @@ class AutonomousRunner {
       }
     }
 
-    // 4. Uniqueness gate (only applies to certain page types).
+    // 4. Uniqueness gate. City-service/customer-question run the full
+    //    landing-page uniqueness suite. Supporting blogs (opt-in via
+    //    AUTONOMOUS_CONTENT_BLOG_UNIQUENESS) run a dedup-only check vs the
+    //    blog corpus so an auto-published blog can't be a near-duplicate of
+    //    something already published.
     const uniquenessGate = getUniquenessGate();
     const needsUniquenessGate = brief.page_type === 'city-service' || brief.page_type === 'customer-question';
+    const needsBlogUniqueness = !needsUniquenessGate
+      && (brief.page_type === 'supporting-blog' || run.action_type === 'new_supporting_blog')
+      && envBool('AUTONOMOUS_CONTENT_BLOG_UNIQUENESS', false);
     let uniquenessResult = { ok: true, skipped: 'not_applicable' };
-    if (!uniquenessGate && needsUniquenessGate) {
+    if (!uniquenessGate && (needsUniquenessGate || needsBlogUniqueness)) {
       uniquenessResult = { ok: false, error: 'uniqueness_gate_unavailable' };
     } else if (uniquenessGate && needsUniquenessGate) {
       const t4 = Date.now();
       try {
         const siblingPages = await this._loadSiblingPages(brief, { required: true });
         uniquenessResult = uniquenessGate.evaluate(draft, brief, { siblingPages });
+      } catch (err) {
+        uniquenessResult = { ok: false, error: err.message };
+      }
+      run.uniqueness_gate_ms = Date.now() - t4;
+    } else if (uniquenessGate && needsBlogUniqueness) {
+      const t4 = Date.now();
+      try {
+        const siblingPages = await this._loadBlogCorpus({ required: true });
+        uniquenessResult = uniquenessGate.evaluateBlog(draft, brief, { siblingPages });
       } catch (err) {
         uniquenessResult = { ok: false, error: err.message };
       }
@@ -785,7 +801,7 @@ class AutonomousRunner {
     if (liveUrls.length) parts.push(`Live: ${liveUrls.slice(0, 2).join(' ')}`);
     const body = parts.join(' ');
 
-    const twilio = require('./twilio');
+    const twilio = require('../twilio');
     const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
     await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
     logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
@@ -845,6 +861,23 @@ class AutonomousRunner {
       const corpus = await this._loadAstroCorpus({ collections: ['services', 'locations'], required });
       const service = (brief.service || '').toLowerCase();
       return corpus.filter((p) => service && p.file.toLowerCase().includes(service));
+    } catch (err) {
+      if (required) throw err;
+      return [];
+    }
+  }
+
+  async _loadBlogCorpus({ required = false } = {}) {
+    // All published blog posts, for supporting-blog dedup. Fail-closed when
+    // required: an unverifiable corpus must not let a possible duplicate
+    // through (the run is skipped/parked and retried next cycle).
+    const planner = getLinkPlanner();
+    if (!planner?.loadAstroCorpus && !planner?.loadAstroCorpusFromGitHub) {
+      if (required) throw new Error('blog_corpus_loader_unavailable');
+      return [];
+    }
+    try {
+      return await this._loadAstroCorpus({ collections: ['blog'], required });
     } catch (err) {
       if (required) throw err;
       return [];

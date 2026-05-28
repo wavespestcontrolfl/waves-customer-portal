@@ -104,11 +104,40 @@ async function runForUrl(url, options = {}) {
 
   if (!snapshot.live_ok || aiResult.summary.p0 > 0) {
     logger.warn(`[post-publish-visibility] ${url} visibility issues: http=${snapshot.http_status} p0=${aiResult.summary.p0}`);
+    await maybeAlertVisibilityFailure(url, snapshot, aiResult, post).catch((err) => {
+      logger.warn(`[post-publish-visibility] visibility alert failed for ${url}: ${err.message}`);
+    });
   } else {
     logger.info(`[post-publish-visibility] ${url} live=${snapshot.live_ok} sitemap=${snapshot.sitemap_present} indexnow=${snapshot.indexnow_status}`);
   }
 
   return { ok: snapshot.live_ok && aiResult.summary.p0 === 0, snapshot };
+}
+
+/**
+ * GATE-002: the AI-visibility gate can only run on the LIVE page, so it
+ * stays post-publish — but a freshly auto-published blog that lands with a
+ * P0 (noindex, robots block, canonical-elsewhere, content not rendered) was
+ * previously only logged + flagged 'visibility_review' with nobody notified.
+ * With unattended auto-publish live, text the operator so it can be fixed or
+ * reverted fast. Opt-in (AUTONOMOUS_CONTENT_VISIBILITY_ALERT=true), scoped to
+ * engine-published posts, routed as internal_alert (honors OWNER_SMS_DISABLED).
+ */
+async function maybeAlertVisibilityFailure(url, snapshot, aiResult, post) {
+  if (process.env.AUTONOMOUS_CONTENT_VISIBILITY_ALERT !== 'true') return;
+  if (!post) return; // only engine-published content, not ad-hoc URL audits
+  const p0Codes = (aiResult.findings || [])
+    .filter((f) => f.severity === 'P0')
+    .map((f) => f.code)
+    .slice(0, 4);
+  const reason = !snapshot.live_ok
+    ? `not live (http ${snapshot.http_status || 'n/a'})`
+    : `P0 ${p0Codes.join(', ') || 'visibility'}`;
+  const body = `Waves content: auto-published page has a visibility problem — ${reason}. ${url}`;
+  const twilio = require('../twilio');
+  const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+  await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+  logger.info(`[post-publish-visibility] visibility alert sent for ${url}`);
 }
 
 async function fetchHtml(url, fetchFn) {
