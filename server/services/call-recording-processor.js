@@ -1158,8 +1158,8 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     const cleaned = rawText.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
     parsed = JSON.parse(cleaned);
   } catch (e) {
-    logger.error(`[call-proc-v2] JSON parse failed: ${e.message} — raw: ${rawText.slice(0, 200)}`);
-    return { status: 'parse_failed', extraction: null, errors: [{ message: e.message, raw: rawText.slice(0, 500) }] };
+    logger.error(`[call-proc-v2] JSON parse failed: ${e.message} (${rawText.length} chars)`);
+    return { status: 'parse_failed', extraction: null, errors: [{ message: e.message }] };
   }
 
   // Pass 2: validate against model-output schema
