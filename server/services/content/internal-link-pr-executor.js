@@ -870,31 +870,77 @@ const VOID_HTML_TAGS = new Set([
 function hiddenElementRanges(html) {
   const ranges = [];
   const stack = [];
-  const tagRe = /<\s*(\/)?\s*([a-zA-Z][\w:-]*)([^>]*)>/g;
-  let match;
-  while ((match = tagRe.exec(String(html || ''))) !== null) {
-    const closing = Boolean(match[1]);
-    const tag = String(match[2] || '').toLowerCase();
-    const attrs = match[3] || '';
+  for (const token of scanHtmlTags(html)) {
+    const closing = token.closing;
+    const tag = token.tag;
+    const attrs = token.attrs || '';
     if (!tag) continue;
     if (closing) {
       const index = stack.map((item) => item.tag).lastIndexOf(tag);
       if (index !== -1) {
         const hiddenItems = stack.splice(index).filter((item) => item.hidden);
-        for (const item of hiddenItems) ranges.push([item.start, tagRe.lastIndex]);
+        for (const item of hiddenItems) ranges.push([item.start, token.end]);
       }
       continue;
     }
 
     const hidden = hasHiddenHtmlAttribute(attrs);
     const selfClosing = /\/\s*$/.test(attrs) || VOID_HTML_TAGS.has(tag);
-    if (hidden && selfClosing) ranges.push([match.index, tagRe.lastIndex]);
-    if (!selfClosing) stack.push({ tag, hidden, start: match.index });
+    if (hidden && selfClosing) ranges.push([token.start, token.end]);
+    if (!selfClosing) stack.push({ tag, hidden, start: token.start });
   }
   for (const item of stack.filter((entry) => entry.hidden)) {
     ranges.push([item.start, String(html || '').length]);
   }
   return ranges;
+}
+
+function scanHtmlTags(html) {
+  const text = String(html || '');
+  const tokens = [];
+  let index = 0;
+  while (index < text.length) {
+    const start = text.indexOf('<', index);
+    if (start === -1) break;
+    const next = text[start + 1] || '';
+    if (!/[A-Za-z/]/.test(next)) {
+      index = start + 1;
+      continue;
+    }
+
+    let quote = null;
+    let end = -1;
+    for (let i = start + 1; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        continue;
+      }
+      if (ch === '>') {
+        end = i + 1;
+        break;
+      }
+    }
+    if (end === -1) break;
+
+    const inside = text.slice(start + 1, end - 1).trim();
+    const match = inside.match(/^(\/)?\s*([a-zA-Z][\w:-]*)([\s\S]*)$/);
+    if (match) {
+      tokens.push({
+        start,
+        end,
+        closing: Boolean(match[1]),
+        tag: String(match[2] || '').toLowerCase(),
+        attrs: match[3] || '',
+      });
+    }
+    index = end;
+  }
+  return tokens;
 }
 
 function hasHiddenHtmlAttribute(attrs) {
@@ -979,4 +1025,5 @@ module.exports._internals = {
   stripNonRenderedHtml,
   hiddenElementRanges,
   hasHiddenHtmlAttribute,
+  scanHtmlTags,
 };

@@ -29,6 +29,7 @@ const {
   stripNonRenderedHtml,
   hiddenElementRanges,
   hasHiddenHtmlAttribute,
+  scanHtmlTags,
 } = executor._internals;
 
 beforeEach(() => {
@@ -540,6 +541,21 @@ describe('internal-link dry-run executor helpers', () => {
       target,
       anchor
     )).toBe(true);
+  });
+
+  test('handles quoted greater-than characters when scanning hidden ancestors', () => {
+    const target = '/pest-control-bradenton-fl/';
+    const anchor = 'Bradenton pest control';
+    const hiddenAfterQuotedGt = `<div data-title="A > B" hidden><a href="${target}">${anchor}</a></div>`;
+    const hiddenStyleAfterJson = `<div data-json='{"copy": "A > B"}' style="display:none"><a href="${target}">${anchor}</a></div>`;
+
+    expect(scanHtmlTags(hiddenAfterQuotedGt)[0]).toMatchObject({
+      tag: 'div',
+      attrs: expect.stringContaining('hidden'),
+    });
+    expect(hiddenElementRanges(hiddenAfterQuotedGt)).toHaveLength(1);
+    expect(htmlContainsCrawlableLink(hiddenAfterQuotedGt, target, anchor)).toBe(false);
+    expect(htmlContainsCrawlableLink(hiddenStyleAfterJson, target, anchor)).toBe(false);
   });
 
   test('verifies merged PR tasks when live HTML contains the expected link', async () => {
