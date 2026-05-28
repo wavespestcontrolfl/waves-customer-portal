@@ -50,7 +50,7 @@ async function checkFacebook() {
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v21.0/me?access_token=${token}`);
+    const res = await fetch(`https://graph.facebook.com/v25.0/me?access_token=${token}`);
     const data = await res.json();
 
     if (res.ok && !data.error) {
@@ -86,7 +86,7 @@ async function checkInstagram() {
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v21.0/${accountId}?access_token=${token}`);
+    const res = await fetch(`https://graph.facebook.com/v25.0/${accountId}?access_token=${token}`);
     const data = await res.json();
 
     if (res.ok && !data.error) {

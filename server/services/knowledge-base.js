@@ -266,10 +266,10 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       if (!token) {
         results.push({ ...credential, status: 'error', error: 'Not configured' });
       } else {
-        const res = await fetch(`https://graph.facebook.com/v21.0/me?access_token=${token}`);
+        const res = await fetch(`https://graph.facebook.com/v25.0/me?access_token=${token}`);
         if (res.ok) {
           // Also check token expiration via debug endpoint
-          const debugRes = await fetch(`https://graph.facebook.com/v21.0/debug_token?input_token=${token}&access_token=${token}`);
+          const debugRes = await fetch(`https://graph.facebook.com/v25.0/debug_token?input_token=${token}&access_token=${token}`);
           let expiresAt = null;
           if (debugRes.ok) {
             const debug = await debugRes.json();

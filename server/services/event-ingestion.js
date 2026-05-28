@@ -177,6 +177,7 @@ async function pullRssSource(source) {
     // Best-effort city from title + description; falls back to source
     // coverage_geo[0] so the tile always has *something*.
     const city = extractCity(title) || extractCity(description) || (source.coverage_geo?.[0] || null);
+    const autoApprove = source.priority_tier === 1;
 
     await db('events_raw')
       .insert({
@@ -191,6 +192,7 @@ async function pullRssSource(source) {
         event_url: eventUrl,
         image_url: imageUrl,
         categories,
+        ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
       .merge({
@@ -280,6 +282,7 @@ async function pullIcalSource(source) {
       || extractCity(description)
       || extractCity(venueName)
       || (source.coverage_geo?.[0] || null);
+    const autoApprove = source.priority_tier === 1;
 
     await db('events_raw')
       .insert({
@@ -295,6 +298,7 @@ async function pullIcalSource(source) {
         event_url: eventUrl,
         image_url: null, // iCal spec doesn't carry images
         categories: null,
+        ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
       .merge({
@@ -484,6 +488,7 @@ Rules:
     const city = (typeof ev.city === 'string' && ev.city.trim())
       ? ev.city.trim().toLowerCase().slice(0, 128)
       : (source.coverage_geo?.[0] || null);
+    const autoApprove = source.priority_tier === 1;
 
     await db('events_raw')
       .insert({
@@ -495,6 +500,7 @@ Rules:
         venue_name: venueName,
         city,
         event_url: eventUrl,
+        ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
       .merge({
