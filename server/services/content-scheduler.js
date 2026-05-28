@@ -148,9 +148,35 @@ const NEWSLETTER_SOCIAL_FALLBACK = {
     'Fresh This Week just dropped — local events across SW Florida. Link in bio. #FreshThisWeek #SWFL #SWFLevents',
   linkedin: () =>
     'Our latest Fresh This Week local guide is live, featuring events and community highlights across Southwest Florida.',
-  gbp: () =>
-    'Fresh This Week is live — local events and weekend ideas across Southwest Florida.',
 };
+
+// GBP posts go to each of the 4 Waves locations. Build per-location copy so
+// the four profiles don't all post the same generic blast — name each area.
+function gbpFallbackByLocation() {
+  const { WAVES_LOCATIONS } = require('../config/locations');
+  const out = {};
+  for (const loc of WAVES_LOCATIONS) {
+    out[loc.id] = `Fresh This Week is live — local events and weekend plans near ${loc.name}, all across SW Florida.`;
+  }
+  return out;
+}
+
+// Coerce whatever the model returned for `gbp` into a complete
+// { [locationId]: caption } object — one entry per Waves location. Accepts a
+// per-location object (preferred), a single string (legacy/uniform — ignored
+// in favor of localized fallback), or nothing. Any missing/blank location is
+// filled from gbpFallbackByLocation() so the social loop always has copy.
+function normalizeGbpByLocation(gbp) {
+  const { WAVES_LOCATIONS } = require('../config/locations');
+  const fallback = gbpFallbackByLocation();
+  const fromModel = gbp && typeof gbp === 'object' && !Array.isArray(gbp) ? gbp : {};
+  const out = {};
+  for (const loc of WAVES_LOCATIONS) {
+    const v = fromModel[loc.id];
+    out[loc.id] = typeof v === 'string' && v.trim() ? v.trim() : fallback[loc.id];
+  }
+  return out;
+}
 
 async function generateNewsletterSocialContent(send) {
   let Anthropic;
@@ -166,9 +192,14 @@ async function generateNewsletterSocialContent(send) {
   const safeSubject = String(send.subject || '').replace(/[\r\n]+/g, ' ').slice(0, 300);
   const safePreview = String(send.preview_text || '').replace(/[\r\n]+/g, ' ').slice(0, 500);
 
+  const { WAVES_LOCATIONS } = require('../config/locations');
+  const locationList = WAVES_LOCATIONS
+    .map((l) => `  "${l.id}": ${l.name} (${l.area})`)
+    .join('\n');
+
   const response = await client.messages.create({
     model: MODELS.WORKHORSE,
-    max_tokens: 600,
+    max_tokens: 800,
     messages: [{
       role: 'user',
       content: `Generate social media captions for Waves Pest Control's weekly local events guide "Fresh This Week."
@@ -178,11 +209,14 @@ Tone: fun, local-guide energy. Light FOMO is good ("just dropped", "here's what'
 Newsletter subject: ${safeSubject}
 Newsletter preview: ${safePreview}
 
+Waves has these Google Business Profile locations. Each GBP post must feel local to THAT area — name or nod to the area so the four profiles don't all post the same blast:
+${locationList}
+
 Return ONLY valid JSON with these keys:
 - facebook: 150-250 chars, conversational, 1-2 emojis, do NOT include any URL
 - instagram: 150-300 chars before hashtags, end with 3-5 hashtags (#FreshThisWeek #SWFL #SWFLevents etc), do NOT include any URL
 - linkedin: 100-200 chars, professional but fun community tone, do NOT include any URL
-- gbp: 80-150 chars, short community-oriented tone, no hashtags, do NOT include any URL`,
+- gbp: an OBJECT keyed by the location ids above. Each value is 80-150 chars, community-oriented, names/nods to THAT specific area, no hashtags, no URL. Example: {"lakewood-ranch": "...", "parrish": "...", "sarasota": "...", "venice": "..."}`,
     }],
   });
 
@@ -191,7 +225,10 @@ Return ONLY valid JSON with these keys:
   if (!jsonMatch) return null;
 
   const parsed = JSON.parse(jsonMatch[0]);
-  if (!parsed.facebook || !parsed.instagram || !parsed.linkedin || !parsed.gbp) return null;
+  if (!parsed.facebook || !parsed.instagram || !parsed.linkedin) return null;
+  // Always hand the social loop a complete per-location gbp object, filling
+  // any area the model skipped (or a legacy single string) from fallback.
+  parsed.gbp = normalizeGbpByLocation(parsed.gbp);
   return parsed;
 }
 
@@ -262,7 +299,7 @@ async function sharePublishedNewsletter(send) {
         facebook: NEWSLETTER_SOCIAL_FALLBACK.facebook(send.subject || 'Fresh This Week'),
         instagram: NEWSLETTER_SOCIAL_FALLBACK.instagram(),
         linkedin: NEWSLETTER_SOCIAL_FALLBACK.linkedin(),
-        gbp: NEWSLETTER_SOCIAL_FALLBACK.gbp(),
+        gbp: gbpFallbackByLocation(),
       };
     }
 
@@ -566,3 +603,5 @@ const ContentScheduler = {
 module.exports = ContentScheduler;
 module.exports.normalizeCalendarRange = normalizeCalendarRange;
 module.exports.sharePublishedNewsletter = sharePublishedNewsletter;
+module.exports.gbpFallbackByLocation = gbpFallbackByLocation;
+module.exports.normalizeGbpByLocation = normalizeGbpByLocation;

@@ -23,6 +23,8 @@ const { lockEventFactsFromDb } = require('../services/newsletter-draft');
 const { findHallucinatedClaims, validateNewsletterDraft } = require('../services/newsletter-validator');
 const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
+const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
+const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
 const {
@@ -1035,5 +1037,54 @@ describe('newsletter ratesFromTotals', () => {
     const r = ratesFromTotals({});
     expect(r.deliveryRate).toBeNull();
     expect(r.openRate).toBeNull();
+  });
+});
+
+// ── Per-location GBP social copy ─────────────────────────────────────
+//
+// Newsletter auto-share posts to 4 Google Business Profile locations. To
+// avoid the same generic blast on all 4, generateNewsletterSocialContent
+// emits a per-location gbp object; these helpers build/normalize it. The
+// social-media loop already consumes customContent.gbp[loc.id].
+
+describe('newsletter GBP per-location social copy', () => {
+  const locIds = WAVES_LOCATIONS.map((l) => l.id);
+
+  test('gbpFallbackByLocation covers every Waves location and names the area', () => {
+    const fb = gbpFallbackByLocation();
+    expect(Object.keys(fb).sort()).toEqual([...locIds].sort());
+    for (const loc of WAVES_LOCATIONS) {
+      expect(fb[loc.id]).toContain(loc.name); // copy is localized, not generic
+      expect(fb[loc.id].length).toBeGreaterThan(0);
+    }
+  });
+
+  test('normalize keeps model-provided per-location copy and fills the gaps', () => {
+    const out = normalizeGbpByLocation({ sarasota: 'Siesta vibes this weekend!', venice: '   ' });
+    expect(out.sarasota).toBe('Siesta vibes this weekend!'); // kept
+    expect(out.venice).toContain('Venice');                   // blank → fallback
+    // every location present
+    expect(Object.keys(out).sort()).toEqual([...locIds].sort());
+    for (const id of locIds) expect(typeof out[id]).toBe('string');
+  });
+
+  test('normalize ignores a legacy single string and localizes all 4', () => {
+    const out = normalizeGbpByLocation('one generic blast for everyone');
+    for (const loc of WAVES_LOCATIONS) {
+      expect(out[loc.id]).toContain(loc.name);
+      expect(out[loc.id]).not.toBe('one generic blast for everyone');
+    }
+  });
+
+  test('normalize handles null/array/garbage by returning full fallback', () => {
+    for (const bad of [null, undefined, [], 42, 'x']) {
+      const out = normalizeGbpByLocation(bad);
+      expect(Object.keys(out).sort()).toEqual([...locIds].sort());
+    }
+  });
+
+  test('trims whitespace on model-provided captions', () => {
+    const out = normalizeGbpByLocation({ parrish: '  Parrish party  ' });
+    expect(out.parrish).toBe('Parrish party');
   });
 });
