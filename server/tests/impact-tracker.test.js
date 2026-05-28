@@ -108,3 +108,21 @@ describe('computeVerdict (diff-in-diff)', () => {
     expect(r.verdict).toBe('neutral');
   });
 });
+
+describe('pausedBuckets — confirmed-regression gating', () => {
+  test('counts only verdict=regressed rows with a 21-day confirmation', async () => {
+    const calls = { where: [], whereNotNull: [] };
+    const builder = {
+      where: (...a) => { calls.where.push(a); return builder; },
+      whereNotNull: (c) => { calls.whereNotNull.push(c); return builder; },
+      groupBy: () => builder,
+      select: () => builder,
+      count: () => Promise.resolve([{ bucket: 'thin_content', regressions: '3' }]),
+    };
+    const fakeDb = () => builder;
+    const out = await tracker.pausedBuckets({ db: fakeDb });
+    expect(calls.where).toContainEqual(['verdict', 'regressed']);
+    expect(calls.whereNotNull).toContain('checked_21d_at');
+    expect(out).toEqual([{ bucket: 'thin_content', regressions: 3 }]);
+  });
+});

@@ -13,8 +13,8 @@
  *      (GSC lag; deploy != recrawl).
  *   2. checkPending (daily) — at 14d and 21d past measurement_start, compute
  *      the page + control deltas and a control-adjusted verdict.
- *   3. pausedBuckets — a bucket with 3+ regressions is surfaced so the runner
- *      can stop drafting that action type until reviewed.
+ *   3. pausedBuckets — a bucket with 3+ confirmed (21-day) regressions is
+ *      surfaced so the runner can stop drafting that action type until reviewed.
  *
  * computeVerdict is a pure function (fully testable, no I/O). Everything else
  * reads gsc_pages / autonomous_runs and writes content_optimization_impact.
@@ -337,9 +337,15 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
  */
 async function pausedBuckets({ db: database = db } = {}) {
   try {
+    // Only 21-day-confirmed regressions count toward the pause threshold.
+    // checkPending() writes verdict='regressed' at the 14-day provisional
+    // check too; counting those would let three unconfirmed 14-day dips pause
+    // a bucket before the 21-day window has run (a provisional dip can recover
+    // by day 21). Gate on checked_21d_at so the pause reflects confirmed loss.
     const rows = await database('content_optimization_impact')
       .where('verdict', 'regressed')
       .whereNotNull('bucket')
+      .whereNotNull('checked_21d_at')
       .groupBy('bucket')
       .select('bucket')
       .count({ regressions: '*' });
