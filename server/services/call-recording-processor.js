@@ -805,6 +805,35 @@ function normalizeOpenAITranscript(data) {
   return null;
 }
 
+// Normalize OpenAI diarized_json segments into a stable, storable shape:
+// { id, index, speaker, start_ms, end_ms, text }. OpenAI reports segment
+// start/end in SECONDS (float) — converted to integer ms here. `id` preserves
+// the provider's stable identifier verbatim (gpt-4o-transcribe-diarize returns
+// a STRING like "seg_001"), so a stored segment can be reconciled with the raw
+// API payload; `index` is our positional fallback for ordering. Keeps the RAW
+// diarization speaker label (A/B/speaker_0); the human Agent/Caller labels live
+// on the text transcript, produced by a separate labeling pass.
+function normalizeOpenAISegments(data) {
+  if (!data || !Array.isArray(data.segments)) return null;
+  const segments = data.segments
+    .map((seg, i) => {
+      const text = String(seg.text || '').trim();
+      if (!text) return null;
+      const start = Number(seg.start);
+      const end = Number(seg.end);
+      return {
+        id: seg.id != null ? seg.id : null,
+        index: i,
+        speaker: seg.speaker || seg.speaker_id || seg.speaker_label || null,
+        start_ms: Number.isFinite(start) ? Math.round(start * 1000) : null,
+        end_ms: Number.isFinite(end) ? Math.round(end * 1000) : null,
+        text,
+      };
+    })
+    .filter(Boolean);
+  return segments.length ? segments : null;
+}
+
 function transcriptHasAgentCallerLabels(transcript) {
   return /(^|\n)\s*(Agent|Caller)\s*:/i.test(String(transcript || ''));
 }
@@ -918,7 +947,9 @@ async function transcribeWithOpenAI(audioBuffer) {
 
     const contentType = res.headers.get('content-type') || '';
     const data = contentType.includes('application/json') ? await res.json() : await res.text();
-    return normalizeOpenAITranscript(data);
+    const text = normalizeOpenAITranscript(data);
+    if (!text) return null;
+    return { text, segments: normalizeOpenAISegments(data) };
   } catch (err) {
     logger.error(`[call-proc] OpenAI transcription error: ${err.message}`);
     return null;
@@ -981,7 +1012,13 @@ async function transcribeRecording(mp3Url, opts = {}) {
     const audioBuffer = await downloadRecording(mp3Url);
     logger.info(`[call-proc] Downloaded ${Math.round(audioBuffer.length / 1024)}KB audio`);
 
-    const openaiTranscript = await transcribeWithOpenAI(audioBuffer);
+    const openai = await transcribeWithOpenAI(audioBuffer);
+    const openaiTranscript = openai?.text || null;
+    // Raw diarized segments (speaker + timestamps) — preserved alongside the
+    // text so a future re-extraction has word-level/speaker structure without
+    // re-paying for transcription. Only OpenAI yields these; Gemini fallback
+    // is text-only.
+    const structuredSegments = openai?.segments || null;
     const openaiNeedsCompletenessFallback = openaiTranscript
       && shouldTryGeminiBeforeAcceptingOpenAI(openaiTranscript, opts);
 
@@ -991,7 +1028,7 @@ async function transcribeRecording(mp3Url, opts = {}) {
 
     if (openaiTranscript && !openaiNeedsCompletenessFallback) {
       const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
-      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai' };
+      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai', structuredSegments };
       logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
     }
 
@@ -1000,9 +1037,9 @@ async function transcribeRecording(mp3Url, opts = {}) {
 
     if (openaiTranscript) {
       const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
-      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai_post_gemini_fallback' };
+      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai_post_gemini_fallback', structuredSegments };
       logger.warn('[call-proc] Using raw OpenAI transcript because labeling and Gemini fallback failed');
-      return { transcription: openaiTranscript, provider: 'openai_unlabeled_fallback' };
+      return { transcription: openaiTranscript, provider: 'openai_unlabeled_fallback', structuredSegments };
     }
 
     return { transcription: null, provider: null };
@@ -2565,6 +2602,7 @@ CallRecordingProcessor._test = {
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   extractCallDataV2,
+  normalizeOpenAISegments,
 };
 
 module.exports = CallRecordingProcessor;
