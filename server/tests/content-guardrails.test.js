@@ -38,6 +38,22 @@ describe('content-guardrails', () => {
     expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK' && f.severity === 'P0')).toBe(true);
   });
 
+  test('brand-token leak hiding only in editable meta is caught for a multi-domain refresh', () => {
+    const r = guardrails.evaluate(
+      { body: 'Local, reliable pest control for your home.', frontmatter: { metaTitle: 'Waves Pest Control — Venice FL' } },
+      { domains: ['veniceflpestcontrol.com'] },
+    );
+    expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('hardcoded price hiding only in metaDescription is caught', () => {
+    const r = guardrails.evaluate(
+      { body: 'Local, reliable pest control for your home.', frontmatter: { metaDescription: 'Pest control from $49/month in Venice.' } },
+      {},
+    );
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+
   test('FAQ section on a blocked service is P0', () => {
     const r = guardrails.evaluate({ body: '## FAQ\nQ: Do you handle rats?' }, { service: 'rodent' });
     expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);

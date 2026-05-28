@@ -105,9 +105,22 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
   const effectiveDomains = Array.isArray(domains) ? domains : (Array.isArray(frontmatter.domains) ? frontmatter.domains : []);
 
+  // Editable meta strings that publishRefresh / publishOrUpdatePage write onto
+  // the (possibly multi-domain) live page. A hardcoded price or literal-brand
+  // leak hiding only in metaTitle/metaDescription would otherwise slip past the
+  // body-only P0 guards. Mirror astro-publisher's REFRESH_EDITABLE_META_FIELDS.
+  const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription']
+    .map((f) => frontmatter[f])
+    .filter(Boolean)
+    .map(String)
+    .join('\n');
+  const publishableText = editableMeta ? `${body}\n${editableMeta}` : body;
+
   const findings = [
-    priceFinding(body),
-    brandTokenFinding(body, effectiveDomains),
+    // Price + brand-token must cover everything that ships: body AND meta.
+    priceFinding(publishableText),
+    brandTokenFinding(publishableText, effectiveDomains),
+    // FAQ + keyword density are body-section concerns only.
     faqBlockedFinding(body, service),
     keywordStuffingFinding(body, kw),
   ].filter(Boolean);
