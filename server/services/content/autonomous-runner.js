@@ -760,7 +760,13 @@ class AutonomousRunner {
     }
 
     if (planner.loadAstroCorpusFromGitHub) {
-      return planner.loadAstroCorpusFromGitHub({ collections });
+      try {
+        return await planner.loadAstroCorpusFromGitHub({ collections });
+      } catch (err) {
+        if (required) throw err;
+        logger.warn(`[autonomous-runner] optional Astro corpus GitHub load skipped: ${err.message}`);
+        return [];
+      }
     }
 
     if (required) throw new Error('ASTRO_REPO_DIR or GitHub Astro corpus loader required');
