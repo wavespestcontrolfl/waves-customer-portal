@@ -741,6 +741,19 @@ describe('hasNameEmailMismatch', () => {
   test('correct name for the Gennett call → no mismatch (both tokens present)', () => {
     expect(hasNameEmailMismatch({ first_name: 'Ryan', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(false);
   });
+  test('wrong first name with a correct surname still flags (Codex P2 — surname match must not bless the whole name)', () => {
+    // "gennett" corroborates the surname, but the residual "ryan" is a first
+    // name we did not extract → the extracted "Jeanette" is contradicted.
+    expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: 'Gennett', email: 'gennettryan@yahoo.com' })).toBe(true);
+    // Surname matches, residual is a different name → still a contradiction.
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Johnson', email: 'johnsonryan@x.com' })).toBe(true);
+  });
+  test('partial match with only a short residual → no mismatch (initials / first-name-only emails)', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'mariar@gmail.com' })).toBe(false); // residual "r"
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'jsmith@x.com' })).toBe(false);          // residual "j"
+    expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'johnnyc@x.com' })).toBe(false);         // residual "nyc" (<4)
+    expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: null, email: 'bobfitness@x.com' })).toBe(false);          // single token present, no missing token
+  });
   test('generic/role mailbox → never a mismatch', () => {
     expect(hasNameEmailMismatch({ first_name: 'Jeanette', last_name: null, email: 'info@company.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: 'Smith', email: 'office@x.com' })).toBe(false);

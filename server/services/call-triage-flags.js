@@ -29,13 +29,35 @@ function hasNameEmailMismatch(caller = {}) {
   const local = email.slice(0, at).replace(/[^a-z]/g, '');
   if (local.length < 4) return false;            // too short to reason about
   if (GENERIC_EMAIL_LOCALPARTS.has(local)) return false;
-  const tokens = [caller.first_name, caller.last_name, caller.name_full]
-    .filter(Boolean)
-    .flatMap((n) => String(n).toLowerCase().split(/\s+/))
-    .map((t) => t.replace(/[^a-z]/g, ''))
-    .filter((t) => t.length >= 3);
+  const tokens = [...new Set(
+    [caller.first_name, caller.last_name, caller.name_full]
+      .filter(Boolean)
+      .flatMap((n) => String(n).toLowerCase().split(/\s+/))
+      .map((t) => t.replace(/[^a-z]/g, ''))
+      .filter((t) => t.length >= 3)
+  )];
   if (tokens.length === 0) return false;          // no usable name to check
-  return !tokens.some((t) => local.includes(t));  // mismatch if none appear
+
+  const present = tokens.filter((t) => local.includes(t));
+
+  // (1) No extracted token appears at all → the name is uncorroborated.
+  if (present.length === 0) return true;
+
+  // (2) Partial corroboration with a contradiction. A matching surname is NOT
+  // enough to bless the whole name: "Jeanette Gennett" / gennettryan@ matches
+  // on "gennett" but the email's residual "ryan" is a different first name we
+  // failed to extract. So when SOME tokens match but at least one is missing,
+  // strip every matched token and flag if what remains still holds a
+  // name-length (>=4) alpha run — that residual is a name the email encodes and
+  // we didn't capture. Short residuals (a first initial in "jsmith", the "r" in
+  // "mariar") are not names, so first-initial / first-name-only emails don't
+  // false-flag.
+  if (present.length < tokens.length) {
+    let residual = local;
+    for (const t of present) residual = residual.split(t).join(' ');
+    if (residual.split(/[^a-z]+/).some((run) => run.length >= 4)) return true;
+  }
+  return false;
 }
 
 // Normalized lookup: lowercase, " county" suffix stripped, whitespace collapsed.
