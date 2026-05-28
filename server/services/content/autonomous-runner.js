@@ -741,12 +741,54 @@ class AutonomousRunner {
       if (run.outcome === 'skipped_no_opportunity') break;
       if (String(run.outcome || '').startsWith('failed')) break;
     }
+    await this._sendDailyDigestSms(runs).catch((err) => {
+      logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
+    });
     return {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
       limit: batchLimit,
       runs,
     };
+  }
+
+  /**
+   * After the daily batch, text the operator a one-line summary so an
+   * unattended auto-publishing engine isn't a black box. Opt-in via
+   * AUTONOMOUS_CONTENT_DIGEST_SMS=true; routed as an internal_alert so it
+   * respects the OWNER_SMS_DISABLED kill switch. Stays silent on a
+   * nothing-happened day (all skipped_no_opportunity) to avoid noise.
+   */
+  async _sendDailyDigestSms(runs) {
+    if (!envBool('AUTONOMOUS_CONTENT_DIGEST_SMS', false)) return;
+    const real = (runs || []).filter((r) => r && r.outcome !== 'skipped_no_opportunity');
+    const published = real.filter((r) => r.outcome === 'completed_published').length;
+    const review = real.filter((r) => r.outcome === 'completed_pending_review').length;
+    const gated = real.filter((r) => r.outcome === 'skipped_gate_fail').length;
+    const failed = real.filter((r) => String(r.outcome || '').startsWith('failed')).length;
+    if (published + review + gated + failed === 0) return; // nothing notable today
+
+    const reasons = {};
+    for (const r of real) {
+      const key = r.skip_reason || r.failure_message;
+      if (key) reasons[key] = (reasons[key] || 0) + 1;
+    }
+    const topReasons = Object.entries(reasons)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([k, v]) => `${k}×${v}`)
+      .join(', ');
+    const liveUrls = real.map((r) => r.published_url).filter(Boolean);
+
+    const parts = [`Waves content engine: ${published} published, ${review} to review, ${gated} gated, ${failed} failed.`];
+    if (topReasons) parts.push(`Why: ${topReasons}.`);
+    if (liveUrls.length) parts.push(`Live: ${liveUrls.slice(0, 2).join(' ')}`);
+    const body = parts.join(' ');
+
+    const twilio = require('./twilio');
+    const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
   }
 
   // ── internals ────────────────────────────────────────────────────
@@ -1413,6 +1455,12 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       failure_message: run.failure_message || null,
       uniqueness_gate_result: JSON.stringify(run.uniqueness_gate_result || {}),
       quality_gate_result: JSON.stringify(run.quality_gate_result || {}),
+      claims_ledger_result: JSON.stringify(run.claims_ledger_result || {}),
+      content_guardrails_result: JSON.stringify(run.content_guardrails_result || {}),
+      seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),
+      facts_sufficiency: JSON.stringify(run.facts_sufficiency || {}),
+      protected_check: JSON.stringify(run.protected_check || {}),
+      seo_completion_gate_ms: run.seo_completion_gate_ms || null,
       draft_payload: JSON.stringify(run.draft_payload || {}),
       agent_id: run.agent_id || null,
       agent_session_id: run.agent_session_id || null,
