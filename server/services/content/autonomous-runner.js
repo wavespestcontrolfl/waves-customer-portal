@@ -82,6 +82,31 @@ function isShadow(actionType) {
   return true;
 }
 
+// Per-action-type auto-publish. When AUTO_PUBLISH_<ACTION_TYPE>=true|1|on,
+// that action type skips the human trust-build ramp: a draft that clears
+// EVERY quality/SEO/guardrail gate publishes automatically (still subject to
+// the canary publishing guards + daily/weekly publish caps). A draft that
+// FAILS a quality gate is skipped silently rather than queued for review.
+// Router-flagged human-review cases (loop / cannibalization / .gov SERP)
+// still route to review. Unset → the trust-build approval ramp applies.
+function autoPublishEnabled(actionType) {
+  const key = `AUTO_PUBLISH_${String(actionType || '').toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+  const v = (process.env[key] || '').toLowerCase();
+  return v === 'true' || v === '1' || v === 'on';
+}
+
+// Actions that require verified facts-bank backing before drafting — kept in
+// sync with facts-sufficiency.js FACTS_GATED_ACTIONS. If the facts-sufficiency
+// module is unavailable, a LIVE one of these must fail closed (skip) rather
+// than draft unverified content (the pre-gate + claims-ledger validator are
+// both skipped when the module can't load).
+const FACTS_GATED_ACTIONS = new Set([
+  'create_or_refresh_city_service_page',
+  'refresh_existing_page',
+  'create_customer_question_page',
+  'new_supporting_blog',
+]);
+
 class AutonomousRunner {
   /**
    * runNext({ minScore, dryRun })
@@ -214,6 +239,19 @@ class AutonomousRunner {
         await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken });
         return finalized;
       }
+    } else if (FACTS_GATED_ACTIONS.has(brief.action_type) && !run.shadow_mode) {
+      // Fail-closed: facts-sufficiency module is unavailable but this is a
+      // LIVE facts-gated action. Refuse to draft — publishing unverified
+      // content (with the claims-ledger validator also skipped) is the one
+      // outcome this gate exists to prevent. Route to review + alert loudly.
+      logger.error(`[autonomous-runner] facts-sufficiency module unavailable — refusing live facts-gated action ${brief.action_type}`);
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped_gate_fail',
+        skip_reason: 'facts_sufficiency_unavailable',
+        reviewer_notes: 'Facts-sufficiency module failed to load; live facts-gated action held to avoid publishing unverified content.',
+      });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'facts_sufficiency_unavailable', { claimToken });
+      return finalized;
     }
 
     // 2a. Router blocked the action — record + skip.
@@ -528,9 +566,12 @@ class AutonomousRunner {
 
     const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed !== false;
 
-    // 6. Trust-build check.
+    // 6. Trust-build check. AUTO_PUBLISH_<ACTION_TYPE>=true skips the human
+    // trust-build ramp once every quality gate has passed; the canary
+    // publishing guards + daily/weekly caps downstream still apply.
+    const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
-    const trustBuildSatisfied = trustBuildCount >= TRUST_BUILD_THRESHOLD;
+    const trustBuildSatisfied = autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD;
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
     // 7. Decide outcome.
@@ -546,6 +587,19 @@ class AutonomousRunner {
     }
 
     if (!gatesPass || !trustBuildSatisfied || brief.human_review_required) {
+      // Auto-publish lanes skip silently on a pure quality-gate failure rather
+      // than build a review backlog. Router-flagged human-review cases (loop /
+      // cannibalization / .gov SERP) still route to review even under
+      // auto-publish, since those are content-risk signals, not quality misses.
+      if (autoPublish && !gatesPass && !brief.human_review_required) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'auto_publish_gate_fail',
+          reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+        });
+        await this._skipClaimOrThrow(queue, opp.id, 'auto_publish_gate_fail', { claimToken });
+        return finalized;
+      }
       const reason = !gatesPass ? 'gate_fail'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
@@ -1578,6 +1632,8 @@ module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
   isShadow,
+  autoPublishEnabled,
+  FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,
   countsTowardTrustBuild,

@@ -13,6 +13,8 @@ const db = require('../models/db');
 const { _internals } = require('../services/content/autonomous-runner');
 const {
   isShadow,
+  autoPublishEnabled,
+  FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,
   countsTowardTrustBuild,
@@ -28,10 +30,10 @@ const ORIGINAL_ENV = { ...process.env };
 afterEach(() => {
   jest.clearAllMocks();
   for (const k of Object.keys(process.env)) {
-    if (k.startsWith('SHADOW_MODE_')) delete process.env[k];
+    if (k.startsWith('SHADOW_MODE_') || k.startsWith('AUTO_PUBLISH_')) delete process.env[k];
   }
   for (const k of Object.keys(ORIGINAL_ENV)) {
-    if (k.startsWith('SHADOW_MODE_')) process.env[k] = ORIGINAL_ENV[k];
+    if (k.startsWith('SHADOW_MODE_') || k.startsWith('AUTO_PUBLISH_')) process.env[k] = ORIGINAL_ENV[k];
   }
 });
 
@@ -386,6 +388,47 @@ describe('isShadow', () => {
     expect(isShadow(null)).toBe(true);
     expect(isShadow(undefined)).toBe(true);
     expect(isShadow('')).toBe(true);
+  });
+});
+
+describe('autoPublishEnabled', () => {
+  test('default OFF when env unset → trust-build ramp applies', () => {
+    expect(autoPublishEnabled('new_supporting_blog')).toBe(false);
+    expect(autoPublishEnabled('add_internal_links')).toBe(false);
+  });
+  test('AUTO_PUBLISH_<ACTION>=true enables auto-publish for that action only', () => {
+    process.env.AUTO_PUBLISH_NEW_SUPPORTING_BLOG = 'true';
+    expect(autoPublishEnabled('new_supporting_blog')).toBe(true);
+    expect(autoPublishEnabled('create_or_refresh_city_service_page')).toBe(false);
+  });
+  test('accepts "1" and "on" as enabled', () => {
+    process.env.AUTO_PUBLISH_NEW_SUPPORTING_BLOG = '1';
+    expect(autoPublishEnabled('new_supporting_blog')).toBe(true);
+    process.env.AUTO_PUBLISH_REFRESH_EXISTING_PAGE = 'on';
+    expect(autoPublishEnabled('refresh_existing_page')).toBe(true);
+  });
+  test('any other value stays OFF (fail-safe)', () => {
+    process.env.AUTO_PUBLISH_NEW_SUPPORTING_BLOG = 'yes';
+    expect(autoPublishEnabled('new_supporting_blog')).toBe(false);
+    process.env.AUTO_PUBLISH_NEW_SUPPORTING_BLOG = 'false';
+    expect(autoPublishEnabled('new_supporting_blog')).toBe(false);
+  });
+  test('null/undefined action_type → not auto-publish', () => {
+    expect(autoPublishEnabled(null)).toBe(false);
+    expect(autoPublishEnabled(undefined)).toBe(false);
+  });
+});
+
+describe('FACTS_GATED_ACTIONS', () => {
+  test('covers the facts-gated content actions kept in sync with facts-sufficiency.js', () => {
+    expect(FACTS_GATED_ACTIONS.has('new_supporting_blog')).toBe(true);
+    expect(FACTS_GATED_ACTIONS.has('create_or_refresh_city_service_page')).toBe(true);
+    expect(FACTS_GATED_ACTIONS.has('create_customer_question_page')).toBe(true);
+    expect(FACTS_GATED_ACTIONS.has('refresh_existing_page')).toBe(true);
+    // metadata-only / link / GBP actions are NOT facts-gated
+    expect(FACTS_GATED_ACTIONS.has('add_internal_links')).toBe(false);
+    expect(FACTS_GATED_ACTIONS.has('rewrite_title_meta')).toBe(false);
+    expect(FACTS_GATED_ACTIONS.has('gbp_post')).toBe(false);
   });
 });
 
