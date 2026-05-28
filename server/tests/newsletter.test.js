@@ -24,6 +24,7 @@ const { findHallucinatedClaims, validateNewsletterDraft } = require('../services
 const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
+const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
@@ -1086,5 +1087,78 @@ describe('newsletter GBP per-location social copy', () => {
   test('trims whitespace on model-provided captions', () => {
     const out = normalizeGbpByLocation({ parrish: '  Parrish party  ' });
     expect(out.parrish).toBe('Parrish party');
+  });
+});
+
+// ── Event duplicate detection + merge helpers ────────────────────────
+//
+// Cross-source dupes (same event scraped from 2 feeds) clutter the queue.
+// findDuplicateClusters suggests merges conservatively (same normalized
+// title + ET day + city); rewriteCalendarEventIds keeps planned calendars
+// pointing at the survivor after a merge.
+
+describe('event normalizeEventTitle', () => {
+  test('strips punctuation, case, and noise words', () => {
+    expect(normalizeEventTitle('The Bradenton Blues Festival!')).toBe('bradenton blues festival');
+    expect(normalizeEventTitle('Jazz & Wine presents: A Night Out')).toBe('jazz and wine night out');
+  });
+  test('two feeds with cosmetic differences normalize equal', () => {
+    expect(normalizeEventTitle('Sarasota Farmers Market'))
+      .toBe(normalizeEventTitle('  sarasota   FARMERS market '));
+  });
+});
+
+describe('event findDuplicateClusters', () => {
+  const ev = (o) => ({ image_url: null, event_url: null, pulled_at: null, ...o });
+
+  test('clusters same title + same ET day + same city from different sources', () => {
+    const clusters = findDuplicateClusters([
+      ev({ id: 'a', title: 'Blues Fest', start_at: '2026-05-30T23:00:00Z', city: 'Bradenton', source_id: 's1', event_url: 'u' }),
+      ev({ id: 'b', title: 'The Blues Fest', start_at: '2026-05-30T20:00:00Z', city: 'bradenton', source_id: 's2', image_url: 'img' }),
+      ev({ id: 'c', title: 'Sarasota Market', start_at: '2026-05-31T13:00:00Z', city: 'Sarasota', source_id: 's1' }),
+    ]);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].events.map((e) => e.id).sort()).toEqual(['a', 'b']);
+    // 'b' has an image → suggested primary (more complete)
+    expect(clusters[0].suggestedPrimaryId).toBe('b');
+  });
+
+  test('does NOT cluster same title on different days', () => {
+    const clusters = findDuplicateClusters([
+      ev({ id: 'a', title: 'Weekly Market', start_at: '2026-05-30T13:00:00Z', city: 'Venice' }),
+      ev({ id: 'b', title: 'Weekly Market', start_at: '2026-06-06T13:00:00Z', city: 'Venice' }),
+    ]);
+    expect(clusters).toHaveLength(0);
+  });
+
+  test('ignores undated or untitled or city-less events (too risky to claim)', () => {
+    const clusters = findDuplicateClusters([
+      ev({ id: 'a', title: 'Market', start_at: null, city: 'Venice' }),
+      ev({ id: 'b', title: 'Market', start_at: '2026-05-30T13:00:00Z', city: '' }),
+      ev({ id: 'c', title: '', start_at: '2026-05-30T13:00:00Z', city: 'Venice' }),
+    ]);
+    expect(clusters).toHaveLength(0);
+  });
+
+  test('singletons are not returned', () => {
+    expect(findDuplicateClusters([
+      ev({ id: 'a', title: 'Solo Event', start_at: '2026-05-30T13:00:00Z', city: 'Venice' }),
+    ])).toEqual([]);
+  });
+});
+
+describe('event rewriteCalendarEventIds', () => {
+  test('replaces merged ids with the primary and dedupes', () => {
+    expect(rewriteCalendarEventIds(['a', 'b', 'c'], { b: 'a' })).toEqual(['a', 'c']);
+  });
+  test('collapses when primary already present', () => {
+    expect(rewriteCalendarEventIds(['a', 'b'], { b: 'a' })).toEqual(['a']);
+  });
+  test('returns null when nothing changes (skip the DB write)', () => {
+    expect(rewriteCalendarEventIds(['x', 'y'], { b: 'a' })).toBeNull();
+    expect(rewriteCalendarEventIds([], { b: 'a' })).toBeNull();
+  });
+  test('accepts a Map merge map', () => {
+    expect(rewriteCalendarEventIds(['a', 'b', 'd'], new Map([['b', 'a'], ['d', 'a']]))).toEqual(['a']);
   });
 });

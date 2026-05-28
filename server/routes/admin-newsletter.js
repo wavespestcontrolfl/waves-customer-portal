@@ -1243,6 +1243,116 @@ router.post('/events/bulk-action', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// POST /api/admin/newsletter/events/merge — collapse cross-source duplicate
+// events into one survivor. The losing rows are marked admin_status='rejected'
+// (which already excludes them from the queue + digest) with merged_into set
+// to the primary, and any newsletter_calendar.event_ids referencing them are
+// rewritten to the primary so planned weeks don't lose the event.
+router.post('/events/merge', async (req, res, next) => {
+  try {
+    const { primaryId, duplicateIds } = req.body || {};
+    if (typeof primaryId !== 'string' || !UUID_RE.test(primaryId)) {
+      return res.status(400).json({ error: 'primaryId must be a valid event UUID' });
+    }
+    if (!Array.isArray(duplicateIds) || duplicateIds.length === 0) {
+      return res.status(400).json({ error: 'duplicateIds required' });
+    }
+    const MAX_MERGE = 50;
+    const dups = [...new Set(
+      duplicateIds.slice(0, MAX_MERGE).filter((id) => typeof id === 'string' && UUID_RE.test(id)),
+    )].filter((id) => id !== primaryId);
+    if (dups.length === 0) {
+      return res.status(400).json({ error: 'no valid duplicate UUIDs distinct from primaryId' });
+    }
+
+    // All rows must exist; primary must not itself already be merged away.
+    const rows = await db('events_raw')
+      .select('id', 'merged_into')
+      .whereIn('id', [primaryId, ...dups]);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const primary = byId.get(primaryId);
+    if (!primary) return res.status(404).json({ error: 'primary event not found' });
+    if (primary.merged_into) {
+      return res.status(409).json({ error: 'primary event is itself already merged into another event' });
+    }
+    const presentDups = dups.filter((id) => byId.has(id));
+    if (presentDups.length === 0) {
+      return res.status(404).json({ error: 'no duplicate events found' });
+    }
+
+    const { rewriteCalendarEventIds } = require('../services/event-duplicates');
+    const mergeMap = new Map(presentDups.map((id) => [id, primaryId]));
+
+    let merged = 0;
+    let calendarsUpdated = 0;
+    await db.transaction(async (trx) => {
+      merged = await trx('events_raw')
+        .whereIn('id', presentDups)
+        .update({
+          admin_status: 'rejected',
+          merged_into: primaryId,
+          suppression_reason: `merged into ${primaryId}`,
+          updated_at: new Date(),
+        });
+
+      // Rewrite any planned calendars that reference a merged id.
+      const calendars = await trx('newsletter_calendar').select('id', 'event_ids');
+      for (const cal of calendars) {
+        const ids = Array.isArray(cal.event_ids)
+          ? cal.event_ids
+          : (() => { try { return JSON.parse(cal.event_ids || '[]'); } catch { return []; } })();
+        const rewritten = rewriteCalendarEventIds(ids, mergeMap);
+        if (rewritten) {
+          await trx('newsletter_calendar').where({ id: cal.id })
+            .update({ event_ids: JSON.stringify(rewritten), updated_at: trx.fn.now() });
+          calendarsUpdated += 1;
+        }
+      }
+    });
+
+    res.json({ success: true, primaryId, merged, calendarsUpdated });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/newsletter/events/duplicates — suggested duplicate clusters
+// among pending/approved events in the upcoming window, for the Event Inbox
+// merge affordance. Detection is conservative (same normalized title + ET day
+// + city) to keep false positives near zero.
+router.get('/events/duplicates', async (req, res, next) => {
+  try {
+    const { findDuplicateClusters } = require('../services/event-duplicates');
+    const days = Math.min(120, Math.max(1, Number(req.query.days) || 60));
+    const startET = parseETDateTime(`${etDateString()}T00:00:00`);
+    const endET = parseETDateTime(`${etDateString(addETDays(new Date(), days))}T23:59:59`);
+
+    const rows = await db('events_raw as e')
+      .leftJoin('event_sources as s', 's.id', 'e.source_id')
+      .select(
+        'e.id', 'e.title', 'e.start_at', 'e.city', 'e.venue_name',
+        'e.event_url', 'e.image_url', 'e.admin_status', 'e.pulled_at',
+        's.name as source_name',
+      )
+      .whereIn('e.admin_status', ['pending', 'approved', 'featured'])
+      .whereNull('e.merged_into')
+      .where('e.start_at', '>=', startET)
+      .where('e.start_at', '<=', endET);
+
+    const clusters = findDuplicateClusters(rows).map((c) => ({
+      key: c.key,
+      suggestedPrimaryId: c.suggestedPrimaryId,
+      events: c.events.map((e) => ({
+        id: e.id, title: e.title, startAt: e.start_at, city: e.city,
+        venue: e.venue_name, sourceName: e.source_name,
+        hasImage: !!e.image_url, hasUrl: !!e.event_url, adminStatus: e.admin_status,
+      })),
+    }));
+
+    res.json({ clusters, clusterCount: clusters.length });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/newsletter/events/sources — source health dashboard
 router.get('/events/sources', async (req, res, next) => {
   try {

@@ -40,6 +40,7 @@ import {
   Star,
   Search,
   RefreshCw,
+  GitMerge,
 } from "lucide-react";
 import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
@@ -820,6 +821,34 @@ function EventInboxView({ onDraftFromEvent }) {
     fetchEvents();
   };
 
+  // Merge duplicates: the FIRST selected row is kept as the primary; the rest
+  // are rejected + merged into it (and any planned calendars repointed).
+  const mergeSelected = async () => {
+    if (selected.size < 2) return;
+    const ids = [...selected];
+    const primaryId = ids[0];
+    const duplicateIds = ids.slice(1);
+    const primaryTitle =
+      events.find((e) => e.id === primaryId)?.title || "the first selected event";
+    if (
+      !confirm(
+        `Merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into "${primaryTitle}"?\n\n` +
+          `The duplicates will be rejected (removed from the queue) and any planned calendars repointed to the primary.`,
+      )
+    )
+      return;
+    try {
+      await adminFetch("/admin/newsletter/events/merge", {
+        method: "POST",
+        body: JSON.stringify({ primaryId, duplicateIds }),
+      });
+      setSelected(new Set());
+      fetchEvents();
+    } catch (e) {
+      alert("Merge failed: " + e.message);
+    }
+  };
+
   const toggleSelect = (id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -994,6 +1023,17 @@ function EventInboxView({ onDraftFromEvent }) {
               <Star size={12} className="mr-1" />
               Feature
             </Button>
+            {selected.size >= 2 && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={mergeSelected}
+                title="Merge duplicates — the first selected event is kept; the rest are merged into it"
+              >
+                <GitMerge size={12} className="mr-1" />
+                Merge {selected.size} (1st = primary)
+              </Button>
+            )}
           </div>
         )}
       </div>
