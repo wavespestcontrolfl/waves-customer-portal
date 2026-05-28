@@ -695,6 +695,22 @@ describe('newsletter lockEventFactsFromDb', () => {
     expect(ev.highlights).not.toMatch(/https?:\/\//i);
     expect(ev.highlights).toBe('Buy tickets');
   });
+
+  test('nulls a URL-only string highlight so no blank bullet renders (Codex P3)', () => {
+    const { locked } = lockEventFactsFromDb(
+      [{ eventId: id1, title: 'Bradenton Blues', highlights: 'at https://fake.example' }],
+      [dbRow()],
+    );
+    expect(locked[0].highlights).toBeNull();
+  });
+
+  test('drops URL-only items from an array of highlights', () => {
+    const { locked } = lockEventFactsFromDb(
+      [{ eventId: id1, title: 'Bradenton Blues', highlights: ['at https://fake.example', 'Live music all night'] }],
+      [dbRow()],
+    );
+    expect(locked[0].highlights).toEqual(['Live music all night']);
+  });
 });
 
 // ── Hallucinated-claim hard-block scanner ────────────────────────────
