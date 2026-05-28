@@ -746,4 +746,26 @@ describe('newsletter validateNewsletterDraft — hallucinated claims hard-block'
     // Non-flagship types intentionally allow pricing — service promos quote prices
     expect(errors.filter((e) => e.includes('Hallucinated claim'))).toEqual([]);
   });
+
+  test('hallucinated claim in plain-text fallback is blocked even when HTML is clean (Codex P2)', () => {
+    const send = {
+      ...baseSend,
+      // HTML body is clean; the text-only fallback SendGrid delivers is not
+      text_body: 'Bradenton Blues this Saturday. Tickets are $15 at the door.',
+    };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
+  });
+
+  test('flagship send with only a text body (no HTML) is still scanned', () => {
+    const send = {
+      subject: 'Weekend Lineup',
+      html_body: null,
+      text_body: 'Free admission for everyone this weekend!',
+      preview_text: 'Weekend',
+      newsletter_type: 'local-weekly-fresh-events',
+    };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
+  });
 });

@@ -28,14 +28,16 @@ const HALLUCINATED_CLAIM_PATTERNS = [
 ];
 
 /**
- * Scan the rendered HTML body for AI-hallucinated factual claims that
- * the draft pipeline can't substantiate from the DB. Returns one error
- * string per distinct claim type detected (deduped on label so a draft
- * mentioning "$10" three times doesn't produce three error rows).
+ * Scan customer-facing body copy (HTML and/or plain text) for
+ * AI-hallucinated factual claims the draft pipeline can't substantiate
+ * from the DB. Returns one error string per distinct claim type detected
+ * (deduped on label so a draft mentioning "$10" three times doesn't
+ * produce three error rows). HTML tags are stripped before matching;
+ * plain text passes through unchanged.
  */
-function findHallucinatedClaims(htmlBody) {
-  if (!htmlBody) return [];
-  const bodyText = htmlBody.replace(/<[^>]+>/g, ' ');
+function findHallucinatedClaims(body) {
+  if (!body) return [];
+  const bodyText = body.replace(/<[^>]+>/g, ' ');
   const seen = new Set();
   const errors = [];
   for (const { pattern, label } of HALLUCINATED_CLAIM_PATTERNS) {
@@ -76,18 +78,24 @@ function validateNewsletterDraft(send, opts = {}) {
     warnings.push('Preview text is empty');
   }
 
-  if (isFlagshipType(send.newsletter_type) && send.html_body) {
-    const bodyText = send.html_body.replace(/<[^>]+>/g, '').toLowerCase();
-    if (!['homeowner minute', 'homeowner tip', 'quick tip', 'before heading out'].some((s) => bodyText.includes(s))) {
-      warnings.push('No Homeowner Minute section detected');
+  if (isFlagshipType(send.newsletter_type)) {
+    if (send.html_body) {
+      const bodyText = send.html_body.replace(/<[^>]+>/g, '').toLowerCase();
+      if (!['homeowner minute', 'homeowner tip', 'quick tip', 'before heading out'].some((s) => bodyText.includes(s))) {
+        warnings.push('No Homeowner Minute section detected');
+      }
+      if (!['schedule service', 'book', 'call us', 'reply to this email', 'wavespestcontrol.com'].some((s) => bodyText.includes(s))) {
+        warnings.push('No Waves CTA detected');
+      }
+      if (!send.html_body.includes('<h2>') && !send.html_body.includes('<strong>')) {
+        warnings.push('No event structure detected');
+      }
     }
-    if (!['schedule service', 'book', 'call us', 'reply to this email', 'wavespestcontrol.com'].some((s) => bodyText.includes(s))) {
-      warnings.push('No Waves CTA detected');
-    }
-    if (!send.html_body.includes('<h2>') && !send.html_body.includes('<strong>')) {
-      warnings.push('No event structure detected');
-    }
-    errors.push(...findHallucinatedClaims(send.html_body));
+    // Scan ALL customer-facing copy — SendGrid delivers text_body to
+    // text-only clients, so a clean HTML body with a hallucinated claim
+    // in the plain-text fallback must still hard-block the send.
+    const combinedBody = [send.html_body, send.text_body].filter(Boolean).join('\n');
+    if (combinedBody) errors.push(...findHallucinatedClaims(combinedBody));
   }
 
   return { errors, warnings };
