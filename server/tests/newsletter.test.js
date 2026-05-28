@@ -658,6 +658,33 @@ describe('newsletter lockEventFactsFromDb', () => {
     expect(dropped).toHaveLength(1);
     expect(dropped[0].reason).toBe('eventId not in approved list');
   });
+
+  test('strips URLs the model slips into commentary prose (Codex P2)', () => {
+    const { locked } = lockEventFactsFromDb(
+      [{
+        eventId: id1,
+        title: 'Bradenton Blues',
+        description: 'Grab tickets at https://scammy.example.com before they sell out.',
+        proTip: 'More info at www.evil.example.com',
+        highlights: ['Buy passes here: http://phish.example.com', 'Live music all night'],
+        closingLine: 'See the lineup at [the site](https://bad.example.com).',
+      }],
+      [dbRow()],
+    );
+    const ev = locked[0];
+    // No raw URLs survive in any commentary field
+    const blob = [ev.description, ev.proTip, ev.closingLine, ...ev.highlights].join(' ');
+    expect(blob).not.toMatch(/https?:\/\//i);
+    expect(blob).not.toMatch(/www\./i);
+    // Connector + URL strip cleanly (no dangling "at"/"here:")
+    expect(ev.description).toBe('Grab tickets before they sell out.');
+    // Markdown link keeps its label, drops the URL
+    expect(ev.closingLine).toContain('the site');
+    // Non-URL commentary is preserved
+    expect(ev.highlights).toContain('Live music all night');
+    // The DB-locked eventUrl is untouched and authoritative
+    expect(ev.eventUrl).toBe('https://example.com/blues');
+  });
 });
 
 // ── Hallucinated-claim hard-block scanner ────────────────────────────

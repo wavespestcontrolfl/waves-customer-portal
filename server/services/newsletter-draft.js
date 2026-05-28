@@ -237,6 +237,34 @@ function dividerHtml() {
  * @param {Array} dbEvents - The events_raw rows fetched by eventIds
  * @returns {{ locked: Array, dropped: Array<{ index:number, reason:string, title?:string }> }}
  */
+// Strip URLs (and bare www. / markdown links) from AI commentary prose.
+// The ONLY link that should reach the body is the DB-locked eventUrl,
+// rendered in the metadata block — a URL the model slipped into prose is
+// unverified and could be wrong or malicious. Leaves trailing connector
+// words like "at"/"here" dangling-free by tidying whitespace + stray
+// punctuation around the removed token.
+function stripCommentaryUrls(value) {
+  if (typeof value !== 'string' || !value) return value;
+  return value
+    .replace(/\[([^\]]*)\]\((?:https?:\/\/|www\.)[^)]*\)/gi, '$1')                       // markdown link → keep label
+    .replace(/\b(?:at|via|from|on|here)\b[\s:]*(?:https?:\/\/|www\.)[^\s)<>"']+/gi, '')   // connector + URL together
+    .replace(/\b(?:https?:\/\/|www\.)[^\s)<>"']+/gi, '')                                  // remaining bare URLs
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,!?;:])/g, '$1')
+    .trim();
+}
+
+function sanitizeCommentaryFields(ev) {
+  const out = { ...ev };
+  for (const k of ['title', 'description', 'proTip', 'closingLine', 'gifCaption']) {
+    if (typeof out[k] === 'string') out[k] = stripCommentaryUrls(out[k]);
+  }
+  if (Array.isArray(out.highlights)) {
+    out.highlights = out.highlights.map((h) => (typeof h === 'string' ? stripCommentaryUrls(h) : h));
+  }
+  return out;
+}
+
 function lockEventFactsFromDb(aiEvents, dbEvents) {
   const dbById = new Map((dbEvents || []).map((r) => [String(r.id).toLowerCase(), r]));
   const locked = [];
@@ -273,7 +301,9 @@ function lockEventFactsFromDb(aiEvents, dbEvents) {
     const location = venue && city ? `${venue}, ${city}` : (venue || city || null);
 
     locked.push({
-      ...ev,
+      // Strip any URLs the model slipped into commentary prose before
+      // spreading — only the DB-locked eventUrl below may render as a link.
+      ...sanitizeCommentaryFields(ev),
       eventId: row.id,
       date,
       location,
