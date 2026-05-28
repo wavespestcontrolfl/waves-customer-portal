@@ -327,6 +327,20 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Autonomous content engine failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 8AM ET — Content-optimization impact tracker. Snapshots a baseline
+  // for newly-live optimizations, then fills the 14d/21d diff-in-diff windows
+  // and records control-adjusted verdicts. Read-only against gsc_pages; writes
+  // only content_optimization_impact. Same gate as the engine.
+  cron.schedule('0 8 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    logger.info('Running: content-optimization impact tracker');
+    try {
+      const ImpactTracker = require('./seo/impact-tracker');
+      await ImpactTracker.sweepNewlyLive({});
+      await ImpactTracker.checkPending({});
+    } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 4AM — Newsletter event ingestion (P3a). Pulls every enabled
   // RSS source from event_sources, upserts into events_raw. Daily cadence

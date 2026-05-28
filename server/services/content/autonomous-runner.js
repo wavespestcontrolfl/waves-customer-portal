@@ -66,6 +66,7 @@ const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
 const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
+const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -143,6 +144,24 @@ class AutonomousRunner {
           reviewer_notes: `Protected page (${prot.reason}${prot.source ? `, ${prot.source}` : ''})${prot.detail ? `: ${prot.detail}` : ''} — not auto-optimized.`,
         });
         await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${prot.reason}`, { claimToken });
+        return finalized;
+      }
+    }
+
+    // 1a.2 Auto-pause guard. A bucket that has accrued repeated regressions
+    // (per the impact tracker's diff-in-diff verdicts) is paused — stop
+    // drafting that action type until a human reviews the losses.
+    const impactTracker = getImpactTracker();
+    if (impactTracker?.pausedBuckets && opp.bucket) {
+      let paused = [];
+      try { paused = await impactTracker.pausedBuckets({ db }); } catch { paused = []; }
+      if (paused.some((p) => p.bucket === opp.bucket)) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: `bucket_paused:${opp.bucket}`,
+          reviewer_notes: `Bucket "${opp.bucket}" auto-paused after repeated regressions — review impact verdicts before resuming.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `bucket_paused:${opp.bucket}`, { claimToken });
         return finalized;
       }
     }
