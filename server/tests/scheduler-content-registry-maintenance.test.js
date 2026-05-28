@@ -10,6 +10,7 @@ jest.mock('../config/feature-gates', () => ({
 const {
   parseListEnv,
   parsePositiveEnvInt,
+  runAutonomousOpportunityMining,
   runContentRegistryMaintenance,
 } = require('../services/scheduler');
 
@@ -85,5 +86,29 @@ describe('scheduler content registry maintenance', () => {
 
     await expect(runContentRegistryMaintenance({ registry, liveStatus })).rejects.toThrow(/GitHub source unavailable/);
     expect(liveStatus.runContentRegistryLiveStatusCheck).not.toHaveBeenCalled();
+  });
+});
+
+describe('scheduler autonomous opportunity mining', () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    jest.clearAllMocks();
+  });
+
+  test('persists mined opportunities for the daily runner with a tunable period', async () => {
+    process.env.AUTONOMOUS_OPPORTUNITY_MINE_PERIOD_DAYS = '14';
+    const miner = {
+      mineAll: jest.fn().mockResolvedValue({
+        persisted: 7,
+        counts: { ctr_rewrite: 3, decay_refresh: 4 },
+      }),
+    };
+
+    const result = await runAutonomousOpportunityMining({ miner });
+
+    expect(miner.mineAll).toHaveBeenCalledWith({ periodDays: 14, persist: true });
+    expect(result.persisted).toBe(7);
   });
 });

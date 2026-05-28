@@ -672,15 +672,27 @@ class AutonomousRunner {
   }
 
   /**
-   * Drains the queue for the cron — runs runNext() once per call.
-   * The cron only fires once per day at 9am ET, so this is a thin
-   * wrapper today; future expansion could batch multiple actions
-   * per day per the weekly mix in scoring-config.WEEKLY_MIX.
+   * Drains the daily cron batch. The opportunity queue already sorts by score,
+   * so each runNext() claims the current best remaining opportunity. Keep the
+   * batch bounded: review generation can scale, while publish canaries still
+   * cap actual live output per action type.
    */
-  async runDaily() {
-    const run = await this.runNext();
-    await this._appendToDailyDigest(run).catch(() => {});
-    return run;
+  async runDaily({ limit = null } = {}) {
+    const batchLimit = dailyBatchLimit(limit);
+    const runs = [];
+    for (let i = 0; i < batchLimit; i += 1) {
+      const run = await this.runNext();
+      runs.push(run);
+      await this._appendToDailyDigest(run).catch(() => {});
+      if (run.outcome === 'skipped_no_opportunity') break;
+      if (String(run.outcome || '').startsWith('failed')) break;
+    }
+    return {
+      outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
+      count: runs.length,
+      limit: batchLimit,
+      runs,
+    };
   }
 
   // ── internals ────────────────────────────────────────────────────
@@ -1405,6 +1417,14 @@ function envInt(key, defaultValue = null) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
 }
 
+function dailyBatchLimit(value = null) {
+  const raw = value == null
+    ? envInt('AUTONOMOUS_CONTENT_DAILY_BATCH_SIZE', 5)
+    : Number.parseInt(value, 10);
+  const parsed = Number.isFinite(raw) && raw > 0 ? raw : 5;
+  return Math.min(Math.max(parsed, 1), 10);
+}
+
 function withTimeout(promise, timeoutMs, message) {
   const ms = Number(timeoutMs);
   if (!Number.isFinite(ms) || ms <= 0) return promise;
@@ -1564,6 +1584,7 @@ module.exports._internals = {
   isDeterministicPublishError,
   envBool,
   envInt,
+  dailyBatchLimit,
   INTERNAL_LINK_RETRYABLE_STATUSES,
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
