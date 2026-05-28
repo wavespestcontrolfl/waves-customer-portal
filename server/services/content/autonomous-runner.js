@@ -127,26 +127,13 @@ class AutonomousRunner {
     // protected URLs are never auto-optimized — regardless of facts. This runs
     // FIRST so e.g. /pest-control-sarasota-fl/ is blocked even though
     // "sarasota × pest-control" passes facts sufficiency.
-    const protectedPages = getProtectedPages();
-    if (protectedPages && opp.page_url) {
-      let prot;
-      try {
-        prot = await protectedPages.isProtected(opp.page_url, { db });
-      } catch (err) {
-        logger.warn(`[autonomous-runner] protected-page check threw: ${err.message}`);
-        prot = { protected: true, reason: 'protected_check_error', detail: err.message };
-      }
-      run.protected_check = prot;
-      if (prot.protected) {
-        const finalized = await finalize(run, t0, {
-          outcome: 'skipped_gate_fail',
-          skip_reason: `protected_page:${prot.reason}`,
-          reviewer_notes: `Protected page (${prot.reason}${prot.source ? `, ${prot.source}` : ''})${prot.detail ? `: ${prot.detail}` : ''} — not auto-optimized.`,
-        });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${prot.reason}`, { claimToken });
-        return finalized;
-      }
+    const initialProtected = await this._checkProtectedPage(opp);
+    if (initialProtected?.protected) {
+      const finalized = await finalize(run, t0, protectedPagePatch(initialProtected));
+      await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
+      return finalized;
     }
+    if (initialProtected) run.protected_check = initialProtected;
 
     // 1a.2 Auto-pause guard. A bucket that has accrued repeated regressions
     // (per the impact tracker's diff-in-diff verdicts) is paused — stop
@@ -192,6 +179,15 @@ class AutonomousRunner {
     run.page_type = brief.page_type;
     run.action_type = brief.action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
+
+    const finalProtected = await this._checkProtectedPage(opp, brief);
+    if (finalProtected?.protected) {
+      run.protected_check = finalProtected;
+      const finalized = await finalize(run, t0, protectedPagePatch(finalProtected));
+      await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
+      return finalized;
+    }
+    if (finalProtected) run.protected_check = finalProtected;
 
     // 2b. Facts-sufficiency gate. Keyed on the FINAL (router-decided)
     // action_type — for content-generating city×service actions, refuse to
@@ -609,6 +605,32 @@ class AutonomousRunner {
     }
 
     Object.assign(run, publishOutcome);
+
+    // No-op refresh: the live page already matched the draft, so nothing was
+    // published. Complete the queue item (don't park it for a PR that doesn't
+    // exist) with a distinct outcome that has no published_url — so it is not
+    // impact-tracked and does not count toward trust-build.
+    if (publishOutcome.publish_status === 'no_changes') {
+      let finalized;
+      try {
+        finalized = await finalize(run, t0, {
+          outcome: 'completed_no_changes',
+          skip_reason: 'publish_no_changes',
+          published_url: null,
+          reviewer_notes: 'Refresh matched the live page byte-for-meaning; no PR opened and nothing to publish or track.',
+        });
+      } catch (err) {
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'no_changes_audit_failed', { claimToken }, err);
+        throw err;
+      }
+      try {
+        await this._completeClaimOrThrow(queue, opp.id, { notes: 'no_changes', claimToken });
+      } catch (err) {
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'no_changes_queue_complete_failed', { claimToken }, err);
+      }
+      return finalized;
+    }
+
     if (!publishOutcome.published_url) {
       const reason = 'astro_pr_pending_merge';
       const notes = publishOutcome.astro_pr_url
@@ -739,6 +761,21 @@ class AutonomousRunner {
   async _releaseClaimOrThrow(queue, opportunityId, payload) {
     const ok = await queue.release(opportunityId, payload);
     if (!ok) throw new Error('queue_release_failed_or_stale_claim');
+  }
+
+  async _checkProtectedPage(opp = {}, brief = null) {
+    const protectedPages = getProtectedPages();
+    if (!protectedPages?.isProtected) return null;
+    const target = protectedPageCandidateUrl(opp, brief);
+    if (!target) return null;
+    let prot;
+    try {
+      prot = await protectedPages.isProtected(target, { db });
+    } catch (err) {
+      logger.warn(`[autonomous-runner] protected-page check threw: ${err.message}`);
+      prot = { protected: true, reason: 'protected_check_error', detail: err.message };
+    }
+    return { ...prot, checked_url: target };
   }
 
   async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
@@ -913,13 +950,16 @@ class AutonomousRunner {
     run.publish_ms = Date.now() - t;
 
     if (publishResult.status === 'no_changes') {
+      // No-op: nothing republished. Mirror the refresh no-op — distinct outcome
+      // with no published_url, so it isn't impact-tracked or counted toward
+      // trust-build.
       return {
         queue: 'complete',
         notes: 'metadata_no_changes',
         patch: {
-          outcome: 'completed_published',
+          outcome: 'completed_no_changes',
           skip_reason: 'metadata_no_changes',
-          published_url: publishResult.url || null,
+          published_url: null,
           publish_status: publishResult.status,
           reviewer_notes: 'Metadata rewrite matched existing frontmatter; no Astro PR was needed.',
         },
@@ -1164,12 +1204,13 @@ class AutonomousRunner {
       const r = await usePublish(draft, brief);
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
-      // commit). Treat it as published so it completes rather than getting
-      // parked as astro_pr_pending_merge with a bogus "merge the PR" note —
-      // mirrors the metadata-rewrite no_changes path. Skip distribution
-      // (IndexNow / link planning) since nothing actually changed.
+      // commit, nothing republished). Leave published_url UNSET so the impact
+      // sweep (whereNotNull('published_url')) and trust-build counting both
+      // skip it — an unchanged page must not earn a baseline/14d/21d verdict or
+      // count toward shadow graduation. The caller completes it as a no-op
+      // rather than parking it for a non-existent PR.
       if (r?.status === 'no_changes') {
-        out.published_url = r?.url || draft.url || null;
+        out.published_url = null;
         out.pending_url = null;
         out.publish_status = 'no_changes';
         out.astro_pr_url = null;
@@ -1382,6 +1423,71 @@ function normalizeContentPath(url) {
     .toLowerCase();
 }
 
+function protectedPageCandidateUrl(opp = {}, brief = null) {
+  return opp.page_url
+    || protectedBriefTargetUrl(opp, brief)
+    || protectedDerivedCityServicePath(opp, brief)
+    || null;
+}
+
+function protectedBriefTargetUrl(opp = {}, brief = null) {
+  if (!brief || !protectedCityServiceGuardApplies(opp, brief)) return null;
+  return brief.target_url || brief.page_url || null;
+}
+
+function protectedPagePatch(prot = {}) {
+  return {
+    outcome: 'skipped_gate_fail',
+    skip_reason: `protected_page:${prot.reason}`,
+    reviewer_notes: `Protected page (${prot.reason}${prot.source ? `, ${prot.source}` : ''})${prot.checked_url ? `, ${prot.checked_url}` : ''})${prot.detail ? `: ${prot.detail}` : ''} — not auto-optimized.`,
+  };
+}
+
+function cityServicePath(service, city) {
+  const serviceSlug = servicePathSlug(service);
+  const citySlug = slugifyPathPart(city);
+  if (!serviceSlug || !citySlug) return null;
+  return `/${serviceSlug}-${citySlug}-fl/`;
+}
+
+function protectedDerivedCityServicePath(opp = {}, brief = null) {
+  if (!protectedCityServiceGuardApplies(opp, brief)) return null;
+  return cityServicePath(brief?.service || opp.service, brief?.city || opp.city);
+}
+
+function protectedCityServiceGuardApplies(opp = {}, brief = null) {
+  const actionType = brief?.action_type || opp.action_type;
+  const pageType = brief?.page_type || opp.page_type;
+  return actionType === 'create_or_refresh_city_service_page'
+    || pageType === 'city-service';
+}
+
+function servicePathSlug(value) {
+  const slug = slugifyPathPart(value);
+  const map = {
+    pest: 'pest-control',
+    lawn: 'lawn-care',
+    mosquito: 'mosquito-control',
+    termite: 'termite-control',
+    rodent: 'rodent-control',
+    'bed-bug': 'bed-bug-control',
+    bedbug: 'bed-bug-control',
+    commercial: 'commercial-pest-control',
+    quote: 'pest-control-quote',
+    inspection: 'termite-inspection',
+  };
+  return map[slug] || slug || null;
+}
+
+function slugifyPathPart(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 function extractFrontmatterScalar(body, key) {
   const text = String(body || '');
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
@@ -1462,6 +1568,12 @@ module.exports._internals = {
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
   normalizeContentPath,
+  protectedPageCandidateUrl,
+  cityServicePath,
+  servicePathSlug,
+  protectedDerivedCityServicePath,
+  protectedBriefTargetUrl,
+  protectedCityServiceGuardApplies,
   extractFrontmatterScalar,
   startOfEtDay,
   startOfEtWeek,

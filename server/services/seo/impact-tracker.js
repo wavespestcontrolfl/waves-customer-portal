@@ -22,6 +22,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const GitHubClient = require('../content-astro/github-client');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // Parse a stored date (a 'YYYY-MM-DD' string or a pg Date at UTC midnight) as
@@ -225,22 +226,93 @@ async function sweepNewlyLive({ db: database = db, now = new Date() } = {}) {
   try {
     rows = await database('autonomous_runs as r')
       .leftJoin('content_optimization_impact as i', 'r.id', 'i.run_id')
-      .whereNotNull('r.published_url')
+      .leftJoin('content_briefs as b', 'r.brief_id', 'b.id')
+      .leftJoin('opportunity_queue as q', 'r.opportunity_id', 'q.id')
       .whereNull('i.id')
-      .select('r.id as run_id', 'r.published_url as page_url', 'r.completed_at');
+      .where((builder) => {
+        builder.whereNotNull('r.published_url').orWhereNotNull('r.astro_pr_url');
+      })
+      .select(
+        'r.id as run_id',
+        'r.published_url',
+        'r.astro_pr_url',
+        'r.completed_at',
+        'b.target_url as brief_target_url',
+        'q.page_url as opportunity_page_url',
+        'r.draft_payload',
+      );
   } catch (err) {
     logger.warn(`[impact-tracker] sweepNewlyLive query failed: ${err.message}`);
     return { created: 0, error: err.message };
   }
   for (const r of rows) {
+    const prInfo = r.published_url ? null : await mergedPrInfo(r.astro_pr_url);
+    if (!r.published_url && !prInfo?.merged) continue;
+    const pageUrl = resolveRunPageUrl(r);
+    if (!pageUrl) {
+      logger.warn(`[impact-tracker] baseline snapshot skipped for run ${r.run_id}: page URL unresolved`);
+      continue;
+    }
     try {
-      await snapshotBaseline({ db: database, runId: r.run_id, pageUrl: r.page_url, deployedAt: r.completed_at || now, now });
+      if (!r.published_url && prInfo?.merged) {
+        await database('autonomous_runs')
+          .where('id', r.run_id)
+          .whereNull('published_url')
+          .update({ published_url: pageUrl, completed_at: prInfo.merged_at || r.completed_at || now });
+      }
+      await snapshotBaseline({
+        db: database,
+        runId: r.run_id,
+        pageUrl,
+        deployedAt: prInfo?.merged_at || r.completed_at || now,
+        now,
+      });
       created += 1;
     } catch (err) {
-      logger.warn(`[impact-tracker] baseline snapshot failed for ${r.page_url}: ${err.message}`);
+      logger.warn(`[impact-tracker] baseline snapshot failed for ${pageUrl}: ${err.message}`);
     }
   }
   return { created, scanned: rows.length };
+}
+
+function parseAstroPrNumber(value) {
+  const match = String(value || '').match(/\/pull\/(\d+)(?:\D|$)/);
+  return match ? Number(match[1]) : null;
+}
+
+async function mergedPrInfo(astroPrUrl) {
+  const prNumber = parseAstroPrNumber(astroPrUrl);
+  if (!prNumber) return null;
+  try {
+    const pr = await GitHubClient.getPr(prNumber);
+    if (!pr?.merged) return { merged: false };
+    return {
+      merged: true,
+      merged_at: pr.merged_at ? new Date(pr.merged_at) : new Date(),
+      merge_commit_sha: pr.merge_commit_sha || null,
+    };
+  } catch (err) {
+    logger.warn(`[impact-tracker] Astro PR lookup failed for ${astroPrUrl}: ${err.message}`);
+    return null;
+  }
+}
+
+function resolveRunPageUrl(row = {}) {
+  return row.published_url
+    || row.brief_target_url
+    || row.opportunity_page_url
+    || draftPayloadUrl(row.draft_payload)
+    || null;
+}
+
+function draftPayloadUrl(value) {
+  if (!value) return null;
+  try {
+    const draft = typeof value === 'string' ? JSON.parse(value) : value;
+    return draft?.url || draft?.page_url || draft?.canonical || null;
+  } catch {
+    return null;
+  }
 }
 
 // ── measurement sweep ───────────────────────────────────────────────
@@ -367,7 +439,7 @@ module.exports = {
   // exposed for tests / reuse
   aggregatePageMetrics,
   selectControlPages,
-  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor },
+  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,

@@ -425,6 +425,8 @@ describe('countsTowardTrustBuild', () => {
       trust_build_approved_at: new Date(),
     })).toBe(false);
     expect(countsTowardTrustBuild({ outcome: 'failed_agent' })).toBe(false);
+    // A no-op refresh published nothing — it must not build trust.
+    expect(countsTowardTrustBuild({ outcome: 'completed_no_changes' })).toBe(false);
   });
 });
 
@@ -505,6 +507,7 @@ function loadRunnerWith({
   indexNow = null,
   linkPlanner = null,
   internalLinkExecutor = null,
+  protectedPages = null,
 }) {
   jest.resetModules();
   const dbMock = jest.fn(() => {
@@ -527,6 +530,7 @@ function loadRunnerWith({
   if (indexNow) jest.doMock('../services/seo/indexnow-submit', () => indexNow);
   if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);
   if (internalLinkExecutor) jest.doMock('../services/content/internal-link-pr-executor', () => internalLinkExecutor);
+  if (protectedPages) jest.doMock('../services/content/protected-pages', () => protectedPages);
   return require('../services/content/autonomous-runner');
 }
 
@@ -590,6 +594,45 @@ describe('runNext dry-run behavior', () => {
     expect(queue.release).not.toHaveBeenCalled();
     expect(queue.skip).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
+  });
+});
+
+describe('protected-page guard', () => {
+  test('blocks derived city-service money pages even when opportunity page_url is absent', async () => {
+    const claimedAt = new Date('2026-05-28T13:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_protected_city_service',
+        action_type: 'create_or_refresh_city_service_page',
+        page_url: null,
+        service: 'pest',
+        city: 'Sarasota',
+        claimed_at: claimedAt,
+      }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = { compose: jest.fn() };
+    const dispatcher = { runWithBrief: jest.fn() };
+    const protectedPages = {
+      isProtected: jest.fn().mockResolvedValue({
+        protected: true,
+        reason: 'money_page',
+        source: 'pattern',
+        detail: 'pest-control city hub',
+      }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, protectedPages });
+
+    const result = await runner.runNext();
+
+    expect(protectedPages.isProtected).toHaveBeenCalledWith('/pest-control-sarasota-fl/', { db: expect.any(Function) });
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('protected_page:money_page');
+    expect(result.reviewer_notes).toContain('/pest-control-sarasota-fl/');
+    expect(briefBuilder.compose).not.toHaveBeenCalled();
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_protected_city_service', 'protected_page:money_page', { claimToken: claimedAt });
   });
 });
 
@@ -1371,7 +1414,7 @@ describe('runNext post-publish bookkeeping', () => {
     }
   });
 
-  test('completes a no_changes publish as published (no PR) instead of parking it for merge', async () => {
+  test('completes a no_changes publish as a no-op (no PR, no published_url, not tracked) instead of parking it', async () => {
     const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
     const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
     process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
@@ -1399,8 +1442,11 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_published');
-      expect(queue.complete).toHaveBeenCalledWith('opp_noop_1', { notes: 'published:/blog/noop/', claimToken: claimedAt });
+      // Distinct no-op outcome with NO published_url → impact sweep
+      // (whereNotNull('published_url')) and trust-build counting both skip it.
+      expect(result.outcome).toBe('completed_no_changes');
+      expect(result.published_url == null).toBe(true);
+      expect(queue.complete).toHaveBeenCalledWith('opp_noop_1', { notes: 'no_changes', claimToken: claimedAt });
       expect(queue.pendingReview).not.toHaveBeenCalled();
       // No real change → no distribution.
       expect(indexNow.submit).not.toHaveBeenCalled();
