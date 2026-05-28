@@ -69,6 +69,19 @@ describe('pest control manual discount (warn-only, not capped)', () => {
     expect(warning.finalAnnual).toBeGreaterThan(0);
   });
 
+  test('Tree & Shrub is also warned (manual warn covers all guarded services, not just pest)', () => {
+    const est = generateEstimate({
+      property: { footprint: 2000, bedArea: 3000 },
+      services: { pest: { frequency: 'monthly' }, lawn: true, mosquito: true, treeShrub: { tier: 'standard' } },
+      manualDiscount: { type: 'PERCENT', value: 90, source: 'test', eligibilityConfirmed: true },
+    });
+    const warnedServices = est.marginWarnings.map(w => w.service);
+    expect(warnedServices).toContain('pest_control');
+    expect(warnedServices).toContain('tree_shrub');
+    const ts = est.lineItems.find(i => i.service === 'tree_shrub');
+    expect(ts.manualMarginWarning).toBe(true);
+  });
+
   test('no margin warning when the manual discount stays above the floor', () => {
     const est = generateEstimate(platinumBundle({
       manualDiscount: { type: 'PERCENT', value: 5, source: 'test', eligibilityConfirmed: true },

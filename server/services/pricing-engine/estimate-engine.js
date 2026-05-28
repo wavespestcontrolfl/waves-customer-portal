@@ -3,7 +3,25 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, URGENCY } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB } = require('./constants');
+
+// All-in annual cost (direct + admin) + margin floor for the guarded services,
+// mirroring discount-engine.applyMarginGuard's per-service cost shapes. Returns
+// null for services that don't expose a cost basis.
+function guardedLineCost(item) {
+  if (item.service === 'pest_control') {
+    const cost = Number(item.costs?.annualCost);
+    return Number.isFinite(cost) ? { cost, floor: Number(GLOBAL.MARGIN_FLOOR) } : null;
+  }
+  if (item.service === 'tree_shrub') {
+    const direct = Number(item.costs?.directCost);
+    const admin = Number(item.costs?.adminCost ?? GLOBAL.ADMIN_ANNUAL);
+    return Number.isFinite(direct)
+      ? { cost: direct + admin, floor: Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR) }
+      : null;
+  }
+  return null;
+}
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
@@ -1288,14 +1306,15 @@ function generateEstimate(input) {
   const manualMarginWarnings = [];
   if (manualDiscountAmount > 0 && manualDiscountableRecurringAnnual > 0) {
     for (const item of manualEligibleItems) {
-      const allInCost = item.service === 'pest_control' ? Number(item.costs?.annualCost) : NaN;
-      if (!Number.isFinite(allInCost) || allInCost < 0) continue;
+      const guard = guardedLineCost(item);
+      if (!guard || guard.cost < 0) continue;
+      const { cost: allInCost, floor: marginFloor } = guard;
       const lineAnnualAfterWG = item.annualAfterDiscount || item.annual || 0;
       if (lineAnnualAfterWG <= 0) continue;
       const lineManualCut = manualDiscountAmount * (lineAnnualAfterWG / manualDiscountableRecurringAnnual);
       const lineFinalAnnual = Math.round((lineAnnualAfterWG - lineManualCut) * 100) / 100;
       const lineMargin = lineFinalAnnual > 0 ? (lineFinalAnnual - allInCost) / lineFinalAnnual : -1;
-      if (lineMargin < GLOBAL.MARGIN_FLOOR) {
+      if (lineMargin < marginFloor) {
         item.manualMarginWarning = true;
         item.manualFinalAnnual = lineFinalAnnual;
         item.manualFinalMargin = Math.round(lineMargin * 1000) / 1000;
@@ -1303,11 +1322,11 @@ function generateEstimate(input) {
           service: item.service,
           type: 'manual_discount_below_margin_floor',
           margin: Math.round(lineMargin * 1000) / 1000,
-          marginFloor: GLOBAL.MARGIN_FLOOR,
+          marginFloor,
           finalAnnual: lineFinalAnnual,
           annualCost: Math.round(allInCost * 100) / 100,
           manualDiscountShare: Math.round(lineManualCut * 100) / 100,
-          message: `${item.service} manual discount drops margin to ${(lineMargin * 100).toFixed(1)}% (below ${(GLOBAL.MARGIN_FLOOR * 100).toFixed(0)}% floor)`,
+          message: `${item.service} manual discount drops margin to ${(lineMargin * 100).toFixed(1)}% (below ${(marginFloor * 100).toFixed(0)}% floor)`,
         });
       }
     }
