@@ -12,6 +12,7 @@ const {
   resolveAstroFileForUrl,
   countInternalLinks,
   firstValidInternalUrl,
+  canonicalUrlFromFrontmatter,
   slugToInternalUrl,
 } = executor._internals;
 
@@ -165,6 +166,22 @@ describe('internal-link dry-run executor helpers', () => {
     expect(loaded.canonical_url).toBe('/pest-control-bradenton-fl/');
     expect(firstValidInternalUrl('{{siteUrl}}/pest-control-bradenton-fl/')).toBe('/pest-control-bradenton-fl/');
     expect(slugToInternalUrl('pest-control-bradenton-fl')).toBe('/pest-control-bradenton-fl/');
+  });
+
+  test('preserves invalid explicit canonicals so dry-run reports a mismatch', () => {
+    const loaded = pageFromAstroFile('src/content/services/pest-control-bradenton-fl.md', [
+      '---',
+      'title: Pest Control in Bradenton',
+      'slug: "pest-control-bradenton-fl"',
+      'canonical: "https://example.com/pest-control-bradenton-fl/"',
+      'category: pest',
+      '---',
+      'Bradenton pest control body.',
+    ].join('\n'));
+
+    expect(loaded.url).toBe('/pest-control-bradenton-fl/');
+    expect(loaded.canonical_url).toBe('https://example.com/pest-control-bradenton-fl/');
+    expect(canonicalUrlFromFrontmatter({ canonical: 'https://example.com/page/' }, '/page/')).toBe('https://example.com/page/');
   });
 
   test('resolves Astro file paths from target URLs', () => {

@@ -227,20 +227,32 @@ function pageFromAstroFile(file, body, { fallbackUrl = null } = {}) {
     fallbackUrl,
     deriveUrlFromFile(file)
   );
-  const canonicalUrl = firstValidInternalUrl(data.canonical, data.canonical_url, url);
+  const canonicalUrl = canonicalUrlFromFrontmatter(data, url);
   return {
     file,
     body,
     frontmatter: data,
     title: data.title || null,
     url,
-    canonical_url: canonicalUrl || url,
+    canonical_url: canonicalUrl,
     page_type: inferPageType(file, data),
     topic: data.primary_keyword || data.target_keyword || data.title || null,
     topic_cluster: data.category || data.service || data.target_service || inferCluster(file, data),
     http_status: 200,
     indexable: !robotsNoindex(data),
   };
+}
+
+function canonicalUrlFromFrontmatter(data = {}, fallbackUrl = null) {
+  const hasCanonical = data.canonical != null && String(data.canonical).trim() !== '';
+  const hasCanonicalUrl = data.canonical_url != null && String(data.canonical_url).trim() !== '';
+  if (hasCanonical || hasCanonicalUrl) {
+    return firstValidInternalUrl(data.canonical, data.canonical_url)
+      || data.canonical
+      || data.canonical_url
+      || null;
+  }
+  return fallbackUrl;
 }
 
 function firstValidInternalUrl(...values) {
@@ -375,6 +387,7 @@ module.exports._internals = {
   pageFromAstroFile,
   pageFacts,
   firstValidInternalUrl,
+  canonicalUrlFromFrontmatter,
   slugToInternalUrl,
   resolveAstroFileForUrl,
   inferPageType,
