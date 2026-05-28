@@ -126,6 +126,7 @@ function findFirstUnlinkedOccurrence(text, phrase) {
     const length = m[0].length;
     if (!hasPhraseBoundary(masked, idx, length, phrase)) continue;
     if (isInsideLink(masked, idx, idx + length)) continue;
+    if (isInsideMarkdownHeading(masked, idx)) continue;
     return {
       index: idx,
       length,
@@ -133,6 +134,11 @@ function findFirstUnlinkedOccurrence(text, phrase) {
     };
   }
   return null;
+}
+
+function isInsideMarkdownHeading(text, index) {
+  const lineStart = String(text || '').lastIndexOf('\n', Math.max(0, index - 1)) + 1;
+  return /^[ \t]{0,3}#{1,6}\s/.test(String(text || '').slice(lineStart, index + 1));
 }
 
 function hasPhraseBoundary(text, start, length, phrase) {
@@ -459,6 +465,7 @@ module.exports._internals = {
   maskNonContentRegions,
   blankRegion,
   findFirstUnlinkedOccurrence,
+  isInsideMarkdownHeading,
   hasPhraseBoundary,
   isWordChar,
   isInsideLink,

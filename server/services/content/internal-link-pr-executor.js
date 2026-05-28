@@ -220,20 +220,53 @@ function seoFieldsFromOpportunity(opportunity) {
 function pageFromAstroFile(file, body, { fallbackUrl = null } = {}) {
   const parsed = frontmatter.parse(body || '');
   const data = parsed.data || {};
-  const url = policy.normalizeInternalUrl(data.slug || data.canonical || fallbackUrl || deriveUrlFromFile(file));
+  const url = firstValidInternalUrl(
+    slugToInternalUrl(data.slug),
+    data.canonical,
+    data.canonical_url,
+    fallbackUrl,
+    deriveUrlFromFile(file)
+  );
+  const canonicalUrl = canonicalUrlFromFrontmatter(data, url);
   return {
     file,
     body,
     frontmatter: data,
     title: data.title || null,
     url,
-    canonical_url: data.canonical || data.canonical_url || url,
+    canonical_url: canonicalUrl,
     page_type: inferPageType(file, data),
     topic: data.primary_keyword || data.target_keyword || data.title || null,
     topic_cluster: data.category || data.service || data.target_service || inferCluster(file, data),
     http_status: 200,
     indexable: !robotsNoindex(data),
   };
+}
+
+function canonicalUrlFromFrontmatter(data = {}, fallbackUrl = null) {
+  const hasCanonical = data.canonical != null && String(data.canonical).trim() !== '';
+  const hasCanonicalUrl = data.canonical_url != null && String(data.canonical_url).trim() !== '';
+  if (hasCanonical || hasCanonicalUrl) {
+    return firstValidInternalUrl(data.canonical, data.canonical_url)
+      || data.canonical
+      || data.canonical_url
+      || null;
+  }
+  return fallbackUrl;
+}
+
+function firstValidInternalUrl(...values) {
+  for (const value of values) {
+    const normalized = policy.normalizeInternalUrl(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function slugToInternalUrl(slug) {
+  const raw = String(slug || '').trim();
+  if (!raw) return null;
+  return raw.startsWith('/') ? raw : `/${raw}/`;
 }
 
 function pageFacts(page, { url }) {
@@ -353,6 +386,9 @@ module.exports._internals = {
   evaluateDryRunTask,
   pageFromAstroFile,
   pageFacts,
+  firstValidInternalUrl,
+  canonicalUrlFromFrontmatter,
+  slugToInternalUrl,
   resolveAstroFileForUrl,
   inferPageType,
   inferCluster,
