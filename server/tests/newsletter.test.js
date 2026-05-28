@@ -22,7 +22,7 @@ const sendgridWebhook = require('../routes/webhooks-sendgrid');
 const { lockEventFactsFromDb } = require('../services/newsletter-draft');
 const { findHallucinatedClaims, validateNewsletterDraft } = require('../services/newsletter-validator');
 const { preflightDigest } = require('../services/newsletter-autopilot');
-const { computeSendRates, aggregateSendMetrics } = require('../services/newsletter-analytics');
+const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
 const {
@@ -1011,5 +1011,29 @@ describe('newsletter aggregateSendMetrics', () => {
     expect(agg.totals.recipients).toBe(0);
     expect(agg.rates.openRate).toBeNull();
     expect(agg.rates.deliveryRate).toBeNull();
+  });
+});
+
+describe('newsletter ratesFromTotals', () => {
+  // The History route sums all sent rows in the DB and feeds the totals here,
+  // so the aggregate isn't capped by the 500-row page window (Codex P2).
+  test('computes pooled rates from a DB-summed totals object', () => {
+    const r = ratesFromTotals({
+      recipients: 2000, delivered: 1900, opened: 760, clicked: 190,
+      bounced: 100, unsubscribed: 38, complained: 19,
+    });
+    expect(r.deliveryRate).toBeCloseTo(0.95, 5);
+    expect(r.openRate).toBeCloseTo(0.4, 5);
+    expect(r.clickRate).toBeCloseTo(0.1, 5);
+    expect(r.clickToOpenRate).toBeCloseTo(0.25, 5);
+    expect(r.bounceRate).toBeCloseTo(0.05, 5);
+    expect(r.unsubscribeRate).toBeCloseTo(0.02, 5);
+    expect(r.complaintRate).toBeCloseTo(0.01, 5);
+  });
+
+  test('all-zero totals yield null rates (no division by zero)', () => {
+    const r = ratesFromTotals({});
+    expect(r.deliveryRate).toBeNull();
+    expect(r.openRate).toBeNull();
   });
 });

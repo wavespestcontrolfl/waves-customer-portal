@@ -25,7 +25,7 @@ const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { createNewsletterDraft } = require('../services/newsletter-draft');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
-const { computeSendRates, aggregateSendMetrics } = require('../services/newsletter-analytics');
+const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 let Anthropic;
@@ -295,11 +295,42 @@ router.get('/sends', async (req, res, next) => {
       .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
       .limit(500);
 
-    // Attach derived engagement rates per send + a pooled aggregate so the
-    // History view renders open/click/bounce/unsub/complaint rates without
-    // re-deriving the math client-side.
+    // Attach derived engagement rates per send so the History view renders
+    // open/click/bounce/unsub/complaint rates without re-deriving the math
+    // client-side.
     const sends = rows.map((row) => ({ ...row, rates: computeSendRates(row) }));
-    const aggregate = aggregateSendMetrics(rows);
+
+    // Pooled aggregate is summed across ALL sent campaigns in the DB — not
+    // the capped 500-row window above — so accounts with >500 rows still get
+    // accurate lifetime rates (mirrors the uncapped status breakdown below).
+    const aggRow = await db('newsletter_sends')
+      .where('status', 'sent')
+      .where('recipient_count', '>', 0)
+      .select(
+        db.raw('COUNT(*)::int as "campaignCount"'),
+        db.raw('COALESCE(SUM(recipient_count), 0)::int as recipients'),
+        db.raw('COALESCE(SUM(delivered_count), 0)::int as delivered'),
+        db.raw('COALESCE(SUM(opened_count), 0)::int as opened'),
+        db.raw('COALESCE(SUM(clicked_count), 0)::int as clicked'),
+        db.raw('COALESCE(SUM(bounced_count), 0)::int as bounced'),
+        db.raw('COALESCE(SUM(unsubscribed_count), 0)::int as unsubscribed'),
+        db.raw('COALESCE(SUM(complained_count), 0)::int as complained'),
+      )
+      .first();
+    const totals = {
+      recipients: Number(aggRow?.recipients || 0),
+      delivered: Number(aggRow?.delivered || 0),
+      opened: Number(aggRow?.opened || 0),
+      clicked: Number(aggRow?.clicked || 0),
+      bounced: Number(aggRow?.bounced || 0),
+      unsubscribed: Number(aggRow?.unsubscribed || 0),
+      complained: Number(aggRow?.complained || 0),
+    };
+    const aggregate = {
+      campaignCount: Number(aggRow?.campaignCount || 0),
+      totals,
+      rates: ratesFromTotals(totals),
+    };
 
     // Uncapped status breakdown so callers (e.g. the Dashboard's Scheduled
     // tile) don't have to derive counts from the 500-row payload.

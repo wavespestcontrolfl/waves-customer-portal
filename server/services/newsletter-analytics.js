@@ -48,13 +48,45 @@ function computeSendRates(send = {}) {
 }
 
 /**
- * Pooled aggregate across multiple sends. Only completed campaigns with at
- * least one recipient count toward the numbers (drafts/scheduled/failed and
- * zero-recipient rows are ignored so the rates aren't diluted).
+ * Pooled rates from a summed totals object. Shared by both the array-based
+ * aggregateSendMetrics and the route's DB-summed aggregate (which must sum
+ * across ALL sent campaigns, not just the History page's row window).
+ *
+ * @param {{recipients:number, delivered:number, opened:number, clicked:number, bounced:number, unsubscribed:number, complained:number}} totals
+ * @returns {Object} rates keyed like computeSendRates
+ */
+function ratesFromTotals(totals = {}) {
+  const recipients = Number(totals.recipients || 0);
+  const delivered = Number(totals.delivered || 0);
+  const opened = Number(totals.opened || 0);
+  const clicked = Number(totals.clicked || 0);
+  const bounced = Number(totals.bounced || 0);
+  const unsubscribed = Number(totals.unsubscribed || 0);
+  const complained = Number(totals.complained || 0);
+
+  return {
+    deliveryRate: rate(delivered, recipients),
+    openRate: rate(opened, delivered),
+    clickRate: rate(clicked, delivered),
+    clickToOpenRate: rate(clicked, opened),
+    bounceRate: rate(bounced, recipients),
+    unsubscribeRate: rate(unsubscribed, delivered),
+    complaintRate: rate(complained, delivered),
+  };
+}
+
+/**
+ * Pooled aggregate across an array of sends. Only completed campaigns with
+ * at least one recipient count toward the numbers (drafts/scheduled/failed
+ * and zero-recipient rows are ignored so the rates aren't diluted).
  *
  * Rates are computed from summed totals (a pooled rate), NOT an average of
  * per-send rates — a 10k-recipient send should weigh more than a 50-recipient
  * one.
+ *
+ * NOTE: the History route does NOT use this for its summary — it sums across
+ * all sent rows in the DB (see GET /sends), because this would only see the
+ * capped row window. This stays as a tested pure utility for array inputs.
  *
  * @param {Object[]} sends - newsletter_sends rows
  * @returns {{campaignCount:number, totals:Object, rates:Object}}
@@ -78,19 +110,7 @@ function aggregateSendMetrics(sends = []) {
     { recipients: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, unsubscribed: 0, complained: 0 },
   );
 
-  return {
-    campaignCount: completed.length,
-    totals,
-    rates: {
-      deliveryRate: rate(totals.delivered, totals.recipients),
-      openRate: rate(totals.opened, totals.delivered),
-      clickRate: rate(totals.clicked, totals.delivered),
-      clickToOpenRate: rate(totals.clicked, totals.opened),
-      bounceRate: rate(totals.bounced, totals.recipients),
-      unsubscribeRate: rate(totals.unsubscribed, totals.delivered),
-      complaintRate: rate(totals.complained, totals.delivered),
-    },
-  };
+  return { campaignCount: completed.length, totals, rates: ratesFromTotals(totals) };
 }
 
-module.exports = { computeSendRates, aggregateSendMetrics };
+module.exports = { computeSendRates, aggregateSendMetrics, ratesFromTotals };
