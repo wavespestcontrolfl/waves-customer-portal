@@ -18,7 +18,12 @@ const {
   mergeVisitTimelineConfig,
 } = require('../services/service-report/visit-timeline');
 
-const GBP_OAUTH_STATE_KEY = 'gbp.oauth_state';
+// Each pending OAuth attempt is its own row keyed by `${PREFIX}${stateNonce}`,
+// so connecting several locations in a row (or two admins/tabs at once) can't
+// clobber each other's state. The legacy single `gbp.oauth_state` key is swept
+// on create.
+const GBP_OAUTH_STATE_PREFIX = 'gbp.oauth_state:';
+const GBP_OAUTH_STATE_LEGACY_KEY = 'gbp.oauth_state';
 const GBP_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const GOOGLE_BUSINESS_LOCATION_IDS = new Set(['lakewood-ranch', 'parrish', 'sarasota', 'venice']);
 
@@ -38,43 +43,45 @@ async function createGoogleOAuthState(locationId, technicianId) {
   const state = crypto.randomBytes(32).toString('base64url');
   const now = new Date();
   const expiresAt = new Date(now.getTime() + GBP_OAUTH_STATE_TTL_MS);
+
+  // Sweep the deprecated single-key row and any expired pending states so
+  // rows don't accumulate. The current attempt gets its own nonce-keyed row.
+  const cutoff = new Date(now.getTime() - GBP_OAUTH_STATE_TTL_MS);
   await db('system_settings')
-    .insert({
-      key: GBP_OAUTH_STATE_KEY,
-      value: JSON.stringify({
-        state,
-        locationId,
-        technicianId: technicianId || null,
-        expiresAt: expiresAt.toISOString(),
-      }),
-      category: 'integrations',
-      description: 'Google Business Profile OAuth one-time state',
-      created_at: now,
-      updated_at: now,
-    })
-    .onConflict('key')
-    .merge({
-      value: JSON.stringify({
-        state,
-        locationId,
-        technicianId: technicianId || null,
-        expiresAt: expiresAt.toISOString(),
-      }),
-      category: 'integrations',
-      description: 'Google Business Profile OAuth one-time state',
-      updated_at: now,
-    });
+    .where('key', GBP_OAUTH_STATE_LEGACY_KEY)
+    .orWhere((b) =>
+      b.where('key', 'like', `${GBP_OAUTH_STATE_PREFIX}%`).andWhere('updated_at', '<', cutoff),
+    )
+    .del();
+
+  await db('system_settings').insert({
+    key: `${GBP_OAUTH_STATE_PREFIX}${state}`,
+    value: JSON.stringify({
+      state,
+      locationId,
+      technicianId: technicianId || null,
+      expiresAt: expiresAt.toISOString(),
+    }),
+    category: 'integrations',
+    description: 'Google Business Profile OAuth one-time state',
+    created_at: now,
+    updated_at: now,
+  });
   return state;
 }
 
 async function consumeGoogleOAuthState(rawState) {
   const state = String(rawState || '');
-  const row = await db('system_settings').where({ key: GBP_OAUTH_STATE_KEY }).first();
+  if (!state) {
+    logger.warn('[admin-settings] GBP OAuth callback rejected: missing state');
+    throw new Error('Invalid or expired OAuth state');
+  }
+  const key = `${GBP_OAUTH_STATE_PREFIX}${state}`;
+  const row = await db('system_settings').where({ key }).first();
   const saved = parseJsonObject(row?.value);
   const expiresAt = saved.expiresAt ? new Date(saved.expiresAt) : null;
   if (
-    !state
-    || !saved.state
+    !saved.state
     || saved.state !== state
     || !saved.locationId
     || !GOOGLE_BUSINESS_LOCATION_IDS.has(saved.locationId)
@@ -82,10 +89,11 @@ async function consumeGoogleOAuthState(rawState) {
     || expiresAt < new Date()
   ) {
     logger.warn('[admin-settings] GBP OAuth callback rejected: invalid or expired state');
+    if (row) await db('system_settings').where({ key }).del();
     throw new Error('Invalid or expired OAuth state');
   }
 
-  await db('system_settings').where({ key: GBP_OAUTH_STATE_KEY }).del();
+  await db('system_settings').where({ key }).del(); // one-time use
   return saved.locationId;
 }
 
@@ -93,8 +101,29 @@ async function consumeGoogleOAuthState(rawState) {
 // Google Business Profile OAuth — per-location authorization
 // =========================================================================
 
+// GET /api/admin/settings/google/auth-url?location=sarasota
+// SPA-friendly variant: returns the Google consent URL as JSON. The admin
+// SPA calls this WITH its bearer token, then navigates the browser to the
+// returned url. A top-level redirect to /google/auth can't carry the
+// Authorization header (admin auth is bearer-only), so the SPA must fetch
+// the url here and redirect itself. Mirrors the Gmail /oauth/auth-url flow.
+router.get('/google/auth-url', adminAuthenticate, requireAdmin, async (req, res) => {
+  try {
+    const locationId = String(req.query.location || '');
+    if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) {
+      return res.status(400).json({ error: 'Unknown location. Use: lakewood-ranch, parrish, sarasota, or venice' });
+    }
+    const state = await createGoogleOAuthState(locationId, req.technicianId);
+    const url = gbp.getAuthUrl(locationId, state);
+    res.json({ url });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/settings/google/auth?location=sarasota
-// Redirects to Google OAuth consent screen for that location's account
+// Redirects to Google OAuth consent screen. Kept for manual/non-SPA use, but
+// requires a bearer header — the SPA uses /google/auth-url above instead.
 router.get('/google/auth', adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const locationId = String(req.query.location || '');

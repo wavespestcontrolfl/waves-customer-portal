@@ -1124,6 +1124,130 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
   );
 }
 
+// Per-location Google Business Profile OAuth connect. Each location authorizes
+// its own Google account, so this lists all four with a Connect button. The
+// click fetches the consent URL with the admin bearer token (a top-level
+// redirect can't carry that header), then navigates the browser to Google.
+function GbpConnectSection() {
+  const [locations, setLocations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(null);
+
+  const params = new URLSearchParams(window.location.search);
+  const justConnected =
+    params.get("gbpOAuth") === "success" ? params.get("location") : null;
+
+  const load = () => {
+    setLoading(true);
+    adminFetch("/admin/gbp/locations")
+      .then((d) => setLocations(d.locations || []))
+      .catch(() => setLocations([]))
+      .finally(() => setLoading(false));
+  };
+  useEffect(load, []);
+
+  const connect = async (id) => {
+    setBusy(id);
+    try {
+      const d = await adminFetch(
+        `/admin/settings/google/auth-url?location=${encodeURIComponent(id)}`,
+      );
+      if (d.url) {
+        window.location.href = d.url; // off to Google's consent screen
+        return;
+      }
+      alert(d.error || "Could not start Google connection");
+    } catch (e) {
+      alert("Connect failed: " + e.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card style={{ marginBottom: 20 }}>
+      <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+        Google Business Profile — per-location connection
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
+        Each location authorizes its own Google account. Connect a location to
+        enable auto-posting (newsletters, updates) and review replies for that
+        profile. Sign in as the Google account that manages that location.
+      </div>
+      {justConnected && (
+        <div
+          style={{
+            fontSize: 12,
+            color: D.green,
+            background: D.green + "18",
+            padding: "8px 12px",
+            borderRadius: 8,
+            marginBottom: 12,
+          }}
+        >
+          ✓ Connected {justConnected}. Status below may take a moment to refresh.
+        </div>
+      )}
+      {loading ? (
+        <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+      ) : (
+        locations.map((loc) => (
+          <div
+            key={loc.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: "10px 0",
+              borderBottom: `1px solid ${D.border}`,
+            }}
+          >
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+                {loc.name}
+              </div>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: loc.hasCredentials ? D.green : loc.authError ? D.red : D.muted,
+                }}
+                title={loc.authError || ""}
+              >
+                {loc.hasCredentials
+                  ? "● Connected"
+                  : loc.authError
+                    ? "● Auth error — reconnect"
+                    : "○ Not connected"}
+              </div>
+            </div>
+            <button
+              onClick={() => connect(loc.id)}
+              disabled={busy === loc.id}
+              style={{
+                padding: "6px 14px",
+                borderRadius: 8,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: busy === loc.id ? "default" : "pointer",
+                border: `1px solid ${D.teal}`,
+                background: loc.hasCredentials ? "transparent" : D.teal,
+                color: loc.hasCredentials ? D.teal : D.white,
+                opacity: busy === loc.id ? 0.5 : 1,
+              }}
+            >
+              {busy === loc.id
+                ? "Opening…"
+                : loc.hasCredentials
+                  ? "Reconnect"
+                  : "Connect"}
+            </button>
+          </div>
+        ))
+      )}
+    </Card>
+  );
+}
+
 function IntegrationsTab({ canAdmin }) {
   if (!canAdmin) {
     return (
@@ -1138,7 +1262,12 @@ function IntegrationsTab({ canAdmin }) {
     );
   }
 
-  return <IntegrationHealthSection />;
+  return (
+    <>
+      <GbpConnectSection />
+      <IntegrationHealthSection />
+    </>
+  );
 }
 
 function TeamList() {
