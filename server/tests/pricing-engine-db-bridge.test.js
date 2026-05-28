@@ -209,7 +209,7 @@ describe('pricing engine DB bridge', () => {
     snapshot.PEST.frequencyDiscounts.v1.bimonthly = 1.5; // >1, invalid
     snapshot.PEST.frequencyDiscounts.v2.monthly = 0;     // 0, invalid
     snapshot.PEST.frequencyDiscounts.v2.quarterly = -0.2; // negative, invalid
-    snapshot.ONE_TIME.pest.premiumMultiplier = 0;        // must be positive
+    snapshot.ONE_TIME.pest.premiumMultiplier = 0;        // must be > 1
     snapshot.ONE_TIME.pest.setupEquivalent = -5;         // must be non-negative
 
     const result = validatePestPricingConfig(snapshot);
@@ -219,9 +219,19 @@ describe('pricing engine DB bridge', () => {
       'PEST.frequencyDiscounts.v1.bimonthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.monthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.quarterly must be in (0, 1]',
-      'ONE_TIME.pest.premiumMultiplier must be positive',
+      'ONE_TIME.pest.premiumMultiplier must be > 1',
       'ONE_TIME.pest.setupEquivalent must be non-negative',
     ]));
+  });
+
+  test('rejects a non-markup one-time pest premium (<= 1 breaks the recurring incentive)', () => {
+    for (const badMultiplier of [1, 0.8]) {
+      const snapshot = JSON.parse(JSON.stringify(constants));
+      snapshot.ONE_TIME.pest.premiumMultiplier = badMultiplier;
+      const result = validatePestPricingConfig(snapshot);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('ONE_TIME.pest.premiumMultiplier must be > 1');
+    }
   });
 
   test('allows pest floor above base (raise-the-minimum config is valid)', () => {

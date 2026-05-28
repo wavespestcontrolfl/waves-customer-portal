@@ -157,7 +157,12 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isPositiveNumber(diag[key])) errors.push(`PEST.productionDiagnostics.${key} must be positive`);
   }
 
-  if (!isPositiveNumber(ONE_TIME.pest?.premiumMultiplier)) errors.push('ONE_TIME.pest.premiumMultiplier must be positive');
+  // Must be a true markup (> 1): one-time = (quarterlyPerApp + setupEquivalent)
+  // × premiumMultiplier must stay strictly above the recurring visit-1 cost
+  // (quarterlyPerApp + setupEquivalent), or the recurring incentive collapses.
+  if (!(isPositiveNumber(ONE_TIME.pest?.premiumMultiplier) && Number(ONE_TIME.pest.premiumMultiplier) > 1)) {
+    errors.push('ONE_TIME.pest.premiumMultiplier must be > 1');
+  }
   if (!isNonNegativeNumber(ONE_TIME.pest?.setupEquivalent)) errors.push('ONE_TIME.pest.setupEquivalent must be non-negative');
   if (!isPositiveNumber(ONE_TIME.pest?.floor)) errors.push('ONE_TIME.pest.floor must be positive');
 
