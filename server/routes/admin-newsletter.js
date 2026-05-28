@@ -1245,6 +1245,10 @@ router.post('/events/bulk-action', async (req, res, next) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Stable int4 advisory-lock key (within pg_advisory_xact_lock's range) so
+// every /events/merge runs one-at-a-time and merge-vs-merge races can't chain.
+const EVENT_MERGE_LOCK_KEY = 778001;
+
 // POST /api/admin/newsletter/events/merge — collapse cross-source duplicate
 // events into one survivor. The losing rows are marked admin_status='rejected'
 // (which already excludes them from the queue + digest) with merged_into set
@@ -1307,11 +1311,16 @@ router.post('/events/merge', async (req, res, next) => {
     let merged = 0;
     let calendarsUpdated = 0;
     await db.transaction(async (trx) => {
-      // Lock + revalidate the primary inside the txn. A concurrent merge could
-      // have used THIS primary as its own duplicate after our preflight check;
-      // FOR UPDATE serializes against that, and the re-read rolls us back if
-      // the primary was already merged away (else we'd repoint calendars to a
-      // non-survivor and create a chained merge).
+      // Serialize ALL merges against each other. Manual multi-row merges with
+      // calendar rewrites have inherent TOCTOU surface (chained merges where
+      // one request's primary becomes another's duplicate); a single
+      // transaction-scoped advisory lock makes merges run one-at-a-time, so
+      // those merge-vs-merge races can't interleave. Auto-releases on commit.
+      await trx.raw('SELECT pg_advisory_xact_lock(?)', [EVENT_MERGE_LOCK_KEY]);
+
+      // Revalidate the primary inside the txn (defense vs non-merge writers).
+      // FOR UPDATE + re-read rolls us back if the primary was merged away (else
+      // we'd repoint calendars to a non-survivor and create a chained merge).
       const lockedPrimary = await trx('events_raw')
         .select('id', 'merged_into')
         .where({ id: primaryId })
@@ -1340,8 +1349,11 @@ router.post('/events/merge', async (req, res, next) => {
         throw new Error('merge conflict: a duplicate was concurrently merged — rolled back');
       }
 
-      // Rewrite any planned calendars that reference a merged id.
-      const calendars = await trx('newsletter_calendar').select('id', 'event_ids');
+      // Rewrite any planned calendars that reference a merged id. FOR UPDATE
+      // locks the rows so a concurrent /calendar edit or autopilot write can't
+      // be clobbered by our snapshot-derived array (table is tiny — one row
+      // per week — so locking all rows for the merge is cheap).
+      const calendars = await trx('newsletter_calendar').select('id', 'event_ids').forUpdate();
       for (const cal of calendars) {
         const ids = Array.isArray(cal.event_ids)
           ? cal.event_ids
