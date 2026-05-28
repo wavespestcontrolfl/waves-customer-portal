@@ -1162,6 +1162,20 @@ class AutonomousRunner {
       : publisher?.publishOrUpdatePage?.bind(publisher);
     if (usePublish) {
       const r = await usePublish(draft, brief);
+      // A refresh whose body + editable meta already match the live page is a
+      // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
+      // commit). Treat it as published so it completes rather than getting
+      // parked as astro_pr_pending_merge with a bogus "merge the PR" note —
+      // mirrors the metadata-rewrite no_changes path. Skip distribution
+      // (IndexNow / link planning) since nothing actually changed.
+      if (r?.status === 'no_changes') {
+        out.published_url = r?.url || draft.url || null;
+        out.pending_url = null;
+        out.publish_status = 'no_changes';
+        out.astro_pr_url = null;
+        run.publish_ms = Date.now() - t1;
+        return out;
+      }
       const isLive = r?.live === true || r?.status === 'live' || r?.merged === true;
       out.published_url = isLive ? (r?.url || draft.url || null) : null;
       out.pending_url = isLive ? null : (r?.url || draft.url || null);

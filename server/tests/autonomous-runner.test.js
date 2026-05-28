@@ -1371,6 +1371,47 @@ describe('runNext post-publish bookkeeping', () => {
     }
   });
 
+  test('completes a no_changes publish as published (no PR) instead of parking it for merge', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_noop_1', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({ id: 'brief_noop_1', action_type: 'new_supporting_blog', page_type: 'blog', human_review_required: false }),
+      };
+      const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { url: '/blog/noop/', title: 'No-op' } }) };
+      const uniquenessGate = { evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }) };
+      const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80 }) };
+      const publisher = {
+        publishOrUpdatePage: jest.fn().mockResolvedValue({ url: '/blog/noop/', status: 'no_changes', live: false }),
+      };
+      const indexNow = { submit: jest.fn().mockResolvedValue({ ok: true, status: 'ok' }) };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, uniquenessGate, qualityGate, publisher, indexNow, linkPlanner: {} });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_published');
+      expect(queue.complete).toHaveBeenCalledWith('opp_noop_1', { notes: 'published:/blog/noop/', claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
+      // No real change → no distribution.
+      expect(indexNow.submit).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
   test('parks opened Astro PRs for review instead of treating them as live published pages', async () => {
     const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
     const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
