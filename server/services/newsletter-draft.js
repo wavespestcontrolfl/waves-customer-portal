@@ -313,8 +313,9 @@ async function assembleBeehiivNewsletter(draft) {
   }
 
   // ── Sign-off ──
-  parts.push(`<p style="margin:20px 0 4px 0;font-size:15px;line-height:1.6;"><strong>${draft.signoff?.split('—')[0]?.trim() || 'Until next time'},</strong></p>`);
-  parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">— <em>The</em> <a href="https://www.wavespestcontrol.com/" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;"><em>Waves Pest Control</em></a> <em>Team</em> 🌊</p>`);
+  parts.push(`<p style="margin:20px 0 4px 0;font-size:15px;line-height:1.6;"><strong>Catch you out there this week.</strong></p>`);
+  const signoffText = draft.signoff || '— The Waves crew';
+  parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
 
   // ── P.S. ──
   if (draft.ps) {
