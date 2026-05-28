@@ -79,6 +79,21 @@ describe('post-publish-visibility-worker', () => {
     const linkTaskQuery = db.mock.results
       .map((result) => result.value)
       .find((chain) => chain.table === 'content_internal_link_tasks');
+    expect(linkTaskQuery.whereIn).toHaveBeenCalledWith('target_url', expect.arrayContaining([
+      'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+      'www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida',
+      '/blog/ghost-ants-kitchen-florida/',
+      '/blog/ghost-ants-kitchen-florida',
+    ]));
     expect(linkTaskQuery.whereIn).toHaveBeenCalledWith('status', ['pending', 'queued', 'patch_candidate', 'approved', 'applied']);
+  });
+
+  test('builds inbound-link target variants for relative planner paths', () => {
+    expect(Worker._internals.inboundLinkTargetVariants('https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/')).toEqual(expect.arrayContaining([
+      'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+      'www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida',
+      '/blog/ghost-ants-kitchen-florida/',
+      '/blog/ghost-ants-kitchen-florida',
+    ]));
   });
 });
