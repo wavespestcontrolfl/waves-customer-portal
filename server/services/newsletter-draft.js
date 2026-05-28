@@ -261,6 +261,10 @@ function sanitizeCommentaryFields(ev) {
   }
   if (Array.isArray(out.highlights)) {
     out.highlights = out.highlights.map((h) => (typeof h === 'string' ? stripCommentaryUrls(h) : h));
+  } else if (typeof out.highlights === 'string') {
+    // assembleBeehiivNewsletter wraps a string highlights into an array
+    // and renders it, so the string shape must be sanitized too.
+    out.highlights = stripCommentaryUrls(out.highlights);
   }
   return out;
 }
