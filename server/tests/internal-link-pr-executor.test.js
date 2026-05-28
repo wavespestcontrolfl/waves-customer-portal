@@ -57,8 +57,8 @@ function page(file, body, extra = {}) {
 const sourceBody = [
   '---',
   'title: Termite Swarmers in Bathrooms',
-  'slug: /blog/termite-swarmers-bathroom/',
-  'canonical: https://www.wavespestcontrol.com/blog/termite-swarmers-bathroom/',
+  'slug: /termite-swarmers-bathroom/',
+  'canonical: https://www.wavespestcontrol.com/termite-swarmers-bathroom/',
   'category: termite',
   'primary_keyword: termite inspection swarmers florida',
   '---',
@@ -91,7 +91,7 @@ describe('internal-link dry-run executor pure evaluation', () => {
     });
 
     expect(result.status).toBe('patch_candidate');
-    expect(result.source_url).toBe('/blog/termite-swarmers-bathroom/');
+    expect(result.source_url).toBe('/termite-swarmers-bathroom/');
     expect(result.target_canonical_url).toBe('/termite-inspection/');
     expect(result.anchor_type).toBe('partial_match');
     expect(result.topical_relevance_score).toBeGreaterThanOrEqual(0.75);
@@ -257,6 +257,46 @@ describe('internal-link dry-run executor helpers', () => {
     expect(loaded.canonical_url).toBe('/pest-control-bradenton-fl/');
     expect(firstValidInternalUrl('{{siteUrl}}/pest-control-bradenton-fl/')).toBe('/pest-control-bradenton-fl/');
     expect(slugToInternalUrl('pest-control-bradenton-fl')).toBe('/pest-control-bradenton-fl/');
+  });
+
+  test('uses Astro entry-id route before legacy blog slug and blocks canonical mismatch', () => {
+    const legacyBlogBody = [
+      '---',
+      'title: Local Pest Control Tips',
+      'slug: /pest-control/local-pest-control-tips/',
+      'canonical: https://www.wavespestcontrol.com/pest-control/local-pest-control-tips/',
+      'category: pest',
+      'primary_keyword: pest control lakewood ranch fl',
+      '---',
+      'When it comes to pest control in Lakewood Ranch, FL, prevention is the best strategy.',
+    ].join('\n');
+    const target = [
+      '---',
+      'title: Pest Control in Lakewood Ranch',
+      'slug: /pest-control-lakewood-ranch-fl/',
+      'canonical: https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+      'category: pest',
+      'primary_keyword: pest control lakewood ranch fl',
+      '---',
+      'Lakewood Ranch pest control service body.',
+    ].join('\n');
+
+    const sourcePage = page('src/content/blog/local-pest-control-tips.md', legacyBlogBody);
+    expect(sourcePage.url).toBe('/local-pest-control-tips/');
+    expect(sourcePage.canonical_url).toBe('/pest-control/local-pest-control-tips/');
+
+    const result = evaluateDryRunTask({
+      source_file: 'src/content/blog/local-pest-control-tips.md',
+      source_url: '/pest-control/local-pest-control-tips/',
+      target_url: '/pest-control-lakewood-ranch-fl/',
+      anchor_text: 'pest control in Lakewood Ranch, FL',
+    }, {
+      sourcePage,
+      targetPage: page('src/content/services/pest-control-lakewood-ranch-fl.md', target),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.skip_reason).toContain('source_canonical_mismatch');
   });
 
   test('preserves invalid explicit canonicals so dry-run reports a mismatch', () => {
