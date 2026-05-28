@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
 const PROMPT_VERSION = 'v1';
 
@@ -109,12 +110,17 @@ TRIAGE FLAGS — Set flags for situations requiring human review:
 Waves services: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, Palm Injection, Exclusion. Calls about unrelated work (SEO, marketing, advertising, construction advice) are not Waves services.`;
 }
 
-const _promptHash = crypto.createHash('sha256')
-  .update(buildExtractionPrompt('', '', ''))
+// Hash the FULL output contract — base prompt AND the JSON schema that
+// extractCallDataV2 appends to it — so any schema change bumps the version
+// even when the model + base prompt are unchanged. The processor stamps this
+// as ai_extraction_prompt_version and the promotion-readiness gate filters on
+// it, so a schema-only change correctly scopes old shadow rows out of the gate.
+const _contractHash = crypto.createHash('sha256')
+  .update(buildExtractionPrompt('', '', '') + '\n' + JSON.stringify(modelOutputSchema))
   .digest('hex')
   .slice(0, 12);
 
-const PROMPT_HASH = `${PROMPT_VERSION}-${_promptHash}`;
+const PROMPT_HASH = `${PROMPT_VERSION}-${_contractHash}`;
 
 module.exports = {
   buildExtractionPrompt,
