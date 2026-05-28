@@ -342,17 +342,17 @@
     },
 
     "commercial_signals": {
-      "type": "object",
+      "type": ["object", "null"],
       "additionalProperties": false,
       "properties": {
         "business_name": { "type": ["string", "null"] },
-        "decision_authority_confirmed": { "type": "boolean" },
-        "procurement_process_mentioned": { "type": "boolean" },
-        "annual_contract_interest": { "type": "boolean" },
-        "competing_quotes_mentioned": { "type": "boolean" },
+        "decision_authority_confirmed": { "type": ["boolean", "null"] },
+        "procurement_process_mentioned": { "type": ["boolean", "null"] },
+        "annual_contract_interest": { "type": ["boolean", "null"] },
+        "competing_quotes_mentioned": { "type": ["boolean", "null"] },
         "budget_signal": { "type": ["string", "null"] },
         "insurance_or_compliance_requirements": {
-          "type": "array",
+          "type": ["array", "null"],
           "items": { "type": "string" }
         }
       }
