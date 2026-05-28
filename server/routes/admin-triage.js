@@ -112,33 +112,29 @@ router.get('/', async (req, res) => {
   }
 });
 
-async function transition(req, res, nextStatus) {
-  const { id } = req.params;
-  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
-
+// Status transition WITHOUT touching res, so callers can gate side effects (like
+// the feedback write) on actually winning the compare-and-swap. Returns an
+// outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
+async function transitionCore({ id, nextStatus, note, assignedTo }) {
   const item = await db('triage_items').where({ id }).first();
-  if (!item) return res.status(404).json({ error: 'Triage item not found' });
-  if (!OPEN_STATES.includes(item.status)) {
-    return res.status(409).json({ error: `Item already ${item.status}` });
-  }
+  if (!item) return { outcome: 'not_found' };
+  if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
 
   // Atomic compare-and-swap: only transition if the row is STILL open. Two staff
-  // resolving/dismissing the same item concurrently can both pass the read check
-  // above; the conditional update + affected-row count makes the loser a no-op 409
-  // instead of silently overwriting the winner's resolution.
+  // actioning the same item concurrently can both pass the read above; the
+  // conditional update + affected-row count makes the loser a no-op so only the
+  // winner mutates the row (and, for verdicts, only the winner writes feedback).
   const updated = await db('triage_items')
     .where({ id })
     .whereIn('status', OPEN_STATES)
     .update({
       status: nextStatus,
       resolution_note: note,
-      assigned_to: req.technicianId,
+      assigned_to: assignedTo,
       resolved_at: new Date(),
       updated_at: new Date(),
     });
-  if (updated === 0) {
-    return res.status(409).json({ error: 'Item was just actioned by someone else' });
-  }
+  if (updated === 0) return { outcome: 'conflict' };
 
   // Keep call_log.review_status in sync with the call's remaining open items.
   if (item.call_log_id) {
@@ -153,7 +149,23 @@ async function transition(req, res, nextStatus) {
       .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
   }
 
-  return res.json({ ok: true, id, status: nextStatus });
+  return { outcome: 'ok', item };
+}
+
+function sendTransitionResult(res, result, id, nextStatus) {
+  switch (result.outcome) {
+    case 'not_found': return res.status(404).json({ error: 'Triage item not found' });
+    case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
+    case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
+    default: return res.json({ ok: true, id, status: nextStatus });
+  }
+}
+
+async function transition(req, res, nextStatus) {
+  const { id } = req.params;
+  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
+  const result = await transitionCore({ id, nextStatus, note, assignedTo: req.technicianId });
+  return sendTransitionResult(res, result, id, nextStatus);
 }
 
 // PUT /api/admin/triage/:id/resolve   { note? }
@@ -189,14 +201,16 @@ router.post('/:id/verdict', async (req, res) => {
     const wrongFields = sanitizeWrongFields(req.body?.wrong_fields);
     const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
 
-    const item = await db('triage_items').where({ id }).first();
-    if (!item) return res.status(404).json({ error: 'Triage item not found' });
-    if (!OPEN_STATES.includes(item.status)) {
-      return res.status(409).json({ error: `Item already ${item.status}` });
+    // Win the compare-and-swap FIRST. Only the reviewer who actually flips the
+    // item open→resolved gets to write the verdict — otherwise a concurrent
+    // loser could overwrite the winner's feedback and still receive a 409.
+    const result = await transitionCore({ id, nextStatus: 'resolved', note, assignedTo: req.technicianId });
+    if (result.outcome !== 'ok') {
+      return sendTransitionResult(res, result, id, 'resolved');
     }
 
     await upsertFeedback({
-      callLogId: item.call_log_id,
+      callLogId: result.item.call_log_id,
       triageItemId: id,
       decisionKind: 'triaged',
       verdict,
@@ -205,9 +219,7 @@ router.post('/:id/verdict', async (req, res) => {
       reviewedBy: req.technicianId,
     });
 
-    // Resolving captures the verdict; reuse the same CAS transition so two
-    // reviewers can't both win.
-    await transition(req, res, 'resolved');
+    return res.json({ ok: true, id, status: 'resolved', verdict });
   } catch (err) {
     logger.error(`[admin-triage] verdict failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });
