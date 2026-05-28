@@ -1010,34 +1010,28 @@ export default function ProjectsPage() {
           border: `1px solid ${D.border}`,
         }}
       >
-        {" "}
-        <FilterPill
-          label="All statuses"
-          active={!filterStatus}
-          onClick={() => setFilterStatus("")}
-        />
-        {["draft", "sent", "closed"].map((s) => (
-          <FilterPill
-            key={s}
-            label={STATUS_STYLES[s].label}
-            active={filterStatus === s}
-            onClick={() => setFilterStatus(filterStatus === s ? "" : s)}
-          />
-        ))}
-        <div style={{ width: 12 }} />{" "}
-        <FilterPill
-          label="All types"
-          active={!filterType}
-          onClick={() => setFilterType("")}
-        />
-        {Object.entries(TYPE_LABELS).map(([key, label]) => (
-          <FilterPill
-            key={key}
-            label={label}
-            active={filterType === key}
-            onClick={() => setFilterType(filterType === key ? "" : key)}
-          />
-        ))}
+        <FilterSelect
+          value={filterStatus}
+          onChange={(e) => setFilterStatus(e.target.value)}
+        >
+          <option value="">All statuses</option>
+          {["draft", "sent", "closed"].map((s) => (
+            <option key={s} value={s}>
+              {STATUS_STYLES[s].label}
+            </option>
+          ))}
+        </FilterSelect>
+        <FilterSelect
+          value={filterType}
+          onChange={(e) => setFilterType(e.target.value)}
+        >
+          <option value="">All types</option>
+          {Object.entries(TYPE_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </FilterSelect>
       </div>
       {error && <Alert tone="error">{error}</Alert>}
       <div
@@ -1219,24 +1213,28 @@ function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
   );
 }
 
-function FilterPill({ label, active, onClick }) {
+function FilterSelect({ value, onChange, children }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <select
+      value={value}
+      onChange={onChange}
       style={{
-        padding: "5px 12px",
-        borderRadius: 999,
-        fontSize: 12,
+        padding: "6px 28px 6px 12px",
+        borderRadius: 8,
+        fontSize: 13,
         fontWeight: 600,
-        background: active ? D.accent : D.pill,
-        color: active ? "#fff" : D.text,
-        border: `1px solid ${active ? D.accent : D.inputBorder}`,
+        color: value ? D.text : D.muted,
+        background: D.card,
+        border: `1px solid ${D.inputBorder}`,
         cursor: "pointer",
+        appearance: "none",
+        backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717A' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
+        backgroundRepeat: "no-repeat",
+        backgroundPosition: "right 10px center",
       }}
     >
-      {label}
-    </button>
+      {children}
+    </select>
   );
 }
 
