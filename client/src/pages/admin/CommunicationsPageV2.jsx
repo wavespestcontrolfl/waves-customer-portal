@@ -63,6 +63,7 @@ import {
   Bell,
   FileText,
   Headphones,
+  Inbox,
   Mail,
   MessageSquare,
   PhoneCall,
@@ -70,6 +71,7 @@ import {
 } from "lucide-react";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
+import TriageInboxTabV2 from "./TriageInboxTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
 import NotificationEventsTabV2 from "./NotificationEventsTabV2";
@@ -183,6 +185,7 @@ const TABS = [
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "calls", label: "Calls", Icon: PhoneCall },
+  { key: "triage", label: "Triage", Icon: Inbox },
   {
     key: "templates",
     label: "SMS Templates",
@@ -1944,11 +1947,12 @@ export default function CommunicationsPageV2() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Communications section"
-        navGridClassName="grid-cols-2 md:grid-cols-7"
+        navGridClassName="grid-cols-2 md:grid-cols-8"
       />
       {tab === "events" && <NotificationEventsTabV2 />}
       {tab === "sms" && <SmsTab />}
       {tab === "calls" && <CallLogTabV2 />}
+      {tab === "triage" && <TriageInboxTabV2 />}
       {tab === "templates" && <SmsTemplatesTabV2 />}
       {tab === "email_templates" && <EmailTemplatesPanelV2 />}
       {tab === "csr" && <CSRCoachTabV2 />}
