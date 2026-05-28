@@ -68,13 +68,20 @@ function normalizeProtocolProductText(value) {
   );
 }
 
-function productAliases(name) {
+function productAliases(productOrName) {
+  const name = typeof productOrName === 'string'
+    ? productOrName
+    : productOrName?.name;
   const normalized = normalizeText(name);
+  const configuredAliases = typeof productOrName === 'string'
+    ? []
+    : (productOrName?.aliases || []).map(normalizeText).filter(Boolean);
   const tokens = normalized.split(' ').filter(Boolean);
   const withoutVendor = tokens.length > 1 ? tokens.slice(1) : tokens;
   const withoutVendorAndNpk = withoutVendor.filter((token) => !/^\d+$/.test(token));
   return [
     normalized,
+    ...configuredAliases,
     withoutVendor.join(' '),
     withoutVendorAndNpk.join(' '),
     tokens.filter((token) => !/^\d+$/.test(token)).join(' '),
@@ -103,7 +110,7 @@ function matchCatalogProduct(line, products) {
     .map((product) => {
       const name = normalizeText(product.name);
       if (!name) return null;
-      const aliases = productAliases(product.name);
+      const aliases = productAliases(product);
       const direct = aliases.some((alias) => normalizedLine.includes(alias));
       const reverse = aliases.some((alias) => alias.includes(normalizedLine));
       const firstTwo = name.split(' ').slice(0, 2).join(' ');
@@ -456,7 +463,7 @@ async function getActiveCalibrations(knex, filters = {}) {
 }
 
 async function getProducts(knex) {
-  return knex('products_catalog')
+  const products = await knex('products_catalog')
     .where(function () {
       this.where({ active: true }).orWhereNull('active');
     })
@@ -469,6 +476,26 @@ async function getProducts(knex) {
       'label_verified_at',
     )
     .catch(() => []);
+
+  if (!products.length) return products;
+
+  const productIds = products.map((product) => product.id).filter(Boolean);
+  const aliases = productIds.length
+    ? await knex('product_aliases')
+      .whereIn('product_id', productIds)
+      .select('product_id', 'alias_name')
+      .catch(() => [])
+    : [];
+  const aliasesByProduct = aliases.reduce((acc, row) => {
+    if (!acc[row.product_id]) acc[row.product_id] = [];
+    acc[row.product_id].push(row.alias_name);
+    return acc;
+  }, {});
+
+  return products.map((product) => ({
+    ...product,
+    aliases: aliasesByProduct[product.id] || [],
+  }));
 }
 
 function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {

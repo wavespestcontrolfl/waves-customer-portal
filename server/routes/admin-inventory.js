@@ -1,4 +1,5 @@
 const express = require('express');
+const { parse: parseCsvSync } = require('csv-parse/sync');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
@@ -23,6 +24,74 @@ function normalizeInventoryUnit(unit) {
   return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
 }
 
+function csvEscape(value) {
+  if (value == null) return '';
+  const str = String(value);
+  return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
+function rowsToCsv(headers, rows) {
+  return [
+    headers.join(','),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(',')),
+  ].join('\n');
+}
+
+function truthy(value) {
+  return ['true', '1', 'yes', 'y'].includes(String(value || '').trim().toLowerCase());
+}
+
+function cleanString(value) {
+  const str = String(value ?? '').trim();
+  return str || null;
+}
+
+function parseDecimalOrNull(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseMappingRows(body = {}) {
+  if (Array.isArray(body.rows)) return body.rows;
+  if (typeof body.csv === 'string' && body.csv.trim()) {
+    return parseCsvSync(body.csv, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+  }
+  return [];
+}
+
+function calculateMappingConfidenceCap(row, verified) {
+  const hasIdentifier = Boolean(
+    cleanString(row.vendor_sku)
+    || cleanString(row.product_url)
+    || cleanString(row.manufacturer_sku)
+    || cleanString(row.upc)
+    || cleanString(row.asin)
+  );
+  const hasPackage = Boolean(
+    parseDecimalOrNull(row.package_size_value) != null
+    && cleanString(row.package_size_unit)
+    && cleanString(row.purchase_uom)
+  );
+
+  if (!hasIdentifier) return 0.50;
+  if (!hasPackage) return 0.70;
+  if (!verified) return 0.80;
+  return 1.00;
+}
+
+function normalizeAvailabilityStatus(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (['in_stock', 'limited', 'out_of_stock', 'backorder', 'unknown'].includes(normalized)) {
+    return normalized;
+  }
+  return value ? 'unknown' : null;
+}
+
 function mapProduct(product, vendorPricing = []) {
   const inventoryOnHand = numberOrNull(product.inventory_on_hand);
   const lowStockThreshold = numberOrNull(product.low_stock_threshold);
@@ -42,6 +111,13 @@ function mapProduct(product, vendorPricing = []) {
     bestPrice: product.best_price ? parseFloat(product.best_price) : null,
     bestVendor: product.best_vendor,
     needsPricing: product.needs_pricing,
+    bestVendorPricingId: product.best_vendor_pricing_id || null,
+    bestPriceAmountCached: product.best_price_amount_cached != null ? parseFloat(product.best_price_amount_cached) : null,
+    bestPriceVendorIdCached: product.best_price_vendor_id_cached || null,
+    bestPriceUpdatedAt: product.best_price_updated_at || null,
+    bestPriceStatus: product.best_price_status || null,
+    costPerUnit: product.cost_per_unit != null ? parseFloat(product.cost_per_unit) : null,
+    costUnit: product.cost_unit || null,
     unitSizeOz: product.unit_size_oz || null,
     unitType: product.unit_type || null,
     monthlyCost: product.monthly_cost_estimate || null,
@@ -127,15 +203,22 @@ router.get('/', async (req, res, next) => {
     const pricingMap = {};
     pricing.forEach(p => {
       if (!pricingMap[p.product_id]) pricingMap[p.product_id] = [];
-      pricingMap[p.product_id].push({
-        id: p.id, vendorId: p.vendor_id, vendorName: p.vendor_name,
-        price: parseFloat(p.price || 0), quantity: p.quantity,
-        url: p.vendor_product_url, isBest: p.is_best_price,
-        lastChecked: p.last_checked_at, shippingCost: p.shipping_cost,
-        taxRate: p.tax_rate, landedCost: p.landed_cost,
-        pricePerOz: p.price_per_oz, vendorSku: p.vendor_sku,
-      });
+    pricingMap[p.product_id].push({
+      id: p.id, vendorId: p.vendor_id, vendorName: p.vendor_name,
+      price: parseFloat(p.price || 0), quantity: p.quantity,
+      url: p.vendor_product_url, isBest: p.is_best_price,
+      lastChecked: p.last_checked_at, shippingCost: p.shipping_cost,
+      taxRate: p.tax_rate, landedCost: p.landed_cost,
+      pricePerOz: p.price_per_oz, vendorSku: p.vendor_sku,
+      sourceType: p.source_type || 'manual',
+      confidenceScore: p.confidence_score != null ? parseFloat(p.confidence_score) : null,
+      availability: p.availability || null,
+      branchLocation: p.branch_location || null,
+      expiresAt: p.expires_at || null,
+      normalizedUnitPrice: p.normalized_unit_price != null ? parseFloat(p.normalized_unit_price) : null,
+      normalizedUnit: p.normalized_unit || p.unit_normalized || p.unit || null,
     });
+  });
 
     // Stats
     const stats = await db('products_catalog').select(
@@ -189,6 +272,9 @@ router.get('/vendors', async (req, res, next) => {
         scrapingEnabled: v.price_scraping_enabled, scrapingPriority: v.scraping_priority,
         scrapeSchedule: v.scrape_schedule, lastScrapeAt: v.last_scrape_at,
         lastScrapeStatus: v.last_scrape_status, scrapeProductCount: v.scrape_product_count,
+        syncMethod: v.sync_method || null, credentialStatus: v.credential_status || null,
+        syncMethodNotes: v.sync_method_notes || null, syncFrequencyMinutes: v.sync_frequency_minutes || null,
+        manualRefreshEnabled: v.manual_refresh_enabled !== false,
         loginUsername: v.login_username, loginEmail: v.login_email,
         loginUrl: v.login_url, accountNumber: v.account_number,
         hasCredentials: !!(v.login_username || v.login_email),
@@ -212,7 +298,10 @@ router.put('/vendors/:id', async (req, res, next) => {
     // Map camelCase to snake_case
     const keyMap = { loginUsername: 'login_username', loginEmail: 'login_email', loginPassword: 'login_password_encrypted',
       accountNumber: 'account_number', loginUrl: 'login_url', scrapingEnabled: 'price_scraping_enabled',
-      scrapingPriority: 'scraping_priority', scrapeSchedule: 'scrape_schedule' };
+      scrapingPriority: 'scraping_priority', scrapeSchedule: 'scrape_schedule',
+      syncMethod: 'sync_method', credentialStatus: 'credential_status',
+      syncMethodNotes: 'sync_method_notes', syncFrequencyMinutes: 'sync_frequency_minutes',
+      manualRefreshEnabled: 'manual_refresh_enabled' };
 
     for (const [camel, snake] of Object.entries(keyMap)) {
       if (body[camel] !== undefined) upd[snake] = body[camel];
@@ -227,15 +316,627 @@ router.put('/vendors/:id', async (req, res, next) => {
 });
 
 // =========================================================================
+// Price Sync control layer — no connector execution in these endpoints
+// =========================================================================
+router.get('/price-sync/vendors', async (req, res, next) => {
+  try {
+    const vendors = await db('vendors as v')
+      .leftJoin('vendor_connections as vc', 'vc.vendor_id', 'v.id')
+      .select(
+        'v.id',
+        'v.name',
+        'v.type',
+        'v.active',
+        'v.website',
+        'vc.id as connection_id',
+        'vc.connection_type',
+        'vc.display_name',
+        'vc.approval_status',
+        'vc.credential_status',
+        'vc.supports_account_pricing',
+        'vc.supports_public_pricing',
+        'vc.supports_inventory',
+        'vc.supports_branch_availability',
+        'vc.supports_bulk_pricing',
+        'vc.last_success_at',
+        'vc.last_failure_at',
+        'vc.failure_reason',
+        db.raw(`(
+          SELECT COUNT(*)
+          FROM distributor_product_map dpm
+          WHERE dpm.vendor_id = v.id
+            AND dpm.active = true
+        ) as mapped_products`),
+        db.raw(`(
+          SELECT COUNT(*)
+          FROM distributor_product_map dpm
+          WHERE dpm.vendor_id = v.id
+            AND dpm.active = true
+            AND dpm.mapping_status = 'verified'
+        ) as verified_mappings`),
+        db.raw(`(
+          SELECT COUNT(*)
+          FROM vendor_pricing vp
+          WHERE vp.vendor_id = v.id
+            AND vp.is_active = true
+            AND vp.approval_status IN ('approved', 'auto_approved')
+        ) as current_prices`),
+        db.raw(`(
+          SELECT COUNT(*)
+          FROM products_catalog pc
+          WHERE pc.best_price_vendor_id_cached = v.id
+        ) as best_prices`),
+        db.raw(`(
+          SELECT COUNT(*)
+          FROM price_approval_events pae
+          WHERE pae.vendor_id = v.id
+            AND pae.approval_status = 'pending'
+        ) as pending_approvals`),
+      )
+      .orderBy('v.name')
+      .orderBy('vc.connection_type');
+
+    const grouped = new Map();
+    for (const row of vendors) {
+      if (!grouped.has(row.id)) {
+        grouped.set(row.id, {
+          id: row.id,
+          name: row.name,
+          type: row.type,
+          active: row.active,
+          website: row.website,
+          mappedProducts: Number(row.mapped_products || 0),
+          verifiedMappings: Number(row.verified_mappings || 0),
+          currentPrices: Number(row.current_prices || 0),
+          bestPrices: Number(row.best_prices || 0),
+          pendingApprovals: Number(row.pending_approvals || 0),
+          nextAction: 'Needs mapping',
+          connections: [],
+        });
+      }
+      const vendor = grouped.get(row.id);
+      if (row.connection_id) {
+        const connection = {
+          id: row.connection_id,
+          type: row.connection_type,
+          displayName: row.display_name || row.connection_type,
+          approvalStatus: row.approval_status,
+          credentialStatus: row.credential_status,
+          supportsAccountPricing: row.supports_account_pricing,
+          supportsPublicPricing: row.supports_public_pricing,
+          supportsInventory: row.supports_inventory,
+          supportsBranchAvailability: row.supports_branch_availability,
+          supportsBulkPricing: row.supports_bulk_pricing,
+          lastSuccessAt: row.last_success_at,
+          lastFailureAt: row.last_failure_at,
+          failureReason: row.failure_reason,
+        };
+        vendor.connections.push(connection);
+      }
+      if (vendor.verifiedMappings > 0 && vendor.currentPrices > 0) vendor.nextAction = 'Ready for manual seed review';
+      else if (vendor.mappedProducts > 0 && vendor.verifiedMappings === 0) vendor.nextAction = 'Verify mappings';
+      if (vendor.connections.some((c) => c.credentialStatus === 'missing' && ['api', 'approved_feed', 'portal_connector', 'workwave_marketplace'].includes(c.type))) {
+        vendor.nextAction = 'Needs credentials/feed approval';
+      }
+    }
+
+    res.json({ vendors: Array.from(grouped.values()) });
+  } catch (err) { next(err); }
+});
+
+router.get('/price-sync/needs-mapping', async (req, res, next) => {
+  try {
+    const rows = await db('products_catalog as pc')
+      .leftJoin('distributor_product_map as dpm', function joinMaps() {
+        this.on('dpm.product_id', '=', 'pc.id').andOn('dpm.active', '=', db.raw('true'));
+      })
+      .where(function activeProducts() {
+        this.where('pc.active', true).orWhereNull('pc.active');
+      })
+      .groupBy('pc.id')
+      .select(
+        'pc.id',
+        'pc.name',
+        'pc.category',
+        'pc.sku',
+        'pc.container_size',
+        'pc.epa_reg_number',
+        'pc.best_price_status',
+        'pc.best_price_updated_at',
+        db.raw('COUNT(dpm.id) as mapped_vendors'),
+        db.raw("COUNT(dpm.id) FILTER (WHERE dpm.mapping_status = 'verified') as verified_mappings"),
+        db.raw("COUNT(dpm.id) FILTER (WHERE dpm.package_size_value IS NOT NULL AND dpm.package_size_unit IS NOT NULL AND dpm.purchase_uom IS NOT NULL) as complete_package_maps"),
+      )
+      .havingRaw("COUNT(dpm.id) FILTER (WHERE dpm.mapping_status = 'verified') = 0")
+      .orderBy('pc.name');
+
+    res.json({
+      products: rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        category: row.category,
+        sku: row.sku,
+        containerSize: row.container_size,
+        epaRegNumber: row.epa_reg_number,
+        bestPriceStatus: row.best_price_status,
+        bestPriceUpdatedAt: row.best_price_updated_at,
+        mappedVendors: Number(row.mapped_vendors || 0),
+        verifiedMappings: Number(row.verified_mappings || 0),
+        completePackageMaps: Number(row.complete_package_maps || 0),
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+router.get('/price-sync/mappings/export', async (req, res, next) => {
+  try {
+    const mode = String(req.query.mode || 'needs_mapping');
+    const headers = [
+      'internal_product_id',
+      'internal_product_name',
+      'vendor_id',
+      'vendor_name',
+      'vendor_connection_id',
+      'connection_type',
+      'vendor_sku',
+      'product_url',
+      'vendor_product_name',
+      'manufacturer',
+      'manufacturer_sku',
+      'upc',
+      'asin',
+      'epa_registration_number',
+      'package_size_value',
+      'package_size_unit',
+      'purchase_uom',
+      'content_quantity',
+      'content_uom',
+      'case_quantity',
+      'pack_count',
+      'branch_id',
+      'branch_name',
+      'mapping_status',
+      'mapping_confidence',
+      'verified',
+      'notes',
+    ];
+
+    let rows = [];
+    if (mode === 'existing') {
+      const mappings = await db('distributor_product_map as dpm')
+        .join('products_catalog as pc', 'pc.id', 'dpm.product_id')
+        .join('vendors as v', 'v.id', 'dpm.vendor_id')
+        .leftJoin('vendor_connections as vc', 'vc.id', 'dpm.vendor_connection_id')
+        .select('dpm.*', 'pc.name as product_name', 'v.name as vendor_name', 'vc.connection_type');
+      rows = mappings.map((m) => ({
+        internal_product_id: m.product_id,
+        internal_product_name: m.product_name,
+        vendor_id: m.vendor_id,
+        vendor_name: m.vendor_name,
+        vendor_connection_id: m.vendor_connection_id,
+        connection_type: m.connection_type,
+        vendor_sku: m.distributor_sku,
+        product_url: m.product_url || m.source_url,
+        vendor_product_name: m.vendor_product_name,
+        manufacturer: '',
+        manufacturer_sku: m.manufacturer_sku,
+        upc: m.upc,
+        asin: m.asin,
+        epa_registration_number: m.epa_registration_number,
+        package_size_value: m.package_size_value,
+        package_size_unit: m.package_size_unit,
+        purchase_uom: m.purchase_uom,
+        content_quantity: m.content_quantity,
+        content_uom: m.content_uom,
+        case_quantity: m.case_quantity,
+        pack_count: m.pack_count,
+        branch_id: m.branch_id,
+        branch_name: m.branch_name,
+        mapping_status: m.mapping_status,
+        mapping_confidence: m.mapping_confidence,
+        verified: m.mapping_status === 'verified' ? 'true' : 'false',
+        notes: m.notes,
+      }));
+    } else {
+      const vendorId = cleanString(req.query.vendorId);
+      const connectionType = cleanString(req.query.connectionType);
+      let defaultVendor = null;
+      if (vendorId) {
+        defaultVendor = await db('vendors as v')
+          .leftJoin('vendor_connections as vc', function joinConnection() {
+            this.on('vc.vendor_id', '=', 'v.id');
+            if (connectionType) this.andOn('vc.connection_type', '=', db.raw('?', [connectionType]));
+          })
+          .where('v.id', vendorId)
+          .select('v.id as vendor_id', 'v.name as vendor_name', 'vc.id as connection_id', 'vc.connection_type')
+          .first();
+      }
+
+      const products = await db('products_catalog as pc')
+        .leftJoin('distributor_product_map as dpm', function joinMaps() {
+          this.on('dpm.product_id', '=', 'pc.id')
+            .andOn('dpm.active', '=', db.raw('true'))
+            .andOn('dpm.mapping_status', '=', db.raw('?', ['verified']));
+        })
+        .where(function activeProducts() {
+          this.where('pc.active', true).orWhereNull('pc.active');
+        })
+        .whereNull('dpm.id')
+        .select('pc.id', 'pc.name', 'pc.category', 'pc.sku', 'pc.container_size', 'pc.epa_reg_number')
+        .orderBy('pc.name');
+      rows = products.map((p) => ({
+        internal_product_id: p.id,
+        internal_product_name: p.name,
+        vendor_id: defaultVendor?.vendor_id || '',
+        vendor_name: defaultVendor?.vendor_name || '',
+        vendor_connection_id: defaultVendor?.connection_id || '',
+        connection_type: defaultVendor?.connection_type || '',
+        vendor_sku: '',
+        product_url: '',
+        vendor_product_name: '',
+        manufacturer: '',
+        manufacturer_sku: '',
+        upc: '',
+        asin: '',
+        epa_registration_number: p.epa_reg_number || '',
+        package_size_value: '',
+        package_size_unit: '',
+        purchase_uom: '',
+        content_quantity: '',
+        content_uom: '',
+        case_quantity: 1,
+        pack_count: 1,
+        branch_id: '',
+        branch_name: '',
+        mapping_status: 'needs_mapping',
+        mapping_confidence: 0,
+        verified: 'false',
+        notes: '',
+      }));
+    }
+
+    res.json({ filename: `${mode}_mappings.csv`, csv: rowsToCsv(headers, rows) });
+  } catch (err) { next(err); }
+});
+
+router.get('/price-sync/manual-seed-template', async (req, res) => {
+  const headers = [
+    'internal_product_id',
+    'vendor_id',
+    'vendor_connection_id',
+    'distributor_product_map_id',
+    'price_amount',
+    'currency',
+    'price_type',
+    'source_type',
+    'availability_status',
+    'branch_id',
+    'branch_name',
+    'normalized_unit_price',
+    'landed_unit_price',
+    'expires_at',
+    'confidence_score',
+    'notes',
+  ];
+  res.json({ filename: 'manual_seed_price_template.csv', csv: rowsToCsv(headers, []) });
+});
+
+router.post('/price-sync/mappings/import', async (req, res, next) => {
+  try {
+    const rows = parseMappingRows(req.body);
+    const rowErrors = [];
+    const imported = [];
+    const skipped = [];
+    const adminId = req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin';
+
+    for (const [index, row] of rows.entries()) {
+      const rowNumber = index + 1;
+      const productId = cleanString(row.internal_product_id || row.product_id);
+      const vendorId = cleanString(row.vendor_id);
+      const vendorConnectionId = cleanString(row.vendor_connection_id);
+      const verified = truthy(row.verified) || cleanString(row.mapping_status) === 'verified';
+      const requestedStatus = cleanString(row.mapping_status) || (verified ? 'verified' : 'mapped_unverified');
+      const mappingStatus = verified ? 'verified' : requestedStatus;
+      const errors = [];
+
+      if (!productId) errors.push('internal_product_id is required');
+      if (!vendorId) errors.push('vendor_id is required');
+      if (verified && !vendorConnectionId) errors.push('vendor_connection_id is required for verified mappings');
+
+      const identifiers = [
+        cleanString(row.vendor_sku),
+        cleanString(row.product_url),
+        cleanString(row.manufacturer_sku),
+        cleanString(row.upc),
+        cleanString(row.asin),
+      ].filter(Boolean);
+      if (!identifiers.length) errors.push('At least one identifier is required: vendor_sku, product_url, manufacturer_sku, upc, or asin');
+
+      const packageSize = parseDecimalOrNull(row.package_size_value);
+      const packageSizeUnit = cleanString(row.package_size_unit);
+      const purchaseUom = cleanString(row.purchase_uom);
+      if (verified) {
+        if (packageSize == null) errors.push('package_size_value is required for verified mappings');
+        if (!packageSizeUnit) errors.push('package_size_unit is required for verified mappings');
+        if (!purchaseUom) errors.push('purchase_uom is required for verified mappings');
+      }
+
+      const requestedConfidence = parseDecimalOrNull(row.mapping_confidence);
+      const confidenceCap = calculateMappingConfidenceCap(row, verified);
+      const mappingConfidence = Math.min(
+        requestedConfidence == null ? (verified ? 0.90 : 0.50) : requestedConfidence,
+        confidenceCap,
+      );
+
+      if (mappingConfidence < 0 || mappingConfidence > 1) errors.push('mapping_confidence must be between 0 and 1');
+      if (verified && mappingConfidence < 0.80) errors.push('verified mappings require confidence >= 0.80 after server-side caps');
+      if (!['needs_mapping', 'mapped_unverified', 'verified', 'rejected', 'inactive'].includes(mappingStatus)) {
+        errors.push(`Invalid mapping_status: ${mappingStatus}`);
+      }
+
+      if (errors.length) {
+        rowErrors.push({ row: rowNumber, productId, vendorId, errors });
+        continue;
+      }
+
+      const [product, vendor, connection] = await Promise.all([
+        db('products_catalog').where({ id: productId }).first(),
+        db('vendors').where({ id: vendorId }).first(),
+        vendorConnectionId ? db('vendor_connections').where({ id: vendorConnectionId, vendor_id: vendorId }).first() : null,
+      ]);
+      if (!product) errors.push('Product not found');
+      if (!vendor) errors.push('Vendor not found');
+      if (vendorConnectionId && !connection) errors.push('Vendor connection not found for vendor');
+      if (verified && !connection) errors.push('Verified mapping requires a valid vendor connection');
+      if (errors.length) {
+        rowErrors.push({ row: rowNumber, productId, vendorId, errors });
+        continue;
+      }
+
+      const data = {
+        product_id: productId,
+        vendor_id: vendorId,
+        vendor_connection_id: vendorConnectionId || null,
+        distributor_sku: cleanString(row.vendor_sku),
+        product_url: cleanString(row.product_url),
+        source_url: cleanString(row.product_url),
+        vendor_product_name: cleanString(row.vendor_product_name),
+        manufacturer_sku: cleanString(row.manufacturer_sku),
+        upc: cleanString(row.upc),
+        asin: cleanString(row.asin),
+        epa_registration_number: cleanString(row.epa_registration_number),
+        package_size_value: packageSize,
+        package_size_unit: packageSizeUnit,
+        purchase_uom: purchaseUom,
+        content_quantity: parseDecimalOrNull(row.content_quantity),
+        content_uom: cleanString(row.content_uom),
+        case_quantity: parseDecimalOrNull(row.case_quantity) ?? 1,
+        pack_count: parseDecimalOrNull(row.pack_count) ?? 1,
+        branch_id: cleanString(row.branch_id),
+        branch_name: cleanString(row.branch_name),
+        mapping_status: mappingStatus,
+        mapping_confidence: mappingConfidence,
+        verified_by: verified ? adminId : null,
+        verified_at: verified ? new Date() : null,
+        notes: cleanString(row.notes),
+        active: mappingStatus !== 'inactive',
+        updated_at: new Date(),
+      };
+
+      const existingQuery = db('distributor_product_map')
+        .where({ product_id: productId, vendor_id: vendorId })
+        .modify((query) => {
+          if (data.distributor_sku) query.where({ distributor_sku: data.distributor_sku });
+          else if (data.product_url) query.where(function byUrl() {
+            this.where({ product_url: data.product_url }).orWhere({ source_url: data.product_url });
+          });
+          else if (data.manufacturer_sku) query.where({ manufacturer_sku: data.manufacturer_sku });
+          else if (data.upc) query.where({ upc: data.upc });
+          else if (data.asin) query.where({ asin: data.asin });
+        });
+      const existing = await existingQuery.first();
+
+      if (existing) {
+        await db('distributor_product_map').where({ id: existing.id }).update(data);
+        imported.push({ row: rowNumber, id: existing.id, action: 'updated', confidence: mappingConfidence });
+      } else {
+        const [inserted] = await db('distributor_product_map').insert({
+          ...data,
+          created_at: new Date(),
+        }).returning('id');
+        imported.push({ row: rowNumber, id: inserted?.id || inserted, action: 'created', confidence: mappingConfidence });
+      }
+    }
+
+    res.json({
+      accepted: rowErrors.length === 0,
+      rowsReceived: rows.length,
+      imported: imported.length,
+      skipped: skipped.length,
+      rowErrors,
+      results: imported,
+      message: `${imported.length} mapping row${imported.length === 1 ? '' : 's'} imported. ${rowErrors.length} row${rowErrors.length === 1 ? '' : 's'} rejected.`,
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/price-sync/manual-seed/import', async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  res.status(202).json({
+    accepted: false,
+    rowsReceived: rows.length,
+    message: 'Manual seed import endpoint is reserved for the seed import worker. No prices were written in this control-layer build.',
+    rowErrors: rows.map((_, index) => ({ row: index + 1, error: 'Import worker not enabled yet' })),
+  });
+});
+
+router.get('/price-sync/review-queue', async (req, res, next) => {
+  try {
+    const rows = await db('price_approval_events as pae')
+      .join('products_catalog as pc', 'pc.id', 'pae.product_id')
+      .join('vendors as v', 'v.id', 'pae.vendor_id')
+      .leftJoin('price_snapshots as ps', 'ps.id', 'pae.snapshot_id')
+      .where('pae.approval_status', req.query.status || 'pending')
+      .select(
+        'pae.*',
+        'pc.name as product_name',
+        'v.name as vendor_name',
+        'ps.source_type',
+        'ps.price_confidence',
+        'ps.captured_at',
+      )
+      .orderBy('pae.created_at', 'desc')
+      .limit(Number(req.query.limit || 100));
+
+    res.json({
+      approvals: rows.map((row) => ({
+        id: row.id,
+        productId: row.product_id,
+        productName: row.product_name,
+        vendorId: row.vendor_id,
+        vendorName: row.vendor_name,
+        oldPrice: row.old_price_amount != null ? Number(row.old_price_amount) : null,
+        newPrice: row.new_price_amount != null ? Number(row.new_price_amount) : null,
+        changeAmount: row.change_amount != null ? Number(row.change_amount) : null,
+        changePercent: row.change_percent != null ? Number(row.change_percent) : null,
+        approvalStatus: row.approval_status,
+        approvalReason: row.approval_reason,
+        sourceType: row.source_type,
+        confidence: row.price_confidence != null ? Number(row.price_confidence) : null,
+        capturedAt: row.captured_at,
+        createdAt: row.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
+  try {
+    const approval = await db('price_approval_events').where({ id: req.params.id }).first();
+    if (!approval) return res.status(404).json({ error: 'Approval event not found' });
+    await db.transaction(async (trx) => {
+      const approvedBy = req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin';
+      const snapshot = approval.snapshot_id
+        ? await trx('price_snapshots').where({ id: approval.snapshot_id }).first()
+        : null;
+      const vendorPricingId = approval.vendor_pricing_id || snapshot?.vendor_pricing_id || null;
+
+      await trx('price_approval_events').where({ id: req.params.id }).update({
+        approval_status: 'approved',
+        approved_by: approvedBy,
+        approved_at: new Date(),
+      });
+
+      if (approval.snapshot_id) {
+        await trx('price_snapshots').where({ id: approval.snapshot_id }).update({
+          requires_approval: false,
+          approval_reason: null,
+        }).catch(() => {});
+      }
+
+      if (vendorPricingId) {
+        const pricingUpdate = {
+          approval_status: 'approved',
+          is_active: true,
+          last_checked_at: snapshot?.captured_at || snapshot?.fetched_at || new Date(),
+        };
+        if (approval.snapshot_id) pricingUpdate.latest_snapshot_id = approval.snapshot_id;
+        if (snapshot?.price_amount != null) pricingUpdate.price_amount = snapshot.price_amount;
+        if (snapshot?.price != null) pricingUpdate.price = snapshot.price;
+        if (snapshot?.normalized_unit_price != null) pricingUpdate.normalized_unit_price = snapshot.normalized_unit_price;
+        if (snapshot?.landed_unit_price != null) pricingUpdate.landed_unit_price = snapshot.landed_unit_price;
+        if (snapshot?.source_type) pricingUpdate.source_type = snapshot.source_type;
+        if (snapshot?.price_type) pricingUpdate.price_type = snapshot.price_type;
+        if (snapshot?.price_confidence != null) pricingUpdate.price_confidence = snapshot.price_confidence;
+        if (snapshot?.source_confidence != null) pricingUpdate.source_confidence = snapshot.source_confidence;
+
+        await trx('vendor_pricing').where({ id: vendorPricingId }).update(pricingUpdate);
+
+        const best = await trx('vendor_pricing as vp')
+          .join('vendors as v', 'v.id', 'vp.vendor_id')
+          .where('vp.product_id', approval.product_id)
+          .where('vp.is_active', true)
+          .whereIn('vp.approval_status', ['approved', 'auto_approved'])
+          .where(function pricedOnly() {
+            this.whereNotNull('vp.price_amount').orWhereNotNull('vp.price');
+          })
+          .select('vp.*', 'v.name as vendor_name')
+          .orderByRaw('COALESCE(vp.landed_unit_price, vp.normalized_unit_price, vp.price_amount, vp.price) ASC')
+          .first();
+        if (best) {
+          await trx('vendor_pricing').where({ product_id: approval.product_id }).update({ is_best_price: false }).catch(() => {});
+          await trx('vendor_pricing').where({ id: best.id }).update({ is_best_price: true }).catch(() => {});
+          await trx('products_catalog').where({ id: approval.product_id }).update({
+            best_vendor_pricing_id: best.id,
+            best_price_amount_cached: best.price_amount || best.price,
+            best_price_vendor_id_cached: best.vendor_id,
+            best_price_updated_at: new Date(),
+            best_price_status: 'current',
+            best_price: best.price || best.price_amount,
+            best_vendor: best.vendor_name,
+            needs_pricing: false,
+          });
+        }
+      }
+    });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+router.post('/price-sync/review-queue/:id/reject', async (req, res, next) => {
+  try {
+    const approval = await db('price_approval_events').where({ id: req.params.id }).first();
+    if (!approval) return res.status(404).json({ error: 'Approval event not found' });
+    await db('price_approval_events').where({ id: req.params.id }).update({
+      approval_status: 'rejected',
+      rejected_by: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin',
+      rejected_at: new Date(),
+      approval_reason: req.body?.reason || approval.approval_reason,
+    });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
 // PUT /:productId/pricing — add/update a vendor price (manual entry)
 // =========================================================================
 router.put('/:productId/pricing', async (req, res, next) => {
   try {
-    const { vendorId, price, quantity, url, shippingCost, taxRate } = req.body;
+    const {
+      vendorId,
+      price,
+      quantity,
+      url,
+      shippingCost,
+      taxRate,
+      sourceType = 'manual',
+      confidenceScore,
+      availability,
+      branchLocation,
+      expiresAt,
+    } = req.body;
     const productId = req.params.productId;
     const sizeOz = normalizeQuantityToOz(quantity);
     const landed = calcLandedCost(price, shippingCost, taxRate);
     const perOz = sizeOz ? Math.round(parseFloat(price) / sizeOz * 10000) / 10000 : null;
+    const landedPerOz = sizeOz && landed != null ? Math.round(landed / sizeOz * 10000) / 10000 : perOz;
+    const confidence = numberOrNull(confidenceScore);
+    const priceConfidence = confidence ?? 0.80;
+    const availabilityStatus = normalizeAvailabilityStatus(availability);
+    const controlLayerPriceFields = {
+      price_amount: price,
+      price_type: 'manual',
+      approval_status: 'approved',
+      currency: 'USD',
+      source_type: sourceType,
+      source_confidence: 0.75,
+      price_confidence: priceConfidence,
+      is_active: true,
+      availability_status: availabilityStatus || 'unknown',
+      branch_name: branchLocation || null,
+      shipping_estimate: shippingCost || null,
+      landed_unit_price: landedPerOz,
+    };
 
     const existing = await db('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }).first();
 
@@ -244,20 +945,140 @@ router.put('/:productId/pricing', async (req, res, next) => {
       try { await db('price_history').insert({ product_id: productId, vendor_id: vendorId, price: existing.price, quantity: existing.quantity, source: 'manual' }); } catch { /* migration pending */ }
 
       // Update — use only columns that exist
-      const upd = { previous_price: existing.price, price, quantity, vendor_product_url: url, last_checked_at: db.fn.now() };
-      try { await db('vendor_pricing').where({ id: existing.id }).update({ ...upd, shipping_cost: shippingCost || null, tax_rate: taxRate || null, landed_cost: landed, unit_normalized: sizeOz ? 'oz' : null, price_per_oz: perOz }); }
+      const upd = {
+        previous_price: existing.price,
+        price,
+        quantity,
+        vendor_product_url: url,
+        last_checked_at: db.fn.now(),
+      };
+      try {
+        await db('vendor_pricing').where({ id: existing.id }).update({
+          ...upd,
+          shipping_cost: shippingCost || null,
+          tax_rate: taxRate || null,
+          landed_cost: landed,
+          unit_normalized: sizeOz ? 'oz' : null,
+          price_per_oz: perOz,
+          normalized_unit_price: perOz,
+          ...controlLayerPriceFields,
+          source_type: sourceType,
+          confidence_score: confidence,
+          availability: availability || null,
+          branch_location: branchLocation || null,
+          expires_at: expiresAt || null,
+        });
+      }
       catch { await db('vendor_pricing').where({ id: existing.id }).update(upd); }
     } else {
       const ins = { product_id: productId, vendor_id: vendorId, price, quantity, vendor_product_url: url, last_checked_at: db.fn.now() };
-      try { await db('vendor_pricing').insert({ ...ins, shipping_cost: shippingCost || null, tax_rate: taxRate || null, landed_cost: landed, unit_normalized: sizeOz ? 'oz' : null, price_per_oz: perOz }); }
+      try {
+        await db('vendor_pricing').insert({
+          ...ins,
+          shipping_cost: shippingCost || null,
+          tax_rate: taxRate || null,
+          landed_cost: landed,
+          unit_normalized: sizeOz ? 'oz' : null,
+          price_per_oz: perOz,
+          normalized_unit_price: perOz,
+          ...controlLayerPriceFields,
+          source_type: sourceType,
+          confidence_score: confidence,
+          availability: availability || null,
+          branch_location: branchLocation || null,
+          expires_at: expiresAt || null,
+        });
+      }
       catch { await db('vendor_pricing').insert(ins); }
 
       try { await db('price_history').insert({ product_id: productId, vendor_id: vendorId, price, quantity, source: 'manual' }); } catch { /* migration pending */ }
     }
 
+    try {
+      const current = await db('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }).first();
+      const [snapshot] = await db('price_snapshots').insert({
+        product_id: productId,
+        vendor_id: vendorId,
+        vendor_pricing_id: current?.id || null,
+        price,
+        price_amount: price,
+        quantity,
+        uom: current?.unit || null,
+        normalized_unit_price: perOz,
+        normalized_unit: sizeOz ? 'oz' : null,
+        availability: availability || null,
+        availability_status: availabilityStatus || 'unknown',
+        branch_location: branchLocation || null,
+        branch_name: branchLocation || null,
+        shipping_estimate: shippingCost || null,
+        landed_unit_price: landedPerOz,
+        fetched_at: db.fn.now(),
+        captured_at: db.fn.now(),
+        expires_at: expiresAt || null,
+        source_type: sourceType,
+        price_type: 'manual',
+        confidence_score: confidence || 0.80,
+        source_confidence: 0.75,
+        price_confidence: priceConfidence,
+        source_url: url || null,
+        metadata: {
+          source: 'admin_inventory_manual_price',
+          enteredBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
+        },
+      }).returning('id');
+      const snapshotId = snapshot?.id || snapshot;
+      if (current?.id && snapshotId) {
+        await db('vendor_pricing').where({ id: current.id }).update({ latest_snapshot_id: snapshotId }).catch(() => {});
+      }
+    } catch { /* snapshot table may not exist on older installs */ }
+
     // Recalculate best price
     await recalcBestPrice(productId);
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /:productId/pricing/refresh — queue an on-demand price refresh request
+router.post('/:productId/pricing/refresh', async (req, res, next) => {
+  try {
+    const { vendorId, notes } = req.body;
+    if (!vendorId) return res.status(400).json({ error: 'vendorId required' });
+
+    const [product, vendor] = await Promise.all([
+      db('products_catalog').where({ id: req.params.productId }).first(),
+      db('vendors').where({ id: vendorId }).first(),
+    ]);
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    if (!vendor) return res.status(404).json({ error: 'Vendor not found' });
+
+    const sourceType = vendor.sync_method || (vendor.price_scraping_enabled ? 'public_scraper' : 'manual');
+    let request = null;
+    try {
+      [request] = await db('price_refresh_requests').insert({
+        product_id: product.id,
+        vendor_id: vendor.id,
+        source_type: sourceType,
+        notes: notes || null,
+        requested_by: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
+        metadata: {
+          productName: product.name,
+          vendorName: vendor.name,
+          syncMethod: vendor.sync_method || null,
+          credentialStatus: vendor.credential_status || null,
+        },
+      }).returning('*');
+    } catch {
+      // Older installs may not have the queue table yet.
+    }
+
+    res.status(202).json({
+      success: true,
+      request,
+      message: `${vendor.name} refresh queued for ${product.name}`,
+      actionRequired: ['portal_connector', 'approved_feed', 'approved_integration', 'api'].includes(sourceType)
+        ? 'Connector credentials/feed setup may be required before this can run automatically.'
+        : null,
+    });
   } catch (err) { next(err); }
 });
 
