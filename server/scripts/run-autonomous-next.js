@@ -12,6 +12,7 @@
  *   node server/scripts/run-autonomous-next.js               # dry-run (no API calls, no DB writes)
  *   node server/scripts/run-autonomous-next.js --live        # full chain but agent + publish gated by SHADOW_MODE_*
  *   node server/scripts/run-autonomous-next.js --min-score=60
+ *   node server/scripts/run-autonomous-next.js --live --verify-internal-links
  *
  * For prod:
  *   railway run -- bash -c '
@@ -38,6 +39,9 @@ function parseBooleanFlag(value) {
 
 const LIVE = parseBooleanFlag(ARGS.live);
 const MIN_SCORE = ARGS['min-score'] ? parseInt(ARGS['min-score'], 10) : undefined;
+if (parseBooleanFlag(ARGS['verify-internal-links'])) {
+  process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = 'true';
+}
 
 function redactCli(value) {
   return String(value || '')
@@ -62,6 +66,10 @@ function redactCli(value) {
     if (result.astro_pr_url) console.log(`Astro PR:          ${result.astro_pr_url}`);
     if (result.indexnow_status) console.log(`IndexNow:          ${result.indexnow_status}`);
     if (typeof result.link_tasks_queued === 'number') console.log(`Link tasks queued: ${result.link_tasks_queued}`);
+    if (typeof result.internal_link_verify_count === 'number') {
+      console.log(`Link PR verify:    ${result.internal_link_verified_count || 0} verified / ${result.internal_link_verify_failed_count || 0} failed / ${result.internal_link_verify_count} checked`);
+    }
+    if (result.internal_link_verify_error) console.log(`Link PR verify:    skipped (${redactCli(result.internal_link_verify_error)})`);
     console.log(`Trust-build:       ${result.trust_build_count_after}`);
 
     console.log('');

@@ -99,6 +99,8 @@ class AutonomousRunner {
     if (!queue) return finalize(run, t0, { outcome: 'failed', failure_message: 'opportunity-queue unavailable' });
     if (dryRun) return this._previewNext({ queue, minScore, t0 });
 
+    await this._verifyMergedInternalLinkPrs(run);
+
     // 1. Claim.
     const t1 = Date.now();
     let opp;
@@ -856,6 +858,35 @@ class AutonomousRunner {
     };
   }
 
+  async _verifyMergedInternalLinkPrs(run) {
+    if (!envBool('AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN', false)) return null;
+    const executor = getInternalLinkExecutor();
+    if (!executor?.runPostMergeVerification) return null;
+    const t = Date.now();
+    try {
+      const timeoutMs = envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS', 15000);
+      const result = await withTimeout(
+        executor.runPostMergeVerification({
+          limit: envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_LIMIT', 10),
+        }),
+        timeoutMs,
+        `internal_link_verify_timeout_${timeoutMs}ms`
+      );
+      const rows = Array.isArray(result?.results) ? result.results : [];
+      run.internal_link_verify_ms = Date.now() - t;
+      run.internal_link_verify_count = Number(result?.count || rows.length || 0);
+      run.internal_link_verified_count = rows.filter((row) => row.status === 'verified').length;
+      run.internal_link_verify_failed_count = rows.filter((row) => row.status === 'failed' || row.failure_reason).length;
+      logger.info(`[autonomous-runner] internal-link verification: checked=${run.internal_link_verify_count} verified=${run.internal_link_verified_count} failed=${run.internal_link_verify_failed_count}`);
+      return result;
+    } catch (err) {
+      run.internal_link_verify_ms = Date.now() - t;
+      run.internal_link_verify_error = err.message;
+      logger.warn(`[autonomous-runner] internal-link verification skipped: ${err.message}`);
+      return null;
+    }
+  }
+
   _hasDraftBriefPublisher(draft, brief) {
     const publisher = getAstroPublisher();
     if (!publisher?.publishOrUpdatePage) return false;
@@ -1131,6 +1162,16 @@ function envInt(key, defaultValue = null) {
   if (raw == null || raw === '') return defaultValue;
   const parsed = parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  const ms = Number(timeoutMs);
+  if (!Number.isFinite(ms) || ms <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message || `timeout_${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function normalizeContentPath(url) {

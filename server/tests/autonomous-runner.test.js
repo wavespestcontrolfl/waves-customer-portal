@@ -602,6 +602,110 @@ describe('runNext claim failures', () => {
   });
 });
 
+describe('runNext internal-link post-merge verification', () => {
+  test('optionally verifies merged internal-link PRs before claiming a new opportunity', async () => {
+    const previousVerify = process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+    process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = 'true';
+    try {
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue(null),
+      };
+      const internalLinkExecutor = {
+        runPostMergeVerification: jest.fn().mockResolvedValue({
+          count: 2,
+          results: [
+            { task_id: 'task-1', status: 'verified' },
+            { task_id: 'task-2', status: 'merged', failure_reason: 'internal_link_verify_empty_live_html' },
+          ],
+        }),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder: {}, internalLinkExecutor });
+
+      const result = await runner.runNext();
+
+      expect(internalLinkExecutor.runPostMergeVerification).toHaveBeenCalledWith({ limit: 10 });
+      expect(queue.claimNext).toHaveBeenCalled();
+      expect(result.outcome).toBe('skipped_no_opportunity');
+      expect(result.internal_link_verify_count).toBe(2);
+      expect(result.internal_link_verified_count).toBe(1);
+      expect(result.internal_link_verify_failed_count).toBe(1);
+    } finally {
+      if (previousVerify === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = previousVerify;
+    }
+  });
+
+  test('verification errors do not block opportunity claiming', async () => {
+    const previousVerify = process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+    process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = 'true';
+    try {
+      const claimedAt = new Date('2026-05-28T07:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_verify_nonblocking',
+          action_type: 'add_internal_links',
+          claimed_at: claimedAt,
+        }),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_verify_nonblocking',
+          action_type: 'add_internal_links',
+          page_type: 'internal-link',
+          target_url: '/pest-control-bradenton-fl/',
+          target_keyword: 'pest control bradenton',
+        }),
+      };
+      const linkPlanner = {
+        planForTarget: jest.fn().mockReturnValue([]),
+      };
+      const internalLinkExecutor = {
+        runPostMergeVerification: jest.fn().mockRejectedValue(new Error('GitHub unavailable')),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
+
+      const result = await runner.runNext();
+
+      expect(result.internal_link_verify_error).toBe('GitHub unavailable');
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('internal_links_dry_run_shadow');
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_verify_nonblocking', 'internal_links_dry_run_shadow', { claimToken: claimedAt });
+    } finally {
+      if (previousVerify === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = previousVerify;
+    }
+  });
+
+  test('verification timeouts do not block opportunity claiming', async () => {
+    const previousVerify = process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+    const previousTimeout = process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS;
+    process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = 'true';
+    process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS = '1';
+    try {
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue(null),
+      };
+      const internalLinkExecutor = {
+        runPostMergeVerification: jest.fn(() => new Promise(() => {})),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder: {}, internalLinkExecutor });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('skipped_no_opportunity');
+      expect(result.internal_link_verify_error).toBe('internal_link_verify_timeout_1ms');
+      expect(queue.claimNext).toHaveBeenCalled();
+    } finally {
+      if (previousVerify === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN = previousVerify;
+      if (previousTimeout === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_VERIFY_TIMEOUT_MS = previousTimeout;
+    }
+  });
+});
+
 describe('runNext Astro corpus loading', () => {
   test('loads uniqueness sibling pages from GitHub when ASTRO_REPO_DIR is unset', async () => {
     const previousAstroDir = process.env.ASTRO_REPO_DIR;
