@@ -377,18 +377,31 @@ class AutonomousRunner {
     if (contentGuardrails && draft) {
       // For a refresh, the draft carries only editable meta — the live page's
       // domains are frozen by publishRefresh. Hydrate them so the brand-token
-      // check enforces against the page that will actually be written.
+      // check enforces against the page that will actually be written. If we
+      // CAN'T read the live page (null/throw), fail CLOSED: route to review
+      // rather than silently treating it as hub-only and skipping the guard
+      // (which would let a literal-brand draft leak onto a spoke domain).
       let liveDomains = null;
       if (brief.action_type === 'refresh_existing_page') {
-        try {
-          const publisher = getAstroPublisher();
-          const liveFm = publisher?.getLiveFrontmatter
-            ? await publisher.getLiveFrontmatter(brief.target_url || opp.page_url)
-            : {};
+        const publisher = getAstroPublisher();
+        if (publisher?.getLiveFrontmatter) {
+          let liveFm;
+          try {
+            liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
+          } catch (err) {
+            logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
+            liveFm = null;
+          }
+          if (liveFm == null) {
+            const finalized = await finalize(run, t0, {
+              outcome: 'skipped_gate_fail',
+              skip_reason: 'refresh_domains_load_failed',
+              reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
+            });
+            await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
+            return finalized;
+          }
           liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
-        } catch (err) {
-          logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
-          liveDomains = [];
         }
       }
       const guardResult = contentGuardrails.evaluate(draft, {

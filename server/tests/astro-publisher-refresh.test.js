@@ -126,3 +126,20 @@ describe('canPublishRefresh', () => {
     expect(pub.canPublishRefresh({ type: 'draft', body: '', page_url: '/p/' }, { action_type: 'refresh_existing_page' })).toBe(false);
   });
 });
+
+describe('getLiveFrontmatter', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('returns null when the file is not found (so callers can fail closed)', async () => {
+    gh.getFile.mockResolvedValue(null);
+    const r = await pub.getLiveFrontmatter('src/content/services/pest-control-venice-fl.md');
+    expect(r).toBeNull();
+  });
+
+  test('returns parsed frontmatter (with domains) when the page exists', async () => {
+    gh.getFile.mockResolvedValue({ content: '---\nslug: "x"\ndomains:\n  - veniceflpestcontrol.com\n---\nbody', sha: 's' });
+    const r = await pub.getLiveFrontmatter('src/content/services/termite-control-venice-fl.md');
+    expect(r).not.toBeNull();
+    expect(r.domains).toEqual(['veniceflpestcontrol.com']);
+  });
+});

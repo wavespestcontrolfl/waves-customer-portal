@@ -621,14 +621,19 @@ function canPublishMetadataRewrite(draft, brief = {}) {
 /**
  * Read the LIVE page's frontmatter from the Astro repo. Used by guardrails to
  * enforce brand-token / multi-domain rules against the real page being
- * refreshed (the refresh draft carries only editable meta). Returns {} if the
- * target can't be resolved or read.
+ * refreshed (the refresh draft carries only editable meta).
+ *
+ * Returns the parsed frontmatter object on success (possibly {} for a found
+ * page with empty frontmatter — a legitimate hub-only page). Returns NULL when
+ * the target can't be resolved or the file can't be read, so callers can tell
+ * "this page has no domains" from "we couldn't check" and fail closed on the
+ * latter.
  */
 async function getLiveFrontmatter(targetUrlOrPath) {
   const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
-  if (!filePath) return {};
+  if (!filePath) return null;
   const existing = await gh.getFile(filePath);
-  if (!existing) return {};
+  if (!existing) return null;
   return fm.parse(existing.content).data || {};
 }
 
