@@ -14,6 +14,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const MODELS = require('../config/models');
+const config = require('../config');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { getNewsletterType } = require('../config/newsletter-types');
 const { etDateString } = require('../utils/datetime-et');
