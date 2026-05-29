@@ -537,6 +537,36 @@ const AppointmentReminders = {
     const results = { sent72h: 0, sent24h: 0, skipped: 0, errors: 0 };
     const now = new Date();
 
+    // Durability backstop for deferred confirmations. Admin saves insert the
+    // reminder row with confirmation_sent=false and fire the Twilio send off the
+    // request path (setImmediate). If the process restarts before that send runs,
+    // the row would be stranded at confirmation_sent=false — and since the main
+    // reminder query below requires confirmation_sent=true, the customer would
+    // also miss the 72h/24h reminders. Heal any stranded row here before the
+    // reminder pass; the 2-minute age floor keeps us from racing an in-flight
+    // deferred task. sendConfirmation is idempotent and marks confirmation_sent
+    // even on landline/failure/past, so a recovered future row can also pick up
+    // its reminder in the same run.
+    try {
+      const staleCutoff = new Date(now.getTime() - 2 * 60 * 1000);
+      const stranded = await db('appointment_reminders')
+        .where({ cancelled: false, confirmation_sent: false })
+        .where('created_at', '<', staleCutoff)
+        .select('scheduled_service_id');
+      for (const r of stranded) {
+        try {
+          await AppointmentReminders.sendConfirmation(r.scheduled_service_id);
+        } catch (e) {
+          logger.error(`[appt-remind] Deferred confirmation recovery failed for ${r.scheduled_service_id}: ${e.message}`);
+        }
+      }
+      if (stranded.length) {
+        logger.info(`[appt-remind] Recovered ${stranded.length} stranded confirmation(s)`);
+      }
+    } catch (e) {
+      logger.error(`[appt-remind] Deferred confirmation recovery sweep failed: ${e.message}`);
+    }
+
     try {
       const reminders = await db('appointment_reminders')
         .where({ cancelled: false, confirmation_sent: true })
