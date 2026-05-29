@@ -5,6 +5,7 @@ import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
+import useIsMobile from "../../hooks/useIsMobile";
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
 import { COLORS, FONTS } from "../../theme-brand";
 
@@ -918,6 +919,7 @@ export default function ProjectsPage() {
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [createMode, setCreateMode] = useState(null);
   const [error, setError] = useState("");
+  const isMobile = useIsMobile(900);
   const isAdmin = getAdminRole() === "admin";
 
   const loadProjects = useCallback(async () => {
@@ -1038,12 +1040,22 @@ export default function ProjectsPage() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: selected ? "1fr 1.4fr" : "1fr",
+          // On phones the master-detail can't sit side by side — stack to one
+          // column, and when a project is open show only the detail (full width)
+          // so its title/photos aren't squished into a sliver. The detail's
+          // close (X) returns to the list.
+          gridTemplateColumns: !isMobile && selected ? "1fr 1.4fr" : "1fr",
           gap: 16,
         }}
       >
-        {/* List */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {/* List — hidden on mobile while a detail is open */}
+        <div
+          style={{
+            display: isMobile && selected ? "none" : "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
           {showRegularProjects &&
             (loading ? (
               <div style={{ padding: 24, color: D.muted }}>Loading…</div>
@@ -2005,6 +2017,7 @@ function ProjectDetail({
               color: ESTIMATE_TEXT,
               marginTop: 4,
               lineHeight: 1.1,
+              overflowWrap: "anywhere",
             }}
           >
             {project.title || typeCfg?.label || "Project"}
