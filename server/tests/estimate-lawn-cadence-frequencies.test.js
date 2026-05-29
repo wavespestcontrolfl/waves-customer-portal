@@ -1,6 +1,7 @@
 const {
   lawnFrequenciesFromResultStats,
   applySelectedLawnTierToEstimateData,
+  buildRenderFlags,
 } = require('../routes/estimate-public');
 
 // Lawn cost-floor tiers as the engine stores them in result.results.lawn
@@ -142,5 +143,27 @@ describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked ca
     const out = applySelectedLawnTierToEstimateData(estDataWithRecurringLawn(), freq);
     expect(out.result.recurring.services[0].visitsPerYear).toBe(12);
     expect(out.result.recurring.services[0].cadence).toBe('monthly');
+  });
+});
+
+describe('buildRenderFlags — WaveGuard tier badge for recurring lawn', () => {
+  const lawnSection = { isRecurring: true, isPest: false, category: 'lawn_care', setupFee: null, frequencies: [{ serviceCategory: 'lawn_care' }] };
+  const mosquitoSection = { isRecurring: true, isPest: false, category: 'mosquito', setupFee: null, frequencies: [{ serviceCategory: 'mosquito' }] };
+
+  test('recurring lawn turns on the WaveGuard tier badge (anchors at Bronze)', () => {
+    const flags = buildRenderFlags({}, [lawnSection], { qualifyingCount: 1 });
+    expect(flags.showWaveGuardTierUi).toBe(true);
+  });
+
+  test('lawn does NOT enable the pest-only setup fee or perks', () => {
+    const flags = buildRenderFlags({}, [lawnSection], { qualifyingCount: 1 });
+    expect(flags.showWaveGuardSetupFee).toBe(false);
+    expect(flags.showWaveGuardPerks).toBe(false);
+    expect(flags.showPestRecurringAddOns).toBe(false);
+  });
+
+  test('scoped to lawn — a mosquito-only estimate still hides the tier badge', () => {
+    const flags = buildRenderFlags({}, [mosquitoSection], { qualifyingCount: 1 });
+    expect(flags.showWaveGuardTierUi).toBe(false);
   });
 });

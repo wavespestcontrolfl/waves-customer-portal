@@ -7335,12 +7335,20 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
   const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
+  // Recurring lawn shows the WaveGuard tier badge (anchors at Bronze) like pest,
+  // per owner decision. Scoped to lawn — does NOT enable the pest-only setup fee
+  // or perks (those stay gated on hasRecurringPest below).
+  const hasRecurringLawn = services.some((section) => section?.isRecurring && (
+    section?.category === 'lawn_care'
+    || section?.key === 'lawn_care'
+    || (Array.isArray(section?.frequencies) && section.frequencies.some((f) => f?.serviceCategory === 'lawn_care'))
+  ));
   const qualifyingCount = Number(combinedRecurring?.qualifyingCount || 0);
   const hasDiscountContext = Number(combinedRecurring?.waveGuardDiscountPct || 0) > 0
     || Number(combinedRecurring?.savingsPerMonth || 0) > 0;
   return {
     showRecurringSummary: combinedRecurring != null,
-    showWaveGuardTierUi: hasRecurringPest || hasDiscountContext || qualifyingCount > 1,
+    showWaveGuardTierUi: hasRecurringPest || hasRecurringLawn || hasDiscountContext || qualifyingCount > 1,
     showWaveGuardPerks: hasRecurringPest || qualifyingCount > 1 || hasDiscountContext,
     showWaveGuardSetupFee: hasRecurringPest || hasWaivableSetupFee,
     showPestRecurringAddOns: hasRecurringPest && !payload.quoteRequired,
@@ -8032,4 +8040,5 @@ module.exports.isMosquitoServiceName = isMosquitoServiceName;
 module.exports.isLawnServiceName = isLawnServiceName;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
+module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
