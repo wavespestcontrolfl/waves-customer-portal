@@ -34,6 +34,13 @@ describe('German Roach Cleanout customer-facing estimate copy', () => {
     expect(isGeneralPestOneTimeItem({ name: 'Rodent Exclusion' })).toBe(false);
   });
 
+  test('the non-roach "Initial Pest Cleanout" is general pest and keeps its toggles', () => {
+    const initialPestCleanout = { service: 'pest_initial_cleanout', name: 'Initial Pest Cleanout', price: 199 };
+    // A plain pest "cleanout" is general pest control — not the roach specialty.
+    expect(isGeneralPestOneTimeItem(initialPestCleanout)).toBe(true);
+    expect(isGermanRoachCleanoutOneTimeItem(initialPestCleanout)).toBe(false);
+  });
+
   test('German Roach Cleanout is detected by service key and by name', () => {
     expect(isGermanRoachCleanoutOneTimeItem(germanRoachItem)).toBe(true);
     expect(isGermanRoachCleanoutOneTimeItem({ name: 'German Roach Cleanout — 4 Visit Program' })).toBe(true);

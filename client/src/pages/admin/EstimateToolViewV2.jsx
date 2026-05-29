@@ -1275,7 +1275,10 @@ function oneTimeChoicePreviewMeta(E, pestTier, oneTimeRows = []) {
   const matches = (needle) =>
     oneTimeText.includes(needle) || (!oneTimeText && recurringText.includes(needle));
 
-  if (matches("german roach") || matches("cleanout")) {
+  // German Roach Cleanout only — must not catch the non-roach "Initial Pest
+  // Cleanout" (pest_initial_cleanout) service, which keeps the standard
+  // one-time pest copy. Mirrors isGermanRoachCleanoutOneTimeItem on the server.
+  if (matches("german roach") || (matches("roach") && matches("cleanout"))) {
     const visitMatch = oneTimeText.match(/(\d+)\s*visit/);
     const n = visitMatch ? Number(visitMatch[1]) : 0;
     const words = { 1: "One visit", 2: "Two visits", 3: "Three visits", 4: "Four visits" };

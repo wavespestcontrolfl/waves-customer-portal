@@ -674,9 +674,12 @@ function detectPestRecurring(recurring) {
 function isGeneralPestOneTimeItem(it = {}) {
   const service = String(it.service || '').toLowerCase();
   if (service === 'one_time_pest' || service === 'pest_control') return true;
-  if (service) return false; // a known specialty service key (german_roach, flea, …) — not general pest
+  if (service === 'german_roach') return false; // specialty cleanout (handled separately)
   const name = String(it.name || it.displayName || it.label || '').toLowerCase();
-  if (/roach|cockroach|cleanout|wasp|bee|hornet|stinging|exclusion|flea|bed\s*bug|termite|rodent|wdo|mosquito|tree|shrub|lawn/.test(name)) return false;
+  // Specialty programs — interior-spray / eave-sweep don't apply to these.
+  // Note: a plain "cleanout" (e.g. the general "Initial Pest Cleanout" service)
+  // is NOT a specialty and keeps the toggles; only roach/insect specialties drop them.
+  if (/roach|cockroach|wasp|bee|hornet|stinging|exclusion|flea|bed\s*bug|termite|rodent|wdo|mosquito|tree|shrub|lawn/.test(name)) return false;
   return /pest|\bant\b/.test(name);
 }
 
