@@ -409,3 +409,20 @@ Observed causes:
 - `8a2c38b` changed adapter recurring totals to exclude rodent bait and palm injection from the WaveGuard-discounted recurring bucket, while still including them in year 1/year 2 totals.
 - Adapter one-time pest now follows the translated v1 engine path with synced pest pricing instead of the stale v2 envelope values.
 - `TERMITE_BAIT` adapter translation currently selects Advance, so the legacy envelope captures `tmBait.ai = 695` and `tmBait.ti = 0`.
+
+---
+
+## 2026-05-29 Lawn V2 cost-floor baseline refresh
+
+Lawn V2 recurring pricing is now the **55% collected-margin cost floor** (not the old bracket table) — shipped in PRs #1328 (server authoritative on save), #1335 (client preview parity), #1341 (shared `@waves/lawn-cost-floor`). The checked-in **LOCAL** regression baselines still carried bracket-era lawn totals, so every lawn-inclusive case failed. Recaptured via `CAPTURE_BASELINE=1 LOCAL=1`.
+
+Intentional, not a baseline bug. See `pricing_changelog` entry `claude-2026-05-29` (migration `20260528000040_lawn_v2_baseline_refresh_changelog`). The new values come from the same engine `lawn-pricing-golden-master.test.js` validates exactly.
+
+Updated LOCAL baselines — only lawn-inclusive cases changed; **all non-lawn cases byte-identical**:
+
+- `pricing-engine.local-baseline.json`: `baseline_single_family_zone_a_quarterly_pest_enhanced_lawn`, `zone_b_monthly_pest_bermuda_premium`, `zone_c_bimonthly_pest_zoysia_standard_treeshrub`, `zone_d_quarterly_pest_bahia_basic`, `edge_large_footprint_5500sf_platinum_bundle`, `platinum_bundle_4_qualifying_services_zone_a`
+- `pricing-engine-v1-adapter.local-baseline.json`: `v1adapter_baseline_zone_a_quarterly_pest_lawn`, `v1adapter_platinum_bundle_4_services_zone_a`, `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub`, `v1adapter_zone_d_quarterly_pest_bahia`
+
+Lawn recurring totals moved **up** (cost floor exceeds the old low-sqft bracket prices) — e.g. the zone-D bahia lawn line $360→$675/yr, zone-A enhanced lawn $696→$837/yr.
+
+**Not done here:** the DB-synced prod baselines (`*.baseline.json`) carry the same stale lawn totals and should be recaptured against prod (`PROD_URL` + `ADMIN_TOKEN`, or `CAPTURE_BASELINE=1` with `syncConstantsFromDB`) once the deploy is confirmed — out of scope for this local-only refresh.
