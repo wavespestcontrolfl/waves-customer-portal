@@ -297,6 +297,17 @@ router.post('/sms', async (req, res) => {
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
+    if (Body && !smsReaction) {
+      void require('../services/estimate-conversion-agent').processInboundSms({
+        customer,
+        from: From,
+        to: To,
+        body: Body,
+        smsLogId: smsLogEntry?.id || null,
+        sourceMessageId: MessageSid || null,
+      }).catch((err) => logger.warn(`[estimate-conversion-agent] async shadow failed: ${err.message}`));
+    }
+
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
     const shouldNotifyKnownInbound = numberConfig.type === 'location' || isTrackingLeadInbound;
 

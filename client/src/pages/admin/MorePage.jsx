@@ -24,6 +24,7 @@ import {
   ExternalLink,
   ChevronRight,
   DatabaseZap,
+  Bot,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
 
@@ -70,6 +71,7 @@ const SECTIONS = [
       { path: "/admin/knowledge", icon: Library, label: "Knowledge Base" },
       { path: "/admin/kb", icon: Brain, label: "Claudeopedia" },
       { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
+      { path: "/admin/agent-decisions", icon: Bot, label: "Agent Review" },
     ],
   },
   {
