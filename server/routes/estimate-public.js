@@ -4338,7 +4338,10 @@ router.put('/:token/accept', async (req, res, next) => {
     const acceptedSchedulingFrequencyKey = acceptedServiceTierKey || acceptedFrequencyKey;
     const selectedServiceTierBillsMonthly = !!acceptedServiceTierKey && acceptedFrequencyKey === 'monthly';
     const acceptedEstDataForPricing = selectedFrequency
-      ? applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency)
+      ? applySelectedLawnTierToEstimateData(
+          applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency),
+          selectedFrequency,
+        )
       : estData;
     if (acceptedEstDataForPricing !== estData) {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
@@ -6405,6 +6408,98 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
     });
 }
 
+// Lawn care tier → cadence. The lawn engine produces 6/9/12-visit tiers
+// (Standard/Enhanced/Premium); customers see them as cadences, matching the
+// house convention (6=Bi-monthly, 9=Every 6 weeks, 12=Monthly).
+function lawnTierKey(row = {}) {
+  const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
+  const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
+  if (raw.includes('premium') || visits === 12) return 'premium';
+  if (raw.includes('enhanced') || visits === 9) return 'enhanced';
+  if (raw.includes('standard') || visits === 6) return 'standard';
+  // Basic (4 visits) is the hidden manager-only tier — keep it DISTINCT from
+  // standard so the customer-cadence whitelist drops it instead of aliasing it
+  // onto the 6-visit Standard slot (which would surface the cheaper 4-visit
+  // price as "Bi-monthly" while accept re-stamps to 6 visits).
+  if (raw.includes('basic') || visits === 4) return 'basic';
+  return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
+}
+
+const LAWN_CADENCE_LABEL = { standard: 'Bi-monthly', enhanced: 'Every 6 weeks', premium: 'Monthly' };
+
+// Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
+// Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
+// estimates (when lawn is the sole recurring service); mixed bundles price
+// lawn inside the pest cadence. Pricing is unchanged — the 6/9/12 cost-floor
+// numbers, relabeled as Bi-monthly / Every 6 weeks / Monthly.
+function lawnFrequenciesFromResultStats(estData = {}) {
+  const resultStats = recurringResultStats(estData);
+  const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];
+  const seen = new Set();
+  const rawManualDiscount = normalizeManualDiscountSummary(estData);
+  return rows
+    .map((row) => {
+      const tierKey = lawnTierKey(row);
+      if (!['standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
+      seen.add(tierKey);
+      const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
+      const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
+      const annualBase = finiteNumberOrNull(row.ann ?? row.annual);
+      const perTreatmentBase = finiteNumberOrNull(row.pa ?? row.perTreatment ?? row.perApp ?? row.perVisit);
+      const discountBaseAnnual = annualBase != null
+        ? annualBase
+        : (monthlyBase != null ? roundMonthly(monthlyBase * 12) : 0);
+      const manualDiscount = manualDiscountForRecurringBase(rawManualDiscount, discountBaseAnnual);
+      const manualDiscountAmount = Number(manualDiscount?.amount || 0);
+      const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
+      const monthly = monthlyBase != null
+        ? Math.max(0, roundMonthly(monthlyBase - manualDiscountMonthly))
+        : null;
+      const annual = annualBase != null
+        ? Math.max(0, roundMonthly(annualBase - manualDiscountAmount))
+        : (monthly != null ? roundMonthly(monthly * 12) : null);
+      const perTreatment = perTreatmentBase != null
+        ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
+        : null;
+      const labelBase = LAWN_CADENCE_LABEL[tierKey] || 'Lawn care';
+      return {
+        key: tierKey,
+        label: labelBase,
+        serviceCategory: 'lawn_care',
+        serviceTierKey: tierKey,
+        monthlyBase,
+        monthly,
+        annual,
+        perTreatment,
+        visitsPerYear: visits,
+        billingFrequencyKey: 'monthly',
+        manualDiscount: manualDiscount || null,
+        recommended: row.recommended === true || row.isRecommended === true,
+        selected: row.selected === true || row.isSelected === true,
+        included: [
+          {
+            key: `lawn_care_${tierKey}`,
+            label: `${labelBase} lawn care program`,
+            detail: visits ? `${Math.round(visits)} visits per year` : null,
+            includedAtThisFrequency: true,
+          },
+          {
+            key: 'lawn_care_treatments',
+            label: 'Fertilization and weed-control treatments',
+            detail: 'Turf treatments matched to your grass type and the season',
+            includedAtThisFrequency: true,
+          },
+        ],
+        addOns: [],
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const order = { standard: 0, enhanced: 1, premium: 2 };
+      return (order[a.key] ?? 99) - (order[b.key] ?? 99);
+    });
+}
+
 function mosquitoTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.selectedTier || row.program || row.n || row.name || row.label || '').trim().toLowerCase();
   const visits = finiteNumberOrNull(row.v ?? row.visits ?? row.visitsPerYear ?? row.frequency);
@@ -6653,6 +6748,118 @@ function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) 
   const nextData = { ...estData, result };
   if (estData.recurring && typeof estData.recurring === 'object') {
     nextData.recurring = applyTreeShrubTierToRecurring(estData.recurring, frequency);
+  }
+  return nextData;
+}
+
+// Lawn cadence runtime metadata — reuses the same cadence keys Tree & Shrub
+// established (bi_monthly / every_6_weeks / monthly) so the accepted recurring
+// line rides the proven downstream scheduling + billing plumbing.
+const LAWN_CADENCE_RUNTIME = {
+  standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 },
+  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 weeks', visitsPerYear: 9 },
+  premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
+};
+function lawnTierRuntimeMeta(tierKey) {
+  return LAWN_CADENCE_RUNTIME[String(tierKey || '').trim().toLowerCase()] || null;
+}
+
+function isLawnTierFrequency(frequency = {}) {
+  if (!lawnTierRuntimeMeta(frequency?.key)) return false;
+  if (frequency.serviceCategory === 'lawn_care') return true;
+  const included = Array.isArray(frequency.included) ? frequency.included : [];
+  return included.some((item) => String(item?.key || item?.service || item?.label || '').toLowerCase().includes('lawn'));
+}
+
+function selectedLawnServiceRow(existing = {}, frequency = {}) {
+  const meta = lawnTierRuntimeMeta(frequency?.key);
+  if (!meta) return existing;
+  const monthly = finiteNumberOrNull(frequency.monthly ?? frequency.monthlyBase ?? existing.mo ?? existing.monthly ?? existing.monthlyTotal);
+  const annual = finiteNumberOrNull(frequency.annual ?? existing.annual ?? existing.ann ?? existing.annualAfterDiscount);
+  const perTreatment = finiteNumberOrNull(frequency.perTreatment ?? frequency.perVisit ?? existing.perTreatment ?? existing.perVisit ?? existing.pa);
+  const visits = finiteNumberOrNull(frequency.visitsPerYear ?? existing.visitsPerYear ?? existing.visits ?? existing.v) || meta.visitsPerYear;
+  const label = frequency.label || meta.label;
+  const row = {
+    ...existing,
+    service: 'lawn_care', serviceKey: meta.serviceKey, service_key: meta.serviceKey,
+    name: meta.name, label: meta.name, displayName: meta.name,
+    frequency: meta.frequencyKey, cadence: meta.frequencyKey, cadenceLabel: label,
+    tier: meta.tierKey, tierKey: meta.tierKey, serviceTier: meta.tierKey, tierLabel: label,
+    billingFrequencyKey: frequency.billingFrequencyKey || 'monthly',
+    selected: true, isSelected: true,
+  };
+  if (monthly != null) { row.mo = monthly; row.monthly = monthly; row.monthlyTotal = monthly; }
+  if (annual != null) { row.ann = annual; row.annual = annual; row.annualAfterDiscount = annual; }
+  if (perTreatment != null) { row.pa = perTreatment; row.perTreatment = perTreatment; row.perVisit = perTreatment; }
+  if (visits != null) { row.v = visits; row.visits = visits; row.visitsPerYear = visits; row.appsPerYear = visits; }
+  return row;
+}
+
+function rewriteLawnRecurringServices(services = [], frequency = {}) {
+  if (!Array.isArray(services)) return { services, changed: false };
+  let changed = false;
+  const nextServices = services.map((svc) => {
+    const name = svc?.name || svc?.label || svc?.displayName || svc?.service || svc?.serviceKey || svc?.service_key;
+    if (!isLawnServiceName(name)) return svc;
+    changed = true;
+    return selectedLawnServiceRow(svc, frequency);
+  });
+  return { services: nextServices, changed };
+}
+
+function applyLawnTierToRecurring(recurring = {}, frequency = {}) {
+  if (!recurring || typeof recurring !== 'object') return recurring;
+  const { services, changed } = rewriteLawnRecurringServices(recurring.services, frequency);
+  if (!changed) return recurring;
+  const monthly = finiteNumberOrNull(frequency.monthly ?? frequency.monthlyBase);
+  const annual = finiteNumberOrNull(frequency.annual);
+  return {
+    ...recurring,
+    services,
+    ...(monthly != null ? { monthlyTotal: monthly, grandTotal: monthly, mo: monthly } : {}),
+    ...(annual != null ? { annualAfterDiscount: annual, annual, ann: annual } : {}),
+  };
+}
+
+function markSelectedLawnTierRows(rows = [], selectedTierKey = '') {
+  if (!Array.isArray(rows)) return rows;
+  const normalizedSelected = String(selectedTierKey || '').trim().toLowerCase();
+  return rows.map((row) => {
+    const tierKey = lawnTierKey(row);
+    if (!['standard', 'enhanced', 'premium'].includes(tierKey)) return row;
+    return { ...row, selected: tierKey === normalizedSelected, isSelected: tierKey === normalizedSelected };
+  });
+}
+
+// Mirror of applySelectedTreeShrubTierToEstimateData: when the customer picks a
+// lawn cadence, re-stamp the recurring lawn line + results.lawn rows to that
+// tier so the accepted service record schedules the chosen cadence/visits (the
+// accepted PRICE already comes straight from selectedFrequency). Self-guards on
+// lawn cadence frequencies, so it's a no-op for any other selection.
+function applySelectedLawnTierToEstimateData(estData = {}, frequency = {}) {
+  if (!isLawnTierFrequency(frequency)) return estData;
+  const hasResult = estData.result && typeof estData.result === 'object';
+  const sourceResult = hasResult ? estData.result : estData;
+  const result = { ...sourceResult };
+
+  if (result.recurring && typeof result.recurring === 'object') {
+    result.recurring = applyLawnTierToRecurring(result.recurring, frequency);
+  }
+  if (result.results && typeof result.results === 'object') {
+    const results = { ...result.results };
+    if (Array.isArray(results.lawn)) {
+      results.lawn = markSelectedLawnTierRows(results.lawn, frequency.key);
+    }
+    if (results.recurring && typeof results.recurring === 'object') {
+      results.recurring = applyLawnTierToRecurring(results.recurring, frequency);
+    }
+    result.results = results;
+  }
+
+  if (!hasResult) return result;
+  const nextData = { ...estData, result };
+  if (estData.recurring && typeof estData.recurring === 'object') {
+    nextData.recurring = applyLawnTierToRecurring(estData.recurring, frequency);
   }
   return nextData;
 }
@@ -7385,9 +7592,14 @@ async function buildPricingBundle(estimate) {
     const mosquitoFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'mosquito'
       ? mosquitoFrequenciesFromResultStats(estData)
       : [];
+    const lawnFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'lawn_care'
+      ? lawnFrequenciesFromResultStats(estData)
+      : [];
     const finalFreqs = hasPest
       ? frequencies
-      : (treeShrubFreqs.length ? treeShrubFreqs : (mosquitoFreqs.length ? mosquitoFreqs : frequencies.slice(0, 1)));
+      : (treeShrubFreqs.length ? treeShrubFreqs
+        : (mosquitoFreqs.length ? mosquitoFreqs
+          : (lawnFreqs.length ? lawnFreqs : frequencies.slice(0, 1))));
     const annualPrepayEligible = annualPrepayEligibleForEstimateData(estData);
 
     // First-visit fees stack — non-recurring charges shown to the customer
@@ -7808,4 +8020,6 @@ module.exports.isRodentServiceName = isRodentServiceName;
 module.exports.isTreeShrubServiceName = isTreeShrubServiceName;
 module.exports.isMosquitoServiceName = isMosquitoServiceName;
 module.exports.isLawnServiceName = isLawnServiceName;
+module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
+module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
