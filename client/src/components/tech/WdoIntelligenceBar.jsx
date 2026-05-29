@@ -22,6 +22,15 @@ function compactFileName(file) {
   return file.name.length > 34 ? `${file.name.slice(0, 30)}...` : file.name;
 }
 
+const SPEC_FIELDS = [
+  ['yearBuilt', 'Year built'],
+  ['constructionMaterial', 'Construction'],
+  ['foundationType', 'Foundation'],
+  ['roofType', 'Roof'],
+  ['stories', 'Stories'],
+  ['squareFootage', 'Living area (sq ft)'],
+];
+
 export default function WdoIntelligenceBar({
   projectId,
   customerId,
@@ -30,6 +39,8 @@ export default function WdoIntelligenceBar({
   propertyAddress,
   findings = {},
   onApplySuggestions,
+  onApplyProfile,
+  initialProfile = null,
   onEvidencePhotoSelected,
   disabled = false,
   palette,
@@ -40,6 +51,19 @@ export default function WdoIntelligenceBar({
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const [applied, setApplied] = useState(false);
+  const [specsApplied, setSpecsApplied] = useState(false);
+
+  // Profile comes from the latest analyze result, or the cached project profile.
+  const profile = result?.propertyProfile || initialProfile || null;
+  const specRows = profile
+    ? SPEC_FIELDS.map(([key, label]) => [label, profile[key]]).filter(([, v]) => hasValue(v))
+    : [];
+
+  function applyProfile() {
+    if (!profile || !onApplyProfile) return;
+    onApplyProfile(profile);
+    setSpecsApplied(true);
+  }
 
   function handlePhotoChange(e) {
     const file = e.target.files?.[0] || null;
@@ -213,6 +237,53 @@ export default function WdoIntelligenceBar({
               {note}
             </div>
           ))}
+        </div>
+      )}
+
+      {specRows.length > 0 && (
+        <div style={{ border: `1px solid ${P.border}`, borderRadius: 6, background: P.card, padding: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 900, color: P.heading, textTransform: 'uppercase' }}>
+              Property specs
+            </span>
+            {onApplyProfile && (
+              <button
+                type="button"
+                onClick={applyProfile}
+                disabled={disabled}
+                style={{
+                  padding: '5px 9px', borderRadius: 6, border: `1px solid ${P.accent}`,
+                  background: P.accent, color: P.accentText, fontSize: 11, fontWeight: 800,
+                  cursor: disabled ? 'default' : 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                Apply to report
+              </button>
+            )}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '3px 12px' }}>
+            {specRows.map(([label, value]) => (
+              <div key={label} style={{ fontSize: 11, color: P.text }}>
+                <span style={{ color: P.muted }}>{label}: </span>
+                <span style={{ fontWeight: 700 }}>{String(value)}</span>
+              </div>
+            ))}
+          </div>
+          {(profile.sourceUrl || profile.confidence) && (
+            <div style={{ fontSize: 10, color: P.muted, marginTop: 6 }}>
+              {profile.confidence ? `Confidence: ${profile.confidence}` : ''}
+              {profile.sourceUrl ? (
+                <>
+                  {profile.confidence ? ' · ' : ''}
+                  <a href={profile.sourceUrl} target="_blank" rel="noreferrer" style={{ color: P.muted }}>source</a>
+                </>
+              ) : ''}
+              {' · '}Auto-pulled — verify on site.
+            </div>
+          )}
+          {specsApplied && (
+            <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>Specs applied to the report fields.</div>
+          )}
         </div>
       )}
     </div>

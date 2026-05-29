@@ -228,6 +228,7 @@ function compactPropertyProfile(profile) {
       ? profile.constructionMaterial
       : null,
     foundationType: profile.foundationType && profile.foundationType !== 'UNKNOWN' ? profile.foundationType : null,
+    roofType: profile.roofType && profile.roofType !== 'UNKNOWN' ? profile.roofType : null,
     sourceUrl,
     confidence: profile._aiConfidence || profile._confidence || profile._dataQuality?.level || null,
   };
@@ -246,6 +247,7 @@ function propertyProfileLines(profile) {
   if (facts.stories) lines.push(`Stories: ${facts.stories}`);
   if (facts.constructionMaterial) lines.push(`Construction: ${facts.constructionMaterial}`);
   if (facts.foundationType) lines.push(`Foundation: ${facts.foundationType}`);
+  if (facts.roofType) lines.push(`Roof: ${facts.roofType}`);
   if (facts.sourceUrl) lines.push(`Source: ${facts.sourceUrl}`);
   if (facts.confidence) lines.push(`Property data confidence: ${facts.confidence}`);
   return lines.length ? lines.join('\n') : '[no property facts found]';
@@ -1039,10 +1041,17 @@ router.get('/:id', async (req, res, next) => {
       return { signed: true, signer_name: s.signer_name || null, signed_at: s.signed_at || null };
     })();
 
+    const propertyProfile = (() => {
+      let p = project.property_profile;
+      if (typeof p === 'string') { try { p = JSON.parse(p); } catch { p = null; } }
+      return p && typeof p === 'object' ? p : null;
+    })();
+
     res.json({
       project: {
         ...project,
         wdo_signature: wdoSignature,
+        property_profile: propertyProfile,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },
@@ -1219,6 +1228,17 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
       currentFindings,
       previousTreatmentPhoto,
     });
+
+    // Cache the resolved property profile on the project so the specs panel
+    // shows on reload without re-running the (web-search) lookup.
+    if (projectId && result.propertyProfile) {
+      const cols = await db('projects').columnInfo().catch(() => ({}));
+      if (cols.property_profile) {
+        await db('projects').where({ id: projectId })
+          .update({ property_profile: JSON.stringify(result.propertyProfile), updated_at: db.fn.now() })
+          .catch((err) => logger.warn(`[projects] could not cache property profile for ${projectId}: ${err.message}`));
+      }
+    }
 
     logger.info('[projects] WDO intelligence generated', {
       customerId,
