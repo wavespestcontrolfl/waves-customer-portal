@@ -1189,7 +1189,7 @@ export function ServiceSection({
       {current ? (
         <PriceCard
           frequency={current}
-          waveGuardTier={(renderFlags.showWaveGuardTierUi && section?.waveGuardTierEligible !== false) ? waveGuardTier : null}
+          waveGuardTier={section?.waveGuardTierEligible !== false ? waveGuardTier : null}
           wording={copy.priceWording}
         />
       ) : null}
@@ -1503,7 +1503,12 @@ export default function EstimateViewPage() {
   const renderFlags = pricing?.renderFlags || {};
   const acceptance = estimate?.acceptance || { mode: 'standard_slot_pick' };
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
-  const waveGuardTier = renderFlags.showWaveGuardTierUi === false ? null : (pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier);
+  // Resolve the tier label unconditionally; whether the badge actually renders
+  // is decided per-section via section.waveGuardTierEligible (server-authoritative
+  // deny-list), so an excluded section (palm/rodent) never shows it even when an
+  // eligible service shares the estimate, and an eligible single service / bundle
+  // always can.
+  const waveGuardTier = pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier || null;
   const combinedFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
 
