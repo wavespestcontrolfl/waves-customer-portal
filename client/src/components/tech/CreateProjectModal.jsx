@@ -240,16 +240,26 @@ function formatCustomerContact(customer) {
     .join(' · ');
 }
 
+// Default structure description from the customer's property type, falling back
+// to single-family residential (the common case / sample report wording).
+function formatStructuresInspected(customer) {
+  const type = String(customer?.property_type || customer?.propertyType || '').toLowerCase();
+  if (type.includes('commercial') || type.includes('business')) return 'Commercial structure';
+  return 'Single-family residential structure';
+}
+
 // Populate the WDO contact/address fields from the selected customer. With
 // overwrite=false (on selection) only blank fields are filled so typed values
 // are preserved; the explicit "Fill from customer" button passes overwrite=true.
 function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
   const address = formatCustomerAddress(customer);
   const contact = formatCustomerContact(customer);
+  const structures = formatStructuresInspected(customer);
   const next = { ...prev };
   if (address && (overwrite || !hasMeaningfulValue(next.property_address))) next.property_address = address;
   if (contact && (overwrite || !hasMeaningfulValue(next.requested_by))) next.requested_by = contact;
   if (contact && (overwrite || !hasMeaningfulValue(next.report_sent_to))) next.report_sent_to = contact;
+  if (structures && (overwrite || !hasMeaningfulValue(next.structures_inspected))) next.structures_inspected = structures;
   return next;
 }
 
