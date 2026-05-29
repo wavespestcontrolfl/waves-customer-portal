@@ -11,9 +11,9 @@
       }
     },
     "out": {
-      "perApp": 76,
-      "annual": 456,
-      "monthly": 38,
+      "perApp": 77,
+      "annual": 462,
+      "monthly": 38.5,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
@@ -92,9 +92,9 @@
       }
     },
     "out": {
-      "perApp": 89,
-      "annual": 534,
-      "monthly": 44.5,
+      "perApp": 90,
+      "annual": 540,
+      "monthly": 45,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
@@ -173,9 +173,9 @@
       }
     },
     "out": {
-      "perApp": 106,
-      "annual": 636,
-      "monthly": 53,
+      "perApp": 108,
+      "annual": 648,
+      "monthly": 54,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
@@ -254,9 +254,9 @@
       }
     },
     "out": {
-      "perApp": 126,
-      "annual": 756,
-      "monthly": 63,
+      "perApp": 129,
+      "annual": 774,
+      "monthly": 64.5,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
@@ -335,9 +335,9 @@
       }
     },
     "out": {
-      "perApp": 167,
-      "annual": 1002,
-      "monthly": 83.5,
+      "perApp": 171,
+      "annual": 1026,
+      "monthly": 85.5,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
@@ -416,9 +416,9 @@
       }
     },
     "out": {
-      "perApp": 75,
-      "annual": 450,
-      "monthly": 37.5,
+      "perApp": 77,
+      "annual": 462,
+      "monthly": 38.5,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
@@ -497,9 +497,9 @@
       }
     },
     "out": {
-      "perApp": 87,
-      "annual": 522,
-      "monthly": 43.5,
+      "perApp": 90,
+      "annual": 540,
+      "monthly": 45,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
@@ -578,9 +578,9 @@
       }
     },
     "out": {
-      "perApp": 104,
-      "annual": 624,
-      "monthly": 52,
+      "perApp": 108,
+      "annual": 648,
+      "monthly": 54,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
@@ -659,9 +659,9 @@
       }
     },
     "out": {
-      "perApp": 124,
-      "annual": 744,
-      "monthly": 62,
+      "perApp": 129,
+      "annual": 774,
+      "monthly": 64.5,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
@@ -740,9 +740,9 @@
       }
     },
     "out": {
-      "perApp": 163,
-      "annual": 978,
-      "monthly": 81.5,
+      "perApp": 171,
+      "annual": 1026,
+      "monthly": 85.5,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
@@ -821,9 +821,9 @@
       }
     },
     "out": {
-      "perApp": 76,
-      "annual": 456,
-      "monthly": 38,
+      "perApp": 81,
+      "annual": 486,
+      "monthly": 40.5,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
@@ -902,9 +902,9 @@
       }
     },
     "out": {
-      "perApp": 88,
-      "annual": 528,
-      "monthly": 44,
+      "perApp": 95,
+      "annual": 570,
+      "monthly": 47.5,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
@@ -983,9 +983,9 @@
       }
     },
     "out": {
-      "perApp": 106,
-      "annual": 636,
-      "monthly": 53,
+      "perApp": 115,
+      "annual": 690,
+      "monthly": 57.5,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
@@ -1064,9 +1064,9 @@
       }
     },
     "out": {
-      "perApp": 126,
-      "annual": 756,
-      "monthly": 63,
+      "perApp": 138,
+      "annual": 828,
+      "monthly": 69,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
@@ -1145,9 +1145,9 @@
       }
     },
     "out": {
-      "perApp": 166,
-      "annual": 996,
-      "monthly": 83,
+      "perApp": 185,
+      "annual": 1110,
+      "monthly": 92.5,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",

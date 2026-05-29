@@ -11,15 +11,37 @@ const {
   lawnComplexityMinutes,
   computeLawnCostFloor,
 } = require('@waves/lawn-cost-floor');
+const protocols = require('../config/protocols.json');
+
+function protocolMaterialBudgetAtReferenceSqft(track, protocolTier, expectedVisits) {
+  const visits = protocols.lawn[track].visits.filter((visit) => visit.tiers?.[protocolTier]);
+  const totalAtTenK = visits.reduce((sum, visit) => sum + Number(visit.material_cost || 0), 0);
+  return Math.round((totalAtTenK / visits.length) * expectedVisits * (4500 / 10000));
+}
 
 describe('lawnMaterialBudget', () => {
   it('returns the track/visits budget (sun/shade is not a pricing input)', () => {
     expect(lawnMaterialBudget('st_augustine', 9)).toBe(141);
     expect(lawnMaterialBudget('bermuda', 9)).toBe(140);
     expect(lawnMaterialBudget('zoysia', 12)).toBe(178);
+    expect(lawnMaterialBudget('st_augustine', 6)).toBe(87);
+    expect(lawnMaterialBudget('bermuda', 6)).toBe(87);
+    expect(lawnMaterialBudget('zoysia', 6)).toBe(101);
   });
   it('falls back to st_augustine for an unknown track', () => {
     expect(lawnMaterialBudget('made_up', 6)).toBe(LAWN_MATERIAL_BUDGETS.st_augustine[6]);
+  });
+
+  it('keeps Standard material guardrails at or above the inventory-backed protocol baseline', () => {
+    expect(lawnMaterialBudget('st_augustine', 6)).toBeGreaterThanOrEqual(
+      protocolMaterialBudgetAtReferenceSqft('st_augustine', 'bronze', 6)
+    );
+    expect(lawnMaterialBudget('bermuda', 6)).toBeGreaterThanOrEqual(
+      protocolMaterialBudgetAtReferenceSqft('bermuda', 'bronze', 6)
+    );
+    expect(lawnMaterialBudget('zoysia', 6)).toBeGreaterThanOrEqual(
+      protocolMaterialBudgetAtReferenceSqft('zoysia', 'bronze', 6)
+    );
   });
 });
 
