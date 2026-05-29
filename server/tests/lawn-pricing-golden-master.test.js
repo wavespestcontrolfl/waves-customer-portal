@@ -43,8 +43,8 @@ describe('lawn pricing golden master', () => {
     }
   });
 
-  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE FULL_SUN = $86 / $774 / $64.50', () => {
-    const r = priceLawnCare({ turfSf: 4250 }, { track: 'st_augustine', tier: 'enhanced', shadeClassification: 'FULL_SUN' });
+  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $86 / $774 / $64.50', () => {
+    const r = priceLawnCare({ turfSf: 4250 }, { track: 'st_augustine', tier: 'enhanced' });
     expect(r.perApp).toBe(86);
     expect(r.annual).toBe(774);
     expect(r.monthly).toBe(64.5);

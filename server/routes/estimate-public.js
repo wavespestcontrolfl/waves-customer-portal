@@ -5171,7 +5171,6 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
             updatedInputs.services.lawn = {
               track: 'st_augustine',
               tier: 'enhanced',
-              shadeClassification: 'FULL_SUN',
             };
           }
         } else if (addPest && !updatedInputs.services.pest) {

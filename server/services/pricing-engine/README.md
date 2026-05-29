@@ -94,7 +94,10 @@ Single source of truth for what this engine prices, how, and with what constants
 
 **Tracks:** `st_augustine` · `bermuda` · `zoysia` · `bahia` (bracket tables in `constants.js:LAWN_BRACKETS`)
 
-**St. Augustine shade handling:**
+**St. Augustine shade handling (PROTOCOL ONLY — not a pricing input):** sun/shade
+affects the agronomic protocol (nitrogen rate / product selection) but NOT price —
+every lawn prices on its track's full-sun material budget. Do not re-wire shade
+into `priceLawnCare`.
 - FULL_SUN: 0.75 lb N/1K, 3 N-apps, PGR + SpeedZone
 - MODERATE_SHADE: 0.625 lb N, 2 N-apps, Pillar
 - HEAVY_SHADE: 0.50 lb N, 2 N-apps, Pillar

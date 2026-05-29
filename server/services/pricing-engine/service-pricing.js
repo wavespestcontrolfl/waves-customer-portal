@@ -1743,7 +1743,6 @@ function priceLawnCare(property, options = {}) {
     track = 'st_augustine',
     tier = 'enhanced',
     lawnFreq,
-    shadeClassification = 'FULL_SUN',
     useLawnCostFloor = true,
     includeHiddenTiers = false,
   } = options;
@@ -1761,22 +1760,18 @@ function priceLawnCare(property, options = {}) {
     ? turfSqFt
     : (hasLawnSqFt && Number.isFinite(legacyLawnSqFt) && legacyLawnSqFt >= 0 ? legacyLawnSqFt : 4500);
 
-  // Lookup annual cost from v4 protocol data (approximate model)
-  // These are based on actual visit-by-visit product costing from v4 protocols
+  // Annual material budget per track/tier, from v4 protocol product costing.
+  // Sun/shade is intentionally NOT a pricing input — every lawn prices on its
+  // track's full-sun budget.
   const materialByTier = {
-    st_augustine: {
-      FULL_SUN: { basic: 64, standard: 83, enhanced: 141, premium: 205 },
-      MODERATE_SHADE: { basic: 50, standard: 65, enhanced: 110, premium: 155 },
-      HEAVY_SHADE: { basic: 44, standard: 58, enhanced: 100, premium: 138 },
-    },
-    bermuda: { FULL_SUN: { basic: 55, standard: 79, enhanced: 140, premium: 215 } },
-    zoysia: { FULL_SUN: { basic: 60, standard: 82, enhanced: 148, premium: 178 } },
-    bahia: { FULL_SUN: { basic: 45, standard: 68, enhanced: 95, premium: 115 } },
+    st_augustine: { basic: 64, standard: 83, enhanced: 141, premium: 205 },
+    bermuda: { basic: 55, standard: 79, enhanced: 140, premium: 215 },
+    zoysia: { basic: 60, standard: 82, enhanced: 148, premium: 178 },
+    bahia: { basic: 45, standard: 68, enhanced: 95, premium: 115 },
   };
 
   const trackMaterials = materialByTier[normalizedTrack] || materialByTier.st_augustine;
-  const shadeMaterials = trackMaterials[shadeClassification] || trackMaterials.FULL_SUN;
-  const annualMaterial = shadeMaterials[selectedTier] || 100;
+  const annualMaterial = trackMaterials[selectedTier] || 100;
 
   // Labor: v4 protocol uses $26.96/visit across all tracks
   const laborPerVisit = 26.96;
@@ -1794,8 +1789,7 @@ function priceLawnCare(property, options = {}) {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
     const tierMaterial = (materialByTier[normalizedTrack] || materialByTier.st_augustine);
-    const tierShadeMat = tierMaterial[shadeClassification] || tierMaterial.FULL_SUN;
-    const tierAnnualBudget = tierShadeMat[t] || 100;
+    const tierAnnualBudget = tierMaterial[t] || 100;
     const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack);
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);
@@ -1850,7 +1844,6 @@ function priceLawnCare(property, options = {}) {
     grassCode: display.code,
     grassType: display.label,
     tier: selected.tier,
-    shadeClassification,
     lawnSqFt,
     turfSf: lawnSqFt,
     turfEstimated: property.turfEstimated,

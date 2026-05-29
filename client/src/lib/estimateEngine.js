@@ -341,18 +341,14 @@ const LAWN_PRICING_V2 = {
   routeDensityMinutes: { DENSE: 5, NORMAL: 10, LOOSE: 15, SPARSE: 20 },
 };
 // Annual material budgets at the 4,500 sqft reference, keyed by visits (4/6/9/12).
-// Mirrors the server's materialByTier (service-pricing.js#priceLawnCare): only
-// St. Augustine carries shade variants; other tracks are FULL_SUN-only and fall
-// back to FULL_SUN for any shade. Kept in lockstep by lawn-client-server-parity.test.js.
+// Mirrors the server's materialByTier (service-pricing.js#priceLawnCare). Sun/shade
+// is NOT a pricing input — every lawn prices on its track's budget. Kept in
+// lockstep by lawn-client-server-parity.test.js.
 const LAWN_MATERIAL_BUDGETS = {
-  st_augustine: {
-    FULL_SUN: { 4: 64, 6: 83, 9: 141, 12: 205 },
-    MODERATE_SHADE: { 4: 50, 6: 65, 9: 110, 12: 155 },
-    HEAVY_SHADE: { 4: 44, 6: 58, 9: 100, 12: 138 },
-  },
-  bermuda: { FULL_SUN: { 4: 55, 6: 79, 9: 140, 12: 215 } },
-  zoysia: { FULL_SUN: { 4: 60, 6: 82, 9: 148, 12: 178 } },
-  bahia: { FULL_SUN: { 4: 45, 6: 68, 9: 95, 12: 115 } },
+  st_augustine: { 4: 64, 6: 83, 9: 141, 12: 205 },
+  bermuda: { 4: 55, 6: 79, 9: 140, 12: 215 },
+  zoysia: { 4: 60, 6: 82, 9: 148, 12: 178 },
+  bahia: { 4: 45, 6: 68, 9: 95, 12: 115 },
 };
 const LAWN_PRICES = {
   st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,39,52,76,100],[3000,39,52,76,100],[3500,41,55,80,106],[4000,43,57,84,111],[5000,47,63,92,123],[6000,51,68,100,135],[7000,54,73,109,146],[8000,58,78,117,158],[10000,65,88,133,182],[12000,73,98,150,205],[15000,84,113,175,240],[20000,102,138,216,298]] },
@@ -1044,7 +1040,6 @@ function lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriv
 // Mirrors the server cost floor (service-pricing.js#calcLawnAnnualCostFloorDetails)
 // so the customer-facing calculator and tech preview match the server-authoritative
 // price. opts mirror the server's property/options:
-//   shadeClassification    'FULL_SUN' (default) | 'MODERATE_SHADE' | 'HEAVY_SHADE'
 //   complexityMinutes      extra labor minutes/visit (moderate/complex landscape,
 //                          heavy shrubs, large driveway) — see lawnComplexityMinutes()
 //   callbackReservePerVisit override of the $2 default (poor maintenance / high pressure)
@@ -1052,10 +1047,8 @@ function lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriv
 // clamp here was the primary source of client/server price drift).
 function calcLawnFloorPrice(sf, grassType, visits, opts = {}) {
   const turfK = Math.max(0, Number(sf) || 0) / 1000;
-  const shade = String(opts.shadeClassification || 'FULL_SUN').toUpperCase();
   const trackBudgets = LAWN_MATERIAL_BUDGETS[grassType] || LAWN_MATERIAL_BUDGETS.st_augustine;
-  const shadeBudgets = trackBudgets[shade] || trackBudgets.FULL_SUN;
-  const annualMaterial = (shadeBudgets[visits] || 100) * ((Number(sf) || 0) / 4500);
+  const annualMaterial = (trackBudgets[visits] || 100) * ((Number(sf) || 0) / 4500);
   const complexityMinutes = Math.max(0, Number(opts.complexityMinutes) || 0);
   const laborMinutesPerVisit = LAWN_PRICING_V2.laborMinutesBase + turfK * LAWN_PRICING_V2.laborMinutesPer1000Sqft + complexityMinutes;
   const annualLabor = visits * LAWN_PRICING_V2.laborRateLoaded * laborMinutesPerVisit / 60;
