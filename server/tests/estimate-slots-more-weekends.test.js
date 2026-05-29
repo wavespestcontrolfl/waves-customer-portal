@@ -42,15 +42,41 @@ describe('estimate slot weekend and expander behavior', () => {
       .toEqual(['soon-open', 'next-open']);
   });
 
-  test('estimate slot selection does not hide earlier same-day windows for date diversity', () => {
+  test('estimate slot selection spreads across distinct days instead of stacking one day', () => {
     const slots = [
       { slotId: 'day-one-9', date: '2026-05-24', windowStart: '09:00', routeOptimal: false },
       { slotId: 'day-one-10', date: '2026-05-24', windowStart: '10:00', routeOptimal: false },
       { slotId: 'day-two-9', date: '2026-05-25', windowStart: '09:00', routeOptimal: false },
     ];
 
+    // Soonest day's earliest window leads (the ASAP option), then the next
+    // distinct day — not a second same-day window.
     expect(slotAvailabilityInternals.selectCustomerFacingSlots(slots, 2).map((slot) => slot.slotId))
-      .toEqual(['day-one-9', 'day-one-10']);
+      .toEqual(['day-one-9', 'day-two-9']);
+  });
+
+  test('diversifyByDay surfaces one slot per day before doubling up, soonest first', () => {
+    // Three days, each with three 9a/11a/1p windows. The customer-facing
+    // list should read across days rather than dumping all of day one.
+    const slots = ['2026-05-24', '2026-05-25', '2026-05-27'].flatMap((date) =>
+      ['09:00', '11:00', '13:00'].map((windowStart) => ({
+        slotId: `${date}_${windowStart}`,
+        date,
+        windowStart,
+        routeOptimal: false,
+      })));
+
+    const picks = slotAvailabilityInternals.selectCustomerFacingSlots(slots, 6);
+    const dates = picks.map((slot) => slot.date);
+
+    // First card is the genuine soonest/earliest window.
+    expect(picks[0].slotId).toBe('2026-05-24_09:00');
+    // First three cards are three different days (no day repeats before all
+    // days are represented).
+    expect(new Set(dates.slice(0, 3)).size).toBe(3);
+    // Later days lead with a spread of times, not another 9 AM each.
+    expect(new Set(picks.slice(0, 3).map((slot) => slot.windowStart)).size)
+      .toBeGreaterThan(1);
   });
 
   test('deduping merged asap and route pools preserves route metadata', () => {
