@@ -259,7 +259,10 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
 
   return (
     <section style={{
-      background: 'linear-gradient(180deg, #F5F1E6 0%, #FFFFFF 100%)',
+      // Solid warm tan (matches the server-rendered estimate's .ai-card).
+      // The previous gradient faded to #FFFFFF at the bottom, which erased
+      // the contrast against the white metric/signal boxes inside the card.
+      background: '#F2EEE0',
       border: `1px solid ${ESTIMATE_BORDER}`,
       borderRadius: 12,
       padding: 24,
@@ -1539,6 +1542,23 @@ export default function EstimateViewPage() {
     );
   }
 
+  // Waves AI property-review panel + "Ask Waves" bar. Rendered AFTER the price
+  // (configure branch) and also after the confirmation card (review branch) so
+  // the price-before-AI ordering holds while the panel + ask stay available
+  // during the held-slot review step too.
+  const aiPanelBlock = (
+    <>
+      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
+      <EstimateAskBar
+        token={token}
+        askToken={estimate.askToken}
+        selectedFrequency={selectedFrequency}
+        serviceMode={serviceMode}
+        chips={pricing.askChips}
+      />
+    </>
+  );
+
   return (
     <Page>
       <Header
@@ -1549,16 +1569,6 @@ export default function EstimateViewPage() {
         headline={copy.headline}
       />
 
-      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
-
-      <EstimateAskBar
-        token={token}
-        askToken={estimate.askToken}
-        selectedFrequency={selectedFrequency}
-        serviceMode={serviceMode}
-        chips={pricing.askChips}
-      />
-
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner
           kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
@@ -1567,14 +1577,17 @@ export default function EstimateViewPage() {
       ) : null}
 
       {ctaPhase === 'review' && reservation ? (
-        <ReviewPhase
-          slotId={selectedSlotId}
-          paymentPreference={paymentPreference}
-          secondsRemaining={countdownSeconds}
-          onConfirm={handleConfirm}
-          onCancel={handleReviewCancel}
-          invoiceMode={!!estimate.billByInvoice}
-        />
+        <>
+          <ReviewPhase
+            slotId={selectedSlotId}
+            paymentPreference={paymentPreference}
+            secondsRemaining={countdownSeconds}
+            onConfirm={handleConfirm}
+            onCancel={handleReviewCancel}
+            invoiceMode={!!estimate.billByInvoice}
+          />
+          {aiPanelBlock}
+        </>
       ) : (
         <>
           {/* One-time mode toggle — only rendered when admin opted this
@@ -1682,6 +1695,11 @@ export default function EstimateViewPage() {
               ) : null}
             </>
           )}
+
+          {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
+              server-rendered estimate's order: price → Waves AI → booking) so
+              the customer sees the price first. */}
+          {aiPanelBlock}
 
           {canShowSlotPicker ? (
             <SlotPicker
