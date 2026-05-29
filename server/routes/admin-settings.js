@@ -25,7 +25,7 @@ const {
 const GBP_OAUTH_STATE_PREFIX = 'gbp.oauth_state:';
 const GBP_OAUTH_STATE_LEGACY_KEY = 'gbp.oauth_state';
 const GBP_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
-const GOOGLE_BUSINESS_LOCATION_IDS = new Set(['lakewood-ranch', 'parrish', 'sarasota', 'venice']);
+const GOOGLE_BUSINESS_LOCATION_IDS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -111,7 +111,7 @@ router.get('/google/auth-url', adminAuthenticate, requireAdmin, async (req, res)
   try {
     const locationId = String(req.query.location || '');
     if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) {
-      return res.status(400).json({ error: 'Unknown location. Use: lakewood-ranch, parrish, sarasota, or venice' });
+      return res.status(400).json({ error: 'Unknown location. Use: bradenton, parrish, sarasota, or venice' });
     }
     const state = await createGoogleOAuthState(locationId, req.technicianId);
     const url = gbp.getAuthUrl(locationId, state);
@@ -127,8 +127,8 @@ router.get('/google/auth-url', adminAuthenticate, requireAdmin, async (req, res)
 router.get('/google/auth', adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const locationId = String(req.query.location || '');
-    if (!locationId) return res.status(400).send('Missing ?location= parameter. Use: lakewood-ranch, parrish, sarasota, or venice');
-    if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) return res.status(400).send('Unknown location. Use: lakewood-ranch, parrish, sarasota, or venice');
+    if (!locationId) return res.status(400).send('Missing ?location= parameter. Use: bradenton, parrish, sarasota, or venice');
+    if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) return res.status(400).send('Unknown location. Use: bradenton, parrish, sarasota, or venice');
 
     const state = await createGoogleOAuthState(locationId, req.technicianId);
     const authUrl = gbp.getAuthUrl(locationId, state);

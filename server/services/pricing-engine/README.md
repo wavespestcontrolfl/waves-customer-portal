@@ -208,7 +208,7 @@ Palm injection pricing requires explicit `treatmentType` and positive integer `p
 
 Standalone prices (customer not on WaveGuard). Applied via `pricePestControlOneTime` / `priceLawnOneTime` / `priceMosquitoOneTime` in `service-pricing.js`.
 
-**Pest one-time:** `max($199, (quarterlyPerApp + $99 setupEquivalent) × 1.20 premiumMultiplier)`. Always anchored on the **quarterly** per-app rate (== pest line `basePrice`), never a discounted monthly/bimonthly per-app. The model keeps a one-off visit strictly **above** what a recurring customer pays on visit 1 ($99 setup + quarterly rate), so there is a real incentive to commit to recurring (and recurring annual-prepay additionally waives the $99). Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $199 floor re-applied. Constants: `ONE_TIME.pest.{setupEquivalent: $99, premiumMultiplier: 1.20, floor: $199}` (admin-editable via `onetime_pest` config keys `setup_equivalent` / `premium_multiplier` / `floor`; the legacy `multiplier` key is ignored). `premium_multiplier` is validated `> 1` — a non-markup value would let one-time fall to/below the recurring visit-1 cost and is rejected on sync.
+**Pest one-time:** `max($199, quarterlyPerApp × 2.2 multiplier)` — a straight multiple of the **quarterly** per-app rate (== pest line `basePrice`), never a discounted monthly/bimonthly per-app. Anchoring on the quarterly rate is the point: that rate already encodes every property metric (footprint, lot, tree/shrub, pool/cage, driveway, complexity, type, age), so one-time scales proportionally with real job difficulty — no separate sq-ft curve, no flat add-on. The multiple keeps a one-off visit strictly **above** what a recurring customer pays on visit 1 ($99 setup + quarterly rate), preserving the incentive to commit. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $199 floor re-applied. Constants: `ONE_TIME.pest.{multiplier: 2.2, floor: $199}` (admin-editable via `onetime_pest` config keys `multiplier` / `floor`). `multiplier` is validated **`>= 2`** — combined with the $199 floor and the $89 pest quarterly floor, that guarantees one-time exceeds recurring visit-1 for every property; a lower value is rejected on sync.
 
 **Lawn one-time (per treatment):**
 
@@ -316,5 +316,5 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 - PEST base/floor anchor (market analysis vs historical)
 - TERMITE monitoring subscription pricing
 - RODENT bait subscription pricing
-- ONE_TIME pest premiumMultiplier (1.20×) + setupEquivalent ($99) + floor rationale
+- ONE_TIME pest multiplier (2.2× off quarterly) + floor rationale
 - TREE_SHRUB 43% target vs 35% global floor

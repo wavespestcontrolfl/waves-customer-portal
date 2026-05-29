@@ -61,6 +61,7 @@ const getLinkPlanner = lazy('internal-link-planner', './internal-link-planner');
 const getInternalLinkExecutor = lazy('internal-link-pr-executor', './internal-link-pr-executor');
 const getSitemap = lazy('sitemap-manager', '../seo/sitemap-manager');
 const getPostPublishVisibilityWorker = lazy('post-publish-visibility-worker', './post-publish-visibility-worker');
+const getAiVisibilityGate = lazy('ai-visibility-gate', './ai-visibility-gate');
 const getTitleMetaSpamGate = lazy('title-meta-spam-gate', './title-meta-spam-gate');
 const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
@@ -503,6 +504,23 @@ class AutonomousRunner {
         const has = await sitemap.hasUrl(draft.url).catch(() => null);
         if (has) ctx.sitemapHasUrl = has.present;
       }
+      // Hydrate the live page body so the quality gate's improvement_over_prior
+      // hard check has a prior version to compare against. Without this every
+      // refresh fails that check (no_previous_version_to_compare) and can never
+      // publish. On load failure we leave previousVersion unset → the hard
+      // check fails closed and the refresh routes to review (safe).
+      if (brief.action_type === 'refresh_existing_page') {
+        const publisher = getAstroPublisher();
+        if (publisher?.loadExistingPageBody) {
+          const prior = await publisher
+            .loadExistingPageBody(brief.target_url || brief.page_url || draft.url)
+            .catch((err) => {
+              logger.warn(`[autonomous-runner] previousVersion load failed: ${err.message}`);
+              return null;
+            });
+          if (prior) ctx.previousVersion = prior;
+        }
+      }
       try {
         qualityResult = qualityGate.evaluate(draft, brief, ctx);
       } catch (err) {
@@ -580,7 +598,39 @@ class AutonomousRunner {
       brief.seo_contract = seoCompletionResult.contract;
     }
 
-    const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed !== false;
+    // 5b. Pre-publish AI-visibility subset (refresh only). Runs the static-HTML
+    // P0 checks (noindex, canonical-elsewhere, empty body, schema-vs-hidden)
+    // before we ever open a PR. The live-only checks (robots.txt, inbound
+    // links) stay in the post-publish visibility worker. Any P0 blocks publish.
+    let prePublishVisibilityResult = { passed: true, skipped: 'not_refresh' };
+    if (brief.action_type === 'refresh_existing_page') {
+      const visGate = getAiVisibilityGate();
+      if (visGate?.evaluateStatic) {
+        try {
+          // No canonicalUrl: publishRefresh freezes canonical from the live
+          // page, so the draft's canonical is irrelevant — passing it would
+          // risk a false P0 and needlessly route a good refresh to review.
+          prePublishVisibilityResult = visGate.evaluateStatic({
+            url: draft.url,
+            html: draft.body,
+          });
+        } catch (err) {
+          prePublishVisibilityResult = {
+            passed: false,
+            error: err.message,
+            summary: { p0: 1, p1: 0, p2: 0, p3: 0, needs_review: true },
+          };
+        }
+      }
+    }
+    run.pre_publish_visibility_result = prePublishVisibilityResult;
+    if (qualityResult && typeof qualityResult === 'object') {
+      qualityResult.pre_publish_visibility = prePublishVisibilityResult;
+      run.quality_gate_result = qualityResult;
+    }
+
+    const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed !== false
+      && prePublishVisibilityResult.passed !== false;
 
     // 6. Trust-build check. AUTO_PUBLISH_<ACTION_TYPE>=true skips the human
     // trust-build ramp once every quality gate has passed; the canary

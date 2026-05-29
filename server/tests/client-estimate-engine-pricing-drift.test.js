@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
+const esbuild = require('esbuild');
 
 const { priceGermanRoach, priceTopDressing, priceDethatching } = require('../services/pricing-engine/service-pricing');
 
@@ -57,20 +57,27 @@ const TOP_DRESSING_EXPECTED = {
   },
 };
 
+// The client engine is ESM and imports @waves/lawn-cost-floor, so it can't be
+// eval'd raw. Bundle to CJS with esbuild (resolving the shared-module import);
+// calculateEstimate/interpolate/fmt/fmtInt are already `export`ed, so they land
+// on module.exports natively.
 function loadClientEstimator(source) {
-  const transformed = source.replace(/\bexport\s+function\s+/g, 'function ');
+  const out = esbuild.buildSync({
+    stdin: {
+      contents: source,
+      resolveDir: path.dirname(clientEstimatorPath),
+      sourcefile: 'estimateEngine.js',
+      loader: 'js',
+    },
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    write: false,
+    logLevel: 'silent',
+  });
   const module = { exports: {} };
-  const sandbox = {
-    module,
-    exports: module.exports,
-    console,
-  };
-  vm.createContext(sandbox);
-  const script = new vm.Script(
-    `${transformed}\nmodule.exports = { calculateEstimate, interpolate, fmt, fmtInt };`,
-    { filename: clientEstimatorPath }
-  );
-  script.runInContext(sandbox);
+  // eslint-disable-next-line no-new-func
+  new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
   return module.exports;
 }
 
@@ -293,12 +300,14 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(preSlab.price).toBe(preSlab.basePrice);
   });
 
-  test('one-time pest mirrors the server (quarterly base + $99) × 1.20 premium, floored at $199', () => {
-    // Must match server/services/pricing-engine ONE_TIME.pest model (no more × 1.75).
+  test('one-time pest mirrors the server: quarterly base × 2.2, floored at $199', () => {
+    // Must match server/services/pricing-engine ONE_TIME.pest model (pure multiple).
     expect(source).toContain('const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));');
-    expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round((quarterlyBase + 99) * 1.20))));');
-    // The legacy 1.75× one-time multiplier must be gone.
+    expect(source).toContain('let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));');
+    expect(source).toContain('if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;');
+    // The legacy 1.75× and the setup+premium forms must both be gone.
     expect(source).not.toContain('Math.round(bpp * 1.75)');
+    expect(source).not.toContain('(quarterlyBase + 99) * 1.20');
   });
 
   test('bed bug fallback no longer treats invalid methods as quote-both', () => {

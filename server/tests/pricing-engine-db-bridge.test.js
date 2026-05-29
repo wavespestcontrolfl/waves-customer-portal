@@ -99,7 +99,7 @@ describe('pricing engine DB bridge', () => {
 
   test('syncs canonical one-time treatment pricing and mosquito programs from pricing_config', async () => {
     const db = pricingConfigDb([
-      { config_key: 'onetime_pest', data: { floor: 199, premium_multiplier: 1.20, setup_equivalent: 99 } },
+      { config_key: 'onetime_pest', data: { floor: 199, multiplier: 2.2 } },
       {
         config_key: 'onetime_lawn',
         data: {
@@ -135,7 +135,7 @@ describe('pricing engine DB bridge', () => {
 
     await expect(syncConstantsFromDB(db)).resolves.toBe(true);
 
-    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, premiumMultiplier: 1.20, setupEquivalent: 99 });
+    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, multiplier: 2.2 });
     expect(constants.ONE_TIME.lawn.floor).toBe(115);
     expect(constants.ONE_TIME.lawn.oneTimeMultiplier).toBe(1.5);
     expect(constants.ONE_TIME.lawn.treatmentMultipliers.fungicide).toBe(1.38);
@@ -209,8 +209,7 @@ describe('pricing engine DB bridge', () => {
     snapshot.PEST.frequencyDiscounts.v1.bimonthly = 1.5; // >1, invalid
     snapshot.PEST.frequencyDiscounts.v2.monthly = 0;     // 0, invalid
     snapshot.PEST.frequencyDiscounts.v2.quarterly = -0.2; // negative, invalid
-    snapshot.ONE_TIME.pest.premiumMultiplier = 0;        // must be > 1
-    snapshot.ONE_TIME.pest.setupEquivalent = -5;         // must be non-negative
+    snapshot.ONE_TIME.pest.multiplier = 0;               // must be positive
 
     const result = validatePestPricingConfig(snapshot);
 
@@ -219,19 +218,47 @@ describe('pricing engine DB bridge', () => {
       'PEST.frequencyDiscounts.v1.bimonthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.monthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.quarterly must be in (0, 1]',
-      'ONE_TIME.pest.premiumMultiplier must be > 1',
-      'ONE_TIME.pest.setupEquivalent must be non-negative',
+      'ONE_TIME.pest.multiplier must be positive',
     ]));
   });
 
-  test('rejects a non-markup one-time pest premium (<= 1 breaks the recurring incentive)', () => {
-    for (const badMultiplier of [1, 0.8]) {
+  const INCENTIVE_ERROR = 'ONE_TIME.pest floor/multiplier too low: one-time (after dollar rounding) must stay strictly above recurring visit-1 (PEST.floor + PEST.initialFee) for every property';
+
+  test('rejects a one-time pest multiplier too low to clear recurring visit-1 (default floor)', () => {
+    for (const badMultiplier of [1.99, 1.2, 1, 0.8]) {
       const snapshot = JSON.parse(JSON.stringify(constants));
-      snapshot.ONE_TIME.pest.premiumMultiplier = badMultiplier;
+      snapshot.ONE_TIME.pest.multiplier = badMultiplier; // floor stays $199
       const result = validatePestPricingConfig(snapshot);
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain('ONE_TIME.pest.premiumMultiplier must be > 1');
+      expect(result.errors).toContain(INCENTIVE_ERROR);
     }
+  });
+
+  test('validates floor and multiplier TOGETHER — a lowered floor can break the incentive', () => {
+    // Codex case: {floor:150, multiplier:2} prices the smallest job at
+    // max(150, 89*2)=178 < recurring visit-1 ($89 + $99 = $188) → must reject.
+    const bad = JSON.parse(JSON.stringify(constants));
+    bad.ONE_TIME.pest = { floor: 150, multiplier: 2 };
+    const badResult = validatePestPricingConfig(bad);
+    expect(badResult.valid).toBe(false);
+    expect(badResult.errors).toContain(INCENTIVE_ERROR);
+
+    // But a high floor legitimately supports a sub-2 multiple — must accept,
+    // proving the guard isn't just a blanket multiplier >= 2 rule.
+    const ok = JSON.parse(JSON.stringify(constants));
+    ok.ONE_TIME.pest = { floor: 300, multiplier: 1.8 };
+    expect(validatePestPricingConfig(ok)).toEqual(expect.objectContaining({ valid: true }));
+  });
+
+  test('rejects a config that only ties after dollar rounding (Codex rounding edge)', () => {
+    // {floor:199, multiplier:1.9901}: a $100 quarterly base rounds to
+    // round(100*1.9901)=$199, exactly recurring visit-1 ($100+$99) — not
+    // strictly above. The unrounded math passes; the rounding-aware scan rejects.
+    const snapshot = JSON.parse(JSON.stringify(constants));
+    snapshot.ONE_TIME.pest = { floor: 199, multiplier: 1.9901 };
+    const result = validatePestPricingConfig(snapshot);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(INCENTIVE_ERROR);
   });
 
   test('allows pest floor above base (raise-the-minimum config is valid)', () => {

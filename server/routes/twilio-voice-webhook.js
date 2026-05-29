@@ -797,7 +797,7 @@ router.post('/outbound-admin-prompt', async (req, res) => {
 router.post('/outbound-connect', async (req, res) => {
   try {
     const customerNumber = req.query.customerNumber || req.body.customerNumber;
-    const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+    const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber || TWILIO_NUMBERS.mainLine.number;
     const rawCallLogId = req.query.callLogId || req.body.callLogId;
     const digits = (req.body.Digits || '').trim();
 

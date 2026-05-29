@@ -324,7 +324,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
   };
 
   const LOCATION_LABELS = {
-    "lakewood-ranch": "Lakewood Ranch",
+    "bradenton": "Lakewood Ranch",
     parrish: "Parrish",
     sarasota: "Sarasota",
     venice: "Venice",
@@ -2364,7 +2364,7 @@ export default function ReviewsPage() {
 
   const locationOptions = [
     { value: "all", label: "All Locations" },
-    { value: "lakewood-ranch", label: "Lakewood Ranch" },
+    { value: "bradenton", label: "Lakewood Ranch" },
     { value: "parrish", label: "Parrish" },
     { value: "sarasota", label: "Sarasota" },
     { value: "venice", label: "Venice" },

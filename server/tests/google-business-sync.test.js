@@ -1,6 +1,6 @@
 jest.mock('../config/locations', () => ({
   WAVES_LOCATIONS: [{
-    id: 'lakewood-ranch',
+    id: 'bradenton',
     name: 'Lakewood Ranch',
     googleLocationResourceName: 'accounts/1/locations/2',
     googlePlaceId: 'place-1',
@@ -153,7 +153,7 @@ describe('Google Business review sync', () => {
 
     const result = await service.syncAllReviews();
 
-    expect(result.sources).toEqual({ 'lakewood-ranch': 'gbp' });
+    expect(result.sources).toEqual({ 'bradenton': 'gbp' });
     expect(result.synced).toBe(2);
     expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
       expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-1', reviewer_name: 'John Doe', star_rating: 5 }),
@@ -165,7 +165,7 @@ describe('Google Business review sync', () => {
     db.__state.rows.google_reviews.push({
       id: 'legacy-1',
       google_review_id: 'places_place-1_1779710400',
-      location_id: 'lakewood-ranch',
+      location_id: 'bradenton',
       reviewer_name: 'John Doe',
       star_rating: 5,
       review_text: 'Old sample',
@@ -201,7 +201,7 @@ describe('Google Business review sync', () => {
       id: 'review-1',
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
-      location_id: 'lakewood-ranch',
+      location_id: 'bradenton',
       reviewer_name: 'John Doe',
       star_rating: 5,
       review_text: 'Great',
@@ -235,7 +235,7 @@ describe('Google Business review sync', () => {
       id: 'review-1',
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
-      location_id: 'lakewood-ranch',
+      location_id: 'bradenton',
       reviewer_name: 'John Doe',
       star_rating: 2,
       review_text: 'Bad',

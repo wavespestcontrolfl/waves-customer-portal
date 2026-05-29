@@ -303,7 +303,7 @@ router.post('/', async (req, res) => {
             // Press-1-to-connect auto-bridge. Create call_log row FIRST so
             // outbound-admin-prompt / outbound-connect can update it without
             // racing Twilio's webhook fire (2–5s after create()).
-            const bridgeCallerId = TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+            const bridgeCallerId = TWILIO_NUMBERS.mainLine.number;
             const [callLogRow] = await db('call_log')
               .insert({
                 customer_id: customer.id,

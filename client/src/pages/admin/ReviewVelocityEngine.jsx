@@ -63,7 +63,7 @@ const C = {
 // CITY_TO_LOCATION map in server/config/locations.js.
 const GBP_LOCATIONS = [
   {
-    id: "lakewood-ranch",
+    id: "bradenton",
     name: "Lakewood Ranch",
     zones: ["lakewood ranch", "bradenton", "university park"],
     zips: [

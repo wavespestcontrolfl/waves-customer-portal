@@ -26,9 +26,22 @@ export default defineConfig({
       },
     },
   },
+  // Force esbuild to pre-bundle the CJS workspace package so Rollup receives
+  // proper ESM named exports instead of a raw module.exports object. Linked
+  // workspace packages are excluded from pre-bundling by default, which causes
+  // Rollup's static analysis to fail with "X is not exported by …" errors.
+  // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
+  optimizeDeps: {
+    include: ['@waves/lawn-cost-floor'],
+  },
   build: {
     outDir: 'dist',
     sourcemap: true,
     chunkSizeWarningLimit: 2000,
+    // Ensure @rollup/plugin-commonjs also processes the linked CJS package
+    // during production builds, complementing the optimizeDeps.include above.
+    commonjsOptions: {
+      include: [/lawn-cost-floor/, /node_modules/],
+    },
   },
 });

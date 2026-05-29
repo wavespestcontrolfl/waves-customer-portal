@@ -7,26 +7,40 @@
  * This test pins the client cost floor to the server's so the two never drift —
  * the divergences it guards (and that the parity fix closed) are:
  *   1. material size-scaling clamp [0.6,2.5]  (client used to clamp; server doesn't)
- *   2. shade material variants (St. Augustine)
- *   3. complexity-minutes (heavy shrubs / moderate-complex landscape / large driveway)
- *   4. callback reserve (poor maintenance / high pest pressure)
+ *   2. complexity-minutes (heavy shrubs / moderate-complex landscape / large driveway)
+ *   3. callback reserve (poor maintenance / high pest pressure)
  */
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
+const esbuild = require('esbuild');
 const { priceLawnCare } = require('../services/pricing-engine');
+// lawnComplexityMinutes is shared (@waves/lawn-cost-floor) — require it directly
+// rather than extracting it from the client bundle.
+const { lawnComplexityMinutes } = require('@waves/lawn-cost-floor');
 
 const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
 
+// The client engine is ESM and imports @waves/lawn-cost-floor, so it can't be
+// eval'd raw. Bundle it to CJS with esbuild (resolving the shared-module import),
+// appending an export for the internal calcLawnFloorPrice the test exercises.
 function loadClientEstimator() {
-  const source = fs.readFileSync(clientEstimatorPath, 'utf8').replace(/\bexport\s+function\s+/g, 'function ');
+  const base = fs.readFileSync(clientEstimatorPath, 'utf8');
+  const out = esbuild.buildSync({
+    stdin: {
+      contents: `${base}\nexport { calcLawnFloorPrice };\n`,
+      resolveDir: path.dirname(clientEstimatorPath),
+      sourcefile: 'estimateEngine.js',
+      loader: 'js',
+    },
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    write: false,
+    logLevel: 'silent',
+  });
   const module = { exports: {} };
-  const sandbox = { module, exports: module.exports, console };
-  vm.createContext(sandbox);
-  new vm.Script(
-    `${source}\nmodule.exports = { calculateEstimate, calcLawnFloorPrice, lawnComplexityMinutes };`,
-    { filename: clientEstimatorPath },
-  ).runInContext(sandbox);
+  // eslint-disable-next-line no-new-func
+  new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
   return module.exports;
 }
 
@@ -73,7 +87,7 @@ describe('client/server lawn parity — complexity minutes', () => {
     { landscapeComplexity: 'COMPLEX', shrubDensity: 'HEAVY', hasLargeDriveway: true },
   ];
   it.each(combos.map((c) => [JSON.stringify(c), c]))('%s', (_l, combo) => {
-    const minutes = client.lawnComplexityMinutes(combo);
+    const minutes = lawnComplexityMinutes(combo);
     const c = client.calcLawnFloorPrice(4250, 'st_augustine', 9, { complexityMinutes: minutes });
     const s = serverTier(4250, 'st_augustine', 9, {
       property: {

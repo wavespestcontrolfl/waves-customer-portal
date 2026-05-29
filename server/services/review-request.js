@@ -14,7 +14,7 @@ const { publicPortalUrl } = require("../utils/portal-url");
 
 // GBP review links per location
 const REVIEW_LINKS = {
-  "lakewood-ranch": "https://g.page/r/CVRc_P5butTMEBM/review",
+  "bradenton": "https://g.page/r/CVRc_P5butTMEBM/review",
   sarasota: "https://g.page/r/CRkzS6M4EpncEBM/review",
   venice: "https://g.page/r/CURA5pQ1KatBEBM/review",
   parrish: "https://g.page/r/Ca-4KKoWwFacEBM/review",
@@ -22,15 +22,15 @@ const REVIEW_LINKS = {
 
 // City → location for review routing
 const CITY_TO_LOCATION = {
-  "lakewood ranch": "lakewood-ranch",
-  bradenton: "lakewood-ranch",
-  "university park": "lakewood-ranch",
-  "braden river": "lakewood-ranch",
-  "longboat key": "lakewood-ranch",
-  "anna maria": "lakewood-ranch",
-  "holmes beach": "lakewood-ranch",
-  palmetto: "lakewood-ranch",
-  cortez: "lakewood-ranch",
+  "lakewood ranch": "bradenton",
+  bradenton: "bradenton",
+  "university park": "bradenton",
+  "braden river": "bradenton",
+  "longboat key": "bradenton",
+  "anna maria": "bradenton",
+  "holmes beach": "bradenton",
+  palmetto: "bradenton",
+  cortez: "bradenton",
   sarasota: "sarasota",
   "siesta key": "sarasota",
   "lido key": "sarasota",
@@ -51,7 +51,7 @@ const CITY_TO_LOCATION = {
 
 function resolveLocation(customer) {
   const city = (customer.city || "").toLowerCase().trim();
-  return CITY_TO_LOCATION[city] || "lakewood-ranch";
+  return CITY_TO_LOCATION[city] || "bradenton";
 }
 
 function generateToken() {
@@ -657,7 +657,7 @@ const ReviewService = {
     // Resolve which Google review link to use
     const location = resolveLocation(customer || {});
     const googleReviewUrl =
-      REVIEW_LINKS[location] || REVIEW_LINKS["lakewood-ranch"];
+      REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
 
     return {
       id: request.id,
@@ -751,7 +751,7 @@ const ReviewService = {
     }
 
     const googleReviewUrl = isPromoter
-      ? REVIEW_LINKS[location] || REVIEW_LINKS["lakewood-ranch"]
+      ? REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"]
       : null;
     return {
       rating,
@@ -925,7 +925,7 @@ const ReviewService = {
       // tokenized rate page once, so reduce friction the second time.
       const location = resolveLocation(customer || {});
       const googleReviewUrl =
-        REVIEW_LINKS[location] || REVIEW_LINKS["lakewood-ranch"];
+        REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
 
       const body = await renderSmsTemplate(
         "review_request_followup",

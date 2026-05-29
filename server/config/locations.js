@@ -9,7 +9,7 @@ const WAVES_LOCATIONS = [
   // review location_id rows in the DB, GBP_REFRESH_TOKEN_LWR, and the
   // admin GBP location set). Renaming it requires a coordinated migration.
   {
-    id: 'lakewood-ranch',
+    id: 'bradenton',
     name: 'Lakewood Ranch',
     area: 'Lakewood Ranch / Bradenton',
     address: '13649 Luxe Ave #110, Bradenton, FL 34211',
@@ -104,7 +104,7 @@ function nearestLocation(latitude, longitude) {
 
 // City → location mapping
 const CITY_TO_LOCATION = {
-  'lakewood ranch': 'lakewood-ranch', 'bradenton': 'lakewood-ranch', 'university park': 'lakewood-ranch',
+  'lakewood ranch': 'bradenton', 'bradenton': 'bradenton', 'university park': 'bradenton',
   'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota',
   'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'port charlotte': 'venice',
   'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'ruskin': 'parrish', 'apollo beach': 'parrish',
@@ -112,7 +112,7 @@ const CITY_TO_LOCATION = {
 
 function resolveLocation(city) {
   const key = (city || '').toLowerCase().trim();
-  const locId = CITY_TO_LOCATION[key] || 'lakewood-ranch';
+  const locId = CITY_TO_LOCATION[key] || 'bradenton';
   return WAVES_LOCATIONS.find(l => l.id === locId) || WAVES_LOCATIONS[0];
 }
 
