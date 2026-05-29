@@ -418,6 +418,28 @@ async function sendCampaign(sendId, opts = {}) {
   await db('newsletter_sends').where({ id: send.id }).update(finalSendUpdate);
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
+    // Advance the calendar lifecycle (idempotent) so a sent newsletter's
+    // calendar row reflects reality instead of being stuck at 'drafted'.
+    try {
+      await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'sent', updated_at: new Date() });
+    } catch (err) {
+      logger.warn(`[newsletter] calendar status update failed for send ${send.id}: ${err.message}`);
+    }
+
+    // First-'sent' only: advance events_raw.times_featured + recompute
+    // freshness for the events this newsletter actually shipped, so the
+    // recurring-series anti-repeat gate decays. Gated on !send.sent_at (a
+    // resume carries preserveSentAt + an existing sent_at) so resumes don't
+    // double-count. Trade-off: a send that FAILED first then succeeded on
+    // resume won't feature — acceptable (under-count beats double-count).
+    if (!send.sent_at) {
+      try {
+        await markEventsFeatured(send);
+      } catch (err) {
+        logger.warn(`[newsletter] times_featured update failed for send ${send.id}: ${err.message}`);
+      }
+    }
+
     const { sharePublishedNewsletter } = require('./content-scheduler');
     db('newsletter_sends').where({ id: send.id }).first().then((freshSend) => {
       if (freshSend) {
@@ -579,4 +601,37 @@ async function processScheduledSends() {
   return { processed };
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, excludeGloballySuppressed };
+/**
+ * Advance events_raw.times_featured + last_featured_at and recompute freshness
+ * for every event a sent newsletter shipped (the locked send.event_ids). This
+ * is what makes the recurring-series anti-repeat gate actually decay for the
+ * automated path — previously only a manual admin "feature" click bumped the
+ * counter, so an approved-but-never-featured recurring event stayed
+ * fresh_series_launch forever and could headline every week.
+ */
+async function markEventsFeatured(send) {
+  let ids = [];
+  try {
+    ids = Array.isArray(send.event_ids) ? send.event_ids : JSON.parse(send.event_ids || '[]');
+  } catch { ids = []; }
+  if (!Array.isArray(ids) || ids.length === 0) return;
+
+  const { classifyFreshness } = require('./event-freshness');
+  const rows = await db('events_raw')
+    .whereIn('id', ids)
+    .select('id', 'event_type', 'times_featured', 'start_at', 'end_at');
+
+  for (const r of rows) {
+    const nextFeatured = (r.times_featured || 0) + 1;
+    const { freshness_status, freshness_score } = classifyFreshness({ ...r, times_featured: nextFeatured });
+    await db('events_raw').where({ id: r.id }).update({
+      times_featured: nextFeatured,
+      last_featured_at: new Date(),
+      freshness_status,
+      freshness_score,
+      updated_at: new Date(),
+    });
+  }
+}
+
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, excludeGloballySuppressed, markEventsFeatured };

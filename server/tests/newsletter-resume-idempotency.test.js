@@ -66,7 +66,7 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   return q;
 }
 
-function buildDb({ send, deliveries = [], subscribers = [] }) {
+function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
@@ -83,6 +83,13 @@ function buildDb({ send, deliveries = [], subscribers = [] }) {
       chain({ result: deliveries }),                        // SELECT after insert
       chain({ updated: subscribers.length }),               // bulk update post-send
       chain({ count: 0 }),                                  // final retryable ledger count
+    ],
+    // Calendar lifecycle: sendCampaign advances the linked calendar row to
+    // 'sent' on a successful send. (markEventsFeatured only touches events_raw
+    // when send.event_ids is non-empty — the fixtures leave it empty, so no
+    // events_raw queue is needed.)
+    newsletter_calendar: [
+      chain({ updated: 1, onUpdate: onCalendarUpdate }),
     ],
   };
   db.mockImplementation((table) => {
@@ -269,9 +276,11 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
         chain({ count: 0 }),
       ],
     };
-    // On a successful 'sent' send the sender fires a fire-and-forget social
-    // share that re-fetches the send row — one extra newsletter_sends read the
-    // strict mock must allow.
+    // Post-send side effects (PR D): on a successful 'sent' send the sender
+    // advances the linked calendar row to 'sent' and the fire-and-forget
+    // social share re-fetches the send row. Provide both so the strict mock
+    // doesn't trip. (markEventsFeatured no-ops here — fixtures have no event_ids.)
+    queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
     queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
@@ -386,9 +395,11 @@ describe('resumeCampaign — preconditions', () => {
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
       ],
     };
-    // On a successful 'sent' send the sender fires a fire-and-forget social
-    // share that re-fetches the send row — one extra newsletter_sends read the
-    // strict mock must allow.
+    // Post-send side effects (PR D): on a successful 'sent' send the sender
+    // advances the linked calendar row to 'sent' and the fire-and-forget
+    // social share re-fetches the send row. Provide both so the strict mock
+    // doesn't trip. (markEventsFeatured no-ops here — fixtures have no event_ids.)
+    queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
     queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
@@ -451,9 +462,11 @@ describe('resumeCampaign — preconditions', () => {
         }),
       ],
     };
-    // On a successful 'sent' send the sender fires a fire-and-forget social
-    // share that re-fetches the send row — one extra newsletter_sends read the
-    // strict mock must allow.
+    // Post-send side effects (PR D): on a successful 'sent' send the sender
+    // advances the linked calendar row to 'sent' and the fire-and-forget
+    // social share re-fetches the send row. Provide both so the strict mock
+    // doesn't trip. (markEventsFeatured no-ops here — fixtures have no event_ids.)
+    queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
     queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
@@ -510,9 +523,11 @@ describe('resumeCampaign — preconditions', () => {
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
       ],
     };
-    // On a successful 'sent' send the sender fires a fire-and-forget social
-    // share that re-fetches the send row — one extra newsletter_sends read the
-    // strict mock must allow.
+    // Post-send side effects (PR D): on a successful 'sent' send the sender
+    // advances the linked calendar row to 'sent' and the fire-and-forget
+    // social share re-fetches the send row. Provide both so the strict mock
+    // doesn't trip. (markEventsFeatured no-ops here — fixtures have no event_ids.)
+    queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
     queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
@@ -591,9 +606,11 @@ describe('resumeCampaign — preconditions', () => {
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
       ],
     };
-    // On a successful 'sent' send the sender fires a fire-and-forget social
-    // share that re-fetches the send row — one extra newsletter_sends read the
-    // strict mock must allow.
+    // Post-send side effects (PR D): on a successful 'sent' send the sender
+    // advances the linked calendar row to 'sent' and the fire-and-forget
+    // social share re-fetches the send row. Provide both so the strict mock
+    // doesn't trip. (markEventsFeatured no-ops here — fixtures have no event_ids.)
+    queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
     queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
@@ -605,5 +622,58 @@ describe('resumeCampaign — preconditions', () => {
 
     expect(finalUpdate).toBeTruthy();
     expect(Object.prototype.hasOwnProperty.call(finalUpdate, 'sent_at')).toBe(false);
+  });
+});
+
+// ── PR D: send-completion side effects ───────────────────────────────────
+describe('sendCampaign — calendar lifecycle + times_featured on send (PR D)', () => {
+  test('advances the linked calendar row to "sent" on a successful first send', async () => {
+    let calUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>x</p>', text_body: 'x',
+        subject: 'Hi', from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves',
+        reply_to: 'contact@wavespestcontrol.com', segment_filter: null, subject_b: null,
+        // no sent_at → first send; no event_ids → markEventsFeatured no-ops
+      },
+      subscribers: [{ id: 1, email: 'a@example.com', unsubscribe_token: 't', customer_id: null }],
+      deliveries: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }],
+      onCalendarUpdate: (p) => { calUpdate = p; },
+    });
+    await sendCampaign('send-1');
+    expect(calUpdate).toMatchObject({ status: 'sent' });
+  });
+});
+
+describe('markEventsFeatured (PR D)', () => {
+  const { markEventsFeatured } = require('../services/newsletter-sender');
+
+  test('increments times_featured + recomputes freshness for each shipped event', async () => {
+    const updates = [];
+    const eventsRaw = [
+      chain({ result: [{ id: 'e1', event_type: 'recurring_series', times_featured: 0, start_at: null, end_at: null }] }),
+      chain({ updated: 1, onUpdate: (p) => updates.push(p) }),
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'events_raw') {
+        if (!eventsRaw.length) throw new Error('events_raw queue exhausted');
+        return eventsRaw.shift();
+      }
+      throw new Error(`unexpected ${table}`);
+    });
+    await markEventsFeatured({ event_ids: ['e1'] });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].times_featured).toBe(1);
+    // recurring_series at times_featured=1 → still fresh_series_launch, score 90-10
+    expect(updates[0].freshness_status).toBe('fresh_series_launch');
+    expect(updates[0].freshness_score).toBe(80);
+    expect(updates[0].last_featured_at).toBeInstanceOf(Date);
+  });
+
+  test('no-ops (no DB query) when event_ids is empty', async () => {
+    db.mockImplementation(() => { throw new Error('should not query for empty event_ids'); });
+    await expect(markEventsFeatured({ event_ids: '[]' })).resolves.toBeUndefined();
+    await expect(markEventsFeatured({ event_ids: [] })).resolves.toBeUndefined();
+    await expect(markEventsFeatured({})).resolves.toBeUndefined();
   });
 });

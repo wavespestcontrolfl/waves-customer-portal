@@ -694,6 +694,10 @@ router.post('/sends/:id/schedule', async (req, res, next) => {
       scheduled_for: when,
       updated_at: new Date(),
     });
+    // Keep the calendar lifecycle in lockstep with the linked send so the
+    // documented state machine self-drives (drafted → scheduled → sent)
+    // instead of relying on manual PATCHes.
+    await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'scheduled', updated_at: new Date() });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
     res.json({ success: true, send: updated });
   } catch (err) { next(err); }
@@ -710,6 +714,8 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
       scheduled_for: null,
       updated_at: new Date(),
     });
+    // Roll the linked calendar row back to 'drafted' to match the send.
+    await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
     res.json({ success: true, send: updated });
   } catch (err) { next(err); }
@@ -1964,6 +1970,14 @@ router.patch('/calendar/:id', async (req, res, next) => {
     if (status !== undefined) {
       const VALID = ['planned', 'drafted', 'scheduled', 'sent', 'skipped'];
       if (!VALID.includes(status)) return res.status(400).json({ error: 'invalid status' });
+      // 'scheduled'/'sent' are system-derived from the linked send lifecycle
+      // (POST /schedule and sendCampaign drive them). Hand-setting them on a
+      // row with no send_id makes the Thursday autopilot skip that week — it
+      // treats scheduled/sent as "already handled" and returns early — while
+      // no newsletter actually exists, a silent missed week with no alert.
+      if (['scheduled', 'sent'].includes(status) && !entry.send_id) {
+        return res.status(400).json({ error: `Cannot set status '${status}' on a calendar entry with no linked send — schedule or send the draft instead.` });
+      }
       updates.status = status;
     }
     if (eventIds !== undefined) {
