@@ -216,6 +216,11 @@ function canShowRecommendationToCustomer(card) {
   return card.type === 'customer_education' && card.requires_human_approval === false;
 }
 
+// Statuses the customer-facing queries (lawn-health + service report) treat as
+// surfaceable. Promoting a card into any of these must clear the copy-safety
+// gate, exactly like the approve / customer_visible flags do.
+const CUSTOMER_FACING_STATUSES = new Set(['approved', 'customer_visible', 'accepted']);
+
 const CUSTOMER_COPY_BLOCKLIST = [
   /callback\s+risk/i,
   /\bchurn\b/i,
@@ -1132,6 +1137,13 @@ router.patch('/recommendations/:recommendationId', async (req, res, next) => {
     }
     if (body.status != null) {
       if (!allowedStatuses.has(body.status)) return res.status(400).json({ error: 'Invalid recommendation status' });
+      // A direct status set into a customer-facing status must clear the same
+      // copy-safety blocklist as the approve / customer_visible flags — don't
+      // let it be a side door around the gate.
+      if (CUSTOMER_FACING_STATUSES.has(body.status)) {
+        const effectiveCopy = patch.customer_copy ?? card.customer_copy ?? '';
+        if (!assertCustomerCopySafe(res, effectiveCopy)) return;
+      }
       patch.status = body.status;
     }
 
@@ -1344,6 +1356,7 @@ router._test = {
   normalizeSnapshotRow,
   normalizeRecommendationRow,
   canShowRecommendationToCustomer,
+  CUSTOMER_FACING_STATUSES,
   customerCopyViolation,
   summarizeRecommendationEvents,
   normalizeRecommendationEventRow,
