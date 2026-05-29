@@ -2,8 +2,7 @@ const {
   lawnFrequenciesFromResultStats,
   applySelectedLawnTierToEstimateData,
   buildRenderFlags,
-  sectionShowsWaveGuardTier,
-  sectionWaveGuardTierEligible,
+  sectionTierEligibleFromKeys,
 } = require('../routes/estimate-public');
 
 // Lawn cost-floor tiers as the engine stores them in result.results.lawn
@@ -148,72 +147,61 @@ describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked ca
   });
 });
 
-describe('buildRenderFlags — WaveGuard tier badge for recurring services', () => {
-  // Real section shape: key === categoryForRecurringServiceKey(key). For the
-  // eligible services key === category; the edge case is palm, whose section is
-  // built with key:'palm_injection' but category:'tree_shrub'.
-  const section = (key, category = key) => ({ isRecurring: true, isPest: false, key, category, setupFee: null, frequencies: [{ serviceCategory: category }] });
+// Build a section the way buildServiceSection does: waveGuardTierEligible is the
+// per-section flag derived from the section's member service keys.
+const sectionWith = (key, memberKeys = [key]) => ({
+  isRecurring: true,
+  isPest: key === 'pest_control',
+  key,
+  setupFee: null,
+  waveGuardTierEligible: sectionTierEligibleFromKeys(true, memberKeys),
+});
 
+describe('buildRenderFlags — estimate-wide tier UI gate (derived from per-section)', () => {
   test.each(['lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
-    'recurring %s shows the WaveGuard tier badge (anchors at Bronze)',
+    'recurring %s turns the tier UI on',
     (key) => {
-      expect(buildRenderFlags({}, [section(key)], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
+      expect(buildRenderFlags({}, [sectionWith(key)], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
     },
   );
 
   test('the tier badge does NOT enable pest-only setup fee / perks / add-ons', () => {
-    const flags = buildRenderFlags({}, [section('lawn_care')], { qualifyingCount: 1 });
+    const flags = buildRenderFlags({}, [sectionWith('lawn_care')], { qualifyingCount: 1 });
     expect(flags.showWaveGuardSetupFee).toBe(false);
     expect(flags.showWaveGuardPerks).toBe(false);
     expect(flags.showPestRecurringAddOns).toBe(false);
   });
 
-  test('palm injection stays excluded even though its section category is tree_shrub', () => {
-    // categoryForRecurringServiceKey('palm_injection') === 'tree_shrub' — must be
-    // rejected by key, not aliased onto the tree_shrub badge (Codex P2).
-    const palm = section('palm_injection', 'tree_shrub');
-    expect(buildRenderFlags({}, [palm], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+  test('palm-only and rodent-only estimates keep the tier UI off', () => {
+    expect(buildRenderFlags({}, [sectionWith('palm_injection')], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+    expect(buildRenderFlags({}, [sectionWith('rodent_bait')], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
   });
 
-  test('rodent stays excluded from the tier badge', () => {
-    const rodent = section('rodent_bait', 'rodent');
-    expect(buildRenderFlags({}, [rodent], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+  test('a bundle with an eligible service turns the tier UI on; an excluded-only bundle does not', () => {
+    expect(buildRenderFlags({}, [sectionWith('bundle', ['tree_shrub', 'palm_injection'])], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
+    expect(buildRenderFlags({}, [sectionWith('bundle', ['palm_injection', 'rodent_bait'])], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
   });
 });
 
-describe('sectionShowsWaveGuardTier — global gate input (allow-list)', () => {
+describe('sectionTierEligibleFromKeys — per-section badge (single source of truth)', () => {
   test.each(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
-    'recurring %s flips the estimate-wide tier UI on',
+    'a single %s section is badge-eligible',
     (key) => {
-      expect(sectionShowsWaveGuardTier({ isRecurring: true, key })).toBe(true);
-    },
-  );
-  test('a combined bundle key does NOT by itself flip the global gate (pest/qualifying handles that)', () => {
-    expect(sectionShowsWaveGuardTier({ isRecurring: true, key: 'bundle' })).toBe(false);
-  });
-});
-
-describe('sectionWaveGuardTierEligible — per-section badge (deny-list, mixed-estimate fix)', () => {
-  test.each(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
-    'recurring %s section keeps its badge',
-    (key) => {
-      expect(sectionWaveGuardTierEligible({ isRecurring: true, key })).toBe(true);
+      expect(sectionTierEligibleFromKeys(true, [key])).toBe(true);
     },
   );
 
-  test('a combined bundle section keeps its badge (contains eligible services) — Codex P2b', () => {
-    expect(sectionWaveGuardTierEligible({ isRecurring: true, key: 'bundle' })).toBe(true);
+  test('palm / rodent single sections are NOT eligible (key not in allow-list)', () => {
+    expect(sectionTierEligibleFromKeys(true, ['palm_injection'])).toBe(false);
+    expect(sectionTierEligibleFromKeys(true, ['rodent_bait'])).toBe(false);
   });
 
-  test('palm injection section is suppressed even bundled with an eligible service — Codex P2a', () => {
-    // Section is built key:'palm_injection' / category:'tree_shrub'; keying off the
-    // service key keeps it badge-free so a Tree & Shrub + Palm split estimate only
-    // badges the tree section.
-    expect(sectionWaveGuardTierEligible({ isRecurring: true, key: 'palm_injection', category: 'tree_shrub' })).toBe(false);
+  test('a bundle keeps the badge iff it contains an eligible service', () => {
+    expect(sectionTierEligibleFromKeys(true, ['tree_shrub', 'palm_injection'])).toBe(true);   // T&S + Palm → badge (P2a/P2b)
+    expect(sectionTierEligibleFromKeys(true, ['palm_injection', 'rodent_bait'])).toBe(false);  // excluded-only bundle → no badge (Codex round-5)
   });
 
-  test('rodent suppressed; one-time sections never badge', () => {
-    expect(sectionWaveGuardTierEligible({ isRecurring: true, key: 'rodent_bait' })).toBe(false);
-    expect(sectionWaveGuardTierEligible({ isRecurring: false, key: 'lawn_care' })).toBe(false);
+  test('one-time (non-recurring) sections never badge', () => {
+    expect(sectionTierEligibleFromKeys(false, ['lawn_care'])).toBe(false);
   });
 });

@@ -7133,7 +7133,7 @@ function sectionFrequenciesForRecurringService(key, recurringService = {}, baseF
   return fallback ? [fallback] : [];
 }
 
-function buildServiceSection({ key, category, label, isRecurring, isPest, frequencies, setupFee, oneTimeBreakdown, quoteRequired }) {
+function buildServiceSection({ key, category, label, isRecurring, isPest, frequencies, setupFee, oneTimeBreakdown, quoteRequired, memberKeys }) {
   const shapedFrequencies = (Array.isArray(frequencies) ? frequencies : [])
     .map((frequency) => shapeServiceFrequency(frequency, { allowAddOns: isPest && isRecurring }));
   const sectionQuoteRequired = quoteRequired === true || shapedFrequencies.some((frequency) => frequency.quoteRequired === true);
@@ -7142,11 +7142,10 @@ function buildServiceSection({ key, category, label, isRecurring, isPest, freque
     label: label || serviceLabelForCategory(category || key),
     isRecurring: !!isRecurring,
     isPest: !!isPest,
-    // Whether this specific section may render the WaveGuard tier badge. Deny-list
-    // so a combined 'bundle' section keeps it; lets the client suppress it only on
-    // excluded sections (palm/rodent) even when the estimate-wide
-    // showWaveGuardTierUi flag is on for a bundled eligible service.
-    waveGuardTierEligible: sectionWaveGuardTierEligible({ isRecurring, key }),
+    // Single source of truth for the tier badge: eligible iff this section covers
+    // at least one badge-eligible service (memberKeys defaults to [key]; a 'bundle'
+    // passes all its recurring keys). The client reads this directly.
+    waveGuardTierEligible: sectionTierEligibleFromKeys(isRecurring, Array.isArray(memberKeys) && memberKeys.length ? memberKeys : [key]),
     isWaveGuardQualifier: PRICING_WAVEGUARD.qualifyingServices.includes(key),
     excludeFromPctDiscount: PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true,
     defaultFrequencyKey: defaultFrequencyKeyFor(shapedFrequencies),
@@ -7249,6 +7248,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       setupFee: hasRecurringPest ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
+      memberKeys: recurringKeys, // badge eligibility reflects the bundle's actual services
     })];
   }
 
@@ -7337,39 +7337,31 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
 }
 
 // Recurring service KEYS that surface the WaveGuard tier badge (Bronze), like
-// pest. Per owner decision. Matched on the service key (not category) because
-// palm_injection's section category aliases to 'tree_shrub' while its key stays
-// 'palm_injection'.
+// pest. Per owner decision. Matched on the service key (palm_injection's section
+// category aliases to 'tree_shrub' but its key stays 'palm_injection', so palm
+// and rodent are simply absent from this allow-list).
 const TIER_BADGE_ELIGIBLE_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
-// Keys explicitly suppressed from the badge even inside a badge-eligible estimate
-// (not WaveGuard-tier services). This is a DENY-list so a combined 'bundle'
-// section — which contains eligible services — keeps its badge.
-const TIER_BADGE_EXCLUDED_KEYS = new Set(['palm_injection', 'rodent_bait', 'rodent']);
 
-// GLOBAL gate input: does the estimate contain any badge-eligible recurring
-// service? (allow-list) — decides whether tier UI shows at all.
-function sectionShowsWaveGuardTier(section = {}) {
-  return !!section?.isRecurring && TIER_BADGE_ELIGIBLE_KEYS.has(section?.key);
-}
-
-// PER-SECTION: may THIS recurring section render the badge? (deny-list) — only
-// the explicitly-excluded single services (palm/rodent) are suppressed, so an
-// eligible single service AND a combined 'bundle' section both keep the badge,
-// while a palm/rodent section bundled alongside an eligible one stays badge-free.
-function sectionWaveGuardTierEligible(section = {}) {
-  return !!section?.isRecurring && !TIER_BADGE_EXCLUDED_KEYS.has(section?.key);
+// A recurring section shows the tier badge iff it represents AT LEAST ONE
+// eligible service. memberKeys = the service keys the section covers ([key] for
+// a single service; all recurring keys for a combined 'bundle'). This is the one
+// source of truth, emitted per section as `waveGuardTierEligible` and read
+// directly by the client — so: palm/rodent single sections stay badge-free, a
+// bundle with an eligible service keeps the badge, and an excluded-only
+// (palm+rodent) bundle does NOT badge.
+function sectionTierEligibleFromKeys(isRecurring, memberKeys = []) {
+  return !!isRecurring && (Array.isArray(memberKeys) ? memberKeys : []).some((k) => TIER_BADGE_ELIGIBLE_KEYS.has(k));
 }
 
 function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
   const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
-  // Tier BADGE shows when any recurring section is badge-eligible (pest or the
-  // owner-approved lawn/tree&shrub/termite/mosquito). Pest-only setup fee, perks,
-  // and add-ons stay gated on hasRecurringPest below. The per-section
-  // waveGuardTierEligible flag keeps excluded sections (palm/rodent) badge-free
-  // even when an eligible service shares the estimate.
-  const hasTierBadgeRecurringService = services.some(sectionShowsWaveGuardTier);
+  // Tier UI shows when any recurring section is badge-eligible. Derived from the
+  // same per-section flag the client reads, so the global gate and the per-section
+  // badge can never disagree. Pest-only setup fee/perks/add-ons stay on
+  // hasRecurringPest below.
+  const hasTierBadgeRecurringService = services.some((section) => section?.waveGuardTierEligible === true);
   const qualifyingCount = Number(combinedRecurring?.qualifyingCount || 0);
   const hasDiscountContext = Number(combinedRecurring?.waveGuardDiscountPct || 0) > 0
     || Number(combinedRecurring?.savingsPerMonth || 0) > 0;
@@ -8068,6 +8060,5 @@ module.exports.isLawnServiceName = isLawnServiceName;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
-module.exports.sectionShowsWaveGuardTier = sectionShowsWaveGuardTier;
-module.exports.sectionWaveGuardTierEligible = sectionWaveGuardTierEligible;
+module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;
 module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
