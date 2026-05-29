@@ -1028,6 +1028,9 @@ function initScheduledJobs() {
       if (result.socialSkipped) {
         // social portion was skipped by feature flag — don't log noise
       }
+      // Re-drive newsletter social shares stranded by a crash between
+      // send-completion and the fire-and-forget share in sendCampaign.
+      await ContentScheduler.retryStrandedNewsletterShares();
     } catch (err) {
       logger.error(`Content scheduler failed: ${err.message}`);
     }

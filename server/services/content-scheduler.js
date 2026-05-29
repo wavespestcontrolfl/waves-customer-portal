@@ -591,6 +591,53 @@ const ContentScheduler = {
   },
 
   /**
+   * Re-drive newsletter social shares that were stranded.
+   *
+   * sendCampaign fires sharePublishedNewsletter as a fire-and-forget promise,
+   * so if the process crashes/restarts before it runs, the row is left with
+   * shared_to_social=false and social_share_status pending/failed and nothing
+   * ever retries it (sharePublishedNewsletter's own stale-recovery only fires
+   * from within a call — and nothing calls it again). This sweep finds those
+   * rows and re-invokes the share; the atomic claim inside sharePublishedNewsletter
+   * makes it safe against the original promise still being in flight.
+   *
+   * Scoped to recently-sent rows so we never reanimate ancient shares. Called
+   * by the content-scheduler cron.
+   */
+  async retryStrandedNewsletterShares({ lookbackDays = 7, limit = 25 } = {}) {
+    const cutoff = new Date(Date.now() - lookbackDays * 86400000);
+    const staleProcessing = new Date(Date.now() - 5 * 60 * 1000);
+
+    const stranded = await db('newsletter_sends')
+      .where('status', 'sent')
+      .where('shared_to_social', false)
+      .where('auto_share_social', true)
+      .where('sent_at', '>=', cutoff)
+      .where((b) =>
+        b.whereIn('social_share_status', ['pending', 'failed'])
+          .orWhereNull('social_share_status')
+          .orWhere((p) =>
+            p.where('social_share_status', 'processing')
+              .where('social_share_attempted_at', '<', staleProcessing),
+          ),
+      )
+      .orderBy('sent_at', 'asc')
+      .limit(limit);
+
+    let retried = 0;
+    for (const send of stranded) {
+      try {
+        await sharePublishedNewsletter(send);
+        retried += 1;
+      } catch (err) {
+        logger.warn(`[content-scheduler] stranded-share retry failed for send ${send.id}: ${err.message}`);
+      }
+    }
+    if (retried > 0) logger.info(`[content-scheduler] re-drove ${retried} stranded newsletter social share(s)`);
+    return { candidates: stranded.length, retried };
+  },
+
+  /**
    * Get upcoming scheduled content for the next N days.
    */
   async getUpcoming(days = 7) {
