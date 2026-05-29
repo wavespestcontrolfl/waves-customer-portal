@@ -262,6 +262,13 @@ function fmtNumber(value, suffix = "") {
   return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })}${suffix}`;
 }
 
+function fmtMoney(value) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function groupText(groups = {}) {
   return [
     groups.frac ? `FRAC ${groups.frac}` : null,
@@ -280,6 +287,9 @@ function ProtocolMixCard({
 }) {
   if (!plan) return null;
   const selectedItems = plan.selectedItems || [];
+  const materialSummary = plan.materialCostSummary || {};
+  const materialTotal =
+    materialSummary.pricedLineCount > 0 ? materialSummary.total : null;
   const fullTankLabel = plan.equipment?.tankCapacityGal
     ? `${fmtNumber(plan.equipment.tankCapacityGal, " gal")} tank`
     : "Full tank";
@@ -354,10 +364,13 @@ function ProtocolMixCard({
             <div className="rounded-sm border-hairline border-zinc-200 p-3">
               {" "}
               <div className="u-label text-ink-tertiary">
-                Selected Products
+                Material Cost
               </div>{" "}
               <div className="u-nums text-16 font-medium text-zinc-900">
-                {selectedItems.length}
+                {fmtMoney(materialTotal)}
+              </div>
+              <div className="text-10 text-ink-tertiary mt-0.5">
+                {materialSummary.pricedLineCount || 0}/{materialSummary.selectedLineCount ?? selectedItems.length} lines priced
               </div>{" "}
             </div>{" "}
           </div>{" "}
@@ -380,6 +393,9 @@ function ProtocolMixCard({
                   </th>{" "}
                   <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                     Area Mix
+                  </th>{" "}
+                  <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
+                    Mat$
                   </th>{" "}
                   <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                     {fullTankLabel}
@@ -485,6 +501,16 @@ function ProtocolMixCard({
                           </>
                         ) : (
                           <div className="u-nums text-13 font-medium text-zinc-900">—</div>
+                        )}
+                      </td>{" "}
+                      <td className="px-3 py-3 text-right whitespace-nowrap">
+                        <div className="u-nums text-13 font-medium text-zinc-900">
+                          {fmtMoney(item.jobMix?.materialCost)}
+                        </div>
+                        {item.jobMix?.materialCostSource && (
+                          <div className="text-10 text-ink-tertiary">
+                            inventory
+                          </div>
                         )}
                       </td>{" "}
                       <td className="px-3 py-3 text-right whitespace-nowrap">

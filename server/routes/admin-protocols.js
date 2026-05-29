@@ -11,6 +11,7 @@ const {
   parseVisitNutrientTargets,
   parseProtocolLines,
   resolveProtocolItems,
+  summarizeMaterialCost,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 
@@ -360,6 +361,11 @@ router.get('/lawn-mix', async (req, res, next) => {
     });
 
     const selectedItems = items.filter((item) => item.selected);
+    const materialCostSummary = summarizeMaterialCost(selectedItems.map((item) => ({
+      selected: item.selected,
+      product: item.product,
+      mix: item.jobMix,
+    })));
     const warnings = [];
     if (!calibration) {
       warnings.push({
@@ -403,6 +409,7 @@ router.get('/lawn-mix', async (req, res, next) => {
         expiresAt: calibration.expires_at || null,
       } : null,
       areaSqft,
+      materialCostSummary,
       items,
       selectedItems,
       mixingOrder: buildMixOrder(selectedItems.map((item) => ({
