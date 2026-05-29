@@ -96,6 +96,12 @@ const EMPTY_SVC = {
   requires_license: false,
   license_category: "",
   min_tech_skill_level: 1,
+  requires_service_report: true,
+  requires_application_log: false,
+  required_photo_count: 0,
+  requires_customer_signature: false,
+  requires_customer_notice: false,
+  closeout_requirements_source: "inferred_v1",
   customer_visible: true,
   booking_enabled: true,
   sort_order: 100,
@@ -103,6 +109,15 @@ const EMPTY_SVC = {
   color: "#18181B",
   is_active: true,
 };
+
+const CLOSEOUT_REQUIREMENT_FIELDS = [
+  "requires_service_report",
+  "requires_application_log",
+  "required_photo_count",
+  "requires_customer_signature",
+  "requires_customer_notice",
+  "closeout_requirements_source",
+];
 
 // Visible name with the legacy "WaveGuard" suffix stripped (it's been getting
 // jammed into the name string; we surface it as a pill instead).
@@ -162,6 +177,16 @@ function categoryLabel(value) {
   );
 }
 
+function closeoutRequirementLabels(svc) {
+  return [
+    svc?.requires_service_report !== false && "Service report",
+    svc?.requires_application_log && "Application/material log",
+    Number(svc?.required_photo_count || 0) > 0 && `${Number(svc.required_photo_count)} photo${Number(svc.required_photo_count) === 1 ? "" : "s"}`,
+    svc?.requires_customer_signature && "Customer signature",
+    svc?.requires_customer_notice && "Customer notice",
+  ].filter(Boolean);
+}
+
 function Field({ label, children, half, htmlFor }) {
   return (
     <div
@@ -192,9 +217,18 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
   const rawFormId = useId().replace(/:/g, "");
   const fieldId = (key) => `${rawFormId}-${key}`;
   const [form, setForm] = useState({ ...EMPTY_SVC, ...svc });
+  const [closeoutTouched, setCloseoutTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const set = (k, v) => setForm((prev) => ({ ...prev, [k]: v }));
+  const setCloseout = (k, v) => {
+    setCloseoutTouched(true);
+    setForm((prev) => ({
+      ...prev,
+      [k]: v,
+      closeout_requirements_source: "manual",
+    }));
+  };
 
   const submit = async () => {
     if (!String(form.name || "").trim()) {
@@ -204,7 +238,11 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
     setSaving(true);
     setError("");
     try {
-      await onSave(form);
+      const payload = { ...form };
+      if (isNew && !closeoutTouched) {
+        CLOSEOUT_REQUIREMENT_FIELDS.forEach((key) => delete payload[key]);
+      }
+      await onSave(payload);
     } catch (e) {
       setError(e.message || "Save failed");
     } finally {
@@ -273,6 +311,32 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
           type="checkbox"
           checked={!!form[key]}
           onChange={(e) => set(key, e.target.checked)}
+        />
+        {label}
+      </label>
+    );
+  };
+  const closeoutChk = (key, label) => {
+    const id = fieldId(key);
+    return (
+      <label
+        htmlFor={id}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 13,
+          color: D.text,
+          cursor: "pointer",
+        }}
+      >
+        {" "}
+        <input
+          id={id}
+          name={key}
+          type="checkbox"
+          checked={!!form[key]}
+          onChange={(e) => setCloseout(key, e.target.checked)}
         />
         {label}
       </label>
@@ -452,6 +516,59 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
           </Field>{" "}
         </div>
       )}
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          color: D.muted,
+          textTransform: "uppercase",
+          letterSpacing: 0.4,
+          marginTop: 14,
+          marginBottom: 8,
+        }}
+      >
+        Closeout Requirements
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 10 }}>
+        {closeoutChk("requires_service_report", "Service report")}
+        {closeoutChk("requires_application_log", "Application/material log")}
+        {closeoutChk("requires_customer_signature", "Customer signature")}
+        {closeoutChk("requires_customer_notice", "Customer notice")}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 10 }}>
+        <Field
+          label="Required Photos"
+          half
+          htmlFor={fieldId("required_photo_count")}
+        >
+          <input
+            id={fieldId("required_photo_count")}
+            name="required_photo_count"
+            style={sInput}
+            type="number"
+            min="0"
+            step="1"
+            value={form.required_photo_count ?? 0}
+            onChange={(e) => setCloseout(
+              "required_photo_count",
+              e.target.value === "" ? 0 : Number(e.target.value),
+            )}
+          />
+        </Field>
+        <Field
+          label="Requirement Source"
+          half
+          htmlFor={fieldId("closeout_requirements_source")}
+        >
+          <input
+            id={fieldId("closeout_requirements_source")}
+            name="closeout_requirements_source"
+            style={{ ...sInput, opacity: 0.75 }}
+            value={form.closeout_requirements_source || "manual"}
+            readOnly
+          />
+        </Field>
+      </div>
       <Field label="Description" htmlFor={fieldId("description")}>
         {" "}
         <textarea
@@ -820,6 +937,7 @@ function DetailPane({
   }
 
   const products = parseProducts(svc);
+  const closeoutRequirements = closeoutRequirementLabels(svc);
 
   const handleDelete = async () => {
     if (
@@ -1065,6 +1183,52 @@ function DetailPane({
                   {p}
                 </span>
               ))}
+            </div>{" "}
+          </div>
+        )}
+        {closeoutRequirements.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            {" "}
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: D.muted,
+                textTransform: "uppercase",
+                letterSpacing: 0.4,
+                marginBottom: 6,
+              }}
+            >
+              Closeout Requirements
+            </div>{" "}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {closeoutRequirements.map((item) => (
+                <span
+                  key={item}
+                  style={{
+                    fontSize: 12,
+                    padding: "4px 10px",
+                    borderRadius: 4,
+                    background: "#F4F4F5",
+                    color: D.text,
+                    border: `1px solid ${D.border}`,
+                  }}
+                >
+                  {item}
+                </span>
+              ))}
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "4px 10px",
+                  borderRadius: 4,
+                  background: "#FAFAFA",
+                  color: D.muted,
+                  border: `1px solid ${D.border}`,
+                }}
+              >
+                {svc.closeout_requirements_source || "inferred_v1"}
+              </span>
             </div>{" "}
           </div>
         )}
