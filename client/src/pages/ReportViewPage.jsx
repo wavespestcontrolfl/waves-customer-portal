@@ -64,7 +64,7 @@ const REVIEW_LOCATIONS = [
     match: ['venice', 'north port', 'englewood', 'nokomis', '34223', '34224', '34275', '34285', '34286', '34287', '34288', '34289', '34292', '34293'],
   },
   {
-    key: 'lakewood-ranch',
+    key: 'bradenton',
     name: 'Lakewood Ranch',
     areaLabel: 'Lakewood Ranch and Bradenton',
     reviewUrl: 'https://g.page/r/CVRc_P5butTMEBM/review',
