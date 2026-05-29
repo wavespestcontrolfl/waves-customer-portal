@@ -35,6 +35,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { geocodeAddress } = require('./geocoder');
 const { classifyFreshness, cityToZone } = require('./event-freshness');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 let Anthropic;
 try {
@@ -176,13 +177,17 @@ async function normalizeRow(row) {
   // (deterministic, no API call) so the revived event re-enters the digest with
   // a current status. Guarded to: not override the Claude pass; only act on the
   // terminal states the revival concerns ('expired'/'stale_recurring'); and only
-  // when the effective date is genuinely future — so a still-past row that was
-  // re-queued for any reason is never wrongly revived, and a manually-'expired'
-  // future event (never re-queued by the revival gate) is never touched.
+  // when the effective date is today-or-later in ET — using the SAME
+  // ET-midnight-today cutoff as the ingestion revival gate and the expiry sweep
+  // (not the now() instant), so an event re-dated to earlier today ET is still
+  // recomputed and re-enters the digest rather than staying stuck excluded. A
+  // still-past row re-queued for any other reason is never wrongly revived, and
+  // a manually-'expired' future event (never re-queued) is never touched.
+  const etMidnightToday = parseETDateTime(`${etDateString()}T00:00:00`);
   if (updates.freshness_status === undefined
       && ['expired', 'stale_recurring'].includes(row.freshness_status)
       && row.event_type && row.event_type !== 'unknown'
-      && new Date(row.end_at || row.start_at) >= new Date()) {
+      && new Date(row.end_at || row.start_at) >= etMidnightToday) {
     const { freshness_status, freshness_score } = classifyFreshness({
       event_type: row.event_type,
       times_featured: row.times_featured || 0,
