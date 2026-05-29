@@ -43,6 +43,8 @@ async function seedWikiFiles() {
       }
 
       await db('knowledge_base').insert({
+        // path is NOT NULL in knowledge_base — use the source wiki file path.
+        path: `wiki/${cat}/${file}`,
         slug,
         title,
         content,
@@ -394,6 +396,9 @@ The blog content engine and pest pressure matrix pull weather data from two UF/I
     // forceUpdate is a seed-control flag, not a DB column — strip it.
     const { forceUpdate, ...row } = entry;
     const payload = {
+      // path is NOT NULL in knowledge_base. Mirror the canonical convention
+      // used by server/services/knowledge-base.js: kb/<category>/<slug>.md.
+      path: `kb/${row.category || 'general'}/${row.slug}.md`,
       ...row,
       tags: JSON.stringify(row.tags || []),
       metadata: JSON.stringify(row.metadata || {}),
