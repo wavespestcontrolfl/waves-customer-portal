@@ -1348,15 +1348,27 @@ async function buildWdoPdfAttachment(project, customer) {
   return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
 }
 
-// WDO inspection auto-invoice fee. Per owner direction the tiers are
-// $150 / $200 / $250 by STRUCTURE footprint — but the WDO inspection form
-// doesn't capture structure footprint yet (customers.property_sqft is treated
-// LAWN area, not the structure), so we bill a flat $250 for now. The invoice is
-// a draft surfaced in the dry-run, so the operator can adjust it before sending.
-// When the form starts capturing structure sq ft, switch this to the tiers.
-const WDO_INSPECTION_FLAT_FEE = 250;
-function resolveWdoInspectionFee() {
-  return WDO_INSPECTION_FLAT_FEE;
+// WDO inspection auto-invoice fee, tiered by STRUCTURE footprint (owner pricing):
+//   ≤2500 sq ft → $150 · ≤3500 → $200 · >3500 → $250.
+// We tier only on the structure footprint captured on the inspection itself
+// (findings.structure_sqft) — never customers.property_sqft, which is treated
+// LAWN area and would mis-bill. If footprint isn't entered we default to the
+// top $250 tier (conservative; the operator sees it in the dry-run and can
+// adjust). NB: kept local rather than SPECIALTY.wdo.brackets, whose $175/$200/
+// $225 values are stale relative to these owner-confirmed tiers.
+const WDO_FEE_TIERS = [
+  { maxSqFt: 2500, price: 150 },
+  { maxSqFt: 3500, price: 200 },
+  { maxSqFt: Infinity, price: 250 },
+];
+function resolveWdoInspectionFee(findings) {
+  const sqft = Number(String(findings?.structure_sqft ?? '').replace(/[^0-9.]/g, '')) || 0;
+  if (sqft > 0) {
+    for (const tier of WDO_FEE_TIERS) {
+      if (sqft <= tier.maxSqFt) return tier.price;
+    }
+  }
+  return 250; // footprint not captured — top tier, operator adjusts in dry-run
 }
 
 function isReusableInvoice(inv) {
@@ -1420,7 +1432,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
 
   // 3. Create a draft, carrying the scheduled-service / service-record linkage
   //    forward so completion + future lookups can find it.
-  const fee = resolveWdoInspectionFee();
+  const fee = resolveWdoInspectionFee(parseFindings(project));
   const created = await InvoiceService.create({
     customerId: project.customer_id,
     serviceRecordId: project.service_record_id || undefined,
