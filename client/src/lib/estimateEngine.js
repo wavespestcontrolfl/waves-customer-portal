@@ -1854,8 +1854,12 @@ export function calculateEstimate(inputs) {
   if (svcOnetimePest && !isCommercial) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
-    const bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
-    const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));
+    // Mirror the server engine (server/services/pricing-engine): one-time =
+    // (quarterly base + $99 setup-equivalent) × 1.20 premium, never below $199.
+    // Anchor on the QUARTERLY base (frequency-independent), never R.pest.pa,
+    // which would be the discounted monthly/bimonthly per-app.
+    const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));
+    const fp = Math.max(199, otP(Math.max(199, Math.round((quarterlyBase + 99) * 1.20))));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
 
