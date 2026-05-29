@@ -462,7 +462,7 @@ router.patch('/sends/:id', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
 
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial, eventIds } = req.body;
 
     // Factual-lock integrity: a flagship ("local-weekly-fresh-events") draft was
     // generated through the fact-locked, hallucination-gated pipeline. Both the
@@ -487,6 +487,17 @@ router.patch('/sends/:id', async (req, res, next) => {
       catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
     }
 
+    // event_ids: only overwrite when the client explicitly supplies it (a fresh
+    // AI re-draft or template swap changed the event set). An ordinary manual
+    // edit — or editing a loaded draft whose ids the client never set — omits
+    // it, so the stored locked ids are preserved instead of blanked. Without
+    // this, re-drafting a saved campaign would ship a new event set while the
+    // old event_ids drove times_featured.
+    const nextEventIds = eventIds !== undefined
+      ? JSON.stringify((Array.isArray(eventIds) ? eventIds : [])
+          .filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12))
+      : send.event_ids;
+
     await db('newsletter_sends').where({ id: req.params.id }).update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
@@ -500,6 +511,7 @@ router.patch('/sends/:id', async (req, res, next) => {
       ai_prompt: aiPrompt !== undefined ? aiPrompt : send.ai_prompt,
       newsletter_type: newsletterType !== undefined ? newsletterType : send.newsletter_type,
       auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
+      event_ids: nextEventIds,
       updated_at: new Date(),
     });
 
