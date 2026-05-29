@@ -114,4 +114,25 @@ describe('one-time pest anchors on the quarterly rate', () => {
     // Pure multiple off the quarterly rate.
     expect(oneTime.price).toBe(Math.max(constants.ONE_TIME.pest.floor, Math.round(oneTime.quarterlyPerApp * constants.ONE_TIME.pest.multiplier)));
   });
+
+  test('loyalty perk never drops one-time below recurring visit 1 (small-home clamp)', () => {
+    // 1,200 sf: the multiple sits near the floor, so the 15% recurring-customer
+    // perk would otherwise undercut recurring visit-1 — the clamp prevents it.
+    const small = { footprint: 1200 };
+    const recurring = priceOneTimePest(small, { isRecurringCustomer: true });
+    const visitOne = recurring.quarterlyPerApp + constants.PEST.initialFee;
+    expect(recurring.recurringIncentiveClampApplied).toBe(true);
+    expect(recurring.price).toBe(visitOne);
+    expect(recurring.price).toBeGreaterThanOrEqual(visitOne);
+
+    // Non-recurring small home is unaffected (no perk to clamp).
+    const nonRecurring = priceOneTimePest(small, { isRecurringCustomer: false });
+    expect(nonRecurring.recurringIncentiveClampApplied).toBe(false);
+    expect(nonRecurring.price).toBeGreaterThan(visitOne);
+
+    // A typical home clears recurring visit-1 even with the perk — no clamp.
+    const typical = priceOneTimePest({ footprint: 2000 }, { isRecurringCustomer: true });
+    expect(typical.recurringIncentiveClampApplied).toBe(false);
+    expect(typical.price).toBeGreaterThan(typical.quarterlyPerApp + constants.PEST.initialFee);
+  });
 });

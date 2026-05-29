@@ -1858,8 +1858,10 @@ export function calculateEstimate(inputs) {
     // quarterly base × 2.2, never below $199. The quarterly base already encodes
     // every property metric, so one-time scales proportionally. Anchor on the
     // QUARTERLY base (frequency-independent), never R.pest.pa (discounted per-app).
+    // The trailing clamp keeps the loyalty perk from dropping one-time below a
+    // recurring customer's visit-1 cost (quarterly + $99 setup).
     const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));
-    const fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
+    const fp = Math.max(quarterlyBase + 99, Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2)))));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
 

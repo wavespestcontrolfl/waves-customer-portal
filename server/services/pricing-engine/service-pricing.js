@@ -3615,7 +3615,18 @@ function priceOneTimePest(property, options = {}) {
   const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
   const discountBase = preUrgencyPrice * urgencyMultiplier;
   const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
-  const price = applyOneTimeFloor(discounted.price, ONE_TIME.pest.floor);
+  let price = applyOneTimeFloor(discounted.price, ONE_TIME.pest.floor);
+
+  // Recurring-incentive clamp. The 15% loyalty perk is applied AFTER the floor,
+  // so on small homes (where the multiple sits near the floor) it could push a
+  // one-time visit to/below a recurring customer's visit-1 cost (quarterly +
+  // $99 setup) — making a one-off cheaper than committing. Never let that
+  // happen: one-time stays at least the recurring visit-1 cost. Only binds for
+  // recurring customers on small homes with no urgency surcharge; for everyone
+  // else the multiple already clears it (guaranteed by the db-bridge invariant).
+  const recurringVisitOneCost = Math.round((base + (PEST.initialFee || 0)) * 100) / 100;
+  const recurringIncentiveClampApplied = price < recurringVisitOneCost;
+  if (recurringIncentiveClampApplied) price = recurringVisitOneCost;
 
   return {
     service: 'one_time_pest',
@@ -3626,6 +3637,8 @@ function priceOneTimePest(property, options = {}) {
     basePrice: Math.round(base * 100) / 100,
     quarterlyPerApp: Math.round(base * 100) / 100,
     multiplier,
+    recurringVisitOneCost,
+    recurringIncentiveClampApplied,
     baseSource,
     baselinePestBasePrice: baselinePest?.basePrice ?? null,
     selectedFloor: ONE_TIME.pest.floor,
