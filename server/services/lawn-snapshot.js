@@ -355,14 +355,14 @@ const PRE_REVIEW_CARD_STATUSES = ['needs_admin_review', 'draft'];
 // preserving the admin decision and its event history. Cards have no FK
 // cascade to snapshots, so they're deleted explicitly; snapshot evidence
 // cascades on snapshot delete.
-async function supersedePriorSnapshots(assessmentId) {
-  const priorIds = await db('property_health_snapshots')
+async function supersedePriorSnapshots(assessmentId, exec = db) {
+  const priorIds = await exec('property_health_snapshots')
     .where({ assessment_id: assessmentId, domain: 'lawn', customer_visible: false })
     .whereNull('approved_at')
     .pluck('id');
   if (!priorIds.length) return;
 
-  const lockedIds = await db('property_recommendation_cards')
+  const lockedIds = await exec('property_recommendation_cards')
     .whereIn('snapshot_id', priorIds)
     .where(function () {
       this.where('customer_visible', true)
@@ -377,17 +377,21 @@ async function supersedePriorSnapshots(assessmentId) {
 
   // Delete only the still-pre-review cards on these snapshots (by definition
   // all of their cards are pre-review, but scope it defensively).
-  await db('property_recommendation_cards')
+  await exec('property_recommendation_cards')
     .whereIn('snapshot_id', removableIds)
     .where('customer_visible', false)
     .whereNull('approved_at')
     .whereIn('status', PRE_REVIEW_CARD_STATUSES)
     .del();
-  await db('property_health_snapshots').whereIn('id', removableIds).del();
+  await exec('property_health_snapshots').whereIn('id', removableIds).del();
 }
 
-async function buildLawnSnapshot({ assessmentId, serviceId = null, serviceRecordId = null, generatedBy = 'system' } = {}) {
+async function buildLawnSnapshot({ assessmentId, serviceId = null, serviceRecordId = null, generatedBy = 'system', trx = null } = {}) {
   if (!assessmentId) throw new Error('assessmentId is required');
+  // When a transaction is supplied, the supersede + insert run inside it so a
+  // per-assessment advisory lock (held by the caller) serializes concurrent
+  // confirms/regenerations. Source-fact reads can stay on the base connection.
+  const exec = trx || db;
   const inputs = await getSnapshotInputs({ assessmentId });
   const assessment = inputs.assessment;
 
@@ -423,9 +427,9 @@ async function buildLawnSnapshot({ assessmentId, serviceId = null, serviceRecord
 
   // Idempotency: collapse repeated confirms / regenerations to a single
   // pre-review snapshot before inserting the fresh one.
-  await supersedePriorSnapshots(assessment.id);
+  await supersedePriorSnapshots(assessment.id, exec);
 
-  const [snapshot] = await db('property_health_snapshots').insert({
+  const [snapshot] = await exec('property_health_snapshots').insert({
     ...draft,
     property_context: JSON.stringify(draft.property_context),
     findings: JSON.stringify(draft.findings),
@@ -442,7 +446,7 @@ async function buildLawnSnapshot({ assessmentId, serviceId = null, serviceRecord
     value: JSON.stringify(row.value),
   }));
   if (evidenceRows.length) {
-    await db('property_snapshot_evidence').insert(evidenceRows);
+    await exec('property_snapshot_evidence').insert(evidenceRows);
   }
 
   return {
