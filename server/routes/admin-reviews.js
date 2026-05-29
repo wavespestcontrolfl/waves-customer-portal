@@ -7,7 +7,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
 const { getServiceContact } = require('../services/customer-contact');
 
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
@@ -138,7 +138,7 @@ router.get('/', async (req, res, next) => {
       ).first(),
       reviewsOnly.clone().modify(whereNeedsRealReply).count('* as count').first(),
       reviewsOnly.clone().modify(whereHasRealReply).count('* as count').first(),
-      reviewsOnly.clone().where('review_created_at', '>=', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()).count('* as count').first(),
+      reviewsOnly.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
         .count('* as count')
         .avg('star_rating as avg')
