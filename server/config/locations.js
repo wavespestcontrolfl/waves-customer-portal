@@ -1,4 +1,13 @@
 const WAVES_LOCATIONS = [
+  // NOTE: this entry's Google Business Profile is branded "Waves Pest
+  // Control Lakewood Ranch" but is physically the BRADENTON office
+  // (13649 Luxe Ave, the (941) 318-7612 GBP line). Waves has 5 staffed
+  // offices but only 4 GBPs — the Lakewood Ranch office proper (9040 Town
+  // Center Pkwy, main line (941) 297-5749) has no GBP and is not a separate
+  // entry here. The `id: 'lakewood-ranch'` is kept as-is because it is a
+  // stable cross-system key (Twilio default caller ID in twilio-numbers.js,
+  // review location_id rows in the DB, GBP_REFRESH_TOKEN_LWR, and the
+  // admin GBP location set). Renaming it requires a coordinated migration.
   {
     id: 'lakewood-ranch',
     name: 'Lakewood Ranch',
@@ -19,7 +28,7 @@ const WAVES_LOCATIONS = [
     id: 'parrish',
     name: 'Parrish',
     area: 'Parrish / Palmetto / Ellenton',
-    address: '5155 115th Dr E, Parrish, FL 34219',
+    address: '5155 115th Cir E, Parrish, FL 34219',
     latitude: 27.5698,
     longitude: -82.4265,
     phone: '(941) 297-2817',

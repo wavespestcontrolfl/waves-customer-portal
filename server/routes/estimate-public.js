@@ -972,7 +972,7 @@ const TERMITE_BAIT_PERKS = [
 // stays self-contained (no require cycle at render time).
 const LOCATIONS = [
   { name: 'Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: WAVES_SUPPORT_PHONE_DISPLAY, phoneRaw: WAVES_SUPPORT_PHONE_E164, slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
-  { name: 'Parrish',        address: '5155 115th Dr E, Parrish, FL 34219',       phone: '(941) 297-2817', phoneRaw: '+19412972817', slug: 'pest-control-parrish-fl',   placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
+  { name: 'Parrish',        address: '5155 115th Cir E, Parrish, FL 34219',      phone: '(941) 297-2817', phoneRaw: '+19412972817', slug: 'pest-control-parrish-fl',   placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
   { name: 'Sarasota',       address: '1450 Pine Warbler Pl, Sarasota, FL 34240', phone: '(941) 297-2606', phoneRaw: '+19412972606', slug: 'pest-control-sarasota-fl',  placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
   { name: 'Venice',         address: '1978 S Tamiami Trl #10, Venice, FL 34293', phone: '(941) 297-3337', phoneRaw: '+19412973337', slug: 'pest-control-venice-fl',    placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
 ];
