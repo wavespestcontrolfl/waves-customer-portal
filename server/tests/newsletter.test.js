@@ -25,7 +25,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
-const { isEligibleForFreshDigest } = require('../services/event-freshness');
+const { isEligibleForFreshDigest, cityToZone } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
@@ -105,6 +105,28 @@ describe('newsletter buildSubscriberQuery', () => {
     const { sql } = shapeOf({ customersOnly: true, leadsOnly: true });
     expect(sql).toMatch(/"customer_id" is not null/);
     expect(sql).toMatch(/"customer_id" is null/);
+  });
+});
+
+describe('event cityToZone — kebab/space normalization', () => {
+  test('maps space-separated city names', () => {
+    expect(cityToZone('Lakewood Ranch')).toBe('manatee');
+    expect(cityToZone('north port')).toBe('south_sarasota');
+    expect(cityToZone('Sarasota')).toBe('sarasota');
+  });
+
+  test('maps kebab-case slugs (scrape prompt + coverage_geo format)', () => {
+    expect(cityToZone('lakewood-ranch')).toBe('manatee');
+    expect(cityToZone('north-port')).toBe('south_sarasota');
+    expect(cityToZone('st-petersburg')).toBe('pinellas');
+    expect(cityToZone('punta-gorda')).toBe('south_sarasota');
+    expect(cityToZone('siesta-key')).toBe('sarasota');
+  });
+
+  test('unknown / empty city returns null', () => {
+    expect(cityToZone('Orlando')).toBeNull();
+    expect(cityToZone('')).toBeNull();
+    expect(cityToZone(null)).toBeNull();
   });
 });
 
