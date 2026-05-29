@@ -23,6 +23,7 @@ const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
 const serviceLibrary = require('../services/service-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -1041,17 +1042,20 @@ router.get('/:id', async (req, res, next) => {
       return { signed: true, signer_name: s.signer_name || null, signed_at: s.signed_at || null };
     })();
 
-    const propertyProfile = (() => {
-      let p = project.property_profile;
+    const parseJsonCol = (v) => {
+      let p = v;
       if (typeof p === 'string') { try { p = JSON.parse(p); } catch { p = null; } }
       return p && typeof p === 'object' ? p : null;
-    })();
+    };
+    const propertyProfile = parseJsonCol(project.property_profile);
+    const wdoHistory = parseJsonCol(project.wdo_history);
 
     res.json({
       project: {
         ...project,
         wdo_signature: wdoSignature,
         property_profile: propertyProfile,
+        wdo_history: wdoHistory,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },
@@ -1249,6 +1253,62 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
     res.json(result);
   } catch (err) {
     logger.error(`[projects] WDO intelligence failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/wdo-history — research prior WDO treatment + permit
+// history for the property (FDACS Section 4). Opt-in (separate web-search call).
+// Body (JSON): { project_id?, customer_id?, property_address? }. Cached on the
+// project when project_id is supplied.
+// ---------------------------------------------------------------------------
+router.post('/wdo-history', async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+
+    const customerId = req.body?.customer_id || null;
+    const projectId = req.body?.project_id || null;
+    let scopedCustomerId = customerId;
+
+    if (projectId) {
+      const project = await db('projects').where({ id: projectId }).first();
+      if (!(await requireProjectAccess(req, res, project))) return;
+      if (project.project_type !== 'wdo_inspection') return res.status(400).json({ error: 'Project is not a WDO inspection' });
+      scopedCustomerId = project.customer_id || customerId;
+    } else if (!isAdmin(req)) {
+      if (!customerId) return res.status(400).json({ error: 'Customer required for technician WDO history' });
+      await validateProjectCreateScope(req, { customer_id: customerId });
+    }
+
+    const customer = scopedCustomerId
+      ? await db('customers').where({ id: scopedCustomerId }).whereNull('deleted_at').first()
+      : null;
+    if (scopedCustomerId && !customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const propertyAddress = cleanOneLine(req.body?.property_address, 500) || formatCustomerPropertyAddress(customer);
+    if (!propertyAddress) return res.status(400).json({ error: 'Property address required' });
+
+    const history = await lookupWdoHistory(propertyAddress);
+    if (!history) {
+      return res.json({ history: null, message: 'No treatment or permit history found — verify on site.' });
+    }
+
+    if (projectId) {
+      const cols = await db('projects').columnInfo().catch(() => ({}));
+      if (cols.wdo_history) {
+        await db('projects').where({ id: projectId })
+          .update({ wdo_history: JSON.stringify(history), updated_at: db.fn.now() })
+          .catch((err) => logger.warn(`[projects] could not cache WDO history for ${projectId}: ${err.message}`));
+      }
+    }
+
+    logger.info('[projects] WDO history generated', {
+      projectId, previousTreatment: history.previousTreatment, confidence: history.confidence,
+    });
+    res.json({ history });
+  } catch (err) {
+    logger.error(`[projects] WDO history failed: ${err.message}`);
     next(err);
   }
 });

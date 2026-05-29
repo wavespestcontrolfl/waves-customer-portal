@@ -40,7 +40,9 @@ export default function WdoIntelligenceBar({
   findings = {},
   onApplySuggestions,
   onApplyProfile,
+  onApplyHistory,
   initialProfile = null,
+  initialHistory = null,
   onEvidencePhotoSelected,
   disabled = false,
   palette,
@@ -52,6 +54,10 @@ export default function WdoIntelligenceBar({
   const [error, setError] = useState('');
   const [applied, setApplied] = useState(false);
   const [specsApplied, setSpecsApplied] = useState(false);
+  const [history, setHistory] = useState(initialHistory);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyApplied, setHistoryApplied] = useState(false);
+  const [historyMsg, setHistoryMsg] = useState('');
 
   // Profile comes from the latest analyze result, or the cached project profile.
   const profile = result?.propertyProfile || initialProfile || null;
@@ -64,6 +70,55 @@ export default function WdoIntelligenceBar({
     onApplyProfile(profile);
     setSpecsApplied(true);
   }
+
+  function applyHistory() {
+    if (!history || !onApplyHistory) return;
+    onApplyHistory(history);
+    setHistoryApplied(true);
+  }
+
+  async function findHistory() {
+    if (disabled || historyLoading) return;
+    const address = String(propertyAddress || findings.property_address || '').trim();
+    if (!customerId && !address) {
+      setError('Pick a customer or enter the property address first.');
+      return;
+    }
+    setHistoryLoading(true);
+    setError('');
+    setHistoryApplied(false);
+    setHistoryMsg('');
+    try {
+      const res = await adminFetch('/admin/projects/wdo-history', {
+        method: 'POST',
+        body: {
+          ...(projectId ? { project_id: projectId } : {}),
+          ...(customerId ? { customer_id: customerId } : {}),
+          ...(address ? { property_address: address } : {}),
+        },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'WDO history lookup failed');
+      setHistory(data.history || null);
+      if (!data.history) setHistoryMsg(data.message || 'No prior treatment or permit history found — verify on site.');
+    } catch (e) {
+      setError(e.message || 'WDO history lookup failed');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  const historyRows = history
+    ? [
+      ['Previous treatment', history.previousTreatment && history.previousTreatment !== 'unknown' ? history.previousTreatment.toUpperCase() : 'Unknown'],
+      ['Notes', history.treatmentNotes],
+      ['Fumigation', history.fumigation
+        ? [history.fumigation.fumigant, history.fumigation.date, history.fumigation.company].filter(Boolean).join(' · ')
+        : ''],
+      ['Re-roof permit', history.roofPermitYear ? String(history.roofPermitYear) : ''],
+      ['Permits found', history.permits?.length ? String(history.permits.length) : ''],
+    ].filter(([, v]) => hasValue(v))
+    : [];
 
   function handlePhotoChange(e) {
     const file = e.target.files?.[0] || null;
@@ -213,6 +268,25 @@ export default function WdoIntelligenceBar({
             Replace fields
           </button>
         )}
+        <button
+          type="button"
+          onClick={findHistory}
+          disabled={disabled || historyLoading}
+          title="Search county permits and listing history for prior WDO treatment (FDACS Section 4)"
+          style={{
+            padding: '7px 10px',
+            borderRadius: 6,
+            border: `1px solid ${P.border}`,
+            background: P.card,
+            color: P.heading,
+            fontSize: 11,
+            fontWeight: 800,
+            cursor: disabled || historyLoading ? 'default' : 'pointer',
+            opacity: disabled || historyLoading ? 0.55 : 1,
+          }}
+        >
+          {historyLoading ? 'Searching…' : 'Treatment history'}
+        </button>
       </div>
 
       {error && (
@@ -283,6 +357,55 @@ export default function WdoIntelligenceBar({
           )}
           {specsApplied && (
             <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>Specs applied to the report fields.</div>
+          )}
+        </div>
+      )}
+
+      {historyMsg && !history && (
+        <div style={{ fontSize: 11, color: P.muted }}>{historyMsg}</div>
+      )}
+
+      {historyRows.length > 0 && (
+        <div style={{ border: `1px solid ${P.border}`, borderRadius: 6, background: P.card, padding: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 900, color: P.heading, textTransform: 'uppercase' }}>
+              Treatment history (Section 4)
+            </span>
+            {onApplyHistory && (
+              <button
+                type="button"
+                onClick={applyHistory}
+                disabled={disabled}
+                style={{
+                  padding: '5px 9px', borderRadius: 6, border: `1px solid ${P.accent}`,
+                  background: P.accent, color: P.accentText, fontSize: 11, fontWeight: 800,
+                  cursor: disabled ? 'default' : 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                Apply to Section 4
+              </button>
+            )}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            {historyRows.map(([label, value]) => (
+              <div key={label} style={{ fontSize: 11, color: P.text, lineHeight: 1.4 }}>
+                <span style={{ color: P.muted }}>{label}: </span>
+                <span style={{ fontWeight: 700 }}>{String(value)}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: P.muted, marginTop: 6 }}>
+            {history.confidence ? `Confidence: ${history.confidence}` : ''}
+            {history.sources?.length ? (
+              <>
+                {history.confidence ? ' · ' : ''}
+                <a href={history.sources[0]} target="_blank" rel="noreferrer" style={{ color: P.muted }}>source</a>
+              </>
+            ) : ''}
+            {' · '}Auto-pulled — verify on site before filing.
+          </div>
+          {historyApplied && (
+            <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>Applied to Section 4 fields.</div>
           )}
         </div>
       )}

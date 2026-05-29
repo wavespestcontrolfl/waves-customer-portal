@@ -6,7 +6,7 @@ import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
-import { applyProfileToWdoFindings } from "../../lib/wdoProfileToFindings";
+import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
 import { COLORS, FONTS } from "../../theme-brand";
 
@@ -1951,6 +1951,11 @@ function ProjectDetail({
     setDirty(true);
   }
 
+  function applyWdoHistory(history) {
+    setEditFindings((f) => applyHistoryToWdoFindings(f, history, { overwrite: true }));
+    setDirty(true);
+  }
+
   if (loading || !project) {
     return (
       <div
@@ -2223,7 +2228,9 @@ function ProjectDetail({
             findings={editFindings}
             onApplySuggestions={applyWdoSuggestions}
             onApplyProfile={applyWdoProfile}
+            onApplyHistory={applyWdoHistory}
             initialProfile={project.property_profile || null}
+            initialHistory={project.wdo_history || null}
             onEvidencePhotoSelected={handleEvidencePhotoSelected}
             disabled={saving || aiWriting}
             palette={{

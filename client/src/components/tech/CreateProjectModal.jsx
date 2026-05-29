@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
-import { applyProfileToWdoFindings } from '../../lib/wdoProfileToFindings';
+import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 
 const ESTIMATE_BG = '#FAF8F3';
@@ -472,6 +472,10 @@ export default function CreateProjectModal({
     setFindings(prev => applyProfileToWdoFindings(prev, profile, { overwrite: true }));
   }
 
+  function applyWdoHistory(history) {
+    setFindings(prev => applyHistoryToWdoFindings(prev, history, { overwrite: true }));
+  }
+
   async function handleAiDraft() {
     if (!projectType) return setError('Pick a project type first');
     const hasFindings = Object.values(findings).some(v => String(v || '').trim());
@@ -828,6 +832,7 @@ export default function CreateProjectModal({
                   findings={findings}
                   onApplySuggestions={applyWdoSuggestions}
                   onApplyProfile={applyWdoProfile}
+                  onApplyHistory={applyWdoHistory}
                   onEvidencePhotoSelected={(file) => queuePhoto(file, 'previous_treatment')}
                   disabled={saving || aiWriting}
                   palette={P}
