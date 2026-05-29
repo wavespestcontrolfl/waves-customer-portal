@@ -4,6 +4,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
+import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
 import { COLORS, FONTS } from "../../theme-brand";
 
@@ -1427,6 +1428,9 @@ function ProjectDetail({
   const hasPrepGuide = project
     ? PROJECT_TYPES_WITH_PREP_GUIDES.has(project.project_type)
     : false;
+  // WDO reports can't be sent until the licensee signature is captured.
+  const wdoNeedsSignature =
+    project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
 
   useEffect(() => {
     if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
@@ -2560,6 +2564,16 @@ function ProjectDetail({
         )}
         <ProjectHistoryPanel activity={data.activity || []} />{" "}
       </div>
+      {canAdminActions && project.project_type === WDO_TYPE && project.status !== "closed" && (
+        <div style={{ padding: "0 16px" }}>
+          <WdoSignaturePad
+            projectId={project.id}
+            signature={project.wdo_signature}
+            defaultSignerName={project.tech_name || ""}
+            onChanged={() => load({ preserveEdits: true })}
+          />
+        </div>
+      )}
       {/* Footer actions */}
       <div
         style={{
@@ -2646,8 +2660,9 @@ function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving}
-              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+              disabled={saving || wdoNeedsSignature}
+              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              title={wdoNeedsSignature ? "Capture the licensee signature first" : undefined}
             >
               Resend report
             </button>
@@ -2658,8 +2673,9 @@ function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving}
-              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+              disabled={saving || wdoNeedsSignature}
+              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              title={wdoNeedsSignature ? "Capture the licensee signature first" : undefined}
             >
               Send report
             </button>
@@ -2670,9 +2686,9 @@ function ProjectDetail({
             <button
               type="button"
               onClick={handleSendWithInvoice}
-              disabled={saving}
-              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
-              title="Send the filled FDACS-13645 report and an invoice together via email + text"
+              disabled={saving || wdoNeedsSignature}
+              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              title={wdoNeedsSignature ? "Capture the licensee signature first" : "Send the filled FDACS-13645 report and an invoice together via email + text"}
             >
               Send report + invoice
             </button>

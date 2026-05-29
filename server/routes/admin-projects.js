@@ -1024,9 +1024,19 @@ router.get('/:id', async (req, res, next) => {
       isExpired: project.prep_expires_at ? new Date(project.prep_expires_at) < new Date() : false,
     } : null;
 
+    // Strip the heavy signature image from the detail payload — expose only
+    // the metadata the UI needs (signed state, who, when).
+    const wdoSignature = (() => {
+      let s = project.wdo_signature;
+      if (typeof s === 'string') { try { s = JSON.parse(s); } catch { s = null; } }
+      if (!s || !s.image) return null;
+      return { signed: true, signer_name: s.signer_name || null, signed_at: s.signed_at || null };
+    })();
+
     res.json({
       project: {
         ...project,
+        wdo_signature: wdoSignature,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },
@@ -1280,14 +1290,54 @@ async function resolveProjectApplicator(project) {
   return { name, idCardNo };
 }
 
-// Build the filled FDACS-13645 PDF for a WDO project as an email attachment.
-// Returns null (and logs) on any failure so a render hiccup never blocks the
-// rest of the delivery.
+// Read the captured licensee e-signature off the project (JSONB column).
+function loadWdoSignature(project) {
+  let sig = project.wdo_signature;
+  if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
+  if (!sig || !sig.image) return null;
+  return {
+    image: sig.image,
+    contentType: sig.content_type || 'image/png',
+    signerName: sig.signer_name || '',
+    signedAt: sig.signed_at || null,
+  };
+}
+
+// Fetch the project's photos from S3 as buffers for the PDF photo addendum,
+// ordered the way the tech arranged them. Failures on individual photos are
+// skipped so one bad object can't sink the whole report.
+async function loadWdoAddendumPhotos(project) {
+  const rows = await db('project_photos')
+    .where({ project_id: project.id })
+    .orderBy('sort_order', 'asc')
+    .orderBy('created_at', 'asc')
+    .catch(() => []);
+  const out = [];
+  for (const ph of rows) {
+    try {
+      const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }));
+      const buffer = await streamToBuffer(object.Body);
+      if (!buffer.length) continue;
+      out.push({ buffer, contentType: object.ContentType || 'image/jpeg', caption: ph.caption || '' });
+    } catch (err) {
+      logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
+    }
+  }
+  return out;
+}
+
+// Build the filled FDACS-13645 PDF (+ signature + photo addendum) for a WDO
+// project as an email attachment. Returns null (and logs) on any failure so a
+// render hiccup never blocks the rest of the delivery.
 async function buildWdoPdfAttachment(project, customer) {
   if (project?.project_type !== 'wdo_inspection') return null;
   try {
-    const applicator = await resolveProjectApplicator(project);
-    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator });
+    const [applicator, photos] = await Promise.all([
+      resolveProjectApplicator(project),
+      loadWdoAddendumPhotos(project),
+    ]);
+    const signature = loadWdoSignature(project);
+    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
     return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
   } catch (err) {
     logger.error(`[projects] WDO PDF build failed for ${project.id}: ${err.message}`);
@@ -1413,6 +1463,12 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    // A WDO report is an official FDACS-13645 filing — it must carry the
+    // licensee signature, so block the send until one is captured.
+    if (project.project_type === 'wdo_inspection' && !loadWdoSignature(project)) {
+      return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+    }
 
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
@@ -1610,11 +1666,72 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
-    const applicator = await resolveProjectApplicator(project);
-    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator });
+    const [applicator, photos] = await Promise.all([
+      resolveProjectApplicator(project),
+      loadWdoAddendumPhotos(project),
+    ]);
+    const signature = loadWdoSignature(project);
+    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="FDACS-13645-${project.id}.pdf"`);
     res.send(buffer);
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/:id/wdo-signature — capture the licensee
+// e-signature for a WDO report. Tech or admin (the licensee signs in the
+// field). Body: { signature (PNG/JPEG data URL), signer_name?, signer_id_card?,
+// attestation? }. DELETE clears it.
+// ---------------------------------------------------------------------------
+const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024; // 2MB
+
+router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.project_type !== 'wdo_inspection') {
+      return res.status(400).json({ error: 'Signatures are only captured for WDO inspections' });
+    }
+    const cols = await db('projects').columnInfo().catch(() => ({}));
+    if (!cols.wdo_signature) {
+      return res.status(503).json({ error: 'Signature capture is not available yet (pending migration)' });
+    }
+
+    const image = String(req.body?.signature || '').trim();
+    const m = image.match(/^data:(image\/(?:png|jpeg));base64,(.+)$/i);
+    if (!m) return res.status(400).json({ error: 'signature must be a PNG or JPEG data URL' });
+    const approxBytes = Math.floor((m[2].length * 3) / 4);
+    if (approxBytes > MAX_SIGNATURE_BYTES) {
+      return res.status(413).json({ error: 'Signature image too large (max 2MB)' });
+    }
+
+    const applicator = await resolveProjectApplicator(project);
+    const signature = {
+      image,
+      content_type: m[1].toLowerCase(),
+      signer_name: String(req.body?.signer_name || applicator.name || '').trim().slice(0, 120),
+      signer_id_card: String(req.body?.signer_id_card || applicator.idCardNo || '').trim().slice(0, 60),
+      attestation: String(req.body?.attestation || 'I certify I performed this inspection and the findings are accurate.').trim().slice(0, 500),
+      signed_at: new Date().toISOString(),
+      signed_by_tech_id: req.technicianId || null,
+    };
+
+    await db('projects').where({ id: project.id }).update({ wdo_signature: JSON.stringify(signature), updated_at: db.fn.now() });
+    await logProjectActivity(req, project, 'project_wdo_signed', `WDO report signed by ${signature.signer_name || 'licensee'}`, { signer_name: signature.signer_name });
+    res.json({ ok: true, signed_at: signature.signed_at, signer_name: signature.signer_name });
+  } catch (err) { next(err); }
+});
+
+router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const cols = await db('projects').columnInfo().catch(() => ({}));
+    if (cols.wdo_signature) {
+      await db('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
+    }
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 
@@ -1639,6 +1756,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (project.project_type !== 'wdo_inspection') {
       return res.status(400).json({ error: 'Report + invoice send is only available for WDO inspections' });
     }
+    // Official FDACS-13645 filing — require the licensee signature first.
+    if (!loadWdoSignature(project)) {
+      return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+    }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
 
     const customer = await db('customers').where({ id: project.customer_id }).first();
@@ -1658,7 +1779,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       invoiceId: req.body?.invoice_id,
     });
 
-    if (['paid', 'void'].includes(invoice.status)) {
+    // Match the canonical invoice non-sendable statuses (invoice.js): don't
+    // push another pay link for an invoice that's paid, void, mid-send, or has
+    // a bank payment (ACH) already in flight ('processing').
+    if (['paid', 'void', 'processing', 'sending'].includes(invoice.status)) {
       return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
     }
 

@@ -20,7 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const logger = require('../logger');
 const {
   WAVES_BUSINESS_NAME,
@@ -226,7 +226,7 @@ function resolveApplicator({ project = {}, findings = {} }) {
  *   load has no `tech_name`, so callers resolve the technician and pass it in;
  *   we fall back to the project/findings only if it's omitted.
  */
-async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride } = {}) {
+async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [] } = {}) {
   if (!project) throw new Error('project required for WDO report PDF');
   const findings = asObject(project.findings);
   const resolved = resolveApplicator({ project, findings });
@@ -244,20 +244,178 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
   }
   applyCheckboxes(form, findings);
 
-  // Flatten so the filed report is read-only (signature line stays blank for
-  // the licensee). flatten() bakes field values into page content.
+  // Stamp the licensee e-signature into the signature field BEFORE flattening,
+  // if one was captured. The image is drawn onto the page (independent of the
+  // form field), so it survives flatten().
+  if (signature?.image) {
+    await stampSignature(pdfDoc, form, signature).catch((err) => {
+      logger.warn(`[wdo-pdf] signature stamp failed for project ${project.id}: ${err.message}`);
+    });
+  }
+
+  // Flatten so the filed report is read-only.
   try {
     form.flatten();
   } catch (err) {
     logger.warn(`[wdo-pdf] flatten failed for project ${project.id}: ${err.message}`);
   }
 
+  // Append the Supplemental Photo Addendum (2 captioned photos per page).
+  if (Array.isArray(photos) && photos.length) {
+    await appendPhotoAddendum(pdfDoc, {
+      photos,
+      propertyAddress: clean(textValues['Address of Property Inspected']),
+    }).catch((err) => {
+      logger.warn(`[wdo-pdf] photo addendum failed for project ${project.id}: ${err.message}`);
+    });
+  }
+
   const bytes = await pdfDoc.save();
   return Buffer.from(bytes);
+}
+
+// Decode a base64 PNG/JPEG data URL or raw base64 string into a Buffer.
+function decodeImageInput(input) {
+  if (Buffer.isBuffer(input)) return input;
+  const str = String(input || '');
+  const m = str.match(/^data:(image\/[a-z+]+);base64,(.*)$/i);
+  const b64 = m ? m[2] : str;
+  return Buffer.from(b64, 'base64');
+}
+
+async function embedImageAuto(pdfDoc, buffer, contentType) {
+  const type = String(contentType || '').toLowerCase();
+  // PNG magic: 89 50 4E 47
+  const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  if (type.includes('png') || isPng) return pdfDoc.embedPng(buffer);
+  return pdfDoc.embedJpg(buffer); // pdf-lib supports png + jpg only
+}
+
+// Draw the captured signature image into the FDACS 'signaturelicensee' field.
+async function stampSignature(pdfDoc, form, signature) {
+  const buffer = decodeImageInput(signature.image);
+  const png = await embedImageAuto(pdfDoc, buffer, signature.contentType || 'image/png');
+  const field = form.getTextField('signaturelicensee');
+  const widget = field.acroField.getWidgets()[0];
+  const rect = widget.getRectangle();
+  const page = findWidgetPage(pdfDoc, widget) || pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
+  // Fit inside the field box, preserving aspect, with a little vertical padding.
+  const maxW = rect.width - 4;
+  const maxH = rect.height - 2;
+  const scale = Math.min(maxW / png.width, maxH / png.height);
+  const w = png.width * scale;
+  const h = png.height * scale;
+  page.drawImage(png, { x: rect.x + 2, y: rect.y + (rect.height - h) / 2, width: w, height: h });
+}
+
+function findWidgetPage(pdfDoc, widget) {
+  let pageRef = null;
+  try { pageRef = widget.P(); } catch { pageRef = null; }
+  if (!pageRef) return null;
+  for (const page of pdfDoc.getPages()) {
+    if (page.ref === pageRef) return page;
+  }
+  return null;
+}
+
+function sanitizeText(value) {
+  // StandardFonts (WinAnsi) can't encode arbitrary unicode; replace common
+  // smart punctuation and drop anything outside the safe range.
+  return String(value || '')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, '-')
+    .replace(/[^\x20-\x7E]/g, '');
+}
+
+function wrapText(text, font, size, maxWidth) {
+  const words = sanitizeText(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, size) > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/**
+ * Append "SUPPLEMENTAL PHOTO ADDENDUM" pages — 2 photos per page, each with a
+ * "Photo N - {caption}" line, matching the supplied sample format.
+ * @param {Array<{ buffer?:Buffer, image?:string, contentType?:string, caption?:string }>} photos
+ */
+async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress }) {
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const PAGE_W = 612;
+  const PAGE_H = 792;
+  const MARGIN = 54;
+  const contentW = PAGE_W - MARGIN * 2;
+  const gray = rgb(0.4, 0.4, 0.4);
+
+  // Each page holds 2 photo slots below the header.
+  const headerBottom = PAGE_H - 96;
+  const slotH = (headerBottom - MARGIN) / 2; // vertical space per photo+caption
+  const captionH = 28;
+  const imgBoxH = slotH - captionH;
+
+  let photoNum = 0;
+  let addendumPage = 0;
+  for (let i = 0; i < photos.length; i += 2) {
+    addendumPage += 1;
+    const page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+
+    // Header
+    const title = 'SUPPLEMENTAL PHOTO ADDENDUM';
+    const titleW = bold.widthOfTextAtSize(title, 14);
+    page.drawText(title, { x: (PAGE_W - titleW) / 2, y: PAGE_H - 50, size: 14, font: bold });
+    const sub = sanitizeText(`WDO Inspection Report - ${propertyAddress || ''}`);
+    const subW = font.widthOfTextAtSize(sub, 10);
+    page.drawText(sub, { x: (PAGE_W - subW) / 2, y: PAGE_H - 66, size: 10, font, color: gray });
+    const pageLabel = `Page A-${addendumPage}`;
+    page.drawText(pageLabel, { x: PAGE_W - MARGIN - font.widthOfTextAtSize(pageLabel, 10), y: PAGE_H - 66, size: 10, font, color: gray });
+    page.drawLine({ start: { x: MARGIN, y: PAGE_H - 76 }, end: { x: PAGE_W - MARGIN, y: PAGE_H - 76 }, thickness: 0.75, color: gray });
+
+    for (let s = 0; s < 2; s += 1) {
+      const photo = photos[i + s];
+      if (!photo) break;
+      photoNum += 1;
+      const slotTop = headerBottom - s * slotH;
+      const imgTop = slotTop;
+      const imgBottom = slotTop - imgBoxH;
+
+      try {
+        const buffer = photo.buffer || decodeImageInput(photo.image);
+        const img = await embedImageAuto(pdfDoc, buffer, photo.contentType);
+        const scale = Math.min(contentW / img.width, imgBoxH / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        page.drawImage(img, { x: (PAGE_W - w) / 2, y: imgBottom + (imgBoxH - h), width: w, height: h });
+      } catch (err) {
+        logger.warn(`[wdo-pdf] could not embed addendum photo ${photoNum}: ${err.message}`);
+        page.drawText(`[Photo ${photoNum} unavailable]`, { x: MARGIN, y: imgBottom + imgBoxH / 2, size: 10, font, color: gray });
+      }
+
+      // Caption under the image
+      const captionText = `Photo ${photoNum} - ${photo.caption || ''}`.trim();
+      const lines = wrapText(captionText, font, 9, contentW).slice(0, 2);
+      let cy = imgBottom - 12;
+      for (const ln of lines) {
+        page.drawText(ln, { x: MARGIN, y: cy, size: 9, font, color: rgb(0.1, 0.1, 0.1) });
+        cy -= 11;
+      }
+    }
+  }
 }
 
 module.exports = {
   buildWdoReportPDFBuffer,
   // exported for tests
-  _private: { splitCompanyAddress, resolveApplicator, buildTextValues },
+  _private: { splitCompanyAddress, resolveApplicator, buildTextValues, decodeImageInput, wrapText, sanitizeText },
 };

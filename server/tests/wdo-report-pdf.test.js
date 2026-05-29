@@ -71,4 +71,36 @@ describe('wdo-report-pdf', () => {
   test('buildWdoReportPDFBuffer throws without a project', async () => {
     await expect(buildWdoReportPDFBuffer({})).rejects.toThrow(/project required/);
   });
+
+  const ONE_PX_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+
+  test('appends a photo addendum (2 photos per page)', async () => {
+    const { PDFDocument } = require('pdf-lib');
+    const buffer = Buffer.from(ONE_PX_PNG, 'base64');
+    const photos = [
+      { buffer, contentType: 'image/png', caption: 'Photo A' },
+      { buffer, contentType: 'image/png', caption: 'Photo B' },
+      { buffer, contentType: 'image/png', caption: 'Photo C' },
+    ];
+    const out = await buildWdoReportPDFBuffer({ project: baseProject, customer, photos });
+    const doc = await PDFDocument.load(out);
+    expect(doc.getPageCount()).toBe(4); // 2 FDACS form pages + 2 addendum pages (3 photos)
+  });
+
+  test('stamps a signature without throwing', async () => {
+    const out = await buildWdoReportPDFBuffer({
+      project: baseProject,
+      customer,
+      signature: { image: `data:image/png;base64,${ONE_PX_PNG}`, contentType: 'image/png', signerName: 'Adam Benetti' },
+    });
+    expect(Buffer.isBuffer(out)).toBe(true);
+    expect(out.slice(0, 5).toString()).toBe('%PDF-');
+  });
+
+  test('decodeImageInput handles data URLs and raw base64', () => {
+    const fromDataUrl = _private.decodeImageInput(`data:image/png;base64,${ONE_PX_PNG}`);
+    const fromRaw = _private.decodeImageInput(ONE_PX_PNG);
+    expect(Buffer.isBuffer(fromDataUrl)).toBe(true);
+    expect(fromDataUrl.equals(fromRaw)).toBe(true);
+  });
 });
