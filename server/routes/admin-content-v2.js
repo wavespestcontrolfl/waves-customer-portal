@@ -11,6 +11,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { normalizeSpokeSites, invalidSpokeSites } = require('../services/content-astro/spoke-sites');
 const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
 const internalLinkReviewQueue = require('../services/content/internal-link-review-queue');
+const { isEnabled } = require('../config/feature-gates');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -235,6 +236,37 @@ router.post('/autonomous/review/:id/decision', async (req, res, next) => {
     });
     if (!item) return res.status(404).json({ error: 'Review item not found' });
     res.json({ success: true, item });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/content/autonomous/run-now
+// Owner-triggered single cycle of the autonomous content engine on the
+// deployed server (which has DB + GitHub + Anthropic creds) — the same work
+// the 7:30am miner + 9am runner crons do, but on demand. Mines fresh
+// opportunities first (so the facts-readiness boost is applied), then claims +
+// runs the top pending item via runNext. Publishing is still fully gated by
+// SHADOW_MODE_* / trust-build / all content gates; this only triggers a cycle.
+// Body: { mine?: boolean (default true), minScore?: number, periodDays?: number }
+router.post('/autonomous/run-now', aiContentLimiter, async (req, res, next) => {
+  try {
+    if (!isEnabled('autonomousContentEngine')) {
+      return res.status(409).json({ error: 'Autonomous content engine is disabled (GATE_AUTONOMOUS_CONTENT).' });
+    }
+    const runner = require('../services/content/autonomous-runner');
+    const miner = require('../services/seo/gsc-opportunity-miner');
+    const doMine = req.body?.mine !== false;
+    const minScore = req.body?.minScore != null ? parseInt(req.body.minScore, 10) : undefined;
+    const periodDays = req.body?.periodDays != null ? parseInt(req.body.periodDays, 10) : 28;
+
+    let mined = null;
+    if (doMine) {
+      const result = await miner.mineAll({ periodDays, persist: true });
+      mined = { persisted: result.persisted, counts: result.counts, errors: result.errors };
+    }
+
+    const run = await runner.runNext({ minScore });
+    logger.info(`[content] manual run-now by ${req.technicianId || 'admin'}: outcome=${run.outcome} action=${run.action_type || '-'} opp=${run.opportunity_id || '-'} pr=${run.astro_pr_url || '-'}`);
+    res.json({ success: true, mined, run });
   } catch (err) { next(err); }
 });
 
