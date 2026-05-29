@@ -97,7 +97,9 @@ All under tech auth (`requireTechOrAdmin`):
 - `POST /api/tech/lawn-diagnostic` — create/persist a draft.
 - `POST /api/tech/lawn-diagnostic/:id/send` — capture contact, mint token, render report. Gate: contact required.
 - `POST /api/tech/lawn-diagnostic/:id/lead` — save as lead (optional).
-- Public: `GET /api/public/lawn-diagnostic/:token` — tokenized report, rate-limited, whitelisted payload (no internal scores/notes).
+- Public (no-auth, by design — see Public-route policy below):
+  - `GET /api/public/lawn-diagnostic/:token` — read-only tokenized report.
+  - `POST /api/public/lawn-diagnostic/:token/quote-request` — request-a-quote CTA write.
 
 ## UI
 New mobile-first **Lawn Diagnostic** view under `/tech/*` (dark `D` palette per CLAUDE.md —
@@ -115,6 +117,33 @@ send path on it (low confidence → "review before sending"). Optional for v1.
 2. Diagnostic rows never appear in `lawn-health` endpoints or any analytics builder — free, separate table.
 3. Public report payload whitelisted — no internal scores/notes leak.
 4. Never writes `lawn_assessments` or any baseline/snapshot table.
+
+## Public-route policy compliance (AGENTS.md) — REQUIRED before/at implementation
+AGENTS.md maintains the canonical allowlist of public-by-token routes and treats
+**any new public route outside that list as P0**. Both public endpoints above MUST be
+added to that allowlist (AGENTS.md "Public-by-token routes" section) **in the
+implementation PR**, each with an explicit contract. This is a planning commitment, not
+optional.
+
+### `GET /api/public/lawn-diagnostic/:token` (read) — model on `/api/public/prep/:token`
+- 32-hex token format gate (`FULL_TOKEN_RE`-style) — generic 404 on any miss/expiry/mismatch.
+- 60 req/min public-route rate limit.
+- Privacy headers: `no-store`, `noindex`, `no-referrer`.
+- Read-only; whitelisted payload (no internal scores, raw AI, product names, or tech notes).
+- Honors `report_expires_at`; expired → generic 404.
+
+### `POST /api/public/lawn-diagnostic/:token/quote-request` (write) — model on lead-webhook / newsletter-subscribe
+- Same 32-hex token gate + generic 404; only valid for a `sent` diagnostic.
+- Strict body validation BEFORE any coercion (reject `null`/`''`/`false`/`[]` — no silent
+  `Number()`/truthy coercion), per the `/api/reports/:token/*` write rules.
+- Dedicated public-route rate limiter + spam guard; double-submit protection
+  (atomic conditional insert, 409 on repeat).
+- No raw PII logging; only writes a lead/quote-request row — never mutates diagnostics
+  scoring or any customer/assessment table.
+
+If this allowlist + contract isn't acceptable, the fallback is to make the report
+**authenticated** instead of public — but that defeats "send a link to a prospect who
+isn't a customer," so public-with-contract is the intended path.
 
 ## Customer-facing report (the prospect-facing output)
 
