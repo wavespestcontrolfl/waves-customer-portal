@@ -253,6 +253,19 @@ describe('waveguard-plan-engine helpers', () => {
       const line = { raw: 'Sweep eaves, windows, doors, and lanai frames' };
       expect(matchCatalogProduct(line, catalog)).toBeNull();
     });
+
+    test('catalogProductHints are specific brand families, never an ambiguous bare brand', () => {
+      // Bare "Advion"/"Contrac" would match multiple distinct catalog rows
+      // (WDG granular vs roach gel vs ant gel) since hints are the sole match text.
+      const AMBIGUOUS = new Set(['Advion', 'Contrac']);
+      for (const visit of protocols.pest.visits) {
+        for (const meta of Object.values(visit.lineMeta || {})) {
+          for (const hint of meta.catalogProductHints || []) {
+            expect(AMBIGUOUS.has(hint)).toBe(false);
+          }
+        }
+      }
+    });
   });
 
   test('matchCatalogProduct handles protocol shorthand that omits catalog vendor prefix', () => {
