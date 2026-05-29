@@ -1189,7 +1189,7 @@ export function ServiceSection({
       {current ? (
         <PriceCard
           frequency={current}
-          waveGuardTier={renderFlags.showWaveGuardTierUi ? waveGuardTier : null}
+          waveGuardTier={(renderFlags.showWaveGuardTierUi && section?.waveGuardTierEligible !== false) ? waveGuardTier : null}
           wording={copy.priceWording}
         />
       ) : null}

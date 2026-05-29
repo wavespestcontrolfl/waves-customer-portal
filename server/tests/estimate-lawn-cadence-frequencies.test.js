@@ -2,6 +2,7 @@ const {
   lawnFrequenciesFromResultStats,
   applySelectedLawnTierToEstimateData,
   buildRenderFlags,
+  sectionShowsWaveGuardTier,
 } = require('../routes/estimate-public');
 
 // Lawn cost-floor tiers as the engine stores them in result.results.lawn
@@ -176,5 +177,26 @@ describe('buildRenderFlags — WaveGuard tier badge for recurring services', () 
   test('rodent stays excluded from the tier badge', () => {
     const rodent = section('rodent_bait', 'rodent');
     expect(buildRenderFlags({}, [rodent], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+  });
+});
+
+describe('sectionShowsWaveGuardTier — per-section eligibility (mixed-estimate fix)', () => {
+  test.each(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
+    'recurring %s section is badge-eligible',
+    (key) => {
+      expect(sectionShowsWaveGuardTier({ isRecurring: true, key })).toBe(true);
+    },
+  );
+
+  test('palm injection section is NOT eligible even bundled with an eligible service', () => {
+    // Its section is built key:'palm_injection' / category:'tree_shrub'; keying off
+    // the service key keeps it badge-free so a Tree & Shrub + Palm split estimate
+    // only badges the tree section (Codex P2 — mixed estimates).
+    expect(sectionShowsWaveGuardTier({ isRecurring: true, key: 'palm_injection', category: 'tree_shrub' })).toBe(false);
+  });
+
+  test('rodent + one-time sections are not eligible', () => {
+    expect(sectionShowsWaveGuardTier({ isRecurring: true, key: 'rodent_bait' })).toBe(false);
+    expect(sectionShowsWaveGuardTier({ isRecurring: false, key: 'lawn_care' })).toBe(false);
   });
 });
