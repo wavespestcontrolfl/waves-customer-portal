@@ -3598,17 +3598,16 @@ function priceOneTimePest(property, options = {}) {
     baseSource = 'computed_quarterly_baseline';
   }
 
-  // One-time = (quarterly per-app + setup-equivalent) × premium markup. This
-  // keeps a one-off visit strictly above what a recurring customer pays on
-  // visit 1 ($99 setup + quarterly rate), preserving the incentive to commit.
-  const setupEquivalent = Number.isFinite(Number(ONE_TIME.pest.setupEquivalent))
-    ? Number(ONE_TIME.pest.setupEquivalent)
-    : (PEST.initialFee || 0);
-  const premiumMultiplier = Number.isFinite(Number(ONE_TIME.pest.premiumMultiplier)) && Number(ONE_TIME.pest.premiumMultiplier) > 0
-    ? Number(ONE_TIME.pest.premiumMultiplier)
+  // One-time = quarterly per-app × multiplier. The quarterly rate already
+  // encodes all property metrics (footprint, lot, tree/shrub, pool/cage,
+  // driveway, complexity, type, age), so one-time scales proportionally with
+  // real job difficulty. multiplier >= 2 (+ the $199 floor) keeps a one-off
+  // visit above a recurring customer's visit-1 cost ($99 setup + quarterly),
+  // preserving the incentive to commit.
+  const multiplier = Number.isFinite(Number(ONE_TIME.pest.multiplier)) && Number(ONE_TIME.pest.multiplier) > 0
+    ? Number(ONE_TIME.pest.multiplier)
     : 1;
-  const recurringEntryCost = Math.round((base + setupEquivalent) * 100) / 100;
-  const multipliedPrice = Math.round(recurringEntryCost * premiumMultiplier);
+  const multipliedPrice = Math.round(base * multiplier);
   const preUrgencyPrice = applyOneTimeFloor(
     multipliedPrice,
     ONE_TIME.pest.floor
@@ -3626,9 +3625,7 @@ function priceOneTimePest(property, options = {}) {
     isRecurringCustomer,
     basePrice: Math.round(base * 100) / 100,
     quarterlyPerApp: Math.round(base * 100) / 100,
-    setupEquivalent,
-    premiumMultiplier,
-    recurringEntryCost,
+    multiplier,
     baseSource,
     baselinePestBasePrice: baselinePest?.basePrice ?? null,
     selectedFloor: ONE_TIME.pest.floor,

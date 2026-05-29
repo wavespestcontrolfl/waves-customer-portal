@@ -204,7 +204,7 @@ async function ensureTable() {
       // One-time
       { config_key: 'onetime_urgency', name: 'Urgency Multipliers', category: 'one_time', sort_order: 1, data: JSON.stringify({ routine: 1.0, soon: 1.25, soon_after_hours: 1.50, urgent: 1.50, urgent_after_hours: 2.0 }) },
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
-      { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, premium_multiplier: 1.20, setup_equivalent: 99 }) },
+      { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 2.2 }) },
       { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 115, fungicide_floor: 115, recurringPerAppMultiplier: 1.50, treatment_multipliers: { fert: 1.00, fertilization: 1.00, weed: 1.12, pest: 1.30, fungicide: 1.38 } }) },
       { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 225, STANDARD: 275, LARGE: 325, XL: 385, ESTATE: 425, ACRE_CLASS: 475, OVER_ACRE: 475, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 75, stationAddOn: 75, dunkAddOn: 15 }) },
       { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 6, data: JSON.stringify({

@@ -288,11 +288,11 @@ describe('pest-control pricing hardening', () => {
     expect(result).toEqual(expect.objectContaining({
       basePrice: 117,
       baseSource: 'computed_quarterly_baseline',
-      preUrgencyPrice: 259,
+      preUrgencyPrice: 257,
       urgencyMultiplier: 1.25,
-      subtotalBeforeRecurringCustomerDiscount: 324,
-      price: 275,
-      recurringCustomerDiscountAmount: 49,
+      subtotalBeforeRecurringCustomerDiscount: 321,
+      price: 273,
+      recurringCustomerDiscountAmount: 48,
     }));
 
     const guarded = priceOneTimePest(p, { recurringPestPerApp: 'bad' });

@@ -99,7 +99,7 @@ describe('pricing engine DB bridge', () => {
 
   test('syncs canonical one-time treatment pricing and mosquito programs from pricing_config', async () => {
     const db = pricingConfigDb([
-      { config_key: 'onetime_pest', data: { floor: 199, premium_multiplier: 1.20, setup_equivalent: 99 } },
+      { config_key: 'onetime_pest', data: { floor: 199, multiplier: 2.2 } },
       {
         config_key: 'onetime_lawn',
         data: {
@@ -135,7 +135,7 @@ describe('pricing engine DB bridge', () => {
 
     await expect(syncConstantsFromDB(db)).resolves.toBe(true);
 
-    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, premiumMultiplier: 1.20, setupEquivalent: 99 });
+    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, multiplier: 2.2 });
     expect(constants.ONE_TIME.lawn.floor).toBe(115);
     expect(constants.ONE_TIME.lawn.oneTimeMultiplier).toBe(1.5);
     expect(constants.ONE_TIME.lawn.treatmentMultipliers.fungicide).toBe(1.38);
@@ -209,8 +209,7 @@ describe('pricing engine DB bridge', () => {
     snapshot.PEST.frequencyDiscounts.v1.bimonthly = 1.5; // >1, invalid
     snapshot.PEST.frequencyDiscounts.v2.monthly = 0;     // 0, invalid
     snapshot.PEST.frequencyDiscounts.v2.quarterly = -0.2; // negative, invalid
-    snapshot.ONE_TIME.pest.premiumMultiplier = 0;        // must be > 1
-    snapshot.ONE_TIME.pest.setupEquivalent = -5;         // must be non-negative
+    snapshot.ONE_TIME.pest.multiplier = 0;               // must be >= 2
 
     const result = validatePestPricingConfig(snapshot);
 
@@ -219,18 +218,17 @@ describe('pricing engine DB bridge', () => {
       'PEST.frequencyDiscounts.v1.bimonthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.monthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.quarterly must be in (0, 1]',
-      'ONE_TIME.pest.premiumMultiplier must be > 1',
-      'ONE_TIME.pest.setupEquivalent must be non-negative',
+      'ONE_TIME.pest.multiplier must be >= 2',
     ]));
   });
 
-  test('rejects a non-markup one-time pest premium (<= 1 breaks the recurring incentive)', () => {
-    for (const badMultiplier of [1, 0.8]) {
+  test('rejects a one-time pest multiplier below 2 (breaks the recurring incentive)', () => {
+    for (const badMultiplier of [1.99, 1.2, 1, 0.8]) {
       const snapshot = JSON.parse(JSON.stringify(constants));
-      snapshot.ONE_TIME.pest.premiumMultiplier = badMultiplier;
+      snapshot.ONE_TIME.pest.multiplier = badMultiplier;
       const result = validatePestPricingConfig(snapshot);
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain('ONE_TIME.pest.premiumMultiplier must be > 1');
+      expect(result.errors).toContain('ONE_TIME.pest.multiplier must be >= 2');
     }
   });
 

@@ -111,6 +111,7 @@ describe('one-time pest anchors on the quarterly rate', () => {
     const oneTime = priceOneTimePest({ footprint: 2000 }, {});
     const recurringVisitOne = oneTime.quarterlyPerApp + constants.PEST.initialFee;
     expect(oneTime.price).toBeGreaterThan(recurringVisitOne);
-    expect(oneTime.recurringEntryCost).toBe(recurringVisitOne);
+    // Pure multiple off the quarterly rate.
+    expect(oneTime.price).toBe(Math.max(constants.ONE_TIME.pest.floor, Math.round(oneTime.quarterlyPerApp * constants.ONE_TIME.pest.multiplier)));
   });
 });
