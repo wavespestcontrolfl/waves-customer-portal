@@ -65,20 +65,41 @@ function sizeFor(mode, api) {
   return (MODE_SIZES[mode] || MODE_SIZES['blog-hero'])[api];
 }
 
+// Topic classifiers — pick a scene that matches the real Waves experience
+// instead of generic stock. UI topics get a Waves-style app mockup; pest
+// topics get a trust-building technician scene (never a gross bug closeup).
+function _isUiTopic(s) { return /\b(estimate|quote|pricing|price|portal|account|dashboard|report|service history|timeline|book|booking|schedule|appointment|invoice|warranty|re-?treat)\b/i.test(s); }
+function _isPestIdTopic(s) { return /\b(ant|roach|cockroach|spider|termite|rodent|rat|mouse|mice|mosquito|midge|no-see-um|flea|tick|wasp|bee|silverfish|earwig|bug|pest)\b/i.test(s); }
+function _isLawnTopic(s) { return /\b(lawn|grass|turf|st\.?\s*augustine|chinch|mole cricket|grub|fertiliz|weed|fungus|sod|aeration)\b/i.test(s); }
+
+const BRAND_STYLE = 'Visual style: clean, bright, modern coastal Southwest Florida. Waves brand palette — deep ocean blue and aqua/teal (#0ea5e9) as the primary accents, generous clean white and light gray, with small warm yellow/coral accents ONLY for a highlight or warning. Photorealistic, trustworthy, professional, reassuring — never fear-based. Do NOT show dark, gross, or scary macro pest closeups. No text, words, letters, numbers, watermarks, or logos anywhere in the image (brand placement is added by the site, not baked into the image).';
+
 function buildPrompt({ title, topic, keyword, city, mode }) {
-  const base = `A high-quality, photorealistic ${mode === 'social-square' ? 'social media tile' : 'blog hero image'} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
-  const focus = `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
-  const local = city
-    ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
-    : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`;
+  const subject = keyword || topic || title || 'professional pest control service';
+  const blob = `${keyword || ''} ${topic || ''} ${title || ''}`;
+  const base = `A high-quality, photorealistic ${mode === 'social-square' ? 'social media tile' : 'blog hero image'} for "Waves Pest Control," a family-owned Southwest Florida pest control & lawn care company. Subject: ${subject}.`;
+  const home = city
+    ? `a clean, modern ${city}-area Florida home with characteristic SWFL landscaping (palm trees, screened lanai, sandy soil, bright sun)`
+    : `a clean, modern Southwest Florida home with palm trees, a screened lanai, and bright tropical landscaping`;
+
+  let scene;
+  if (_isUiTopic(blob)) {
+    // Real-Waves-UI reference: estimate flow / customer portal / digital report / service timeline.
+    scene = `Scene: a smartphone or tablet held in front of ${home}, its screen showing a clean Waves-style app interface — rounded cards with deep-blue and teal accents — such as a simple multi-step estimate/quote flow OR a customer dashboard with a service-history list, a small property treatment-map thumbnail, and green check icons. The interface should look like a polished, real pest-control website/customer-portal experience, NOT a generic or unrelated app. The screen shows only simple icons, a map pin, checkmarks, and colored shapes — no readable text or numbers on the screen.`;
+  } else if (_isPestIdTopic(blob)) {
+    scene = `Scene: a uniformed, professional Waves technician inspecting or treating the exterior of ${home} — foundation, entry points, eaves/soffits — conveying local expertise and trust. Do NOT make a disgusting or scary pest closeup the focus.`;
+  } else {
+    scene = `Setting: ${subject}, shown at ${home} in a clean, trust-building, service-focused way.`;
+  }
+  const lawn = _isLawnTopic(blob) ? ' This is a lawn-care topic, so include fresh, healthy green accents while keeping the Waves blue/teal identity present.' : '';
+
   // Aspect/dimension lives in the prompt because Gemini's generateContent
   // doesn't accept a size parameter — without this, Gemini-only deploys
   // return arbitrary aspect ratios for both blog heroes and social tiles.
   const composition = mode === 'social-square'
     ? `Composition: square 1:1 aspect ratio, 1024x1024.`
-    : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
-  const style = `Style: bright, clean, professional. Teal/ocean-blue accent (#0ea5e9). No text, words, watermarks, or logos in the image.`;
-  return [base, focus, local, composition, style].join(' ');
+    : `Composition: landscape 3:2 aspect ratio, 1536x1024, with clean negative space for an optional text overlay.`;
+  return [base, scene + lawn, composition, BRAND_STYLE].join(' ');
 }
 
 // ── providers ────────────────────────────────────────────────────────

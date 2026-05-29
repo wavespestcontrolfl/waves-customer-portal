@@ -96,6 +96,18 @@ Violating these makes the live page render broken:
 - Avoid stray curly braces { } in body copy — a token-substitution plugin
   processes {token} patterns and will mangle literal braces.
 
+VISUAL EDUCATION — make the post scannable and "show" the process, not just tell it:
+- Use crisp MARKDOWN for labeled visuals (they render sharp and are
+  SEO-indexable; AI-image diagrams garble text). A markdown TABLE for
+  comparisons (e.g. DIY vs professional) and for step/stage timelines (e.g.
+  Day 0 → Days 1–3 → Days 7–10 → ongoing), and a short bold "at-a-glance"
+  callout near the CTA listing only TRUE promises (same-day service,
+  licensed techs, no contracts, digital reports, free re-treats / money-back
+  guarantee). Prefer a compact timeline/comparison table over prose where it fits.
+- Any in-body image must be DIFFERENT from the hero — e.g. a technician
+  inspecting, or a Waves-style estimate / customer-portal / digital-report
+  mockup (match the real Waves UI, not a generic app).
+
 TOOL USE:
 - Always call get_content_brief(opportunity_id) first to load the full brief
   if you weren't given it inline. Use get_serp_profile / get_gsc_signal /
