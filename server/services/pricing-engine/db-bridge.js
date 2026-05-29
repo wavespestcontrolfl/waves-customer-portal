@@ -157,15 +157,26 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isPositiveNumber(diag[key])) errors.push(`PEST.productionDiagnostics.${key} must be positive`);
   }
 
-  // one-time = quarterlyPerApp × multiplier. Must be >= 2: with the $199 one-time
-  // floor and the $89 pest quarterly floor, multiplier >= 2 guarantees one-time
-  // always exceeds a recurring customer's visit-1 cost ($99 setup + quarterly),
-  // for every property. A lower multiple lets mid-range homes underquote vs.
-  // recurring entry, collapsing the incentive this model exists to protect.
-  if (!(isPositiveNumber(ONE_TIME.pest?.multiplier) && Number(ONE_TIME.pest.multiplier) >= 2)) {
-    errors.push('ONE_TIME.pest.multiplier must be >= 2');
-  }
+  // one-time = max(otFloor, quarterlyPerApp × multiplier).
+  if (!isPositiveNumber(ONE_TIME.pest?.multiplier)) errors.push('ONE_TIME.pest.multiplier must be positive');
   if (!isPositiveNumber(ONE_TIME.pest?.floor)) errors.push('ONE_TIME.pest.floor must be positive');
+  // Combined incentive invariant: one-time must stay STRICTLY ABOVE a recurring
+  // customer's visit-1 cost (PEST.floor quarterly + PEST.initialFee setup) for
+  // every property — otherwise a one-off visit is no more expensive than
+  // committing, and the incentive collapses. Both `multiplier` and `floor` are
+  // admin-editable, so validate them together, not in isolation. The worst case
+  // (minimum gap) sits at the floor↔multiple transition, q* = max(PEST.floor,
+  // otFloor / multiplier); checking that point covers the whole property range.
+  const otMult = Number(ONE_TIME.pest?.multiplier);
+  const otFloor = Number(ONE_TIME.pest?.floor);
+  if (isPositiveNumber(otMult) && isPositiveNumber(otFloor) && isPositiveNumber(PEST.floor) && isNonNegativeNumber(PEST.initialFee)) {
+    const worstQuarterly = Math.max(Number(PEST.floor), otFloor / otMult);
+    const oneTimeAtWorst = Math.max(otFloor, worstQuarterly * otMult);
+    const recurringVisitOne = worstQuarterly + Number(PEST.initialFee);
+    if (!(oneTimeAtWorst > recurringVisitOne)) {
+      errors.push('ONE_TIME.pest floor/multiplier too low: one-time must exceed recurring visit-1 (PEST.floor + PEST.initialFee) for every property');
+    }
+  }
 
   const mosquitoCategories = Array.isArray(MOSQUITO.lotCategories) ? MOSQUITO.lotCategories : [];
   const mosquitoPrograms = Array.isArray(MOSQUITO.programs) ? MOSQUITO.programs : ['seasonal9', 'monthly12'];

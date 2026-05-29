@@ -209,7 +209,7 @@ describe('pricing engine DB bridge', () => {
     snapshot.PEST.frequencyDiscounts.v1.bimonthly = 1.5; // >1, invalid
     snapshot.PEST.frequencyDiscounts.v2.monthly = 0;     // 0, invalid
     snapshot.PEST.frequencyDiscounts.v2.quarterly = -0.2; // negative, invalid
-    snapshot.ONE_TIME.pest.multiplier = 0;               // must be >= 2
+    snapshot.ONE_TIME.pest.multiplier = 0;               // must be positive
 
     const result = validatePestPricingConfig(snapshot);
 
@@ -218,18 +218,36 @@ describe('pricing engine DB bridge', () => {
       'PEST.frequencyDiscounts.v1.bimonthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.monthly must be in (0, 1]',
       'PEST.frequencyDiscounts.v2.quarterly must be in (0, 1]',
-      'ONE_TIME.pest.multiplier must be >= 2',
+      'ONE_TIME.pest.multiplier must be positive',
     ]));
   });
 
-  test('rejects a one-time pest multiplier below 2 (breaks the recurring incentive)', () => {
+  const INCENTIVE_ERROR = 'ONE_TIME.pest floor/multiplier too low: one-time must exceed recurring visit-1 (PEST.floor + PEST.initialFee) for every property';
+
+  test('rejects a one-time pest multiplier too low to clear recurring visit-1 (default floor)', () => {
     for (const badMultiplier of [1.99, 1.2, 1, 0.8]) {
       const snapshot = JSON.parse(JSON.stringify(constants));
-      snapshot.ONE_TIME.pest.multiplier = badMultiplier;
+      snapshot.ONE_TIME.pest.multiplier = badMultiplier; // floor stays $199
       const result = validatePestPricingConfig(snapshot);
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain('ONE_TIME.pest.multiplier must be >= 2');
+      expect(result.errors).toContain(INCENTIVE_ERROR);
     }
+  });
+
+  test('validates floor and multiplier TOGETHER — a lowered floor can break the incentive', () => {
+    // Codex case: {floor:150, multiplier:2} prices the smallest job at
+    // max(150, 89*2)=178 < recurring visit-1 ($89 + $99 = $188) → must reject.
+    const bad = JSON.parse(JSON.stringify(constants));
+    bad.ONE_TIME.pest = { floor: 150, multiplier: 2 };
+    const badResult = validatePestPricingConfig(bad);
+    expect(badResult.valid).toBe(false);
+    expect(badResult.errors).toContain(INCENTIVE_ERROR);
+
+    // But a high floor legitimately supports a sub-2 multiple — must accept,
+    // proving the guard isn't just a blanket multiplier >= 2 rule.
+    const ok = JSON.parse(JSON.stringify(constants));
+    ok.ONE_TIME.pest = { floor: 300, multiplier: 1.8 };
+    expect(validatePestPricingConfig(ok)).toEqual(expect.objectContaining({ valid: true }));
   });
 
   test('allows pest floor above base (raise-the-minimum config is valid)', () => {
