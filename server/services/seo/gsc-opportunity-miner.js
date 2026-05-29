@@ -277,6 +277,11 @@ class GscOpportunityMiner {
     }
 
     const allOpportunities = Object.values(buckets).flat();
+
+    // Facts-readiness boost — applied before persistAll so well-supported
+    // rewrite opportunities can clear the global minScoreToAct floor.
+    await this._applyFactsReadinessBoost(allOpportunities);
+
     const counts = Object.fromEntries(
       Object.entries(buckets).map(([k, v]) => [k, v.length])
     );
@@ -285,6 +290,55 @@ class GscOpportunityMiner {
     if (persist) persisted = await this.persistAll(allOpportunities);
 
     return { counts, errors, persisted, opportunities: allOpportunities };
+  }
+
+  /**
+   * Facts-readiness boost. For refresh opportunities whose city×service is
+   * verified-sufficient in the facts bank, add WEIGHTS.factsReady to the score
+   * so a well-supported rewrite can clear the global minScoreToAct floor —
+   * WITHOUT lowering that floor (a weak page stays out even with facts). The
+   * boost is scoped to refresh_existing_page this pass. Results are cached per
+   * city::service to avoid repeated facts-bank loads. Best-effort: a facts
+   * lookup failure simply yields no boost — the publish-time facts-sufficiency
+   * gate still blocks unverified content, so under-boosting is the safe
+   * direction.
+   */
+  async _applyFactsReadinessBoost(opportunities = []) {
+    let factsSufficiency;
+    try {
+      factsSufficiency = require('../content/facts-sufficiency');
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] facts-sufficiency unavailable; skipping readiness boost: ${err.message}`);
+      return;
+    }
+    const cache = new Map();
+    for (const opp of opportunities) {
+      if (opp.action_type !== 'refresh_existing_page') continue;
+      if (!opp.city || !opp.service) continue;
+      const key = `${String(opp.city).toLowerCase()}::${String(opp.service).toLowerCase()}`;
+      let ready = cache.get(key);
+      if (ready === undefined) {
+        try {
+          // Mirror the runner: call check() with no opts so the facts-bank
+          // loader resolves ASTRO_REPO_DIR or falls back to GitHub.
+          const verdict = await factsSufficiency.check({
+            action_type: 'refresh_existing_page',
+            city: opp.city,
+            service: opp.service,
+          });
+          ready = !!(verdict && verdict.applicable !== false && verdict.sufficient);
+        } catch (err) {
+          logger.warn(`[gsc-opp-miner] facts readiness check failed for ${key}: ${err.message}`);
+          ready = false;
+        }
+        cache.set(key, ready);
+      }
+      if (!ready) continue;
+      opp.score += WEIGHTS.factsReady;
+      if (opp.score_breakdown && typeof opp.score_breakdown === 'object') {
+        opp.score_breakdown.factsReady = WEIGHTS.factsReady;
+      }
+    }
   }
 
   // ── own-page resolution helper ─────────────────────────────────────

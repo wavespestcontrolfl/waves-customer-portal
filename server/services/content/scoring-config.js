@@ -22,6 +22,14 @@ const WEIGHTS = {
   closeRate: 15,
   revenueRealization: 20,
 
+  // Facts-readiness boost. Applied ONLY to rewrite opportunities whose
+  // city×service is verified-sufficient in the facts bank (see
+  // gsc-opportunity-miner). Sized so a genuinely-decent candidate (~62-65)
+  // plus verified facts clears minScoreToAct (75 → 76-79), while a weak
+  // candidate (~40) stays out even with facts (~54). Self-limiting: keeps the
+  // 75 floor intact and only lets well-supported, already-promising pages act.
+  factsReady: 14,
+
   // Penalties — subtracted.
   cannibalizationRisk: 35,
   serpMismatch: 40,

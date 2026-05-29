@@ -97,6 +97,54 @@ function evaluate(input = {}) {
   };
 }
 
+/**
+ * Pre-publish subset of evaluate(): runs ONLY the P0 checks derivable from the
+ * generated HTML/markdown, with no live-site dependency. It deliberately omits
+ * the checks that require the published page — robots.txt fetch
+ * (P0_BOT_BLOCKED_BY_ROBOTS) and inbound-link count
+ * (P0_NO_CRAWLABLE_INBOUND_INTERNAL_LINK) — so it can't false-block a draft
+ * that simply isn't live yet. Those live-only checks stay in the post-publish
+ * visibility worker. Used to stop a refresh from ever opening a PR when the
+ * draft itself is unindexable (noindex, canonical pointing elsewhere, empty
+ * body, or schema describing hidden content).
+ */
+function evaluateStatic(input = {}) {
+  const {
+    url,
+    html = '',
+    body = '',
+    canonicalUrl = null,
+    schemaMatchesVisibleContent = true,
+  } = input;
+
+  const findings = [];
+  const text = visibleText(html || body);
+  const canonical = canonicalUrl || extractCanonical(html);
+  const robotsMeta = extractRobotsMeta(html);
+
+  if (robotsMeta.noindex) {
+    findings.push(finding('P0', 'P0_PAGE_NOINDEX', 'Page has a noindex robots directive.', 'Remove noindex before publishing or keep the page out of the autonomous publish lane.'));
+  }
+  if (!text || text.length < 300) {
+    findings.push(finding('P0', 'P0_MAIN_CONTENT_NOT_RENDERED', 'Main answer content is not present in rendered/static HTML.', 'Ensure the answer body is server-rendered or statically generated.'));
+  }
+  if (canonical && url && !canonicalsMatch(canonical, url)) {
+    findings.push(finding('P0', 'P0_CANONICAL_POINTS_ELSEWHERE', 'Canonical points away from the published URL.', 'Set canonical to the live URL unless intentional consolidation is documented.'));
+  }
+  if (schemaMatchesVisibleContent === false) {
+    findings.push(finding('P0', 'P0_SCHEMA_DESCRIBES_HIDDEN_CONTENT', 'Structured data describes hidden or absent content.', 'Keep schema aligned with visible page text.'));
+  }
+
+  const summary = summarize(findings);
+  return {
+    passed: summary.p0 === 0,
+    findings,
+    summary,
+    canonical_url: canonical || null,
+    robots_meta: robotsMeta.raw || null,
+  };
+}
+
 function finding(severity, code, message, recommendation) {
   return { severity, code, message, recommendation };
 }
@@ -212,6 +260,7 @@ function pathFromUrl(value) {
 module.exports = {
   BOT_AGENTS,
   evaluate,
+  evaluateStatic,
   _internals: {
     canonicalsMatch,
     extractCanonical,
