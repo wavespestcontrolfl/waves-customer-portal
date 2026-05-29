@@ -30,27 +30,22 @@ function add(label, property, options) {
   });
 }
 
-// Core grid: 4 tracks × 5 sqft × 3 sold tiers, FULL_SUN / DENSE.
+// Core grid: 4 tracks × 5 sqft × 3 sold tiers, DENSE. Sun/shade is not a
+// pricing input, so the matrix has no shade dimension.
 for (const t of tracks) {
   for (const sq of [3000, 4250, 6000, 8000, 12000]) {
     for (const tier of tiers) {
-      add(`${t}/${tier}/${sq}/FULL_SUN/DENSE`, { turfSf: sq }, { track: t, tier, shadeClassification: 'FULL_SUN' });
+      add(`${t}/${tier}/${sq}/DENSE`, { turfSf: sq }, { track: t, tier });
     }
-  }
-}
-// Shade sweep (St. Augustine is the track whose materials vary by shade).
-for (const shade of ['MODERATE_SHADE', 'HEAVY_SHADE']) {
-  for (const tier of tiers) {
-    add(`st_augustine/${tier}/4250/${shade}/DENSE`, { turfSf: 4250 }, { track: 'st_augustine', tier, shadeClassification: shade });
   }
 }
 // Route-density sweep.
 for (const rd of ['NORMAL', 'LOOSE', 'SPARSE']) {
-  add(`st_augustine/enhanced/4250/FULL_SUN/${rd}`, { turfSf: 4250, routeDensity: rd }, { track: 'st_augustine', tier: 'enhanced', shadeClassification: 'FULL_SUN' });
+  add(`st_augustine/enhanced/4250/${rd}`, { turfSf: 4250, routeDensity: rd }, { track: 'st_augustine', tier: 'enhanced' });
 }
 // Edges: below table minimum, and above table maximum (custom-quote / extrapolation).
-add('st_augustine/enhanced/2500/FULL_SUN/DENSE-tiny', { turfSf: 2500 }, { track: 'st_augustine', tier: 'enhanced', shadeClassification: 'FULL_SUN' });
-add('st_augustine/enhanced/22000/FULL_SUN/DENSE-overmax', { turfSf: 22000 }, { track: 'st_augustine', tier: 'enhanced', shadeClassification: 'FULL_SUN' });
+add('st_augustine/enhanced/2500/DENSE-tiny', { turfSf: 2500 }, { track: 'st_augustine', tier: 'enhanced' });
+add('st_augustine/enhanced/22000/DENSE-overmax', { turfSf: 22000 }, { track: 'st_augustine', tier: 'enhanced' });
 
 const out = path.join(__dirname, 'lawn-pricing-golden-master.json');
 fs.writeFileSync(out, JSON.stringify(cases, null, 2) + '\n');

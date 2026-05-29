@@ -14,7 +14,7 @@
  *     paymentMethod: 'card' | 'us_bank_account',
  *     services: {
  *       pest:       { frequency, roachType, version },
- *       lawn:       { track, tier, shadeClassification },
+ *       lawn:       { track, tier },
  *       treeShrub:  { tier, access, treeCount },
  *       palm:       { palmCount, treatmentType, palmSize },
  *       mosquito:   { tier: 'seasonal' | 'monthly' },

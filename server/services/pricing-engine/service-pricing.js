@@ -1757,7 +1757,6 @@ function priceLawnCare(property, options = {}) {
     track = 'st_augustine',
     tier = 'enhanced',
     lawnFreq,
-    shadeClassification = 'FULL_SUN',
     useLawnCostFloor = true,
     includeHiddenTiers = false,
   } = options;
@@ -1776,9 +1775,9 @@ function priceLawnCare(property, options = {}) {
     : (hasLawnSqFt && Number.isFinite(legacyLawnSqFt) && legacyLawnSqFt >= 0 ? legacyLawnSqFt : 4500);
 
   // Annual material budget at the 4,500 sqft reference — sourced from the shared
-  // @waves/lawn-cost-floor table (same data the client preview uses) keyed by
-  // track → shade → visits.
-  const annualMaterial = lawnMaterialBudget(normalizedTrack, shadeClassification, tierConfig.freq);
+  // @waves/lawn-cost-floor table (same data the client preview uses), keyed by
+  // track → visits. Sun/shade is NOT a pricing input.
+  const annualMaterial = lawnMaterialBudget(normalizedTrack, tierConfig.freq);
 
   // Labor: v4 protocol uses $26.96/visit across all tracks
   const laborPerVisit = 26.96;
@@ -1795,7 +1794,7 @@ function priceLawnCare(property, options = {}) {
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
-    const tierAnnualBudget = lawnMaterialBudget(normalizedTrack, shadeClassification, tc.freq);
+    const tierAnnualBudget = lawnMaterialBudget(normalizedTrack, tc.freq);
     const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack);
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);
@@ -1850,7 +1849,6 @@ function priceLawnCare(property, options = {}) {
     grassCode: display.code,
     grassType: display.label,
     tier: selected.tier,
-    shadeClassification,
     lawnSqFt,
     turfSf: lawnSqFt,
     turfEstimated: property.turfEstimated,

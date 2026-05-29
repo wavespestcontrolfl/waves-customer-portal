@@ -13,17 +13,13 @@ const {
 } = require('@waves/lawn-cost-floor');
 
 describe('lawnMaterialBudget', () => {
-  it('returns track/shade/visits budget; St. Augustine has shade variants', () => {
-    expect(lawnMaterialBudget('st_augustine', 'FULL_SUN', 9)).toBe(141);
-    expect(lawnMaterialBudget('st_augustine', 'MODERATE_SHADE', 9)).toBe(110);
-    expect(lawnMaterialBudget('st_augustine', 'HEAVY_SHADE', 9)).toBe(100);
+  it('returns the track/visits budget (sun/shade is not a pricing input)', () => {
+    expect(lawnMaterialBudget('st_augustine', 9)).toBe(141);
+    expect(lawnMaterialBudget('bermuda', 9)).toBe(140);
+    expect(lawnMaterialBudget('zoysia', 12)).toBe(178);
   });
-  it('falls back to FULL_SUN for tracks without shade variants', () => {
-    expect(lawnMaterialBudget('bermuda', 'HEAVY_SHADE', 9)).toBe(LAWN_MATERIAL_BUDGETS.bermuda.FULL_SUN[9]);
-  });
-  it('defaults shade and unknown track sanely', () => {
-    expect(lawnMaterialBudget('zoysia', undefined, 12)).toBe(178);
-    expect(lawnMaterialBudget('made_up', 'FULL_SUN', 6)).toBe(LAWN_MATERIAL_BUDGETS.st_augustine.FULL_SUN[6]);
+  it('falls back to st_augustine for an unknown track', () => {
+    expect(lawnMaterialBudget('made_up', 6)).toBe(LAWN_MATERIAL_BUDGETS.st_augustine[6]);
   });
 });
 
@@ -49,7 +45,7 @@ describe('lawnComplexityMinutes', () => {
 });
 
 describe('computeLawnCostFloor', () => {
-  it('reproduces the canonical 4,250 St-Aug Enhanced/9 DENSE FULL_SUN floor ($774/yr → $86/app)', () => {
+  it('reproduces the canonical 4,250 St-Aug Enhanced/9 DENSE floor ($774/yr → $86/app)', () => {
     const floor = computeLawnCostFloor({
       lawnSqFt: 4250,
       visits: 9,

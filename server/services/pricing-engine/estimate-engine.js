@@ -590,7 +590,6 @@ function generateEstimate(input) {
         track: services.lawn.track || 'st_augustine',
         tier: services.lawn.tier || 'enhanced',
         lawnFreq: services.lawn.lawnFreq || input.lawnFreq,
-        shadeClassification: services.lawn.shadeClassification || 'FULL_SUN',
         useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? true,
         targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
         routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,

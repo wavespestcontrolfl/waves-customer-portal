@@ -1026,11 +1026,10 @@ function lawnLookup(lp, sf, freqIdx) {
 
 // Delegates entirely to @waves/lawn-cost-floor so the preview floor is the same
 // math the server bills. opts mirror the server's property/options:
-//   shadeClassification    'FULL_SUN' (default) | 'MODERATE_SHADE' | 'HEAVY_SHADE'
 //   complexityMinutes      extra labor minutes/visit — see lawnComplexityMinutes()
 //   callbackReservePerVisit override of the $2 default (poor maintenance / high pressure)
 function calcLawnFloorPrice(sf, grassType, visits, opts = {}) {
-  const annualMaterialBudget = lawnMaterialBudget(grassType, opts.shadeClassification, visits);
+  const annualMaterialBudget = lawnMaterialBudget(grassType, visits);
   const materialCostPerVisit = lawnMaterialCostPerVisit(annualMaterialBudget, sf, visits);
   const floor = computeLawnCostFloor({
     lawnSqFt: sf,

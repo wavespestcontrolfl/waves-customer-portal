@@ -139,7 +139,6 @@ function currentServiceObjectsFor(keys, context) {
       track: context.grassType,
       tier: 'enhanced',
       lawnFreq: 9,
-      shadeClassification: context.shadeClassification,
     };
     if (key === 'mosquito') services.mosquito = { tier: 'monthly12' };
     if (key === 'tree_shrub') services.treeShrub = { tier: 'standard' };
@@ -156,7 +155,6 @@ function optionServices(option, context) {
       track: context.grassType,
       tier: option.tier,
       lawnFreq: option.lawnFreq,
-      shadeClassification: context.shadeClassification,
     },
   };
   if (option.serviceKey === 'mosquito') return { mosquito: { tier: option.program } };
@@ -369,11 +367,6 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   }
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);
-  const shadeClassification = String(turfProfile?.sun_exposure || '').toLowerCase() === 'heavy_shade'
-    ? 'HEAVY_SHADE'
-    : String(turfProfile?.sun_exposure || '').toLowerCase() === 'partial_shade'
-      ? 'MODERATE_SHADE'
-      : 'FULL_SUN';
 
   const propertyInput = {
     homeSqFt,
@@ -394,7 +387,6 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   return {
     propertyInput,
     grassType,
-    shadeClassification,
     palmCount,
     address,
     source,
@@ -665,7 +657,6 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
 
   const context = {
     grassType: propertyContext.grassType,
-    shadeClassification: propertyContext.shadeClassification,
     palmCount: propertyContext.palmCount,
   };
   const currentServices = currentServiceObjectsFor(currentServiceKeys, context);
@@ -786,7 +777,6 @@ function summarizeProperty(context) {
     lawnSqFt: p.lawnSqFt || null,
     stories: p.stories || null,
     grassType: context.grassType || null,
-    shadeClassification: context.shadeClassification || null,
   };
 }
 

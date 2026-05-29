@@ -7,9 +7,8 @@
  * This test pins the client cost floor to the server's so the two never drift —
  * the divergences it guards (and that the parity fix closed) are:
  *   1. material size-scaling clamp [0.6,2.5]  (client used to clamp; server doesn't)
- *   2. shade material variants (St. Augustine)
- *   3. complexity-minutes (heavy shrubs / moderate-complex landscape / large driveway)
- *   4. callback reserve (poor maintenance / high pest pressure)
+ *   2. complexity-minutes (heavy shrubs / moderate-complex landscape / large driveway)
+ *   3. callback reserve (poor maintenance / high pest pressure)
  */
 const fs = require('fs');
 const path = require('path');
@@ -47,11 +46,11 @@ function loadClientEstimator() {
 
 const client = loadClientEstimator();
 
-// Server's selected-tier price for a given turf/track/freq (+ optional property/shade).
-function serverTier(sf, track, visits, { shadeClassification = 'FULL_SUN', property = {} } = {}) {
+// Server's selected-tier price for a given turf/track/freq (+ optional property).
+function serverTier(sf, track, visits, { property = {} } = {}) {
   const result = priceLawnCare(
     { turfSf: sf, ...property },
-    { track, lawnFreq: visits, shadeClassification, useLawnCostFloor: true },
+    { track, lawnFreq: visits, useLawnCostFloor: true },
   );
   const tier = result.tiers.find((t) => t.freq === visits);
   if (!tier) throw new Error(`no server tier for visits=${visits}`);
@@ -77,20 +76,6 @@ describe('client/server lawn parity — base grid (clamp removal)', () => {
     const c = client.calcLawnFloorPrice(2500, 'st_augustine', 9);
     const s = serverTier(2500, 'st_augustine', 9);
     expect(c.pa).toBe(s.pa);
-  });
-});
-
-describe('client/server lawn parity — shade (St. Augustine)', () => {
-  it.each(['MODERATE_SHADE', 'HEAVY_SHADE'])('%s @ 4250/9', (shade) => {
-    const c = client.calcLawnFloorPrice(4250, 'st_augustine', 9, { shadeClassification: shade });
-    const s = serverTier(4250, 'st_augustine', 9, { shadeClassification: shade });
-    expect({ pa: c.pa, ann: c.ann, mo: c.mo }).toEqual(s);
-  });
-
-  it('shade reduces price vs full sun', () => {
-    const full = client.calcLawnFloorPrice(4250, 'st_augustine', 9, { shadeClassification: 'FULL_SUN' });
-    const heavy = client.calcLawnFloorPrice(4250, 'st_augustine', 9, { shadeClassification: 'HEAVY_SHADE' });
-    expect(heavy.pa).toBeLessThan(full.pa);
   });
 });
 

@@ -51,12 +51,6 @@ for (const track of ['bermuda', 'zoysia', 'bahia']) {
   const r = priceLawnCare(refProperty, { track, tier: 'enhanced' });
   console.log(`  ${track.padEnd(14)} | Mo: ${fmt(r.monthly).padStart(5)} | Annual: ${fmt(r.annual).padStart(7)} | Margin: ${pct(r.margin)}`);
 }
-console.log('  --- Shade modifier (St. Aug) ---');
-for (const shade of ['FULL_SUN', 'MODERATE_SHADE', 'HEAVY_SHADE']) {
-  const r = priceLawnCare(refProperty, { track: 'st_augustine', tier: 'enhanced', shadeClassification: shade });
-  console.log(`  ${shade.padEnd(16)} | Cost: ${fmt(r.costs.total).padStart(6)} | Margin: ${pct(r.margin)}`);
-}
-
 // ── TREE & SHRUB ──
 console.log('\n' + '─'.repeat(70));
 console.log('TREE & SHRUB (2,000 sqft beds, 5 trees)');

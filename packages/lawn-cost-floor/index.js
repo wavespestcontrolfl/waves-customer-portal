@@ -32,27 +32,21 @@ const LAWN_COST_FLOOR_DEFAULTS = {
 // Visits per sold/hidden tier.
 const LAWN_TIER_VISITS = { basic: 4, standard: 6, enhanced: 9, premium: 12 };
 
-// Annual material budgets at the 4,500 sqft reference, by track → shade → visits.
-// Only St. Augustine carries shade variants; other tracks are FULL_SUN-only.
+// Annual material budgets at the 4,500 sqft reference, by track → visits.
+// Sun/shade is NOT a pricing input — every lawn prices on its track's budget.
 const LAWN_MATERIAL_BUDGETS = {
-  st_augustine: {
-    FULL_SUN: { 4: 64, 6: 83, 9: 141, 12: 205 },
-    MODERATE_SHADE: { 4: 50, 6: 65, 9: 110, 12: 155 },
-    HEAVY_SHADE: { 4: 44, 6: 58, 9: 100, 12: 138 },
-  },
-  bermuda: { FULL_SUN: { 4: 55, 6: 79, 9: 140, 12: 215 } },
-  zoysia: { FULL_SUN: { 4: 60, 6: 82, 9: 148, 12: 178 } },
-  bahia: { FULL_SUN: { 4: 45, 6: 68, 9: 95, 12: 115 } },
+  st_augustine: { 4: 64, 6: 83, 9: 141, 12: 205 },
+  bermuda: { 4: 55, 6: 79, 9: 140, 12: 215 },
+  zoysia: { 4: 60, 6: 82, 9: 148, 12: 178 },
+  bahia: { 4: 45, 6: 68, 9: 95, 12: 115 },
 };
 
 const MATERIAL_REFERENCE_SQFT = 4500;
 
-// Annual material budget (at the reference sqft) for a track/shade/visits combo.
-function lawnMaterialBudget(track, shadeClassification, visits) {
+// Annual material budget (at the reference sqft) for a track/visits combo.
+function lawnMaterialBudget(track, visits) {
   const trackBudgets = LAWN_MATERIAL_BUDGETS[track] || LAWN_MATERIAL_BUDGETS.st_augustine;
-  const shade = String(shadeClassification || 'FULL_SUN').toUpperCase();
-  const shadeBudgets = trackBudgets[shade] || trackBudgets.FULL_SUN;
-  return shadeBudgets[visits] || 100;
+  return trackBudgets[visits] || 100;
 }
 
 // Per-visit material cost: the annual budget scaled linearly by turf size,

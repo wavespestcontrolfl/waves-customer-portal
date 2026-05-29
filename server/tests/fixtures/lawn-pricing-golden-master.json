@@ -1,14 +1,13 @@
 [
   {
-    "label": "st_augustine/standard/3000/FULL_SUN/DENSE",
+    "label": "st_augustine/standard/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -28,15 +27,14 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/3000/FULL_SUN/DENSE",
+    "label": "st_augustine/enhanced/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -56,15 +54,14 @@
     }
   },
   {
-    "label": "st_augustine/premium/3000/FULL_SUN/DENSE",
+    "label": "st_augustine/premium/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -84,15 +81,14 @@
     }
   },
   {
-    "label": "st_augustine/standard/4250/FULL_SUN/DENSE",
+    "label": "st_augustine/standard/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "st_augustine",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -112,15 +108,14 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/4250/FULL_SUN/DENSE",
+    "label": "st_augustine/enhanced/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -140,15 +135,14 @@
     }
   },
   {
-    "label": "st_augustine/premium/4250/FULL_SUN/DENSE",
+    "label": "st_augustine/premium/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "st_augustine",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -168,15 +162,14 @@
     }
   },
   {
-    "label": "st_augustine/standard/6000/FULL_SUN/DENSE",
+    "label": "st_augustine/standard/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -196,15 +189,14 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/6000/FULL_SUN/DENSE",
+    "label": "st_augustine/enhanced/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -224,15 +216,14 @@
     }
   },
   {
-    "label": "st_augustine/premium/6000/FULL_SUN/DENSE",
+    "label": "st_augustine/premium/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -252,15 +243,14 @@
     }
   },
   {
-    "label": "st_augustine/standard/8000/FULL_SUN/DENSE",
+    "label": "st_augustine/standard/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -280,15 +270,14 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/8000/FULL_SUN/DENSE",
+    "label": "st_augustine/enhanced/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -308,15 +297,14 @@
     }
   },
   {
-    "label": "st_augustine/premium/8000/FULL_SUN/DENSE",
+    "label": "st_augustine/premium/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -336,15 +324,14 @@
     }
   },
   {
-    "label": "st_augustine/standard/12000/FULL_SUN/DENSE",
+    "label": "st_augustine/standard/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -364,15 +351,14 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/12000/FULL_SUN/DENSE",
+    "label": "st_augustine/enhanced/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -392,15 +378,14 @@
     }
   },
   {
-    "label": "st_augustine/premium/12000/FULL_SUN/DENSE",
+    "label": "st_augustine/premium/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -420,15 +405,14 @@
     }
   },
   {
-    "label": "bermuda/standard/3000/FULL_SUN/DENSE",
+    "label": "bermuda/standard/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "bermuda",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -448,15 +432,14 @@
     }
   },
   {
-    "label": "bermuda/enhanced/3000/FULL_SUN/DENSE",
+    "label": "bermuda/enhanced/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "bermuda",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -476,15 +459,14 @@
     }
   },
   {
-    "label": "bermuda/premium/3000/FULL_SUN/DENSE",
+    "label": "bermuda/premium/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "bermuda",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -504,15 +486,14 @@
     }
   },
   {
-    "label": "bermuda/standard/4250/FULL_SUN/DENSE",
+    "label": "bermuda/standard/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "bermuda",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -532,15 +513,14 @@
     }
   },
   {
-    "label": "bermuda/enhanced/4250/FULL_SUN/DENSE",
+    "label": "bermuda/enhanced/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "bermuda",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -560,15 +540,14 @@
     }
   },
   {
-    "label": "bermuda/premium/4250/FULL_SUN/DENSE",
+    "label": "bermuda/premium/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "bermuda",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -588,15 +567,14 @@
     }
   },
   {
-    "label": "bermuda/standard/6000/FULL_SUN/DENSE",
+    "label": "bermuda/standard/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "bermuda",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -616,15 +594,14 @@
     }
   },
   {
-    "label": "bermuda/enhanced/6000/FULL_SUN/DENSE",
+    "label": "bermuda/enhanced/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "bermuda",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -644,15 +621,14 @@
     }
   },
   {
-    "label": "bermuda/premium/6000/FULL_SUN/DENSE",
+    "label": "bermuda/premium/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "bermuda",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -672,15 +648,14 @@
     }
   },
   {
-    "label": "bermuda/standard/8000/FULL_SUN/DENSE",
+    "label": "bermuda/standard/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "bermuda",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -700,15 +675,14 @@
     }
   },
   {
-    "label": "bermuda/enhanced/8000/FULL_SUN/DENSE",
+    "label": "bermuda/enhanced/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "bermuda",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -728,15 +702,14 @@
     }
   },
   {
-    "label": "bermuda/premium/8000/FULL_SUN/DENSE",
+    "label": "bermuda/premium/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "bermuda",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -756,15 +729,14 @@
     }
   },
   {
-    "label": "bermuda/standard/12000/FULL_SUN/DENSE",
+    "label": "bermuda/standard/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "bermuda",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -784,15 +756,14 @@
     }
   },
   {
-    "label": "bermuda/enhanced/12000/FULL_SUN/DENSE",
+    "label": "bermuda/enhanced/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "bermuda",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -812,15 +783,14 @@
     }
   },
   {
-    "label": "bermuda/premium/12000/FULL_SUN/DENSE",
+    "label": "bermuda/premium/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "bermuda",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -840,15 +810,14 @@
     }
   },
   {
-    "label": "zoysia/standard/3000/FULL_SUN/DENSE",
+    "label": "zoysia/standard/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "zoysia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -868,15 +837,14 @@
     }
   },
   {
-    "label": "zoysia/enhanced/3000/FULL_SUN/DENSE",
+    "label": "zoysia/enhanced/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "zoysia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -896,15 +864,14 @@
     }
   },
   {
-    "label": "zoysia/premium/3000/FULL_SUN/DENSE",
+    "label": "zoysia/premium/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "zoysia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -924,15 +891,14 @@
     }
   },
   {
-    "label": "zoysia/standard/4250/FULL_SUN/DENSE",
+    "label": "zoysia/standard/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "zoysia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -952,15 +918,14 @@
     }
   },
   {
-    "label": "zoysia/enhanced/4250/FULL_SUN/DENSE",
+    "label": "zoysia/enhanced/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "zoysia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -980,15 +945,14 @@
     }
   },
   {
-    "label": "zoysia/premium/4250/FULL_SUN/DENSE",
+    "label": "zoysia/premium/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "zoysia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1008,15 +972,14 @@
     }
   },
   {
-    "label": "zoysia/standard/6000/FULL_SUN/DENSE",
+    "label": "zoysia/standard/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "zoysia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1036,15 +999,14 @@
     }
   },
   {
-    "label": "zoysia/enhanced/6000/FULL_SUN/DENSE",
+    "label": "zoysia/enhanced/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "zoysia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1064,15 +1026,14 @@
     }
   },
   {
-    "label": "zoysia/premium/6000/FULL_SUN/DENSE",
+    "label": "zoysia/premium/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "zoysia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1092,15 +1053,14 @@
     }
   },
   {
-    "label": "zoysia/standard/8000/FULL_SUN/DENSE",
+    "label": "zoysia/standard/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "zoysia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1120,15 +1080,14 @@
     }
   },
   {
-    "label": "zoysia/enhanced/8000/FULL_SUN/DENSE",
+    "label": "zoysia/enhanced/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "zoysia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1148,15 +1107,14 @@
     }
   },
   {
-    "label": "zoysia/premium/8000/FULL_SUN/DENSE",
+    "label": "zoysia/premium/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "zoysia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1176,15 +1134,14 @@
     }
   },
   {
-    "label": "zoysia/standard/12000/FULL_SUN/DENSE",
+    "label": "zoysia/standard/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "zoysia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1204,15 +1161,14 @@
     }
   },
   {
-    "label": "zoysia/enhanced/12000/FULL_SUN/DENSE",
+    "label": "zoysia/enhanced/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "zoysia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1232,15 +1188,14 @@
     }
   },
   {
-    "label": "zoysia/premium/12000/FULL_SUN/DENSE",
+    "label": "zoysia/premium/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "zoysia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1260,15 +1215,14 @@
     }
   },
   {
-    "label": "bahia/standard/3000/FULL_SUN/DENSE",
+    "label": "bahia/standard/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "bahia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1288,15 +1242,14 @@
     }
   },
   {
-    "label": "bahia/enhanced/3000/FULL_SUN/DENSE",
+    "label": "bahia/enhanced/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "bahia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1316,15 +1269,14 @@
     }
   },
   {
-    "label": "bahia/premium/3000/FULL_SUN/DENSE",
+    "label": "bahia/premium/3000/DENSE",
     "in": {
       "property": {
         "turfSf": 3000
       },
       "options": {
         "track": "bahia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1344,15 +1296,14 @@
     }
   },
   {
-    "label": "bahia/standard/4250/FULL_SUN/DENSE",
+    "label": "bahia/standard/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "bahia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1372,15 +1323,14 @@
     }
   },
   {
-    "label": "bahia/enhanced/4250/FULL_SUN/DENSE",
+    "label": "bahia/enhanced/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "bahia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1400,15 +1350,14 @@
     }
   },
   {
-    "label": "bahia/premium/4250/FULL_SUN/DENSE",
+    "label": "bahia/premium/4250/DENSE",
     "in": {
       "property": {
         "turfSf": 4250
       },
       "options": {
         "track": "bahia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1428,15 +1377,14 @@
     }
   },
   {
-    "label": "bahia/standard/6000/FULL_SUN/DENSE",
+    "label": "bahia/standard/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "bahia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1456,15 +1404,14 @@
     }
   },
   {
-    "label": "bahia/enhanced/6000/FULL_SUN/DENSE",
+    "label": "bahia/enhanced/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "bahia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1484,15 +1431,14 @@
     }
   },
   {
-    "label": "bahia/premium/6000/FULL_SUN/DENSE",
+    "label": "bahia/premium/6000/DENSE",
     "in": {
       "property": {
         "turfSf": 6000
       },
       "options": {
         "track": "bahia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1512,15 +1458,14 @@
     }
   },
   {
-    "label": "bahia/standard/8000/FULL_SUN/DENSE",
+    "label": "bahia/standard/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "bahia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1540,15 +1485,14 @@
     }
   },
   {
-    "label": "bahia/enhanced/8000/FULL_SUN/DENSE",
+    "label": "bahia/enhanced/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "bahia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1568,15 +1512,14 @@
     }
   },
   {
-    "label": "bahia/premium/8000/FULL_SUN/DENSE",
+    "label": "bahia/premium/8000/DENSE",
     "in": {
       "property": {
         "turfSf": 8000
       },
       "options": {
         "track": "bahia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1596,15 +1539,14 @@
     }
   },
   {
-    "label": "bahia/standard/12000/FULL_SUN/DENSE",
+    "label": "bahia/standard/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "bahia",
-        "tier": "standard",
-        "shadeClassification": "FULL_SUN"
+        "tier": "standard"
       }
     },
     "out": {
@@ -1624,15 +1566,14 @@
     }
   },
   {
-    "label": "bahia/enhanced/12000/FULL_SUN/DENSE",
+    "label": "bahia/enhanced/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "bahia",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1652,15 +1593,14 @@
     }
   },
   {
-    "label": "bahia/premium/12000/FULL_SUN/DENSE",
+    "label": "bahia/premium/12000/DENSE",
     "in": {
       "property": {
         "turfSf": 12000
       },
       "options": {
         "track": "bahia",
-        "tier": "premium",
-        "shadeClassification": "FULL_SUN"
+        "tier": "premium"
       }
     },
     "out": {
@@ -1680,175 +1620,7 @@
     }
   },
   {
-    "label": "st_augustine/standard/4250/MODERATE_SHADE/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 4250
-      },
-      "options": {
-        "track": "st_augustine",
-        "tier": "standard",
-        "shadeClassification": "MODERATE_SHADE"
-      }
-    },
-    "out": {
-      "perApp": 82,
-      "annual": 492,
-      "monthly": 41,
-      "freq": 6,
-      "tier": "standard",
-      "track": "st_augustine",
-      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
-      "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 59,
-      "marketAnnual": 708
-    }
-  },
-  {
-    "label": "st_augustine/enhanced/4250/MODERATE_SHADE/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 4250
-      },
-      "options": {
-        "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "MODERATE_SHADE"
-      }
-    },
-    "out": {
-      "perApp": 79,
-      "annual": 711,
-      "monthly": 59.25,
-      "freq": 9,
-      "tier": "enhanced",
-      "track": "st_augustine",
-      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
-      "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 86,
-      "marketAnnual": 1032
-    }
-  },
-  {
-    "label": "st_augustine/premium/4250/MODERATE_SHADE/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 4250
-      },
-      "options": {
-        "track": "st_augustine",
-        "tier": "premium",
-        "shadeClassification": "MODERATE_SHADE"
-      }
-    },
-    "out": {
-      "perApp": 77,
-      "annual": 924,
-      "monthly": 77,
-      "freq": 12,
-      "tier": "premium",
-      "track": "st_augustine",
-      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
-      "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 114,
-      "marketAnnual": 1368
-    }
-  },
-  {
-    "label": "st_augustine/standard/4250/HEAVY_SHADE/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 4250
-      },
-      "options": {
-        "track": "st_augustine",
-        "tier": "standard",
-        "shadeClassification": "HEAVY_SHADE"
-      }
-    },
-    "out": {
-      "perApp": 80,
-      "annual": 480,
-      "monthly": 40,
-      "freq": 6,
-      "tier": "standard",
-      "track": "st_augustine",
-      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
-      "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 59,
-      "marketAnnual": 708
-    }
-  },
-  {
-    "label": "st_augustine/enhanced/4250/HEAVY_SHADE/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 4250
-      },
-      "options": {
-        "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "HEAVY_SHADE"
-      }
-    },
-    "out": {
-      "perApp": 77,
-      "annual": 693,
-      "monthly": 57.75,
-      "freq": 9,
-      "tier": "enhanced",
-      "track": "st_augustine",
-      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
-      "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 86,
-      "marketAnnual": 1032
-    }
-  },
-  {
-    "label": "st_augustine/premium/4250/HEAVY_SHADE/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 4250
-      },
-      "options": {
-        "track": "st_augustine",
-        "tier": "premium",
-        "shadeClassification": "HEAVY_SHADE"
-      }
-    },
-    "out": {
-      "perApp": 74,
-      "annual": 888,
-      "monthly": 74,
-      "freq": 12,
-      "tier": "premium",
-      "track": "st_augustine",
-      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
-      "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 114,
-      "marketAnnual": 1368
-    }
-  },
-  {
-    "label": "st_augustine/enhanced/4250/FULL_SUN/NORMAL",
+    "label": "st_augustine/enhanced/4250/NORMAL",
     "in": {
       "property": {
         "turfSf": 4250,
@@ -1856,8 +1628,7 @@
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1877,7 +1648,7 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/4250/FULL_SUN/LOOSE",
+    "label": "st_augustine/enhanced/4250/LOOSE",
     "in": {
       "property": {
         "turfSf": 4250,
@@ -1885,8 +1656,7 @@
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1906,7 +1676,7 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/4250/FULL_SUN/SPARSE",
+    "label": "st_augustine/enhanced/4250/SPARSE",
     "in": {
       "property": {
         "turfSf": 4250,
@@ -1914,8 +1684,7 @@
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1935,15 +1704,14 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/2500/FULL_SUN/DENSE-tiny",
+    "label": "st_augustine/enhanced/2500/DENSE-tiny",
     "in": {
       "property": {
         "turfSf": 2500
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
@@ -1963,15 +1731,14 @@
     }
   },
   {
-    "label": "st_augustine/enhanced/22000/FULL_SUN/DENSE-overmax",
+    "label": "st_augustine/enhanced/22000/DENSE-overmax",
     "in": {
       "property": {
         "turfSf": 22000
       },
       "options": {
         "track": "st_augustine",
-        "tier": "enhanced",
-        "shadeClassification": "FULL_SUN"
+        "tier": "enhanced"
       }
     },
     "out": {
