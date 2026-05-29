@@ -298,6 +298,24 @@ function defaultTargetSendAt(weekOf) {
   return parseETDateTime(`${weekOf}T08:00:00`); // Thursday 8 AM ET
 }
 
+/**
+ * Stable signed-int4 Postgres advisory-lock key for a newsletter week, derived
+ * from the YYYY-MM-DD week string. Shared by the Thursday autopilot and the
+ * draft-from-plan route so both serialize on the SAME key and cannot each
+ * create a draft for the week. (The previous key hashed only the first 4 bytes
+ * of an ISO timestamp — i.e. the year digits — so it collapsed to one key per
+ * calendar year.) FNV-1a → unsigned → mod 2^31-1.
+ */
+function weekLockKey(weekOf) {
+  const s = `nl-week:${String(weekOf || '')}`;
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) % 2147483647;
+}
+
 module.exports = {
   cityToZone,
   CITY_ZONE_MAP,
@@ -310,4 +328,5 @@ module.exports = {
   getCurrentNewsletterThursday,
   getNewsletterWeekOf,
   defaultTargetSendAt,
+  weekLockKey,
 };

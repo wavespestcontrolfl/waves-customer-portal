@@ -20,7 +20,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, defaultTargetSendAt } = require('./event-freshness');
+const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, defaultTargetSendAt, weekLockKey } = require('./event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { createNewsletterDraft } = require('./newsletter-draft');
 const { getFlagshipType } = require('../config/newsletter-types');
@@ -305,8 +305,10 @@ async function autoDraftFlagship() {
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
   //    insert are atomic. pg_advisory_xact_lock auto-releases when the
-  //    transaction ends — no leak if the process crashes mid-flight.
-  const lockKey = Math.abs(Buffer.from(plan.startDate.toISOString()).readInt32BE(0) % 2147483647);
+  //    transaction ends — no leak if the process crashes mid-flight. The key is
+  //    per-WEEK (weekLockKey) and shared with the draft-from-plan route so the
+  //    two paths can't both create a draft for the same week.
+  const lockKey = weekLockKey(weekOf);
 
   let send;
   let earlyReturn = null;

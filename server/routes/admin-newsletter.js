@@ -20,7 +20,7 @@ const { linkToCustomer, subscribeOrResubscribe } = require('../services/newslett
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 const { isFlagshipType } = require('../config/newsletter-types');
-const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt } = require('../services/event-freshness');
+const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt, weekLockKey } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { createNewsletterDraft } = require('../services/newsletter-draft');
@@ -2027,16 +2027,24 @@ router.patch('/calendar/:id', async (req, res, next) => {
 router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, next) => {
   try {
     const result = await db.transaction(async (trx) => {
-      const calendar = await trx('newsletter_calendar')
+      // Read week_of first (no row lock) to derive the per-week advisory-lock
+      // key, then take that lock BEFORE the forUpdate. Acquiring the advisory
+      // lock first in BOTH this path and the autopilot avoids a lock-order
+      // deadlock (autopilot takes the advisory lock before touching any row).
+      const wk = await trx('newsletter_calendar')
         .where({ id: req.params.id })
-        .forUpdate()
-        .first();
-
-      if (!calendar) {
+        .first(trx.raw("to_char(week_of, 'YYYY-MM-DD') as week_of"));
+      if (!wk) {
         const err = new Error('not found');
         err.status = 404;
         throw err;
       }
+      await trx.raw('SELECT pg_advisory_xact_lock(?)', [weekLockKey(wk.week_of)]);
+
+      const calendar = await trx('newsletter_calendar')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
 
       // Idempotent: return existing send if already drafted
       if (calendar.send_id) {
@@ -2050,6 +2058,28 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
         const err = new Error('Cannot draft a skipped week');
         err.status = 400;
         throw err;
+      }
+
+      // Adopt an autopilot draft created for this same week instead of making a
+      // second one. The Thursday cron may have produced a draft while this
+      // request waited on the advisory lock, and it links the calendar OUTSIDE
+      // its lock — so calendar.send_id can still read null here even though a
+      // draft exists. Same dedup the autopilot uses (flagship, status draft,
+      // created_by NULL), bounded to this week's window so drafting a non-current
+      // week can't adopt the current week's draft.
+      const weekStart = parseETDateTime(`${wk.week_of}T00:00:00`);
+      const weekEnd = parseETDateTime(`${etDateString(addETDays(weekStart, 7))}T00:00:00`);
+      const autopilotDraft = await trx('newsletter_sends')
+        .where({ newsletter_type: 'local-weekly-fresh-events', status: 'draft' })
+        .whereNull('created_by')
+        .where('created_at', '>=', weekStart)
+        .where('created_at', '<', weekEnd)
+        .first();
+      if (autopilotDraft) {
+        await trx('newsletter_calendar')
+          .where({ id: calendar.id })
+          .update({ send_id: autopilotDraft.id, status: 'drafted', updated_at: trx.fn.now() });
+        return { existing: true, send: autopilotDraft };
       }
 
       // Build prompt from calendar plan
