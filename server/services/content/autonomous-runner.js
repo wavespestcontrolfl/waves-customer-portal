@@ -598,18 +598,21 @@ class AutonomousRunner {
       brief.seo_contract = seoCompletionResult.contract;
     }
 
-    // 5b. Pre-publish AI-visibility subset (refresh only). Runs the static-HTML
-    // P0 checks (noindex, canonical-elsewhere, empty body, schema-vs-hidden)
-    // before we ever open a PR. The live-only checks (robots.txt, inbound
-    // links) stay in the post-publish visibility worker. Any P0 blocks publish.
-    let prePublishVisibilityResult = { passed: true, skipped: 'not_refresh' };
-    if (brief.action_type === 'refresh_existing_page') {
+    // 5b. Pre-publish AI-visibility subset. Runs the static-HTML P0 checks
+    // (noindex, canonical-elsewhere, empty body, schema-vs-hidden) before we
+    // ever open a PR — for refreshes AND newly generated supporting blogs, so
+    // an unindexable new draft can't slip through the way a bad refresh can't.
+    // The live-only checks (robots.txt, inbound links) stay in the post-publish
+    // visibility worker. Any P0 blocks publish.
+    let prePublishVisibilityResult = { passed: true, skipped: 'not_applicable' };
+    if (brief.action_type === 'refresh_existing_page' || brief.action_type === 'new_supporting_blog') {
       const visGate = getAiVisibilityGate();
       if (visGate?.evaluateStatic) {
         try {
           // No canonicalUrl: publishRefresh freezes canonical from the live
-          // page, so the draft's canonical is irrelevant — passing it would
-          // risk a false P0 and needlessly route a good refresh to review.
+          // page, and a new blog's canonical is its own URL — so the draft
+          // canonical is either irrelevant or self-referential, and passing it
+          // would risk a false P0 and needlessly route good content to review.
           prePublishVisibilityResult = visGate.evaluateStatic({
             url: draft.url,
             html: draft.body,
