@@ -620,6 +620,25 @@ function calculateProductAmount({
   };
 }
 
+function summarizeMaterialCost(items = []) {
+  const selectedItems = items.filter((item) => item?.selected !== false);
+  const hasMaterialCost = (item) => item.mix?.materialCost != null && Number.isFinite(Number(item.mix.materialCost));
+  const pricedItems = selectedItems.filter(hasMaterialCost);
+  const missingItems = selectedItems.filter((item) => item.product && item.mix?.amount && !hasMaterialCost(item));
+  const total = pricedItems.reduce((sum, item) => sum + Number(item.mix.materialCost), 0);
+  return {
+    total: Number(total.toFixed(2)),
+    pricedLineCount: pricedItems.length,
+    selectedLineCount: selectedItems.length,
+    missingPriceCount: missingItems.length,
+    source: pricedItems.length ? 'inventory_mix_material_cost' : 'unavailable',
+    missingPriceProducts: missingItems.map((item) => ({
+      productId: item.product.id,
+      productName: item.product.name,
+    })),
+  };
+}
+
 function buildMixOrder(items) {
   const order = [
     'water_conditioner',
@@ -1128,6 +1147,7 @@ async function buildPlanForService(serviceId, options = {}) {
     }) : null,
   }));
   const plannedItems = planItems.filter((item) => item.selected);
+  const materialCostSummary = summarizeMaterialCost(plannedItems);
 
   const ordinanceSummary = summarizeOrdinanceStatus({ date: serviceDate, ordinances, candidateItems: plannedCandidateItems });
   const nutrientProjection = calculateNutrients(plannedItems, lawnSqft);
@@ -1290,6 +1310,7 @@ async function buildPlanForService(serviceId, options = {}) {
       tankCapacityGal: calibration?.tank_capacity_gal ? Number(calibration.tank_capacity_gal) : null,
       lawnSqft: profile?.lawn_sqft || null,
       nutrientProjection,
+      materialCostSummary,
       items: plannedItems,
       conditionalOptions: planItems.filter((item) => item.role === 'conditional' && !item.selected),
     },
@@ -1309,6 +1330,7 @@ module.exports = {
   buildPlanForService,
   calculateProductAmount,
   parseVisitNutrientTargets,
+  summarizeMaterialCost,
   effectiveAreaFactor,
   calculateNutrientLedgerFromRows,
   calculateNutrients,

@@ -17,6 +17,7 @@ const {
   selectedMayFertilizerBranch,
   summarizeCalibration,
   summarizeAnnualN,
+  summarizeMaterialCost,
   summarizeOrdinanceStatus,
 } = require('../services/waveguard-plan-engine');
 const {
@@ -422,6 +423,35 @@ describe('waveguard-plan-engine helpers', () => {
     expect(ordinance.blocks.map((block) => block.code)).toEqual(
       expect.arrayContaining(['nitrogen_blackout', 'phosphorus_blackout'])
     );
+  });
+
+  test('summarizeMaterialCost totals selected inventory-backed mix costs', () => {
+    const summary = summarizeMaterialCost([{
+      selected: true,
+      product: { id: 'zero-p', name: 'LESCO 24-0-11' },
+      mix: { materialCost: 21.12 },
+    }, {
+      selected: true,
+      product: { id: 'carbon', name: 'CarbonPro-L' },
+      mix: { materialCost: 14.24 },
+    }, {
+      selected: false,
+      product: { id: 'dismiss', name: 'Dismiss' },
+      mix: { materialCost: 4.36 },
+    }, {
+      selected: true,
+      product: { id: 'unknown', name: 'Needs price product' },
+      mix: { amount: 2, materialCost: null },
+    }]);
+
+    expect(summary).toEqual({
+      total: 35.36,
+      pricedLineCount: 2,
+      selectedLineCount: 3,
+      missingPriceCount: 1,
+      source: 'inventory_mix_material_cost',
+      missingPriceProducts: [{ productId: 'unknown', productName: 'Needs price product' }],
+    });
   });
 
   test('classifyProtocolLine marks Celsius as spot allowance and May fertilizers as one-of branch', () => {
