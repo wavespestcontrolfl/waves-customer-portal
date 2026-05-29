@@ -2832,7 +2832,7 @@ export function ProtocolPanel({ service, onClose }) {
                             Visit {v.visit} · {v.month}
                           </div>{" "}
                           <div style={{ fontSize: 11, color: D.muted }}>
-                            ${v.material_cost || "—"} mat
+                            Legacy mat: ${v.material_cost || "—"}
                           </div>{" "}
                         </div>{" "}
                         <div
@@ -2984,7 +2984,7 @@ export function ProtocolPanel({ service, onClose }) {
                         >
                           {" "}
                           <div>
-                            Mat:{" "}
+                            Legacy Mat:{" "}
                             {matchedProtocolVisit.material_cost || "inventory"}
                           </div>{" "}
                           <div>
@@ -3114,7 +3114,7 @@ export function ProtocolPanel({ service, onClose }) {
                           >
                             {" "}
                             <div>
-                              Mat: {v.material_cost || "inventory"}
+                              Legacy Mat: {v.material_cost || "inventory"}
                             </div>{" "}
                             <div>Labor: {v.labor_cost || "standard"}</div>{" "}
                           </div>{" "}

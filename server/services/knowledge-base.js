@@ -461,7 +461,7 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
           for (const v of track.visits) {
             const tierList = Object.entries(v.tiers || {}).filter(([,on]) => on).map(([t]) => t).join(', ');
             lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
-            lines.push(`  Materials: $${v.material_cost} | Labor: $${v.labor_cost} | Tiers: ${tierList}`);
+            lines.push(`  Legacy materials: $${v.material_cost} | Labor: $${v.labor_cost} | Tiers: ${tierList}`);
             if (v.notes) lines.push(`  Notes: ${v.notes}`);
           }
         }
@@ -475,7 +475,7 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
           lines.push(`**${track.visits.length} Visits/Year:**\n`);
           for (const v of track.visits) {
             lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
-            lines.push(`  Materials: $${v.material_cost} | Labor: $${v.labor_cost}`);
+            lines.push(`  Legacy materials: $${v.material_cost} | Labor: $${v.labor_cost}`);
           }
         }
         const slug = `protocol-${slugify(trackId)}`;
