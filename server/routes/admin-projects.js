@@ -1348,27 +1348,33 @@ async function buildWdoPdfAttachment(project, customer) {
   return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
 }
 
-// WDO inspection auto-invoice fee, tiered by STRUCTURE footprint (owner pricing):
-//   ≤2500 sq ft → $150 · ≤3500 → $200 · >3500 → $250.
-// We tier only on the structure footprint captured on the inspection itself
-// (findings.structure_sqft) — never customers.property_sqft, which is treated
-// LAWN area and would mis-bill. If footprint isn't entered we default to the
-// top $250 tier (conservative; the operator sees it in the dry-run and can
-// adjust). NB: kept local rather than SPECIALTY.wdo.brackets, whose $175/$200/
-// $225 values are stale relative to these owner-confirmed tiers.
+// WDO inspection auto-invoice fee. The tech can pick the fee directly on the
+// form (findings.inspection_fee, owner tiers $150/$200/$250); that selection
+// always wins. If they didn't pick one, fall back to tiering by the structure
+// footprint they entered (≤2500 → $150 · ≤3500 → $200 · >3500 → $250), and if
+// neither is set default to the top $250 tier (conservative; surfaced in the
+// dry-run for the operator to adjust). We never tier on customers.property_sqft
+// (that's lawn area) and keep this local because SPECIALTY.wdo.brackets
+// ($175/$200/$225) is stale relative to these owner-confirmed tiers.
 const WDO_FEE_TIERS = [
   { maxSqFt: 2500, price: 150 },
   { maxSqFt: 3500, price: 200 },
   { maxSqFt: Infinity, price: 250 },
 ];
+function parseWdoFee(value) {
+  const m = String(value ?? '').match(/\$?\s*(\d{2,5}(?:\.\d{1,2})?)/);
+  return m ? Number(m[1]) : 0;
+}
 function resolveWdoInspectionFee(findings) {
+  const picked = parseWdoFee(findings?.inspection_fee);
+  if (picked > 0) return picked;
   const sqft = Number(String(findings?.structure_sqft ?? '').replace(/[^0-9.]/g, '')) || 0;
   if (sqft > 0) {
     for (const tier of WDO_FEE_TIERS) {
       if (sqft <= tier.maxSqFt) return tier.price;
     }
   }
-  return 250; // footprint not captured — top tier, operator adjusts in dry-run
+  return 250; // nothing picked or measured — top tier, operator adjusts in dry-run
 }
 
 function isReusableInvoice(inv) {

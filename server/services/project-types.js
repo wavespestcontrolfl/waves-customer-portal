@@ -31,7 +31,8 @@ const PROJECT_TYPES = {
     findingsFields: [
       { key: 'property_address', label: 'Property inspected', type: 'text', placeholder: 'Street address, city, state, ZIP' },
       { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', placeholder: 'Main home, detached garage, shed, addition…' },
-      { key: 'structure_sqft', label: 'Structure footprint (approx. sq ft)', type: 'text', placeholder: 'Under-roof area, e.g. 2200 — sets the fee tier (≤2500 $150 · ≤3500 $200 · >3500 $250)' },
+      { key: 'structure_sqft', label: 'Structure footprint (approx. sq ft)', type: 'text', placeholder: 'Under-roof area, e.g. 2200 — used for the fee tier if no fee is picked' },
+      { key: 'inspection_fee', label: 'Inspection fee', type: 'select', options: ['$150 — up to 2,500 sq ft', '$200 — 2,501 to 3,500 sq ft', '$250 — over 3,500 sq ft'] },
       { key: 'requested_by', label: 'Inspection requested by', type: 'text', placeholder: 'Name and contact information' },
       { key: 'report_sent_to', label: 'Report sent to', type: 'text', placeholder: 'Name and contact information if different' },
       { key: 'inspection_scope', label: 'Visible / accessible areas inspected', type: 'textarea', placeholder: 'Interior, attic access, garage, exterior perimeter, crawlspace…' },
