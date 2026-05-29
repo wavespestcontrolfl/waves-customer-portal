@@ -46,6 +46,13 @@ const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 // whole source pull. Leaving the stale status in place is harmless — the row is
 // excluded for the ~1h until the next normalize run recomputes it.
 //
+// We ALSO set freshness_revival_pending=true — an explicit, one-shot marker the
+// normalizer consumes to recompute freshness for ONLY genuinely-revived rows.
+// Without it the normalizer would have to infer "was revived" from
+// normalized_at IS NULL, which is not unique to revival (e.g. a geocode
+// re-queue) and would let it override an admin's manual 'expired' on a row that
+// ingestion never re-dated.
+//
 // Gated on OLD effective date < ET-midnight-today AND NEW effective date >=
 // ET-midnight-today, where effective date = COALESCE(end_at, start_at). Two
 // reasons for the ET-midnight boundary rather than now():
@@ -65,6 +72,7 @@ function revivalResetFields() {
   const etMidnight = parseETDateTime(`${etDateString()}T00:00:00`);
   return {
     normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
+    freshness_revival_pending: db.raw(`CASE WHEN ${REVIVAL_COND} THEN true ELSE events_raw.freshness_revival_pending END`, { etMidnight }),
   };
 }
 

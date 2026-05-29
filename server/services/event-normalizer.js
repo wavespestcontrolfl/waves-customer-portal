@@ -170,32 +170,38 @@ async function normalizeRow(row) {
   }
 
   // Freshness recompute for revived rows: when ingestion re-dates an event
-  // past→future it resets normalized_at (re-queueing the row here) but leaves the
-  // stale terminal freshness_status in place (the column is NOT NULL, so it can't
-  // be cleared in the upsert). Such a row already has a known event_type, so the
-  // Claude pass above is skipped — recompute classifyFreshness directly
-  // (deterministic, no API call) so the revived event re-enters the digest with
-  // a current status. Guarded to: not override the Claude pass; only act on the
+  // past→future it resets normalized_at (re-queueing the row here) and sets the
+  // explicit freshness_revival_pending marker, but leaves the stale terminal
+  // freshness_status in place (the column is NOT NULL, so it can't be cleared in
+  // the upsert). Such a row already has a known event_type, so the Claude pass
+  // above is skipped — recompute classifyFreshness directly (deterministic, no
+  // API call) so the revived event re-enters the digest with a current status.
+  // Gated on the EXPLICIT marker — never inferred from normalized_at IS NULL,
+  // which is not unique to revival (e.g. a geocode re-queue) and would otherwise
+  // let us override an admin's manual 'expired' on a row ingestion never
+  // re-dated. Also guarded to: not override the Claude pass; only act on the
   // terminal states the revival concerns ('expired'/'stale_recurring'); and only
-  // when the effective date is today-or-later in ET — using the SAME
-  // ET-midnight-today cutoff as the ingestion revival gate and the expiry sweep
-  // (not the now() instant), so an event re-dated to earlier today ET is still
-  // recomputed and re-enters the digest rather than staying stuck excluded. A
-  // still-past row re-queued for any other reason is never wrongly revived, and
-  // a manually-'expired' future event (never re-queued) is never touched.
-  const etMidnightToday = parseETDateTime(`${etDateString()}T00:00:00`);
-  if (updates.freshness_status === undefined
-      && ['expired', 'stale_recurring'].includes(row.freshness_status)
-      && row.event_type && row.event_type !== 'unknown'
-      && new Date(row.end_at || row.start_at) >= etMidnightToday) {
-    const { freshness_status, freshness_score } = classifyFreshness({
-      event_type: row.event_type,
-      times_featured: row.times_featured || 0,
-      start_at: row.start_at,
-      end_at: row.end_at,
-    });
-    updates.freshness_status = freshness_status;
-    updates.freshness_score = freshness_score;
+  // when the effective date is today-or-later in ET (same ET-midnight cutoff as
+  // ingestion + the expiry sweep), so a row that drifted back past midnight is
+  // not wrongly revived. The marker is one-shot — cleared once consumed below.
+  if (row.freshness_revival_pending) {
+    const etMidnightToday = parseETDateTime(`${etDateString()}T00:00:00`);
+    if (updates.freshness_status === undefined
+        && ['expired', 'stale_recurring'].includes(row.freshness_status)
+        && row.event_type && row.event_type !== 'unknown'
+        && new Date(row.end_at || row.start_at) >= etMidnightToday) {
+      const { freshness_status, freshness_score } = classifyFreshness({
+        event_type: row.event_type,
+        times_featured: row.times_featured || 0,
+        start_at: row.start_at,
+        end_at: row.end_at,
+      });
+      updates.freshness_status = freshness_status;
+      updates.freshness_score = freshness_score;
+    }
+    // One-shot: clear the marker now that the normalizer has handled the row,
+    // whether or not it recomputed (e.g. status wasn't terminal).
+    updates.freshness_revival_pending = false;
   }
 
   // Derive region_zone from city if not already set

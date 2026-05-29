@@ -208,11 +208,28 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     expect(lower).toMatch(/else events_raw\.normalized_at end/);
   });
 
-  test('only re-queues via normalized_at — never nulls the NOT NULL freshness_status', () => {
+  test('re-queues via normalized_at + sets the explicit revival marker — never nulls the NOT NULL freshness_status', () => {
     const f = revivalResetFields();
     // freshness_status is NOT NULL in the DB, so the revival must not touch it
-    // in the upsert (the normalizer recomputes it instead).
-    expect(Object.keys(f)).toEqual(['normalized_at']);
+    // in the upsert (the normalizer recomputes it instead). It signals revival
+    // via normalized_at (re-queue) + freshness_revival_pending (explicit marker
+    // the normalizer consumes), both safe to set in the ON CONFLICT update.
+    expect(Object.keys(f).sort()).toEqual(['freshness_revival_pending', 'normalized_at']);
+  });
+
+  test('revival marker is gated on the SAME past→future ET-midnight condition, defaulting to the existing value', () => {
+    const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+    const { sql, bindings } = revivalResetFields().freshness_revival_pending.toSQL();
+    const lower = sql.toLowerCase();
+    expect(lower).toMatch(/case when/);
+    expect(lower).toMatch(/coalesce\(events_raw\.end_at, events_raw\.start_at\) </);
+    expect(lower).toMatch(/coalesce\(excluded\.end_at, excluded\.start_at\) >=/);
+    expect(lower).not.toContain('now()');
+    // True only on a genuine past→future re-date; otherwise preserve the column
+    // (never NULL — it's NOT NULL in the DB).
+    expect(lower).toMatch(/then true else events_raw\.freshness_revival_pending end/);
+    const expected = parseETDateTime(`${etDateString()}T00:00:00`).getTime();
+    bindings.forEach((b) => expect(new Date(b).getTime()).toBe(expected));
   });
 });
 
