@@ -75,7 +75,11 @@ per-photo AI score columns.
 
 ## Reuse (service-layer, no rebuild)
 - `server/services/lawn-assessment.js` → `analyzePhoto()` vision engine (Claude + Gemini).
-- `server/services/photos.js` → `PhotoService.uploadBase64()` / `getViewUrl()` (S3 + signed URLs).
+- `server/services/photos.js` → `PhotoService.getUploadUrl()` + the existing server-side
+  base64 upload pattern (`new PutObjectCommand({...})`, see `admin-lawn-assessment.js:679-690`)
+  and `getViewUrl()` for signed reads. NOTE: there is no `uploadBase64()` helper today —
+  either follow the existing manual `getUploadUrl` + `PutObjectCommand` pattern, or add a
+  shared `uploadBase64()` to `PhotoService` as explicit scope; do not assume it exists.
 - Tokenized public-page pattern from estimates (`EstimateViewPage` + `estimate-public.js`) — web page, NOT PDF (no render-to-PDF exists in the repo).
 - Public report token + `express-rate-limit` + expiry pattern from `server/routes/reports-public.js` / `estimate-public.js`.
 
@@ -92,7 +96,10 @@ per-photo AI score columns.
    the pipeline. Optional, never forced — a quick diagnosis shouldn't auto-spam the CRM.
 
 ## API (new)
-All under tech auth (`requireTechOrAdmin`):
+All tech routes mount **`adminAuthenticate` then `requireTechOrAdmin`** (both, in that
+order — `requireTechOrAdmin` only works after `adminAuthenticate` populates `req.techRole`;
+used alone it 403s every request). Mirror `server/routes/tech-track.js:52` /
+`admin-lawn-assessment.js:327-328`.
 - `POST /api/tech/lawn-diagnostic/analyze` — analyze-only, no persistence (internal feedback).
 - `POST /api/tech/lawn-diagnostic` — create/persist a draft.
 - `POST /api/tech/lawn-diagnostic/:id/send` — capture contact, mint token, render report. Gate: contact required.
