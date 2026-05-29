@@ -490,55 +490,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 5:30AM ET — Expire past events. classifyFreshness never emits an
-  // 'expired' status and nothing else transitions an event out of its fresh
-  // state once its date passes, so a one_time/annual event keeps its high
-  // freshness_score forever in the DB. Mark anything whose effective date
-  // (end_at for multi-day, else start_at) is before ET-today as expired so the
-  // terminal-state rejects in isEligibleForFreshDigest + the editorial fetch
-  // filters reflect reality and ranking/admin views aren't polluted by
-  // past events. Runs before the 4AM-ingest/5AM-normalize → digest window.
-  // =========================================================================
-  cron.schedule('30 5 * * *', async () => {
-    try {
-      const { parseETDateTime, etDateString } = require('../utils/datetime-et');
-      const { classifyFreshness } = require('./event-freshness');
-      const etMidnightToday = parseETDateTime(`${etDateString()}T00:00:00`);
-
-      // (a) Expire past events.
-      const expired = await db('events_raw')
-        .whereNot('freshness_status', 'expired')
-        .whereRaw('COALESCE(end_at, start_at) < ?', [etMidnightToday])
-        .update({ freshness_status: 'expired', freshness_score: 0, updated_at: new Date() });
-
-      // (b) Revive: a feed re-pull can move an already-expired row's date back
-      //     into the future — the onConflict().merge() paths update start_at/end_at
-      //     but not freshness_status, so the renewed event would stay permanently
-      //     excluded by the whereNotIn(['expired', ...]) filters. Recompute
-      //     freshness for those rows so they re-enter the digest. This keeps the
-      //     sweep self-correcting without touching the ingestion merges or the
-      //     (event_type-gated) normalizer.
-      const revivable = await db('events_raw')
-        .where('freshness_status', 'expired')
-        .whereRaw('COALESCE(end_at, start_at) >= ?', [etMidnightToday])
-        .select('id', 'event_type', 'times_featured', 'start_at', 'end_at');
-      let revived = 0;
-      for (const row of revivable) {
-        const { freshness_status, freshness_score } = classifyFreshness(row);
-        if (freshness_status !== 'expired') {
-          await db('events_raw').where({ id: row.id })
-            .update({ freshness_status, freshness_score, updated_at: new Date() });
-          revived += 1;
-        }
-      }
-
-      if (expired > 0 || revived > 0) logger.info(`[event-expiry] expired ${expired} past event(s), revived ${revived} re-dated event(s)`);
-    } catch (err) {
-      logger.error(`[event-expiry] failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // EVERY MIN — Automation runner. Fires the next step of any enrollment
   // whose next_send_at has passed. Indexed query on automation_enrollments.
   // =========================================================================
