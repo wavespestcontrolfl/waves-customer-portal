@@ -37,23 +37,25 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
-// (a feed correcting/rescheduling a previously-expired event), clear the stored
-// freshness so the row isn't stuck 'expired'/'stale_recurring' — the editorial
-// fetch filters exclude those — and reset normalized_at so the normalizer
-// recomputes freshness for the new date. Gated on OLD effective date < now()
-// AND NEW effective date >= now(), where effective date = COALESCE(end_at,
-// start_at) — the SAME effective date the expiry sweep uses. Using the old
-// effective date (not bare start_at) is essential: a multi-day event that's
-// in-progress (start past, end still future) was never expirable, so it must
-// NOT trip the revival on every upsert — otherwise an admin's manual 'expired'
-// curation of a running exhibit would be cleared. Spread into each
-// onConflict().merge(). EXCLUDED.* is the proposed insert; events_raw.* is the
-// existing row.
+// (a feed correcting/rescheduling a previously-expired event), re-queue the row
+// for the normalizer by resetting normalized_at — the normalizer then recomputes
+// freshness for the new date so the row isn't stuck 'expired'/'stale_recurring'
+// (the editorial fetch filters exclude those). We deliberately do NOT touch
+// freshness_status here: the column is NOT NULL (migration 20260524000002), so
+// nulling it in the ON CONFLICT update would violate the constraint and fail the
+// whole source pull. Leaving the stale status in place is harmless — the row is
+// excluded for the ~1h until the next normalize run recomputes it.
+//
+// Gated on OLD effective date < now() AND NEW effective date >= now(), where
+// effective date = COALESCE(end_at, start_at) — the SAME effective date the
+// expiry sweep uses. Using the old EFFECTIVE date (not bare start_at) is
+// essential: an in-progress multi-day event (start past, end still future) was
+// never expirable, so it must NOT trip the revival on every upsert — otherwise
+// an admin's manual 'expired' curation of a running exhibit would be undone.
+// EXCLUDED.* is the proposed insert; events_raw.* is the existing row.
 const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < now() AND COALESCE(EXCLUDED.end_at, EXCLUDED.start_at) >= now()';
 function revivalResetFields() {
   return {
-    freshness_status: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.freshness_status END`),
-    freshness_score: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.freshness_score END`),
     normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`),
   };
 }

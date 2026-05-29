@@ -169,15 +169,20 @@ async function normalizeRow(row) {
   }
 
   // Freshness recompute for revived rows: when ingestion re-dates an event
-  // past→future it clears freshness_status + resets normalized_at, re-queueing
-  // the row here. Such a row already has a known event_type, so the Claude pass
-  // above is skipped — recompute classifyFreshness directly (deterministic, no
-  // API call) from the stored type + current dates so the revived event gets a
-  // real status instead of NULL (which the whereNotIn editorial filters treat
-  // as excluded). Guarded so it never overrides the Claude pass, and only fires
-  // on the cleared-freshness signal — a manual 'expired' curation stays non-null.
-  if (updates.freshness_status === undefined && !row.freshness_status
-      && row.event_type && row.event_type !== 'unknown') {
+  // past→future it resets normalized_at (re-queueing the row here) but leaves the
+  // stale terminal freshness_status in place (the column is NOT NULL, so it can't
+  // be cleared in the upsert). Such a row already has a known event_type, so the
+  // Claude pass above is skipped — recompute classifyFreshness directly
+  // (deterministic, no API call) so the revived event re-enters the digest with
+  // a current status. Guarded to: not override the Claude pass; only act on the
+  // terminal states the revival concerns ('expired'/'stale_recurring'); and only
+  // when the effective date is genuinely future — so a still-past row that was
+  // re-queued for any reason is never wrongly revived, and a manually-'expired'
+  // future event (never re-queued by the revival gate) is never touched.
+  if (updates.freshness_status === undefined
+      && ['expired', 'stale_recurring'].includes(row.freshness_status)
+      && row.event_type && row.event_type !== 'unknown'
+      && new Date(row.end_at || row.start_at) >= new Date()) {
     const { freshness_status, freshness_score } = classifyFreshness({
       event_type: row.event_type,
       times_featured: row.times_featured || 0,
