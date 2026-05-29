@@ -41,10 +41,26 @@ async function remap(knex, from, to) {
   return results;
 }
 
+// The GBP OAuth refresh token (when connected via the admin OAuth flow) is
+// stored in system_settings under key `gbp.oauth_tokens.<locationId>`
+// (google-business.js). google-business.js now looks it up under
+// `...bradenton`, so the stored key must move too — otherwise Bradenton GBP
+// sync/replies lose stored credentials (env GBP_REFRESH_TOKEN_LWR still works
+// as a fallback, but stored-token envs would break until reconnect).
+async function remapSettingKey(knex, from, to) {
+  const hasTable = await knex.schema.hasTable('system_settings').catch(() => false);
+  if (!hasTable) return;
+  await knex('system_settings')
+    .where('key', `gbp.oauth_tokens.${from}`)
+    .update({ key: `gbp.oauth_tokens.${to}` });
+}
+
 exports.up = async function (knex) {
   await remap(knex, OLD_ID, NEW_ID);
+  await remapSettingKey(knex, OLD_ID, NEW_ID);
 };
 
 exports.down = async function (knex) {
   await remap(knex, NEW_ID, OLD_ID);
+  await remapSettingKey(knex, NEW_ID, OLD_ID);
 };
