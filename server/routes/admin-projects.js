@@ -1626,6 +1626,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
+    // Enforce the WDO constraint the UI relies on — the auto-created invoice is
+    // a "WDO Inspection" line, so a direct API call on another project type
+    // must not bill the wrong service (mirrors the /fdacs-pdf guard).
+    if (project.project_type !== 'wdo_inspection') {
+      return res.status(400).json({ error: 'Report + invoice send is only available for WDO inspections' });
+    }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
 
     const customer = await db('customers').where({ id: project.customer_id }).first();
