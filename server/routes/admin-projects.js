@@ -1348,22 +1348,23 @@ async function buildWdoPdfAttachment(project, customer) {
   return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
 }
 
-// WDO inspection auto-invoice fee. The tech can pick the fee directly on the
-// form (findings.inspection_fee, owner tiers $150/$200/$250); that selection
-// always wins. If they didn't pick one, fall back to tiering by the structure
-// footprint they entered (≤2500 → $150 · ≤3500 → $200 · >3500 → $250), and if
-// neither is set default to the top $250 tier (conservative; surfaced in the
-// dry-run for the operator to adjust). We never tier on customers.property_sqft
-// (that's lawn area) and keep this local because SPECIALTY.wdo.brackets
-// ($175/$200/$225) is stale relative to these owner-confirmed tiers.
+// WDO inspection auto-invoice fee. The tech enters any fee on the form
+// (findings.inspection_fee) — WDO pricing varies by construction (wood frame),
+// new build, prior termite history, etc., so it's a free amount, not fixed
+// tiers. That entry always wins. If it's left blank, fall back to tiering by
+// the structure footprint they entered (≤2500 → $150 · ≤3500 → $200 · >3500 →
+// $250), and if neither is set default to the top $250 tier (conservative;
+// surfaced in the dry-run for the operator to adjust). We never tier on
+// customers.property_sqft (that's lawn area).
 const WDO_FEE_TIERS = [
   { maxSqFt: 2500, price: 150 },
   { maxSqFt: 3500, price: 200 },
   { maxSqFt: Infinity, price: 250 },
 ];
 function parseWdoFee(value) {
-  const m = String(value ?? '').match(/\$?\s*(\d{2,5}(?:\.\d{1,2})?)/);
-  return m ? Number(m[1]) : 0;
+  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+  const n = m ? Number(m[1]) : 0;
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 function resolveWdoInspectionFee(findings) {
   const picked = parseWdoFee(findings?.inspection_fee);
