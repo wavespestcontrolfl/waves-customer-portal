@@ -4121,7 +4121,7 @@ describe('public estimate one-time breakdown', () => {
             {
               service: 'lawn_care',
               name: 'Lawn Care',
-              mo: 64.5,
+              mo: 69,
               discountable: false,
               discountEligible: false,
               waveGuardDiscountEligible: false,
@@ -4138,12 +4138,12 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(parts).toEqual(expect.objectContaining({
-      baseMonthly: 114.5,
+      baseMonthly: 119,
       discountableBaseMonthly: 50,
-      nonDiscountableMonthly: 64.5,
+      nonDiscountableMonthly: 69,
       source: 'summed',
     }));
-    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(109.5);
+    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(114);
   });
 
   test('public recurring services inherit Lawn V2 discount exclusion from engine line items', () => {
@@ -4153,9 +4153,9 @@ describe('public estimate one-time breakdown', () => {
           {
             service: 'lawn_care',
             label: 'Lawn Care',
-            annual: 774,
-            monthly: 64.5,
-            perApp: 86,
+            annual: 828,
+            monthly: 69,
+            perApp: 92,
             visitsPerYear: 9,
             discount: {
               discountable: false,
@@ -4171,7 +4171,7 @@ describe('public estimate one-time breakdown', () => {
         ],
         recurring: {
           services: [
-            { service: 'lawn_care', name: 'Lawn Care', mo: 64.5 },
+            { service: 'lawn_care', name: 'Lawn Care', mo: 69 },
             { service: 'pest_control', name: 'Pest Control', mo: 50 },
           ],
         },

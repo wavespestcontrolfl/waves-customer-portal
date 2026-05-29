@@ -85,14 +85,14 @@ function serverResultMonthly(monthly, annual) {
 
 describe('compareClientToServer', () => {
   it('flags drift on a meaningful annual delta and ignores sub-cent monthly rounding', () => {
-    const drift = compareClientToServer({ annualTotal: 1376, monthlyTotal: 114.67, onetimeTotal: 0 }, { annualTotal: 774, monthlyTotal: 64.5, onetimeTotal: 0 }, NOW);
+    const drift = compareClientToServer({ annualTotal: 1376, monthlyTotal: 114.67, onetimeTotal: 0 }, { annualTotal: 828, monthlyTotal: 69, onetimeTotal: 0 }, NOW);
     expect(drift.hasDrift).toBe(true);
-    expect(drift.annualDelta).toBe(-602);
-    expect(drift.pctAnnual).toBeCloseTo(-0.4375, 4);
+    expect(drift.annualDelta).toBe(-548);
+    expect(drift.pctAnnual).toBeCloseTo(-0.3983, 4);
     expect(drift.computedAt).toBe('2026-05-28T08:00:00.000Z');
   });
   it('reports no drift when totals match', () => {
-    const drift = compareClientToServer({ annualTotal: 774, monthlyTotal: 64.5, onetimeTotal: 0 }, { annualTotal: 774, monthlyTotal: 64.5, onetimeTotal: 0 }, NOW);
+    const drift = compareClientToServer({ annualTotal: 828, monthlyTotal: 69, onetimeTotal: 0 }, { annualTotal: 828, monthlyTotal: 69, onetimeTotal: 0 }, NOW);
     expect(drift.hasDrift).toBe(false);
     expect(drift.annualDelta).toBe(0);
   });
@@ -106,8 +106,8 @@ describe('serverRecomputeFromEstimateData', () => {
 
   it('replays engineRequest through the injected adapter + engine', async () => {
     const translateV2CallToV1Input = jest.fn(() => baseInput({ services: { lawn: { track: 'st_augustine', lawnFreq: 9 } } }));
-    const generateEstimate = jest.fn(() => ({ lineItems: [{ service: 'lawn_care', monthly: 64.5, annual: 774 }] }));
-    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(64.5, 774));
+    const generateEstimate = jest.fn(() => ({ lineItems: [{ service: 'lawn_care', monthly: 69, annual: 828 }] }));
+    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(69, 828));
     const res = await serverRecomputeFromEstimateData(
       { engineRequest: { profile: { lotSqFt: 10000 }, selectedServices: ['LAWN'], options: { grassType: 'st_augustine', lawnFreq: 9 } } },
       { translateV2CallToV1Input, generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
@@ -115,7 +115,7 @@ describe('serverRecomputeFromEstimateData', () => {
     expect(translateV2CallToV1Input).toHaveBeenCalled();
     expect(res.recomputed).toBe(true);
     expect(res.source).toBe('ENGINE_REQUEST');
-    expect(res.serverTotals).toMatchObject({ monthlyTotal: 64.5, annualTotal: 774, onetimeTotal: 0 });
+    expect(res.serverTotals).toMatchObject({ monthlyTotal: 69, annualTotal: 828, onetimeTotal: 0 });
   });
 
   it('returns ENGINE_ERROR (not throw) when the engine throws', async () => {
@@ -164,8 +164,8 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
     const recompute = async () => ({
       recomputed: true,
       source: 'ENGINE_REQUEST',
-      serverResult: serverResultMonthly(64.5, 774),
-      serverTotals: { monthlyTotal: 64.5, annualTotal: 774, onetimeTotal: 0 },
+      serverResult: serverResultMonthly(69, 828),
+      serverTotals: { monthlyTotal: 69, annualTotal: 828, onetimeTotal: 0 },
     });
     await createOrReuseAdminEstimate({
       database,
@@ -180,14 +180,14 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
     });
     const row = getInsert().row;
     expect(row.pricing_authority).toBe('SERVER');
-    expect(row.monthly_total).toBe(64.5);
-    expect(row.annual_total).toBe(774);
-    expect(row.server_computed_price).toBe(774); // annual is the source of truth
+    expect(row.monthly_total).toBe(69);
+    expect(row.annual_total).toBe(828);
+    expect(row.server_computed_price).toBe(828); // annual is the source of truth
     expect(row.client_preview_price).toBe(1376); // derived from the client's estimate_data, not body.annualTotal
     expect(row.pricing_drift).toMatchObject({ hasDrift: true, annualDelta: expect.any(Number) });
     // Blob/column agreement: the embedded result was overwritten to the server result.
     const persisted = JSON.parse(row.estimate_data);
-    expect(persisted.result.recurring.grandTotal).toBe(64.5);
+    expect(persisted.result.recurring.grandTotal).toBe(69);
   });
 
   it('fails open to CLIENT_FALLBACK and still saves when recompute errors', async () => {
