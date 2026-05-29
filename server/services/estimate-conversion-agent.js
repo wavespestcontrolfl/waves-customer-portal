@@ -12,6 +12,7 @@ const ACCEPTANCE_RE = /\b(give (you|your team) a try|want to start|ready to star
 const SCHEDULE_WINDOW_RE = /\b(week of|next week|couple weeks?|any time|start (on|the|that)?|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
 const HOME_QUESTION_RE = /\b(do i need to be home|need to be home|have to be home|do we need to be there|access to the exterior)\b/i;
 const SERVICE_QUESTION_RE = /\b(typical visit|outline of the service|what'?s included|does it include|sweep|sweeping|webs?|lanai|cage|front door|entry points?|shrubs?)\b/i;
+const GENERAL_ESTIMATE_QUESTION_RE = /\b(how much|fees?|price|pricing|cost|bundle|bundled|add that|add .*later|come inside|inside|safe for pets?|new estimate|proceed with (a )?service)\b|\?/i;
 
 function normalizePhoneLast10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -54,8 +55,9 @@ function classifyEstimateSmsIntent(body, context = {}) {
   const scheduleWindow = SCHEDULE_WINDOW_RE.test(text);
   const homeQuestion = HOME_QUESTION_RE.test(text);
   const serviceQuestion = SERVICE_QUESTION_RE.test(text);
+  const generalEstimateQuestion = hasEstimate && GENERAL_ESTIMATE_QUESTION_RE.test(text);
 
-  if (!accepted && !scheduleWindow && !homeQuestion && !serviceQuestion && !hasEstimate) {
+  if (!accepted && !scheduleWindow && !homeQuestion && !serviceQuestion && !generalEstimateQuestion) {
     return {
       intent: null,
       confidence: 0,
@@ -92,6 +94,11 @@ function classifyEstimateSmsIntent(body, context = {}) {
   if (serviceQuestion) {
     recommendedActions.push('answer_service_scope_question');
     autoActionsAllowed.push('draft_service_scope_reply');
+  }
+
+  if (generalEstimateQuestion && !serviceQuestion && !homeQuestion) {
+    recommendedActions.push('draft_estimate_question_reply');
+    autoActionsAllowed.push('draft_estimate_question_reply');
   }
 
   if (homeQuestion) {
@@ -133,16 +140,17 @@ function classifyEstimateSmsIntent(body, context = {}) {
     blockedActions: [...new Set(blockedActions)],
     safetyFlags: [...new Set(safetyFlags)],
     suggestedMessage,
-    reasoningSummary: buildReasoningSummary({ accepted, scheduleWindow, homeQuestion, serviceQuestion, hasEstimate }),
+    reasoningSummary: buildReasoningSummary({ accepted, scheduleWindow, homeQuestion, serviceQuestion, generalEstimateQuestion, hasEstimate }),
   };
 }
 
-function buildReasoningSummary({ accepted, scheduleWindow, homeQuestion, serviceQuestion, hasEstimate }) {
+function buildReasoningSummary({ accepted, scheduleWindow, homeQuestion, serviceQuestion, generalEstimateQuestion, hasEstimate }) {
   const parts = [];
   if (accepted) parts.push('customer text contains a verbal acceptance signal');
   if (scheduleWindow) parts.push('customer references timing or a scheduling window');
   if (homeQuestion) parts.push('customer asks whether they need to be home');
   if (serviceQuestion) parts.push('customer asks about service scope');
+  if (generalEstimateQuestion && !serviceQuestion && !homeQuestion) parts.push('customer asks a general estimate question');
   parts.push(hasEstimate ? 'an open estimate context was found' : 'no open estimate context was found');
   return parts.join('; ') + '.';
 }
