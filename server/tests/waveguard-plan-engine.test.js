@@ -263,6 +263,80 @@ describe('waveguard-plan-engine helpers', () => {
     expect(product.id).toBe('zero-p');
   });
 
+  test('matchCatalogProduct uses protocol shorthand aliases for remaining WaveGuard materials', () => {
+    const products = [
+      {
+        id: 'carbonpro',
+        name: 'LESCO CarbonPro-L w/ MobilEX Biostimulant Liquid Soil Amendment',
+        aliases: ['CarbonPro-L', 'CarbonPro-L biostimulant'],
+      },
+      {
+        id: 'high-mn',
+        name: 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
+        aliases: ['High Mn Combo', 'High Mn Combo micros'],
+      },
+      {
+        id: 'dispatch',
+        name: 'Dispatch Sprayable Wetting Agent',
+        aliases: ['Dispatch', 'Dispatch wetting agent'],
+      },
+      {
+        id: 'three-way',
+        name: 'LESCO Three-Way Selective Herbicide',
+        aliases: ['Three-Way', 'OR Three-Way'],
+      },
+      {
+        id: 'dismiss',
+        name: 'Dismiss NXT',
+        aliases: ['Dismiss', 'Dismiss if sedge'],
+      },
+    ];
+
+    expect(matchCatalogProduct({ raw: 'CarbonPro-L biostimulant ($14.24)' }, products).id).toBe('carbonpro');
+    expect(matchCatalogProduct({ raw: 'High Mn Combo micros ($1.33)' }, products).id).toBe('high-mn');
+    expect(matchCatalogProduct({ raw: 'Premium: Dispatch wetting agent ($11.76)' }, products).id).toBe('dispatch');
+    expect(matchCatalogProduct({ raw: 'OR Three-Way ($3.00) if too warm' }, products).id).toBe('three-way');
+    expect(matchCatalogProduct({ raw: 'Dismiss if sedge ($4.36)' }, products).id).toBe('dismiss');
+  });
+
+  test('calculateProductAmount prices seeded Topchoice and Three-Way aliases from rates', () => {
+    const topchoice = calculateProductAmount({
+      product: {
+        name: 'Topchoice Granular Insecticide',
+        default_rate_per_1000: 2,
+        rate_unit: 'lb',
+        cost_per_unit: 1.7916,
+        cost_unit: 'lb',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 0,
+    });
+    const threeWay = calculateProductAmount({
+      product: {
+        name: 'LESCO Three-Way Selective Herbicide',
+        default_rate_per_1000: 0.916,
+        rate_unit: 'fl_oz',
+        cost_per_unit: 0.3276,
+        cost_unit: 'fl_oz',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 1,
+    });
+
+    expect(topchoice).toMatchObject({
+      amount: 20,
+      amountUnit: 'lb',
+      materialCost: 35.83,
+      materialCostSource: 'inventory_cost_per_unit',
+    });
+    expect(threeWay).toMatchObject({
+      amount: 9.16,
+      amountUnit: 'fl_oz',
+      materialCost: 3,
+      materialCostSource: 'inventory_cost_per_unit',
+    });
+  });
+
   test('calculateProductAmount uses lawn area and carrier calibration', () => {
     const result = calculateProductAmount({
       product: {
