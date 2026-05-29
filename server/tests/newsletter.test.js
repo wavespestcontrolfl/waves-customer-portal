@@ -32,7 +32,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
-const { isEligibleForFreshDigest, cityToZone } = require('../services/event-freshness');
+const { isEligibleForFreshDigest, cityToZone, weekLockKey } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
@@ -159,6 +159,30 @@ describe('event cityToZone — kebab/space normalization', () => {
     expect(cityToZone('Orlando')).toBeNull();
     expect(cityToZone('')).toBeNull();
     expect(cityToZone(null)).toBeNull();
+  });
+});
+
+describe('event weekLockKey — per-week advisory-lock key', () => {
+  test('distinct weeks produce distinct keys (the old per-year-collision bug)', () => {
+    const k1 = weekLockKey('2026-05-28');
+    const k2 = weekLockKey('2026-06-04');
+    const k3 = weekLockKey('2026-01-01');
+    expect(k1).not.toBe(k2);
+    expect(k1).not.toBe(k3);
+    expect(k2).not.toBe(k3);
+  });
+
+  test('same week is stable (autopilot + draft-from-plan derive the same key)', () => {
+    expect(weekLockKey('2026-05-28')).toBe(weekLockKey('2026-05-28'));
+  });
+
+  test('always a non-negative signed-int4 (valid pg advisory-lock key)', () => {
+    for (const w of ['2026-05-28', '2025-12-31', '2027-03-10', '', null]) {
+      const k = weekLockKey(w);
+      expect(Number.isInteger(k)).toBe(true);
+      expect(k).toBeGreaterThanOrEqual(0);
+      expect(k).toBeLessThan(2147483647);
+    }
   });
 });
 
