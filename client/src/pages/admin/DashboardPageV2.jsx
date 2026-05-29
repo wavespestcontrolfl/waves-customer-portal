@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Badge,
+  Button,
   Card,
   CardBody,
   CardHeader,
@@ -86,6 +87,7 @@ export default function DashboardPageV2() {
   const [alerts, setAlerts] = useState([]);
   const [commandCenter, setCommandCenter] = useState(null);
   const [commandCenterError, setCommandCenterError] = useState(null);
+  const [commandCenterAction, setCommandCenterAction] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -154,6 +156,29 @@ export default function DashboardPageV2() {
       cancelled = true;
     };
   }, []);
+
+  async function handleCommandCenterAlertAction(row, action) {
+    if (!row?.alertId || !action) return;
+    setCommandCenterAction(`${row.alertId}:${action}`);
+    try {
+      const body = { action };
+      if (action === "snooze") {
+        body.snoozedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      }
+      await adminFetch(`/admin/command-center/alerts/${row.alertId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      const refreshed = await adminFetch("/admin/command-center");
+      setCommandCenter(refreshed);
+      setCommandCenterError(null);
+    } catch (err) {
+      console.error("[dashboard-v2] command-center alert action", err);
+      setCommandCenterError(err);
+    } finally {
+      setCommandCenterAction(null);
+    }
+  }
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -333,6 +358,8 @@ export default function DashboardPageV2() {
       <CommandCenterPanel
         data={commandCenter}
         error={commandCenterError}
+        onAlertAction={handleCommandCenterAlertAction}
+        pendingAction={commandCenterAction}
       />
       {/* Hero KPI row — sparkline + delta */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
@@ -793,7 +820,7 @@ const COMMAND_SECTIONS = [
   { key: "teamAttention", title: "Team Attention", empty: "No team follow-up items found." },
 ];
 
-function CommandCenterPanel({ data, error }) {
+function CommandCenterPanel({ data, error, onAlertAction, pendingAction }) {
   const summary = data?.summary || {};
   const sections = data?.sections || {};
   const cards = [
@@ -849,6 +876,8 @@ function CommandCenterPanel({ data, error }) {
                   title={section.title}
                   rows={sections[section.key] || []}
                   empty={section.empty}
+                  onAlertAction={onAlertAction}
+                  pendingAction={pendingAction}
                 />
               ))}
             </div>
@@ -859,7 +888,7 @@ function CommandCenterPanel({ data, error }) {
   );
 }
 
-function CommandSection({ id, title, rows, empty }) {
+function CommandSection({ id, title, rows, empty, onAlertAction, pendingAction }) {
   return (
     <div id={id} className="rounded-sm border-hairline border-zinc-200 bg-surface-sunken p-3 min-h-[160px]">
       <div className="flex items-center justify-between gap-3 mb-2">
@@ -871,7 +900,12 @@ function CommandSection({ id, title, rows, empty }) {
       ) : (
         <div className="divide-y divide-zinc-200">
           {rows.slice(0, 8).map((row) => (
-            <CommandIssueRow key={row.id} row={row} />
+            <CommandIssueRow
+              key={row.id}
+              row={row}
+              onAlertAction={onAlertAction}
+              pendingAction={pendingAction}
+            />
           ))}
           {rows.length > 8 && (
             <div className="text-12 text-ink-secondary pt-2">
@@ -884,7 +918,7 @@ function CommandSection({ id, title, rows, empty }) {
   );
 }
 
-function CommandIssueRow({ row }) {
+function CommandIssueRow({ row, onAlertAction, pendingAction }) {
   const amount = row.metadata?.total ?? row.metadata?.amount;
   const detail = [
     row.customer?.name,
@@ -892,11 +926,10 @@ function CommandIssueRow({ row }) {
     row.metadata?.serviceType,
     row.metadata?.status,
   ].filter(Boolean).slice(0, 3).join(" · ");
+  const canAct = Boolean(row.alertId && onAlertAction);
+  const isPending = (action) => pendingAction === `${row.alertId}:${action}`;
   return (
-    <a
-      href={row.href || "#"}
-      className="block py-2.5 text-13 hover:bg-white/70 rounded-xs px-1 -mx-1 u-focus-ring"
-    >
+    <div className="py-2.5 text-13 hover:bg-white/70 rounded-xs px-1 -mx-1">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 min-w-0">
@@ -908,14 +941,55 @@ function CommandIssueRow({ row }) {
           </div>
           <div className="text-12 text-ink-secondary mt-1 line-clamp-2">{row.summary}</div>
           {detail && <div className="text-11 text-ink-secondary mt-1 truncate">{detail}</div>}
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <a href={row.href || "#"} className="text-11 font-medium uppercase text-zinc-900 underline-offset-2 hover:underline u-focus-ring">
+              Open source
+            </a>
+            {row.alertStatus && (
+              <span className="text-11 text-ink-secondary uppercase">{row.alertStatus}</span>
+            )}
+          </div>
         </div>
-        {amount != null && (
-          <span className="u-nums text-12 text-zinc-900 flex-shrink-0">
-            {fmtMoney(Number(amount) || 0)}
-          </span>
-        )}
+        <div className="flex-shrink-0 flex flex-col items-end gap-2">
+          {amount != null && (
+            <span className="u-nums text-12 text-zinc-900">
+              {fmtMoney(Number(amount) || 0)}
+            </span>
+          )}
+          {canAct && (
+            <div className="flex items-center gap-1 flex-wrap justify-end max-w-[220px]">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2"
+                disabled={Boolean(pendingAction)}
+                onClick={() => onAlertAction(row, "snooze")}
+              >
+                {isPending("snooze") ? "Snoozing" : "Snooze"}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-7 px-2"
+                disabled={Boolean(pendingAction)}
+                onClick={() => onAlertAction(row, "dismiss")}
+              >
+                {isPending("dismiss") ? "Dismissing" : "Dismiss"}
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                className="h-7 px-2"
+                disabled={Boolean(pendingAction)}
+                onClick={() => onAlertAction(row, "resolve")}
+              >
+                {isPending("resolve") ? "Resolving" : "Resolve"}
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
-    </a>
+    </div>
   );
 }
 

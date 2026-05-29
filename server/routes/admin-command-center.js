@@ -3,6 +3,12 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString } = require('../utils/datetime-et');
+const {
+  syncCommandCenterAlerts,
+  applyAlertLifecycle,
+  updateAlert,
+  listEvents,
+} = require('../services/admin-alerts');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -434,7 +440,7 @@ router.get('/', async (req, res, next) => {
       getMoneyCollections(base),
       getCustomerIssues(base),
     ]);
-    const sections = {
+    const rawSections = {
       todaysJobs,
       jobsNeedingAttention,
       pipelineFollowUp,
@@ -443,6 +449,8 @@ router.get('/', async (req, res, next) => {
       customerIssues,
       teamAttention: [],
     };
+    const alertsByKey = await syncCommandCenterAlerts(rawSections);
+    const sections = applyAlertLifecycle(rawSections, alertsByKey);
     sections.teamAttention = rollupTeamAttention(sections);
     res.json({
       date,
@@ -459,6 +467,33 @@ router.get('/', async (req, res, next) => {
       sections,
       generatedAt: new Date().toISOString(),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch('/alerts/:id', async (req, res, next) => {
+  try {
+    const action = String(req.body?.action || '').trim();
+    const alert = await updateAlert({
+      id: req.params.id,
+      action,
+      actorUserId: req.technicianId,
+      ownerUserId: req.body?.ownerUserId,
+      snoozedUntil: req.body?.snoozedUntil,
+      note: req.body?.note,
+    });
+    res.json({ alert });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.get('/alerts/:id/events', async (req, res, next) => {
+  try {
+    const events = await listEvents(req.params.id);
+    res.json({ events });
   } catch (err) {
     next(err);
   }
