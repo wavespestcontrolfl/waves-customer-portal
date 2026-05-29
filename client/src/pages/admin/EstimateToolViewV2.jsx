@@ -2046,6 +2046,9 @@ export default function EstimateToolViewV2({
   const [estimate, setEstimate] = useState(null);
   const [savedId, setSavedId] = useState(null);
   const [savedViewUrl, setSavedViewUrl] = useState(null);
+  // Set when the server-authoritative price (Decision #2) differs from the
+  // client preview at save time, so the operator isn't left quoting a stale number.
+  const [priceRecomputeNotice, setPriceRecomputeNotice] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -3165,9 +3168,14 @@ export default function EstimateToolViewV2({
         result.modifiers = mods;
       }
 
+      // Stash the exact engine request so the server can replay it on save and
+      // be the authority on the persisted price (Decision #2). This is the same
+      // payload sent to /calculate-estimate above.
+      result.engineRequest = { profile, selectedServices, options };
       setEstimate(result);
       setSavedId(null);
       setSavedViewUrl(null);
+      setPriceRecomputeNotice(null);
       setLookupStatus((s) => ({ ...s, type: "ok" }));
       return result;
     } catch (e) {
@@ -3205,7 +3213,7 @@ export default function EstimateToolViewV2({
           customerEmail: form.customerEmail || "",
           leadId: form.leadId || null,
           customerId: form.customerId || existingCustomerMatch?.id || null,
-          estimateData: { inputs: form, result: E, summary: estimateSummary },
+          estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
           monthlyTotal,
           annualTotal: monthlyTotal * 12,
           onetimeTotal,
@@ -3223,6 +3231,27 @@ export default function EstimateToolViewV2({
       const d = await r.json();
       const id = d.id || d.estimateId;
       const viewUrl = estimatePreviewUrlFromSave(d);
+      // The server recomputes the authoritative price on save. If it differs
+      // from the preview, surface it so we don't quote a number the system
+      // won't honor.
+      const serverMonthly = Number(d.monthlyTotal);
+      const serverOnetime = Number(d.onetimeTotal);
+      const monthlyDiffers =
+        Number.isFinite(serverMonthly) &&
+        Math.abs(serverMonthly - (monthlyTotal || 0)) >= 0.5;
+      const onetimeDiffers =
+        Number.isFinite(serverOnetime) &&
+        Math.abs(serverOnetime - (onetimeTotal || 0)) >= 0.5;
+      if ((monthlyDiffers || onetimeDiffers) && d.pricingAuthority === "SERVER") {
+        setPriceRecomputeNotice({
+          serverMonthly: monthlyDiffers ? serverMonthly : null,
+          clientMonthly: monthlyDiffers ? monthlyTotal || 0 : null,
+          serverOnetime: onetimeDiffers ? serverOnetime : null,
+          clientOnetime: onetimeDiffers ? onetimeTotal || 0 : null,
+        });
+      } else {
+        setPriceRecomputeNotice(null);
+      }
       setSavedId(id);
       setSavedViewUrl(viewUrl);
       return { id, viewUrl };
@@ -5920,6 +5949,19 @@ export default function EstimateToolViewV2({
             {savedId && (
               <div className="text-12 text-ink-secondary">
                 Saved — ID #{savedId}.
+              </div>
+            )}
+
+            {priceRecomputeNotice && (
+              <div className="text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 mt-2">
+                Final price recomputed on save (server-authoritative):
+                {priceRecomputeNotice.serverMonthly != null && (
+                  <> {" "}${priceRecomputeNotice.serverMonthly.toFixed(2)}/mo (preview showed ${priceRecomputeNotice.clientMonthly.toFixed(2)})</>
+                )}
+                {priceRecomputeNotice.serverOnetime != null && (
+                  <> {priceRecomputeNotice.serverMonthly != null ? "·" : ""} ${priceRecomputeNotice.serverOnetime.toFixed(2)} one-time (preview showed ${priceRecomputeNotice.clientOnetime.toFixed(2)})</>
+                )}
+                . The saved/billed price is the server value.
               </div>
             )}
           </div>

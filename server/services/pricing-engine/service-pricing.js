@@ -1824,6 +1824,7 @@ function priceLawnCare(property, options = {}) {
       pricingSource: costFloorApplied ? 'COST_FLOOR' : market.pricingSource,
       marketMonthly,
       marketAnnual,
+      marketSource: market.pricingSource,
       costFloorAnnual,
       costFloorApplied,
       costFloorDetails,
@@ -1869,6 +1870,16 @@ function priceLawnCare(property, options = {}) {
       : [],
     marketMonthly: selected.marketMonthly,
     marketAnnual: selected.marketAnnual,
+    // Lawn V2 is cost-floor authoritative; the bracket table is reference-only.
+    // Exposed as a nested object (per pricing spec) so consumers can show an
+    // old-vs-new comparison without mistaking it for the charged price. Flat
+    // marketMonthly/marketAnnual above are retained for back-compat.
+    marketReference: {
+      monthly: selected.marketMonthly,
+      annual: selected.marketAnnual,
+      perApp: Math.round((selected.marketAnnual / (LAWN_TIERS[selected.tier]?.freq ?? tierConfig.freq)) * 100) / 100,
+      source: selected.marketSource || 'MARKET_TABLE',
+    },
     costFloorAnnual: selected.costFloorAnnual,
     costFloorApplied: selected.costFloorApplied,
     costs: {

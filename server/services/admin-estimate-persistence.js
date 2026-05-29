@@ -12,6 +12,9 @@ const {
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
+const logger = require('./logger');
+const pricingEngine = require('./pricing-engine');
+const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
@@ -208,6 +211,141 @@ function applyResolvedTotalsToEstimateData(estimateData, totals, quoteRequired) 
   }
 }
 
+// Decision #2 — the server is authoritative on the persisted/billed price.
+// We replay the engine inputs the client captured back through the SAME pricing
+// engine the live preview used, then persist the server-computed totals. The
+// client number is retained only as an auditable preview. "Authoritative" here
+// means authoritative over the COMPUTATION, conditional on the client-captured
+// inputs (turf sf, services, shade, etc.) — input provenance is out of scope.
+function compareClientToServer(clientTotals, serverTotals, now = () => new Date()) {
+  const cA = fallbackMoney(clientTotals && clientTotals.annualTotal);
+  const sA = fallbackMoney(serverTotals && serverTotals.annualTotal);
+  const cM = fallbackMoney(clientTotals && clientTotals.monthlyTotal);
+  const sM = fallbackMoney(serverTotals && serverTotals.monthlyTotal);
+  const cO = fallbackMoney(clientTotals && clientTotals.onetimeTotal);
+  const sO = fallbackMoney(serverTotals && serverTotals.onetimeTotal);
+  const annualDelta = roundMoney(sA - cA);
+  const monthlyDelta = roundMoney(sM - cM);
+  const onetimeDelta = roundMoney(sO - cO);
+  return {
+    annualDelta,
+    monthlyDelta,
+    onetimeDelta,
+    pctAnnual: cA > 0 ? Math.round((annualDelta / cA) * 10000) / 10000 : null,
+    // Annual is the source of truth (the 55% lawn floor is defined on annual);
+    // a few cents of monthly rounding is not drift.
+    hasDrift: Math.abs(annualDelta) >= 0.5 || Math.abs(onetimeDelta) >= 0.5,
+    computedAt: now().toISOString(),
+  };
+}
+
+// Resolve a replayable engine input from the persisted estimate_data and re-run
+// the engine. Supports both shapes: the admin save's `engineRequest`
+// ({ profile, selectedServices, options } — the exact /calculate-estimate
+// payload) and the public/lead `engineInputs` (already a v1 engine input).
+// Returns { recomputed:true, source, serverResult, serverTotals } or
+// { recomputed:false, reason } so callers can fail open.
+async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
+  const generateEstimate = deps.generateEstimate || pricingEngine.generateEstimate;
+  const needsSync = deps.needsSync || pricingEngine.needsSync;
+  const syncConstantsFromDB = deps.syncConstantsFromDB || pricingEngine.syncConstantsFromDB;
+  const mapResult = deps.mapV1ToLegacyShape || mapV1ToLegacyShape;
+  // Lazy-require the route adapter to avoid a service→route load-order cycle.
+  let translate = deps.translateV2CallToV1Input;
+  if (translate === undefined) {
+    try {
+      translate = require('../routes/property-lookup-v2').translateV2CallToV1Input;
+    } catch (_) {
+      translate = null;
+    }
+  }
+
+  if (!estimateData || typeof estimateData !== 'object') {
+    return { recomputed: false, reason: 'NO_INPUTS' };
+  }
+
+  let v1Input = null;
+  let source = null;
+  const req = estimateData.engineRequest;
+  if (req && typeof req === 'object' && req.profile && typeof translate === 'function') {
+    try {
+      v1Input = translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {});
+      source = 'ENGINE_REQUEST';
+    } catch (_) {
+      v1Input = null;
+    }
+  }
+  if (!v1Input && estimateData.engineInputs && typeof estimateData.engineInputs === 'object') {
+    v1Input = estimateData.engineInputs;
+    source = 'ENGINE_INPUTS';
+  }
+  if (!v1Input) return { recomputed: false, reason: 'NO_INPUTS' };
+
+  try {
+    if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
+      await syncConstantsFromDB();
+    }
+    const v1 = generateEstimate(v1Input);
+    const serverResult = mapResult(v1);
+    const serverTotals = deriveTotalsFromEstimateData({ result: serverResult });
+    return { recomputed: true, source, serverResult, serverTotals };
+  } catch (error) {
+    return { recomputed: false, reason: 'ENGINE_ERROR', error };
+  }
+}
+
+// Decide the authoritative totals + audit columns for a save. Fails OPEN to the
+// client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
+// every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
+// an engine error is logged at error level.
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute }) {
+  const recomputeFn = recompute || serverRecomputeFromEstimateData;
+  const audit = {
+    pricing_authority: null,
+    server_computed_price: null,
+    client_preview_price: positiveMoney(clientPreview.annualTotal),
+    pricing_drift: null,
+  };
+
+  // Quote-required / manager-approval estimates carry no billable price yet —
+  // leave them exactly as today (authority null, no recompute).
+  if (quoteRequired) {
+    return { totals: clientPreview, audit };
+  }
+
+  let result;
+  try {
+    result = await recomputeFn(estimateData, { now });
+  } catch (error) {
+    result = { recomputed: false, reason: 'ENGINE_ERROR', error };
+  }
+
+  if (result.recomputed) {
+    // Overwrite the embedded result so the stored blob and the persisted
+    // columns agree — blob/column divergence is exactly the bug class this fixes.
+    estimateData.result = result.serverResult;
+    const drift = compareClientToServer(clientPreview, result.serverTotals, now);
+    audit.pricing_authority = 'SERVER';
+    audit.server_computed_price = positiveMoney(result.serverTotals.annualTotal);
+    audit.pricing_drift = drift;
+    if (drift.hasDrift) {
+      logger.warn(`[pricing-authority] server recompute corrected client preview annualDelta=${drift.annualDelta} pctAnnual=${drift.pctAnnual}`);
+    }
+    return { totals: result.serverTotals, audit };
+  }
+
+  audit.pricing_authority = 'CLIENT_FALLBACK';
+  if (result.reason === 'ENGINE_ERROR') {
+    // Deploy-bug signal: a billed price that came from a broken engine.
+    logger.error(`[pricing-authority] CLIENT_FALLBACK reason=ENGINE_ERROR — persisted client preview as NON-authoritative price${result.error ? ` err=${result.error.message}` : ''}`);
+  } else {
+    // No replayable input (legacy/transitional estimate). Findable via the
+    // pricing_authority column; warn rather than page.
+    logger.warn(`[pricing-authority] CLIENT_FALLBACK reason=${result.reason} — no replayable engine input; persisted client preview`);
+  }
+  return { totals: clientPreview, audit };
+}
+
 function buildEstimatePersistenceFields(body, context = {}) {
   const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
   const quoteRequired = estimateDataHasQuoteRequirement(estimateData) ||
@@ -253,6 +391,7 @@ async function createOrReuseAdminEstimate({
   technician,
   now = () => new Date(),
   randomBytes = crypto.randomBytes,
+  recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
 }) {
   const {
     leadId,
@@ -267,7 +406,15 @@ async function createOrReuseAdminEstimate({
   });
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
-  const totals = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
+  const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
+  const pricing = await resolveServerAuthoritativePricing({
+    estimateData: trustedEstimateData,
+    clientPreview,
+    quoteRequired,
+    now,
+    recompute,
+  });
+  const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
   const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
@@ -281,10 +428,13 @@ async function createOrReuseAdminEstimate({
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
 
   const expiresAt = estimateExpiresAt(now);
-  const writeFields = buildEstimatePersistenceFields(
-    { ...body, estimateData: trustedEstimateData },
-    { technician, technicianId, now },
-  );
+  const writeFields = {
+    ...buildEstimatePersistenceFields(
+      { ...body, estimateData: trustedEstimateData },
+      { technician, technicianId, now },
+    ),
+    ...pricing.audit,
+  };
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
@@ -362,4 +512,7 @@ module.exports = {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   estimateViewUrl,
+  serverRecomputeFromEstimateData,
+  resolveServerAuthoritativePricing,
+  compareClientToServer,
 };

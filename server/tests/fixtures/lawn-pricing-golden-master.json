@@ -1,0 +1,1993 @@
+[
+  {
+    "label": "st_augustine/standard/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 76,
+      "annual": 456,
+      "monthly": 38,
+      "freq": 6,
+      "tier": "standard",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 52,
+      "marketAnnual": 624
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 73,
+      "annual": 657,
+      "monthly": 54.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 76,
+      "marketAnnual": 912
+    }
+  },
+  {
+    "label": "st_augustine/premium/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 71,
+      "annual": 852,
+      "monthly": 71,
+      "freq": 12,
+      "tier": "premium",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 100,
+      "marketAnnual": 1200
+    }
+  },
+  {
+    "label": "st_augustine/standard/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 89,
+      "annual": 534,
+      "monthly": 44.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 59,
+      "marketAnnual": 708
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 86,
+      "annual": 774,
+      "monthly": 64.5,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 86,
+      "marketAnnual": 1032
+    }
+  },
+  {
+    "label": "st_augustine/premium/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 86,
+      "annual": 1032,
+      "monthly": 86,
+      "freq": 12,
+      "tier": "premium",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 114,
+      "marketAnnual": 1368
+    }
+  },
+  {
+    "label": "st_augustine/standard/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 106,
+      "annual": 636,
+      "monthly": 53,
+      "freq": 6,
+      "tier": "standard",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 68,
+      "marketAnnual": 816
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 105,
+      "annual": 945,
+      "monthly": 78.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 100,
+      "marketAnnual": 1200
+    }
+  },
+  {
+    "label": "st_augustine/premium/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 106,
+      "annual": 1272,
+      "monthly": 106,
+      "freq": 12,
+      "tier": "premium",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 135,
+      "marketAnnual": 1620
+    }
+  },
+  {
+    "label": "st_augustine/standard/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 126,
+      "annual": 756,
+      "monthly": 63,
+      "freq": 6,
+      "tier": "standard",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 78,
+      "marketAnnual": 936
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 127,
+      "annual": 1143,
+      "monthly": 95.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 117,
+      "marketAnnual": 1404
+    }
+  },
+  {
+    "label": "st_augustine/premium/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 130,
+      "annual": 1560,
+      "monthly": 130,
+      "freq": 12,
+      "tier": "premium",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 158,
+      "marketAnnual": 1896
+    }
+  },
+  {
+    "label": "st_augustine/standard/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 167,
+      "annual": 1002,
+      "monthly": 83.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 98,
+      "marketAnnual": 1176
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 171,
+      "annual": 1539,
+      "monthly": 128.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 150,
+      "marketAnnual": 1800
+    }
+  },
+  {
+    "label": "st_augustine/premium/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 177,
+      "annual": 2124,
+      "monthly": 177,
+      "freq": 12,
+      "tier": "premium",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 205,
+      "marketAnnual": 2460
+    }
+  },
+  {
+    "label": "bermuda/standard/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 75,
+      "annual": 450,
+      "monthly": 37.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 57,
+      "marketAnnual": 684
+    }
+  },
+  {
+    "label": "bermuda/enhanced/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 72,
+      "annual": 648,
+      "monthly": 54,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 84,
+      "marketAnnual": 1008
+    }
+  },
+  {
+    "label": "bermuda/premium/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 73,
+      "annual": 876,
+      "monthly": 73,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 113,
+      "marketAnnual": 1356
+    }
+  },
+  {
+    "label": "bermuda/standard/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 87,
+      "annual": 522,
+      "monthly": 43.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 58,
+      "marketAnnual": 696
+    }
+  },
+  {
+    "label": "bermuda/enhanced/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 86,
+      "annual": 774,
+      "monthly": 64.5,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 86,
+      "marketAnnual": 1032
+    }
+  },
+  {
+    "label": "bermuda/premium/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 88,
+      "annual": 1056,
+      "monthly": 88,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 116,
+      "marketAnnual": 1392
+    }
+  },
+  {
+    "label": "bermuda/standard/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 104,
+      "annual": 624,
+      "monthly": 52,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 67,
+      "marketAnnual": 804
+    }
+  },
+  {
+    "label": "bermuda/enhanced/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 105,
+      "annual": 945,
+      "monthly": 78.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 100,
+      "marketAnnual": 1200
+    }
+  },
+  {
+    "label": "bermuda/premium/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 109,
+      "annual": 1308,
+      "monthly": 109,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 137,
+      "marketAnnual": 1644
+    }
+  },
+  {
+    "label": "bermuda/standard/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 124,
+      "annual": 744,
+      "monthly": 62,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 76,
+      "marketAnnual": 912
+    }
+  },
+  {
+    "label": "bermuda/enhanced/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 127,
+      "annual": 1143,
+      "monthly": 95.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 117,
+      "marketAnnual": 1404
+    }
+  },
+  {
+    "label": "bermuda/premium/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 133,
+      "annual": 1596,
+      "monthly": 133,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 161,
+      "marketAnnual": 1932
+    }
+  },
+  {
+    "label": "bermuda/standard/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 163,
+      "annual": 978,
+      "monthly": 81.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 96,
+      "marketAnnual": 1152
+    }
+  },
+  {
+    "label": "bermuda/enhanced/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 171,
+      "annual": 1539,
+      "monthly": 128.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 149,
+      "marketAnnual": 1788
+    }
+  },
+  {
+    "label": "bermuda/premium/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "bermuda",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 181,
+      "annual": 2172,
+      "monthly": 181,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bermuda",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 210,
+      "marketAnnual": 2520
+    }
+  },
+  {
+    "label": "zoysia/standard/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 76,
+      "annual": 456,
+      "monthly": 38,
+      "freq": 6,
+      "tier": "standard",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 57,
+      "marketAnnual": 684
+    }
+  },
+  {
+    "label": "zoysia/enhanced/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 74,
+      "annual": 666,
+      "monthly": 55.5,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 85,
+      "marketAnnual": 1020
+    }
+  },
+  {
+    "label": "zoysia/premium/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 68,
+      "annual": 816,
+      "monthly": 68,
+      "freq": 12,
+      "tier": "premium",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 107,
+      "marketAnnual": 1284
+    }
+  },
+  {
+    "label": "zoysia/standard/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 88,
+      "annual": 528,
+      "monthly": 44,
+      "freq": 6,
+      "tier": "standard",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 58,
+      "marketAnnual": 696
+    }
+  },
+  {
+    "label": "zoysia/enhanced/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 88,
+      "annual": 792,
+      "monthly": 66,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 87,
+      "marketAnnual": 1044
+    }
+  },
+  {
+    "label": "zoysia/premium/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 81,
+      "annual": 972,
+      "monthly": 81,
+      "freq": 12,
+      "tier": "premium",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 110,
+      "marketAnnual": 1320
+    }
+  },
+  {
+    "label": "zoysia/standard/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 106,
+      "annual": 636,
+      "monthly": 53,
+      "freq": 6,
+      "tier": "standard",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 67,
+      "marketAnnual": 804
+    }
+  },
+  {
+    "label": "zoysia/enhanced/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 108,
+      "annual": 972,
+      "monthly": 81,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 102,
+      "marketAnnual": 1224
+    }
+  },
+  {
+    "label": "zoysia/premium/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 100,
+      "annual": 1200,
+      "monthly": 100,
+      "freq": 12,
+      "tier": "premium",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 128,
+      "marketAnnual": 1536
+    }
+  },
+  {
+    "label": "zoysia/standard/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 126,
+      "annual": 756,
+      "monthly": 63,
+      "freq": 6,
+      "tier": "standard",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 77,
+      "marketAnnual": 924
+    }
+  },
+  {
+    "label": "zoysia/enhanced/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 130,
+      "annual": 1170,
+      "monthly": 97.5,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 119,
+      "marketAnnual": 1428
+    }
+  },
+  {
+    "label": "zoysia/premium/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 121,
+      "annual": 1452,
+      "monthly": 121,
+      "freq": 12,
+      "tier": "premium",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 149,
+      "marketAnnual": 1788
+    }
+  },
+  {
+    "label": "zoysia/standard/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 166,
+      "annual": 996,
+      "monthly": 83,
+      "freq": 6,
+      "tier": "standard",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 97,
+      "marketAnnual": 1164
+    }
+  },
+  {
+    "label": "zoysia/enhanced/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 176,
+      "annual": 1584,
+      "monthly": 132,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 153,
+      "marketAnnual": 1836
+    }
+  },
+  {
+    "label": "zoysia/premium/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "zoysia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 163,
+      "annual": 1956,
+      "monthly": 163,
+      "freq": 12,
+      "tier": "premium",
+      "track": "zoysia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 192,
+      "marketAnnual": 2304
+    }
+  },
+  {
+    "label": "bahia/standard/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 72,
+      "annual": 432,
+      "monthly": 36,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 51,
+      "marketAnnual": 612
+    }
+  },
+  {
+    "label": "bahia/enhanced/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 65,
+      "annual": 585,
+      "monthly": 48.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 70,
+      "marketAnnual": 840
+    }
+  },
+  {
+    "label": "bahia/premium/3000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 3000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 60,
+      "annual": 720,
+      "monthly": 60,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 89,
+      "marketAnnual": 1068
+    }
+  },
+  {
+    "label": "bahia/standard/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 83,
+      "annual": 498,
+      "monthly": 41.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 56,
+      "marketAnnual": 672
+    }
+  },
+  {
+    "label": "bahia/enhanced/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 76,
+      "annual": 684,
+      "monthly": 57,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 78,
+      "marketAnnual": 936
+    }
+  },
+  {
+    "label": "bahia/premium/4250/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 70,
+      "annual": 840,
+      "monthly": 70,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 99,
+      "marketAnnual": 1188
+    }
+  },
+  {
+    "label": "bahia/standard/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 99,
+      "annual": 594,
+      "monthly": 49.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 64,
+      "marketAnnual": 768
+    }
+  },
+  {
+    "label": "bahia/enhanced/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 90,
+      "annual": 810,
+      "monthly": 67.5,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 89,
+      "marketAnnual": 1068
+    }
+  },
+  {
+    "label": "bahia/premium/6000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 6000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 84,
+      "annual": 1008,
+      "monthly": 84,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 113,
+      "marketAnnual": 1356
+    }
+  },
+  {
+    "label": "bahia/standard/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 117,
+      "annual": 702,
+      "monthly": 58.5,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 73,
+      "marketAnnual": 876
+    }
+  },
+  {
+    "label": "bahia/enhanced/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 107,
+      "annual": 963,
+      "monthly": 80.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 102,
+      "marketAnnual": 1224
+    }
+  },
+  {
+    "label": "bahia/premium/8000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 8000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 100,
+      "annual": 1200,
+      "monthly": 100,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 129,
+      "marketAnnual": 1548
+    }
+  },
+  {
+    "label": "bahia/standard/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "standard",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 152,
+      "annual": 912,
+      "monthly": 76,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 90,
+      "marketAnnual": 1080
+    }
+  },
+  {
+    "label": "bahia/enhanced/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 141,
+      "annual": 1269,
+      "monthly": 105.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 127,
+      "marketAnnual": 1524
+    }
+  },
+  {
+    "label": "bahia/premium/12000/FULL_SUN/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 12000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "premium",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 132,
+      "annual": 1584,
+      "monthly": 132,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bahia",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 160,
+      "marketAnnual": 1920
+    }
+  },
+  {
+    "label": "st_augustine/standard/4250/MODERATE_SHADE/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "standard",
+        "shadeClassification": "MODERATE_SHADE"
+      }
+    },
+    "out": {
+      "perApp": 82,
+      "annual": 492,
+      "monthly": 41,
+      "freq": 6,
+      "tier": "standard",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 59,
+      "marketAnnual": 708
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/4250/MODERATE_SHADE/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "MODERATE_SHADE"
+      }
+    },
+    "out": {
+      "perApp": 79,
+      "annual": 711,
+      "monthly": 59.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 86,
+      "marketAnnual": 1032
+    }
+  },
+  {
+    "label": "st_augustine/premium/4250/MODERATE_SHADE/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "premium",
+        "shadeClassification": "MODERATE_SHADE"
+      }
+    },
+    "out": {
+      "perApp": 77,
+      "annual": 924,
+      "monthly": 77,
+      "freq": 12,
+      "tier": "premium",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 114,
+      "marketAnnual": 1368
+    }
+  },
+  {
+    "label": "st_augustine/standard/4250/HEAVY_SHADE/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "standard",
+        "shadeClassification": "HEAVY_SHADE"
+      }
+    },
+    "out": {
+      "perApp": 80,
+      "annual": 480,
+      "monthly": 40,
+      "freq": 6,
+      "tier": "standard",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 59,
+      "marketAnnual": 708
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/4250/HEAVY_SHADE/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "HEAVY_SHADE"
+      }
+    },
+    "out": {
+      "perApp": 77,
+      "annual": 693,
+      "monthly": 57.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 86,
+      "marketAnnual": 1032
+    }
+  },
+  {
+    "label": "st_augustine/premium/4250/HEAVY_SHADE/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "premium",
+        "shadeClassification": "HEAVY_SHADE"
+      }
+    },
+    "out": {
+      "perApp": 74,
+      "annual": 888,
+      "monthly": 74,
+      "freq": 12,
+      "tier": "premium",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 114,
+      "marketAnnual": 1368
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/4250/FULL_SUN/NORMAL",
+    "in": {
+      "property": {
+        "turfSf": 4250,
+        "routeDensity": "NORMAL"
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 93,
+      "annual": 837,
+      "monthly": 69.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 86,
+      "marketAnnual": 1032
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/4250/FULL_SUN/LOOSE",
+    "in": {
+      "property": {
+        "turfSf": 4250,
+        "routeDensity": "LOOSE"
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 99,
+      "annual": 891,
+      "monthly": 74.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 86,
+      "marketAnnual": 1032
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/4250/FULL_SUN/SPARSE",
+    "in": {
+      "property": {
+        "turfSf": 4250,
+        "routeDensity": "SPARSE"
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 106,
+      "annual": 954,
+      "monthly": 79.5,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 86,
+      "marketAnnual": 1032
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/2500/FULL_SUN/DENSE-tiny",
+    "in": {
+      "property": {
+        "turfSf": 2500
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 67,
+      "annual": 603,
+      "monthly": 50.25,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 76,
+      "marketAnnual": 912
+    }
+  },
+  {
+    "label": "st_augustine/enhanced/22000/FULL_SUN/DENSE-overmax",
+    "in": {
+      "property": {
+        "turfSf": 22000
+      },
+      "options": {
+        "track": "st_augustine",
+        "tier": "enhanced",
+        "shadeClassification": "FULL_SUN"
+      }
+    },
+    "out": {
+      "perApp": 281,
+      "annual": 2529,
+      "monthly": 210.75,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "st_augustine",
+      "pricingBasis": "FIFTY_FIVE_MARGIN_FLOOR",
+      "pricingSource": "COST_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_55_FLOOR",
+      "customQuoteFlag": true,
+      "marginFloorOk": true,
+      "marketMonthly": 232,
+      "marketAnnual": 2784
+    }
+  }
+]
