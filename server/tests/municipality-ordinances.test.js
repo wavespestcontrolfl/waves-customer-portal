@@ -103,22 +103,25 @@ describeOrSkip('municipality_ordinances (PR 1.4)', () => {
     expect(r.restricted_end_month).toBe(9);
   });
 
-  test('Charlotte County has no verified blackout window — office review', async () => {
+  test('Charlotte County has the Jun 1–Sept 30 N/P blackout (corrected 2026-05-28)', async () => {
     const r = await knex('municipality_ordinances')
       .where({ jurisdiction_name: 'Charlotte County', active: true })
       .first();
-    // Charlotte deliberately seeded WITHOUT an aggressive blackout
-    // window because no county-level ordinance is verified. The plan
-    // engine reads this state as "office review required for N/P".
-    expect(r.restricted_start_month).toBeNull();
-    expect(r.restricted_end_month).toBeNull();
-    expect(r.restricted_nitrogen).toBe(false);
-    expect(r.restricted_phosphorus).toBe(false);
+    // Charlotte County HAS run a Jun 1–Sept 30 nitrogen+phosphorus blackout
+    // since 2008 (Charlotte Harbor protection), verified vs charlottecountyfl.gov.
+    // The original seed (20260430000011) conservatively left this null/false
+    // citing no verified citation; migration 20260528000031 corrects it.
+    expect(r.restricted_start_month).toBe(6);
+    expect(r.restricted_start_day).toBe(1);
+    expect(r.restricted_end_month).toBe(9);
+    expect(r.restricted_end_day).toBe(30);
+    expect(r.restricted_nitrogen).toBe(true);
+    expect(r.restricted_phosphorus).toBe(true);
     // FFL baseline still applies for slow-release + annual cap.
     expect(parseFloat(r.slow_release_required_pct)).toBe(50);
     expect(parseFloat(r.annual_n_limit_per_1000)).toBe(4);
-    // Notes flag the office-review requirement so it's not silent.
-    expect(r.notes).toMatch(/office review/i);
+    // Notes reflect the correction.
+    expect(r.notes).toMatch(/blackout/i);
   });
 
   // ── Provenance ───────────────────────────────────────────────────────
@@ -155,9 +158,14 @@ describeOrSkip('municipality_ordinances (PR 1.4)', () => {
     // new Date() at migration runtime would falsely record the
     // deploy date and undermine the audit trail.
     const rows = await knex('municipality_ordinances').where({ active: true });
+    // Original 4 jurisdictions were verified 2026-04-30. Charlotte was
+    // re-verified 2026-05-28 when migration 20260528000031 corrected its
+    // blackout window — still a real, hardcoded verification date (not
+    // new Date()/deploy time), which is what this test guards.
+    const EXPECTED_VERIFIED = { 'Charlotte County': '2026-05-28' };
     for (const r of rows) {
       const checked = new Date(r.source_checked_at).toISOString().slice(0, 10);
-      expect(checked).toBe('2026-04-30');
+      expect(checked).toBe(EXPECTED_VERIFIED[r.jurisdiction_name] || '2026-04-30');
     }
   });
 
@@ -183,15 +191,20 @@ describeOrSkip('municipality_ordinances (PR 1.4)', () => {
     expect(charlotteAfterDelete).toBeUndefined();
 
     // Re-run the seed step (the up() function — the createTable
-    // step is guarded by hasTable so it'll be a no-op).
+    // step is guarded by hasTable so it'll be a no-op). NOTE: this
+    // restores the ORIGINAL (pre-correction) Charlotte row, so re-apply
+    // the correction migration to match the production end-state.
     await migration.up(knex);
+    const fixMigration = require(path.join(__dirname, '..', 'models', 'migrations', '20260528000031_fix_kb_blackout_charlotte_northport.js'));
+    await fixMigration.up(knex);
 
-    // Charlotte should be restored.
+    // Charlotte should be restored AND corrected (blackout, not office-review).
     const charlotteAfterReseed = await knex('municipality_ordinances')
       .where({ jurisdiction_name: 'Charlotte County', active: true })
       .first();
     expect(charlotteAfterReseed).toBeTruthy();
-    expect(charlotteAfterReseed.notes).toMatch(/office review/i);
+    expect(charlotteAfterReseed.restricted_nitrogen).toBe(true);
+    expect(charlotteAfterReseed.notes).toMatch(/blackout/i);
 
     // The other 3 must NOT have been duplicated by the re-run.
     const sarasotaActive = await knex('municipality_ordinances')
