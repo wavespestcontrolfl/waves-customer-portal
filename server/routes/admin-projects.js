@@ -1676,11 +1676,27 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       });
     }
 
-    // Report link (ensure a token exists, same shape as /send).
+    // Report link + portal visibility — mirror /send so a token_only WDO report
+    // never leaks into the customer portal via the `portal_visible IS NULL` +
+    // 'sent' legacy-visible path in documents.js.
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
-    if (!project.report_token) {
-      await db('projects').where({ id: project.id }).update({ report_token: token, updated_at: db.fn.now() });
+    const projectCols = await db('projects').columnInfo().catch(() => ({}));
+    const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
+      logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
+      return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
+    });
+    const tokenUpdate = { report_token: token, updated_at: db.fn.now() };
+    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
+    if (projectCols.portal_visibility) {
+      tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
     }
+    if (projectCols.portal_attach_policy) {
+      tokenUpdate.portal_attach_policy = portalAttachment.completionProfile?.portalAttachPolicy || project.portal_attach_policy || 'active_portal_customer';
+    }
+    if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
+      tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
+    }
+    await db('projects').where({ id: project.id }).update(tokenUpdate);
     const refreshed = await db('projects').where({ id: project.id }).first();
     const reportPath = await projectReportPathForProject(db, refreshed, customer);
     const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
@@ -1758,7 +1774,18 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       channels.email = { ok: false, error: 'No email on file' };
     }
 
-    const delivered = channels.sms?.ok || channels.email?.ok;
+    // Mirror /send: only count channels the customer actually has, so an
+    // email-only or SMS-only customer whose one channel succeeds is recorded as
+    // 'sent', not 'partial'.
+    const availableChannels = [
+      customer.phone ? 'sms' : null,
+      emailRecipient.email ? 'email' : null,
+    ].filter(Boolean);
+    const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
+    const deliveryStatus = successfulChannelCount === 0
+      ? 'failed'
+      : successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
+    const delivered = successfulChannelCount > 0;
 
     // Finalize the invoice as delivered (it went out alongside the report).
     // markDeliverySent uses the canonical finalization semantics: it promotes
@@ -1781,7 +1808,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         sent_at: project.sent_at || db.fn.now(),
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
-        delivery_status: (channels.sms?.ok && channels.email?.ok) ? 'sent' : 'partial',
+        delivery_status: deliveryStatus,
         updated_at: db.fn.now(),
       });
     }
@@ -1802,6 +1829,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       report_url: reportPath || `/report/project/${token}`,
       pay_url: payUrl,
       channels,
+      delivery_status: deliveryStatus,
       sent: delivered,
     });
   } catch (err) {
