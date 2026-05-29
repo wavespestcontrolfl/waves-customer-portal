@@ -35,9 +35,9 @@ const LAWN_TIER_VISITS = { basic: 4, standard: 6, enhanced: 9, premium: 12 };
 // Annual material budgets at the 4,500 sqft reference, by track → visits.
 // Sun/shade is NOT a pricing input — every lawn prices on its track's budget.
 const LAWN_MATERIAL_BUDGETS = {
-  st_augustine: { 4: 64, 6: 87, 9: 141, 12: 205 },
-  bermuda: { 4: 57, 6: 87, 9: 140, 12: 215 },
-  zoysia: { 4: 67, 6: 101, 9: 148, 12: 178 },
+  st_augustine: { 4: 64, 6: 87, 9: 167, 12: 205 },
+  bermuda: { 4: 57, 6: 87, 9: 164, 12: 215 },
+  zoysia: { 4: 67, 6: 101, 9: 174, 12: 178 },
   bahia: { 4: 45, 6: 68, 9: 95, 12: 115 },
 };
 

@@ -81,8 +81,8 @@ describe('estimate converter annual prepay amount', () => {
       lineItems: [
         {
           service: 'lawn_care',
-          annual: 774,
-          annualAfterDiscount: 774,
+          annual: 828,
+          annualAfterDiscount: 828,
           discount: {
             discountable: false,
             policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
@@ -97,7 +97,7 @@ describe('estimate converter annual prepay amount', () => {
       ],
     };
 
-    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(774);
+    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(828);
   });
 
   test('annual prepay floor reads public quote engineResult line items and annual aliases', () => {
@@ -106,7 +106,7 @@ describe('estimate converter annual prepay amount', () => {
         lineItems: [
           {
             service: 'lawn_care',
-            ann: 774,
+            ann: 828,
             discount: {
               discountable: false,
               policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
@@ -121,6 +121,6 @@ describe('estimate converter annual prepay amount', () => {
       },
     };
 
-    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(774);
+    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(828);
   });
 });

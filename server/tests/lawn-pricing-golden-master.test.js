@@ -43,11 +43,11 @@ describe('lawn pricing golden master', () => {
     }
   });
 
-  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $86 / $774 / $64.50', () => {
+  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $92 / $828 / $69.00', () => {
     const r = priceLawnCare({ turfSf: 4250 }, { track: 'st_augustine', tier: 'enhanced' });
-    expect(r.perApp).toBe(86);
-    expect(r.annual).toBe(774);
-    expect(r.monthly).toBe(64.5);
+    expect(r.perApp).toBe(92);
+    expect(r.annual).toBe(828);
+    expect(r.monthly).toBe(69);
     expect(r.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_55_FLOOR');
     // Annual is source-of-truth; monthly is derived and must reconcile within ¢.
     expect(Math.abs(r.monthly * 12 - r.annual)).toBeLessThanOrEqual(0.5);

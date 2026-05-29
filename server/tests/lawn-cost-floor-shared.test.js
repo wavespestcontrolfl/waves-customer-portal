@@ -21,8 +21,9 @@ function protocolMaterialBudgetAtReferenceSqft(track, protocolTier, expectedVisi
 
 describe('lawnMaterialBudget', () => {
   it('returns the track/visits budget (sun/shade is not a pricing input)', () => {
-    expect(lawnMaterialBudget('st_augustine', 9)).toBe(141);
-    expect(lawnMaterialBudget('bermuda', 9)).toBe(140);
+    expect(lawnMaterialBudget('st_augustine', 9)).toBe(167);
+    expect(lawnMaterialBudget('bermuda', 9)).toBe(164);
+    expect(lawnMaterialBudget('zoysia', 9)).toBe(174);
     expect(lawnMaterialBudget('zoysia', 12)).toBe(178);
     expect(lawnMaterialBudget('st_augustine', 6)).toBe(87);
     expect(lawnMaterialBudget('bermuda', 6)).toBe(87);
@@ -41,6 +42,18 @@ describe('lawnMaterialBudget', () => {
     );
     expect(lawnMaterialBudget('zoysia', 6)).toBeGreaterThanOrEqual(
       protocolMaterialBudgetAtReferenceSqft('zoysia', 'bronze', 6)
+    );
+  });
+
+  it('keeps Enhanced material guardrails at or above the inventory-backed protocol baseline', () => {
+    expect(lawnMaterialBudget('st_augustine', 9)).toBeGreaterThanOrEqual(
+      protocolMaterialBudgetAtReferenceSqft('st_augustine', 'enhanced', 9)
+    );
+    expect(lawnMaterialBudget('bermuda', 9)).toBeGreaterThanOrEqual(
+      protocolMaterialBudgetAtReferenceSqft('bermuda', 'enhanced', 9)
+    );
+    expect(lawnMaterialBudget('zoysia', 9)).toBeGreaterThanOrEqual(
+      protocolMaterialBudgetAtReferenceSqft('zoysia', 'enhanced', 9)
     );
   });
 });
@@ -67,11 +80,11 @@ describe('lawnComplexityMinutes', () => {
 });
 
 describe('computeLawnCostFloor', () => {
-  it('reproduces the canonical 4,250 St-Aug Enhanced/9 DENSE floor ($774/yr → $86/app)', () => {
+  it('reproduces the canonical 4,250 St-Aug Enhanced/9 DENSE floor under inventory-backed guardrails', () => {
     const floor = computeLawnCostFloor({
       lawnSqFt: 4250,
       visits: 9,
-      materialCostPerVisit: lawnMaterialCostPerVisit(141, 4250, 9),
+      materialCostPerVisit: lawnMaterialCostPerVisit(167, 4250, 9),
       laborMinutesBase: 12,
       laborMinutesPer1000Sqft: 2.5,
       complexityMinutes: 0,
@@ -83,7 +96,7 @@ describe('computeLawnCostFloor', () => {
       targetGrossMargin: 0.55,
     });
     const perApp = Math.ceil(floor.minimumCollectedAnnualPriceFor55 / 9);
-    expect(perApp).toBe(86);
-    expect(perApp * 9).toBe(774);
+    expect(perApp).toBe(92);
+    expect(perApp * 9).toBe(828);
   });
 });

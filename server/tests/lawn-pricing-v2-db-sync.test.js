@@ -46,13 +46,13 @@ describe('Lawn Pricing V2 DB sync', () => {
         SPARSE: 20,
       },
     });
-    expect(lawn.perApp).toBe(86);
-    expect(lawn.annual).toBe(774);
-    expect(lawn.monthly).toBe(64.5);
-    expect(lawn.costs.total).toBeGreaterThanOrEqual(347);
-    expect(lawn.costs.total).toBeLessThan(348);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(771);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(772);
+    expect(lawn.perApp).toBe(92);
+    expect(lawn.annual).toBe(828);
+    expect(lawn.monthly).toBe(69);
+    expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
+    expect(lawn.costs.total).toBeLessThan(372);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(826);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(827);
     expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_55_FLOOR');
     expect(lawn.pricingSource).toBe('COST_FLOOR');
     expect(lawn.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
@@ -80,8 +80,8 @@ describe('Lawn Pricing V2 DB sync', () => {
       qualifyingCount: 2,
       activeServices: ['pest_control', 'lawn_care'],
     });
-    expect(lawn.annual).toBe(774);
-    expect(lawn.annualAfterDiscount).toBe(774);
+    expect(lawn.annual).toBe(828);
+    expect(lawn.annualAfterDiscount).toBe(828);
     expect(lawn.discount).toMatchObject({
       discountable: false,
       requestedDiscountPercent: 0.10,
