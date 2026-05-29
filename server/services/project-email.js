@@ -292,7 +292,7 @@ async function sendProjectReportWithInvoice({
   return sendProjectTemplate({
     project,
     customer,
-    templateKey: 'project.report_ready',
+    templateKey: 'project.report_with_invoice',
     payload,
     suppressionGroupKey: SERVICE_GROUP,
     categories: ['project_report', 'project_report_with_invoice', `project_type_${safeKey(project?.project_type)}`],

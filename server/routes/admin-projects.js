@@ -1276,7 +1276,14 @@ async function buildWdoPdfAttachment(project, customer) {
 // to the base bracket if footprint isn't available.
 function resolveWdoInspectionFee(customer, findings) {
   const brackets = SPECIALTY?.wdo?.brackets || [];
-  const footprint = Number(findings?.property_sqft || customer?.square_footage || customer?.sqft) || 0;
+  // customers stores size on the `property_sqft` column (with `home_sqft` as a
+  // secondary used by the pricing AI); read those rather than non-existent
+  // square_footage/sqft fields so 2,501+ sq ft homes hit the $200/$225 tiers.
+  const footprint = Number(
+    findings?.property_sqft
+    || customer?.property_sqft
+    || customer?.home_sqft,
+  ) || 0;
   if (footprint > 0) {
     for (const bracket of brackets) {
       if (footprint <= bracket.maxSqFt) {
