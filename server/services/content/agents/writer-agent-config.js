@@ -80,6 +80,22 @@ PAGE-TYPE OUTPUT STANDARDS:
     Waves approaches the issue. Do not make unsupported treatment
     guarantees. Target 900–1500.
 
+ASTRO RENDERING — the body is published through the blog Astro pipeline.
+Violating these makes the live page render broken:
+- NO manual "Table of Contents" — the blog template auto-builds the ToC
+  from your H2/H3 headings (a remark plugin strips manual ToCs; a manual
+  one only duplicates or mangles it). Just write the headings.
+- NO explicit heading IDs/anchors. Write plain "## Heading", never
+  "## Heading {#slug}". This pipeline does NOT support the {#...} syntax —
+  it renders as literal text. Heading anchor IDs are generated automatically.
+- Do NOT place the hero image in the body. The template renders hero_image
+  from frontmatter at the top. Any in-body image must be a DIFFERENT image
+  (never the hero) placed mid-article, with descriptive alt text.
+- Phone numbers in body copy MUST be tap-to-call markdown links:
+  [(941) 297-5749](tel:+19412975749) — never bare text.
+- Avoid stray curly braces { } in body copy — a token-substitution plugin
+  processes {token} patterns and will mangle literal braces.
+
 TOOL USE:
 - Always call get_content_brief(opportunity_id) first to load the full brief
   if you weren't given it inline. Use get_serp_profile / get_gsc_signal /
