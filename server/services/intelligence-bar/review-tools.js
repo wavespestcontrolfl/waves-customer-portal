@@ -366,10 +366,14 @@ async function triggerReviewRequest(input) {
   if (!customer) return { error: 'Customer not found' };
   if (!customer.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
 
-  // Check if already sent recently
+  // Check if already sent recently. "Last 30 days" is a rolling DURATION, not a
+  // calendar boundary, so compare created_at (a UTC timestamp) against the exact
+  // instant 30×24h ago — both sides are UTC instants, so there's no ET leak. A
+  // bare ET date string here would be read as midnight in the session tz and
+  // wrongly block a request sent early on the cutoff date (Codex #1378 P2).
   const recent = await db('review_requests')
     .where({ customer_id: customer.id })
-    .where('created_at', '>=', etDateString(addETDays(new Date(), -30)))
+    .where('created_at', '>=', new Date(Date.now() - 30 * 86400000).toISOString())
     .first();
   if (recent) return { already_sent: true, status: recent.status, sent_at: recent.created_at, note: 'Already sent a review request in the last 30 days' };
 
