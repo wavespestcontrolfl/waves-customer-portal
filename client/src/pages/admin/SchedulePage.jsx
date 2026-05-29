@@ -5842,7 +5842,7 @@ export function CompletionPanel({
       customerInteraction: interactionLabel,
       customerConcern: concern,
       pestActivityRating: clientPestRating ?? null,
-      photoCount: Array.isArray(photos) ? photos.length : 0,
+      photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
     };
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
