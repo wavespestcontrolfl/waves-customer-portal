@@ -1693,12 +1693,19 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
 
     const delivered = channels.sms?.ok || channels.email?.ok;
 
-    // Transition the invoice to 'sent' (it was just delivered alongside the
-    // report). We update status directly rather than calling
-    // InvoiceService.sendInvoice so the invoice's own SMS path doesn't fire a
-    // second, duplicate text.
-    if (delivered && invoice.status === 'draft') {
-      await db('invoices').where({ id: invoice.id }).update({ status: 'sent', sent_at: db.fn.now(), updated_at: db.fn.now() });
+    // Finalize the invoice as delivered (it went out alongside the report).
+    // markDeliverySent uses the canonical finalization semantics: it promotes
+    // draft / scheduled / sending → sent and clears scheduled_send_at (and the
+    // scheduled-review fields), so a 'scheduled' invoice can't be re-sent later
+    // by processScheduledSends. It does NOT send anything itself, so the
+    // invoice's own SMS path never fires a second, duplicate text.
+    if (delivered) {
+      await InvoiceService.markDeliverySent(invoice.id, {
+        sms: !!channels.sms?.ok,
+        email: !!channels.email?.ok,
+        source: 'project_report_with_invoice',
+        payUrl,
+      }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
     }
 
     if (delivered) {
