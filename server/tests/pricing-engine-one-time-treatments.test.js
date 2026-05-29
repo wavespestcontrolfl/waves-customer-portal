@@ -10,11 +10,11 @@ const {
   constants,
 } = require('../services/pricing-engine');
 
-// One-time pest = max(floor, (quarterlyPerApp + setupEquivalent) × premiumMultiplier).
-// Keeps a one-off visit strictly above what a recurring customer pays on visit 1.
+// One-time pest = max(floor, quarterlyPerApp × multiplier). Pure multiple off
+// the quarterly rate; keeps a one-off visit above recurring visit-1.
 function expectedOneTimePest(quarterlyPerApp) {
-  const { setupEquivalent, premiumMultiplier, floor } = constants.ONE_TIME.pest;
-  return Math.max(floor, Math.round((quarterlyPerApp + setupEquivalent) * premiumMultiplier));
+  const { multiplier, floor } = constants.ONE_TIME.pest;
+  return Math.max(floor, Math.round(quarterlyPerApp * multiplier));
 }
 
 function property(overrides = {}) {
@@ -50,8 +50,7 @@ describe('pricing engine one-time treatment rules', () => {
 
     expect(recurringBase).toBe(117);
     expect(result.quarterlyPerApp).toBe(117);
-    expect(result.setupEquivalent).toBe(constants.PEST.initialFee);
-    expect(result.recurringEntryCost).toBe(recurringBase + constants.ONE_TIME.pest.setupEquivalent);
+    expect(result.multiplier).toBe(constants.ONE_TIME.pest.multiplier);
     expect(result.price).toBe(expectedOneTimePest(recurringBase));
     // One-time must cost strictly more than recurring visit 1 ($99 setup + quarterly rate).
     expect(result.price).toBeGreaterThan(recurringBase + constants.PEST.initialFee);

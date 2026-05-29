@@ -1896,11 +1896,15 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
     // Mirror the server engine (server/services/pricing-engine): one-time =
-    // (quarterly base + $99 setup-equivalent) × 1.20 premium, never below $199.
-    // Anchor on the QUARTERLY base (frequency-independent), never R.pest.pa,
-    // which would be the discounted monthly/bimonthly per-app.
+    // quarterly base × 2.2, never below $199. The quarterly base already encodes
+    // every property metric, so one-time scales proportionally. Anchor on the
+    // QUARTERLY base (frequency-independent), never R.pest.pa (discounted per-app).
+    // The trailing clamp keeps the loyalty perk from dropping one-time to/below a
+    // recurring customer's visit-1 cost (quarterly + $99 setup) — strictly above
+    // (+1, whole-dollar prices), matching the server engine.
     const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));
-    const fp = Math.max(199, otP(Math.max(199, Math.round((quarterlyBase + 99) * 1.20))));
+    let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
+    if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
 

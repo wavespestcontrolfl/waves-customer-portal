@@ -3598,17 +3598,16 @@ function priceOneTimePest(property, options = {}) {
     baseSource = 'computed_quarterly_baseline';
   }
 
-  // One-time = (quarterly per-app + setup-equivalent) × premium markup. This
-  // keeps a one-off visit strictly above what a recurring customer pays on
-  // visit 1 ($99 setup + quarterly rate), preserving the incentive to commit.
-  const setupEquivalent = Number.isFinite(Number(ONE_TIME.pest.setupEquivalent))
-    ? Number(ONE_TIME.pest.setupEquivalent)
-    : (PEST.initialFee || 0);
-  const premiumMultiplier = Number.isFinite(Number(ONE_TIME.pest.premiumMultiplier)) && Number(ONE_TIME.pest.premiumMultiplier) > 0
-    ? Number(ONE_TIME.pest.premiumMultiplier)
+  // One-time = quarterly per-app × multiplier. The quarterly rate already
+  // encodes all property metrics (footprint, lot, tree/shrub, pool/cage,
+  // driveway, complexity, type, age), so one-time scales proportionally with
+  // real job difficulty. multiplier >= 2 (+ the $199 floor) keeps a one-off
+  // visit above a recurring customer's visit-1 cost ($99 setup + quarterly),
+  // preserving the incentive to commit.
+  const multiplier = Number.isFinite(Number(ONE_TIME.pest.multiplier)) && Number(ONE_TIME.pest.multiplier) > 0
+    ? Number(ONE_TIME.pest.multiplier)
     : 1;
-  const recurringEntryCost = Math.round((base + setupEquivalent) * 100) / 100;
-  const multipliedPrice = Math.round(recurringEntryCost * premiumMultiplier);
+  const multipliedPrice = Math.round(base * multiplier);
   const preUrgencyPrice = applyOneTimeFloor(
     multipliedPrice,
     ONE_TIME.pest.floor
@@ -3616,7 +3615,19 @@ function priceOneTimePest(property, options = {}) {
   const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
   const discountBase = preUrgencyPrice * urgencyMultiplier;
   const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
-  const price = applyOneTimeFloor(discounted.price, ONE_TIME.pest.floor);
+  let price = applyOneTimeFloor(discounted.price, ONE_TIME.pest.floor);
+
+  // Recurring-incentive clamp. The 15% loyalty perk is applied AFTER the floor,
+  // so on small homes (where the multiple sits near the floor) it could push a
+  // one-time visit to/below a recurring customer's visit-1 cost (quarterly +
+  // $99 setup) — making a one-off no more expensive than committing. Never let
+  // that happen: one-time stays STRICTLY above recurring visit-1 (prices are
+  // whole dollars, so +1 is the minimal strict margin). Only binds for recurring
+  // customers on small homes with no urgency surcharge; for everyone else the
+  // multiple already clears it (guaranteed by the db-bridge invariant).
+  const recurringVisitOneCost = Math.round((base + (PEST.initialFee || 0)) * 100) / 100;
+  const recurringIncentiveClampApplied = price <= recurringVisitOneCost;
+  if (recurringIncentiveClampApplied) price = recurringVisitOneCost + 1;
 
   return {
     service: 'one_time_pest',
@@ -3626,9 +3637,9 @@ function priceOneTimePest(property, options = {}) {
     isRecurringCustomer,
     basePrice: Math.round(base * 100) / 100,
     quarterlyPerApp: Math.round(base * 100) / 100,
-    setupEquivalent,
-    premiumMultiplier,
-    recurringEntryCost,
+    multiplier,
+    recurringVisitOneCost,
+    recurringIncentiveClampApplied,
     baseSource,
     baselinePestBasePrice: baselinePest?.basePrice ?? null,
     selectedFloor: ONE_TIME.pest.floor,

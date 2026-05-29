@@ -814,19 +814,22 @@ const RODENT = {
 // ONE-TIME SERVICES
 // ============================================================
 const ONE_TIME = {
-  // One-time pest is anchored on what a recurring customer pays to START
-  // service — the quarterly per-app rate PLUS the $99 WaveGuard setup fee —
-  // then marked up by `premiumMultiplier` so a one-time visit is always
-  // strictly MORE expensive than entering the recurring program. This is the
-  // recurring incentive: a one-off caller pays a premium over the committed
-  // customer's first visit, and recurring annual-prepay additionally waives
-  // the $99 setup. Formula: max(floor, (quarterlyPerApp + setupEquivalent) ×
-  // premiumMultiplier). `setupEquivalent` mirrors PEST.initialFee; kept as its
-  // own field so the admin Pricing Logic panel can decouple them if needed.
-  // Floor $199 is a safety net (the formula normally clears it on its own).
+  // One-time pest = a straight multiple of the QUARTERLY per-app rate.
+  // Formula: max(floor, quarterlyPerApp × multiplier).
+  //
+  // Anchoring on the quarterly rate is the whole design: that rate already
+  // encodes every property metric (footprint, lot size, tree/shrub density,
+  // pool/cage, driveway, complexity, property type, age), so a one-time visit
+  // scales proportionally with real job difficulty — no separate sq-ft curve,
+  // no flat add-on that would distort small vs. large properties.
+  //
+  // `multiplier` must stay >= 2 (enforced in db-bridge): combined with the
+  // $199 floor and the $89 pest quarterly floor, that guarantees one-time
+  // always exceeds a recurring customer's visit-1 cost ($99 setup + quarterly),
+  // preserving the incentive to commit to recurring. 2.2 keeps a typical home
+  // (~$117 quarterly) at ~$257.
   pest: {
-    setupEquivalent: r(99),
-    premiumMultiplier: 1.20,
+    multiplier: 2.2,
     floor: r(199),
   },
   lawn: {
