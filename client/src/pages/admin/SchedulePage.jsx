@@ -5804,6 +5804,57 @@ export function CompletionPanel({
       return text && currentNotes.includes(text.toLowerCase());
     });
   }
+  // Single source of truth for the AI report payload + the "is there enough to
+  // generate?" gate, so the two Generate buttons (mobile + desktop) and the
+  // server can't drift. The payload classifies inputs by provenance so the
+  // prompt won't turn a customer concern or a recommendation into a confirmed
+  // finding (see the server prompt). photoCount is reported but never enough on
+  // its own — the model can't see the photos.
+  function buildAiReportPayload() {
+    const productsApplied = selectedProducts
+      .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
+      .join(", ");
+    const actionsCompleted = labelsStillInNotes(selectedProtocolActionLabels);
+    const observations = labelsStillInNotes(selectedObservationLabels);
+    const recommendations = labelsStillInNotes(selectedRecommendationLabels);
+    const concern = customerConcern.trim();
+    const interactionLabel = CUSTOMER_INTERACTION_OPTIONS.find(
+      (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
+    )?.label || "";
+    const payload = {
+      customerName: service.customerName,
+      serviceType: service.serviceType,
+      technicianName: service.technicianName || "Waves Tech",
+      serviceDate: new Date().toLocaleDateString("en-US", {
+        month: "long", day: "numeric", year: "numeric",
+      }),
+      arrivalTime: service.checkInTime
+        ? new Date(service.checkInTime).toLocaleTimeString("en-US", {
+            hour: "numeric", minute: "2-digit", hour12: true,
+          })
+        : "",
+      serviceNotes: notes.trim(),
+      productsApplied,
+      areasServiced,
+      actionsCompleted,
+      observations,
+      recommendations,
+      customerInteraction: interactionLabel,
+      customerConcern: concern,
+      pestActivityRating: clientPestRating ?? null,
+      photoCount: Array.isArray(photos) ? photos.length : 0,
+    };
+    const hasReportInput =
+      Boolean(payload.serviceNotes) ||
+      productsApplied.length > 0 ||
+      areasServiced.length > 0 ||
+      actionsCompleted.length > 0 ||
+      observations.length > 0 ||
+      recommendations.length > 0 ||
+      Boolean(concern) ||
+      payload.pestActivityRating !== null;
+    return { payload, hasReportInput };
+  }
   function recordActionScope(label, scope, treatmentApplied) {
     if (!label || (scope !== "interior" && scope !== "exterior")) return;
     setActionScopeByLabel((prev) => ({
@@ -7062,40 +7113,14 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={async () => {
-                  if (!notes.trim()) {
-                    alert("Add service notes first.");
+                  const { payload, hasReportInput } = buildAiReportPayload();
+                  if (!hasReportInput) {
+                    alert("Add service notes, products, or visit details first.");
                     return;
                   }
                   setGenerating(true);
                   try {
-                    const productNames = selectedProducts
-                      .map(
-                        (p) =>
-                          p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""),
-                      )
-                      .join(", ");
-                    const r = await generateAiReport({
-                      customerName: service.customerName,
-                      serviceType: service.serviceType,
-                      technicianName: service.technicianName || "Waves Tech",
-                      serviceDate: new Date().toLocaleDateString("en-US", {
-                        month: "long",
-                        day: "numeric",
-                        year: "numeric",
-                      }),
-                      arrivalTime: service.checkInTime
-                        ? new Date(service.checkInTime).toLocaleTimeString(
-                            "en-US",
-                            {
-                              hour: "numeric",
-                              minute: "2-digit",
-                              hour12: true,
-                            },
-                          )
-                        : "",
-                      serviceNotes: notes,
-                      productsApplied: productNames,
-                    });
+                    const r = await generateAiReport(payload);
                     if (r.report) setNotes(r.report);
                   } catch (e) {
                     alert("AI report failed: " + e.message);
@@ -8687,36 +8712,14 @@ export function CompletionPanel({
           {!quickComplete && (
             <button
               onClick={async () => {
-                if (!notes.trim()) {
-                  alert("Add service notes first.");
+                const { payload, hasReportInput } = buildAiReportPayload();
+                if (!hasReportInput) {
+                  alert("Add service notes, products, or visit details first.");
                   return;
                 }
                 setGenerating(true);
                 try {
-                  const productNames = selectedProducts
-                    .map(
-                      (p) =>
-                        p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""),
-                    )
-                    .join(", ");
-                  const r = await generateAiReport({
-                    customerName: service.customerName,
-                    serviceType: service.serviceType,
-                    technicianName: service.technicianName || "Waves Tech",
-                    serviceDate: new Date().toLocaleDateString("en-US", {
-                      month: "long",
-                      day: "numeric",
-                      year: "numeric",
-                    }),
-                    arrivalTime: service.checkInTime
-                      ? new Date(service.checkInTime).toLocaleTimeString(
-                          "en-US",
-                          { hour: "numeric", minute: "2-digit", hour12: true },
-                        )
-                      : "",
-                    serviceNotes: notes,
-                    productsApplied: productNames,
-                  });
+                  const r = await generateAiReport(payload);
                   if (r.report) setNotes(r.report);
                 } catch (e) {
                   alert("AI report failed: " + e.message);
