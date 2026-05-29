@@ -105,6 +105,11 @@ async function markEstimateManuallyAccepted({
       declined_at: null,
       decline_reason: null,
       updated_at: now,
+      // Freeze the price at acceptance (atomic with the status flip; the
+      // whereIn(status) guard below stops a second accept from re-pricing).
+      price_locked_at: estimate.price_locked_at || now,
+      price_locked_by: 'manual_accept',
+      pricing_authority: 'LOCKED',
     };
     if (!estimate.sent_at) updates.sent_at = now;
 

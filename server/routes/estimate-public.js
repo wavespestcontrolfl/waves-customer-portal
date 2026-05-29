@@ -4400,6 +4400,14 @@ router.put('/:token/accept', async (req, res, next) => {
       const acceptedUpdates = {
         status: 'accepted',
         accepted_at: trx.fn.now(),
+        // Acceptance is where money commits — freeze the price. The frequency
+        // rung selected below is the one legitimate accept-time re-derive; it is
+        // written into this same atomic update, so derive→lock cannot race or
+        // leave a stale-price lock. The .whereNotIn('status', ['accepted',...])
+        // guard on the update prevents a second accept from re-pricing.
+        price_locked_at: trx.fn.now(),
+        price_locked_by: 'customer_accept',
+        pricing_authority: 'LOCKED',
       };
       let nextEstimateData = acceptedEstDataForPricing && typeof acceptedEstDataForPricing === 'object'
         ? { ...acceptedEstDataForPricing }

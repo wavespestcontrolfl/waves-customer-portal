@@ -345,4 +345,55 @@ describe('estimate manual acceptance', () => {
     expect(updates).toEqual([]);
     expect(inserts).toEqual([]);
   });
+
+  test('locks the price at acceptance (price_locked_at/by + pricing_authority=LOCKED)', async () => {
+    const estimate = {
+      id: 'estimate-lock',
+      status: 'viewed',
+      customer_id: 'customer-9',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '86.00',
+      waveguard_tier: 'Bronze',
+      price_locked_at: null,
+    };
+    const { database, updates } = makeDb(estimate);
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-9',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-9' }) },
+    });
+    expect(updates[0].patch).toMatchObject({
+      status: 'accepted',
+      price_locked_at: 'NOW',
+      price_locked_by: 'manual_accept',
+      pricing_authority: 'LOCKED',
+    });
+    // The status guard is what prevents a second accept from re-pricing.
+    expect(updates[0].statusList).toEqual({ column: 'status', values: ['sent', 'viewed'] });
+  });
+
+  test('preserves an existing lock timestamp rather than re-stamping it', async () => {
+    const estimate = {
+      id: 'estimate-prelocked',
+      status: 'viewed',
+      customer_id: 'customer-10',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '86.00',
+      waveguard_tier: 'Bronze',
+      price_locked_at: '2026-05-12T09:00:00.000Z',
+    };
+    const { database, updates } = makeDb(estimate);
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-10',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-10' }) },
+    });
+    expect(updates[0].patch.price_locked_at).toBe('2026-05-12T09:00:00.000Z');
+  });
 });

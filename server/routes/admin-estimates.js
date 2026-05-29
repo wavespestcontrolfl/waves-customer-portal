@@ -340,6 +340,13 @@ router.post('/', async (req, res, next) => {
       id: estimate.id,
       token: estimate.token,
       viewUrl: estimateViewUrl(estimate.token),
+      // Server-authoritative pricing (Decision #2): the UI compares these to the
+      // client preview it sent and surfaces a "recomputed" notice if they differ.
+      monthlyTotal: estimate.monthly_total != null ? Number(estimate.monthly_total) : null,
+      annualTotal: estimate.annual_total != null ? Number(estimate.annual_total) : null,
+      onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
+      pricingAuthority: estimate.pricing_authority || null,
+      pricingDrift: estimate.pricing_drift || null,
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
