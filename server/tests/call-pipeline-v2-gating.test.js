@@ -557,6 +557,23 @@ describe('computeAddressHash', () => {
     expect(computeAddressHash(a)).toBe(computeAddressHash(b));
   });
 
+  // Regression: street must participate in the hash. The call site builds this object
+  // from customer.address_line1 (NOT customer.street_address, which does not exist as a
+  // column — that typo collapsed the hash to city+zip and let same-city/zip street
+  // corrections silently reuse the pre-correction appointment via idempotency_key).
+  test('differs when only the street differs (same city/zip)', () => {
+    const a = { street_line_1: '8224 Abalone Loop', city: 'Parrish', postal_code: '34219' };
+    const b = { street_line_1: '101 Main St', city: 'Parrish', postal_code: '34219' };
+    expect(computeAddressHash(a)).not.toBe(computeAddressHash(b));
+  });
+
+  test('missing street degrades to city/zip but stays distinct from full address', () => {
+    const full = { street_line_1: '8224 Abalone Loop', city: 'Parrish', postal_code: '34219' };
+    const noStreet = { street_line_1: undefined, city: 'Parrish', postal_code: '34219' };
+    expect(computeAddressHash(noStreet)).not.toBeNull();
+    expect(computeAddressHash(noStreet)).not.toBe(computeAddressHash(full));
+  });
+
   test('null address returns null', () => {
     expect(computeAddressHash(null)).toBeNull();
   });

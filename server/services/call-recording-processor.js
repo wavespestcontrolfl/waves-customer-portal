@@ -2178,7 +2178,7 @@ const CallRecordingProcessor = {
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
                     confirmedStartAt: extracted.preferred_date_time,
                     primaryServiceCategory: serviceType,
-                    addressHash: computeAddressHash({ street_line_1: customer.street_address, city: customer.city, postal_code: customer.zip }),
+                    addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
                   }),
                 };
                 const [created] = await trx('scheduled_services')
