@@ -177,8 +177,13 @@ async function sendBatch({ recipients, fromEmail, fromName, subject, html, text,
     personalizations: recipients.map((r) => ({
       to: [{ email: r.email }],
       // Per-recipient unsubscribe header — RFC 8058 one-click compliant.
+      // Advertise ONLY the HTTPS one-click endpoint: it routes to a live
+      // portal handler that flips the subscriber. The previous mailto:
+      // unsubscribe@wavespestcontrol.com had no inbound processor anywhere,
+      // so clients honoring that branch sent opt-outs into a black hole —
+      // a CAN-SPAM hazard. Don't advertise an unmonitored opt-out channel.
       headers: {
-        'List-Unsubscribe': `<mailto:unsubscribe@wavespestcontrol.com?subject=unsubscribe>, <${r.unsubscribeUrl}>`,
+        'List-Unsubscribe': `<${r.unsubscribeUrl}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       },
       // Substitution lets the body footer point at the right URL per recipient.

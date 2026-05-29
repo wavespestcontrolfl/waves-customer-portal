@@ -21,8 +21,31 @@ function stripHtml(html) {
   return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 }
 
+// Suppression types that block delivery on EVERY send stream, mirroring
+// activeSuppressionFor() in email-template-library.js. Bounces stay GLOBAL by
+// design (email audit C4), so the newsletter blast must honor them too.
+const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
+
+// Exclude any address with an active GLOBAL suppression (bounce /
+// spam_complaint / do_not_email) recorded via ANY stream — mirrors
+// activeSuppressionFor() so the newsletter blast can't re-mail addresses every
+// other send path already blocks. The correlated subquery references
+// newsletter_subscribers.email, so this must be applied to a query that has
+// that table in scope (segment build, recipient count, AND the resume/retry
+// refetch — the resume path does NOT go through buildSubscriberQuery, so it
+// must call this helper directly).
+function excludeGloballySuppressed(query) {
+  return query.whereNotExists(function () {
+    this.select(db.raw('1'))
+      .from('email_suppressions as es')
+      .where('es.status', 'active')
+      .whereRaw('LOWER(es.email) = LOWER(newsletter_subscribers.email)')
+      .whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES);
+  });
+}
+
 function buildSubscriberQuery(segmentFilter) {
-  let q = db('newsletter_subscribers').where({ status: 'active' });
+  let q = excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' }));
   if (!segmentFilter) return q;
 
   const f = segmentFilter;
@@ -196,12 +219,13 @@ async function sendCampaign(sendId, opts = {}) {
       .map((d) => d.subscriber_id)
       .filter((id) => id !== null && id !== undefined)));
     subscribers = retryableSubscriberIds.length
-      ? await db('newsletter_subscribers')
-        .where({ status: 'active' })
-        .whereIn('id', retryableSubscriberIds)
-        .select('id', 'email', 'unsubscribe_token', 'customer_id')
+      ? await excludeGloballySuppressed(
+        db('newsletter_subscribers')
+          .where({ status: 'active' })
+          .whereIn('id', retryableSubscriberIds),
+      ).select('id', 'email', 'unsubscribe_token', 'customer_id')
       : [];
-    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger`);
+    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger (globally-suppressed excluded)`);
   }
 
   const deliveryBySub = new Map(existingDeliveries.map((d) => [d.subscriber_id, d]));
@@ -456,12 +480,16 @@ async function prepareResumeCampaign(sendId) {
     throw err;
   }
   if (totalDeliveries > 0) {
-    const outstanding = await applyRetryableDeliveryFilter(
+    // Mirror the retry refetch's suppression exclusion so the "anything left to
+    // resume?" count matches what sendCampaign will actually send — otherwise a
+    // campaign whose only outstanding rows are globally-suppressed would falsely
+    // report work remaining (and previously would have re-mailed them).
+    const outstanding = await excludeGloballySuppressed(applyRetryableDeliveryFilter(
       db('newsletter_send_deliveries')
         .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
         .where({ 'newsletter_send_deliveries.send_id': send.id, 'newsletter_subscribers.status': 'active' }),
       'newsletter_send_deliveries',
-    )
+    ))
       .count('* as c')
       .first();
     if (Number(outstanding?.c || 0) === 0) {
@@ -551,4 +579,4 @@ async function processScheduledSends() {
   return { processed };
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, excludeGloballySuppressed };

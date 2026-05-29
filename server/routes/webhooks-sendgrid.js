@@ -598,6 +598,19 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
         });
     }
   }
+
+  // Record the GLOBAL suppression ledger entry for hard bounces and spam
+  // complaints so every send stream honors them — including future newsletter
+  // blasts via buildSubscriberQuery's anti-join. Mirrors the automation +
+  // transactional paths, which already call this; the newsletter handler was
+  // the only stream that updated subscriber state but never wrote the ledger,
+  // so a hard-bounced/complained address kept getting re-mailed. Runs even
+  // when there's no matching subscriber row (the address still bounced).
+  // suppressionForEmailEvent only emits a row for TRUE hard bounces and
+  // spam complaints, so soft bounces / blocks / opt-outs are unaffected.
+  if (ev.event === 'bounce' || ev.event === 'spamreport') {
+    await recordEmailSuppressionForEvent(ev, null, null, updates.subscriberAt || new Date(), client);
+  }
 }
 
 /**

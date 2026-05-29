@@ -16,7 +16,8 @@
  *     silently corrupts campaign analytics or double-applies events.
  */
 
-const { buildSubscriberQuery } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, excludeGloballySuppressed } = require('../services/newsletter-sender');
+const db = require('../models/db');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
 const {
@@ -61,6 +62,31 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(sql).not.toMatch(/customer_id/);
     expect(sql).not.toMatch(/source/);
     expect(sql).not.toMatch(/tags/);
+  });
+
+  test('always anti-joins the global email_suppressions ledger (bounce/spam/do_not_email)', () => {
+    const { sql, bindings } = shapeOf(null);
+    expect(sql).toMatch(/not exists/i);
+    expect(sql).toMatch(/email_suppressions/);
+    expect(bindings).toEqual(expect.arrayContaining(['bounce', 'spam_complaint', 'do_not_email']));
+  });
+
+  test('suppression anti-join is present even with a segment filter applied', () => {
+    const { sql } = shapeOf({ customersOnly: true });
+    expect(sql).toMatch(/email_suppressions/);
+    expect(sql).toMatch(/"customer_id" is not null/);
+  });
+
+  // The resume/retry path does NOT call buildSubscriberQuery — it reuses this
+  // shared helper directly (Codex #1346 P1). Pin that the helper emits the same
+  // global-suppression exclusion so resumed sends honor it too.
+  test('excludeGloballySuppressed adds the global email_suppressions anti-join', () => {
+    const { sql, bindings } = excludeGloballySuppressed(
+      db('newsletter_subscribers').where({ status: 'active' }),
+    ).toSQL();
+    expect(sql).toMatch(/not exists/i);
+    expect(sql).toMatch(/email_suppressions/);
+    expect(bindings).toEqual(expect.arrayContaining(['bounce', 'spam_complaint', 'do_not_email']));
   });
 
   test('customersOnly adds customer_id IS NOT NULL', () => {

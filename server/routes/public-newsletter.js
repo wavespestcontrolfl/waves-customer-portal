@@ -179,22 +179,19 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     // pending state. Errors here are best-effort: we still return 200
     // because the row is queued and the operator can resend manually,
     // and we don't want to leak SendGrid status to the public form.
+    // Uniform response across new / pending / already-active so the endpoint
+    // can't be used as an enumeration oracle to learn which addresses are
+    // confirmed subscribers. We still only SEND a confirmation email when the
+    // row is genuinely pending; an already-active address is a silent no-op
+    // and an attacker can't tell the two apart from the response.
     if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
       try {
         await sendConfirmationEmail(result.subscriber);
       } catch (e) {
         logger.error(`[newsletter] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
       }
-      return res.json({
-        success: true,
-        pending: true,
-        resent: result.action === 'confirmation_resent',
-      });
     }
-    if (result.action === 'already_active') return res.json({ success: true, alreadySubscribed: true });
-    // 'resubscribed' / 'created' / 'confirmed' shouldn't happen on this
-    // path since requireConfirmation=true, but cover them for safety.
-    res.json({ success: true });
+    res.json({ success: true, pending: true });
   } catch (err) {
     if (err.code === 'INVALID_EMAIL' || err.code === 'EMAIL_REQUIRED') {
       return res.status(400).json({ error: err.message });
