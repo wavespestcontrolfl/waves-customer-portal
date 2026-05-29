@@ -14,6 +14,7 @@ const {
   summarizeMaterialCost,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { scopeFromText } = require('../services/service-report/action-scope');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -85,17 +86,10 @@ function actionLabel(kind, line, product) {
 
 // Interim scope classifier for protocol-derived actions (pest services show
 // these instead of the generic chips). PR2 replaces this with explicit
-// per-line metadata in protocols.json; until then this controlled keyword map
-// is the fallback that lets an interior treatment fire the re-entry countdown.
+// per-line metadata in protocols.json; until then this shared classifier is
+// the fallback that lets an interior treatment fire the re-entry countdown.
 function actionScopeForLine(line, product) {
-  const text = normalizeText(`${line?.raw || ''} ${product?.name || ''} ${product?.category || ''}`);
-  const interior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|crack|crevice|void|voids|cabinet|pantry|closet|hinge|hinges|appliance|appliances|plumbing)\b/.test(text);
-  const exterior = /\b(exterior|outside|outdoor|perimeter|foundation|eave|eaves|soffit|yard|lawn|landscape|mulch|bed|beds|lanai|patio|driveway|fence|window|windows|door|doors|entry)\b/.test(text);
-  // Prioritize interior: a mixed/interior line should fire the re-entry window
-  // (the conservative safety choice). Exterior is asserted by other actions/areas.
-  if (interior) return 'interior';
-  if (exterior) return 'exterior';
-  return null;
+  return scopeFromText(`${line?.raw || ''} ${product?.name || ''} ${product?.category || ''}`);
 }
 
 function actionTreatmentApplied(kind, line) {
