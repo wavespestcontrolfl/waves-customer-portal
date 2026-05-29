@@ -1257,13 +1257,38 @@ function pdfEmailAttachment(filename, buffer) {
   };
 }
 
+function parseFindings(project) {
+  try { return typeof project.findings === 'string' ? JSON.parse(project.findings) : (project.findings || {}); }
+  catch { return {}; }
+}
+
+// Resolve the FDACS Section-1 inspector identity. The WDO findings don't
+// collect the inspector and a plain db('projects') load has no tech_name, so
+// load the technician who performed the project (created_by_tech_id) and use
+// their name + FL applicator license (the individual's ID-card number). An
+// explicit applicator_* finding still wins if present.
+async function resolveProjectApplicator(project) {
+  const findings = parseFindings(project);
+  let name = String(findings.applicator_name || project.tech_name || '').trim();
+  let idCardNo = String(findings.applicator_fdacs_id || '').trim();
+  if ((!name || !idCardNo) && project.created_by_tech_id) {
+    const tech = await db('technicians').where({ id: project.created_by_tech_id }).first().catch(() => null);
+    if (tech) {
+      name = name || String(tech.name || '').trim();
+      idCardNo = idCardNo || String(tech.fl_applicator_license || '').trim();
+    }
+  }
+  return { name, idCardNo };
+}
+
 // Build the filled FDACS-13645 PDF for a WDO project as an email attachment.
 // Returns null (and logs) on any failure so a render hiccup never blocks the
 // rest of the delivery.
 async function buildWdoPdfAttachment(project, customer) {
   if (project?.project_type !== 'wdo_inspection') return null;
   try {
-    const buffer = await buildWdoReportPDFBuffer({ project, customer });
+    const applicator = await resolveProjectApplicator(project);
+    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator });
     return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
   } catch (err) {
     logger.error(`[projects] WDO PDF build failed for ${project.id}: ${err.message}`);
@@ -1274,16 +1299,14 @@ async function buildWdoPdfAttachment(project, customer) {
 // Resolve the WDO inspection fee from the canonical bracketed pricing config
 // (SPECIALTY.wdo.brackets), keyed on property footprint when known. Falls back
 // to the base bracket if footprint isn't available.
-function resolveWdoInspectionFee(customer, findings) {
+function resolveWdoInspectionFee(findings) {
   const brackets = SPECIALTY?.wdo?.brackets || [];
-  // customers stores size on the `property_sqft` column (with `home_sqft` as a
-  // secondary used by the pricing AI); read those rather than non-existent
-  // square_footage/sqft fields so 2,501+ sq ft homes hit the $200/$225 tiers.
-  const footprint = Number(
-    findings?.property_sqft
-    || customer?.property_sqft
-    || customer?.home_sqft,
-  ) || 0;
+  // WDO brackets key on STRUCTURE footprint. customers.property_sqft is treated
+  // LAWN area (see initial_schema) and there is no structure-footprint column,
+  // so we never infer the tier from customer columns — that would bill a small
+  // house on a big lot into the $200/$225 tiers. Only an explicit structure
+  // footprint captured on the inspection itself overrides the base bracket.
+  const footprint = Number(findings?.structure_sqft || findings?.wdo_structure_sqft) || 0;
   if (footprint > 0) {
     for (const bracket of brackets) {
       if (footprint <= bracket.maxSqFt) {
@@ -1357,11 +1380,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
 
   // 3. Create a draft, carrying the scheduled-service / service-record linkage
   //    forward so completion + future lookups can find it.
-  const findings = (() => {
-    try { return typeof project.findings === 'string' ? JSON.parse(project.findings) : (project.findings || {}); }
-    catch { return {}; }
-  })();
-  const fee = resolveWdoInspectionFee(customer, findings);
+  const findings = parseFindings(project);
+  const fee = resolveWdoInspectionFee(findings);
   const created = await InvoiceService.create({
     customerId: project.customer_id,
     serviceRecordId: project.service_record_id || undefined,
@@ -1604,7 +1624,8 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
-    const buffer = await buildWdoReportPDFBuffer({ project, customer });
+    const applicator = await resolveProjectApplicator(project);
+    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="FDACS-13645-${project.id}.pdf"`);
     res.send(buffer);

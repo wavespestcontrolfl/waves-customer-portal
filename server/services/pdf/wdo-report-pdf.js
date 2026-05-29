@@ -219,13 +219,21 @@ function resolveApplicator({ project = {}, findings = {} }) {
 /**
  * Build the filled, flattened FDACS-13645 PDF as a Buffer.
  * @param {object} args
- * @param {object} args.project   projects row (findings may be JSON string)
- * @param {object} args.customer  customers row (for address fallback)
+ * @param {object} args.project    projects row (findings may be JSON string)
+ * @param {object} args.customer   customers row (for address fallback)
+ * @param {object} [args.applicator]  resolved inspector identity ({ name, idCardNo }).
+ *   The WDO findings don't collect the inspector and a plain `db('projects')`
+ *   load has no `tech_name`, so callers resolve the technician and pass it in;
+ *   we fall back to the project/findings only if it's omitted.
  */
-async function buildWdoReportPDFBuffer({ project, customer } = {}) {
+async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride } = {}) {
   if (!project) throw new Error('project required for WDO report PDF');
   const findings = asObject(project.findings);
-  const applicator = resolveApplicator({ project, findings });
+  const resolved = resolveApplicator({ project, findings });
+  const applicator = {
+    name: clean(applicatorOverride?.name) || resolved.name,
+    idCardNo: clean(applicatorOverride?.idCardNo) || resolved.idCardNo,
+  };
 
   const pdfDoc = await PDFDocument.load(loadTemplateBytes());
   const form = pdfDoc.getForm();
