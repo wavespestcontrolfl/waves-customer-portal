@@ -287,6 +287,69 @@ async function getReminderPrefs(customerId) {
   };
 }
 
+// Deliver the confirmation SMS for an already-inserted reminder `record`.
+// Split out of registerAppointment so the slow Twilio lookup + send can be
+// driven either inline (booking_new / call-recording) or off the request path
+// (admin manual save) without duplicating the prefs/landline/mark-sent logic.
+// Operates on the record passed in — it does NOT re-fetch — so callers that
+// already hold the record keep their exact query sequence.
+async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel }) {
+  if (apptTime.getTime() <= Date.now()) {
+    await db('appointment_reminders')
+      .where({ id: record.id })
+      .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+    logger.warn(
+      `[appt-remind] Confirmation skipped for past appointment ${scheduledServiceId} ` +
+      `at ${apptTime.toISOString()}`,
+    );
+    return false;
+  }
+
+  try {
+    const prefs = await getReminderPrefs(customerId);
+    if (!prefs.appointmentConfirmation) {
+      await db('appointment_reminders')
+        .where({ id: record.id })
+        .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+      logger.info(`[appt-remind] Confirmation skipped by preference for customer ${customerId}`);
+      return false;
+    }
+    const { customer } = await getCustomerAndTech(customerId, scheduledServiceId);
+    if (customer) {
+      const day = formatDay(apptTime);
+      const date = formatDate(apptTime);
+      const time = formatTime(apptTime);
+
+      const sent = await safeSendAppointment(customer, prefs.raw, async (contact) => {
+        const firstName = contact.name || customer.first_name || 'there';
+        return renderTemplate(
+          'appointment_confirmation',
+          { first_name: firstName, service_type: serviceLabel, date, time, day },
+          { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
+        );
+      }, 'confirmation', 'appointment_confirmation');
+
+      // Mark sent whether or not delivery succeeded (landline / block) so
+      // reminders can proceed and we don't retry the confirmation.
+      await db('appointment_reminders')
+        .where({ id: record.id })
+        .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+      if (sent) {
+        logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${serviceLabel}`);
+      }
+      return sent;
+    }
+    return false;
+  } catch (err) {
+    logger.error(`[appt-remind] Confirmation SMS failed: ${err.message}`);
+    // Still mark confirmation_sent so reminders can proceed
+    await db('appointment_reminders')
+      .where({ id: record.id })
+      .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+    return false;
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
@@ -397,73 +460,72 @@ const AppointmentReminders = {
 
       logger.info(`[appt-remind] Registered: ${scheduledServiceId} (source: ${source})`);
 
-      // Send confirmation SMS for booking_new / admin_manual
-      if (sendConfirmation) {
-        if (apptTime.getTime() <= Date.now()) {
-          await db('appointment_reminders')
-            .where({ id: record.id })
-            .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-          logger.warn(
-            `[appt-remind] Confirmation skipped for past appointment ${scheduledServiceId} ` +
-            `at ${apptTime.toISOString()}`,
-          );
-          return record;
-        }
-
-        try {
-          const prefs = await getReminderPrefs(customerId);
-          if (!prefs.appointmentConfirmation) {
-            await db('appointment_reminders')
-              .where({ id: record.id })
-              .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-            logger.info(`[appt-remind] Confirmation skipped by preference for customer ${customerId}`);
-            return record;
-          }
-          const { customer, techName } = await getCustomerAndTech(customerId, scheduledServiceId);
-          if (customer) {
-            const day = formatDay(apptTime);
-            const date = formatDate(apptTime);
-            const time = formatTime(apptTime);
-
-            const sent = await safeSendAppointment(customer, prefs.raw, async (contact) => {
-              const firstName = contact.name || customer.first_name || 'there';
-              return renderTemplate(
-                'appointment_confirmation',
-                { first_name: firstName, service_type: registration.serviceLabel, date, time, day },
-                { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
-              );
-            }, 'confirmation', 'appointment_confirmation');
-
-            if (sent) {
-              await db('appointment_reminders')
-                .where({ id: record.id })
-                .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-              logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${registration.serviceLabel}`);
-            } else {
-              // Mark as sent even if landline — don't retry
-              await db('appointment_reminders')
-                .where({ id: record.id })
-                .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-            }
-          }
-        } catch (err) {
-          logger.error(`[appt-remind] Confirmation SMS failed: ${err.message}`);
-          // Still mark confirmation_sent so reminders can proceed
-          await db('appointment_reminders')
-            .where({ id: record.id })
-            .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-        }
-      } else {
+      if (!sendConfirmation) {
         // non-confirmation sources — mark confirmation as "sent" (not applicable)
         await db('appointment_reminders')
           .where({ id: record.id })
           .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        return record;
       }
 
+      // The caller wants a confirmation SMS. With deferConfirmation set (admin
+      // manual save path) the durable reminder row is already inserted above —
+      // leave confirmation_sent=false and let the caller fire the slow Twilio
+      // send off the request path via sendConfirmation(). This keeps the row
+      // durable before the HTTP response so a same-second cancel/reschedule can
+      // still find and update it. Other callers (booking_new, call-recording)
+      // send inline as before.
+      if (options.deferConfirmation) {
+        return record;
+      }
+
+      await deliverConfirmation(record, {
+        scheduledServiceId,
+        customerId,
+        apptTime,
+        serviceLabel: registration.serviceLabel,
+      });
       return record;
     } catch (err) {
       logger.error(`[appt-remind] registerAppointment failed: ${err.message}`);
       return null;
+    }
+  },
+
+  /**
+   * Send the confirmation SMS for an already-registered reminder row, looked up
+   * by scheduled_service_id. Split out of registerAppointment so the slow
+   * Twilio lookup + send can run off the request path while the row itself is
+   * inserted durably and synchronously (see registerAppointment's
+   * deferConfirmation option). Idempotent — a row that already has
+   * confirmation_sent set is skipped.
+   */
+  async sendConfirmation(scheduledServiceId) {
+    try {
+      const record = await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first();
+      if (!record) {
+        logger.warn(`[appt-remind] sendConfirmation: no reminder row for ${scheduledServiceId}`);
+        return false;
+      }
+      if (record.confirmation_sent) return false;
+      // The row is now inserted before the HTTP response, so a same-second
+      // cancel/reschedule can flip cancelled=true before this deferred send
+      // runs — don't text a confirmation for an appointment that's already gone.
+      if (record.cancelled) {
+        logger.info(`[appt-remind] sendConfirmation: skipping cancelled appointment ${scheduledServiceId}`);
+        return false;
+      }
+      return await deliverConfirmation(record, {
+        scheduledServiceId,
+        customerId: record.customer_id,
+        apptTime: new Date(record.appointment_time),
+        serviceLabel: record.service_type,
+      });
+    } catch (err) {
+      logger.error(`[appt-remind] sendConfirmation failed: ${err.message}`);
+      return false;
     }
   },
 

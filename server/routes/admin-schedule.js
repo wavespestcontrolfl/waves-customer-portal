@@ -1786,39 +1786,60 @@ router.post('/', requireAdmin, async (req, res, next) => {
       } catch (e) { logger.error(`[schedule] prepaid stamp failed (non-blocking): ${e.message}`); }
     }
 
-    // The appointment(s) and any prepayment are committed at this point — respond
-    // immediately so the admin UI isn't held on "Saving…" while the remaining
-    // best-effort side-effects run. Everything in the setImmediate block below
-    // was already wrapped as non-blocking/logged-only; the only change is that it
-    // now runs *after* the response instead of blocking it. That deferred work is
-    // what was costing ~15-20s: confirmation SMS + Twilio landline lookups (one
-    // network round-trip each, looped for recurring series), plus the recurring
-    // welcome SMS, tech notification, tagging, prepay-terms refresh, and dispatch
-    // broadcast — none of which affect the response payload or financial state.
+    // Register appointment-reminder rows synchronously, BEFORE the response, with
+    // deferConfirmation so the slow Twilio confirmation SMS does NOT run here.
+    //  - Honors the "Send confirmation SMS" checkbox: admin_manual defaults to true,
+    //    but sendConfirmationSms === false skips the confirmation SMS (the reminder
+    //    row is still inserted so 72h/24h reminders fire).
+    //  - The row insert is a fast local DB write; doing it on the save path keeps
+    //    every reminder row durable before the client can act on the response, so
+    //    a same-second cancel/reschedule (which only UPDATE existing rows) can't
+    //    race a not-yet-inserted child row into firing reminders for a cancelled
+    //    or moved visit. Only the Twilio send is deferred below.
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      for (const appt of createdAppointments) {
+        try {
+          await AppointmentReminders.registerAppointment(
+            appt.id, customerId,
+            `${appt.date}T${windowStart || '08:00'}`,
+            serviceType, 'admin_manual',
+            { sendConfirmation: !!appt.confirmation, deferConfirmation: true }
+          );
+        } catch (e) {
+          logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
+        }
+      }
+    } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+
+    // The appointment(s), any prepayment, and all reminder rows are committed at
+    // this point — respond immediately so the admin UI isn't held on "Saving…"
+    // while the remaining best-effort side-effects run. Everything in the
+    // setImmediate block below was already non-blocking/logged-only; the only
+    // change is that it now runs *after* the response. That deferred work is what
+    // was costing ~15-20s: the confirmation SMS + Twilio landline lookup, plus the
+    // recurring welcome SMS, tech notification, tagging, prepay-terms refresh, and
+    // dispatch broadcast — none of which affect the response payload, financial
+    // state, or reminder-row durability.
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
 
     // ── Post-commit side-effects (fire-and-forget; never fail the request) ──
     setImmediate(async () => {
       try {
-        // Register for appointment reminders.
-        //  - Honors the "Send confirmation SMS" checkbox: admin_manual defaults to true,
-        //    but sendConfirmationSms === false skips the confirmation SMS (reminder row
-        //    is still inserted so 72h/24h reminders fire).
+        // Fire the deferred confirmation SMS for any appointment that wants one
+        // (the reminder rows were already inserted durably above). This is the
+        // slow, Twilio-bound step: landline lookup + send.
         try {
           const AppointmentReminders = require('../services/appointment-reminders');
           for (const appt of createdAppointments) {
+            if (!appt.confirmation) continue;
             try {
-              await AppointmentReminders.registerAppointment(
-                appt.id, customerId,
-                `${appt.date}T${windowStart || '08:00'}`,
-                serviceType, 'admin_manual',
-                { sendConfirmation: !!appt.confirmation }
-              );
+              await AppointmentReminders.sendConfirmation(appt.id);
             } catch (e) {
-              logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
+              logger.error(`Appointment confirmation SMS failed for ${appt.id}: ${e.message}`);
             }
           }
-        } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+        } catch (e) { logger.error(`Appointment confirmation SMS failed: ${e.message}`); }
 
         if (shouldSendNewRecurringWelcome) {
           try {
