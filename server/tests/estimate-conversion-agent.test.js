@@ -68,6 +68,19 @@ describe('estimate conversion agent shadow decisions', () => {
     expect(decision.recommendedActions).toEqual([]);
   });
 
+  test('skips unrelated courtesy texts even with an estimate context', () => {
+    const decision = classifyEstimateSmsIntent('Great! Thank you', { estimate });
+    expect(decision.intent).toBeNull();
+    expect(decision.recommendedActions).toEqual([]);
+  });
+
+  test('keeps general estimate questions but gives them a draft action', () => {
+    const decision = classifyEstimateSmsIntent('How much would it be to add lawn pest control later?', { estimate });
+    expect(decision.intent).toBe('estimate_question');
+    expect(decision.recommendedActions).toEqual(expect.arrayContaining(['draft_estimate_question_reply']));
+    expect(decision.autoActionsAllowed).toEqual(expect.arrayContaining(['draft_estimate_question_reply']));
+  });
+
   test('extracts short-code estimate links and normalizes phones', () => {
     expect(extractShortCode('Hello Paul! Your estimate is ready: https://portal.wavespestcontrol.com/l/ek556')).toBe('ek556');
     expect(normalizePhoneLast10('+1 (941) 555-0101')).toBe('9415550101');
