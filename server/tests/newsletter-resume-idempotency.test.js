@@ -40,7 +40,7 @@ const { sendCampaign, resumeCampaign } = require('../services/newsletter-sender'
 function chain({ first, result, returning, count, updated, onUpdate, onWhereIn } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
-   'select', 'orderBy', 'limit', 'leftJoin', 'join']
+   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.whereIn = jest.fn((...args) => {
     if (onWhereIn) onWhereIn(...args);
@@ -72,6 +72,7 @@ function buildDb({ send, deliveries = [], subscribers = [] }) {
       chain({ first: send }),                              // fetch send
       chain({ updated: 1, returning: [{ id: send?.id }] }),// atomic claim
       chain({ updated: 1 }),                               // final status update
+      chain({ first: null }),                              // social-share re-fetch (null → share skipped)
     ],
     newsletter_subscribers: [
       chain({ count: subscribers.length }),                 // 0-recipient guard
@@ -268,6 +269,10 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
         chain({ count: 0 }),
       ],
     };
+    // On a successful 'sent' send the sender fires a fire-and-forget social
+    // share that re-fetches the send row — one extra newsletter_sends read the
+    // strict mock must allow.
+    queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
       if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
@@ -381,6 +386,10 @@ describe('resumeCampaign — preconditions', () => {
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
       ],
     };
+    // On a successful 'sent' send the sender fires a fire-and-forget social
+    // share that re-fetches the send row — one extra newsletter_sends read the
+    // strict mock must allow.
+    queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
       if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
@@ -442,6 +451,10 @@ describe('resumeCampaign — preconditions', () => {
         }),
       ],
     };
+    // On a successful 'sent' send the sender fires a fire-and-forget social
+    // share that re-fetches the send row — one extra newsletter_sends read the
+    // strict mock must allow.
+    queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
       if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
@@ -497,6 +510,10 @@ describe('resumeCampaign — preconditions', () => {
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
       ],
     };
+    // On a successful 'sent' send the sender fires a fire-and-forget social
+    // share that re-fetches the send row — one extra newsletter_sends read the
+    // strict mock must allow.
+    queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
       if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
@@ -574,6 +591,10 @@ describe('resumeCampaign — preconditions', () => {
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
       ],
     };
+    // On a successful 'sent' send the sender fires a fire-and-forget social
+    // share that re-fetches the send row — one extra newsletter_sends read the
+    // strict mock must allow.
+    queues.newsletter_sends.push(chain({ first: null }));
     db.mockImplementation((table) => {
       const queue = queues[table];
       if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
