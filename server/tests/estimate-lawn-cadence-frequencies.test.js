@@ -147,28 +147,34 @@ describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked ca
 });
 
 describe('buildRenderFlags — WaveGuard tier badge for recurring services', () => {
-  const sectionFor = (category) => ({ isRecurring: true, isPest: false, category, setupFee: null, frequencies: [{ serviceCategory: category }] });
+  // Real section shape: key === categoryForRecurringServiceKey(key). For the
+  // eligible services key === category; the edge case is palm, whose section is
+  // built with key:'palm_injection' but category:'tree_shrub'.
+  const section = (key, category = key) => ({ isRecurring: true, isPest: false, key, category, setupFee: null, frequencies: [{ serviceCategory: category }] });
 
   test.each(['lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
     'recurring %s shows the WaveGuard tier badge (anchors at Bronze)',
-    (category) => {
-      const flags = buildRenderFlags({}, [sectionFor(category)], { qualifyingCount: 1 });
-      expect(flags.showWaveGuardTierUi).toBe(true);
+    (key) => {
+      expect(buildRenderFlags({}, [section(key)], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
     },
   );
 
   test('the tier badge does NOT enable pest-only setup fee / perks / add-ons', () => {
-    const flags = buildRenderFlags({}, [sectionFor('lawn_care')], { qualifyingCount: 1 });
+    const flags = buildRenderFlags({}, [section('lawn_care')], { qualifyingCount: 1 });
     expect(flags.showWaveGuardSetupFee).toBe(false);
     expect(flags.showWaveGuardPerks).toBe(false);
     expect(flags.showPestRecurringAddOns).toBe(false);
   });
 
-  test.each(['rodent_bait', 'palm_injection'])(
-    'recurring %s stays excluded from the tier badge',
-    (category) => {
-      const flags = buildRenderFlags({}, [sectionFor(category)], { qualifyingCount: 1 });
-      expect(flags.showWaveGuardTierUi).toBe(false);
-    },
-  );
+  test('palm injection stays excluded even though its section category is tree_shrub', () => {
+    // categoryForRecurringServiceKey('palm_injection') === 'tree_shrub' — must be
+    // rejected by key, not aliased onto the tree_shrub badge (Codex P2).
+    const palm = section('palm_injection', 'tree_shrub');
+    expect(buildRenderFlags({}, [palm], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+  });
+
+  test('rodent stays excluded from the tier badge', () => {
+    const rodent = section('rodent_bait', 'rodent');
+    expect(buildRenderFlags({}, [rodent], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+  });
 });

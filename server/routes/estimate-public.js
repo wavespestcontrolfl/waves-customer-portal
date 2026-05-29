@@ -7332,9 +7332,13 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
 }
 
 // Recurring service categories that surface the WaveGuard tier badge (Bronze)
-// on a single-service estimate, like pest. Per owner decision; excludes
-// rodent_bait / palm_injection (not WaveGuard-tier services).
+// on a single-service estimate, like pest. Per owner decision.
 const TIER_BADGE_RECURRING_CATEGORIES = new Set(['lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
+// Service keys that must NOT get the badge even when their section category
+// aliases onto an eligible one. palm_injection's section is built with
+// category:'tree_shrub' (categoryForRecurringServiceKey), so it has to be
+// rejected by KEY first; rodent is excluded too. (Not WaveGuard-tier services.)
+const TIER_BADGE_EXCLUDED_KEYS = new Set(['palm_injection', 'rodent_bait', 'rodent']);
 
 function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
@@ -7342,13 +7346,14 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
   const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
   // Recurring non-pest services that show the WaveGuard tier badge (anchors at
   // Bronze) like pest, per owner decision. Tier BADGE only — the pest-only setup
-  // fee, perks, and add-ons stay gated on hasRecurringPest below. rodent/palm are
-  // excluded (not WaveGuard-tier services).
-  const hasTierBadgeRecurringService = services.some((section) => section?.isRecurring && (
-    TIER_BADGE_RECURRING_CATEGORIES.has(section?.category)
-    || TIER_BADGE_RECURRING_CATEGORIES.has(section?.key)
-    || (Array.isArray(section?.frequencies) && section.frequencies.some((f) => TIER_BADGE_RECURRING_CATEGORIES.has(f?.serviceCategory)))
-  ));
+  // fee, perks, and add-ons stay gated on hasRecurringPest below.
+  const hasTierBadgeRecurringService = services.some((section) => {
+    if (!section?.isRecurring) return false;
+    if (TIER_BADGE_EXCLUDED_KEYS.has(section?.key)) return false; // reject palm/rodent before the category alias matches
+    return TIER_BADGE_RECURRING_CATEGORIES.has(section?.category)
+      || TIER_BADGE_RECURRING_CATEGORIES.has(section?.key)
+      || (Array.isArray(section?.frequencies) && section.frequencies.some((f) => TIER_BADGE_RECURRING_CATEGORIES.has(f?.serviceCategory)));
+  });
   const qualifyingCount = Number(combinedRecurring?.qualifyingCount || 0);
   const hasDiscountContext = Number(combinedRecurring?.waveGuardDiscountPct || 0) > 0
     || Number(combinedRecurring?.savingsPerMonth || 0) > 0;
