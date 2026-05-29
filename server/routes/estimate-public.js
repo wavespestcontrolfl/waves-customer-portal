@@ -7142,10 +7142,11 @@ function buildServiceSection({ key, category, label, isRecurring, isPest, freque
     label: label || serviceLabelForCategory(category || key),
     isRecurring: !!isRecurring,
     isPest: !!isPest,
-    // Whether this specific section may render the WaveGuard tier badge. Lets
-    // the client suppress it on excluded sections (palm/rodent) even when the
-    // estimate-wide showWaveGuardTierUi flag is on for a bundled eligible service.
-    waveGuardTierEligible: sectionShowsWaveGuardTier({ isRecurring, key }),
+    // Whether this specific section may render the WaveGuard tier badge. Deny-list
+    // so a combined 'bundle' section keeps it; lets the client suppress it only on
+    // excluded sections (palm/rodent) even when the estimate-wide
+    // showWaveGuardTierUi flag is on for a bundled eligible service.
+    waveGuardTierEligible: sectionWaveGuardTierEligible({ isRecurring, key }),
     isWaveGuardQualifier: PRICING_WAVEGUARD.qualifyingServices.includes(key),
     excludeFromPctDiscount: PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true,
     defaultFrequencyKey: defaultFrequencyKeyFor(shapedFrequencies),
@@ -7336,16 +7337,27 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
 }
 
 // Recurring service KEYS that surface the WaveGuard tier badge (Bronze), like
-// pest. Per owner decision. Matched on the section's service key (not category)
-// because palm_injection's section category aliases to 'tree_shrub' — its key
-// stays 'palm_injection', so key-matching excludes it (and rodent) cleanly.
+// pest. Per owner decision. Matched on the service key (not category) because
+// palm_injection's section category aliases to 'tree_shrub' while its key stays
+// 'palm_injection'.
 const TIER_BADGE_ELIGIBLE_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
+// Keys explicitly suppressed from the badge even inside a badge-eligible estimate
+// (not WaveGuard-tier services). This is a DENY-list so a combined 'bundle'
+// section — which contains eligible services — keeps its badge.
+const TIER_BADGE_EXCLUDED_KEYS = new Set(['palm_injection', 'rodent_bait', 'rodent']);
 
-// Per-section: does THIS recurring section show the tier badge? Used both to
-// build the global gate and (via section.waveGuardTierEligible) to suppress the
-// badge on excluded sections in mixed/split estimates.
+// GLOBAL gate input: does the estimate contain any badge-eligible recurring
+// service? (allow-list) — decides whether tier UI shows at all.
 function sectionShowsWaveGuardTier(section = {}) {
   return !!section?.isRecurring && TIER_BADGE_ELIGIBLE_KEYS.has(section?.key);
+}
+
+// PER-SECTION: may THIS recurring section render the badge? (deny-list) — only
+// the explicitly-excluded single services (palm/rodent) are suppressed, so an
+// eligible single service AND a combined 'bundle' section both keep the badge,
+// while a palm/rodent section bundled alongside an eligible one stays badge-free.
+function sectionWaveGuardTierEligible(section = {}) {
+  return !!section?.isRecurring && !TIER_BADGE_EXCLUDED_KEYS.has(section?.key);
 }
 
 function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
@@ -8057,4 +8069,5 @@ module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionShowsWaveGuardTier = sectionShowsWaveGuardTier;
+module.exports.sectionWaveGuardTierEligible = sectionWaveGuardTierEligible;
 module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
