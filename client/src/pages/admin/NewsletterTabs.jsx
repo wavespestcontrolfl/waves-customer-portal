@@ -172,6 +172,14 @@ export function ComposeView({
   const [previewText, setPreviewText] = useState("");
   const [htmlBody, setHtmlBody] = useState("");
   const [textBody, setTextBody] = useState("");
+  // Locked event ids from the last AI draft — carried into the /sends save so
+  // the sent newsletter can advance events_raw.times_featured for what shipped.
+  const [draftEventIds, setDraftEventIds] = useState([]);
+  // Only true when the event association changed THIS session (fresh AI draft
+  // or template swap). Gates whether the save sends eventIds: on an ordinary
+  // manual edit — or when editing a loaded draft whose ids the client never set
+  // — we omit them so the server preserves the stored ids instead of blanking.
+  const [eventIdsDirty, setEventIdsDirty] = useState(false);
   const [fromName, setFromName] = useState("Waves Pest Control");
   const [fromEmail, setFromEmail] = useState("newsletter@wavespestcontrol.com");
   // Defaults to the logged-in admin's email (populated below) so test
@@ -359,6 +367,11 @@ export function ComposeView({
     userHasEdited.current = true;
     setHtmlBody(t.html);
     setSelectedTemplate(key === "blank" ? null : key);
+    // A hand-picked template body isn't anchored to AI-locked events — clear the
+    // ids and mark dirty so the save writes the empty set (the prior AI events
+    // no longer match this body).
+    setDraftEventIds([]);
+    setEventIdsDirty(true);
   };
 
   const saveDraft = async () => {
@@ -376,20 +389,26 @@ export function ComposeView({
         newsletterType: activeNewsletterType,
         autoShareSocial,
       };
+      // Send eventIds only when the event association changed this session
+      // (dirty). Omitting them lets the server preserve the stored ids on an
+      // ordinary edit or when editing a loaded draft; including them on a fresh
+      // AI re-draft (even of an already-saved campaign) updates them in step
+      // with the new body.
+      const saveBody = eventIdsDirty ? { ...body, eventIds: draftEventIds } : body;
       if (draftId) {
         await adminFetch(`/admin/newsletter/sends/${draftId}`, {
           method: "PATCH",
-          body: JSON.stringify(body),
+          body: JSON.stringify(saveBody),
         });
-        setStatus("Draft saved.");
       } else {
         const d = await adminFetch("/admin/newsletter/sends", {
           method: "POST",
-          body: JSON.stringify(body),
+          body: JSON.stringify(saveBody),
         });
         setDraftId(d.send.id);
-        setStatus("Draft saved.");
       }
+      setEventIdsDirty(false);
+      setStatus("Draft saved.");
     } catch (e) {
       setStatus("Save failed: " + e.message);
     }
@@ -520,6 +539,8 @@ export function ComposeView({
     setPreviewText("");
     setHtmlBody("");
     setTextBody("");
+    setDraftEventIds([]);
+    setEventIdsDirty(false);
     setScheduleAt("");
     setSelectedTemplate(null);
   };
@@ -544,6 +565,11 @@ export function ComposeView({
     if (d.previewText) setPreviewText(d.previewText);
     if (d.htmlBody) setHtmlBody(d.htmlBody);
     if (d.textBody) setTextBody(d.textBody);
+    // Carry the locked event ids so saveDraft persists them for times_featured.
+    // Mark dirty so the next save (POST or PATCH) writes the new set — covers
+    // re-drafting an already-saved campaign with a different event lineup.
+    setDraftEventIds(Array.isArray(res.eventIds) ? res.eventIds : []);
+    setEventIdsDirty(true);
     // Always sync — `template` is null when operator picks "Free-form" in
     // the modal, and we want that to clear the prior selection so the
     // next modal opens defaulting to no template.

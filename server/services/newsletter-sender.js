@@ -418,6 +418,28 @@ async function sendCampaign(sendId, opts = {}) {
   await db('newsletter_sends').where({ id: send.id }).update(finalSendUpdate);
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
+    // Advance the calendar lifecycle (idempotent) so a sent newsletter's
+    // calendar row reflects reality instead of being stuck at 'drafted'.
+    try {
+      await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'sent', updated_at: new Date() });
+    } catch (err) {
+      logger.warn(`[newsletter] calendar status update failed for send ${send.id}: ${err.message}`);
+    }
+
+    // First-'sent' only: advance events_raw.times_featured + recompute
+    // freshness for the events this newsletter actually shipped, so the
+    // recurring-series anti-repeat gate decays. Gated on !send.sent_at (a
+    // resume carries preserveSentAt + an existing sent_at) so resumes don't
+    // double-count. Trade-off: a send that FAILED first then succeeded on
+    // resume won't feature — acceptable (under-count beats double-count).
+    if (!send.sent_at) {
+      try {
+        await markEventsFeatured(send);
+      } catch (err) {
+        logger.warn(`[newsletter] times_featured update failed for send ${send.id}: ${err.message}`);
+      }
+    }
+
     const { sharePublishedNewsletter } = require('./content-scheduler');
     db('newsletter_sends').where({ id: send.id }).first().then((freshSend) => {
       if (freshSend) {
@@ -559,6 +581,11 @@ async function processScheduledSends() {
             scheduled_for: null,
             updated_at: new Date(),
           });
+          // Keep the calendar in lockstep: this send is no longer scheduled, so
+          // roll its linked calendar row back to 'drafted'. Without this the
+          // row would stay 'scheduled' forever (autopilot then skips the week)
+          // and /cancel-schedule can't repair it — the send is already draft.
+          await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
           continue;
         }
       }
@@ -579,4 +606,45 @@ async function processScheduledSends() {
   return { processed };
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, excludeGloballySuppressed };
+/**
+ * Advance events_raw.times_featured + last_featured_at and recompute freshness
+ * for every event a sent newsletter shipped (the locked send.event_ids). This
+ * is what makes the recurring-series anti-repeat gate actually decay for the
+ * automated path — previously only a manual admin "feature" click bumped the
+ * counter, so an approved-but-never-featured recurring event stayed
+ * fresh_series_launch forever and could headline every week.
+ */
+async function markEventsFeatured(send) {
+  let ids = [];
+  try {
+    ids = Array.isArray(send.event_ids) ? send.event_ids : JSON.parse(send.event_ids || '[]');
+  } catch { ids = []; }
+  if (!Array.isArray(ids) || ids.length === 0) return;
+
+  const { classifyFreshness } = require('./event-freshness');
+
+  // Lock + read + write each event row inside a transaction (SELECT ... FOR
+  // UPDATE) so two sends that ship the same event can't both read the same
+  // times_featured and write back the same value — which would lose an
+  // increment and decay the recurring-series gate too slowly. The row lock
+  // serializes them and keeps the recomputed freshness consistent with the
+  // final count. One row per transaction (≤12 events per send).
+  for (const id of ids) {
+    await db.transaction(async (trx) => {
+      const row = await trx('events_raw').where({ id }).forUpdate()
+        .first('id', 'event_type', 'times_featured', 'start_at', 'end_at');
+      if (!row) return;
+      const nextFeatured = (row.times_featured || 0) + 1;
+      const { freshness_status, freshness_score } = classifyFreshness({ ...row, times_featured: nextFeatured });
+      await trx('events_raw').where({ id }).update({
+        times_featured: nextFeatured,
+        last_featured_at: new Date(),
+        freshness_status,
+        freshness_score,
+        updated_at: new Date(),
+      });
+    });
+  }
+}
+
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, excludeGloballySuppressed, markEventsFeatured };

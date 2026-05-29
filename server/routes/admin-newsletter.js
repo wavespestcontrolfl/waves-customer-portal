@@ -416,12 +416,21 @@ function generateSlug(subject) {
 // POST /api/admin/newsletter/sends — create a draft
 router.post('/sends', async (req, res, next) => {
   try {
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial, eventIds } = req.body;
     if (!subject) return res.status(400).json({ error: 'subject required' });
 
     let normalizedFromEmail;
     try { normalizedFromEmail = normalizeFromEmail(fromEmail); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
+    // Persist the locked event ids so the sender can advance times_featured for
+    // the events that shipped. The manual Compose / Digest-Planner flow saves
+    // here after /draft-ai (persist:false) returns the locked events — without
+    // this the saved send keeps event_ids '[]' and markEventsFeatured no-ops,
+    // defeating the recurring-series anti-repeat decay for AI-drafted sends.
+    const safeEventIds = Array.isArray(eventIds)
+      ? eventIds.filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12)
+      : [];
 
     const [row] = await db('newsletter_sends').insert({
       subject,
@@ -439,6 +448,7 @@ router.post('/sends', async (req, res, next) => {
       slug: generateSlug(subject),
       created_by: req.technicianId || null,
       auto_share_social: autoShareSocial !== false,
+      event_ids: JSON.stringify(safeEventIds),
     }).returning('*');
 
     res.json({ success: true, send: row });
@@ -452,7 +462,7 @@ router.patch('/sends/:id', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
 
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial, eventIds } = req.body;
 
     // Factual-lock integrity: a flagship ("local-weekly-fresh-events") draft was
     // generated through the fact-locked, hallucination-gated pipeline. Both the
@@ -477,6 +487,17 @@ router.patch('/sends/:id', async (req, res, next) => {
       catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
     }
 
+    // event_ids: only overwrite when the client explicitly supplies it (a fresh
+    // AI re-draft or template swap changed the event set). An ordinary manual
+    // edit — or editing a loaded draft whose ids the client never set — omits
+    // it, so the stored locked ids are preserved instead of blanked. Without
+    // this, re-drafting a saved campaign would ship a new event set while the
+    // old event_ids drove times_featured.
+    const nextEventIds = eventIds !== undefined
+      ? JSON.stringify((Array.isArray(eventIds) ? eventIds : [])
+          .filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12))
+      : send.event_ids;
+
     await db('newsletter_sends').where({ id: req.params.id }).update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
@@ -490,6 +511,7 @@ router.patch('/sends/:id', async (req, res, next) => {
       ai_prompt: aiPrompt !== undefined ? aiPrompt : send.ai_prompt,
       newsletter_type: newsletterType !== undefined ? newsletterType : send.newsletter_type,
       auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
+      event_ids: nextEventIds,
       updated_at: new Date(),
     });
 
@@ -694,6 +716,10 @@ router.post('/sends/:id/schedule', async (req, res, next) => {
       scheduled_for: when,
       updated_at: new Date(),
     });
+    // Keep the calendar lifecycle in lockstep with the linked send so the
+    // documented state machine self-drives (drafted → scheduled → sent)
+    // instead of relying on manual PATCHes.
+    await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'scheduled', updated_at: new Date() });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
     res.json({ success: true, send: updated });
   } catch (err) { next(err); }
@@ -710,6 +736,8 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
       scheduled_for: null,
       updated_at: new Date(),
     });
+    // Roll the linked calendar row back to 'drafted' to match the send.
+    await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
     res.json({ success: true, send: updated });
   } catch (err) { next(err); }
@@ -824,7 +852,10 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         includeCTA,
         persist: false,
       });
-      return res.json({ success: true, draft });
+      // Return the locked event ids so the Compose flow can carry them into
+      // the /sends save (the saved row needs them for times_featured tracking).
+      const lockedEventIds = (draft.events || []).map((e) => e.eventId).filter(Boolean);
+      return res.json({ success: true, draft, eventIds: lockedEventIds });
     }
 
     // ── Legacy flow: template-guided or free-form ─────────────────────
@@ -1964,6 +1995,14 @@ router.patch('/calendar/:id', async (req, res, next) => {
     if (status !== undefined) {
       const VALID = ['planned', 'drafted', 'scheduled', 'sent', 'skipped'];
       if (!VALID.includes(status)) return res.status(400).json({ error: 'invalid status' });
+      // 'scheduled'/'sent' are system-derived from the linked send lifecycle
+      // (POST /schedule and sendCampaign drive them). Hand-setting them on a
+      // row with no send_id makes the Thursday autopilot skip that week — it
+      // treats scheduled/sent as "already handled" and returns early — while
+      // no newsletter actually exists, a silent missed week with no alert.
+      if (['scheduled', 'sent'].includes(status) && !entry.send_id) {
+        return res.status(400).json({ error: `Cannot set status '${status}' on a calendar entry with no linked send — schedule or send the draft instead.` });
+      }
       updates.status = status;
     }
     if (eventIds !== undefined) {

@@ -781,6 +781,10 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     slug,
     created_by: null,
     auto_share_social: true,
+    // Record the locked event ids so the sender can advance events_raw
+    // .times_featured (+ recompute freshness) for exactly the events that
+    // actually shipped, on the first 'sent' transition.
+    event_ids: JSON.stringify((draft.events || []).map((e) => e.eventId).filter(Boolean)),
   }).returning('*');
 
   // 8. Return { send, draft }
