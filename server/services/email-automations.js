@@ -64,6 +64,9 @@ const AUTOMATIONS = {
     description: 'For LWR customers who have given us a Google review',
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_REVIEW_LWR || 'aut_7a99204b-3a0f-46db-914f-05722f2eb7f0',
+    // Beehiiv segment label — intentionally kept as 'lakewood-ranch' (the GBP
+    // brand) even though the internal location id was renamed to 'bradenton'.
+    // Renaming would split this segment from already-tagged subscribers.
     tags: ['reviewed', 'lakewood-ranch'],
     enabled: true,
   },

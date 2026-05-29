@@ -216,7 +216,7 @@ Return ONLY valid JSON with these keys:
 - facebook: 150-250 chars, conversational, 1-2 emojis, do NOT include any URL
 - instagram: 150-300 chars before hashtags, end with 3-5 hashtags (#FreshThisWeek #SWFL #SWFLevents etc), do NOT include any URL
 - linkedin: 100-200 chars, professional but fun community tone, do NOT include any URL
-- gbp: an OBJECT keyed by the location ids above. Each value is 80-150 chars, community-oriented, names/nods to THAT specific area, no hashtags, no URL. Example: {"lakewood-ranch": "...", "parrish": "...", "sarasota": "...", "venice": "..."}`,
+- gbp: an OBJECT keyed by the location ids above. Each value is 80-150 chars, community-oriented, names/nods to THAT specific area, no hashtags, no URL. Example: {"bradenton": "...", "parrish": "...", "sarasota": "...", "venice": "..."}`,
     }],
   });
 

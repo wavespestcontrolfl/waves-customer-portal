@@ -35,15 +35,15 @@ const { hashResolvedSnapshot } = require('./completion-attempts');
 // belongs to a configuration concern, not the SMS send service; PR #3
 // or a later refactor can lift this into shared config.
 const REVIEW_GBP_BY_CITY = {
-  'lakewood ranch': 'lakewood-ranch',
-  'bradenton': 'lakewood-ranch',
-  'university park': 'lakewood-ranch',
-  'braden river': 'lakewood-ranch',
-  'longboat key': 'lakewood-ranch',
-  'anna maria': 'lakewood-ranch',
-  'holmes beach': 'lakewood-ranch',
-  'palmetto': 'lakewood-ranch',
-  'cortez': 'lakewood-ranch',
+  'lakewood ranch': 'bradenton',
+  'bradenton': 'bradenton',
+  'university park': 'bradenton',
+  'braden river': 'bradenton',
+  'longboat key': 'bradenton',
+  'anna maria': 'bradenton',
+  'holmes beach': 'bradenton',
+  'palmetto': 'bradenton',
+  'cortez': 'bradenton',
   'sarasota': 'sarasota',
   'siesta key': 'sarasota',
   'lido key': 'sarasota',
@@ -88,7 +88,7 @@ function renderAttestation(template, { protocolName, products, areas }) {
 
 function resolveReviewRouting(customer) {
   const city = String(customer?.city || '').toLowerCase().trim();
-  const gbp = REVIEW_GBP_BY_CITY[city] || 'lakewood-ranch';
+  const gbp = REVIEW_GBP_BY_CITY[city] || 'bradenton';
   const routingReason = REVIEW_GBP_BY_CITY[city] ? `service_city_${city.replace(/\s+/g, '_')}` : 'default_fallback';
   return { gbpResolved: gbp, routingReason };
 }

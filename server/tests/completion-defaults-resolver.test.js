@@ -167,7 +167,7 @@ describe('resolveStandardCompletionDefaults', () => {
     expect(result.snapshot.review.routingReason).toBe('service_city_north_port');
   });
 
-  test('Unknown city falls back to lakewood-ranch GBP with default_fallback reason', async () => {
+  test('Unknown city falls back to bradenton GBP with default_fallback reason', async () => {
     const knex = happyPathKnex({ service: { ...VENICE_SERVICE, customer_city: 'Naples' } });
     const result = await resolveStandardCompletionDefaults({
       serviceId: 'svc-1',
@@ -175,7 +175,7 @@ describe('resolveStandardCompletionDefaults', () => {
       now: FIXED_NOW,
       trx: knex,
     });
-    expect(result.snapshot.review.gbpResolved).toBe('lakewood-ranch');
+    expect(result.snapshot.review.gbpResolved).toBe('bradenton');
     expect(result.snapshot.review.routingReason).toBe('default_fallback');
   });
 

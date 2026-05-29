@@ -1,19 +1,27 @@
 const TWILIO_NUMBERS = {
   // ── Location Lines ──────────────────────────────────────────
   locations: {
-    'lakewood-ranch': { number: '+19413187612', formatted: '(941) 318-7612', label: 'Lakewood Ranch — HQ (Pest)', isMainLine: true },
+    // The 'bradenton' GBP line is branded "Waves Pest Control Lakewood
+    // Ranch" on Google but is the Bradenton office (13649 Luxe Ave).
+    'bradenton': { number: '+19413187612', formatted: '(941) 318-7612', label: 'Lakewood Ranch GBP — Bradenton office (Pest)' },
     'parrish': { number: '+19412972817', formatted: '(941) 297-2817', label: 'Parrish (Pest)' },
     'sarasota': { number: '+19412972606', formatted: '(941) 297-2606', label: 'Sarasota (Pest)' },
     'venice': { number: '+19412973337', formatted: '(941) 297-3337', label: 'Venice (Pest)' },
   },
 
+  // Main Waves company line (general). Default outbound / caller-ID
+  // fallback when a customer has no resolved location. Tied to the
+  // Lakewood Ranch (9040 Town Center) mailing address but is the general
+  // company number, not a GBP office line.
+  mainLine: { number: '+19412975749', formatted: '(941) 297-5749', label: 'Waves Main Line' },
+
   // ── Pest Control Domain Tracking ────────────────────────────
   domainTracking: [
-    { number: '+19412975749', formatted: '(941) 297-5749', domain: 'wavespestcontrol.com', area: 'General', location: 'lakewood-ranch', page: 'main site' },
-    { number: '+19413187612', formatted: '(941) 318-7612', domain: 'wavespestcontrol.com', area: 'Bradenton', location: 'lakewood-ranch', page: '/pest-control-bradenton-fl/' },
+    { number: '+19412975749', formatted: '(941) 297-5749', domain: 'wavespestcontrol.com', area: 'General', location: 'bradenton', page: 'main site' },
+    { number: '+19413187612', formatted: '(941) 318-7612', domain: 'wavespestcontrol.com', area: 'Bradenton', location: 'bradenton', page: '/pest-control-bradenton-fl/' },
     { number: '+19412972606', formatted: '(941) 297-2606', domain: 'wavespestcontrol.com', area: 'Sarasota', location: 'sarasota', page: '/pest-control-sarasota-fl/' },
-    { number: '+19412838194', formatted: '(941) 283-8194', domain: 'bradentonflexterminator.com', area: 'Bradenton', location: 'lakewood-ranch' },
-    { number: '+19413265011', formatted: '(941) 326-5011', domain: 'bradentonflpestcontrol.com', area: 'Bradenton', location: 'lakewood-ranch' },
+    { number: '+19412838194', formatted: '(941) 283-8194', domain: 'bradentonflexterminator.com', area: 'Bradenton', location: 'bradenton' },
+    { number: '+19413265011', formatted: '(941) 326-5011', domain: 'bradentonflpestcontrol.com', area: 'Bradenton', location: 'bradenton' },
     { number: '+19412972671', formatted: '(941) 297-2671', domain: 'sarasotaflpestcontrol.com', area: 'Sarasota', location: 'sarasota' },
     { number: '+19412135203', formatted: '(941) 213-5203', domain: 'palmettoexterminator.com', area: 'Palmetto', location: 'parrish' },
     { number: '+19412943355', formatted: '(941) 294-3355', domain: 'palmettoflpestcontrol.com', area: 'Palmetto', location: 'parrish' },
@@ -28,11 +36,11 @@ const TWILIO_NUMBERS = {
 
   // ── Lawn Care Domain Tracking ───────────────────────────────
   lawnDomainTracking: [
-    { number: '+19413041850', formatted: '(941) 304-1850', domain: 'bradentonfllawncare.com', area: 'Bradenton', location: 'lakewood-ranch' },
+    { number: '+19413041850', formatted: '(941) 304-1850', domain: 'bradentonfllawncare.com', area: 'Bradenton', location: 'bradenton' },
     { number: '+19412691692', formatted: '(941) 269-1692', domain: 'sarasotafllawncare.com', area: 'Sarasota', location: 'sarasota' },
     { number: '+19412077456', formatted: '(941) 207-7456', domain: 'parrishfllawncare.com', area: 'Parrish', location: 'parrish' },
     { number: '+19414131227', formatted: '(941) 413-1227', domain: 'venicelawncare.com', area: 'Venice', location: 'venice' },
-    { number: '+19412413824', formatted: '(941) 241-3824', domain: 'waveslawncare.com', area: 'General', location: 'lakewood-ranch' },
+    { number: '+19412413824', formatted: '(941) 241-3824', domain: 'waveslawncare.com', area: 'General', location: 'bradenton' },
   ],
 
   // ── Other ───────────────────────────────────────────────────
@@ -48,7 +56,7 @@ const TWILIO_NUMBERS = {
       number: '+19412691697',
       formatted: '(941) 269-1697',
       label: 'Google Ads — Pest',
-      location: 'lakewood-ranch',
+      location: 'bradenton',
     },
   },
 
@@ -96,15 +104,15 @@ const TWILIO_NUMBERS = {
     // Van wrap
     if (this.tracking.vanWrap.number === phoneNumber) return { ...this.tracking.vanWrap, type: 'van_tracking' };
     // Toll-free / customer chat
-    if (this.tollFree.number === phoneNumber) return { ...this.tollFree, type: 'location', locationId: 'lakewood-ranch' };
+    if (this.tollFree.number === phoneNumber) return { ...this.tollFree, type: 'location', locationId: 'bradenton' };
     // Unassigned — still handle
     const unassigned = this.unassigned.find(u => u.number === phoneNumber);
-    if (unassigned) return { ...unassigned, type: 'location', locationId: 'lakewood-ranch' };
+    if (unassigned) return { ...unassigned, type: 'location', locationId: 'bradenton' };
     return null;
   },
 
   getOutboundNumber(customerLocationId) {
-    return this.locations[customerLocationId]?.number || this.locations['lakewood-ranch'].number;
+    return this.locations[customerLocationId]?.number || this.mainLine.number;
   },
 
   getLeadSourceFromNumber(phoneNumber) {

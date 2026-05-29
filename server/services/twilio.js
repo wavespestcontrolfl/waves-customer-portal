@@ -419,7 +419,7 @@ const TwilioService = {
         }
 
         fromNumber = TWILIO_NUMBERS.getOutboundNumber(
-          locationId || "lakewood-ranch",
+          locationId || "bradenton",
         );
       }
       attemptedFrom = fromNumber;
