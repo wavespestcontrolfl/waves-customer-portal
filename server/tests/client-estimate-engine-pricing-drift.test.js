@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
+const esbuild = require('esbuild');
 
 const { priceGermanRoach, priceTopDressing, priceDethatching } = require('../services/pricing-engine/service-pricing');
 
@@ -57,20 +57,27 @@ const TOP_DRESSING_EXPECTED = {
   },
 };
 
+// The client engine is ESM and imports @waves/lawn-cost-floor, so it can't be
+// eval'd raw. Bundle to CJS with esbuild (resolving the shared-module import);
+// calculateEstimate/interpolate/fmt/fmtInt are already `export`ed, so they land
+// on module.exports natively.
 function loadClientEstimator(source) {
-  const transformed = source.replace(/\bexport\s+function\s+/g, 'function ');
+  const out = esbuild.buildSync({
+    stdin: {
+      contents: source,
+      resolveDir: path.dirname(clientEstimatorPath),
+      sourcefile: 'estimateEngine.js',
+      loader: 'js',
+    },
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    write: false,
+    logLevel: 'silent',
+  });
   const module = { exports: {} };
-  const sandbox = {
-    module,
-    exports: module.exports,
-    console,
-  };
-  vm.createContext(sandbox);
-  const script = new vm.Script(
-    `${transformed}\nmodule.exports = { calculateEstimate, interpolate, fmt, fmtInt };`,
-    { filename: clientEstimatorPath }
-  );
-  script.runInContext(sandbox);
+  // eslint-disable-next-line no-new-func
+  new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
   return module.exports;
 }
 
