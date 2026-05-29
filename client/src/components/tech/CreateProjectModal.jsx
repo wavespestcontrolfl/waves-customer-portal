@@ -224,6 +224,35 @@ function formatCustomerAddress(customer) {
     .trim();
 }
 
+function formatCustomerName(customer) {
+  if (!customer) return '';
+  const first = customer.firstName || customer.first_name || '';
+  const last = customer.lastName || customer.last_name || '';
+  const name = [first, last].filter(Boolean).join(' ').trim();
+  return name || customer.companyName || customer.company_name || '';
+}
+
+// "Jane Doe · (941) 555-0101 · jane@example.com" for the FDACS contact fields.
+function formatCustomerContact(customer) {
+  if (!customer) return '';
+  return [formatCustomerName(customer), customer.phone || '', customer.email || '']
+    .filter(Boolean)
+    .join(' · ');
+}
+
+// Populate the WDO contact/address fields from the selected customer. With
+// overwrite=false (on selection) only blank fields are filled so typed values
+// are preserved; the explicit "Fill from customer" button passes overwrite=true.
+function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
+  const address = formatCustomerAddress(customer);
+  const contact = formatCustomerContact(customer);
+  const next = { ...prev };
+  if (address && (overwrite || !hasMeaningfulValue(next.property_address))) next.property_address = address;
+  if (contact && (overwrite || !hasMeaningfulValue(next.requested_by))) next.requested_by = contact;
+  if (contact && (overwrite || !hasMeaningfulValue(next.report_sent_to))) next.report_sent_to = contact;
+  return next;
+}
+
 function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
   const allowed = [
     'property_address',
@@ -381,9 +410,10 @@ export default function CreateProjectModal({
 
   useEffect(() => {
     if (projectType !== 'wdo_inspection') return;
-    const address = formatCustomerAddress(selectedCustomer);
-    if (!address) return;
-    setFindings(prev => prev.property_address ? prev : { ...prev, property_address: address });
+    if (!selectedCustomer) return;
+    // Seamlessly fill address + requested-by + report-sent-to from the picked
+    // customer, without clobbering anything the tech already typed.
+    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, false));
   }, [projectType, selectedCustomer]);
 
   function handleFindingChange(key, value) {
@@ -418,9 +448,9 @@ export default function CreateProjectModal({
   }
 
   function fillWdoAddressFromCustomer() {
-    const address = formatCustomerAddress(selectedCustomer);
-    if (!address) return;
-    setFindings(prev => ({ ...prev, property_address: address }));
+    if (!selectedCustomer) return;
+    // Explicit action — overwrite address + contact fields from the customer.
+    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, true));
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
@@ -692,9 +722,8 @@ export default function CreateProjectModal({
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
                           const phone = c.phone || '';
                           setCustomerLabel([name, phone].filter(Boolean).join(' · ') || c.id);
-                          const address = formatCustomerAddress(c);
-                          if (projectType === 'wdo_inspection' && address) {
-                            setFindings(prev => ({ ...prev, property_address: address }));
+                          if (projectType === 'wdo_inspection') {
+                            setFindings(prev => applyCustomerToWdoFindings(prev, c, false));
                           }
                         }}
                         style={{
