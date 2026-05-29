@@ -204,7 +204,23 @@ async function searchGiphy(term) {
   } catch { return null; }
 }
 
-function safeImageUrl(url) {
+// HTML-escape a string before it is interpolated into the email body.
+// Critical defense: event titles/descriptions come from ingested external
+// feeds and the rest is free-form model output, so any raw <a>/<img>/<script>
+// must be neutralized or it renders live in subscribers' inboxes.
+function escapeHtml(text) {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Validate a URL for safe use in an href/src: http(s) only, quotes escaped.
+// Shared by image src and the DB-locked event ticket link so a malformed or
+// javascript:/data: URL (even one that slipped through ingestion) can't render.
+function safeUrl(url) {
   if (!url || typeof url !== 'string') return null;
   try {
     const u = new URL(url);
@@ -275,6 +291,19 @@ function sanitizeCommentaryFields(ev) {
   return out;
 }
 
+// Free-prose fields the model authors outside the per-event objects. They get
+// the same URL strip the event commentary already gets — only the DB-locked
+// event ticket link may render. (Raw HTML in these fields is separately
+// neutralized by markdownToHtml's escaping at render time; this removes
+// invented/off-brand link TEXT a reader could still click as plain markdown.)
+const PROSE_FIELDS = ['greeting', 'introText', 'transitionLine', 'homeownerMinute', 'closingHeading', 'closingText', 'signoff', 'ps'];
+function sanitizeProseFields(draft) {
+  for (const k of PROSE_FIELDS) {
+    if (typeof draft[k] === 'string') draft[k] = stripCommentaryUrls(draft[k]);
+  }
+  return draft;
+}
+
 function lockEventFactsFromDb(aiEvents, dbEvents) {
   const dbById = new Map((dbEvents || []).map((r) => [String(r.id).toLowerCase(), r]));
   const locked = [];
@@ -336,14 +365,18 @@ function gifBlock(url, caption) {
 <img src="${url}" alt="" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
 </div>`;
   if (caption) {
-    html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${caption}</p>`;
+    html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${escapeHtml(caption)}</p>`;
   }
   return html;
 }
 
 function markdownToHtml(text) {
   if (!text) return '';
-  return text
+  // Escape HTML FIRST, then apply the bold/italic markdown. The ** and _
+  // markers survive escaping, so formatting still renders, but any injected
+  // <a href>/<img onerror> in model output or ingested event copy becomes
+  // inert text instead of a live tag.
+  return escapeHtml(text)
     .replace(/\*\*_([^_]+)_\*\*/g, '<strong><em>$1</em></strong>')
     .replace(/_\*\*([^*]+)\*\*_/g, '<em><strong>$1</strong></em>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -355,16 +388,16 @@ async function assembleBeehiivNewsletter(draft) {
   const events = draft.events || [];
 
   // ── Hero Image ──
-  const heroUrl = safeImageUrl(draft.heroImageUrl);
+  const heroUrl = safeUrl(draft.heroImageUrl);
   if (heroUrl) {
     parts.push(`<div style="margin:0 0 20px 0;text-align:center;">
-<img src="${heroUrl}" alt="${(draft.selectedSubject || 'Fresh This Week').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
+<img src="${heroUrl}" alt="${escapeHtml(draft.selectedSubject || 'Fresh This Week')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
 </div>`);
   }
 
   // ── Table of Contents ──
   const tocItems = events.map(ev =>
-    `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${ev.emoji || '🎯'} ${markdownToHtml(ev.title)}</a></li>`
+    `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${escapeHtml(ev.emoji || '🎯')} ${markdownToHtml(ev.title)}</a></li>`
   );
   if (draft.homeownerMinute) {
     tocItems.push(`<li style="margin:0 0 6px 0;"><a href="#homeowner-minute" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🏠 Homeowner Minute</a></li>`);
@@ -396,13 +429,13 @@ async function assembleBeehiivNewsletter(draft) {
 
     // Heading
     const anchorId = `evt-${slugify(ev.title)}`;
-    parts.push(`<h2 id="${anchorId}" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${ev.emoji || '🎯'} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
+    parts.push(`<h2 id="${anchorId}" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
 
     // Event thumbnail (from events_raw.image_url) or GIF
-    const thumbUrl = safeImageUrl(ev.imageUrl);
+    const thumbUrl = safeUrl(ev.imageUrl);
     if (thumbUrl) {
       parts.push(`<div style="text-align:center;margin:8px 0 12px 0;">
-<img src="${thumbUrl}" alt="${(ev.title || '').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+<img src="${thumbUrl}" alt="${escapeHtml(ev.title || '')}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
 </div>`);
     }
     if (!thumbUrl) {
@@ -415,16 +448,18 @@ async function assembleBeehiivNewsletter(draft) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(ev.description)}</p>`);
     }
 
-    // Metadata block
+    // Metadata block. date/location/address are DB-locked but originate from
+    // ingested feeds, so escape them; the ticket link is validated via safeUrl.
     const meta = [];
-    if (ev.date) meta.push(`📅 <strong>${ev.date}</strong>`);
+    if (ev.date) meta.push(`📅 <strong>${escapeHtml(ev.date)}</strong>`);
     if (ev.location) {
-      const loc = ev.address ? `${ev.location} (${ev.address})` : ev.location;
+      const loc = ev.address ? `${escapeHtml(ev.location)} (${escapeHtml(ev.address)})` : escapeHtml(ev.location);
       meta.push(`📍 <em>${loc}</em>`);
     }
     if (ev.admission) meta.push(`🎟️ ${markdownToHtml(ev.admission)}`);
-    if (ev.eventUrl) {
-      meta.push(`🔗 <a href="${ev.eventUrl}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">Tickets &amp; Info</a>`);
+    const ticketUrl = safeUrl(ev.eventUrl);
+    if (ticketUrl) {
+      meta.push(`🔗 <a href="${ticketUrl}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">Tickets &amp; Info</a>`);
     }
     if (meta.length) {
       parts.push(`<div style="margin:0 0 14px 0;padding:12px 16px;background:${COLORS.cardBg};border-radius:8px;font-size:14px;line-height:2;">\n${meta.join('<br/>\n')}\n</div>`);
@@ -464,7 +499,7 @@ async function assembleBeehiivNewsletter(draft) {
   if (draft.closingHeading || draft.closingText) {
     parts.push(dividerHtml());
     if (draft.closingHeading) {
-      parts.push(`<h2 style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">${draft.closingEmoji || '📝'} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+      parts.push(`<h2 style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
     if (draft.closingText) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText)}</p>`);
@@ -543,6 +578,13 @@ async function createNewsletterDraft({
       (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id),
     );
     if (safeIds.length > 0) {
+      // Editorial gate: only approved/featured, non-merged, non-expired events
+      // may be locked into a draft. The autopilot auto-source path is already
+      // filtered, but explicit eventIds (admin /draft-ai) and calendar
+      // event_ids flow straight here — without these filters a rejected,
+      // merged-away, or expired event could be re-pulled with DB-accurate
+      // facts and shipped as "fresh". Ineligible ids simply don't resolve and
+      // get dropped by lockEventFactsFromDb.
       approvedEvents = await knex('events_raw as e')
         .leftJoin('event_sources as s', 's.id', 'e.source_id')
         .select(
@@ -551,6 +593,9 @@ async function createNewsletterDraft({
           'e.image_url', 'e.categories', 's.name as source_name',
         )
         .whereIn('e.id', safeIds)
+        .whereIn('e.admin_status', ['approved', 'featured'])
+        .whereNull('e.merged_into')
+        .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
         .orderByRaw('e.freshness_score DESC NULLS LAST');
 
       eventBlock = formatEventBlock(approvedEvents);
@@ -642,6 +687,12 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     draft.events = locked;
   }
 
+  // 4a.5 Strip stray URLs from the free-prose fields (intro / homeowner minute /
+  //      closing / etc). Per-event commentary is already sanitized inside
+  //      lockEventFactsFromDb; this extends the same defense to the prose the
+  //      model authors outside the events array.
+  sanitizeProseFields(draft);
+
   // 4b. Generate hero image (runs in parallel with nothing — fire and await)
   if (draft.events?.length && !draft.heroImageUrl) {
     draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Fresh This Week');
@@ -682,6 +733,23 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   draft.voiceWarnings = voiceCheck.warnings;
   draft.newsletterType = newsletterType;
 
+  // 5b. Defense-in-depth: run the same hallucinated-claim scan the send gate
+  //     uses, here at creation, so a fabricated price/efficacy claim is
+  //     surfaced on the draft (in logs + on the returned object) instead of
+  //     only being discovered at /validate or /send. Flagship-gated to match
+  //     the send-time policy (events guide can't quote admission); does not
+  //     block draft creation — the send gate remains the hard stop.
+  if (typeConfig?.flagship) {
+    const { findHallucinatedClaims } = require('./newsletter-validator');
+    const claimErrors = findHallucinatedClaims(
+      [draft.htmlBody, draft.textBody].filter(Boolean).join('\n'),
+    );
+    if (claimErrors.length > 0) {
+      draft.hallucinationErrors = claimErrors;
+      logger.warn(`[newsletter-draft] ${claimErrors.length} hallucinated-claim error(s) at draft time: ${claimErrors.join(' | ')}`);
+    }
+  }
+
   // Map flagship output to legacy shape
   draft.subject = draft.selectedSubject || draft.subjectVariants?.[0] || '';
 
@@ -719,4 +787,13 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   return { send, draft };
 }
 
-module.exports = { createNewsletterDraft, lockEventFactsFromDb };
+module.exports = {
+  createNewsletterDraft,
+  lockEventFactsFromDb,
+  // Exported for unit testing the injection/prose defenses
+  escapeHtml,
+  safeUrl,
+  markdownToHtml,
+  sanitizeProseFields,
+  assembleBeehiivNewsletter,
+};

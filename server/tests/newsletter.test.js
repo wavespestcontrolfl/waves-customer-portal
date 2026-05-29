@@ -19,7 +19,13 @@
 const { buildSubscriberQuery } = require('../services/newsletter-sender');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
-const { lockEventFactsFromDb } = require('../services/newsletter-draft');
+const {
+  lockEventFactsFromDb,
+  markdownToHtml,
+  sanitizeProseFields,
+  safeUrl,
+  assembleBeehiivNewsletter,
+} = require('../services/newsletter-draft');
 const { findHallucinatedClaims, validateNewsletterDraft } = require('../services/newsletter-validator');
 const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
@@ -781,6 +787,121 @@ describe('newsletter findHallucinatedClaims', () => {
   test('returns empty for missing body', () => {
     expect(findHallucinatedClaims('')).toEqual([]);
     expect(findHallucinatedClaims(null)).toEqual([]);
+  });
+
+  test('catches a Unicode homoglyph dollar sign (NFKC fold)', () => {
+    // Fullwidth '＄' (U+FF04) + fullwidth digits render as "$15" to the reader
+    // but are not ASCII '$'. NFKC normalization must fold them so the regex hits.
+    expect(findHallucinatedClaims('<p>Tickets are ＄１５ at the door</p>').length).toBeGreaterThan(0);
+  });
+});
+
+describe('newsletter assembly — HTML injection defense (markdownToHtml escaping)', () => {
+  test('escapes a raw anchor tag injected via event copy', () => {
+    const out = markdownToHtml('Check this <a href="https://evil.example/phish">free tickets</a> now');
+    expect(out).not.toContain('<a ');
+    expect(out).toContain('&lt;a href=&quot;https://evil.example/phish&quot;&gt;');
+  });
+
+  test('escapes an img onerror payload', () => {
+    const out = markdownToHtml('<img src=x onerror="steal()">');
+    expect(out).toBe('&lt;img src=x onerror=&quot;steal()&quot;&gt;');
+  });
+
+  test('still renders bold/italic markdown after escaping', () => {
+    expect(markdownToHtml('**bold** and _italic_')).toBe('<strong>bold</strong> and <em>italic</em>');
+    expect(markdownToHtml('**_both_**')).toBe('<strong><em>both</em></strong>');
+  });
+
+  test('escapes ampersands and quotes without breaking formatting', () => {
+    expect(markdownToHtml('Tom & Jerry say "hi"')).toBe('Tom &amp; Jerry say &quot;hi&quot;');
+  });
+
+  test('empty/falsy input returns empty string', () => {
+    expect(markdownToHtml('')).toBe('');
+    expect(markdownToHtml(null)).toBe('');
+  });
+});
+
+describe('newsletter safeUrl — href/src validation', () => {
+  test('passes http(s) URLs through (quotes escaped)', () => {
+    expect(safeUrl('https://www.eventbrite.com/e/123')).toBe('https://www.eventbrite.com/e/123');
+  });
+
+  test('rejects javascript: and data: schemes', () => {
+    expect(safeUrl('javascript:alert(1)')).toBeNull();
+    expect(safeUrl('data:text/html,<script>x</script>')).toBeNull();
+  });
+
+  test('rejects malformed/empty input', () => {
+    expect(safeUrl('not a url')).toBeNull();
+    expect(safeUrl('')).toBeNull();
+    expect(safeUrl(null)).toBeNull();
+  });
+
+  test('escapes a double-quote that would break out of the attribute', () => {
+    expect(safeUrl('https://x.test/a"onmouseover="evil')).not.toContain('"onmouseover');
+  });
+});
+
+describe('newsletter sanitizeProseFields — URL strip on free-prose fields', () => {
+  test('strips a bare URL the model slipped into the homeowner minute', () => {
+    const draft = sanitizeProseFields({ homeownerMinute: 'Book now at https://not-waves.example/deal before it ends.' });
+    expect(draft.homeownerMinute).not.toContain('http');
+    expect(draft.homeownerMinute).not.toContain('not-waves');
+  });
+
+  test('keeps the label of a markdown link but drops the URL across all prose fields', () => {
+    const draft = sanitizeProseFields({
+      introText: 'Welcome! [click here](https://evil.example) for more',
+      closingText: 'Visit www.spam.example today',
+      ps: 'P.S. https://x.example',
+      signoff: '— The Waves crew',
+    });
+    expect(draft.introText).toContain('click here');
+    expect(draft.introText).not.toContain('evil.example');
+    expect(draft.closingText).not.toContain('spam.example');
+    expect(draft.ps).not.toContain('http');
+    expect(draft.signoff).toBe('— The Waves crew');
+  });
+
+  test('leaves non-string fields untouched', () => {
+    const draft = sanitizeProseFields({ greeting: null, introText: undefined });
+    expect(draft.greeting).toBeNull();
+    expect(draft.introText).toBeUndefined();
+  });
+});
+
+describe('newsletter assembleBeehiivNewsletter — end-to-end injection + URL locking', () => {
+  // No GIPHY_API_KEY in the test env, so searchGiphy returns null and assembly
+  // is deterministic and network-free.
+  test('a malicious event title/description cannot inject live markup, and a bad eventUrl is dropped', async () => {
+    const draft = {
+      selectedSubject: 'Weekend Lineup',
+      greeting: 'Hey there',
+      introText: 'Big week ahead.',
+      events: [{
+        eventId: 'a0000000-0000-4000-8000-000000000001',
+        emoji: '🎵',
+        title: 'Concert <img src=x onerror="steal()">',
+        description: 'Go see it <a href="https://evil.example">here</a>',
+        date: 'Saturday, May 31 @ 7:00 PM',
+        location: 'The Venue <script>x</script>, Sarasota',
+        address: '123 Main St',
+        eventUrl: 'javascript:alert(1)',
+        imageUrl: null,
+      }],
+      homeownerMinute: 'Seal your foundation.',
+    };
+    const html = await assembleBeehiivNewsletter(draft);
+    // No live tags from model/ingested fields
+    expect(html).not.toContain('onerror="steal()"');
+    expect(html).not.toContain('<a href="https://evil.example">');
+    expect(html).not.toContain('<script>x</script>');
+    // The dangerous scheme never becomes an href
+    expect(html).not.toContain('javascript:alert(1)');
+    // Escaped forms ARE present
+    expect(html).toContain('&lt;img src=x onerror=&quot;steal()&quot;&gt;');
   });
 });
 

@@ -55,7 +55,12 @@ function decodeEntities(text) {
  */
 function findHallucinatedClaims(body) {
   if (!body) return [];
-  const bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ');
+  // NFKC folds Unicode look-alikes (fullwidth '＄', fullwidth digits, etc.)
+  // down to their ASCII forms so a homoglyph "＄15" / "ｆｒｅｅ" can't render as
+  // the claim to subscribers while slipping past the ASCII regexes.
+  const bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' '))
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ');
   const seen = new Set();
   const errors = [];
   for (const { pattern, label } of HALLUCINATED_CLAIM_PATTERNS) {

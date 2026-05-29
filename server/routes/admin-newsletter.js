@@ -443,6 +443,20 @@ router.patch('/sends/:id', async (req, res, next) => {
 
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial } = req.body;
 
+    // Factual-lock integrity: a flagship ("local-weekly-fresh-events") draft was
+    // generated through the fact-locked, hallucination-gated pipeline. Both the
+    // /send gate and the scheduler tick only run findHallucinatedClaims for the
+    // flagship type, so flipping a flagship send's type away from flagship would
+    // silently disable the hard-block ($-amount / efficacy claims would ship).
+    // Refuse the change — delete + recreate to genuinely retype.
+    if (newsletterType !== undefined
+        && isFlagshipType(send.newsletter_type)
+        && !isFlagshipType(newsletterType)) {
+      return res.status(400).json({
+        error: 'Cannot change a fresh-events (flagship) newsletter to another type — it would bypass the factual-locking send gate. Delete and recreate instead.',
+      });
+    }
+
     // Validate from_email only when the caller is changing it. Skipping
     // validation on PATCHes that don't touch the field keeps existing
     // drafts editable even if the allowlist contracts.
