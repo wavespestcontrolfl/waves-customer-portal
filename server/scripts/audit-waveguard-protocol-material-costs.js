@@ -29,7 +29,10 @@ function normalizedStaticMaterialCost(visit) {
 function isMaterialIntentLine(item) {
   if (!item) return false;
   if (item.scope === 'INSPECTION_ONLY') return false;
-  return /\$[\d.]+/.test(String(item.raw || ''));
+  const raw = String(item.raw || '');
+  if (/conditional ceiling|reprice flag/i.test(raw)) return false;
+  if (/soil sample/i.test(raw)) return false;
+  return item.selected && /\$[\d.]+/.test(raw);
 }
 
 async function getProtocolProducts() {

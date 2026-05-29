@@ -337,6 +337,27 @@ describe('waveguard-plan-engine helpers', () => {
     });
   });
 
+  test('calculateProductAmount prices seeded High Mn Combo protocol allowance', () => {
+    const result = calculateProductAmount({
+      product: {
+        name: 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
+        default_rate_per_1000: 0.1975,
+        rate_unit: 'fl_oz',
+        cost_per_unit: 0.6734,
+        cost_unit: 'fl_oz',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 1,
+    });
+
+    expect(result).toMatchObject({
+      amount: 1.975,
+      amountUnit: 'fl_oz',
+      materialCost: 1.33,
+      materialCostSource: 'inventory_cost_per_unit',
+    });
+  });
+
   test('calculateProductAmount uses lawn area and carrier calibration', () => {
     const result = calculateProductAmount({
       product: {
