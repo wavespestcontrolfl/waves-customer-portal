@@ -80,7 +80,7 @@ const TEMPLATE = {
     company_phone: '(941) 555-0100',
     pay_url: 'https://portal.wavespestcontrol.com/pay/sample',
     invoice_number: 'WPC-2026-0001',
-    amount_due: '$175.00',
+    amount_due: '$250.00',
   },
 };
 

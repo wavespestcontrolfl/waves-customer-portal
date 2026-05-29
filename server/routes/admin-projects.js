@@ -37,7 +37,6 @@ const {
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
-const { SPECIALTY } = require('../services/pricing-engine/constants');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 
@@ -1296,27 +1295,15 @@ async function buildWdoPdfAttachment(project, customer) {
   }
 }
 
-// Resolve the WDO inspection fee from the canonical bracketed pricing config
-// (SPECIALTY.wdo.brackets), keyed on property footprint when known. Falls back
-// to the base bracket if footprint isn't available.
-function resolveWdoInspectionFee(findings) {
-  const brackets = SPECIALTY?.wdo?.brackets || [];
-  // WDO brackets key on STRUCTURE footprint. customers.property_sqft is treated
-  // LAWN area (see initial_schema) and there is no structure-footprint column,
-  // so we never infer the tier from customer columns — that would bill a small
-  // house on a big lot into the $200/$225 tiers. Only an explicit structure
-  // footprint captured on the inspection itself overrides the base bracket.
-  const footprint = Number(findings?.structure_sqft || findings?.wdo_structure_sqft) || 0;
-  if (footprint > 0) {
-    for (const bracket of brackets) {
-      if (footprint <= bracket.maxSqFt) {
-        const price = Number(bracket.price);
-        if (Number.isFinite(price) && price > 0) return price;
-      }
-    }
-  }
-  const base = Number(brackets[0]?.price);
-  return Number.isFinite(base) && base > 0 ? base : 175; // base bracket (≤2500 sq ft)
+// WDO inspection auto-invoice fee. Per owner direction the tiers are
+// $150 / $200 / $250 by STRUCTURE footprint — but the WDO inspection form
+// doesn't capture structure footprint yet (customers.property_sqft is treated
+// LAWN area, not the structure), so we bill a flat $250 for now. The invoice is
+// a draft surfaced in the dry-run, so the operator can adjust it before sending.
+// When the form starts capturing structure sq ft, switch this to the tiers.
+const WDO_INSPECTION_FLAT_FEE = 250;
+function resolveWdoInspectionFee() {
+  return WDO_INSPECTION_FLAT_FEE;
 }
 
 function isReusableInvoice(inv) {
@@ -1380,8 +1367,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
 
   // 3. Create a draft, carrying the scheduled-service / service-record linkage
   //    forward so completion + future lookups can find it.
-  const findings = parseFindings(project);
-  const fee = resolveWdoInspectionFee(findings);
+  const fee = resolveWdoInspectionFee();
   const created = await InvoiceService.create({
     customerId: project.customer_id,
     serviceRecordId: project.service_record_id || undefined,
