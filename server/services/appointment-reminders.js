@@ -291,9 +291,11 @@ async function getReminderPrefs(customerId) {
 // Split out of registerAppointment so the slow Twilio lookup + send can be
 // driven either inline (booking_new / call-recording) or off the request path
 // (admin manual save) without duplicating the prefs/landline/mark-sent logic.
-// Operates on the record passed in — it does NOT re-fetch — so callers that
-// already hold the record keep their exact query sequence.
-async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel }) {
+// Operates on the record passed in — it does NOT re-fetch by default — so the
+// inline callers keep their exact query sequence. The deferred path passes
+// recheckBeforeSend so a same-second cancel/reschedule landing after the row
+// was first read can still suppress the now-stale send.
+async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false }) {
   if (apptTime.getTime() <= Date.now()) {
     await db('appointment_reminders')
       .where({ id: record.id })
@@ -316,6 +318,20 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
     }
     const { customer } = await getCustomerAndTech(customerId, scheduledServiceId);
     if (customer) {
+      // Deferred path only: between sendConfirmation's initial read and this
+      // send, an admin can cancel or reschedule the just-created appointment.
+      // The cancel handler flips cancelled=true; the reschedule handler claims
+      // confirmation_sent=true. Either means this confirmation is now redundant
+      // (the cancel/reschedule notice owns the customer message and, for a
+      // reschedule, our formatted time would be stale), so skip the send.
+      if (recheckBeforeSend) {
+        const fresh = await db('appointment_reminders').where({ id: record.id }).first();
+        if (!fresh || fresh.cancelled || fresh.confirmation_sent) {
+          logger.info(`[appt-remind] Confirmation superseded by cancel/reschedule for ${scheduledServiceId}`);
+          return false;
+        }
+      }
+
       const day = formatDay(apptTime);
       const date = formatDate(apptTime);
       const time = formatTime(apptTime);
@@ -522,6 +538,7 @@ const AppointmentReminders = {
         customerId: record.customer_id,
         apptTime: new Date(record.appointment_time),
         serviceLabel: record.service_type,
+        recheckBeforeSend: true,
       });
     } catch (err) {
       logger.error(`[appt-remind] sendConfirmation failed: ${err.message}`);
@@ -720,16 +737,26 @@ const AppointmentReminders = {
       // Reset reminder flags. If we successfully send a reschedule notice
       // below, we mark any already-due reminder windows as sent so cron does
       // not immediately repeat the same appointment details.
+      const rescheduleUpdate = {
+        appointment_time: newApptTime,
+        reminder_72h_sent: false,
+        reminder_72h_sent_at: null,
+        reminder_24h_sent: false,
+        reminder_24h_sent_at: null,
+        updated_at: new Date(),
+      };
+      // A reschedule supersedes a still-pending creation confirmation — admin
+      // saves defer the confirmation SMS off the request path, so a reschedule
+      // landing in that window must claim the slot. This suppresses the deferred
+      // sendConfirmation (which skips confirmation_sent rows) so the customer
+      // gets the reschedule notice below, not a stale-time confirmation after it.
+      if (!record.confirmation_sent) {
+        rescheduleUpdate.confirmation_sent = true;
+        rescheduleUpdate.confirmation_sent_at = new Date();
+      }
       await db('appointment_reminders')
         .where({ id: record.id })
-        .update({
-          appointment_time: newApptTime,
-          reminder_72h_sent: false,
-          reminder_72h_sent_at: null,
-          reminder_24h_sent: false,
-          reminder_24h_sent_at: null,
-          updated_at: new Date(),
-        });
+        .update(rescheduleUpdate);
 
       if (!sendNotification) {
         logger.info(`[appt-remind] Reschedule notice suppressed for ${scheduledServiceId}`);
