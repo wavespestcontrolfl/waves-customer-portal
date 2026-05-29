@@ -37,6 +37,8 @@ const { buildAndStoreSmsPreviewImage } = require('../services/service-report/pre
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+const { resolveCloseoutRequirementsForJobs } = require('../services/service-closeout-requirements');
+const { validateCloseoutCompletionRequirements } = require('../services/closeout-completion-validation');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
@@ -74,6 +76,31 @@ function computeTechEta(techRow, jobCoords) {
     + Math.cos(fromLat * Math.PI / 180) * Math.cos(toLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   const distMi = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 1.4;
   return Math.max(1, Math.round((distMi / 30) * 60));
+}
+
+async function closeoutRequirementsForScheduledService(serviceId, { failOpen = false } = {}) {
+  let row;
+  try {
+    row = await db('scheduled_services')
+      .where({ id: serviceId })
+      .first('id', 'service_id', 'service_type');
+  } catch (err) {
+    if (failOpen) return null;
+    err.statusCode = err.statusCode || 400;
+    err.code = err.code || 'closeout_requirements_unavailable';
+    throw err;
+  }
+  if (!row) return null;
+  let requirements;
+  try {
+    requirements = await resolveCloseoutRequirementsForJobs([row]);
+  } catch (err) {
+    if (failOpen) return null;
+    err.statusCode = err.statusCode || 400;
+    err.code = err.code || 'closeout_requirements_unavailable';
+    throw err;
+  }
+  return requirements.get(row.id) || requirements.get(String(row.id)) || null;
 }
 
 async function renderTemplate(templateKey, vars, context = {}) {
@@ -1312,9 +1339,11 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
       if (result.reason === 'service_not_found') {
         return res.status(404).json({ error: 'Service not found', code: 'service_not_found' });
       }
+      const closeoutRequirements = await closeoutRequirementsForScheduledService(req.params.serviceId, { failOpen: true });
       return res.json({
         available: false,
         reason: result.reason,
+        closeoutRequirements,
         // Surface the reason-specific detail fields the resolver
         // returned without re-listing them here — the resolver owns
         // the shape per reason, the route is just a pass-through.
@@ -1324,9 +1353,11 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
     }
 
     const { snapshot, snapshotHash } = result;
+    const closeoutRequirements = await closeoutRequirementsForScheduledService(req.params.serviceId, { failOpen: true });
     return res.json({
       available: true,
       mode: 'one_tap_available',
+      closeoutRequirements,
       snapshotHash,
       buttonCopy: 'Complete — Protocol Performed',
       attestationText: snapshot.techAttestationText,
@@ -1478,6 +1509,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'project_required_completion',
         completionProfile,
       });
+    }
+    const closeoutRequirements = await closeoutRequirementsForScheduledService(svc.id);
+    const requiredCloseoutPhotoCount = Number(closeoutRequirements?.requiredPhotoCount || 0);
+    let completionPhotosUploadedBeforeStatus = false;
+    if (!isIncompleteVisit && closeoutRequirements) {
+      const submittedProductIds = [...new Set((Array.isArray(products) ? products : [])
+        .map((product) => product?.productId)
+        .filter(Boolean)
+        .map(String))];
+      const validProductIds = closeoutRequirements.requiresApplicationLog && submittedProductIds.length
+        ? new Set(await db('products_catalog')
+          .whereIn('id', submittedProductIds)
+          .pluck('id')
+          .then((ids) => ids.map(String)))
+        : null;
+      const closeoutViolations = validateCloseoutCompletionRequirements(closeoutRequirements, {
+        completionPhotos,
+        products,
+      }, {
+        validProductIds,
+      });
+      if (closeoutViolations.length) {
+        return res.status(400).json({
+          error: 'Required closeout items are missing.',
+          code: 'closeout_requirements_missing',
+          closeoutRequirements,
+          violations: closeoutViolations,
+        });
+      }
     }
 
     const reportServiceLine = detectServiceLine(svc.service_type);
@@ -1841,6 +1901,42 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
 
+        if (!isIncompleteVisit && requiredCloseoutPhotoCount > 0) {
+          completionPhotoUploadResult = await uploadServicePhotoDataUrls({
+            serviceRecordId: record.id,
+            photos: completionPhotos,
+            photoType: 'after',
+            knex: trx,
+          });
+          completionPhotosUploadedBeforeStatus = true;
+          const distinctPhotoIds = new Set((completionPhotoUploadResult.photos || [])
+            .map((photo) => photo?.id)
+            .filter(Boolean));
+          const persistedRequiredPhotoCount = distinctPhotoIds.size || completionPhotoUploadResult.uploaded;
+          if (persistedRequiredPhotoCount < requiredCloseoutPhotoCount) {
+            const err = new Error('Required closeout photo upload failed');
+            err.isOperational = true;
+            err.statusCode = 400;
+            err.code = 'required_closeout_photo_upload_failed';
+            err.details = completionPhotoUploadResult.errors || [];
+            throw err;
+          }
+          const latestNotes = parseJsonObject(record.structured_notes);
+          const photoNotes = {
+            ...latestNotes,
+            completionPhotos: {
+              uploaded: completionPhotoUploadResult.uploaded,
+              persistedDistinct: persistedRequiredPhotoCount,
+              failed: completionPhotoUploadResult.failed,
+              uploadedAt: new Date().toISOString(),
+            },
+          };
+          await trx('service_records').where({ id: record.id }).update({
+            structured_notes: serializeJsonb(photoNotes),
+          });
+          record.structured_notes = photoNotes;
+        }
+
         if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length) {
           const findingRows = reportObservations.map((title) => ({
             service_record_id: record.id,
@@ -2128,7 +2224,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
 
-    if (Array.isArray(completionPhotos) && completionPhotos.length) {
+    if (Array.isArray(completionPhotos) && completionPhotos.length && !completionPhotosUploadedBeforeStatus) {
       completionPhotoUploadResult = await uploadServicePhotoDataUrls({
         serviceRecordId: record.id,
         photos: completionPhotos,
@@ -3041,6 +3137,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // allow a retry to re-create service_record / invoice / SMS.
     if (!markedSucceeded && !durableCompletionCommitted) {
       await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+      if (err?.statusCode) {
+        return res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code || 'completion_failed',
+          details: err.details || undefined,
+        });
+      }
     } else {
       logger.error(
         `[dispatch] Post-commit error in /complete (attempt ${completionAttempt?.id} remains resumable): ${err.message}`
