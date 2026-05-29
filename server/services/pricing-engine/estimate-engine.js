@@ -760,7 +760,7 @@ function generateEstimate(input) {
     });
     if (recurringPestRoachType === 'german') {
       const reason = 'german_roach_initial_and_cleanout_both_selected';
-      const warning = 'German initial knockdown and German Roach 3-visit cleanout are both selected. Verify this is intentional.';
+      const warning = 'German initial knockdown and German Roach Cleanout are both selected. Verify this is intentional.';
       result.requiresManualReview = true;
       result.manualReviewReasons = uniqueStrings([...(result.manualReviewReasons || []), reason]);
       result.warnings = uniqueStrings([...(result.warnings || []), warning]);

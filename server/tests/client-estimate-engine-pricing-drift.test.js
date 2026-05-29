@@ -196,8 +196,11 @@ describe('deprecated client estimator pricing drift guards', () => {
     const discountedCleanout = recurringCustomer.oneTime.specItems.find((line) => line.service === 'german_roach');
 
     expect(cleanout).toEqual(expect.objectContaining({
-      name: 'German Roach Cleanout — 3 Visit Program',
-      setupCharge: 100,
+      name: 'German Roach Cleanout — 2 Visit Program',
+      severity: 'light',
+      price: 350,
+      visits: 2,
+      setupCharge: 0,
       total: cleanout.price,
       noRecurringDiscount: true,
     }));
@@ -206,23 +209,31 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(recurringCustomer.oneTime.total).toBe(cleanout.price);
   });
 
-  test('client fallback German Roach Cleanout matches server total', () => {
-    const estimate = calculateEstimate({
-      homeSqFt: 2800,
-      stories: 1,
-      lotSqFt: 10000,
-      propertyType: 'single_family',
-      svcRoach: true,
-      roachType: 'GERMAN',
-      urgency: 'NONE',
-      isAfterHours: false,
-    });
-    const cleanout = estimate.oneTime.specItems.find((line) => line.service === 'german_roach');
-    const server = priceGermanRoach({ footprint: 2800 });
+  test('client fallback German Roach Cleanout matches server total across severity tiers', () => {
+    [
+      { roachSeverity: 'light', expected: 350 },
+      { roachSeverity: 'medium', expected: 450 },
+      { roachSeverity: 'heavy', expected: 550 },
+    ].forEach(({ roachSeverity, expected }) => {
+      const estimate = calculateEstimate({
+        homeSqFt: 2800,
+        stories: 1,
+        lotSqFt: 10000,
+        propertyType: 'single_family',
+        svcRoach: true,
+        roachType: 'GERMAN',
+        roachSeverity,
+        urgency: 'NONE',
+        isAfterHours: false,
+      });
+      const cleanout = estimate.oneTime.specItems.find((line) => line.service === 'german_roach');
+      const server = priceGermanRoach({ footprint: 2800 }, { severity: roachSeverity });
 
-    expect(cleanout.price).toBe(server.total);
-    expect(cleanout.total).toBe(server.total);
-    expect(estimate.oneTime.total).toBe(server.total);
+      expect(cleanout.price).toBe(expected);
+      expect(cleanout.price).toBe(server.total);
+      expect(cleanout.total).toBe(server.total);
+      expect(estimate.oneTime.total).toBe(server.total);
+    });
   });
 
   test('admin termite footprint override stays service-scoped', () => {

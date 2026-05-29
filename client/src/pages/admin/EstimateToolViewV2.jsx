@@ -1808,6 +1808,7 @@ export default function EstimateToolViewV2({
     bedbugRooms: "1",
     bedbugMethod: "CHEMICAL",
     bedbugSeverity: "light",
+    germanRoachSeverity: "light",
     bedbugPrepStatus: "ready",
     bedbugOccupancyType: "singleFamily",
     bedbugEquipment: "INHOUSE",
@@ -2908,6 +2909,7 @@ export default function EstimateToolViewV2({
         roachType: form.roachType || "REGULAR",
         standaloneRoachTreatment: !!form.svcRoach && form.roachType === "REGULAR",
         germanRoachCleanoutSelected: !!form.svcRoach && form.roachType === "GERMAN",
+        germanRoachSeverity: form.germanRoachSeverity || "light",
         onetimeLawnType: form.otLawnType || "FERT",
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
@@ -5284,10 +5286,22 @@ export default function EstimateToolViewV2({
                           value: "REGULAR",
                           label: "Standalone Native Cockroach Treatment",
                         },
-                        { value: "GERMAN", label: "German Roach Cleanout — 3 Visit Program" },
+                        { value: "GERMAN", label: "German Roach Cleanout" },
                       ]}
                     />{" "}
                   </FieldV2>{" "}
+                  {form.roachType === "GERMAN" && (
+                    <FieldV2 label="Infestation Severity" className="mb-0 mt-2">
+                      <SelectV2
+                        k="germanRoachSeverity"
+                        options={[
+                          { value: "light", label: "Light — 2 Visits ($350)" },
+                          { value: "moderate", label: "Medium — 3 Visits ($450)" },
+                          { value: "heavy", label: "Heavy — 4 Visits ($550)" },
+                        ]}
+                      />
+                    </FieldV2>
+                  )}
                   {form.roachType === "GERMAN" && (
                     <div className="text-11 text-ink-secondary mt-2">
                       German Roach Cleanout is a separate specialty program, not the German version of native cockroach treatment.

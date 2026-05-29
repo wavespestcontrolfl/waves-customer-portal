@@ -342,3 +342,24 @@ Sensitive operational fields (gate codes, lockbox codes, garage codes, access no
 **Blast radius:** At default constants the change only moves one-time pest (typical ~flat, loaded up, small down to floor); recurring pricing, the margin guard, and all other services are untouched. Migration is pre-deploy + fail-fast; sync reads only `multiplier` (legacy `premium_multiplier`/`setup_equivalent` ignored, incompatible with the `>=2` guard). Client mirror updated in lockstep (drift test enforces parity).
 
 **Revisit if:** one-time conversion data shows 2.2× is suppressing one-off leads (lower it toward 2.0, the floor of the guard), or margin analysis on heavy initial visits says the multiple should be higher for the largest properties (consider a mild progressive multiple rather than reintroducing a flat add-on).
+
+---
+
+## 2026-05-29 — German Roach Cleanout = severity tiers, all-in flat price (replaces footprint + setup charge)
+
+**Decision:** Replace the German Roach Cleanout (`german_roach`) pricing model. Old: footprint-interpolated base (`$450` base, `$400` floor, `±$40…+$85` footprint adjustment) **plus** a separate `$100` setup charge, fixed at 3 visits (`total = price + 100`, e.g. `$574` at 2,800 sf). New: a flat, **all-in** price keyed purely on infestation severity, with the visit count rising by tier:
+- Light → `$350`, 2 visits
+- Medium (`moderate`) → `$450`, 3 visits
+- Heavy → `$550`, 4 visits
+
+The tier price is the full customer total — there is **no separate setup charge** (`setupCharge: 0`) and **footprint is no longer consulted at all**. `severe` collapses into the Heavy tier; a missing/invalid severity defaults to **Light** (`severityWasDefaulted: true`). `pricingModel` is now `german_roach_severity_tier_cleanout` (the old `german_roach_three_visit_cleanout` is retained as `legacyPricingModel` for backward compat). The line stays `noRecurringDiscount` (excluded from WaveGuard/recurring percentage discounts) as before.
+
+**Implementation:** `SPECIALTY.germanRoach` in `constants.js` is now `{ defaultSeverity, tiers: { light, moderate, heavy } }` (the `base`/`floor`/`setupCharge`/`footprintAdj` keys are gone). `priceGermanRoach` (`service-pricing.js`) does a severity → tier lookup instead of footprint interpolation. The client mirror (`client/src/lib/estimateEngine.js`) was updated in lockstep (drift test enforces server/client parity across all three tiers). `severity` now flows through both line-item normalizers (`v1-legacy-mapper.js` + client) so the quoted tier is visible to the UI. `db-bridge.js`'s `validatePestPricingConfig` was updated to validate the new tier shape (`defaultSeverity` references a real tier; each of light/moderate/heavy has a positive `price` and `visits`) instead of the removed `base`/`floor`/`footprintAdj` keys. The V2 server translate path (`property-lookup-v2.js`) already forwarded `germanRoachSeverity || roachSeverity` into `services.germanRoach`, so no engine-routing change was needed there.
+
+**Admin UI:** both estimators (`EstimateToolViewV2.jsx` default, legacy `EstimatePage.jsx`) now show an **Infestation Severity** selector (Light/Medium/Heavy with visit + price hints) when the roach Service Type is "German Roach Cleanout", wired to a new `germanRoachSeverity` form field (defaults `light`). V2 posts it in the server options payload; the legacy page maps it to `roachSeverity` for the client-preview engine. The Service Type option label dropped the hardcoded "— 3 Visit Program" suffix since the visit count is now tier-dependent.
+
+**Context:** Owner request — the old footprint+setup model "made no sense" for German roach: square footage is a poor proxy for the real cost driver (number of return trips to break the breeding cycle), and the separate setup charge obscured the all-in price. Severity tiers are easier for the office/techs to quote and for customers to understand, and tie visit count directly to infestation severity.
+
+**Blast radius:** Only `german_roach` pricing moves; every other service (including the single-visit `pest_initial_roach` initial knockdown fees and the zeroed `roachModifier`) is untouched. The DB seed row `onetime_german_roach` is inert with respect to the engine (db-bridge only validates `SPECIALTY.germanRoach`; it does not override it from DB config), so no migration was needed. Default (no severity selected) now quotes Light/$350/2 visits where the old default was $574 at 2,800 sf.
+
+**Revisit if:** severity self-reporting proves unreliable (techs consistently re-tier on site) — consider an in-field severity confirmation step before the cleanout price locks; or if a very large heavy infestation genuinely costs more than the flat Heavy tier covers (reintroduce a bounded size or visit add-on rather than reverting to footprint interpolation).

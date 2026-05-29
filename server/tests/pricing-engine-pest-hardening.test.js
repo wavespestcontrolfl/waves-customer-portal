@@ -206,10 +206,10 @@ describe('pest-control pricing hardening', () => {
     expect(specialty.lineItems.filter(line => line.service === 'pest_initial_roach')).toHaveLength(0);
     expect(specialty.lineItems.filter(line => line.service === 'german_roach_initial')).toHaveLength(0);
     expect(specialty.summary.oneTimeTotal).toBe(0);
-    expect(specialty.summary.specialtyTotal).toBe(574);
-    expect(specialty.summary.year1Total).toBe(574);
+    expect(specialty.summary.specialtyTotal).toBe(350);
+    expect(specialty.summary.year1Total).toBe(350);
     expect(quickQuote({ homeSqFt: 2800, stories: 1, lotSqFt: 10000, services: { germanRoach: true } }).services).toContainEqual(
-      expect.objectContaining({ name: 'german_roach', price: 574 })
+      expect.objectContaining({ name: 'german_roach', price: 350 })
     );
 
     const directDuplicate = generateEstimate({
@@ -276,9 +276,9 @@ describe('pest-control pricing hardening', () => {
     });
     const germanLine = germanCleanout.lineItems.find(line => line.service === 'german_roach');
     expect(germanLine.priceAfterDiscount).toBe(germanLine.price);
-    expect(germanLine.totalAfterDiscount ?? germanLine.total).toBe(574);
+    expect(germanLine.totalAfterDiscount ?? germanLine.total).toBe(350);
     expect(germanLine.discount.appliedDiscounts).toContainEqual(expect.objectContaining({ type: 'exclusion' }));
-    expect(germanCleanout.summary.specialtyTotal).toBe(574);
+    expect(germanCleanout.summary.specialtyTotal).toBe(350);
   });
 
   test('one-time pest protocol example and invalid recurring baseline guard are stable', () => {
@@ -300,16 +300,38 @@ describe('pest-control pricing hardening', () => {
     expect(guarded.warnings).toContain('invalid_recurring_pest_per_app_ignored');
   });
 
-  test('German Roach multi-visit and WDO boundaries preserve valid pricing', () => {
+  test('German Roach severity tiers and WDO boundaries preserve valid pricing', () => {
+    // Footprint no longer factors in; severity drives the all-in flat price.
     expect(priceGermanRoach({ footprint: 2800 })).toEqual(expect.objectContaining({
       source: 'german_roach_cleanout_selected',
-      pricingModel: 'german_roach_three_visit_cleanout',
-      legacyPricingModel: 'german_roach_multi_visit',
-      footprintAdj: 24,
-      price: 474,
-      setupCharge: 100,
-      total: 574,
+      pricingModel: 'german_roach_severity_tier_cleanout',
+      legacyPricingModel: 'german_roach_three_visit_cleanout',
+      severity: 'light',
+      severityWasDefaulted: true,
+      price: 350,
+      setupCharge: 0,
+      total: 350,
+      visits: 2,
+      label: 'German Roach Cleanout — 2 Visit Program',
+    }));
+    expect(priceGermanRoach({ footprint: 800 }, { severity: 'medium' })).toEqual(expect.objectContaining({
+      severity: 'moderate',
+      severityWasDefaulted: false,
+      price: 450,
+      total: 450,
       visits: 3,
+    }));
+    expect(priceGermanRoach({ footprint: 5500 }, { severity: 'heavy' })).toEqual(expect.objectContaining({
+      severity: 'heavy',
+      price: 550,
+      total: 550,
+      visits: 4,
+    }));
+    // 'severe' collapses into the heavy tier.
+    expect(priceGermanRoach({}, { severity: 'severe' })).toEqual(expect.objectContaining({
+      severity: 'heavy',
+      price: 550,
+      visits: 4,
     }));
 
     expect(priceWDO({ footprint: 2500 }).price).toBe(175);

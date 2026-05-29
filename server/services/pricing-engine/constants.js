@@ -1213,13 +1213,16 @@ const SPECIALTY = {
     marginDivisor: 0.45,  // 55% target margin
   },
   germanRoach: {
-    base: r(450),
-    floor: r(400),
-    setupCharge: r(100),
-    footprintAdj: [
-      [800, -r(40)], [1200, -r(20)], [1500, -r(10)], [2000, 0],
-      [2500, r(15)], [3000, r(30)], [4000, r(55)], [5500, r(85)],
-    ],
+    // Severity-based, all-in flat pricing. The tier price is the full customer
+    // total — there is no separate setup charge, and footprint/square-footage is
+    // no longer a factor (German roach cost is driven by infestation severity /
+    // number of return trips to break the breeding cycle, not home size).
+    defaultSeverity: 'light',
+    tiers: {
+      light: { price: r(350), visits: 2 },
+      moderate: { price: r(450), visits: 3 },
+      heavy: { price: r(550), visits: 4 },
+    },
   },
   bedBug: {
     chemical: {

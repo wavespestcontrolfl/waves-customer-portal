@@ -366,19 +366,20 @@ describe('estimate v2 service toggle adapter', () => {
     const mapped = mapV1ToLegacyShape(estimate);
     const cleanout = mapped.oneTime.specItems.find((line) => line.service === 'german_roach');
 
-    expect(estimate.summary.specialtyTotal).toBe(574);
+    expect(estimate.summary.specialtyTotal).toBe(350);
     expect(cleanout).toEqual(expect.objectContaining({
-      name: 'German Roach Cleanout — 3 Visit Program',
-      price: 574,
+      name: 'German Roach Cleanout — 2 Visit Program',
+      price: 350,
       source: 'german_roach_cleanout_selected',
-      pricingModel: 'german_roach_three_visit_cleanout',
-      visits: 3,
-      setupCharge: 100,
-      total: 574,
+      pricingModel: 'german_roach_severity_tier_cleanout',
+      severity: 'light',
+      visits: 2,
+      setupCharge: 0,
+      total: 350,
       noRecurringDiscount: true,
     }));
-    expect(mapped.oneTime.total).toBe(574);
-    expect(mapped.totals.year1).toBe(574);
+    expect(mapped.oneTime.total).toBe(350);
+    expect(mapped.totals.year1).toBe(350);
   });
 
   test('does not double-bill regular roach when recurring pest already includes regular knockdown', () => {

@@ -241,12 +241,19 @@ function validatePestPricingConfig(snapshot = constants) {
   if (!isNonNegativeNumber(onetimeMosquito.dunkAddOn)) errors.push('ONE_TIME.mosquito.dunkAddOn must be non-negative');
 
   const germanRoach = SPECIALTY.germanRoach || {};
-  if (!isPositiveNumber(germanRoach.base)) errors.push('SPECIALTY.germanRoach.base must be positive');
-  if (!isPositiveNumber(germanRoach.floor)) errors.push('SPECIALTY.germanRoach.floor must be positive');
-  if (!isNonNegativeNumber(germanRoach.setupCharge)) errors.push('SPECIALTY.germanRoach.setupCharge must be non-negative');
-  if (!Array.isArray(germanRoach.footprintAdj) || germanRoach.footprintAdj.length === 0) {
-    errors.push('SPECIALTY.germanRoach.footprintAdj is required');
+  const germanRoachTiers = germanRoach.tiers || {};
+  if (!germanRoach.defaultSeverity || !germanRoachTiers[germanRoach.defaultSeverity]) {
+    errors.push('SPECIALTY.germanRoach.defaultSeverity must reference an existing tier');
   }
+  ['light', 'moderate', 'heavy'].forEach((tierKey) => {
+    const tier = germanRoachTiers[tierKey];
+    if (!tier || !isPositiveNumber(tier.price)) {
+      errors.push(`SPECIALTY.germanRoach.tiers.${tierKey}.price must be positive`);
+    }
+    if (!tier || !isPositiveNumber(tier.visits)) {
+      errors.push(`SPECIALTY.germanRoach.tiers.${tierKey}.visits must be positive`);
+    }
+  });
 
   if (!Array.isArray(BED_BUG.allowedMethods) || !BED_BUG.allowedMethods.includes('HYBRID')) {
     errors.push('BED_BUG.allowedMethods must include HYBRID');

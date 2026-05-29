@@ -21,11 +21,18 @@ describe('admin estimate roach UI copy', () => {
     expect(source).toContain('This is not a recurring per-visit multiplier.');
 
     expect(source).toContain('Standalone Native Cockroach Treatment');
-    expect(source).toContain('German Roach Cleanout \u2014 3 Visit Program');
+    expect(source).toContain('German Roach Cleanout');
     expect(source).toContain('Cockroach Specialty Service');
     expect(source).toContain('Standalone / Specialty Services');
     expect(source).toContain('Service Type');
     expect(source).toContain('German Roach Cleanout is a separate specialty program');
+
+    // Severity tier selector drives the 2/3/4-visit flat program price.
+    expect(source).toContain('germanRoachSeverity');
+    expect(source).toContain('Infestation Severity');
+    expect(source).toContain('Light \u2014 2 Visits ($350)');
+    expect(source).toContain('Medium \u2014 3 Visits ($450)');
+    expect(source).toContain('Heavy \u2014 4 Visits ($550)');
 
     expect(source).toContain('recurringRoachType');
     expect(source).toContain('standaloneRoachTreatment');
@@ -39,7 +46,7 @@ describe('admin estimate roach UI copy', () => {
     expect(source).toContain("source: 'recurring_pest_roach_activity'");
     expect(source).toContain("source: 'standalone_native_cockroach_treatment'");
     expect(source).toContain("source: 'german_roach_cleanout_selected'");
-    expect(source).toContain("pricingModel: 'german_roach_three_visit_cleanout'");
+    expect(source).toContain("pricingModel: 'german_roach_severity_tier_cleanout'");
     expect(source).toContain("skippedService: 'standalone_native_cockroach_treatment'");
     expect(source).toContain("skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach'");
     expect(source).not.toContain("name: 'German Roach (3-visit)'");

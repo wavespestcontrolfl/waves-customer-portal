@@ -251,8 +251,8 @@ first-visit line.
   one-time service discount target. It is not waived by annual prepay and
   is excluded from recurring-customer one-time percentage discounts.
 - Standalone regular roach uses the higher standalone native-roach scale.
-- Standalone German roach remains the separate multi-visit German roach
-  cleanout service.
+- Standalone German roach is the separate German Roach Cleanout program,
+  priced by infestation severity (see German Roach Cleanout below).
 
 **Brackets.**
 - Recurring native roach initial: `$119` under 1,500 sqft, `$139` from
@@ -261,6 +261,18 @@ first-visit line.
   1,500-2,500 sqft, `$249` over 2,500 sqft.
 - Standalone regular roach: `$202.50` under 1,500 sqft, `$239` from
   1,500-2,500 sqft, `$289` over 2,500 sqft.
+
+**German Roach Cleanout (`german_roach`).** Severity-based, all-in flat
+pricing — footprint/square-footage is not a factor and there is no separate
+setup charge (the tier price is the full customer total). Severity drives both
+price and the number of return visits needed to break the breeding cycle:
+- Light: `$350`, 2 visits.
+- Medium (`moderate`): `$450`, 3 visits.
+- Heavy: `$550`, 4 visits.
+
+Severity `severe` collapses into the Heavy tier; a missing/invalid severity
+defaults to Light. Like the initial knockdown fees, the cleanout is excluded
+from percentage discounts (`noRecurringDiscount`).
 
 **Rationale.** Roach work is a heavier first visit, not a clean recurring
 percentage premium. A fixed initial fee recovers the product and labor cost
@@ -358,6 +370,7 @@ benefit from deeper write-ups:
   per-service targets above the floor?
 - Frequency-discount curves for pest (`v1` 0.85/0.70 vs `v2` 0.88/0.78).
   Currently `v2` is live. Is `v1` retired permanently or still a fallback?
-- Initial fees / setup fees: `PEST.initialFee = $99`, rodent setup $199,
-  german roach setup $100. Are these calibrated against acquisition cost
-  recovery or against a typical CAC payback target?
+- Initial fees / setup fees: `PEST.initialFee = $99`, rodent setup $199.
+  (German Roach Cleanout no longer carries a separate setup charge — its
+  severity-tier price is all-in.) Are these calibrated against acquisition
+  cost recovery or against a typical CAC payback target?
