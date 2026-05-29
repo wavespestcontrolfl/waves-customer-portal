@@ -1542,6 +1542,23 @@ export default function EstimateViewPage() {
     );
   }
 
+  // Waves AI property-review panel + "Ask Waves" bar. Rendered AFTER the price
+  // (configure branch) and also after the confirmation card (review branch) so
+  // the price-before-AI ordering holds while the panel + ask stay available
+  // during the held-slot review step too.
+  const aiPanelBlock = (
+    <>
+      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
+      <EstimateAskBar
+        token={token}
+        askToken={estimate.askToken}
+        selectedFrequency={selectedFrequency}
+        serviceMode={serviceMode}
+        chips={pricing.askChips}
+      />
+    </>
+  );
+
   return (
     <Page>
       <Header
@@ -1560,14 +1577,17 @@ export default function EstimateViewPage() {
       ) : null}
 
       {ctaPhase === 'review' && reservation ? (
-        <ReviewPhase
-          slotId={selectedSlotId}
-          paymentPreference={paymentPreference}
-          secondsRemaining={countdownSeconds}
-          onConfirm={handleConfirm}
-          onCancel={handleReviewCancel}
-          invoiceMode={!!estimate.billByInvoice}
-        />
+        <>
+          <ReviewPhase
+            slotId={selectedSlotId}
+            paymentPreference={paymentPreference}
+            secondsRemaining={countdownSeconds}
+            onConfirm={handleConfirm}
+            onCancel={handleReviewCancel}
+            invoiceMode={!!estimate.billByInvoice}
+          />
+          {aiPanelBlock}
+        </>
       ) : (
         <>
           {/* One-time mode toggle — only rendered when admin opted this
@@ -1676,18 +1696,10 @@ export default function EstimateViewPage() {
             </>
           )}
 
-          {/* Waves AI property-review panel + Ask bar render AFTER the price/plan
-              (matches the server-rendered estimate's order: price → Waves AI →
-              booking) so the customer sees the price first. */}
-          <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
-
-          <EstimateAskBar
-            token={token}
-            askToken={estimate.askToken}
-            selectedFrequency={selectedFrequency}
-            serviceMode={serviceMode}
-            chips={pricing.askChips}
-          />
+          {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
+              server-rendered estimate's order: price → Waves AI → booking) so
+              the customer sees the price first. */}
+          {aiPanelBlock}
 
           {canShowSlotPicker ? (
             <SlotPicker
