@@ -176,12 +176,23 @@ function applyCheckboxes(form, findings) {
   }
 
   // Inaccessible / obstructed areas — keyword-detect to tick the named boxes.
+  // The findings field uses an "other:" convention for areas outside the named
+  // categories, so detect that too (and tick Other for any inaccessible text
+  // that matched none of the named categories, so Section 3 isn't left with an
+  // uncategorized note).
   const inacc = clean(findings.inaccessible_areas).toLowerCase();
   if (inacc) {
-    if (inacc.includes('attic')) checkBox(form, 'Attic');
-    if (inacc.includes('interior')) checkBox(form, 'Interior');
-    if (inacc.includes('exterior')) checkBox(form, 'Exterior');
-    if (inacc.includes('crawl')) checkBox(form, 'Crawlspace');
+    const attic = inacc.includes('attic');
+    const interior = inacc.includes('interior');
+    const exterior = inacc.includes('exterior');
+    const crawl = inacc.includes('crawl');
+    if (attic) checkBox(form, 'Attic');
+    if (interior) checkBox(form, 'Interior');
+    if (exterior) checkBox(form, 'Exterior');
+    if (crawl) checkBox(form, 'Crawlspace');
+    if (inacc.includes('other') || !(attic || interior || exterior || crawl)) {
+      checkBox(form, 'Other');
+    }
   }
 
   // Treatment method
