@@ -233,10 +233,12 @@ function normalizeOptionList(value) {
 
 function classifyProtocolLine(raw, role) {
   const text = normalizeText(raw);
+  const hasDollarCost = /\$[\d.]+/.test(String(raw || ''));
   const scope = (() => {
     if (text.includes('if p') && (text.includes('24 2 11') || text.includes('24 0 11'))) {
       return 'BRANCH_ONE_OF';
     }
+    if (text.includes('skip') && !hasDollarCost) return 'INSPECTION_ONLY';
     if (text.includes('soil sample')) return 'FIRST_YEAR_ONLY';
     if (text.includes('drive by scout') || text.includes('scout') || text.includes('audit') || text.includes('wellness touchpoint') || text.includes('annual report')) {
       return 'INSPECTION_ONLY';
