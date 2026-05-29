@@ -168,6 +168,26 @@ async function normalizeRow(row) {
     }
   }
 
+  // Freshness recompute for revived rows: when ingestion re-dates an event
+  // past→future it clears freshness_status + resets normalized_at, re-queueing
+  // the row here. Such a row already has a known event_type, so the Claude pass
+  // above is skipped — recompute classifyFreshness directly (deterministic, no
+  // API call) from the stored type + current dates so the revived event gets a
+  // real status instead of NULL (which the whereNotIn editorial filters treat
+  // as excluded). Guarded so it never overrides the Claude pass, and only fires
+  // on the cleared-freshness signal — a manual 'expired' curation stays non-null.
+  if (updates.freshness_status === undefined && !row.freshness_status
+      && row.event_type && row.event_type !== 'unknown') {
+    const { freshness_status, freshness_score } = classifyFreshness({
+      event_type: row.event_type,
+      times_featured: row.times_featured || 0,
+      start_at: row.start_at,
+      end_at: row.end_at,
+    });
+    updates.freshness_status = freshness_status;
+    updates.freshness_score = freshness_score;
+  }
+
   // Derive region_zone from city if not already set
   if (!row.region_zone && row.city) {
     const zone = cityToZone(row.city);

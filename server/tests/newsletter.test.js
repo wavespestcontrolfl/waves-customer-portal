@@ -186,6 +186,25 @@ describe('event weekLockKey — per-week advisory-lock key', () => {
   });
 });
 
+describe('event ingestion revivalResetFields — past→future re-date clears freshness', () => {
+  const { revivalResetFields } = require('../services/event-ingestion');
+
+  test('CASE is gated on OLD start_at past AND NEW effective date future', () => {
+    const sql = revivalResetFields().freshness_status.toString().toLowerCase();
+    expect(sql).toMatch(/case when/);
+    expect(sql).toMatch(/events_raw\.start_at < now\(\)/);
+    expect(sql).toMatch(/coalesce\(excluded\.end_at, excluded\.start_at\) >= now\(\)/);
+    // Preserves the existing value when the condition is false (manual curation).
+    expect(sql).toMatch(/else events_raw\.freshness_status end/);
+  });
+
+  test('clears freshness_status, freshness_score, and normalized_at', () => {
+    const f = revivalResetFields();
+    expect(Object.keys(f).sort()).toEqual(['freshness_score', 'freshness_status', 'normalized_at']);
+    expect(f.normalized_at.toString().toLowerCase()).toMatch(/else events_raw\.normalized_at end/);
+  });
+});
+
 describe('newsletter EMAIL_RE', () => {
   const ok = ['a@b.co', 'first.last@example.com', 'with+tag@gmail.com', 'h@host.io'];
   const bad = [

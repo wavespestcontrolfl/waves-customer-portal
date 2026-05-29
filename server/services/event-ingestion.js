@@ -36,6 +36,24 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 
+// On a re-pull that moves an event's date from the PAST back into the FUTURE
+// (a feed correcting/rescheduling a previously-expired event), clear the stored
+// freshness so the row isn't stuck 'expired'/'stale_recurring' — the editorial
+// fetch filters exclude those — and reset normalized_at so the normalizer
+// recomputes freshness for the new date. Gated on OLD start_at < now() AND NEW
+// effective date (end_at for multi-day, else start_at) >= now(), so a
+// manually-curated future event an admin set to 'expired' (its date was never
+// in the past) is left untouched. Spread into each onConflict().merge().
+// EXCLUDED.* is the proposed insert value; events_raw.* is the existing row.
+const REVIVAL_COND = 'events_raw.start_at < now() AND COALESCE(EXCLUDED.end_at, EXCLUDED.start_at) >= now()';
+function revivalResetFields() {
+  return {
+    freshness_status: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.freshness_status END`),
+    freshness_score: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.freshness_score END`),
+    normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`),
+  };
+}
+
 let Parser;
 try {
   Parser = require('rss-parser');
@@ -205,6 +223,7 @@ async function pullRssSource(source) {
         categories,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
+        ...revivalResetFields(),
       });
 
     upserted += 1;
@@ -311,6 +330,7 @@ async function pullIcalSource(source) {
         event_url: eventUrl,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
+        ...revivalResetFields(),
       });
 
     upserted += 1;
@@ -512,6 +532,7 @@ Rules:
         event_url: eventUrl,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
+        ...revivalResetFields(),
       });
 
     upserted += 1;
@@ -599,4 +620,5 @@ async function ingestAllEnabledSources() {
 module.exports = {
   ingestAllEnabledSources,
   ingestSource, // exported for ad-hoc admin-triggered pulls
+  revivalResetFields, // exported for unit testing the past→future revival SQL
 };
