@@ -69,7 +69,9 @@ function resolveScopes(structured) {
 async function main() {
   let scanned = 0;
   let fixed = 0;
-  let lastId = 0;
+  // service_records.id is a UUID — keyset-paginate with a string cursor
+  // (uuid > uuid is a valid, stable ordering in Postgres). No numeric seed.
+  let lastId = null;
   const limit = getLimit();
   const samples = [];
 
@@ -78,7 +80,7 @@ async function main() {
   for (;;) {
     const rows = await db('service_records')
       .whereNotNull('advisory')
-      .andWhere('id', '>', lastId)
+      .modify((qb) => { if (lastId) qb.andWhere('id', '>', lastId); })
       .orderBy('id', 'asc')
       .limit(BATCH)
       .select('id', 'service_type', 'service_line', 'structured_notes', 'advisory');
