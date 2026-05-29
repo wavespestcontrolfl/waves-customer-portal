@@ -612,8 +612,24 @@ function isFleaBreakdownItem(item = {}) {
   return raw.includes('flea');
 }
 
+function isGermanRoachCleanoutBreakdownItem(item = {}) {
+  if (String(item.service || '').toLowerCase() === 'german_roach') return true;
+  const raw = [item.label, item.name, item.displayName].filter(Boolean).join(' ').toLowerCase();
+  return raw.includes('german roach') || (raw.includes('roach') && raw.includes('cleanout'));
+}
+
+function germanRoachVisitPhrase(visits) {
+  const n = Number(visits) || 0;
+  const words = { 1: 'One visit', 2: 'Two visits', 3: 'Three visits', 4: 'Four visits' };
+  return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
+}
+
 function oneTimePriceCopy(breakdown = {}) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+  const germanRoachItem = items.find(isGermanRoachCleanoutBreakdownItem);
+  if (germanRoachItem) {
+    return `${germanRoachVisitPhrase(germanRoachItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule. 100% guaranteed with the Waves Guarantee.`;
+  }
   const fleaItems = items.filter(isFleaBreakdownItem);
   if (fleaItems.length > 0) {
     const hasEliminationPackage = fleaItems.some((item) => item.offerKey === 'flea_elimination_two_visit' || Number(item.visits) === 2);

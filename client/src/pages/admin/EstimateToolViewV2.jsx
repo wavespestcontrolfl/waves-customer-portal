@@ -1275,6 +1275,18 @@ function oneTimeChoicePreviewMeta(E, pestTier, oneTimeRows = []) {
   const matches = (needle) =>
     oneTimeText.includes(needle) || (!oneTimeText && recurringText.includes(needle));
 
+  if (matches("german roach") || matches("cleanout")) {
+    const visitMatch = oneTimeText.match(/(\d+)\s*visit/);
+    const n = visitMatch ? Number(visitMatch[1]) : 0;
+    const words = { 1: "One visit", 2: "Two visits", 3: "Three visits", 4: "Four visits" };
+    const phrase = words[n] || (n > 0 ? `${n} visits` : "Multiple visits");
+    return {
+      recurringLabel: "German Roach Cleanout",
+      oneTimeLabel: "German Roach Cleanout",
+      description:
+        `${phrase} to break the breeding cycle. Pay on service day, no recurring schedule. 100% guaranteed with the Waves Guarantee.`,
+    };
+  }
   if (matches("mosquito")) {
     return {
       recurringLabel: "Recurring Mosquito Control",

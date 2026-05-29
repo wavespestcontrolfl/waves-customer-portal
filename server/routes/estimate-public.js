@@ -667,17 +667,45 @@ function detectPestRecurring(recurring) {
   return { count: pest.length, visitsPerYear: vpy, monthlyBase };
 }
 
-function detectPestOneTime(oneTimeItems) {
-  return (oneTimeItems || []).some((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')));
+// The interior-spray / exterior-eave-sweep preference toggles describe the
+// GENERAL pest-control visit. They do not apply to specialty one-time services
+// (German Roach Cleanout, standalone cockroach, wasp/stinging, exclusion, etc.),
+// so only a general one-time pest line should surface them.
+function isGeneralPestOneTimeItem(it = {}) {
+  const service = String(it.service || '').toLowerCase();
+  if (service === 'one_time_pest' || service === 'pest_control') return true;
+  if (service) return false; // a known specialty service key (german_roach, flea, …) — not general pest
+  const name = String(it.name || it.displayName || it.label || '').toLowerCase();
+  if (/roach|cockroach|cleanout|wasp|bee|hornet|stinging|exclusion|flea|bed\s*bug|termite|rodent|wdo|mosquito|tree|shrub|lawn/.test(name)) return false;
+  return /pest|\bant\b/.test(name);
 }
 
-// Sum of one-time pest item prices on this estimate (matches the regex
-// in detectPestOneTime). Used to clamp the one-time toggle discount
-// above ONE_TIME.pest.floor.
+function detectPestOneTime(oneTimeItems) {
+  return (oneTimeItems || []).some(isGeneralPestOneTimeItem);
+}
+
+// Sum of general one-time pest item prices on this estimate (matches
+// detectPestOneTime). Used to clamp the one-time toggle discount above
+// ONE_TIME.pest.floor.
 function pestOneTimeBase(oneTimeItems) {
   return (oneTimeItems || [])
-    .filter((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')))
+    .filter(isGeneralPestOneTimeItem)
     .reduce((acc, it) => acc + Number(it.price || 0), 0);
+}
+
+// German Roach Cleanout is a multi-visit specialty program (priced one-time but
+// run over 2/3/4 visits). It gets its own customer copy + the Waves Guarantee,
+// and never the general-pest preference toggles.
+function isGermanRoachCleanoutOneTimeItem(it = {}) {
+  if (String(it.service || '').toLowerCase() === 'german_roach') return true;
+  const raw = [it.name, it.label, it.displayName].filter(Boolean).join(' ').toLowerCase();
+  return raw.includes('german roach') || (raw.includes('roach') && raw.includes('cleanout'));
+}
+
+function germanRoachVisitPhrase(visits) {
+  const n = Number(visits) || 0;
+  const words = { 1: 'One visit', 2: 'Two visits', 3: 'Three visits', 4: 'Four visits' };
+  return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
 }
 
 // Minimum monthly price for a recurring pest plan at the given cadence,
@@ -2085,6 +2113,11 @@ function renderPage(token, estimate, estData) {
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
   const hasPreSlabOneTime = oneTimeItems.some(isPreSlabOneTimeItem);
   const preSlabOneTimeCopy = hasPreSlabOneTime ? preSlabCustomerCopy(oneTimeItems) : '';
+  const germanRoachCleanoutItem = oneTimeItems.find(isGermanRoachCleanoutOneTimeItem);
+  const germanRoachOneTimeCopy = germanRoachCleanoutItem
+    ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
+    : '';
+  const germanRoachGuaranteeCopy = '100% guaranteed with the Waves Guarantee.';
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
 
@@ -2599,7 +2632,7 @@ function renderPage(token, estimate, estData) {
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))}
         </div>
       </div>
     `;
@@ -3088,7 +3121,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
+    ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
 
@@ -8024,6 +8057,10 @@ module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;
+module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
+module.exports.detectPestOneTime = detectPestOneTime;
+module.exports.isGermanRoachCleanoutOneTimeItem = isGermanRoachCleanoutOneTimeItem;
+module.exports.germanRoachVisitPhrase = germanRoachVisitPhrase;
 module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmount;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;
