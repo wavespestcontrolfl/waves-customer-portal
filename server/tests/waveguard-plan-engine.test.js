@@ -257,7 +257,7 @@ describe('waveguard-plan-engine helpers', () => {
     test('catalogProductHints are specific brand families, never an ambiguous bare brand', () => {
       // Bare "Advion"/"Contrac" would match multiple distinct catalog rows
       // (WDG granular vs roach gel vs ant gel) since hints are the sole match text.
-      const AMBIGUOUS = new Set(['Advion', 'Contrac']);
+      const AMBIGUOUS = new Set(['Advion', 'Contrac', 'Gentrol']);
       for (const visit of protocols.pest.visits) {
         for (const meta of Object.values(visit.lineMeta || {})) {
           for (const hint of meta.catalogProductHints || []) {

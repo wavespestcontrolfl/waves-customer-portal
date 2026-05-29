@@ -971,7 +971,7 @@
         "lineMeta": {
           "Cockroach gel bait in kitchen, bath, hinges, appliances, and plumbing voids": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Advion Cockroach Gel Bait"] },
           "Crack-and-crevice treatment": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Alpine WSG"] },
-          "Insect growth regulator point-source or aerosol where label allows": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Gentrol"] }
+          "Insect growth regulator point-source or aerosol where label allows": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Gentrol IGR"] }
         },
         "material_cost": "inventory",
         "labor_cost": "elevated",
