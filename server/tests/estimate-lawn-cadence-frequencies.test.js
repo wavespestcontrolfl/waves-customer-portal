@@ -28,6 +28,19 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     ]);
   });
 
+  test('emits a perServiceTreatments row so the price card shows the rich per-visit detail block', () => {
+    const freqs = lawnFrequenciesFromResultStats(lawnEstData());
+    for (const f of freqs) {
+      expect(Array.isArray(f.perServiceTreatments)).toBe(true);
+      expect(f.perServiceTreatments).toHaveLength(1);
+      const row = f.perServiceTreatments[0];
+      expect(row.service).toBe('lawn_care');
+      expect(row.label).toBe('Lawn Care');
+      expect(row.visitsPerYear).toBe(f.visitsPerYear);
+      expect(row.displayPrice).toBe(f.perTreatment); // per-visit price drives "$X / application"
+    }
+  });
+
   test('carries the cost-floor prices through unchanged and tags lawn_care', () => {
     const freqs = lawnFrequenciesFromResultStats(lawnEstData());
     const enhanced = freqs.find((f) => f.key === 'enhanced');

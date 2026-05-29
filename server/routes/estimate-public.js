@@ -6490,6 +6490,16 @@ function lawnFrequenciesFromResultStats(estData = {}) {
             includedAtThisFrequency: true,
           },
         ],
+        // Per-service treatment detail — drives the same rich price-card line
+        // pest/bundle estimates show (per-visit price + visits/year + benefit
+        // bullets from SERVICE_INCLUSIONS.lawn_care), so lawn mirrors them.
+        perServiceTreatments: perTreatment != null ? [{
+          service: 'lawn_care',
+          label: 'Lawn Care',
+          perTreatment,
+          displayPrice: perTreatment,
+          visitsPerYear: visits,
+        }] : [],
         addOns: [],
       };
     })
