@@ -581,6 +581,11 @@ async function processScheduledSends() {
             scheduled_for: null,
             updated_at: new Date(),
           });
+          // Keep the calendar in lockstep: this send is no longer scheduled, so
+          // roll its linked calendar row back to 'drafted'. Without this the
+          // row would stay 'scheduled' forever (autopilot then skips the week)
+          // and /cancel-schedule can't repair it — the send is already draft.
+          await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
           continue;
         }
       }

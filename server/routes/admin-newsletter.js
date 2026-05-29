@@ -416,12 +416,21 @@ function generateSlug(subject) {
 // POST /api/admin/newsletter/sends — create a draft
 router.post('/sends', async (req, res, next) => {
   try {
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial, eventIds } = req.body;
     if (!subject) return res.status(400).json({ error: 'subject required' });
 
     let normalizedFromEmail;
     try { normalizedFromEmail = normalizeFromEmail(fromEmail); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
+    // Persist the locked event ids so the sender can advance times_featured for
+    // the events that shipped. The manual Compose / Digest-Planner flow saves
+    // here after /draft-ai (persist:false) returns the locked events — without
+    // this the saved send keeps event_ids '[]' and markEventsFeatured no-ops,
+    // defeating the recurring-series anti-repeat decay for AI-drafted sends.
+    const safeEventIds = Array.isArray(eventIds)
+      ? eventIds.filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12)
+      : [];
 
     const [row] = await db('newsletter_sends').insert({
       subject,
@@ -439,6 +448,7 @@ router.post('/sends', async (req, res, next) => {
       slug: generateSlug(subject),
       created_by: req.technicianId || null,
       auto_share_social: autoShareSocial !== false,
+      event_ids: JSON.stringify(safeEventIds),
     }).returning('*');
 
     res.json({ success: true, send: row });
@@ -830,7 +840,10 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         includeCTA,
         persist: false,
       });
-      return res.json({ success: true, draft });
+      // Return the locked event ids so the Compose flow can carry them into
+      // the /sends save (the saved row needs them for times_featured tracking).
+      const lockedEventIds = (draft.events || []).map((e) => e.eventId).filter(Boolean);
+      return res.json({ success: true, draft, eventIds: lockedEventIds });
     }
 
     // ── Legacy flow: template-guided or free-form ─────────────────────
