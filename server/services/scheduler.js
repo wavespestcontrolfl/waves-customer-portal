@@ -490,6 +490,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 5:30AM ET — Expire past events. classifyFreshness never emits an
+  // 'expired' status and nothing else transitions an event out of its fresh
+  // state once its date passes, so a one_time/annual event would keep its high
+  // freshness_score forever. Mark anything whose effective date (end_at for
+  // multi-day, else start_at) is before ET-today as expired so the terminal
+  // rejects in isEligibleForFreshDigest + the editorial fetch filters reflect
+  // reality and admin/ranking views aren't polluted by past events. Expire-only:
+  // an event re-dated back into the future is revived by the ingestion merge
+  // (clears freshness) + the normalizer recompute, NOT here — a date-based
+  // reviver couldn't tell a system-expired row from an admin's manual 'expired'
+  // curation, but ingestion seeing the date move past→future is unambiguous.
+  // =========================================================================
+  cron.schedule('30 5 * * *', async () => {
+    try {
+      const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+      const etMidnightToday = parseETDateTime(`${etDateString()}T00:00:00`);
+      const count = await db('events_raw')
+        .whereNot('freshness_status', 'expired')
+        .whereRaw('COALESCE(end_at, start_at) < ?', [etMidnightToday])
+        .update({ freshness_status: 'expired', freshness_score: 0, updated_at: new Date() });
+      if (count > 0) logger.info(`[event-expiry] Marked ${count} past event(s) expired`);
+    } catch (err) {
+      logger.error(`[event-expiry] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Automation runner. Fires the next step of any enrollment
   // whose next_send_at has passed. Indexed query on automation_enrollments.
   // =========================================================================

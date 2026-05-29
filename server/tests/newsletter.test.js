@@ -186,6 +186,53 @@ describe('event weekLockKey — per-week advisory-lock key', () => {
   });
 });
 
+describe('event ingestion revivalResetFields — past→future re-date clears freshness', () => {
+  const { revivalResetFields } = require('../services/event-ingestion');
+
+  test('CASE is gated on OLD effective date past AND NEW effective date future, against the ET-midnight cutoff (not now())', () => {
+    const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+    const { sql, bindings } = revivalResetFields().normalized_at.toSQL();
+    const lower = sql.toLowerCase();
+    expect(lower).toMatch(/case when/);
+    // OLD side uses the effective date (COALESCE) — not bare start_at — so an
+    // in-progress multi-day event (start past, end future) is NOT revived.
+    expect(lower).toMatch(/coalesce\(events_raw\.end_at, events_raw\.start_at\) </);
+    expect(lower).toMatch(/coalesce\(excluded\.end_at, excluded\.start_at\) >=/);
+    // Boundary is the ET-midnight cutoff (same as the expiry sweep) — NOT now() —
+    // so an event manually expired earlier *today* is preserved when re-dated forward.
+    expect(lower).not.toContain('now()');
+    const expected = parseETDateTime(`${etDateString()}T00:00:00`).getTime();
+    expect(bindings.length).toBeGreaterThan(0);
+    bindings.forEach((b) => expect(new Date(b).getTime()).toBe(expected));
+    // Preserves the existing value when the condition is false (manual curation).
+    expect(lower).toMatch(/else events_raw\.normalized_at end/);
+  });
+
+  test('re-queues via normalized_at + sets the explicit revival marker — never nulls the NOT NULL freshness_status', () => {
+    const f = revivalResetFields();
+    // freshness_status is NOT NULL in the DB, so the revival must not touch it
+    // in the upsert (the normalizer recomputes it instead). It signals revival
+    // via normalized_at (re-queue) + freshness_revival_pending (explicit marker
+    // the normalizer consumes), both safe to set in the ON CONFLICT update.
+    expect(Object.keys(f).sort()).toEqual(['freshness_revival_pending', 'normalized_at']);
+  });
+
+  test('revival marker is gated on the SAME past→future ET-midnight condition, defaulting to the existing value', () => {
+    const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+    const { sql, bindings } = revivalResetFields().freshness_revival_pending.toSQL();
+    const lower = sql.toLowerCase();
+    expect(lower).toMatch(/case when/);
+    expect(lower).toMatch(/coalesce\(events_raw\.end_at, events_raw\.start_at\) </);
+    expect(lower).toMatch(/coalesce\(excluded\.end_at, excluded\.start_at\) >=/);
+    expect(lower).not.toContain('now()');
+    // True only on a genuine past→future re-date; otherwise preserve the column
+    // (never NULL — it's NOT NULL in the DB).
+    expect(lower).toMatch(/then true else events_raw\.freshness_revival_pending end/);
+    const expected = parseETDateTime(`${etDateString()}T00:00:00`).getTime();
+    bindings.forEach((b) => expect(new Date(b).getTime()).toBe(expected));
+  });
+});
+
 describe('newsletter EMAIL_RE', () => {
   const ok = ['a@b.co', 'first.last@example.com', 'with+tag@gmail.com', 'h@host.io'];
   const bad = [
