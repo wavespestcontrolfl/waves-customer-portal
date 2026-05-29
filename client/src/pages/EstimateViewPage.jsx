@@ -1504,11 +1504,15 @@ export default function EstimateViewPage() {
   const acceptance = estimate?.acceptance || { mode: 'standard_slot_pick' };
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
   // Resolve the tier label unconditionally; whether the badge actually renders
-  // is decided per-section via section.waveGuardTierEligible (server-authoritative
-  // deny-list), so an excluded section (palm/rodent) never shows it even when an
-  // eligible service shares the estimate, and an eligible single service / bundle
-  // always can.
+  // is decided by per-section eligibility (server-authoritative
+  // section.waveGuardTierEligible — true iff the section covers >=1 WaveGuard
+  // service), so an excluded section (palm/rodent) never shows it even alongside
+  // an eligible service, and an eligible single service / bundle always can.
   const waveGuardTier = pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier || null;
+  // The combined bundle summary card represents the whole recurring plan: show
+  // the tier only if any section in it is eligible (so an excluded-only bundle
+  // — e.g. palm + rodent — stays badge-free here too).
+  const combinedTierEligible = services.some((s) => s?.waveGuardTierEligible === true);
   const combinedFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
 
@@ -1658,7 +1662,7 @@ export default function EstimateViewPage() {
                 <CombinedRecurringPriceCard
                   combined={pricing.combinedRecurring}
                   selectedFrequency={combinedFrequency}
-                  waveGuardTier={waveGuardTier}
+                  waveGuardTier={combinedTierEligible ? waveGuardTier : null}
                 />
               ) : null}
 
