@@ -363,3 +363,26 @@ The tier price is the full customer total — there is **no separate setup charg
 **Blast radius:** Only `german_roach` pricing moves; every other service (including the single-visit `pest_initial_roach` initial knockdown fees and the zeroed `roachModifier`) is untouched. The DB seed row `onetime_german_roach` is inert with respect to the engine (db-bridge only validates `SPECIALTY.germanRoach`; it does not override it from DB config), so no migration was needed. Default (no severity selected) now quotes Light/$350/2 visits where the old default was $574 at 2,800 sf.
 
 **Revisit if:** severity self-reporting proves unreliable (techs consistently re-tier on site) — consider an in-field severity confirmation step before the cleanout price locks; or if a very large heavy infestation genuinely costs more than the flat Heavy tier covers (reintroduce a bounded size or visit add-on rather than reverting to footprint interpolation).
+
+---
+
+## 2026-05-29 — WDO inspection → filled FDACS-13645 PDF + combined report-with-invoice send
+
+**Decision:** Built the missing pieces of the WDO inspection workflow so a `wdo_inspection` project can be turned into the genuine, filled state form and delivered to the customer alongside an invoice in a single action.
+
+**What shipped:**
+- `server/services/pdf/wdo-report-pdf.js` — fills the **real** FDACS-13645 AcroForm from `project.findings` using `pdf-lib`, then flattens it. Field map covers Section 1 company/inspector header (from `server/constants/business.js`), property/requester, Section 2 finding checkboxes + narrative, inaccessible-area checkboxes (keyword-detected), previous-treatment + treated-at-inspection radios, treatment method, and Section 5 comments. The form is flattened (locked); the licensee **signature line is left blank** by design.
+- The official `forms.fdacs.gov/13645.pdf` is owner-password encrypted with no usable AcroForm in the older bundled copy. The current official form **is** a fillable AcroForm (71 fields). We committed the decrypted (qpdf `--decrypt`, empty password) fillable copy to `server/assets/forms/fdacs-13645-fillable.pdf` as the fill template. The pre-existing flat reference PDF at `client/public/forms/fdacs-13645-wdo-inspection-report.pdf` is untouched (techs still open it as a reference).
+- `POST /admin/projects/:id/send` now attaches the filled FDACS-13645 PDF to the report email for WDO projects.
+- `GET /admin/projects/:id/fdacs-pdf` — admin preview/download of the filled form.
+- `POST /admin/projects/:id/send-with-invoice` — combined delivery: **one** email (FDACS PDF + invoice PDF attached, report link + pay link in body) and **one** SMS (report link + pay link). Supports `dry_run` to surface the resolved invoice amount before sending. Auto-creates a draft WDO inspection invoice when none is linked, priced from `SPECIALTY.wdo.brackets` (≤2500 $175 · ≤3500 $200 · >3500 $225). On delivery it transitions the invoice `draft → sent` directly (not via `InvoiceService.sendInvoice`) so the invoice's own SMS path doesn't fire a duplicate text.
+- `project-email.js` gained `attachments` pass-through on `sendProjectReportReady` + a new `sendProjectReportWithInvoice` (reuses the seeded `project.report_ready` template — no new template to ship).
+- UI: a **"Send report + invoice"** button on the WDO project detail (`ProjectsPage.jsx`), gated to `wdo_inspection`, non-closed projects. Dry-run first to confirm the invoice amount, then send. New `pdf-lib` dependency added to `server/package.json`.
+
+**Signature protocol:** Per Rule 5E-14.142 F.A.C. / Ch. 482.226 F.S., form 13645 must carry the licensee/cardholder signature and date. We do not auto-forge a signature — printed name, ID-card number, and date are filled; the signature line stays blank for the licensee to sign before filing. A stored-signature-image option was deliberately deferred.
+
+**Blast radius:** Additive. New module + two new routes + one extended email helper + one UI button. The existing `/send` flow is unchanged except for the WDO email attachment. To avoid coupling the projects route's boot to the `@waves/lawn-cost-floor` workspace package, the WDO fee is read from `pricing-engine/constants.js` (pure config) rather than importing `service-pricing.js`.
+
+**SMS constraint:** SMS cannot carry attachments, so the customer gets the FDACS + invoice PDFs by email; the SMS carries the report link and the pay link. Both PDFs are also reachable from those links.
+
+**Revisit if:** the owner wants the signature captured digitally (add a stored/e-sign step before flatten); or wants the combined send to skip the dry-run amount confirmation; or FDACS reissues the form with renamed fields (the filler logs and skips unknown fields rather than throwing, so a revision degrades gracefully but should be re-mapped).

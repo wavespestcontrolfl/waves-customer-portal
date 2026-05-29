@@ -34,6 +34,12 @@ const {
   completeProjectBackedService,
   resolveProjectPortalAttachment,
 } = require('../services/project-completion');
+const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
+const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
+const InvoiceService = require('../services/invoice');
+const { SPECIALTY } = require('../services/pricing-engine/constants');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1240,11 +1246,109 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// WDO report PDF + invoice helpers (shared by /send and /send-with-invoice)
+// ---------------------------------------------------------------------------
+function pdfEmailAttachment(filename, buffer) {
+  return {
+    filename,
+    content: buffer.toString('base64'),
+    type: 'application/pdf',
+    disposition: 'attachment',
+  };
+}
+
+// Build the filled FDACS-13645 PDF for a WDO project as an email attachment.
+// Returns null (and logs) on any failure so a render hiccup never blocks the
+// rest of the delivery.
+async function buildWdoPdfAttachment(project, customer) {
+  if (project?.project_type !== 'wdo_inspection') return null;
+  try {
+    const buffer = await buildWdoReportPDFBuffer({ project, customer });
+    return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
+  } catch (err) {
+    logger.error(`[projects] WDO PDF build failed for ${project.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Resolve the WDO inspection fee from the canonical bracketed pricing config
+// (SPECIALTY.wdo.brackets), keyed on property footprint when known. Falls back
+// to the base bracket if footprint isn't available.
+function resolveWdoInspectionFee(customer, findings) {
+  const brackets = SPECIALTY?.wdo?.brackets || [];
+  const footprint = Number(findings?.property_sqft || customer?.square_footage || customer?.sqft) || 0;
+  if (footprint > 0) {
+    for (const bracket of brackets) {
+      if (footprint <= bracket.maxSqFt) {
+        const price = Number(bracket.price);
+        if (Number.isFinite(price) && price > 0) return price;
+      }
+    }
+  }
+  const base = Number(brackets[0]?.price);
+  return Number.isFinite(base) && base > 0 ? base : 175; // base bracket (≤2500 sq ft)
+}
+
+// Find an invoice already linked to this project, else create a draft. Returns
+// { invoice, created }. Used by the combined report+invoice send.
+async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
+  if (invoiceId) {
+    const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
+    if (!explicit) throw new Error('Invoice not found for this customer');
+    return { invoice: explicit, created: false };
+  }
+
+  // Reuse a non-paid invoice already attached to the project's service record.
+  if (project.service_record_id) {
+    const linked = await db('invoices')
+      .where({ customer_id: project.customer_id, service_record_id: project.service_record_id })
+      .whereNotIn('status', ['void', 'paid'])
+      .orderBy('created_at', 'desc')
+      .first();
+    if (linked) return { invoice: linked, created: false };
+  }
+
+  const findings = (() => {
+    try { return typeof project.findings === 'string' ? JSON.parse(project.findings) : (project.findings || {}); }
+    catch { return {}; }
+  })();
+  const fee = resolveWdoInspectionFee(customer, findings);
+  const created = await InvoiceService.create({
+    customerId: project.customer_id,
+    serviceRecordId: project.service_record_id || undefined,
+    title: 'WDO Inspection',
+    lineItems: [{
+      description: 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)',
+      quantity: 1,
+      unit_price: fee,
+      amount: fee,
+    }],
+    notes: `Auto-generated for WDO inspection project ${project.id}.`,
+  });
+  // Re-fetch so callers get the canonical DB row shape (line_items as JSONB, etc.).
+  const fresh = await db('invoices').where({ id: created.id }).first();
+  return { invoice: fresh || created, created: true };
+}
+
+// Normalize an invoice's line_items into an array for PDF rendering — the
+// column may arrive as parsed JSONB (array) or a raw JSON string depending on
+// the driver / code path.
+function normalizeInvoiceLineItemsForPdf(lineItems) {
+  if (Array.isArray(lineItems)) return lineItems;
+  if (typeof lineItems === 'string') {
+    try { const parsed = JSON.parse(lineItems); return Array.isArray(parsed) ? parsed : []; }
+    catch { return []; }
+  }
+  return [];
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/projects/:id/send — generate token, mark sent, notify customer
 // Admin-only (prevents accidental send by tech before review).
 //
 // Notifies the customer via SMS (Twilio) and email (SendGrid) with the
-// public report link. The public token can be generated before delivery,
+// public report link. For WDO inspections, the filled FDACS-13645 PDF is
+// attached to the email. The public token can be generated before delivery,
 // but status only moves to 'sent' after at least one customer channel works.
 // ---------------------------------------------------------------------------
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
@@ -1344,6 +1448,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     // Email (through editable Waves template library)
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+    const wdoAttachment = await buildWdoPdfAttachment(updatedProject, customer);
     if (emailRecipient.email) {
       try {
         const result = await ProjectEmail.sendProjectReportReady({
@@ -1351,6 +1456,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           customer,
           reportUrl,
           isResend: Boolean(project.sent_at || project.status === 'sent'),
+          attachments: wdoAttachment ? [wdoAttachment] : [],
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -1424,6 +1530,213 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 function projectEmailFailureMessage(result) {
   return result?.reason || result?.error || 'Email send blocked/failed';
 }
+
+function normalizeUsPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/projects/:id/fdacs-pdf — preview/download the filled
+// FDACS-13645 WDO inspection report. Admin-only.
+// ---------------------------------------------------------------------------
+router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.project_type !== 'wdo_inspection') {
+      return res.status(400).json({ error: 'FDACS-13645 PDF is only available for WDO inspections' });
+    }
+    const customer = project.customer_id
+      ? await db('customers').where({ id: project.customer_id }).first()
+      : null;
+    const buffer = await buildWdoReportPDFBuffer({ project, customer });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="FDACS-13645-${project.id}.pdf"`);
+    res.send(buffer);
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/:id/send-with-invoice — combined delivery.
+// Admin-only. Sends ONE email (filled FDACS-13645 PDF + invoice PDF attached,
+// report link + pay link in the body) and ONE SMS (report link + pay link).
+//
+// Body: { invoice_id?, dry_run?, override_reason? }
+//   - invoice_id : use this existing invoice; otherwise reuse a linked draft
+//                  or auto-create a draft WDO inspection invoice.
+//   - dry_run    : resolve/create the invoice and return its amount WITHOUT
+//                  sending — lets the UI confirm the figure first.
+// ---------------------------------------------------------------------------
+router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
+
+    const customer = await db('customers').where({ id: project.customer_id }).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Readiness gate mirrors /send so we never email an incomplete report.
+    const readiness = evaluateProjectSendReadiness({ project, customer });
+    const overrideReason = String(req.body?.override_reason || '').trim();
+    const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
+    if (readiness.missing.length > 0 && !hasReadinessOverride) {
+      return res.status(422).json({ error: 'Project report is missing required details', missing: readiness.missing });
+    }
+
+    const { invoice, created } = await resolveOrCreateProjectInvoice({
+      project,
+      customer,
+      invoiceId: req.body?.invoice_id,
+    });
+
+    if (['paid', 'void'].includes(invoice.status)) {
+      return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
+    }
+
+    // dry_run: surface the resolved invoice + amount, send nothing.
+    if (req.body?.dry_run) {
+      return res.json({
+        dry_run: true,
+        invoice: {
+          id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          total: invoice.total,
+          status: invoice.status,
+          created,
+        },
+      });
+    }
+
+    // Report link (ensure a token exists, same shape as /send).
+    const token = project.report_token || crypto.randomBytes(16).toString('hex');
+    if (!project.report_token) {
+      await db('projects').where({ id: project.id }).update({ report_token: token, updated_at: db.fn.now() });
+    }
+    const refreshed = await db('projects').where({ id: project.id }).first();
+    const reportPath = await projectReportPathForProject(db, refreshed, customer);
+    const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
+
+    // Pay link (short URL, same shape as invoice-email).
+    const domain = publicPortalUrl();
+    const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
+      kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+
+    // Build both PDFs.
+    const attachments = [];
+    const wdoAttachment = await buildWdoPdfAttachment(refreshed, customer);
+    if (wdoAttachment) attachments.push(wdoAttachment);
+    try {
+      const invoiceForPdf = { ...invoice, customer, line_items: normalizeInvoiceLineItemsForPdf(invoice.line_items) };
+      const invoiceBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
+      attachments.push(pdfEmailAttachment(`invoice-${invoice.invoice_number}.pdf`, invoiceBuffer));
+    } catch (err) {
+      logger.error(`[projects] invoice PDF build failed for ${invoice.invoice_number}: ${err.message}`);
+    }
+
+    const typeLabel = getProjectType(project.project_type)?.label || 'Report';
+    const firstName = customer.first_name || 'there';
+    const channels = {};
+
+    // ONE SMS — report link + pay link.
+    const normalized = normalizeUsPhone(customer.phone);
+    if (normalized) {
+      try {
+        const baseBody = await renderRequiredSmsTemplate('project_report_ready', {
+          first_name: firstName,
+          project_type: typeLabel,
+          report_url: reportUrl,
+        }, { workflow: 'project_report_with_invoice', entity_type: 'project', entity_id: project.id });
+        const smsBody = `${baseBody}\n\nInvoice ${invoice.invoice_number} ($${Number(invoice.total).toFixed(2)}): ${payUrl}`;
+        const result = await sendCustomerMessage({
+          to: normalized,
+          body: smsBody,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'support_resolution',
+          customerId: customer.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'admin_project_report_with_invoice',
+          metadata: { original_message_type: 'project_report_with_invoice', project_id: project.id, invoice_id: invoice.id },
+        });
+        channels.sms = result.sent ? { ok: true } : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+      } catch (e) {
+        logger.error(`[projects] combined send sms failed: ${e.message}`);
+        channels.sms = { ok: false, error: e.message };
+      }
+    } else {
+      channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
+    }
+
+    // ONE email — both PDFs attached.
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+    if (emailRecipient.email) {
+      try {
+        const result = await ProjectEmail.sendProjectReportWithInvoice({
+          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+        });
+        channels.email = result.ok
+          ? { ok: true, messageId: result.messageId || null }
+          : { ok: false, error: projectEmailFailureMessage(result) };
+      } catch (e) {
+        logger.error(`[projects] combined send email failed: ${e.message}`);
+        channels.email = { ok: false, error: e.message };
+      }
+    } else {
+      channels.email = { ok: false, error: 'No email on file' };
+    }
+
+    const delivered = channels.sms?.ok || channels.email?.ok;
+
+    // Transition the invoice to 'sent' (it was just delivered alongside the
+    // report). We update status directly rather than calling
+    // InvoiceService.sendInvoice so the invoice's own SMS path doesn't fire a
+    // second, duplicate text.
+    if (delivered && invoice.status === 'draft') {
+      await db('invoices').where({ id: invoice.id }).update({ status: 'sent', sent_at: db.fn.now(), updated_at: db.fn.now() });
+    }
+
+    if (delivered) {
+      await db('projects').where({ id: project.id }).update({
+        status: 'sent',
+        sent_at: project.sent_at || db.fn.now(),
+        last_delivery_at: db.fn.now(),
+        delivery_channels: channels,
+        delivery_status: (channels.sms?.ok && channels.email?.ok) ? 'sent' : 'partial',
+        updated_at: db.fn.now(),
+      });
+    }
+
+    await logProjectActivity(
+      req, project,
+      delivered ? 'project_report_with_invoice_sent' : 'project_report_with_invoice_failed',
+      delivered
+        ? `Report + invoice sent: ${typeLabel} (${invoice.invoice_number})`
+        : `Report + invoice delivery failed: ${typeLabel}`,
+      { report_token: token, invoice_id: invoice.id, invoice_created: created, channels,
+        ...(hasReadinessOverride ? { readiness_override: { reason: overrideReason, missing: readiness.missing } } : {}) },
+    );
+
+    res.json({
+      project_id: project.id,
+      invoice: { id: invoice.id, invoice_number: invoice.invoice_number, total: invoice.total, created },
+      report_url: reportPath || `/report/project/${token}`,
+      pay_url: payUrl,
+      channels,
+      sent: delivered,
+    });
+  } catch (err) {
+    if (err?.message === 'Invoice not found for this customer') {
+      return res.status(404).json({ error: err.message });
+    }
+    next(err);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // POST /api/admin/projects/:id/send-prep-guide — send mapped prep email

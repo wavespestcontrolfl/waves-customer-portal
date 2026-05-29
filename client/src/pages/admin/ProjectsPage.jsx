@@ -1562,6 +1562,75 @@ function ProjectDetail({
     }
   }
 
+  async function handleSendWithInvoice() {
+    if (!canAdminActions) {
+      setError("Admin access required to send project reports.");
+      return;
+    }
+    const readiness = evaluateProjectReadiness({
+      project: { ...project, title: editTitle },
+      typeCfg,
+      findings: editFindings,
+      recommendations: editRecs,
+      projectDate: editProjectDate,
+    });
+    let overrideReason = "";
+    if (readiness.missing.length) {
+      const lines = readiness.missing.map((item) => `Missing: ${item.label}`);
+      if (!confirm(`This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`)) return;
+      overrideReason =
+        window.prompt("Enter the admin override reason for sending this incomplete report:")?.trim() || "";
+      if (!overrideReason) return;
+    }
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await saveDirtyProjectEdits("Could not save project before sending");
+      // dry_run first so the operator can confirm the invoice amount.
+      const preview = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
+        method: "POST",
+        body: { dry_run: true, ...(overrideReason ? { override_reason: overrideReason } : {}) },
+      });
+      const pv = await readJsonResponse(preview, "Could not prepare invoice");
+      const inv = pv.invoice || {};
+      const amount = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : "the amount shown";
+      const verb = inv.created ? "Create and send" : "Send";
+      if (
+        !confirm(
+          `${verb} invoice ${inv.invoice_number || ""} for ${amount} together with the WDO report?\n\n` +
+            `The customer gets one email (FDACS-13645 report PDF + invoice PDF) and one text (report + pay links).`,
+        )
+      ) {
+        setSaving(false);
+        return;
+      }
+      const r = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
+        method: "POST",
+        body: {
+          invoice_id: inv.id,
+          ...(overrideReason ? { override_reason: overrideReason } : {}),
+        },
+      });
+      const d = await readJsonResponse(r, "Could not send report + invoice");
+      if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);
+      setDelivery(d.channels || null);
+      if (d.sent === false) {
+        setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
+      } else {
+        setNotice(
+          `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
+        );
+      }
+      await load();
+      onChanged?.();
+    } catch (e) {
+      setError(e.message || "Could not send report + invoice");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function handleSendPrepGuide() {
     if (!canAdminActions) {
       setError("Admin access required to send prep guides.");
@@ -2595,6 +2664,19 @@ function ProjectDetail({
               Send report
             </button>
           )}
+        {canAdminActions &&
+          project.project_type === WDO_TYPE &&
+          project.status !== "closed" && (
+            <button
+              type="button"
+              onClick={handleSendWithInvoice}
+              disabled={saving}
+              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+              title="Send the filled FDACS-13645 report and an invoice together via email + text"
+            >
+              Send report + invoice
+            </button>
+          )}
       </div>{" "}
     </div>
   );
@@ -2605,6 +2687,8 @@ const PROJECT_ACTIVITY_LABELS = {
   project_updated: "Updated",
   project_report_sent: "Sent",
   project_report_resent: "Resent",
+  project_report_with_invoice_sent: "Report + invoice sent",
+  project_report_with_invoice_failed: "Report + invoice failed",
   project_prep_guide_sent: "Prep guide sent",
   project_prep_guide_failed: "Prep guide failed",
   project_portal_invite_sent: "Portal invite sent",
