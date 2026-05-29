@@ -502,12 +502,37 @@ function initScheduledJobs() {
   cron.schedule('30 5 * * *', async () => {
     try {
       const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+      const { classifyFreshness } = require('./event-freshness');
       const etMidnightToday = parseETDateTime(`${etDateString()}T00:00:00`);
-      const count = await db('events_raw')
+
+      // (a) Expire past events.
+      const expired = await db('events_raw')
         .whereNot('freshness_status', 'expired')
         .whereRaw('COALESCE(end_at, start_at) < ?', [etMidnightToday])
         .update({ freshness_status: 'expired', freshness_score: 0, updated_at: new Date() });
-      if (count > 0) logger.info(`[event-expiry] Marked ${count} past event(s) expired`);
+
+      // (b) Revive: a feed re-pull can move an already-expired row's date back
+      //     into the future — the onConflict().merge() paths update start_at/end_at
+      //     but not freshness_status, so the renewed event would stay permanently
+      //     excluded by the whereNotIn(['expired', ...]) filters. Recompute
+      //     freshness for those rows so they re-enter the digest. This keeps the
+      //     sweep self-correcting without touching the ingestion merges or the
+      //     (event_type-gated) normalizer.
+      const revivable = await db('events_raw')
+        .where('freshness_status', 'expired')
+        .whereRaw('COALESCE(end_at, start_at) >= ?', [etMidnightToday])
+        .select('id', 'event_type', 'times_featured', 'start_at', 'end_at');
+      let revived = 0;
+      for (const row of revivable) {
+        const { freshness_status, freshness_score } = classifyFreshness(row);
+        if (freshness_status !== 'expired') {
+          await db('events_raw').where({ id: row.id })
+            .update({ freshness_status, freshness_score, updated_at: new Date() });
+          revived += 1;
+        }
+      }
+
+      if (expired > 0 || revived > 0) logger.info(`[event-expiry] expired ${expired} past event(s), revived ${revived} re-dated event(s)`);
     } catch (err) {
       logger.error(`[event-expiry] failed: ${err.message}`);
     }
