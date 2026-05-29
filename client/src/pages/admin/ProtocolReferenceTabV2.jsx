@@ -117,13 +117,8 @@ function CurrentVisitCardV2({ visit, trackName }) {
   if (!visit) return null;
   const primaryProducts = parseProductLines(visit.primary);
   const secondaryProducts = parseProductLines(visit.secondary);
-  const materialCost = parseFloat(visit.material_cost);
   const laborCost = parseFloat(visit.labor_cost);
-  const hasNumericCost =
-    Number.isFinite(materialCost) || Number.isFinite(laborCost);
-  const totalCost =
-    (Number.isFinite(materialCost) ? materialCost : 0) +
-    (Number.isFinite(laborCost) ? laborCost : 0);
+  const hasNumericCost = Number.isFinite(laborCost);
   const costLabel = (value) =>
     Number.isFinite(parseFloat(value)) ? `$${value}` : value || "0";
 
@@ -228,10 +223,13 @@ function CurrentVisitCardV2({ visit, trackName }) {
         <div className="flex gap-3 flex-wrap items-center px-3 py-2 bg-zinc-50 rounded border border-hairline border-zinc-200">
           {" "}
           <div className="text-12 text-ink-tertiary">
-            Materials:{" "}
+            Legacy Mat:{" "}
             <span className="font-mono u-nums text-ink-primary font-medium">
               {costLabel(visit.material_cost)}
             </span>{" "}
+            <span className="text-10 text-ink-tertiary ml-1">
+              reference
+            </span>
           </div>{" "}
           <div className="text-12 text-ink-tertiary">
             Labor:{" "}
@@ -241,7 +239,7 @@ function CurrentVisitCardV2({ visit, trackName }) {
           </div>
           {hasNumericCost && (
             <div className="ml-auto text-13 text-ink-primary font-medium font-mono u-nums">
-              Total: ${totalCost.toFixed(2)}
+              Labor: ${laborCost.toFixed(2)}
             </div>
           )}
         </div>
@@ -966,7 +964,7 @@ export default function ProtocolReferenceTabV2() {
                         { k: "Month", cls: "" },
                         { k: "Primary Applications", cls: "min-w-[250px]" },
                         { k: "Secondary / Conditional", cls: "min-w-[200px]" },
-                        { k: "Mat$", cls: "text-right whitespace-nowrap" },
+                        { k: "Legacy Mat$", cls: "text-right whitespace-nowrap" },
                         { k: "Lab$", cls: "text-right whitespace-nowrap" },
                         { k: "Tiers", cls: "" },
                         { k: "Notes / SOP", cls: "min-w-[200px]" },
