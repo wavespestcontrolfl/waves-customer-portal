@@ -293,8 +293,12 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(preSlab.price).toBe(preSlab.basePrice);
   });
 
-  test('keeps one-time pest floor as a final customer-facing floor', () => {
-    expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));');
+  test('one-time pest mirrors the server (quarterly base + $99) × 1.20 premium, floored at $199', () => {
+    // Must match server/services/pricing-engine ONE_TIME.pest model (no more × 1.75).
+    expect(source).toContain('const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));');
+    expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round((quarterlyBase + 99) * 1.20))));');
+    // The legacy 1.75× one-time multiplier must be gone.
+    expect(source).not.toContain('Math.round(bpp * 1.75)');
   });
 
   test('bed bug fallback no longer treats invalid methods as quote-both', () => {
