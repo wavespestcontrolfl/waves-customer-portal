@@ -617,19 +617,27 @@ async function markEventsFeatured(send) {
   if (!Array.isArray(ids) || ids.length === 0) return;
 
   const { classifyFreshness } = require('./event-freshness');
-  const rows = await db('events_raw')
-    .whereIn('id', ids)
-    .select('id', 'event_type', 'times_featured', 'start_at', 'end_at');
 
-  for (const r of rows) {
-    const nextFeatured = (r.times_featured || 0) + 1;
-    const { freshness_status, freshness_score } = classifyFreshness({ ...r, times_featured: nextFeatured });
-    await db('events_raw').where({ id: r.id }).update({
-      times_featured: nextFeatured,
-      last_featured_at: new Date(),
-      freshness_status,
-      freshness_score,
-      updated_at: new Date(),
+  // Lock + read + write each event row inside a transaction (SELECT ... FOR
+  // UPDATE) so two sends that ship the same event can't both read the same
+  // times_featured and write back the same value — which would lose an
+  // increment and decay the recurring-series gate too slowly. The row lock
+  // serializes them and keeps the recomputed freshness consistent with the
+  // final count. One row per transaction (≤12 events per send).
+  for (const id of ids) {
+    await db.transaction(async (trx) => {
+      const row = await trx('events_raw').where({ id }).forUpdate()
+        .first('id', 'event_type', 'times_featured', 'start_at', 'end_at');
+      if (!row) return;
+      const nextFeatured = (row.times_featured || 0) + 1;
+      const { freshness_status, freshness_score } = classifyFreshness({ ...row, times_featured: nextFeatured });
+      await trx('events_raw').where({ id }).update({
+        times_featured: nextFeatured,
+        last_featured_at: new Date(),
+        freshness_status,
+        freshness_score,
+        updated_at: new Date(),
+      });
     });
   }
 }

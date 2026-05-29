@@ -40,7 +40,7 @@ const { sendCampaign, resumeCampaign } = require('../services/newsletter-sender'
 function chain({ first, result, returning, count, updated, onUpdate, onWhereIn } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
-   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join']
+   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.whereIn = jest.fn((...args) => {
     if (onWhereIn) onWhereIn(...args);
@@ -648,20 +648,27 @@ describe('sendCampaign — calendar lifecycle + times_featured on send (PR D)', 
 describe('markEventsFeatured (PR D)', () => {
   const { markEventsFeatured } = require('../services/newsletter-sender');
 
-  test('increments times_featured + recomputes freshness for each shipped event', async () => {
+  test('atomically increments times_featured + recomputes freshness under a row lock', async () => {
     const updates = [];
+    // Per event: SELECT ... FOR UPDATE (.first) then the UPDATE, both via trx.
     const eventsRaw = [
-      chain({ result: [{ id: 'e1', event_type: 'recurring_series', times_featured: 0, start_at: null, end_at: null }] }),
+      chain({ first: { id: 'e1', event_type: 'recurring_series', times_featured: 0, start_at: null, end_at: null } }),
       chain({ updated: 1, onUpdate: (p) => updates.push(p) }),
     ];
-    db.mockImplementation((table) => {
+    const trx = jest.fn((table) => {
       if (table === 'events_raw') {
         if (!eventsRaw.length) throw new Error('events_raw queue exhausted');
         return eventsRaw.shift();
       }
       throw new Error(`unexpected ${table}`);
     });
+    db.transaction = jest.fn(async (cb) => cb(trx));
+
     await markEventsFeatured({ event_ids: ['e1'] });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    // The read locks the row (forUpdate) before the write — no lost increment.
+    expect(eventsRaw.length).toBe(0);
     expect(updates).toHaveLength(1);
     expect(updates[0].times_featured).toBe(1);
     // recurring_series at times_featured=1 → still fresh_series_launch, score 90-10
