@@ -863,9 +863,9 @@ function SmsTab() {
   const handleUpload = async (fileList) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
-    const remaining = 5 - attachments.length;
+    const remaining = 10 - attachments.length;
     if (remaining <= 0) {
-      alert("Max 5 attachments per message");
+      alert("Max 10 attachments per message");
       return;
     }
     const queue = files.slice(0, remaining);
