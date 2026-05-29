@@ -66,3 +66,51 @@ describe('ai-visibility-gate', () => {
     expect(result.findings.some((item) => /FAQPage/.test(item.code))).toBe(false);
   });
 });
+
+describe('ai-visibility-gate.evaluateStatic (pre-publish subset)', () => {
+  test('passes a good draft and ignores live-only checks (no inbound links / robots.txt)', () => {
+    const result = Gate.evaluateStatic({
+      url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+      html: GOOD_HTML,
+      // deliberately NO robotsTxt and NO internalInboundLinks — the subset
+      // must not block a draft that simply isn't live yet.
+    });
+    expect(result.passed).toBe(true);
+    expect(result.summary.p0).toBe(0);
+    expect(result.findings.some((f) => f.code === 'P0_NO_CRAWLABLE_INBOUND_INTERNAL_LINK')).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P0_BOT_BLOCKED_BY_ROBOTS')).toBe(false);
+  });
+
+  test('blocks a noindex draft', () => {
+    const html = GOOD_HTML.replace('<head>', '<head><meta name="robots" content="noindex, nofollow">');
+    const result = Gate.evaluateStatic({ url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/', html });
+    expect(result.passed).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P0_PAGE_NOINDEX')).toBe(true);
+  });
+
+  test('blocks a canonical that points elsewhere', () => {
+    const result = Gate.evaluateStatic({
+      url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+      html: GOOD_HTML,
+      canonicalUrl: 'https://www.wavespestcontrol.com/some-other-page/',
+    });
+    expect(result.passed).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P0_CANONICAL_POINTS_ELSEWHERE')).toBe(true);
+  });
+
+  test('blocks an empty / unrendered body', () => {
+    const result = Gate.evaluateStatic({ url: 'https://www.wavespestcontrol.com/x/', html: '<html><body></body></html>' });
+    expect(result.passed).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P0_MAIN_CONTENT_NOT_RENDERED')).toBe(true);
+  });
+
+  test('blocks schema describing hidden content', () => {
+    const result = Gate.evaluateStatic({
+      url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+      html: GOOD_HTML,
+      schemaMatchesVisibleContent: false,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P0_SCHEMA_DESCRIBES_HIDDEN_CONTENT')).toBe(true);
+  });
+});

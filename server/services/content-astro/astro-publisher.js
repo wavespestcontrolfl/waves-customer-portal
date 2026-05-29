@@ -637,6 +637,23 @@ async function getLiveFrontmatter(targetUrlOrPath) {
   return fm.parse(existing.content).data || {};
 }
 
+/**
+ * Load the live page BODY (markdown after the frontmatter) for a refresh
+ * improvement comparison. Returns { body, word_count } on success, or NULL
+ * when the target can't be resolved or the file can't be read — callers fail
+ * closed (the content-quality gate's improvement_over_prior check refuses to
+ * publish a refresh without a prior version to compare against).
+ */
+async function loadExistingPageBody(targetUrlOrPath) {
+  const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (!filePath) return null;
+  const existing = await gh.getFile(filePath);
+  if (!existing) return null;
+  const body = fm.parse(existing.content).content || '';
+  const word_count = body.split(/\s+/).filter(Boolean).length;
+  return { body, word_count };
+}
+
 function canPublishRefresh(draft, brief = {}) {
   const actionType = String(brief.action_type || '').trim();
   return !!(
@@ -1190,6 +1207,7 @@ module.exports = {
   publishMetadataRewrite,
   publishRefresh,
   getLiveFrontmatter,
+  loadExistingPageBody,
   canPublishDraftBrief,
   canPublishMetadataRewrite,
   canPublishRefresh,

@@ -143,3 +143,21 @@ describe('getLiveFrontmatter', () => {
     expect(r.domains).toEqual(['veniceflpestcontrol.com']);
   });
 });
+
+describe('loadExistingPageBody', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('returns null when the file is not found (callers fail closed)', async () => {
+    gh.getFile.mockResolvedValue(null);
+    const r = await pub.loadExistingPageBody('/pest-control-venice-fl/');
+    expect(r).toBeNull();
+  });
+
+  test('returns the body and word_count of the live page', async () => {
+    gh.getFile.mockResolvedValue({ content: EXISTING, sha: 's' });
+    const r = await pub.loadExistingPageBody('/pest-control-sarasota-fl/');
+    expect(r).not.toBeNull();
+    expect(r.body).toContain('Old body content about Sarasota pest control.');
+    expect(r.word_count).toBe(7);
+  });
+});
