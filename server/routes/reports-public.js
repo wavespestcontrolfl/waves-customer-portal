@@ -558,8 +558,9 @@ router.get('/:token', async (req, res, next) => {
     return res.status(404).json({ error: 'Report not found' });
   }
   try {
-    // PDF includes a customer address header, so this query keeps address fields.
-    // The /data JSON endpoint below intentionally does NOT return address.
+    // PDF includes a customer address header, so this query keeps address
+    // fields. The token-gated /data view shows the address too (see the
+    // /:token/data handler) — it's the customer's own service document.
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')

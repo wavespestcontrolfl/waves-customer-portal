@@ -1177,12 +1177,12 @@ async function loadLinkedLawnAssessment(service, knex = db) {
     : null;
   if (byService) return byService;
 
-  return knex('lawn_assessments')
-    .where(baseCriteria)
-    .orderBy('service_date', 'desc')
-    .orderBy('created_at', 'desc')
-    .first()
-    .catch(() => null);
+  // Intentionally NO customer-wide fallback. A visit only shows the Lawn
+  // Intelligence card for an assessment linked to THIS visit (by service
+  // record or scheduled service). Falling back to the customer's most-recent
+  // assessment would label last month's scores as today's result, so when the
+  // visit has no assessment of its own we show nothing.
+  return null;
 }
 
 async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
@@ -1727,6 +1727,7 @@ module.exports = {
   serviceDisplayName,
   treatmentScope,
   buildLawnAssessmentReportData,
+  loadLinkedLawnAssessment,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,
   defaultGeometry,
