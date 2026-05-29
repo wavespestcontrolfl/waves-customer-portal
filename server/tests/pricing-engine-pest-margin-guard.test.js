@@ -122,8 +122,9 @@ describe('one-time pest anchors on the quarterly rate', () => {
     const recurring = priceOneTimePest(small, { isRecurringCustomer: true });
     const visitOne = recurring.quarterlyPerApp + constants.PEST.initialFee;
     expect(recurring.recurringIncentiveClampApplied).toBe(true);
-    expect(recurring.price).toBe(visitOne);
-    expect(recurring.price).toBeGreaterThanOrEqual(visitOne);
+    // Strictly above recurring visit-1 (whole-dollar prices → +1 minimal margin).
+    expect(recurring.price).toBe(visitOne + 1);
+    expect(recurring.price).toBeGreaterThan(visitOne);
 
     // Non-recurring small home is unaffected (no perk to clamp).
     const nonRecurring = priceOneTimePest(small, { isRecurringCustomer: false });

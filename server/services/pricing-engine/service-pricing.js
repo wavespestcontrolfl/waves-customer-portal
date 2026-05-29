@@ -3620,13 +3620,14 @@ function priceOneTimePest(property, options = {}) {
   // Recurring-incentive clamp. The 15% loyalty perk is applied AFTER the floor,
   // so on small homes (where the multiple sits near the floor) it could push a
   // one-time visit to/below a recurring customer's visit-1 cost (quarterly +
-  // $99 setup) — making a one-off cheaper than committing. Never let that
-  // happen: one-time stays at least the recurring visit-1 cost. Only binds for
-  // recurring customers on small homes with no urgency surcharge; for everyone
-  // else the multiple already clears it (guaranteed by the db-bridge invariant).
+  // $99 setup) — making a one-off no more expensive than committing. Never let
+  // that happen: one-time stays STRICTLY above recurring visit-1 (prices are
+  // whole dollars, so +1 is the minimal strict margin). Only binds for recurring
+  // customers on small homes with no urgency surcharge; for everyone else the
+  // multiple already clears it (guaranteed by the db-bridge invariant).
   const recurringVisitOneCost = Math.round((base + (PEST.initialFee || 0)) * 100) / 100;
-  const recurringIncentiveClampApplied = price < recurringVisitOneCost;
-  if (recurringIncentiveClampApplied) price = recurringVisitOneCost;
+  const recurringIncentiveClampApplied = price <= recurringVisitOneCost;
+  if (recurringIncentiveClampApplied) price = recurringVisitOneCost + 1;
 
   return {
     service: 'one_time_pest',

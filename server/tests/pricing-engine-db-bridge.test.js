@@ -222,7 +222,7 @@ describe('pricing engine DB bridge', () => {
     ]));
   });
 
-  const INCENTIVE_ERROR = 'ONE_TIME.pest floor/multiplier too low: one-time must exceed recurring visit-1 (PEST.floor + PEST.initialFee) for every property';
+  const INCENTIVE_ERROR = 'ONE_TIME.pest floor/multiplier too low: one-time (after dollar rounding) must stay strictly above recurring visit-1 (PEST.floor + PEST.initialFee) for every property';
 
   test('rejects a one-time pest multiplier too low to clear recurring visit-1 (default floor)', () => {
     for (const badMultiplier of [1.99, 1.2, 1, 0.8]) {
@@ -248,6 +248,17 @@ describe('pricing engine DB bridge', () => {
     const ok = JSON.parse(JSON.stringify(constants));
     ok.ONE_TIME.pest = { floor: 300, multiplier: 1.8 };
     expect(validatePestPricingConfig(ok)).toEqual(expect.objectContaining({ valid: true }));
+  });
+
+  test('rejects a config that only ties after dollar rounding (Codex rounding edge)', () => {
+    // {floor:199, multiplier:1.9901}: a $100 quarterly base rounds to
+    // round(100*1.9901)=$199, exactly recurring visit-1 ($100+$99) — not
+    // strictly above. The unrounded math passes; the rounding-aware scan rejects.
+    const snapshot = JSON.parse(JSON.stringify(constants));
+    snapshot.ONE_TIME.pest = { floor: 199, multiplier: 1.9901 };
+    const result = validatePestPricingConfig(snapshot);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(INCENTIVE_ERROR);
   });
 
   test('allows pest floor above base (raise-the-minimum config is valid)', () => {

@@ -164,17 +164,26 @@ function validatePestPricingConfig(snapshot = constants) {
   // customer's visit-1 cost (PEST.floor quarterly + PEST.initialFee setup) for
   // every property — otherwise a one-off visit is no more expensive than
   // committing, and the incentive collapses. Both `multiplier` and `floor` are
-  // admin-editable, so validate them together, not in isolation. The worst case
-  // (minimum gap) sits at the floor↔multiple transition, q* = max(PEST.floor,
-  // otFloor / multiplier); checking that point covers the whole property range.
+  // admin-editable, so validate them together. Checked over the SAME dollar
+  // rounding the pricer uses (`max(otFloor, round(q × multiplier))`), because a
+  // near-boundary config can pass the unrounded math yet round down to a tie.
+  // The minimum gap sits around the floor↔multiple transition (q* = otFloor /
+  // multiplier); the floor regime decreases toward it and the multiple regime
+  // increases away from it, so scanning [PEST.floor, ceil(q*)+2] covers the
+  // whole reachable range — large quarterly bases only widen the gap.
   const otMult = Number(ONE_TIME.pest?.multiplier);
   const otFloor = Number(ONE_TIME.pest?.floor);
   if (isPositiveNumber(otMult) && isPositiveNumber(otFloor) && isPositiveNumber(PEST.floor) && isNonNegativeNumber(PEST.initialFee)) {
-    const worstQuarterly = Math.max(Number(PEST.floor), otFloor / otMult);
-    const oneTimeAtWorst = Math.max(otFloor, worstQuarterly * otMult);
-    const recurringVisitOne = worstQuarterly + Number(PEST.initialFee);
-    if (!(oneTimeAtWorst > recurringVisitOne)) {
-      errors.push('ONE_TIME.pest floor/multiplier too low: one-time must exceed recurring visit-1 (PEST.floor + PEST.initialFee) for every property');
+    const qMin = Math.floor(Number(PEST.floor));
+    const qMax = Math.ceil(Math.max(Number(PEST.floor), otFloor / otMult)) + 2;
+    const setup = Number(PEST.initialFee);
+    let incentiveViolated = false;
+    for (let q = qMin; q <= qMax; q++) {
+      const oneTime = Math.max(otFloor, Math.round(q * otMult));
+      if (!(oneTime > q + setup)) { incentiveViolated = true; break; }
+    }
+    if (incentiveViolated) {
+      errors.push('ONE_TIME.pest floor/multiplier too low: one-time (after dollar rounding) must stay strictly above recurring visit-1 (PEST.floor + PEST.initialFee) for every property');
     }
   }
 
