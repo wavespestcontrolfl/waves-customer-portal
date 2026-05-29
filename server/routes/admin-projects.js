@@ -958,12 +958,18 @@ router.get('/', async (req, res, next) => {
       .groupBy('project_id');
     const photoMap = Object.fromEntries(photoCounts.map(x => [x.project_id, Number(x.n)]));
 
-    const projects = await Promise.all(rows.map(async (r) => ({
-        ...r,
+    const projects = await Promise.all(rows.map(async (r) => {
+      // Drop the heavy signature blob (a base64 data URL up to 2MB) from list
+      // payloads — expose only a boolean. The detail route returns metadata.
+      const { wdo_signature, ...rest } = r;
+      return {
+        ...rest,
+        wdo_signed: !!wdo_signature,
         customer_name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
         report_url: r.report_token ? await projectReportPathForProject(db, r, r) : null,
         photo_count: photoMap[r.id] || 0,
-      })));
+      };
+    }));
 
     res.json({ projects });
   } catch (err) { next(err); }
@@ -1825,7 +1831,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const previousInvoiceStatus = invoice.status;
     const claimedRows = await db('invoices')
       .where({ id: invoice.id })
-      .whereIn('status', ['draft', 'scheduled', 'sent'])
+      // Mirror InvoiceService SEND_CLAIMABLE_STATUSES so resending a report for
+      // an opened/overdue invoice works (getByToken flips sent → viewed once
+      // the customer opens the pay link).
+      .whereIn('status', ['draft', 'scheduled', 'sent', 'viewed', 'overdue'])
       .update({ status: 'sending', updated_at: db.fn.now() });
     if (!claimedRows) {
       return res.status(409).json({ error: 'Invoice send already in progress', invoice_id: invoice.id });
