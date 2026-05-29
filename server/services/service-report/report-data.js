@@ -5,6 +5,7 @@ const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { buildNoActivityFinding } = require('./no-activity-finding');
+const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -1117,15 +1118,13 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
       customer_id: customerId,
       snapshot_id: snapshotId,
       domain: 'lawn',
-      customer_visible: true,
     })
     .orderBy('created_at', 'asc')
     .catch(() => []);
 
   const priorityRank = { high: 1, medium: 2, low: 3 };
   return rows
-    .filter((row) => ['approved', 'customer_visible', 'accepted'].includes(row.status))
-    .filter((row) => row.approved_at || (row.type === 'customer_education' && row.requires_human_approval === false))
+    .filter(isCardCustomerSurfaceable)
     .sort((a, b) => (priorityRank[a.priority] || 4) - (priorityRank[b.priority] || 4))
     .slice(0, 3)
     .map(formatApprovedLawnRecommendation)

@@ -11,6 +11,9 @@ const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { isCardCustomerSurfaceable } = require('../services/lawn-recommendation-visibility');
+
+const CARD_PRIORITY_RANK = { high: 1, medium: 2, low: 3 };
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -231,30 +234,19 @@ async function getCustomerVisibleSnapshotData(customerId, latestAssessmentId) {
 
   if (!snapshot) return { latestSnapshot: null, recommendationCards: [] };
 
-  const cards = await db('property_recommendation_cards')
+  const rows = await db('property_recommendation_cards')
     .where({
       snapshot_id: snapshot.id,
       customer_id: customerId,
       domain: 'lawn',
-      customer_visible: true,
     })
-    .whereIn('status', ['approved', 'customer_visible', 'accepted'])
-    .where(function () {
-      this.whereNotNull('approved_at')
-        .orWhere(function () {
-          this.where({ type: 'customer_education', requires_human_approval: false });
-        });
-    })
-    .orderByRaw(`
-      CASE priority
-        WHEN 'high' THEN 1
-        WHEN 'medium' THEN 2
-        ELSE 3
-      END
-    `)
     .orderBy('created_at', 'asc')
-    .limit(3)
     .catch(() => []);
+
+  const cards = rows
+    .filter(isCardCustomerSurfaceable)
+    .sort((a, b) => (CARD_PRIORITY_RANK[a.priority] || 4) - (CARD_PRIORITY_RANK[b.priority] || 4))
+    .slice(0, 3);
 
   return {
     latestSnapshot: formatCustomerSnapshot(snapshot),
@@ -278,25 +270,18 @@ async function getVisibleSnapshotForCustomer(customerId, snapshotId) {
 
 async function getVisibleRecommendationForCustomer(customerId, recommendationId, snapshotId) {
   if (!customerId || !recommendationId) return null;
-  return db('property_recommendation_cards')
+  const card = await db('property_recommendation_cards')
     .where({
       id: recommendationId,
       customer_id: customerId,
       domain: 'lawn',
-      customer_visible: true,
     })
     .modify((query) => {
       if (snapshotId) query.where({ snapshot_id: snapshotId });
     })
-    .whereIn('status', ['approved', 'customer_visible', 'accepted'])
-    .where(function () {
-      this.whereNotNull('approved_at')
-        .orWhere(function () {
-          this.where({ type: 'customer_education', requires_human_approval: false });
-        });
-    })
     .first()
     .catch(() => null);
+  return isCardCustomerSurfaceable(card) ? card : null;
 }
 
 // =========================================================================

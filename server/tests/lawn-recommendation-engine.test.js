@@ -83,7 +83,11 @@ describe('lawn recommendation engine', () => {
     expect(card).toBeNull();
   });
 
-  test('education cards can be low-risk but still start hidden until a route approves visibility', () => {
+  // Education cards are BORN hidden (customer_visible:false) so snapshot
+  // supersede can collapse regenerated duplicates; the low-risk ones
+  // (requires_human_approval:false) auto-surface at read time via
+  // isCardCustomerSurfaceable, not by flipping this stored row.
+  test('education cards are born hidden + low-risk (auto-surface happens at read time)', () => {
     const card = RecommendationEngine.evaluateCustomerEducation({
       assessment: { stress_flags: JSON.stringify({ drought_stress: true }) },
       snapshot: {
