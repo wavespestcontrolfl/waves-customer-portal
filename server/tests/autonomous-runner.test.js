@@ -601,6 +601,7 @@ function loadRunnerWith({
   qualityGate = null,
   uniquenessGate = null,
   seoCompletionGate = { evaluate: jest.fn().mockReturnValue({ passed: true, score: 100, summary: { p0: 0, p1: 0, p2: 0 }, findings: [] }) },
+  visibilityGate = { evaluateStatic: jest.fn().mockReturnValue({ passed: true, findings: [], summary: { p0: 0, p1: 0, p2: 0, p3: 0, needs_review: false } }) },
   publisher = null,
   indexNow = null,
   linkPlanner = null,
@@ -624,6 +625,7 @@ function loadRunnerWith({
   if (qualityGate) jest.doMock('../services/content/content-quality-gate', () => qualityGate);
   if (uniquenessGate) jest.doMock('../services/content/uniqueness-gate', () => uniquenessGate);
   if (seoCompletionGate) jest.doMock('../services/content/seo-completion-gate', () => seoCompletionGate);
+  if (visibilityGate) jest.doMock('../services/content/ai-visibility-gate', () => visibilityGate);
   if (publisher) jest.doMock('../services/content-astro/astro-publisher', () => publisher);
   if (indexNow) jest.doMock('../services/seo/indexnow-submit', () => indexNow);
   if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);

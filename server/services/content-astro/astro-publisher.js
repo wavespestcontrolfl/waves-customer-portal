@@ -32,6 +32,14 @@ const { normalizeSpokeSites } = require('./spoke-sites');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const ASTRO_HERO_DIR = 'public/images/blog';
+
+// Only blog posts are governed by the blog frontmatter schema. Service/location
+// pages live elsewhere and carry their own fields (trackingNumberKey, cityPhone,
+// pageType, …) that the blog schema's additionalProperties:false would reject, so
+// they must NOT be blog-schema-validated on refresh/metadata rewrite.
+function isBlogTarget(filePath) {
+  return typeof filePath === 'string' && filePath.startsWith(`${ASTRO_BLOG_DIR}/`);
+}
 const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
@@ -450,6 +458,10 @@ async function publishMetadataRewrite(draft, brief = {}) {
     meta_description: String(draft.meta_description || '').trim(),
   };
 
+  // Blog targets must stay schema-valid after a metadata rewrite (e.g.
+  // meta_description 115-160). Non-blog pages use a different contract.
+  if (isBlogTarget(filePath)) assertValidBlogFrontmatter(nextFrontmatter);
+
   const markdown = fm.stringify(nextFrontmatter, parsed.content || '');
   if (markdown === existing.content) {
     return {
@@ -559,6 +571,13 @@ async function publishRefresh(draft, brief = {}) {
   const today = dateOnly(new Date());
   if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
   else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
+
+  // Blog targets must stay schema-valid after a refresh (meta_description
+  // 115-160, required fields intact). The merge only overrides fields that
+  // already exist on the live page, so a valid blog post stays valid unless the
+  // agent produced an out-of-bounds title/meta — which this gate now blocks
+  // before a PR is ever opened. Non-blog pages use a different contract.
+  if (isBlogTarget(filePath)) assertValidBlogFrontmatter(nextFrontmatter);
 
   const markdown = fm.stringify(nextFrontmatter, `${newBody}\n`);
 

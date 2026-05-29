@@ -161,3 +161,98 @@ describe('loadExistingPageBody', () => {
     expect(r.word_count).toBe(7);
   });
 });
+
+// A live blog post whose frontmatter is valid per packages/blog-schema/schema.json.
+const BLOG_FILE_PATH = 'src/content/blog/drywood-termite-signs-sarasota.md';
+const VALID_BLOG = [
+  '---',
+  'title: "Drywood Termite Signs in Sarasota Homes"',
+  'slug: "/blog/drywood-termite-signs-sarasota/"',
+  'meta_description: "Spot drywood termite signs in your Sarasota home early: frass piles, blistered paint, and discarded wings. Here is what Waves techs look for first."',
+  'primary_keyword: "drywood termite signs"',
+  'secondary_keywords:',
+  '  - "termite frass"',
+  'category: "termite"',
+  'post_type: "diagnostic"',
+  'service_areas_tag:',
+  '  - "Sarasota"',
+  'related_services: []',
+  'spoke_links: []',
+  'author:',
+  '  name: "Adam Benetti"',
+  '  role: "Lead Technician"',
+  '  bio_url: "/about/authors/adam-benetti"',
+  'technically_reviewed_by:',
+  '  name: "Adam Benetti"',
+  '  credential: "FDACS Certified Operator"',
+  '  bio_url: "/about/authors/adam-benetti"',
+  'fact_checked_by: "Waves Editorial"',
+  'published: "2026-05-01"',
+  'updated: "2026-05-01"',
+  'technically_reviewed: "2026-05-01"',
+  'fact_checked: "2026-05-01"',
+  'review_cadence: "quarterly"',
+  'reading_time_min: 5',
+  'hero_image:',
+  '  src: "/images/blog/drywood/hero.webp"',
+  '  alt: "Drywood termite frass on a windowsill"',
+  'og_image: "/images/blog/drywood/hero.webp"',
+  'canonical: "https://www.wavespestcontrol.com/blog/drywood-termite-signs-sarasota/"',
+  'schema_types:',
+  '  - "Article"',
+  'disclosure:',
+  '  type: "none"',
+  '---',
+  'Original drywood termite body content for the live blog post.',
+].join('\n');
+const BLOG_BRIEF = { action_type: 'refresh_existing_page', target_url: '/blog/drywood-termite-signs-sarasota/' };
+
+function blogRefreshDraft(overrides = {}) {
+  return {
+    type: 'draft',
+    file_path: BLOG_FILE_PATH,
+    page_url: '/blog/drywood-termite-signs-sarasota/',
+    frontmatter: { ...(overrides.frontmatter || {}) },
+    body: overrides.body || 'Refreshed drywood termite body content mentioning frass and discarded wings near window sills around Laurel Park.',
+  };
+}
+
+describe('publishRefresh blog-schema validation gate', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue({ content: VALID_BLOG, sha: 'blog-sha' });
+    gh.putFile.mockResolvedValue({ commit: { sha: 'new-sha' } });
+    gh.createPr.mockResolvedValue({ number: 88, html_url: 'https://github.com/x/y/pull/88', head: { sha: 'h' } });
+    gh.createIssueComment.mockResolvedValue({});
+  });
+
+  test('publishes a blog refresh when the merged frontmatter stays schema-valid', async () => {
+    const res = await pub.publishRefresh(blogRefreshDraft(), BLOG_BRIEF);
+    expect(res.status).toBe('pr_open');
+    expect(gh.putFile).toHaveBeenCalledTimes(1);
+    const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
+    expect(data.meta_description.length).toBeGreaterThanOrEqual(115);
+    expect(data.meta_description.length).toBeLessThanOrEqual(160);
+  });
+
+  test('blocks a blog refresh that pushes meta_description out of the 115-160 bound', async () => {
+    const tooLong = `Drywood termite signs ${'x'.repeat(180)}`;
+    await expect(
+      pub.publishRefresh(blogRefreshDraft({ frontmatter: { meta_description: tooLong } }), BLOG_BRIEF),
+    ).rejects.toMatchObject({ code: 'BLOG_FRONTMATTER_INVALID' });
+    expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('does NOT blog-validate a non-blog (service) page refresh', async () => {
+    // Service pages use metaDescription (not meta_description) and other fields
+    // the blog schema forbids; a too-short metaDescription must NOT be rejected.
+    gh.getFile.mockResolvedValue({ content: EXISTING, sha: 'svc-sha' });
+    const res = await pub.publishRefresh(
+      refreshDraft({ frontmatter: { metaDescription: 'short' }, body: 'Updated Sarasota service body near Laurel Park.' }),
+      BRIEF,
+    );
+    expect(res.status).toBe('pr_open');
+    expect(gh.putFile).toHaveBeenCalledTimes(1);
+  });
+});
