@@ -1708,26 +1708,28 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const firstName = customer.first_name || 'there';
     const channels = {};
 
-    // ONE SMS — report link + pay link.
+    // ONE SMS — report link + pay link. Because it carries the pay link, it
+    // goes through the canonical 'payment_link' policy (consent, kill switch,
+    // identity trust, invoiceId requirement). That policy forbids an exact
+    // price and caps at 2 segments, so the body omits the dollar amount (it's
+    // on the pay page / invoice PDF) and stays terse.
     const normalized = normalizeUsPhone(customer.phone);
     if (normalized) {
       try {
-        const baseBody = await renderRequiredSmsTemplate('project_report_ready', {
-          first_name: firstName,
-          project_type: typeLabel,
-          report_url: reportUrl,
-        }, { workflow: 'project_report_with_invoice', entity_type: 'project', entity_id: project.id });
-        const smsBody = `${baseBody}\n\nInvoice ${invoice.invoice_number} ($${Number(invoice.total).toFixed(2)}): ${payUrl}`;
+        const smsBody = `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
         const result = await sendCustomerMessage({
           to: normalized,
           body: smsBody,
           channel: 'sms',
           audience: 'customer',
-          purpose: 'support_resolution',
+          purpose: 'payment_link',
           customerId: customer.id,
+          invoiceId: invoice.id,
           identityTrustLevel: 'phone_matches_customer',
           entryPoint: 'admin_project_report_with_invoice',
-          metadata: { original_message_type: 'project_report_with_invoice', project_id: project.id, invoice_id: invoice.id },
+          // original_message_type 'invoice' keeps the admin-sms-templates
+          // invoice kill switch applicable to this billing text.
+          metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id },
         });
         channels.sms = result.sent ? { ok: true } : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
       } catch (e) {
