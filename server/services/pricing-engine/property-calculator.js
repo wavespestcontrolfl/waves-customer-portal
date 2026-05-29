@@ -6,6 +6,9 @@ const {
   MOSQUITO,
 } = require('./constants');
 
+const PLAUSIBLE_TURF_OVERAGE_TOLERANCE_SF = 250;
+const PLAUSIBLE_TURF_OVERAGE_TOLERANCE_RATIO = 0.05;
+
 function calculateFootprint(homeSqFt, stories) {
   const sqft = Number(homeSqFt) || 0;
   return Math.round(sqft / Math.max(1, Number(stories) || 1));
@@ -27,6 +30,55 @@ function hasNonNegativeNumber(value) {
     value !== '' &&
     Number.isFinite(Number(value)) &&
     Number(value) >= 0;
+}
+
+function isAffirmative(value) {
+  if (value === true) return true;
+  if (typeof value === 'number') return value === 1;
+  return ['YES', 'TRUE', 'Y', '1'].includes(String(value || '').trim().toUpperCase());
+}
+
+function hasAffirmative(...values) {
+  return values.some(isAffirmative);
+}
+
+function isPresenceValue(value) {
+  if (value === true) return true;
+  if (typeof value === 'number') return value > 0;
+  const raw = String(value || '').trim().toUpperCase();
+  if (!raw) return false;
+  return !['NO', 'NONE', 'FALSE', 'N', '0', 'UNKNOWN'].includes(raw);
+}
+
+function hasPresenceValue(...values) {
+  return values.some(isPresenceValue);
+}
+
+function normalizeFeatureEnum(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw || undefined;
+}
+
+function normalizeFeatureInputs(input = {}) {
+  const raw = input.features || {};
+  const features = { ...raw };
+
+  features.poolCage = hasAffirmative(raw.poolCage, raw.hasPoolCage, input.poolCage, input.hasPoolCage);
+  features.pool = hasAffirmative(raw.pool, raw.hasPool, input.pool, input.hasPool) || features.poolCage;
+  features.largeDriveway = hasAffirmative(raw.largeDriveway, raw.hasLargeDriveway, input.largeDriveway, input.hasLargeDriveway);
+
+  const poolCageSize = raw.poolCageSize ?? input.poolCageSize;
+  if (poolCageSize !== undefined && poolCageSize !== null && poolCageSize !== '') {
+    features.poolCageSize = poolCageSize;
+  }
+
+  features.shrubs = normalizeFeatureEnum(raw.shrubs || raw.shrubDensity || input.shrubDensity || features.shrubs);
+  features.trees = normalizeFeatureEnum(raw.trees || raw.treeDensity || input.treeDensity || features.trees);
+  features.complexity = normalizeFeatureEnum(raw.complexity || raw.landscapeComplexity || input.landscapeComplexity || features.complexity);
+  features.nearWater = hasPresenceValue(raw.nearWater, input.nearWater);
+  features.attachedGarage = hasAffirmative(raw.attachedGarage, input.attachedGarage);
+
+  return features;
 }
 
 function estimateHardscape(lotSqFt, propertyType, features = {}) {
@@ -92,6 +144,43 @@ function computeTurfArea(input, fallback = {}) {
 
   const estimated = toPositiveNumber(input.estimatedTurfSf);
   if (estimated > 0) {
+    const hasKnownMaxEstimatedTurfSf = input.maxEstimatedTurfSfKnown === true &&
+      hasNonNegativeNumber(input.maxEstimatedTurfSf);
+    const maxEstimatedTurfSf = hasKnownMaxEstimatedTurfSf ? Number(input.maxEstimatedTurfSf) : 0;
+    if (hasKnownMaxEstimatedTurfSf && estimated > maxEstimatedTurfSf) {
+      const overage = estimated - maxEstimatedTurfSf;
+      const tolerance = Math.max(
+        PLAUSIBLE_TURF_OVERAGE_TOLERANCE_SF,
+        maxEstimatedTurfSf * PLAUSIBLE_TURF_OVERAGE_TOLERANCE_RATIO
+      );
+      if (overage <= tolerance) {
+        return {
+          turfSf: maxEstimatedTurfSf,
+          turfEstimated: true,
+          turfConfidence: 'MEDIUM',
+          turfBasis: 'plausibleMaxTurfCap',
+          turfOpenArea: maxEstimatedTurfSf,
+          turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'],
+        };
+      }
+      const hasFallbackTurf =
+        fallback.turfSf !== undefined &&
+        fallback.turfSf !== null &&
+        fallback.turfSf !== '' &&
+        Number.isFinite(Number(fallback.turfSf)) &&
+        Number(fallback.turfSf) >= 0;
+      const fallbackTurfSf = hasFallbackTurf
+        ? Math.min(Number(fallback.turfSf), maxEstimatedTurfSf)
+        : maxEstimatedTurfSf;
+      return {
+        turfSf: fallbackTurfSf,
+        turfEstimated: true,
+        turfConfidence: 'LOW',
+        turfBasis: hasFallbackTurf ? 'legacyHardscapeEstimate' : 'plausibleMaxTurfCap',
+        turfOpenArea: maxEstimatedTurfSf,
+        turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'],
+      };
+    }
     return {
       turfSf: estimated,
       turfEstimated: true,
@@ -373,7 +462,8 @@ function calculatePropertyProfile(input) {
   const explicitFootprint = toPositiveNumber(input.footprintSqFt ?? input.footprint);
   const footprint = explicitFootprint || calculateFootprint(input.homeSqFt, input.stories || 1);
   const explicitPerimeter = toPositiveNumber(input.perimeterLF ?? input.perimeterLf ?? input.perimeter);
-  const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, input.features || {});
+  const normalizedFeatures = normalizeFeatureInputs(input);
+  const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, normalizedFeatures);
   const hasInputBedArea = hasNonNegativeNumber(input.bedArea);
   const estimatedBedAreaInput = hasNonNegativeNumber(input.estimatedBedAreaSf)
     ? input.estimatedBedAreaSf
@@ -388,9 +478,14 @@ function calculatePropertyProfile(input) {
     ? { ...input, estimatedBedAreaSf: estimatedBedAreaInput }
     : input;
   const bedRatio = explicitBedArea !== null && input.lotSqFt > 0 ? explicitBedArea / input.lotSqFt : 0;
-  const features = { ...(input.features || {}), bedRatio };
+  const features = { ...normalizedFeatures, bedRatio };
   const legacyLawnEstimate = estimateLawnSqFt(input.lotSqFt, footprint, hardscape, features);
-  const turfArea = computeTurfArea(turfInput, { turfSf: legacyLawnEstimate });
+  const hasPlausibleMaxTurfSf = toPositiveNumber(input.lotSqFt) > 0;
+  const plausibleMaxTurfSf = Math.max(0, Math.round((Number(input.lotSqFt) || 0) - footprint - hardscape));
+  const turfArea = computeTurfArea(
+    { ...turfInput, maxEstimatedTurfSf: plausibleMaxTurfSf, maxEstimatedTurfSfKnown: hasPlausibleMaxTurfSf },
+    { turfSf: legacyLawnEstimate }
+  );
   const lawnSqFt = turfArea.turfSf;
   const sourceHint = String(input.bedAreaSource || '').trim().toLowerCase();
   const validSourceHint = ['explicit', 'estimated', 'lot_based', 'fallback'].includes(sourceHint) ? sourceHint : null;
@@ -426,8 +521,8 @@ function calculatePropertyProfile(input) {
   } else if (toPositiveNumber(input.lotSqFt) > 0) {
     const rawLotBedArea = estimateBedArea(
       input.lotSqFt,
-      (input.features || {}).shrubs,
-      (input.features || {}).complexity,
+      features.shrubs,
+      features.complexity,
       { uncapped: true }
     );
     bedArea = Math.min(rawLotBedArea, BED_AREA_CAP);
@@ -443,7 +538,7 @@ function calculatePropertyProfile(input) {
     bedAreaSource = 'fallback';
     bedAreaPricingConfidence = 'low';
   }
-  const perimeter = explicitPerimeter || calculatePerimeter(footprint, (input.features || {}).complexity);
+  const perimeter = explicitPerimeter || calculatePerimeter(footprint, features.complexity);
   const perimeterSource = explicitPerimeter ? 'property_perimeter' : 'computed_from_footprint';
   const lotCategory = getLotCategory(input.lotSqFt);
   const mosquitoTreatableSqFt = Math.max(0, input.lotSqFt - footprint - hardscape);
@@ -474,13 +569,13 @@ function calculatePropertyProfile(input) {
     stories: input.stories || 1,
     storiesSource: input.storiesSource || null,
     propertyType: input.propertyType || 'single_family',
-    features: input.features || {},
+    features,
     // v2 enriched fields — consumed by modifiers.deriveModifiers()
     yearBuilt: input.yearBuilt || null,
     constructionMaterial: input.constructionMaterial || null,
     foundationType: input.foundationType || null,
     roofType: input.roofType || null,
-    nearWater: input.nearWater || (input.features?.nearWater ? 'CLOSE' : 'NONE'),
+    nearWater: input.nearWater || (features.nearWater ? 'CLOSE' : 'NONE'),
     waterDistance: input.waterDistance || null,
     isHOA: !!input.isHOA,
     hoaFee: input.hoaFee || null,
@@ -488,7 +583,7 @@ function calculatePropertyProfile(input) {
     isNewHomeowner: !!input.isNewHomeowner,
     fenceType: input.fenceType || null,
     outbuildingCount: input.outbuildingCount || 0,
-    attachedGarage: !!(input.attachedGarage || input.features?.attachedGarage),
+    attachedGarage: !!features.attachedGarage,
     footprintSqFt: input.footprintSqFt,
     buildingSqFt: input.buildingSqFt,
     livingAreaSqFt: input.livingAreaSqFt,
