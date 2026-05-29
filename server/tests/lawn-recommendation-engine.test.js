@@ -51,6 +51,38 @@ describe('lawn recommendation engine', () => {
     expect(RecommendationEngine.isCustomerCopySafe(card.customer_copy)).toBe(true);
   });
 
+  test('follow_up_needed stress flag triggers a follow-up card even without a severe finding', () => {
+    const card = RecommendationEngine.evaluateFollowUp({
+      customerId: 'customer-1',
+      assessment: { stress_flags: JSON.stringify({ follow_up_needed: true }) },
+      snapshot: {
+        id: 'snapshot-1',
+        customer_id: 'customer-1',
+        findings: JSON.stringify([{ key: 'weed_pressure', severity: 1 }]),
+      },
+    });
+
+    expect(card).toMatchObject({
+      type: 'follow_up',
+      status: 'needs_admin_review',
+      requires_human_approval: true,
+    });
+    expect(card.trigger_signals.some((s) => s.key === 'tech_follow_up_signal')).toBe(true);
+  });
+
+  test('no follow-up card without a severe finding or a follow-up signal', () => {
+    const card = RecommendationEngine.evaluateFollowUp({
+      customerId: 'customer-1',
+      assessment: { stress_flags: JSON.stringify({ new_sod: true }) },
+      snapshot: {
+        id: 'snapshot-1',
+        customer_id: 'customer-1',
+        findings: JSON.stringify([{ key: 'weed_pressure', severity: 1 }]),
+      },
+    });
+    expect(card).toBeNull();
+  });
+
   test('education cards can be low-risk but still start hidden until a route approves visibility', () => {
     const card = RecommendationEngine.evaluateCustomerEducation({
       assessment: { stress_flags: JSON.stringify({ drought_stress: true }) },

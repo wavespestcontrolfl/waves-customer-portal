@@ -245,10 +245,15 @@ function serializeCard(card) {
   };
 }
 
-async function generateRecommendationCards({ snapshotId, assessmentId, customerId } = {}) {
+async function generateRecommendationCards({ snapshotId, assessmentId, customerId, trx = null } = {}) {
   if (!snapshotId) throw new Error('snapshotId is required');
 
-  const snapshot = await db('property_health_snapshots').where({ id: snapshotId, domain: 'lawn' }).first();
+  // Run inside the caller's transaction when supplied so card generation is
+  // serialized under the same per-assessment advisory lock as the snapshot
+  // insert — otherwise an overlapping confirm could orphan these cards.
+  const exec = trx || db;
+
+  const snapshot = await exec('property_health_snapshots').where({ id: snapshotId, domain: 'lawn' }).first();
   if (!snapshot) {
     const err = new Error('Snapshot not found');
     err.code = 'snapshot_not_found';
@@ -258,8 +263,8 @@ async function generateRecommendationCards({ snapshotId, assessmentId, customerI
   const resolvedCustomerId = customerId || snapshot.customer_id;
   const resolvedAssessmentId = assessmentId || snapshot.assessment_id;
   const [customer, assessment] = await Promise.all([
-    db('customers').where({ id: resolvedCustomerId }).first(),
-    resolvedAssessmentId ? db('lawn_assessments').where({ id: resolvedAssessmentId }).first() : Promise.resolve(null),
+    exec('customers').where({ id: resolvedCustomerId }).first(),
+    resolvedAssessmentId ? exec('lawn_assessments').where({ id: resolvedAssessmentId }).first() : Promise.resolve(null),
   ]);
 
   if (!assessment?.confirmed_by_tech) return [];
@@ -280,7 +285,7 @@ async function generateRecommendationCards({ snapshotId, assessmentId, customerI
 
   if (!candidates.length) return [];
 
-  const inserted = await db('property_recommendation_cards')
+  const inserted = await exec('property_recommendation_cards')
     .insert(candidates.map(serializeCard))
     .returning('*');
 
@@ -292,7 +297,7 @@ async function generateRecommendationCards({ snapshotId, assessmentId, customerI
     actor_type: 'system',
     metadata: JSON.stringify({ type: card.type, status: card.status }),
   }));
-  if (eventRows.length) await db('property_recommendation_events').insert(eventRows);
+  if (eventRows.length) await exec('property_recommendation_events').insert(eventRows);
 
   return inserted;
 }

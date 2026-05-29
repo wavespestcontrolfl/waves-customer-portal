@@ -124,6 +124,35 @@ async function resolveAssessmentServiceRecordId(assessment) {
   return serviceRecord.id;
 }
 
+// Fixed namespace for the per-assessment snapshot-generation advisory lock, so
+// hashtext(assessmentId) can't collide with any other advisory lock key.
+const SNAPSHOT_LOCK_NAMESPACE = 0x4c41574e; // 'LAWN'
+
+// Generate the property-health snapshot + recommendation cards as one
+// serialized unit. A pg_advisory_xact_lock keyed on the assessment makes
+// overlapping POST /confirm or /snapshot/regenerate requests run one-at-a-time,
+// so the supersede→insert sequence can't race itself into duplicate (or
+// orphaned) pre-review artifacts. The lock auto-releases when the txn ends.
+async function generateSnapshotAndCards({ assessmentId, serviceId, serviceRecordId, customerId, generatedBy }) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [SNAPSHOT_LOCK_NAMESPACE, assessmentId]);
+    const snapshot = await LawnSnapshot.buildLawnSnapshot({
+      assessmentId,
+      serviceId,
+      serviceRecordId,
+      generatedBy,
+      trx,
+    });
+    const cards = await RecommendationEngine.generateRecommendationCards({
+      snapshotId: snapshot.id,
+      assessmentId,
+      customerId,
+      trx,
+    });
+    return { snapshot, cards };
+  });
+}
+
 async function attachOutcomePhotoRefs(outcome, assessmentId) {
   if (!outcome) return;
   try {
@@ -788,6 +817,9 @@ const STRESS_FLAG_KEYS = [
   'disease_suspicion',
   'recent_scalp',
   'new_sod',
+  // Consumed by lawn-recommendation-engine.evaluateFollowUp to trigger a
+  // follow-up card; must be an accepted key or /confirm rejects it (400).
+  'follow_up_needed',
 ];
 
 function normalizeStressFlags(input) {
@@ -891,17 +923,15 @@ router.post('/confirm', async (req, res, next) => {
     let propertySnapshot = null;
     let recommendationCards = [];
     try {
-      propertySnapshot = await LawnSnapshot.buildLawnSnapshot({
+      const generated = await generateSnapshotAndCards({
         assessmentId,
         serviceId: updated.service_id || null,
         serviceRecordId: resolvedServiceRecordId,
+        customerId: updated.customer_id,
         generatedBy: req.technician?.role === 'admin' ? 'admin' : 'tech',
       });
-      recommendationCards = await RecommendationEngine.generateRecommendationCards({
-        snapshotId: propertySnapshot.id,
-        assessmentId,
-        customerId: updated.customer_id,
-      });
+      propertySnapshot = generated.snapshot;
+      recommendationCards = generated.cards;
     } catch (snapshotErr) {
       logger.error(`[lawn-assessment] Snapshot/recommendation generation failed (non-blocking): ${snapshotErr.message}`);
     }
@@ -993,16 +1023,12 @@ router.post('/:assessmentId/snapshot/regenerate', async (req, res, next) => {
       return res.status(400).json({ error: 'Cannot generate a snapshot from an unconfirmed assessment' });
     }
 
-    const snapshot = await LawnSnapshot.buildLawnSnapshot({
+    await generateSnapshotAndCards({
       assessmentId: assessment.id,
       serviceId: assessment.service_id || null,
       serviceRecordId: assessment.service_record_id || null,
-      generatedBy: 'admin',
-    });
-    await RecommendationEngine.generateRecommendationCards({
-      snapshotId: snapshot.id,
-      assessmentId: assessment.id,
       customerId: assessment.customer_id,
+      generatedBy: 'admin',
     });
 
     res.json({ success: true, ...(await getSnapshotReviewPayload(assessment.id)) });
