@@ -1,0 +1,7 @@
+{
+  "name": "@waves/lawn-cost-floor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Single source of truth for the Lawn V2 55% cost-floor math. Imported by BOTH the server pricing engine (authoritative on save) and the client estimate preview so the two cannot drift. Pure CommonJS, no dependencies.",
+  "main": "index.js"
+}

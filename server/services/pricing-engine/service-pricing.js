@@ -11,6 +11,14 @@ const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
 } = require('./property-calculator');
+// Single source of truth for the Lawn V2 cost-floor math, shared with the client
+// estimate preview so the shown price and the billed price cannot drift.
+const {
+  lawnMaterialBudget,
+  lawnMaterialCostPerVisit,
+  lawnComplexityMinutes,
+  computeLawnCostFloor,
+} = require('@waves/lawn-cost-floor');
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -1684,11 +1692,13 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
   const shrubs = String(features.shrubs || property.shrubDensity || '').toLowerCase();
   const maintenance = String(property.maintenanceCondition || '').toUpperCase().replace(/[\s-]+/g, '_');
   const pressure = String(property.overallPestPressure || '').toUpperCase().replace(/[\s-]+/g, '_');
-  const complexityMinutes =
-    (complexity === 'moderate' ? 5 : 0) +
-    (complexity === 'complex' ? 10 : 0) +
-    (shrubs === 'heavy' ? 5 : 0) +
-    ((property.fenceType || features.gate || features.accessDifficulty || '').toString().toLowerCase().includes('privacy') || features.largeDriveway ? 5 : 0);
+  const complexityMinutes = lawnComplexityMinutes({
+    landscapeComplexity: complexity,
+    shrubDensity: shrubs,
+    hasLargeDriveway: features.largeDriveway,
+    hasPrivacyFence: (property.fenceType || features.gate || features.accessDifficulty || '')
+      .toString().toLowerCase().includes('privacy'),
+  });
   const callbackReservePerVisit =
     LAWN_PRICING_V2.callbackReservePerVisitDefault +
     (['POOR', 'DEFERRED'].includes(maintenance) ? 5 : 0) +
@@ -1697,35 +1707,39 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
   const annualMaterialBudget = Number.isFinite(Number(options.annualMaterialBudget))
     ? Number(options.annualMaterialBudget)
     : null;
+  // Material-per-visit: shared (unclamped) budget scaling, or the $/K fallback.
   const materialCostPerVisit = annualMaterialBudget !== null
-    ? (annualMaterialBudget * (lawnSqFt / 4500)) / visits
+    ? lawnMaterialCostPerVisit(annualMaterialBudget, lawnSqFt, visits)
     : turfK * materialCostPerK;
-  const laborMinutesPerVisit = laborMinutesBase + turfK * laborMinutesPerK + complexityMinutes;
   const laborRate = LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE;
-  const laborCostPerVisit = laborRate * laborMinutesPerVisit / 60;
-  const driveCostPerVisit = laborRate * routeDriveMinutes / 60;
-  const equipmentCostPerVisit = LAWN_PRICING_V2.equipmentReservePerVisit;
-  const perVisitCost = materialCostPerVisit + laborCostPerVisit + driveCostPerVisit + equipmentCostPerVisit + callbackReservePerVisit;
-  const annualMaterial = materialCostPerVisit * visits;
-  const annualLabor = laborCostPerVisit * visits;
-  const annualDrive = driveCostPerVisit * visits;
-  const annualEquipment = equipmentCostPerVisit * visits;
-  const annualCallbackReserve = callbackReservePerVisit * visits;
   const annualAdmin = Number.isFinite(Number(options.adminAnnual))
     ? Math.max(0, Number(options.adminAnnual))
     : LAWN_PRICING_V2.adminAnnualDefault;
-  const annualCost = annualMaterial + annualLabor + annualDrive + annualEquipment + annualCallbackReserve + annualAdmin;
-  const minimumCollectedAnnualPriceFor55 = Math.round((annualCost / (1 - targetGrossMargin)) * 100) / 100;
+
+  const floor = computeLawnCostFloor({
+    lawnSqFt,
+    visits,
+    materialCostPerVisit,
+    laborMinutesBase,
+    laborMinutesPer1000Sqft: laborMinutesPerK,
+    complexityMinutes,
+    laborRate,
+    routeDriveMinutes,
+    callbackReservePerVisit,
+    equipmentReservePerVisit: LAWN_PRICING_V2.equipmentReservePerVisit,
+    adminAnnual: annualAdmin,
+    targetGrossMargin,
+  });
   return {
-    annualMaterial: roundMoney(annualMaterial),
-    annualLabor: roundMoney(annualLabor),
-    annualDrive: roundMoney(annualDrive),
-    annualEquipment: roundMoney(annualEquipment),
-    annualCallbackReserve: roundMoney(annualCallbackReserve),
-    annualAdmin: roundMoney(annualAdmin),
-    annualCost: roundMoney(annualCost),
-    minimumCollectedAnnualPriceFor55,
-    laborMinutesPerVisit: roundMoney(laborMinutesPerVisit),
+    annualMaterial: roundMoney(floor.annualMaterial),
+    annualLabor: roundMoney(floor.annualLabor),
+    annualDrive: roundMoney(floor.annualDrive),
+    annualEquipment: roundMoney(floor.annualEquipment),
+    annualCallbackReserve: roundMoney(floor.annualCallbackReserve),
+    annualAdmin: roundMoney(floor.annualAdmin),
+    annualCost: roundMoney(floor.annualCost),
+    minimumCollectedAnnualPriceFor55: floor.minimumCollectedAnnualPriceFor55,
+    laborMinutesPerVisit: roundMoney(floor.laborMinutesPerVisit),
     routeDriveMinutes,
     routeDensity,
     targetCollectedMarginFloor: targetGrossMargin,
@@ -1761,22 +1775,10 @@ function priceLawnCare(property, options = {}) {
     ? turfSqFt
     : (hasLawnSqFt && Number.isFinite(legacyLawnSqFt) && legacyLawnSqFt >= 0 ? legacyLawnSqFt : 4500);
 
-  // Lookup annual cost from v4 protocol data (approximate model)
-  // These are based on actual visit-by-visit product costing from v4 protocols
-  const materialByTier = {
-    st_augustine: {
-      FULL_SUN: { basic: 64, standard: 83, enhanced: 141, premium: 205 },
-      MODERATE_SHADE: { basic: 50, standard: 65, enhanced: 110, premium: 155 },
-      HEAVY_SHADE: { basic: 44, standard: 58, enhanced: 100, premium: 138 },
-    },
-    bermuda: { FULL_SUN: { basic: 55, standard: 79, enhanced: 140, premium: 215 } },
-    zoysia: { FULL_SUN: { basic: 60, standard: 82, enhanced: 148, premium: 178 } },
-    bahia: { FULL_SUN: { basic: 45, standard: 68, enhanced: 95, premium: 115 } },
-  };
-
-  const trackMaterials = materialByTier[normalizedTrack] || materialByTier.st_augustine;
-  const shadeMaterials = trackMaterials[shadeClassification] || trackMaterials.FULL_SUN;
-  const annualMaterial = shadeMaterials[selectedTier] || 100;
+  // Annual material budget at the 4,500 sqft reference — sourced from the shared
+  // @waves/lawn-cost-floor table (same data the client preview uses) keyed by
+  // track → shade → visits.
+  const annualMaterial = lawnMaterialBudget(normalizedTrack, shadeClassification, tierConfig.freq);
 
   // Labor: v4 protocol uses $26.96/visit across all tracks
   const laborPerVisit = 26.96;
@@ -1793,9 +1795,7 @@ function priceLawnCare(property, options = {}) {
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
-    const tierMaterial = (materialByTier[normalizedTrack] || materialByTier.st_augustine);
-    const tierShadeMat = tierMaterial[shadeClassification] || tierMaterial.FULL_SUN;
-    const tierAnnualBudget = tierShadeMat[t] || 100;
+    const tierAnnualBudget = lawnMaterialBudget(normalizedTrack, shadeClassification, tc.freq);
     const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack);
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);

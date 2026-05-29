@@ -38,6 +38,16 @@
  * - Tier commitment data for billing reconciliation
  */
 
+// Lawn V2 cost floor — single source of truth shared with the server pricing
+// engine (@waves/lawn-cost-floor) so the previewed price and the server-
+// authoritative billed price cannot drift.
+import {
+  lawnMaterialBudget,
+  lawnMaterialCostPerVisit,
+  lawnComplexityMinutes,
+  computeLawnCostFloor,
+} from '@waves/lawn-cost-floor';
+
 /* ── helpers ────────────────────────────────────────────────── */
 
 export function interpolate(v, b) {
@@ -340,20 +350,8 @@ const LAWN_PRICING_V2 = {
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: { DENSE: 5, NORMAL: 10, LOOSE: 15, SPARSE: 20 },
 };
-// Annual material budgets at the 4,500 sqft reference, keyed by visits (4/6/9/12).
-// Mirrors the server's materialByTier (service-pricing.js#priceLawnCare): only
-// St. Augustine carries shade variants; other tracks are FULL_SUN-only and fall
-// back to FULL_SUN for any shade. Kept in lockstep by lawn-client-server-parity.test.js.
-const LAWN_MATERIAL_BUDGETS = {
-  st_augustine: {
-    FULL_SUN: { 4: 64, 6: 83, 9: 141, 12: 205 },
-    MODERATE_SHADE: { 4: 50, 6: 65, 9: 110, 12: 155 },
-    HEAVY_SHADE: { 4: 44, 6: 58, 9: 100, 12: 138 },
-  },
-  bermuda: { FULL_SUN: { 4: 55, 6: 79, 9: 140, 12: 215 } },
-  zoysia: { FULL_SUN: { 4: 60, 6: 82, 9: 148, 12: 178 } },
-  bahia: { FULL_SUN: { 4: 45, 6: 68, 9: 95, 12: 115 } },
-};
+// Material budgets now live in @waves/lawn-cost-floor (lawnMaterialBudget),
+// shared with the server so the table can't drift between preview and bill.
 const LAWN_PRICES = {
   st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,39,52,76,100],[3000,39,52,76,100],[3500,41,55,80,106],[4000,43,57,84,111],[5000,47,63,92,123],[6000,51,68,100,135],[7000,54,73,109,146],[8000,58,78,117,158],[10000,65,88,133,182],[12000,73,98,150,205],[15000,84,113,175,240],[20000,102,138,216,298]] },
   bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,42,57,84,113],[4000,42,57,84,113],[5000,45,62,92,125],[6000,48,67,100,137],[7000,52,71,108,149],[8000,55,76,117,161],[10000,62,86,133,186],[12000,68,96,149,210],[15000,78,110,174,246],[20000,95,135,215,307]] },
@@ -1026,60 +1024,44 @@ function lawnLookup(lp, sf, freqIdx) {
   return { monthly: pts[pts.length - 1][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
 }
 
-// Extra labor minutes/visit from landscape complexity — mirrors the server's
-// complexityMinutes (service-pricing.js#calcLawnAnnualCostFloorDetails). The
-// client doesn't collect a privacy-fence signal, so that term reduces to the
-// large-driveway flag (the server defaults the same way when fence is absent).
-function lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriveway } = {}) {
-  const complexity = String(landscapeComplexity || '').toLowerCase();
-  const shrubs = String(shrubDensity || '').toLowerCase();
-  return (
-    (complexity === 'moderate' ? 5 : 0) +
-    (complexity === 'complex' ? 10 : 0) +
-    (shrubs === 'heavy' ? 5 : 0) +
-    (hasLargeDriveway ? 5 : 0)
-  );
-}
-
-// Mirrors the server cost floor (service-pricing.js#calcLawnAnnualCostFloorDetails)
-// so the customer-facing calculator and tech preview match the server-authoritative
-// price. opts mirror the server's property/options:
+// Delegates entirely to @waves/lawn-cost-floor so the preview floor is the same
+// math the server bills. opts mirror the server's property/options:
 //   shadeClassification    'FULL_SUN' (default) | 'MODERATE_SHADE' | 'HEAVY_SHADE'
-//   complexityMinutes      extra labor minutes/visit (moderate/complex landscape,
-//                          heavy shrubs, large driveway) — see lawnComplexityMinutes()
+//   complexityMinutes      extra labor minutes/visit — see lawnComplexityMinutes()
 //   callbackReservePerVisit override of the $2 default (poor maintenance / high pressure)
-// Material scales with sf/4500 UNCLAMPED to match the server (the old [0.6,2.5]
-// clamp here was the primary source of client/server price drift).
 function calcLawnFloorPrice(sf, grassType, visits, opts = {}) {
-  const turfK = Math.max(0, Number(sf) || 0) / 1000;
-  const shade = String(opts.shadeClassification || 'FULL_SUN').toUpperCase();
-  const trackBudgets = LAWN_MATERIAL_BUDGETS[grassType] || LAWN_MATERIAL_BUDGETS.st_augustine;
-  const shadeBudgets = trackBudgets[shade] || trackBudgets.FULL_SUN;
-  const annualMaterial = (shadeBudgets[visits] || 100) * ((Number(sf) || 0) / 4500);
-  const complexityMinutes = Math.max(0, Number(opts.complexityMinutes) || 0);
-  const laborMinutesPerVisit = LAWN_PRICING_V2.laborMinutesBase + turfK * LAWN_PRICING_V2.laborMinutesPer1000Sqft + complexityMinutes;
-  const annualLabor = visits * LAWN_PRICING_V2.laborRateLoaded * laborMinutesPerVisit / 60;
-  const annualDrive = visits * LAWN_PRICING_V2.laborRateLoaded * LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity] / 60;
-  const callbackReservePerVisit = Number.isFinite(Number(opts.callbackReservePerVisit))
-    ? Math.max(0, Number(opts.callbackReservePerVisit))
-    : LAWN_PRICING_V2.callbackReservePerVisitDefault;
-  const annualCallbackReserve = visits * callbackReservePerVisit;
-  const annualCost = annualMaterial + annualLabor + annualDrive + annualCallbackReserve + LAWN_PRICING_V2.adminAnnualDefault;
-  const minimumCollectedAnnualPriceFor55 = Math.round((annualCost / (1 - LAWN_PRICING_V2.targetCollectedMarginFloor)) * 100) / 100;
-  const pa = Math.ceil(minimumCollectedAnnualPriceFor55 / visits);
+  const annualMaterialBudget = lawnMaterialBudget(grassType, opts.shadeClassification, visits);
+  const materialCostPerVisit = lawnMaterialCostPerVisit(annualMaterialBudget, sf, visits);
+  const floor = computeLawnCostFloor({
+    lawnSqFt: sf,
+    visits,
+    materialCostPerVisit,
+    laborMinutesBase: LAWN_PRICING_V2.laborMinutesBase,
+    laborMinutesPer1000Sqft: LAWN_PRICING_V2.laborMinutesPer1000Sqft,
+    complexityMinutes: Math.max(0, Number(opts.complexityMinutes) || 0),
+    laborRate: LAWN_PRICING_V2.laborRateLoaded,
+    routeDriveMinutes: LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity],
+    callbackReservePerVisit: Number.isFinite(Number(opts.callbackReservePerVisit))
+      ? Math.max(0, Number(opts.callbackReservePerVisit))
+      : LAWN_PRICING_V2.callbackReservePerVisitDefault,
+    equipmentReservePerVisit: LAWN_PRICING_V2.equipmentReservePerVisit,
+    adminAnnual: LAWN_PRICING_V2.adminAnnualDefault,
+    targetGrossMargin: LAWN_PRICING_V2.targetCollectedMarginFloor,
+  });
+  const pa = Math.ceil(floor.minimumCollectedAnnualPriceFor55 / visits);
   const ann = pa * visits;
   return {
     pa,
     ann,
     mo: Math.round(ann / 12 * 100) / 100,
-    costFloorAnnual: minimumCollectedAnnualPriceFor55,
+    costFloorAnnual: floor.minimumCollectedAnnualPriceFor55,
     costs: {
-      annualMaterial: Math.round(annualMaterial * 100) / 100,
-      annualLabor: Math.round(annualLabor * 100) / 100,
-      annualDrive: Math.round(annualDrive * 100) / 100,
-      annualCallbackReserve: Math.round(annualCallbackReserve * 100) / 100,
+      annualMaterial: Math.round(floor.annualMaterial * 100) / 100,
+      annualLabor: Math.round(floor.annualLabor * 100) / 100,
+      annualDrive: Math.round(floor.annualDrive * 100) / 100,
+      annualCallbackReserve: Math.round(floor.annualCallbackReserve * 100) / 100,
       annualAdmin: LAWN_PRICING_V2.adminAnnualDefault,
-      total: Math.round(annualCost * 100) / 100,
+      total: Math.round(floor.annualCost * 100) / 100,
     },
   };
 }
