@@ -33,6 +33,7 @@ const express = require('express');
 const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const smsMedia = require('../services/sms-media');
 
 function makeQueryBuilder(rows = []) {
   const calls = { limit: [], offset: [] };
@@ -171,6 +172,65 @@ describe('admin communications SMS route', () => {
           adminUserId: 'admin-1',
         }),
       }));
+    });
+  });
+
+  test('rejects an MMS whose media exceeds Twilio\'s 5MB total per-message cap', async () => {
+    // Six sub-5MB images individually pass the per-file cap but blow the 5MB
+    // aggregate Twilio enforces — guard before the send instead of bouncing.
+    smsMedia.mediaFromOutboundAttachments.mockReturnValueOnce(
+      Array.from({ length: 6 }, (_, i) => ({ url: `https://cdn/${i}.jpg`, size: 1024 * 1024 })),
+    );
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'See attached',
+          mediaAttachments: Array.from({ length: 6 }, (_, i) => ({ url: `https://cdn/${i}.jpg`, size: 1024 * 1024 })),
+          messageType: 'manual',
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(413);
+      expect(body.error).toMatch(/5MB per-message limit/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('allows an MMS whose media stays within the 5MB total cap', async () => {
+    smsMedia.mediaFromOutboundAttachments.mockReturnValueOnce([
+      { url: 'https://cdn/a.jpg', size: 2 * 1024 * 1024 },
+      { url: 'https://cdn/b.jpg', size: 2 * 1024 * 1024 },
+    ]);
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'See attached',
+          mediaAttachments: [
+            { url: 'https://cdn/a.jpg', size: 2 * 1024 * 1024 },
+            { url: 'https://cdn/b.jpg', size: 2 * 1024 * 1024 },
+          ],
+          messageType: 'manual',
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalled();
     });
   });
 

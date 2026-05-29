@@ -869,6 +869,18 @@ function SmsTab() {
       return;
     }
     const queue = files.slice(0, remaining);
+    // Twilio rejects an MMS whose body + all media exceeds 5MB total, so the
+    // per-file 5MB cap isn't enough once several images are attached — guard
+    // the cumulative size up front rather than letting the /sms send bounce.
+    const MAX_TOTAL_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+    const existingBytes = attachments.reduce((s, a) => s + (a.size || 0), 0);
+    const queueBytes = queue.reduce((s, f) => s + (f.size || 0), 0);
+    if (existingBytes + queueBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+      alert(
+        "Attachments would exceed Twilio's 5MB total limit per message. Remove or compress images and try again.",
+      );
+      return;
+    }
     setUploading(true);
     try {
       const fd = new FormData();

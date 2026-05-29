@@ -72,6 +72,16 @@ router.post('/sms', async (req, res, next) => {
     if (!to || (!cleanBody && media.length === 0)) {
       return res.status(400).json({ error: 'to and body or media required' });
     }
+    // Twilio caps a single MMS at 5MB total across all media (not per file), so
+    // a batch of otherwise-valid sub-5MB images can still be rejected at send.
+    // Reject here with a clear message instead of bubbling up a Twilio error.
+    const MAX_TOTAL_MEDIA_BYTES = 5 * 1024 * 1024;
+    const totalMediaBytes = media.reduce((sum, m) => sum + (Number(m.size) || 0), 0);
+    if (media.length > 0 && totalMediaBytes > MAX_TOTAL_MEDIA_BYTES) {
+      return res.status(413).json({
+        error: `Attachments total ${(totalMediaBytes / 1024 / 1024).toFixed(1)}MB, over Twilio's 5MB per-message limit`,
+      });
+    }
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
