@@ -189,10 +189,12 @@ describe('event weekLockKey — per-week advisory-lock key', () => {
 describe('event ingestion revivalResetFields — past→future re-date clears freshness', () => {
   const { revivalResetFields } = require('../services/event-ingestion');
 
-  test('CASE is gated on OLD start_at past AND NEW effective date future', () => {
+  test('CASE is gated on OLD effective date past AND NEW effective date future', () => {
     const sql = revivalResetFields().freshness_status.toString().toLowerCase();
     expect(sql).toMatch(/case when/);
-    expect(sql).toMatch(/events_raw\.start_at < now\(\)/);
+    // OLD side uses the effective date (COALESCE) — not bare start_at — so an
+    // in-progress multi-day event (start past, end future) is NOT revived.
+    expect(sql).toMatch(/coalesce\(events_raw\.end_at, events_raw\.start_at\) < now\(\)/);
     expect(sql).toMatch(/coalesce\(excluded\.end_at, excluded\.start_at\) >= now\(\)/);
     // Preserves the existing value when the condition is false (manual curation).
     expect(sql).toMatch(/else events_raw\.freshness_status end/);
