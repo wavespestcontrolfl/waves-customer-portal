@@ -151,7 +151,7 @@ router.post('/call', async (req, res, next) => {
     }
     const client = twilio(config.twilio.accountSid, config.twilio.authToken);
 
-    const from = fromNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+    const from = fromNumber || TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
     const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
     const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';

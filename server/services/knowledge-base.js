@@ -309,7 +309,7 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     try {
       const gbpService = require('./google-business');
       const { WAVES_LOCATIONS } = require('../config/locations');
-      const LOC_KEYS = { 'lakewood-ranch': 'LWR', 'parrish': 'PARRISH', 'sarasota': 'SARASOTA', 'venice': 'VENICE' };
+      const LOC_KEYS = { 'bradenton': 'LWR', 'parrish': 'PARRISH', 'sarasota': 'SARASOTA', 'venice': 'VENICE' };
 
       for (const loc of WAVES_LOCATIONS) {
         const envKey = LOC_KEYS[loc.id];

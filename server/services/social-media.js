@@ -923,7 +923,7 @@ const SocialMediaService = {
 
     if (platform === 'facebook') return postToFacebook(text, link);
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
-    if (platform === 'gbp') return postToGBP(locationId || 'lakewood-ranch', text, link, imageUrl);
+    if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
   },
 

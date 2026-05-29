@@ -108,7 +108,7 @@ describe('admin follow-up call workflow', () => {
     }));
     const url = new URL(create.mock.calls[0][0].url);
     expect(url.searchParams.get('customerNumber')).toBe('+19415550199');
-    expect(url.searchParams.get('callerIdNumber')).toBe('+19413187612');
+    expect(url.searchParams.get('callerIdNumber')).toBe('+19412975749'); // main Waves line (default)
     expect(url.searchParams.get('leadName')).toBe('Ada');
     expect(url.searchParams.get('eventLabel')).toBe('Estimate accepted');
     expect(url.searchParams.get('callLogId')).toBe('call-log-1');

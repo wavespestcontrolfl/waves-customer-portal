@@ -139,7 +139,7 @@ async function triggerAdminFollowupCall({
 
   try {
     if (autoBridge) {
-      const bridgeCallerId = TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+      const bridgeCallerId = TWILIO_NUMBERS.mainLine.number;
       const [callLogRow] = await database('call_log')
         .insert({
           customer_id: customerId || null,

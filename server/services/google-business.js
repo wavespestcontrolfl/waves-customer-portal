@@ -49,7 +49,7 @@ function sameReviewerAndTime(row, reviewerName, createdAt, maxDriftMs = 24 * 60 
  */
 
 const LOCATION_ENV_KEYS = {
-  'lakewood-ranch': 'LWR',
+  'bradenton': 'LWR',
   'parrish': 'PARRISH',
   'sarasota': 'SARASOTA',
   'venice': 'VENICE',
@@ -270,7 +270,7 @@ class GoogleBusinessService {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
       if (match) {
         const loc = WAVES_LOCATIONS.find(l => l.googleAccountId === match[1]);
-        locationId = loc?.id || 'lakewood-ranch';
+        locationId = loc?.id || 'bradenton';
       }
     }
     const headers = await this._getHeaders(locationId);
@@ -284,7 +284,7 @@ class GoogleBusinessService {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
       if (match) {
         const loc = WAVES_LOCATIONS.find(l => l.googleAccountId === match[1]);
-        locationId = loc?.id || 'lakewood-ranch';
+        locationId = loc?.id || 'bradenton';
       }
     }
     const headers = await this._getHeaders(locationId);
