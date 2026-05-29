@@ -14,6 +14,7 @@ const {
   summarizeMaterialCost,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { scopeFromText } = require('../services/service-report/action-scope');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -83,6 +84,21 @@ function actionLabel(kind, line, product) {
   return raw || productName || 'Completed protocol item';
 }
 
+// Interim scope classifier for protocol-derived actions (pest services show
+// these instead of the generic chips). PR2 replaces this with explicit
+// per-line metadata in protocols.json; until then this shared classifier is
+// the fallback that lets an interior treatment fire the re-entry countdown.
+function actionScopeForLine(line, product) {
+  return scopeFromText(`${line?.raw || ''} ${product?.name || ''} ${product?.category || ''}`);
+}
+
+function actionTreatmentApplied(kind, line) {
+  if (kind === 'inspection') return false;
+  const text = normalizeText(line?.raw || '');
+  if (/\b(declin|no access|not treated|unavailable|skip|skipped|customer not home)\b/.test(text)) return false;
+  return true;
+}
+
 function serializeProtocolProduct(product) {
   if (!product) return null;
   return {
@@ -110,6 +126,8 @@ function buildCompletionActions({ lines, products, programKey, visit }) {
       raw: line.raw,
       role: line.role,
       conditional: !!line.conditional,
+      scope: actionScopeForLine(line, product),
+      treatmentApplied: actionTreatmentApplied(kind, line),
       product: serializeProtocolProduct(product),
     };
   });

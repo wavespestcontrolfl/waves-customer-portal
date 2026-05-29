@@ -24,7 +24,7 @@ const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispat
 const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
-const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
+const { buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
@@ -1382,6 +1382,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       managerApproval,
       tankCleanout,
       protocolActionsCompleted,
+      protocolActionScopesCompleted,
       observations,
       recommendations,
       formResponses,
@@ -1485,6 +1486,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
     ]);
+    // Structured scope for each completed action — authoritative interior/
+    // exterior signal for the re-entry advisory (see report-data treatmentScope).
+    const reportProtocolActionScopes = (Array.isArray(protocolActionScopesCompleted) ? protocolActionScopesCompleted : [])
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const scope = String(entry.scope || '').toLowerCase();
+        if (scope !== 'interior' && scope !== 'exterior') return null;
+        return {
+          label: String(entry.label || '').trim() || null,
+          scope,
+          treatmentApplied: entry.treatmentApplied === true,
+        };
+      })
+      .filter(Boolean);
     const reportObservations = normalizeCompletionTextArray([
       ...(Array.isArray(observations) ? observations : []),
       ...taggedCompletionNoteLines(technicianNotes, ['found']),
@@ -1708,6 +1723,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardTankCleanout,
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
+            protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,
           };
@@ -1760,16 +1776,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
           if (serviceRecordCols.advisory && useServiceReportV1) {
-            recordInsert.advisory = serializeJsonb(normalizeAdvisoryForTreatmentScope(
-              reportConfig.advisoryDefaults,
-              {
-                service: {
-                  areas_serviced: completionAreas,
-                  structured_notes: { areasTreated: completionAreas },
-                },
-                applications: products || [],
-              },
-            ));
+            // Pass the completed-action scopes so an interior treatment keeps
+            // its re-entry window even when only exterior areas were chipped.
+            // This is the gate: the advisory is persisted here and the report
+            // build can only zero it further, never restore it.
+            const advisoryNormalized = buildCompletionAdvisory({
+              advisoryDefaults: reportConfig.advisoryDefaults,
+              completionAreas,
+              protocolActionScopes: reportProtocolActionScopes,
+              applications: products || [],
+            });
+            recordInsert.advisory = serializeJsonb(advisoryNormalized);
+            const interiorBefore = reportConfig.advisoryDefaults?.interior_reentry_min ?? null;
+            const interiorAfter = advisoryNormalized.interior_reentry_min ?? null;
+            if (interiorBefore !== interiorAfter) {
+              logger.info('[completion] re-entry scope normalized', {
+                serviceId: svc.id,
+                areasTreated: completionAreas,
+                protocolActionScopesCompleted: reportProtocolActionScopes,
+                interiorReentryMinBefore: interiorBefore,
+                interiorReentryMinAfter: interiorAfter,
+              });
+            }
           }
           if (serviceRecordCols.completion_source) recordInsert.completion_source = 'detailed_form';
           if (serviceRecordCols.protocol_defaults_used) recordInsert.protocol_defaults_used = false;
