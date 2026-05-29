@@ -938,13 +938,42 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
     service?.base_price != null ? String(service.base_price) : "",
   );
   const [isActive, setIsActive] = useState(service?.is_active !== false);
+  const [requiresServiceReport, setRequiresServiceReport] = useState(service?.requires_service_report !== false);
+  const [requiresApplicationLog, setRequiresApplicationLog] = useState(!!service?.requires_application_log);
+  const [requiredPhotoCount, setRequiredPhotoCount] = useState(String(service?.required_photo_count || 0));
+  const [requiresCustomerSignature, setRequiresCustomerSignature] = useState(!!service?.requires_customer_signature);
+  const [requiresCustomerNotice, setRequiresCustomerNotice] = useState(!!service?.requires_customer_notice);
+  const [closeoutTouched, setCloseoutTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const toggleCloseout = (setter, value) => {
+    setCloseoutTouched(true);
+    setter(value);
+  };
 
   const submit = async (e) => {
     e.preventDefault();
     setSaving(true);
     setError(null);
+    const closeoutPayload = closeoutTouched
+      ? {
+          requires_service_report: requiresServiceReport,
+          requires_application_log: requiresApplicationLog,
+          required_photo_count: requiredPhotoCount === "" ? 0 : Number(requiredPhotoCount),
+          requires_customer_signature: requiresCustomerSignature,
+          requires_customer_notice: requiresCustomerNotice,
+          closeout_requirements_source: "manual",
+        }
+      : isNew
+        ? {}
+        : {
+            requires_service_report: requiresServiceReport,
+            requires_application_log: requiresApplicationLog,
+            required_photo_count: requiredPhotoCount === "" ? 0 : Number(requiredPhotoCount),
+            requires_customer_signature: requiresCustomerSignature,
+            requires_customer_notice: requiresCustomerNotice,
+            closeout_requirements_source: service?.closeout_requirements_source || "inferred_v1",
+          };
     try {
       await aFetch(
         isNew ? "/admin/services" : `/admin/services/${service.id}`,
@@ -961,6 +990,7 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
                 ? Number(basePrice)
                 : null,
             is_active: isActive,
+            ...closeoutPayload,
           }),
         },
       );
@@ -1078,6 +1108,60 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
         />{" "}
         <span className="text-ink-primary">Active</span>{" "}
       </label>
+      <div className="border-t border-zinc-200 pt-3 flex flex-col gap-3">
+        <div
+          className="text-ink-tertiary uppercase tracking-label"
+          style={{ fontSize: 11 }}
+        >
+          Closeout Requirements
+        </div>
+        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={requiresServiceReport}
+            onChange={(e) => toggleCloseout(setRequiresServiceReport, e.target.checked)}
+          />
+          <span className="text-ink-primary">Service report</span>
+        </label>
+        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={requiresApplicationLog}
+            onChange={(e) => toggleCloseout(setRequiresApplicationLog, e.target.checked)}
+          />
+          <span className="text-ink-primary">Application/material log</span>
+        </label>
+        <Field label="Required photos">
+          <input
+            className={inputChrome}
+            type="number"
+            inputMode="numeric"
+            step="1"
+            min="0"
+            value={requiredPhotoCount}
+            onChange={(e) => {
+              setCloseoutTouched(true);
+              setRequiredPhotoCount(e.target.value);
+            }}
+          />
+        </Field>
+        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={requiresCustomerSignature}
+            onChange={(e) => toggleCloseout(setRequiresCustomerSignature, e.target.checked)}
+          />
+          <span className="text-ink-primary">Customer signature</span>
+        </label>
+        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={requiresCustomerNotice}
+            onChange={(e) => toggleCloseout(setRequiresCustomerNotice, e.target.checked)}
+          />
+          <span className="text-ink-primary">Customer notice</span>
+        </label>
+      </div>
       {error && (
         <div className="text-alert-fg" style={{ fontSize: 12 }}>
           {error}

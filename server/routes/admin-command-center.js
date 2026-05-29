@@ -216,6 +216,22 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
       .catch(() => []);
     const withApplications = new Set(appRows.map((r) => r.scheduled_service_id));
 
+    const serviceRecordRows = await db('service_records')
+      .whereIn('scheduled_service_id', completedJobIds)
+      .select('id', 'scheduled_service_id')
+      .catch(() => []);
+    const serviceRecordByJobId = new Map(serviceRecordRows.map((r) => [r.scheduled_service_id, r]));
+    const serviceRecordIds = serviceRecordRows.map((r) => r.id).filter(Boolean);
+    const photoRows = serviceRecordIds.length
+      ? await db('service_photos')
+        .whereIn('service_record_id', serviceRecordIds)
+        .groupBy('service_record_id')
+        .select('service_record_id')
+        .count('* as count')
+        .catch(() => [])
+      : [];
+    const photoCountByServiceRecordId = new Map(photoRows.map((r) => [r.service_record_id, Number(r.count || 0)]));
+
     for (const row of rows.filter((r) => completedJobIds.includes(r.sourceRecordId))) {
       const closeoutRequirements = requirementsByJob.get(row.sourceRecordId) || {};
       if (closeoutRequirements.requiresServiceReport && !withForms.has(row.sourceRecordId)) {
@@ -239,6 +255,27 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
           summary: 'Completed job is missing the required chemical or material application record.',
           metadata: { ...row.metadata, closeoutRequirements },
         }));
+      }
+      const requiredPhotoCount = Number(closeoutRequirements.requiredPhotoCount || 0);
+      if (requiredPhotoCount > 0) {
+        const serviceRecord = serviceRecordByJobId.get(row.sourceRecordId);
+        const actualPhotoCount = serviceRecord?.id ? Number(photoCountByServiceRecordId.get(serviceRecord.id) || 0) : 0;
+        if (actualPhotoCount < requiredPhotoCount) {
+          attention.push(issue({
+            ...row,
+            id: `${row.sourceRecordId}_missing_required_photos`,
+            type: 'missing_required_photos',
+            severity: 'medium',
+            label: 'Missing required photos',
+            summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
+            metadata: {
+              ...row.metadata,
+              closeoutRequirements,
+              actualPhotoCount,
+              requiredPhotoCount,
+            },
+          }));
+        }
       }
     }
   }
