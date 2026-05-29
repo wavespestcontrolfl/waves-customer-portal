@@ -517,6 +517,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 5:45AM ET — Cross-source duplicate auto-merge. Ingest dedupes only on
+  // (source_id, external_id), so the same real-world event pulled from two feeds
+  // becomes two rows and could both reach a digest. Cluster upcoming events
+  // (normalized title + ET day + city — conservative, near-zero false positives)
+  // and collapse each cluster into one survivor (highest-priority source, then
+  // most complete). Runs after the 5AM normalize + 5:30AM expire, before the
+  // Thursday-7AM autopilot, so the lineup it sees is already de-duplicated.
+  // =========================================================================
+  cron.schedule('45 5 * * *', async () => {
+    try {
+      const { autoMergeDuplicates } = require('./event-dedup');
+      await autoMergeDuplicates();
+    } catch (err) {
+      logger.error(`[event-dedup] auto-merge run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Automation runner. Fires the next step of any enrollment
   // whose next_send_at has passed. Indexed query on automation_enrollments.
   // =========================================================================

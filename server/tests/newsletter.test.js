@@ -32,6 +32,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
+const { pickSurvivor } = require('../services/event-dedup');
 const { isEligibleForFreshDigest, cityToZone, weekLockKey } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
@@ -1337,6 +1338,33 @@ describe('newsletter GBP per-location social copy', () => {
 // findDuplicateClusters suggests merges conservatively (same normalized
 // title + ET day + city); rewriteCalendarEventIds keeps planned calendars
 // pointing at the survivor after a merge.
+
+describe('event-dedup pickSurvivor', () => {
+  const ev = (id, o = {}) => ({ id, source_priority_tier: null, image_url: null, event_url: null, pulled_at: null, ...o });
+
+  test('keeps the highest-priority source (lowest priority_tier)', () => {
+    const s = pickSurvivor([ev('a', { source_priority_tier: 3 }), ev('b', { source_priority_tier: 1 }), ev('c', { source_priority_tier: 2 })]);
+    expect(s.id).toBe('b');
+  });
+
+  test('a numbered tier beats a null tier (nulls last)', () => {
+    const s = pickSurvivor([ev('a', { source_priority_tier: null, image_url: 'x' }), ev('b', { source_priority_tier: 4 })]);
+    expect(s.id).toBe('b');
+  });
+
+  test('on equal tier, the more complete row wins (image > url)', () => {
+    const s = pickSurvivor([ev('a', { source_priority_tier: 2, event_url: 'u' }), ev('b', { source_priority_tier: 2, image_url: 'i' })]);
+    expect(s.id).toBe('b');
+  });
+
+  test('on equal tier + completeness, the earliest-pulled row wins', () => {
+    const s = pickSurvivor([
+      ev('a', { source_priority_tier: 2, pulled_at: '2026-05-10T00:00:00Z' }),
+      ev('b', { source_priority_tier: 2, pulled_at: '2026-05-02T00:00:00Z' }),
+    ]);
+    expect(s.id).toBe('b');
+  });
+});
 
 describe('event normalizeEventTitle', () => {
   test('strips punctuation, case, and noise words', () => {

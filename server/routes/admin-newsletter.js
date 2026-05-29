@@ -1301,10 +1301,6 @@ router.post('/events/bulk-action', async (req, res, next) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Stable int4 advisory-lock key (within pg_advisory_xact_lock's range) so
-// every /events/merge runs one-at-a-time and merge-vs-merge races can't chain.
-const EVENT_MERGE_LOCK_KEY = 778001;
-
 // POST /api/admin/newsletter/events/merge — collapse cross-source duplicate
 // events into one survivor. The losing rows are marked admin_status='rejected'
 // (which already excludes them from the queue + digest) with merged_into set
@@ -1361,67 +1357,10 @@ router.post('/events/merge', async (req, res, next) => {
       return res.json({ success: true, primaryId, merged: 0, calendarsUpdated: 0, alreadyMerged: presentDups.length });
     }
 
-    const { rewriteCalendarEventIds } = require('../services/event-duplicates');
-    const mergeMap = new Map(toMerge.map((id) => [id, primaryId]));
-
-    let merged = 0;
-    let calendarsUpdated = 0;
-    await db.transaction(async (trx) => {
-      // Serialize ALL merges against each other. Manual multi-row merges with
-      // calendar rewrites have inherent TOCTOU surface (chained merges where
-      // one request's primary becomes another's duplicate); a single
-      // transaction-scoped advisory lock makes merges run one-at-a-time, so
-      // those merge-vs-merge races can't interleave. Auto-releases on commit.
-      await trx.raw('SELECT pg_advisory_xact_lock(?)', [EVENT_MERGE_LOCK_KEY]);
-
-      // Revalidate the primary inside the txn (defense vs non-merge writers).
-      // FOR UPDATE + re-read rolls us back if the primary was merged away (else
-      // we'd repoint calendars to a non-survivor and create a chained merge).
-      const lockedPrimary = await trx('events_raw')
-        .select('id', 'merged_into')
-        .where({ id: primaryId })
-        .forUpdate()
-        .first();
-      if (!lockedPrimary) {
-        throw new Error('merge conflict: primary event no longer exists — rolled back');
-      }
-      if (lockedPrimary.merged_into) {
-        throw new Error('merge conflict: primary was concurrently merged into another event — rolled back');
-      }
-
-      // Conditional on merged_into IS NULL — if a concurrent merge claimed any
-      // row between our SELECT and here, fewer rows update and we roll back
-      // rather than clobber the other merge.
-      merged = await trx('events_raw')
-        .whereIn('id', toMerge)
-        .whereNull('merged_into')
-        .update({
-          admin_status: 'rejected',
-          merged_into: primaryId,
-          suppression_reason: `merged into ${primaryId}`,
-          updated_at: new Date(),
-        });
-      if (merged !== toMerge.length) {
-        throw new Error('merge conflict: a duplicate was concurrently merged — rolled back');
-      }
-
-      // Rewrite any planned calendars that reference a merged id. FOR UPDATE
-      // locks the rows so a concurrent /calendar edit or autopilot write can't
-      // be clobbered by our snapshot-derived array (table is tiny — one row
-      // per week — so locking all rows for the merge is cheap).
-      const calendars = await trx('newsletter_calendar').select('id', 'event_ids').forUpdate();
-      for (const cal of calendars) {
-        const ids = Array.isArray(cal.event_ids)
-          ? cal.event_ids
-          : (() => { try { return JSON.parse(cal.event_ids || '[]'); } catch { return []; } })();
-        const rewritten = rewriteCalendarEventIds(ids, mergeMap);
-        if (rewritten) {
-          await trx('newsletter_calendar').where({ id: cal.id })
-            .update({ event_ids: JSON.stringify(rewritten), updated_at: trx.fn.now() });
-          calendarsUpdated += 1;
-        }
-      }
-    });
+    // Shared, advisory-locked merge transaction (also used by the automated
+    // cross-source dedup cron) — see server/services/event-dedup.js.
+    const { mergeEvents } = require('../services/event-dedup');
+    const { merged, calendarsUpdated } = await mergeEvents(primaryId, toMerge);
 
     res.json({ success: true, primaryId, merged, calendarsUpdated });
   } catch (err) { next(err); }
