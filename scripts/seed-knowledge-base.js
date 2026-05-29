@@ -95,19 +95,21 @@ async function seedTokenCredentials() {
 async function seedCoreKnowledge() {
   const entries = [
     {
-      title: 'Nitrogen Blackout — Sarasota & Manatee Counties',
+      title: 'Nitrogen Blackout — Sarasota, Manatee & Charlotte Counties',
       slug: 'nitrogen-blackout-sarasota-manatee',
       category: 'agronomics',
-      tags: ['nitrogen', 'fertilizer', 'blackout', 'regulation', 'sarasota', 'manatee'],
+      tags: ['nitrogen', 'phosphorus', 'fertilizer', 'blackout', 'regulation', 'sarasota', 'manatee', 'charlotte'],
       confidence: 'high',
       content: `# Nitrogen Blackout — June 1 through September 30
 
-Both Sarasota and Manatee counties prohibit nitrogen-containing fertilizer application from June 1 to September 30 each year.
+Sarasota, Manatee, AND Charlotte counties all prohibit nitrogen- and phosphorus-containing fertilizer application from June 1 to September 30 each year.
 
 ## Key Rules
 - NO nitrogen in ANY form during the blackout window (liquid, granular, slow-release)
+- NO phosphorus during the blackout window
 - Iron-only and micronutrient-only applications ARE allowed during blackout
 - Potassium (0-0-X) products ARE allowed
+- Outside the blackout, ≥50% slow-release nitrogen is required (all three counties)
 - Violation can result in fines and license issues
 
 ## Impact on Lawn Programs
@@ -116,8 +118,9 @@ Both Sarasota and Manatee counties prohibit nitrogen-containing fertilizer appli
 - Resume nitrogen in early October (first app after September 30)
 - Communicate blackout reason to customers proactively — prevents "why is my lawn yellow" calls
 
-## Charlotte County
-Charlotte county does NOT have the same blackout ordinance as of last verification. Verify annually.`,
+## County Scope
+All three Waves service counties — Sarasota, Manatee, and Charlotte — run the same June 1–Sept 30 blackout. Charlotte County's ordinance (in place since 2008) protects Charlotte Harbor from red-tide / algal-bloom nutrient runoff. Geo note: North Port falls under Sarasota County; Port Charlotte under Charlotte County.
+Source: charlottecountyfl.gov (One Charlotte One Water), verified 2026-05-28.`,
     },
     {
       title: 'Celsius WG — Application Limits',
