@@ -72,6 +72,18 @@ function str(value, max) {
   return String(value == null ? '' : value).trim().slice(0, max);
 }
 
+// Only keep http(s) URLs — the model's `sources` come from searched pages and
+// could be prompt-injected to a javascript:/data: URI that would execute when
+// an admin clicks the rendered source link.
+function isHttpUrl(value) {
+  try {
+    const u = new URL(String(value));
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function normalizeHistory(parsed) {
   if (!parsed) return null;
   const pt = String(parsed.previousTreatment || '').toLowerCase();
@@ -98,7 +110,9 @@ function normalizeHistory(parsed) {
         description: str(p?.description, 200),
       })).filter((p) => p.type || p.description)
       : [],
-    sources: Array.isArray(parsed.sources) ? parsed.sources.slice(0, 8).map((s) => str(s, 300)).filter(Boolean) : [],
+    sources: Array.isArray(parsed.sources)
+      ? parsed.sources.map((s) => str(s, 300)).filter(isHttpUrl).slice(0, 8)
+      : [],
     confidence: ['high', 'medium', 'low'].includes(conf) ? conf : 'low',
   };
 }

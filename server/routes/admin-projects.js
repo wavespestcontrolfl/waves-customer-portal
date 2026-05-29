@@ -1269,12 +1269,23 @@ router.post('/wdo-history', async (req, res, next) => {
 
     const customerId = req.body?.customer_id || null;
     const projectId = req.body?.project_id || null;
+    const wantRefresh = req.body?.refresh === true || req.body?.refresh === 'true';
     let scopedCustomerId = customerId;
 
     if (projectId) {
       const project = await db('projects').where({ id: projectId }).first();
       if (!(await requireProjectAccess(req, res, project))) return;
       if (project.project_type !== 'wdo_inspection') return res.status(400).json({ error: 'Project is not a WDO inspection' });
+      // Return the cached history unless an explicit refresh is requested — this
+      // opt-in lookup runs up to 8 web searches, so the common reload/retry must
+      // not re-bill an Anthropic call for the same project.
+      if (!wantRefresh) {
+        let cached = project.wdo_history;
+        if (typeof cached === 'string') { try { cached = JSON.parse(cached); } catch { cached = null; } }
+        if (cached && typeof cached === 'object') {
+          return res.json({ history: cached, cached: true });
+        }
+      }
       scopedCustomerId = project.customer_id || customerId;
     } else if (!isAdmin(req)) {
       if (!customerId) return res.status(400).json({ error: 'Customer required for technician WDO history' });
@@ -1462,6 +1473,33 @@ function isReusableInvoice(inv) {
   return inv && !['void', 'paid'].includes(inv.status);
 }
 
+const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)';
+
+// If a reused invoice is still the auto-created WDO draft (untouched: draft
+// status, our title + single WDO line item) and the resolved fee has since
+// changed (the tech edited inspection_fee / structure_sqft between the dry-run
+// and the send), reprice its line item so we never bill the stale amount. A
+// manually edited invoice (different title/lines) is left untouched.
+async function maybeRepriceWdoDraft(invoice, project) {
+  if (!invoice || invoice.status !== 'draft' || String(invoice.title || '') !== 'WDO Inspection') return invoice;
+  let items = invoice.line_items;
+  if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = null; } }
+  if (!Array.isArray(items) || items.length !== 1) return invoice;
+  if (!String(items[0].description || '').startsWith('WDO Inspection (FDACS')) return invoice;
+
+  const fee = resolveWdoInspectionFee(parseFindings(project));
+  if (Number(items[0].amount ?? items[0].unit_price) === fee) return invoice;
+  try {
+    const updated = await InvoiceService.update(invoice.id, {
+      line_items: [{ description: WDO_INVOICE_LINE_DESCRIPTION, quantity: 1, unit_price: fee, amount: fee }],
+    });
+    return updated || invoice;
+  } catch (err) {
+    logger.warn(`[projects] WDO draft reprice failed for ${invoice.id}: ${err.message}`);
+    return invoice;
+  }
+}
+
 // Persist the project → invoice link so a later dry-run / send / resend reuses
 // the same invoice instead of minting a duplicate. Guarded so it degrades to a
 // no-op in environments where the projects.invoice_id column hasn't migrated.
@@ -1496,7 +1534,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
   //    projects with no service linkage, and the dry-run → send → resend path).
   if (project.invoice_id) {
     const prior = await db('invoices').where({ id: project.invoice_id, customer_id: project.customer_id }).first();
-    if (isReusableInvoice(prior)) return { invoice: prior, created: false };
+    if (isReusableInvoice(prior)) return { invoice: await maybeRepriceWdoDraft(prior, project), created: false };
   }
 
   // 2. Reuse a non-paid invoice already minted for the same scheduled service
@@ -1513,7 +1551,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
       .first();
     if (linked) {
       await persistProjectInvoiceLink(project, linked.id);
-      return { invoice: linked, created: false };
+      return { invoice: await maybeRepriceWdoDraft(linked, project), created: false };
     }
   }
 
@@ -1526,7 +1564,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
     scheduledServiceId: project.scheduled_service_id || undefined,
     title: 'WDO Inspection',
     lineItems: [{
-      description: 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)',
+      description: WDO_INVOICE_LINE_DESCRIPTION,
       quantity: 1,
       unit_price: fee,
       amount: fee,

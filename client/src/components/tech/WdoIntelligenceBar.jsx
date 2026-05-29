@@ -17,6 +17,12 @@ function hasValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== '';
 }
 
+// Only treat http(s) URLs as safe to render as a clickable source link.
+function safeHttpUrl(value) {
+  const s = String(value || '').trim();
+  return /^https?:\/\//i.test(s) ? s : null;
+}
+
 function compactFileName(file) {
   if (!file?.name) return 'Selected photo';
   return file.name.length > 34 ? `${file.name.slice(0, 30)}...` : file.name;
@@ -77,7 +83,7 @@ export default function WdoIntelligenceBar({
     setHistoryApplied(true);
   }
 
-  async function findHistory() {
+  async function findHistory(refresh = false) {
     if (disabled || historyLoading) return;
     const address = String(propertyAddress || findings.property_address || '').trim();
     if (!customerId && !address) {
@@ -95,6 +101,7 @@ export default function WdoIntelligenceBar({
           ...(projectId ? { project_id: projectId } : {}),
           ...(customerId ? { customer_id: customerId } : {}),
           ...(address ? { property_address: address } : {}),
+          ...(refresh ? { refresh: true } : {}),
         },
       });
       const data = await res.json();
@@ -270,7 +277,7 @@ export default function WdoIntelligenceBar({
         )}
         <button
           type="button"
-          onClick={findHistory}
+          onClick={() => findHistory(Boolean(history))}
           disabled={disabled || historyLoading}
           title="Search county permits and listing history for prior WDO treatment (FDACS Section 4)"
           style={{
@@ -285,7 +292,7 @@ export default function WdoIntelligenceBar({
             opacity: disabled || historyLoading ? 0.55 : 1,
           }}
         >
-          {historyLoading ? 'Searching…' : 'Treatment history'}
+          {historyLoading ? 'Searching…' : (history ? 'Refresh history' : 'Treatment history')}
         </button>
       </div>
 
@@ -346,10 +353,10 @@ export default function WdoIntelligenceBar({
           {(profile.sourceUrl || profile.confidence) && (
             <div style={{ fontSize: 10, color: P.muted, marginTop: 6 }}>
               {profile.confidence ? `Confidence: ${profile.confidence}` : ''}
-              {profile.sourceUrl ? (
+              {safeHttpUrl(profile.sourceUrl) ? (
                 <>
                   {profile.confidence ? ' · ' : ''}
-                  <a href={profile.sourceUrl} target="_blank" rel="noreferrer" style={{ color: P.muted }}>source</a>
+                  <a href={safeHttpUrl(profile.sourceUrl)} target="_blank" rel="noreferrer" style={{ color: P.muted }}>source</a>
                 </>
               ) : ''}
               {' · '}Auto-pulled — verify on site.
@@ -396,10 +403,10 @@ export default function WdoIntelligenceBar({
           </div>
           <div style={{ fontSize: 10, color: P.muted, marginTop: 6 }}>
             {history.confidence ? `Confidence: ${history.confidence}` : ''}
-            {history.sources?.length ? (
+            {safeHttpUrl(history.sources?.[0]) ? (
               <>
                 {history.confidence ? ' · ' : ''}
-                <a href={history.sources[0]} target="_blank" rel="noreferrer" style={{ color: P.muted }}>source</a>
+                <a href={safeHttpUrl(history.sources[0])} target="_blank" rel="noreferrer" style={{ color: P.muted }}>source</a>
               </>
             ) : ''}
             {' · '}Auto-pulled — verify on site before filing.
