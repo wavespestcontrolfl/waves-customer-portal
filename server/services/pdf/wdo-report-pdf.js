@@ -246,11 +246,15 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
 
   // Stamp the licensee e-signature into the signature field BEFORE flattening,
   // if one was captured. The image is drawn onto the page (independent of the
-  // form field), so it survives flatten().
+  // form field), so it survives flatten(). A failure here is fatal — the send
+  // gate treats the project as signed, so we must not silently emit an unsigned
+  // form instead.
   if (signature?.image) {
-    await stampSignature(pdfDoc, form, signature).catch((err) => {
-      logger.warn(`[wdo-pdf] signature stamp failed for project ${project.id}: ${err.message}`);
-    });
+    try {
+      await stampSignature(pdfDoc, form, signature);
+    } catch (err) {
+      throw new Error(`WDO signature could not be stamped: ${err.message}`);
+    }
   }
 
   // Flatten so the filed report is read-only.

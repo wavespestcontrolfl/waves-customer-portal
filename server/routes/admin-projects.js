@@ -1327,22 +1327,19 @@ async function loadWdoAddendumPhotos(project) {
 }
 
 // Build the filled FDACS-13645 PDF (+ signature + photo addendum) for a WDO
-// project as an email attachment. Returns null (and logs) on any failure so a
-// render hiccup never blocks the rest of the delivery.
+// project as an email attachment. Throws on failure — for a WDO report the
+// FDACS PDF *is* the deliverable, so callers must abort the send rather than
+// deliver a report-less or unsigned message. Returns null only for non-WDO
+// projects (which carry no FDACS attachment).
 async function buildWdoPdfAttachment(project, customer) {
   if (project?.project_type !== 'wdo_inspection') return null;
-  try {
-    const [applicator, photos] = await Promise.all([
-      resolveProjectApplicator(project),
-      loadWdoAddendumPhotos(project),
-    ]);
-    const signature = loadWdoSignature(project);
-    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
-    return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
-  } catch (err) {
-    logger.error(`[projects] WDO PDF build failed for ${project.id}: ${err.message}`);
-    return null;
-  }
+  const [applicator, photos] = await Promise.all([
+    resolveProjectApplicator(project),
+    loadWdoAddendumPhotos(project),
+  ]);
+  const signature = loadWdoSignature(project);
+  const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
+  return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
 }
 
 // WDO inspection auto-invoice fee. Per owner direction the tiers are
@@ -1513,6 +1510,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const typeLabel = typeCfg?.label || 'Service';
     const firstName = customer?.first_name || 'there';
 
+    // Build the FDACS report PDF up-front. For a WDO report this PDF *is* the
+    // deliverable (and is gated as signed), so a build/stamp failure must abort
+    // before any channel send rather than deliver a report-less message.
+    let wdoAttachment = null;
+    try {
+      wdoAttachment = await buildWdoPdfAttachment(updatedProject, customer);
+    } catch (e) {
+      logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
+      return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
+    }
+
     const channels = {};
 
     // SMS
@@ -1562,7 +1570,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     // Email (through editable Waves template library)
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
-    const wdoAttachment = await buildWdoPdfAttachment(updatedProject, customer);
     if (emailRecipient.email) {
       try {
         const result = await ProjectEmail.sendProjectReportReady({
@@ -1690,6 +1697,7 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
     if (project.project_type !== 'wdo_inspection') {
       return res.status(400).json({ error: 'Signatures are only captured for WDO inspections' });
     }
@@ -1704,6 +1712,15 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
     const approxBytes = Math.floor((m[2].length * 3) / 4);
     if (approxBytes > MAX_SIGNATURE_BYTES) {
       return res.status(413).json({ error: 'Signature image too large (max 2MB)' });
+    }
+    // Validate the decoded bytes are a real PNG/JPEG (magic bytes) so a
+    // malformed data URL can't be saved and later fail silently at stamp time
+    // while the send gate still treats the project as signed.
+    const decoded = Buffer.from(m[2], 'base64');
+    const isPng = decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e && decoded[3] === 0x47;
+    const isJpeg = decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff;
+    if (!isPng && !isJpeg) {
+      return res.status(400).json({ error: 'signature image is not a valid PNG or JPEG' });
     }
 
     const applicator = await resolveProjectApplicator(project);
@@ -1727,6 +1744,7 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
     const cols = await db('projects').columnInfo().catch(() => ({}));
     if (cols.wdo_signature) {
       await db('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
@@ -1800,6 +1818,19 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // Atomically claim the invoice as 'sending' before any side effects, so two
+    // overlapping send-with-invoice POSTs can't both pass the status check and
+    // deliver duplicate report/pay-link messages (mirrors the InvoiceService
+    // send-claim). Released below if nothing is delivered.
+    const previousInvoiceStatus = invoice.status;
+    const claimedRows = await db('invoices')
+      .where({ id: invoice.id })
+      .whereIn('status', ['draft', 'scheduled', 'sent'])
+      .update({ status: 'sending', updated_at: db.fn.now() });
+    if (!claimedRows) {
+      return res.status(409).json({ error: 'Invoice send already in progress', invoice_id: invoice.id });
+    }
+
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +
     // 'sent' legacy-visible path in documents.js.
@@ -1832,10 +1863,19 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       codePrefix: invoiceShortCodePrefix(invoice),
     });
 
-    // Build both PDFs.
+    // Build both PDFs. The FDACS report IS the deliverable here, so if it can't
+    // be built (e.g. signature can't be stamped) abort and release the claim
+    // rather than sending a report-less message.
     const attachments = [];
-    const wdoAttachment = await buildWdoPdfAttachment(refreshed, customer);
-    if (wdoAttachment) attachments.push(wdoAttachment);
+    try {
+      const wdoAttachment = await buildWdoPdfAttachment(refreshed, customer);
+      if (wdoAttachment) attachments.push(wdoAttachment);
+    } catch (e) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      logger.error(`[projects] WDO PDF build failed for ${refreshed.id}: ${e.message}`);
+      return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
+    }
     try {
       const invoiceForPdf = { ...invoice, customer, line_items: normalizeInvoiceLineItemsForPdf(invoice.line_items) };
       const invoiceBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
@@ -1924,6 +1964,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         source: 'project_report_with_invoice',
         payUrl,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
+    } else {
+      // Nothing went out — release the 'sending' claim back to its prior status
+      // so the invoice isn't stranded and can be retried.
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
     }
 
     if (delivered) {
