@@ -9,6 +9,7 @@ const {
   updateAlert,
   listEvents,
 } = require('../services/admin-alerts');
+const { resolveCloseoutRequirementsForJobs } = require('../services/service-closeout-requirements');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -113,6 +114,7 @@ function mapJob(row) {
     occurredAt: row.scheduled_date,
     metadata: {
       serviceType: row.service_type,
+      serviceId: row.service_id || null,
       status: row.status,
       scheduledWindow: [row.window_start, row.window_end].filter(Boolean).join(' - '),
       technicianName: row.tech_name || null,
@@ -129,6 +131,7 @@ async function getTodaysJobs({ date, technicianId, serviceLine }) {
       's.id',
       's.customer_id',
       's.technician_id',
+      's.service_id',
       's.service_type',
       's.scheduled_date',
       's.window_start',
@@ -191,6 +194,14 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
   }
 
   if (completedJobIds.length) {
+    const completedJobs = rows
+      .filter((r) => completedJobIds.includes(r.sourceRecordId))
+      .map((r) => ({
+        id: r.sourceRecordId,
+        service_id: r.metadata.serviceId,
+        service_type: r.metadata.serviceType,
+      }));
+    const requirementsByJob = await resolveCloseoutRequirementsForJobs(completedJobs);
     const formRows = await db('job_form_submissions')
       .whereIn('scheduled_service_id', completedJobIds)
       .whereNotNull('completed_at')
@@ -206,24 +217,27 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
     const withApplications = new Set(appRows.map((r) => r.scheduled_service_id));
 
     for (const row of rows.filter((r) => completedJobIds.includes(r.sourceRecordId))) {
-      if (!withForms.has(row.sourceRecordId)) {
+      const closeoutRequirements = requirementsByJob.get(row.sourceRecordId) || {};
+      if (closeoutRequirements.requiresServiceReport && !withForms.has(row.sourceRecordId)) {
         attention.push(issue({
           ...row,
-          id: `${row.sourceRecordId}_possible_missing_report`,
-          type: 'possible_missing_service_report',
+          id: `${row.sourceRecordId}_missing_required_service_report`,
+          type: 'missing_required_service_report',
           severity: 'medium',
-          label: 'Possible missing service report',
-          summary: 'Completed job may be missing a required closeout report.',
+          label: 'Missing required service report',
+          summary: 'Completed job is missing the required closeout report.',
+          metadata: { ...row.metadata, closeoutRequirements },
         }));
       }
-      if (/pest|lawn|mosquito|termite|roach|ant|flea|bed/i.test(row.metadata.serviceType || '') && !withApplications.has(row.sourceRecordId)) {
+      if (closeoutRequirements.requiresApplicationLog && !withApplications.has(row.sourceRecordId)) {
         attention.push(issue({
           ...row,
-          id: `${row.sourceRecordId}_possible_missing_material_log`,
-          type: 'possible_missing_material_log',
+          id: `${row.sourceRecordId}_missing_required_material_log`,
+          type: 'missing_required_material_log',
           severity: 'medium',
-          label: 'Possible missing material log',
-          summary: 'Completed job may require a chemical or material application record.',
+          label: 'Missing required material log',
+          summary: 'Completed job is missing the required chemical or material application record.',
+          metadata: { ...row.metadata, closeoutRequirements },
         }));
       }
     }

@@ -3,6 +3,7 @@
  */
 const db = require('../models/db');
 const { auditServiceCatalogChange } = require('./audit-log');
+const { inferCloseoutDefaults } = require('./service-closeout-requirements');
 
 const SERVICE_COLS = [
   'id', 'service_key', 'name', 'short_name', 'description', 'internal_notes',
@@ -14,9 +15,20 @@ const SERVICE_COLS = [
   'is_taxable', 'tax_category', 'tax_service_key',
   'requires_license', 'license_category', 'requires_certification', 'min_tech_skill_level',
   'default_equipment', 'default_products', 'typical_materials_cost',
+  'requires_service_report', 'requires_application_log', 'required_photo_count',
+  'requires_customer_signature', 'requires_customer_notice', 'closeout_requirements_source',
   'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
   'is_active', 'is_archived',
   'created_at', 'updated_at',
+];
+
+const CLOSEOUT_REQUIREMENT_COLS = [
+  'requires_service_report',
+  'requires_application_log',
+  'required_photo_count',
+  'requires_customer_signature',
+  'requires_customer_notice',
+  'closeout_requirements_source',
 ];
 
 const VALID_CATEGORIES = new Set([
@@ -29,6 +41,8 @@ const VALID_FREQUENCIES = new Set(['', 'monthly', 'every_6_weeks', 'bimonthly', 
 const NON_LIVE_SCHEDULE_STATUSES = ['completed', 'cancelled', 'skipped'];
 const BOOLEAN_COLS = new Set([
   'is_waveguard', 'requires_follow_up', 'is_taxable', 'requires_license',
+  'requires_service_report', 'requires_application_log',
+  'requires_customer_signature', 'requires_customer_notice',
   'customer_visible', 'booking_enabled', 'is_active', 'is_archived',
 ]);
 
@@ -208,7 +222,7 @@ function validateServicePayload(data, { partial = false } = {}) {
     'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
     'base_price', 'price_range_min', 'price_range_max',
-    'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
+    'min_tech_skill_level', 'typical_materials_cost', 'required_photo_count', 'sort_order',
   ]) {
     if (data[key] === undefined || data[key] === '' || data[key] === null) continue;
     const parsed = Number(data[key]);
@@ -308,6 +322,7 @@ async function createService(data, { audit } = {}) {
     'is_taxable', 'tax_category', 'tax_service_key',
     'requires_license', 'license_category', 'requires_certification', 'min_tech_skill_level',
     'default_equipment', 'default_products', 'typical_materials_cost',
+    ...CLOSEOUT_REQUIREMENT_COLS,
     'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
     'is_active', 'is_archived',
   ];
@@ -315,7 +330,7 @@ async function createService(data, { audit } = {}) {
     'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
     'base_price', 'price_range_min', 'price_range_max',
-    'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
+    'min_tech_skill_level', 'typical_materials_cost', 'required_photo_count', 'sort_order',
   ]);
   const jsonbKeys = new Set(['requires_certification', 'default_equipment', 'default_products']);
 
@@ -344,6 +359,12 @@ async function createService(data, { audit } = {}) {
       }
       insert[key] = val;
     }
+  }
+  const hasExplicitCloseout = CLOSEOUT_REQUIREMENT_COLS.some((key) => data[key] !== undefined);
+  if (!hasExplicitCloseout) {
+    Object.assign(insert, inferCloseoutDefaults(insert, insert.name));
+  } else if (!insert.closeout_requirements_source) {
+    insert.closeout_requirements_source = 'manual';
   }
 
   return db.transaction(async (trx) => {
@@ -374,6 +395,7 @@ async function updateService(id, data, { audit } = {}) {
     'is_taxable', 'tax_category', 'tax_service_key',
     'requires_license', 'license_category', 'requires_certification', 'min_tech_skill_level',
     'default_equipment', 'default_products', 'typical_materials_cost',
+    ...CLOSEOUT_REQUIREMENT_COLS,
     'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
     'is_active', 'is_archived',
   ];
@@ -382,7 +404,7 @@ async function updateService(id, data, { audit } = {}) {
     'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
     'base_price', 'price_range_min', 'price_range_max',
-    'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
+    'min_tech_skill_level', 'typical_materials_cost', 'required_photo_count', 'sort_order',
   ]);
   // JSONB columns — must be objects/arrays/null, not strings
   const jsonbKeys = new Set(['requires_certification', 'default_equipment', 'default_products']);
@@ -413,6 +435,15 @@ async function updateService(id, data, { audit } = {}) {
         }
       }
       update[key] = val;
+    }
+  }
+  const hasExplicitCloseout = CLOSEOUT_REQUIREMENT_COLS.some((key) => data[key] !== undefined);
+  if (hasExplicitCloseout && !update.closeout_requirements_source) {
+    update.closeout_requirements_source = 'manual';
+  } else if (!hasExplicitCloseout && (data.name !== undefined || data.category !== undefined)) {
+    const source = String(before.closeout_requirements_source || '').trim();
+    if (!source || source === 'default' || source === 'inferred_v1') {
+      Object.assign(update, inferCloseoutDefaults({ ...before, ...update }, update.name || before.name));
     }
   }
 
