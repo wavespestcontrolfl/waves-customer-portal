@@ -594,6 +594,7 @@ describe('waveguard-plan-engine helpers', () => {
     const celsius = classifyProtocolLine('Celsius WG + NIS broadleaf ($3.84)', 'base');
     const branch = classifyProtocolLine('★ IF P index ≥80: LESCO 24-0-11 ($8.68)', 'base');
     const abbreviatedBranch = classifyProtocolLine('★ IF P ≥80: LESCO 24-0-11 ($8.68)', 'base');
+    const skipOnly = classifyProtocolLine('★ NON-IRRIGATED: skip Moisture Manager', 'base');
 
     expect(celsius.scope).toBe('SPOT_ALLOWANCE');
     expect(celsius.areaFactorDefault).toBe(0.25);
@@ -604,6 +605,8 @@ describe('waveguard-plan-engine helpers', () => {
       conditionFlag: 'soil_p_index',
     });
     expect(abbreviatedBranch.scope).toBe('BRANCH_ONE_OF');
+    expect(skipOnly.scope).toBe('INSPECTION_ONLY');
+    expect(effectiveAreaFactor(skipOnly, {})).toBe(0);
   });
 
   test('resolveProtocolItems selects only one May fertilizer branch and defaults missing soil test to 24-0-11', () => {
