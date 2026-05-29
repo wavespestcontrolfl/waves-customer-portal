@@ -1,17 +1,23 @@
 /**
- * Data fix — update the LIVE knowledge_base nitrogen-blackout row in place.
+ * Data fix — correct the Charlotte/North Port fertilizer-blackout facts in the
+ * two LIVE tables that carry them, on deploy:
+ *   1) knowledge_base  — informational (Intelligence Bar / recommendation context)
+ *   2) municipality_ordinances — OPERATIONAL (drives the product blackout blockers
+ *      in waveguard-plan-engine + admin-dispatch)
  *
  * Context: PR #1329 corrected the seed (Charlotte DOES have the June 1-Sept 30
  * blackout; North Port starts April 1) and added a `forceUpdate` flag. But
  * forceUpdate only corrects an already-seeded row when someone MANUALLY re-runs
- * scripts/seed-knowledge-base.js against the environment. Deploys run knex
- * migrations, not the seed — so without this migration the live row keeps the
- * stale "Charlotte does NOT have the blackout" text, which the recommendation
- * engine / Intelligence Bar surface. This migration corrects it automatically
- * on deploy (Codex P2 on #1329 named "a one-off data migration" as the remedy).
+ * scripts/seed-knowledge-base.js. Deploys run knex migrations, not the seed — so
+ * without this migration the live rows keep the stale "Charlotte does NOT have
+ * the blackout" data. The KB drives what the Intelligence Bar SAYS; the
+ * municipality_ordinances row drives what the product checks actually BLOCK.
+ * Fixing only the KB would leave Charlotte N/P applications operationally allowed
+ * during the real blackout (Codex P2 on #1329 + #1342).
  *
- * Self-contained: content embedded as JSON (canonical, matches main's seed).
- * Update-only — fresh environments get the correct content from the seed.
+ * Self-contained: KB content embedded as JSON (canonical, matches main's seed).
+ * Both updates are update-only and idempotent; fresh environments get correct
+ * data from their respective seeds.
  */
 
 const SLUG = "nitrogen-blackout-sarasota-manatee";
@@ -31,17 +37,46 @@ const ENTRY = {
 };
 
 exports.up = async function up(knex) {
-  if (!(await knex.schema.hasTable('knowledge_base'))) return;
-  const existing = await knex('knowledge_base').where({ slug: SLUG }).first();
-  if (!existing) return; // fresh envs are seeded with correct content; nothing to fix
-  await knex('knowledge_base').where({ slug: SLUG }).update({
-    title: ENTRY.title,
-    tags: JSON.stringify(ENTRY.tags),
-    content: ENTRY.content,
-    confidence: 'high',
-    last_verified_at: new Date(),
-    verified_by: 'migration-blackout-charlotte-northport',
-  });
+  // 1) knowledge_base — INFORMATIONAL layer (Intelligence Bar / recommendation
+  //    context). Update-only; fresh envs get correct content from the seed.
+  if (await knex.schema.hasTable('knowledge_base')) {
+    const existing = await knex('knowledge_base').where({ slug: SLUG }).first();
+    if (existing) {
+      await knex('knowledge_base').where({ slug: SLUG }).update({
+        title: ENTRY.title,
+        tags: JSON.stringify(ENTRY.tags),
+        content: ENTRY.content,
+        confidence: 'high',
+        last_verified_at: new Date(),
+        verified_by: 'migration-blackout-charlotte-northport',
+      });
+    }
+  }
+
+  // 2) municipality_ordinances — OPERATIONAL layer. This table drives the actual
+  //    product blackout blockers in WaveGuard plan-engine (getApplicableOrdinances)
+  //    and admin-dispatch (actualProductBlackoutBlocks). Charlotte County was
+  //    seeded (20260430000011) with restricted_nitrogen/phosphorus = false and a
+  //    null window, so the blockers WRONGLY allow N/P in Charlotte Jun 1–Sep 30 —
+  //    a compliance gap that fixing only the KB would leave open. Correct the
+  //    active county row in place (this was a data error, not a real ordinance
+  //    amendment). Verified vs charlottecountyfl.gov 2026-05-28.
+  if (await knex.schema.hasTable('municipality_ordinances')) {
+    await knex('municipality_ordinances')
+      .where({ jurisdiction_type: 'county', jurisdiction_name: 'Charlotte County', active: true })
+      .update({
+        restricted_start_month: 6,
+        restricted_start_day: 1,
+        restricted_end_month: 9,
+        restricted_end_day: 30,
+        restricted_nitrogen: true,
+        restricted_phosphorus: true,
+        source_url: 'https://www.charlottecountyfl.gov/one-charlotte-one-water/improving-water-quality/fertilizers-pesticides-irrigation.stml',
+        source_name: 'Charlotte County One Charlotte One Water — Fertilizer Ordinance',
+        source_checked_at: '2026-05-28',
+        notes: 'Jun 1 - Sept 30 restricted: N/P prohibited (Charlotte County ordinance, in effect since 2008 to protect Charlotte Harbor). Slow-release N >= 50% outside the season. Corrected 2026-05-28 - prior seed row incorrectly recorded no county-level blackout.',
+      });
+  }
 };
 
 exports.down = async function down() {
