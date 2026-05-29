@@ -21,8 +21,25 @@ function stripHtml(html) {
   return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 }
 
+// Suppression types that block delivery on EVERY send stream, mirroring
+// activeSuppressionFor() in email-template-library.js. Bounces stay GLOBAL by
+// design (email audit C4), so the newsletter blast must honor them too.
+const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
+
 function buildSubscriberQuery(segmentFilter) {
   let q = db('newsletter_subscribers').where({ status: 'active' });
+  // Exclude any address with an active GLOBAL suppression (bounce /
+  // spam_complaint / do_not_email) recorded via ANY stream. Without this the
+  // newsletter would re-mail addresses every other send path already blocks,
+  // hurting deliverability and ignoring do-not-email requests. Applies to the
+  // count, the send fetch, and the resume fetch — all go through this builder.
+  q = q.whereNotExists(function () {
+    this.select(db.raw('1'))
+      .from('email_suppressions as es')
+      .where('es.status', 'active')
+      .whereRaw('LOWER(es.email) = LOWER(newsletter_subscribers.email)')
+      .whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES);
+  });
   if (!segmentFilter) return q;
 
   const f = segmentFilter;

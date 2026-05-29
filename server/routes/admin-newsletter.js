@@ -192,10 +192,21 @@ router.get('/subscribers.csv', async (req, res, next) => {
 // Designed for a Beehiiv CSV export → POST flow.
 router.post('/subscribers/import', async (req, res, next) => {
   try {
-    const { subscribers, source = 'beehiiv_import' } = req.body;
+    const { subscribers, source = 'beehiiv_import', preConsented = true } = req.body;
     if (!Array.isArray(subscribers) || subscribers.length === 0) {
       return res.status(400).json({ error: 'subscribers[] required' });
     }
+    // Cap the batch so an accidental/oversized paste can't insert an enormous
+    // active audience in one request (and to bound the bulk write).
+    const MAX_IMPORT = 25000;
+    if (subscribers.length > MAX_IMPORT) {
+      return res.status(400).json({ error: `Too many rows (${subscribers.length}); max ${MAX_IMPORT} per import — split into batches` });
+    }
+    // Pre-consented imports (e.g. the Beehiiv migration of already-opted-in
+    // subscribers) land 'active'. Pass preConsented:false to import an
+    // unverified list as 'pending' so it can't be mailed until each address
+    // double-opts-in, rather than silently becoming a sendable audience.
+    const importStatus = preConsented === false ? 'pending' : 'active';
 
     // Two-pass: filter to valid rows in JS (so we have a clean count of
     // bad inputs), then a single bulk INSERT ... ON CONFLICT DO NOTHING
@@ -213,7 +224,7 @@ router.post('/subscribers/import', async (req, res, next) => {
         first_name: s.firstName || s.first_name || null,
         last_name: s.lastName || s.last_name || null,
         source,
-        status: 'active',
+        status: importStatus,
       });
     }
 

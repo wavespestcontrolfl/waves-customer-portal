@@ -57,6 +57,19 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(sql).not.toMatch(/tags/);
   });
 
+  test('always anti-joins the global email_suppressions ledger (bounce/spam/do_not_email)', () => {
+    const { sql, bindings } = shapeOf(null);
+    expect(sql).toMatch(/not exists/i);
+    expect(sql).toMatch(/email_suppressions/);
+    expect(bindings).toEqual(expect.arrayContaining(['bounce', 'spam_complaint', 'do_not_email']));
+  });
+
+  test('suppression anti-join is present even with a segment filter applied', () => {
+    const { sql } = shapeOf({ customersOnly: true });
+    expect(sql).toMatch(/email_suppressions/);
+    expect(sql).toMatch(/"customer_id" is not null/);
+  });
+
   test('customersOnly adds customer_id IS NOT NULL', () => {
     const { sql } = shapeOf({ customersOnly: true });
     expect(sql).toMatch(/"customer_id" is not null/);
