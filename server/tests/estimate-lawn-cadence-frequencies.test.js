@@ -57,6 +57,26 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(lawnFrequenciesFromResultStats({})).toEqual([]);
   });
 
+  test('drops a hidden Basic (4-visit) row without stealing the Standard slot', () => {
+    // Basic listed BEFORE Standard — must NOT alias onto standard and drop the
+    // real 6-visit Standard row (Codex P2). Basic is excluded; Standard stays at 6.
+    const freqs = lawnFrequenciesFromResultStats({
+      results: {
+        lawn: [
+          { name: 'Basic', v: 4, mo: 35, ann: 420, pa: 105, recommended: false },
+          { name: 'Standard', v: 6, mo: 45.5, ann: 546, pa: 91, recommended: false },
+          { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true },
+          { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89, recommended: false },
+        ],
+      },
+    });
+    expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    const std = freqs.find((f) => f.key === 'standard');
+    expect(std.label).toBe('Bi-monthly');
+    expect(std.visitsPerYear).toBe(6);
+    expect(std.monthly).toBe(45.5); // the real 6-visit price, not Basic's $35
+  });
+
   test('each cadence lists the program + treatments as included', () => {
     const std = lawnFrequenciesFromResultStats(lawnEstData()).find((f) => f.key === 'standard');
     expect(std.included.map((i) => i.key)).toEqual(['lawn_care_standard', 'lawn_care_treatments']);

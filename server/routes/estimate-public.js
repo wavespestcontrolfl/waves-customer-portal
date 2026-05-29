@@ -6416,7 +6416,12 @@ function lawnTierKey(row = {}) {
   const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
   if (raw.includes('premium') || visits === 12) return 'premium';
   if (raw.includes('enhanced') || visits === 9) return 'enhanced';
-  if (raw.includes('standard') || raw.includes('basic') || visits === 6 || visits === 4) return 'standard';
+  if (raw.includes('standard') || visits === 6) return 'standard';
+  // Basic (4 visits) is the hidden manager-only tier — keep it DISTINCT from
+  // standard so the customer-cadence whitelist drops it instead of aliasing it
+  // onto the 6-visit Standard slot (which would surface the cheaper 4-visit
+  // price as "Bi-monthly" while accept re-stamps to 6 visits).
+  if (raw.includes('basic') || visits === 4) return 'basic';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
