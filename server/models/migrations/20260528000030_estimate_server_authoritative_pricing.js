@@ -44,11 +44,13 @@ exports.up = async function (knex) {
     }
   }
 
-  const hasAuthIndex = await knex.schema.hasColumn('estimates', 'pricing_authority');
-  if (hasAuthIndex) {
-    await knex.schema.alterTable('estimates', (t) => {
-      t.index('pricing_authority', 'idx_estimates_pricing_authority');
-    }).catch(() => { /* index already exists — safe to ignore on re-run */ });
+  const hasAuthColumn = await knex.schema.hasColumn('estimates', 'pricing_authority');
+  if (hasAuthColumn) {
+    // Raw IF NOT EXISTS rather than a swallowed .catch(): knex runs this
+    // migration inside a transaction, so a duplicate-index error on a partial
+    // rerun would abort the whole transaction (and break the backfill below) —
+    // catching the JS error does not reset the aborted PG transaction.
+    await knex.raw('CREATE INDEX IF NOT EXISTS idx_estimates_pricing_authority ON estimates (pricing_authority)');
   }
 
   // Backfill: legacy accepted estimates have no lock, so the acceptance guard
@@ -70,12 +72,8 @@ exports.down = async function (knex) {
   const hasTable = await knex.schema.hasTable('estimates');
   if (!hasTable) return;
 
-  const hasAuthIndex = await knex.schema.hasColumn('estimates', 'pricing_authority');
-  if (hasAuthIndex) {
-    await knex.schema.alterTable('estimates', (t) => {
-      t.dropIndex('pricing_authority', 'idx_estimates_pricing_authority');
-    }).catch(() => { /* index may not exist */ });
-  }
+  // Drop the index before its column; IF EXISTS keeps the down path idempotent.
+  await knex.raw('DROP INDEX IF EXISTS idx_estimates_pricing_authority');
 
   for (const name of [
     'pricing_authority',
