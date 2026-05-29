@@ -3603,7 +3603,6 @@ export default function EstimateToolViewV2({
     hasTurfPricedSelection &&
     confirmedTurfSqFt === null &&
     aiTurfSqFt !== null &&
-    aiTurfSqFt >= 15000 &&
     turfReviewReasons.length > 0;
   const hasAnyTermiteSelection =
     !!form.svcTermiteBait ||

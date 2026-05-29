@@ -1492,11 +1492,11 @@ function buildFieldVerifyFlags(rc, ai) {
     lotSqFt: rc?.lotSize,
     aiConfidence: ai?.confidenceScore,
   });
-  if (estimatedTurfSf >= TURF_REVIEW_THRESHOLD_SQFT && turfReviewReasons.length > 0) {
+  if (estimatedTurfSf > 0 && turfReviewReasons.length > 0) {
     flags.push({
       field: 'estimatedTurfSf',
       reason: `AI turf estimate ${Math.round(estimatedTurfSf).toLocaleString()} sq ft needs review — ${turfReviewReasons.join(', ')}`,
-      priority: estimatedTurfSf > TURF_MANUAL_CONFIRMATION_SQFT ? 'HIGH' : 'MEDIUM',
+      priority: estimatedTurfSf >= TURF_REVIEW_THRESHOLD_SQFT || turfReviewReasons.some(reason => /% of lot/.test(reason)) ? 'HIGH' : 'MEDIUM',
     });
   }
 
