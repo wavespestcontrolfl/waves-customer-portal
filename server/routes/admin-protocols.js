@@ -8,6 +8,7 @@ const {
   calculateProductAmount,
   effectiveAreaFactor,
   matchCatalogProduct,
+  parseVisitNutrientTargets,
   parseProtocolLines,
   resolveProtocolItems,
 } = require('../services/waveguard-plan-engine');
@@ -123,7 +124,7 @@ async function getProtocolProducts() {
       'frac_group', 'irac_group', 'hrac_group',
       'analysis_n', 'analysis_p', 'analysis_k',
       'default_rate_per_1000', 'rate_unit',
-      'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'needs_pricing',
+      'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at', 'rainfast_minutes', 'rei_hours',
       'labeled_turf_species', 'excluded_turf_species',
@@ -276,6 +277,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     const baseLines = parseProtocolLines(visit.primary, 'base');
     const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
     const allLines = [...baseLines, ...conditionalLines];
+    const nutrientTargets = parseVisitNutrientTargets(visit.notes);
 
     const resolvedLines = resolveProtocolItems(allLines, products, {
       selectedConditionalProductIds: req.query.selectedConditionalProductIds,
@@ -301,12 +303,12 @@ router.get('/lawn-mix', async (req, res, next) => {
         isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
       });
       const jobMix = selected && product && carrier
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor })
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets })
         : null;
       const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
       const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
       const fullTankMix = selected && product && carrier && tankCoverageSqft
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier })
+        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
         : null;
 
       return {
@@ -340,6 +342,7 @@ router.get('/lawn-mix', async (req, res, next) => {
           costPerUnit: product.cost_per_unit != null ? Number(product.cost_per_unit) : null,
           costUnit: product.cost_unit || null,
           containerSize: product.container_size || null,
+          unitSizeOz: product.unit_size_oz != null ? Number(product.unit_size_oz) : null,
           needsPricing: product.needs_pricing === true,
           rainfastMinutes: product.rainfast_minutes || null,
           reiHours: product.rei_hours || null,
