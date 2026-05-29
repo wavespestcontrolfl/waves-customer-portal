@@ -83,6 +83,28 @@ function actionLabel(kind, line, product) {
   return raw || productName || 'Completed protocol item';
 }
 
+// Interim scope classifier for protocol-derived actions (pest services show
+// these instead of the generic chips). PR2 replaces this with explicit
+// per-line metadata in protocols.json; until then this controlled keyword map
+// is the fallback that lets an interior treatment fire the re-entry countdown.
+function actionScopeForLine(line, product) {
+  const text = normalizeText(`${line?.raw || ''} ${product?.name || ''} ${product?.category || ''}`);
+  const interior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|crack|crevice|void|voids|cabinet|pantry|closet|hinge|hinges|appliance|appliances|plumbing)\b/.test(text);
+  const exterior = /\b(exterior|outside|outdoor|perimeter|foundation|eave|eaves|soffit|yard|lawn|landscape|mulch|bed|beds|lanai|patio|driveway|fence|window|windows|door|doors|entry)\b/.test(text);
+  // Prioritize interior: a mixed/interior line should fire the re-entry window
+  // (the conservative safety choice). Exterior is asserted by other actions/areas.
+  if (interior) return 'interior';
+  if (exterior) return 'exterior';
+  return null;
+}
+
+function actionTreatmentApplied(kind, line) {
+  if (kind === 'inspection') return false;
+  const text = normalizeText(line?.raw || '');
+  if (/\b(declin|no access|not treated|unavailable|skip|skipped|customer not home)\b/.test(text)) return false;
+  return true;
+}
+
 function serializeProtocolProduct(product) {
   if (!product) return null;
   return {
@@ -110,6 +132,8 @@ function buildCompletionActions({ lines, products, programKey, visit }) {
       raw: line.raw,
       role: line.role,
       conditional: !!line.conditional,
+      scope: actionScopeForLine(line, product),
+      treatmentApplied: actionTreatmentApplied(kind, line),
       product: serializeProtocolProduct(product),
     };
   });

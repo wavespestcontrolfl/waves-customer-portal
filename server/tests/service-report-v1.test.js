@@ -12,6 +12,7 @@ const {
   methodFromProduct,
   minutesFromElapsed,
   normalizeAdvisoryForTreatmentScope,
+  buildCompletionAdvisory,
 } = require('../services/service-report/report-data');
 const {
   hashPhotoChainPayload,
@@ -231,6 +232,155 @@ describe('service report v1', () => {
     expect(unknownScope).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
     expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
     expect(context.targets.map((target) => target.key)).toEqual(['exterior']);
+  });
+
+  describe('structured action scope drives interior re-entry', () => {
+    const advisory = { exterior_reentry_min: 30, interior_reentry_min: 120, irrigation_hold_hr: 24 };
+    const exteriorAreas = JSON.stringify(['Exterior perimeter']);
+    const interiorAreas = JSON.stringify(['Interior — baseboards/kitchen/baths']);
+
+    test('interior treatment action keeps interior even with exterior-only areas', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          areas_serviced: exteriorAreas,
+          structured_notes: {
+            areasTreated: ['Exterior perimeter'],
+            protocolActionScopesCompleted: [
+              { label: 'Applied interior treatment', scope: 'interior', treatmentApplied: true },
+            ],
+          },
+        },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120 });
+    });
+
+    test('interior INSPECTION (treatmentApplied:false) does NOT fire interior', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          areas_serviced: exteriorAreas,
+          structured_notes: {
+            areasTreated: ['Exterior perimeter'],
+            protocolActionScopesCompleted: [
+              { label: 'Interior inspection', scope: 'interior', treatmentApplied: false },
+            ],
+          },
+        },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 0 });
+    });
+
+    test('exterior-only actions zero interior', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          structured_notes: {
+            protocolActionScopesCompleted: [
+              { label: 'Applied non-repellent solutions (exterior)', scope: 'exterior', treatmentApplied: true },
+            ],
+          },
+        },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 0 });
+    });
+
+    test('mixed interior + exterior actions keep both windows', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          structured_notes: {
+            protocolActionScopesCompleted: [
+              { label: 'Applied repellent solutions (exterior)', scope: 'exterior', treatmentApplied: true },
+              { label: 'Applied non-repellent solutions (interior)', scope: 'interior', treatmentApplied: true },
+            ],
+          },
+        },
+      });
+      expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+    });
+
+    test('conflict: exterior area + interior action ⇒ interior fires', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          areas_serviced: exteriorAreas,
+          structured_notes: {
+            protocolActionScopesCompleted: [
+              { label: 'Applied interior treatment', scope: 'interior', treatmentApplied: true },
+            ],
+          },
+        },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120 });
+    });
+
+    test('conflict: interior area + exterior action ⇒ interior still fires (area wins)', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          areas_serviced: interiorAreas,
+          structured_notes: {
+            protocolActionScopesCompleted: [
+              { label: 'Applied non-repellent solutions (exterior)', scope: 'exterior', treatmentApplied: true },
+            ],
+          },
+        },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120 });
+    });
+
+    test('legacy record with no structured scopes falls back to area regex', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: exteriorAreas },
+        applications: [{ application_area: 'Exterior perimeter' }],
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 0 });
+    });
+
+    test('structured_notes as a JSON string is parsed', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          areas_serviced: exteriorAreas,
+          structured_notes: JSON.stringify({
+            protocolActionScopesCompleted: [
+              { label: 'Applied interior treatment', scope: 'interior', treatmentApplied: true },
+            ],
+          }),
+        },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120 });
+    });
+
+    test.each([null, [], 'not-json', [{ junk: true }], [{ scope: 'interior' }]])(
+      'malformed protocolActionScopesCompleted (%p) is ignored; exterior areas still zero interior',
+      (bad) => {
+        const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+          service: {
+            areas_serviced: exteriorAreas,
+            structured_notes: { protocolActionScopesCompleted: bad },
+          },
+        });
+        expect(normalized).toMatchObject({ interior_reentry_min: 0 });
+      },
+    );
+
+    // Write-path coverage: buildCompletionAdvisory is exactly what the
+    // /complete route persists. Asserts the route's scope wiring, not just
+    // the normalizer in isolation.
+    test('buildCompletionAdvisory: exterior areas + interior treatment action keeps interior', () => {
+      const built = buildCompletionAdvisory({
+        advisoryDefaults: advisory,
+        completionAreas: ['Exterior perimeter'],
+        protocolActionScopes: [
+          { label: 'Applied interior treatment', scope: 'interior', treatmentApplied: true },
+        ],
+      });
+      expect(built).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+    });
+
+    test('buildCompletionAdvisory: exterior-only completion zeroes interior', () => {
+      const built = buildCompletionAdvisory({
+        advisoryDefaults: advisory,
+        completionAreas: ['Exterior perimeter'],
+        protocolActionScopes: [],
+      });
+      expect(built).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+    });
   });
 
   test('premium experience builds customer-facing modules from service facts', () => {

@@ -57,24 +57,35 @@ const D = {
   inputBorder: "#CBD5E1",
 };
 
+// Each action carries explicit scope + treatmentApplied so the re-entry
+// advisory never has to regex the label. treatmentApplied:false = a
+// non-chemical action (inspection/monitor/sweep) that must NOT fire the
+// interior dry-time countdown. (Shown only for services without a protocol;
+// pest services show protocol-derived actions that carry their own scope.)
 const CHIP_ACTIONS = [
-  "Applied perimeter band",
-  "Interior — baseboards/kitchen/baths",
-  "Cobweb sweep",
-  "Granular applied in beds",
-  "Spot-treated weeds",
-  "Checked bait stations",
-  "Barrier treatment",
-  "Larvicide applied",
-  "De-webbed eaves",
-  "Used non-repellent solutions",
-  "Used repellent solutions with a surfactant",
-  "Dusted wall voids",
-  "Applied gel bait",
-  "Crack and crevice treatment",
-  "Flushed with aerosol",
-  "Treated entry points (doors/windows/pipes)",
+  { label: "Applied perimeter band", scope: "exterior", treatmentApplied: true },
+  { label: "Applied non-repellent solutions (exterior)", scope: "exterior", treatmentApplied: true },
+  { label: "Applied non-repellent solutions (interior)", scope: "interior", treatmentApplied: true },
+  { label: "Applied repellent solutions (exterior)", scope: "exterior", treatmentApplied: true },
+  { label: "Applied repellent solutions (interior)", scope: "interior", treatmentApplied: true },
+  { label: "Applied interior treatment", scope: "interior", treatmentApplied: true },
+  { label: "Interior — baseboards/kitchen/baths", scope: "interior", treatmentApplied: true },
+  { label: "Cobweb sweep", scope: "exterior", treatmentApplied: false },
+  { label: "Granular applied in beds", scope: "exterior", treatmentApplied: true },
+  { label: "Spot-treated weeds", scope: "exterior", treatmentApplied: true },
+  { label: "Checked bait stations", scope: "exterior", treatmentApplied: false },
+  { label: "Barrier treatment", scope: "exterior", treatmentApplied: true },
+  { label: "Larvicide applied", scope: "exterior", treatmentApplied: true },
+  { label: "De-webbed eaves", scope: "exterior", treatmentApplied: false },
+  { label: "Dusted wall voids", scope: "interior", treatmentApplied: true },
+  { label: "Applied gel bait", scope: "interior", treatmentApplied: true },
+  { label: "Crack and crevice treatment", scope: "interior", treatmentApplied: true },
+  { label: "Flushed with aerosol", scope: "interior", treatmentApplied: true },
+  { label: "Treated entry points (doors/windows/pipes)", scope: "exterior", treatmentApplied: true },
 ];
+const CHIP_ACTION_BY_LABEL = Object.fromEntries(
+  CHIP_ACTIONS.map((chip) => [chip.label, chip]),
+);
 const CHIP_OBSERVATIONS = [
   "Pest activity noted",
   "Standing water found",
@@ -4992,6 +5003,9 @@ export function CompletionPanel({
   const [protocolActionsLoading, setProtocolActionsLoading] = useState(false);
   const [selectedProtocolActionLabels, setSelectedProtocolActionLabels] =
     useState([]);
+  // label -> { scope, treatmentApplied } for completed actions, so the
+  // submit payload can send structured scope without regexing labels.
+  const [actionScopeByLabel, setActionScopeByLabel] = useState({});
   const [selectedObservationLabels, setSelectedObservationLabels] = useState(
     [],
   );
@@ -5517,6 +5531,7 @@ export function CompletionPanel({
         customerInteraction,
         customerConcern,
         selectedProtocolActionLabels,
+        actionScopeByLabel,
         selectedObservationLabels,
         selectedRecommendationLabels,
         nextVisitNote,
@@ -5563,6 +5578,7 @@ export function CompletionPanel({
     customerInteraction,
     customerConcern,
     selectedProtocolActionLabels,
+    actionScopeByLabel,
     selectedObservationLabels,
     selectedRecommendationLabels,
     nextVisitNote,
@@ -5619,6 +5635,11 @@ export function CompletionPanel({
       Array.isArray(savedDraft.selectedProtocolActionLabels)
         ? savedDraft.selectedProtocolActionLabels
         : [],
+    );
+    setActionScopeByLabel(
+      savedDraft.actionScopeByLabel && typeof savedDraft.actionScopeByLabel === "object"
+        ? savedDraft.actionScopeByLabel
+        : {},
     );
     setSelectedObservationLabels(
       Array.isArray(savedDraft.selectedObservationLabels)
@@ -5783,11 +5804,19 @@ export function CompletionPanel({
       return text && currentNotes.includes(text.toLowerCase());
     });
   }
+  function recordActionScope(label, scope, treatmentApplied) {
+    if (!label || (scope !== "interior" && scope !== "exterior")) return;
+    setActionScopeByLabel((prev) => ({
+      ...prev,
+      [label]: { scope, treatmentApplied: treatmentApplied === true },
+    }));
+  }
   function applyProtocolAction(action) {
     if (!action) return;
     const noteText =
       action.note || action.label || action.raw || "Completed protocol item";
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
+    recordActionScope(noteText, action.scope, action.treatmentApplied);
     addChipNote(
       action.conditional ? "Protocol optional" : "Protocol",
       noteText,
@@ -5997,6 +6026,13 @@ export function CompletionPanel({
       const reportProtocolActions = labelsStillInNotes(
         selectedProtocolActionLabels,
       );
+      const reportProtocolActionScopes = reportProtocolActions
+        .map((label) => {
+          const meta = actionScopeByLabel[label];
+          if (!meta) return null;
+          return { label, scope: meta.scope, treatmentApplied: meta.treatmentApplied === true };
+        })
+        .filter(Boolean);
       const reportObservations = labelsStillInNotes(selectedObservationLabels);
       const reportRecommendations = labelsStillInNotes(
         selectedRecommendationLabels,
@@ -6065,6 +6101,7 @@ export function CompletionPanel({
         areasServiced,
         customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
+        protocolActionScopesCompleted: reportProtocolActionScopes,
         observations: reportObservations,
         recommendations: reportRecommendations,
         lawnAssessmentId,
@@ -6164,6 +6201,8 @@ export function CompletionPanel({
     if (!value) return;
     if (!protocolActions.length) {
       appendUniqueLabel(setSelectedProtocolActionLabels, value);
+      const chip = CHIP_ACTION_BY_LABEL[value];
+      if (chip) recordActionScope(value, chip.scope, chip.treatmentApplied);
       addChipNote("Action", value);
       return;
     }
@@ -6965,8 +7004,8 @@ export function CompletionPanel({
                           </option>
                         ))
                       : CHIP_ACTIONS.map((chip) => (
-                          <option key={chip} value={chip}>
-                            {chip}
+                          <option key={chip.label} value={chip.label}>
+                            {chip.label}
                           </option>
                         ))}
                   </select>
@@ -8593,8 +8632,8 @@ export function CompletionPanel({
                           </option>
                         ))
                       : CHIP_ACTIONS.map((chip) => (
-                          <option key={chip} value={chip}>
-                            {chip}
+                          <option key={chip.label} value={chip.label}>
+                            {chip.label}
                           </option>
                         ))}
                   </select>

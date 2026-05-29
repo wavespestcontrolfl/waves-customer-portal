@@ -153,14 +153,45 @@ function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
   return uniqueStrings(values);
 }
 
+// Structured scope is the authoritative signal for completed treatment
+// actions: each entry carries an explicit { scope, treatmentApplied } so we
+// never have to regex an action label (brittle — e.g. "Interior inspection"
+// would falsely match \binterior\b). Only entries with treatmentApplied ===
+// true assert scope; an inspection / declined / no-access action contributes
+// nothing and must not fire the interior re-entry countdown.
+function structuredActionScope(service = {}) {
+  const structured = parseJsonObject(service.structured_notes);
+  const entries = []
+    .concat(Array.isArray(service.protocolActionScopesCompleted) ? service.protocolActionScopesCompleted : [])
+    .concat(Array.isArray(structured.protocolActionScopesCompleted) ? structured.protocolActionScopesCompleted : []);
+  let hasInterior = false;
+  let hasExterior = false;
+  let hasTreatment = false;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || entry.treatmentApplied !== true) continue;
+    const scope = String(entry.scope || '').toLowerCase();
+    if (scope === 'interior') { hasInterior = true; hasTreatment = true; }
+    else if (scope === 'exterior') { hasExterior = true; hasTreatment = true; }
+  }
+  return { hasInterior, hasExterior, hasTreatment };
+}
+
 function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
   const text = scopeTextValues({ service, applications, zones })
     .join(' ')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ');
-  const hasInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
-  const hasExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn)\b/.test(text);
-  return { hasInterior, hasExterior, hasExplicitScope: text.trim().length > 0 };
+  // Area chips are a controlled vocabulary and remain a valid scope signal.
+  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
+  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn)\b/.test(text);
+  // Structured action scope is additive: an interior treatment fires interior
+  // even when only exterior areas were chipped (and vice-versa).
+  const action = structuredActionScope(service);
+  return {
+    hasInterior: textInterior || action.hasInterior,
+    hasExterior: textExterior || action.hasExterior,
+    hasExplicitScope: text.trim().length > 0 || action.hasTreatment,
+  };
 }
 
 function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [] } = {}) {
@@ -175,6 +206,24 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   }
 
   return normalized;
+}
+
+// Build the advisory persisted at completion time from the exact inputs the
+// completion route has on hand. This is the write-path gate: whatever scope is
+// resolved here is what the customer sees — the report build can only zero it
+// further, never restore it. Kept as a pure helper so the scope wiring is
+// directly testable without the full /complete route harness.
+function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [] } = {}) {
+  return normalizeAdvisoryForTreatmentScope(advisoryDefaults, {
+    service: {
+      areas_serviced: completionAreas,
+      structured_notes: {
+        areasTreated: completionAreas,
+        protocolActionScopesCompleted: protocolActionScopes,
+      },
+    },
+    applications,
+  });
 }
 
 function compactAddress(record) {
@@ -1723,6 +1772,7 @@ module.exports = {
   minutesFromElapsed,
   methodFromProduct,
   normalizeAdvisoryForTreatmentScope,
+  buildCompletionAdvisory,
   serviceDisplayName,
   treatmentScope,
   buildLawnAssessmentReportData,
