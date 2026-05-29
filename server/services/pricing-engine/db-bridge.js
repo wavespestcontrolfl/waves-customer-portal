@@ -111,6 +111,10 @@ function validatePestPricingConfig(snapshot = constants) {
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
+  // NOTE: floor > base is intentionally allowed. The price is
+  // `max(floor, base + adjustments)`, so a floor above base just raises the
+  // minimum quote for small/low-adjustment properties while larger/adjusted
+  // homes still exceed it — a valid "raise the minimum" config, not an error.
   if (!isNonNegativeNumber(PEST.initialFee)) errors.push('PEST.initialFee must be non-negative');
   validateSortedBrackets(errors, 'PEST.footprintBrackets', PEST.footprintBrackets, 'sqft', 'adj');
 
@@ -125,8 +129,14 @@ function validatePestPricingConfig(snapshot = constants) {
   }
   for (const version of ['v1', 'v2']) {
     for (const frequency of ['quarterly', 'bimonthly', 'monthly']) {
-      if (!isFiniteNumber(PEST.frequencyDiscounts?.[version]?.[frequency])) {
+      const mult = PEST.frequencyDiscounts?.[version]?.[frequency];
+      if (!isFiniteNumber(mult)) {
         errors.push(`PEST.frequencyDiscounts.${version}.${frequency} is required`);
+      } else if (!(Number(mult) > 0 && Number(mult) <= 1)) {
+        // Per-visit multipliers must be in (0, 1] — quarterly is the 1.0
+        // reference; deeper cadences discount per visit. A value >1, 0, or
+        // negative would over/under-price or invert the price.
+        errors.push(`PEST.frequencyDiscounts.${version}.${frequency} must be in (0, 1]`);
       }
     }
   }
@@ -147,7 +157,13 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isPositiveNumber(diag[key])) errors.push(`PEST.productionDiagnostics.${key} must be positive`);
   }
 
-  if (!isPositiveNumber(ONE_TIME.pest?.multiplier)) errors.push('ONE_TIME.pest.multiplier must be positive');
+  // Must be a true markup (> 1): one-time = (quarterlyPerApp + setupEquivalent)
+  // × premiumMultiplier must stay strictly above the recurring visit-1 cost
+  // (quarterlyPerApp + setupEquivalent), or the recurring incentive collapses.
+  if (!(isPositiveNumber(ONE_TIME.pest?.premiumMultiplier) && Number(ONE_TIME.pest.premiumMultiplier) > 1)) {
+    errors.push('ONE_TIME.pest.premiumMultiplier must be > 1');
+  }
+  if (!isNonNegativeNumber(ONE_TIME.pest?.setupEquivalent)) errors.push('ONE_TIME.pest.setupEquivalent must be non-negative');
   if (!isPositiveNumber(ONE_TIME.pest?.floor)) errors.push('ONE_TIME.pest.floor must be positive');
 
   const mosquitoCategories = Array.isArray(MOSQUITO.lotCategories) ? MOSQUITO.lotCategories : [];
@@ -1106,8 +1122,16 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.onetime_pest) {
       const ot = config.onetime_pest;
       if (ot.floor != null) constants.ONE_TIME.pest.floor = r(Number(ot.floor));
-      if (ot.multiplier != null || ot.markup_multiplier != null) {
-        constants.ONE_TIME.pest.multiplier = Number(ot.multiplier ?? ot.markup_multiplier);
+      // New model: one-time = (quarterly per-app + setupEquivalent) × premiumMultiplier.
+      // Only honor the NEW keys — the legacy `multiplier` meant "× quarterly
+      // per-app" (no setup added), which is not interchangeable with the premium
+      // markup, so a stale legacy row is intentionally ignored (falls back to the
+      // code default). The companion migration rewrites old rows to the new shape.
+      if (ot.premium_multiplier != null) {
+        constants.ONE_TIME.pest.premiumMultiplier = Number(ot.premium_multiplier);
+      }
+      if (ot.setup_equivalent != null) {
+        constants.ONE_TIME.pest.setupEquivalent = r(Number(ot.setup_equivalent));
       }
     }
     if (config.onetime_lawn) {

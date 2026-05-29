@@ -258,14 +258,20 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(ts.finalAnnual).toBeLessThanOrEqual(ts.preDiscountAnnual);
     });
 
-    test('non-Tree & Shrub services are not touched by the T&S guard', () => {
+    test('only guarded services (Tree & Shrub, Pest) carry margin-guard fields', () => {
       constants.WAVEGUARD.tiers.platinum.discount = 0.40;
       const estimate = generateEstimate(makeBaseEstimateInput());
       for (const item of estimate.lineItems) {
-        if (item.service === 'tree_shrub') continue;
-        // Only T&S should carry marginGuardApplied / discountCapped fields.
+        // Tree & Shrub and Pest Control are both auto-discount margin-guarded.
+        if (item.service === 'tree_shrub' || item.service === 'pest_control') continue;
         expect(item.marginGuardApplied).toBeUndefined();
         expect(item.discountCapped).toBeUndefined();
+      }
+      // Pest, when present, is guarded too (fields are defined, even if no cap fired).
+      const pest = estimate.lineItems.find(i => i.service === 'pest_control');
+      if (pest) {
+        expect(typeof pest.marginGuardApplied).toBe('boolean');
+        expect(typeof pest.discountCapped).toBe('boolean');
       }
     });
   });

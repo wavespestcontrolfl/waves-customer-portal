@@ -185,22 +185,38 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
   return roundCurrency(price);
 }
 
-// Tree & Shrub post-discount margin guard.
+// Post-discount margin guard (Tree & Shrub + Pest Control).
 //
 // Protects the same margin definition the engine displays to admin/customer:
-//     margin = (annual - directCost - adminCost) / annual
+//     margin = (annual - allInAnnualCost) / annual
+// where allInAnnualCost is direct cost + admin overhead.
 //
 // So the discounted annual must satisfy
-//     annual >= (directCost + adminCost) / (1 - marginFloor)
+//     annual >= allInAnnualCost / (1 - marginFloor)
 //
-// Guard policy:
+// Guard policy (applies to AUTO discounts — WaveGuard tier):
 //  - Cap the discount when it would push displayed margin below the floor.
 //  - Never raise the discounted price above the original undiscounted annual:
 //    if the undiscounted price itself doesn't clear the floor, the discount
 //    engine just prevents *additional* discounting. Fixing under-priced base
 //    quotes is the pricing engine's job, not the discount engine's.
+//
+// Cost-shape per service: Tree & Shrub exposes costs.directCost + costs.adminCost
+// separately; Pest exposes a single costs.annualCost that already folds in admin.
+// Manual owner discounts are NOT capped here — they warn-only (see estimate-engine).
 function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
-  if (!serviceQuote || serviceQuote.service !== 'tree_shrub') {
+  const service = serviceQuote?.service;
+  let annualCostAllIn = null;
+  let marginFloor = Number(GLOBAL.MARGIN_FLOOR);
+  if (service === 'tree_shrub') {
+    const directCost = Number(serviceQuote.costs?.directCost);
+    const adminCost = Number(serviceQuote.costs?.adminCost ?? GLOBAL.ADMIN_ANNUAL);
+    if (Number.isFinite(directCost)) annualCostAllIn = directCost + adminCost;
+    marginFloor = Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR);
+  } else if (service === 'pest_control') {
+    const annualCost = Number(serviceQuote.costs?.annualCost);
+    if (Number.isFinite(annualCost)) annualCostAllIn = annualCost;
+  } else {
     return {
       finalAnnual: roundMoney(finalAnnual),
       finalMargin: null,
@@ -209,14 +225,11 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
     };
   }
 
-  const annualDirectCost = Number(serviceQuote.costs?.directCost);
-  const adminCost = Number(serviceQuote.costs?.adminCost ?? GLOBAL.ADMIN_ANNUAL);
-  const marginFloor = Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR);
   const candidateAnnual = roundMoney(finalAnnual);
   const originalAnnual = Number(serviceQuote.annual);
   const hasOriginal = Number.isFinite(originalAnnual) && originalAnnual > 0;
 
-  if (!Number.isFinite(annualDirectCost) || annualDirectCost < 0 || candidateAnnual <= 0) {
+  if (annualCostAllIn === null || annualCostAllIn < 0 || candidateAnnual <= 0) {
     return {
       finalAnnual: candidateAnnual,
       finalMargin: null,
@@ -225,7 +238,7 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
     };
   }
 
-  const finalMargin = (candidateAnnual - annualDirectCost - adminCost) / candidateAnnual;
+  const finalMargin = (candidateAnnual - annualCostAllIn) / candidateAnnual;
   if (finalMargin >= marginFloor) {
     return {
       finalAnnual: candidateAnnual,
@@ -239,12 +252,12 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
     };
   }
 
-  const minAnnualForMargin = (annualDirectCost + adminCost) / (1 - marginFloor);
+  const minAnnualForMargin = annualCostAllIn / (1 - marginFloor);
   // Raise the discounted price to the margin floor, but never above the
   // original undiscounted price — see policy comment above.
   const lifted = Math.max(candidateAnnual, minAnnualForMargin);
   const guardedAnnual = ceilMoney(hasOriginal ? Math.min(lifted, originalAnnual) : lifted);
-  const guardedMargin = (guardedAnnual - annualDirectCost - adminCost) / guardedAnnual;
+  const guardedMargin = (guardedAnnual - annualCostAllIn) / guardedAnnual;
   const actualDiscountPct = hasOriginal ? 1 - guardedAnnual / originalAnnual : 0;
 
   return {

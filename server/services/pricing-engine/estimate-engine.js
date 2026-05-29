@@ -3,7 +3,25 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, URGENCY } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB } = require('./constants');
+
+// All-in annual cost (direct + admin) + margin floor for the guarded services,
+// mirroring discount-engine.applyMarginGuard's per-service cost shapes. Returns
+// null for services that don't expose a cost basis.
+function guardedLineCost(item) {
+  if (item.service === 'pest_control') {
+    const cost = Number(item.costs?.annualCost);
+    return Number.isFinite(cost) ? { cost, floor: Number(GLOBAL.MARGIN_FLOOR) } : null;
+  }
+  if (item.service === 'tree_shrub') {
+    const direct = Number(item.costs?.directCost);
+    const admin = Number(item.costs?.adminCost ?? GLOBAL.ADMIN_ANNUAL);
+    return Number.isFinite(direct)
+      ? { cost: direct + admin, floor: Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR) }
+      : null;
+  }
+  return null;
+}
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
@@ -683,7 +701,10 @@ function generateEstimate(input) {
         urgency: services.oneTimePest.urgency || 'NONE',
         afterHours: services.oneTimePest.afterHours || false,
         isRecurringCustomer,
-        recurringPestPerApp: services.pest ? lineItems.find(l => l.service === 'pest_control')?.perApp : null,
+        // Anchor on the QUARTERLY rate (basePrice), never the selected-frequency
+        // perApp — a monthly/bimonthly perApp is discounted and would understate
+        // the one-time price.
+        recurringPestPerApp: services.pest ? lineItems.find(l => l.service === 'pest_control')?.basePrice : null,
         roachType: services.oneTimePest.roachType || 'none',
       });
       lineItems.push(result);
@@ -1177,7 +1198,9 @@ function generateEstimate(input) {
     if (item.annual) {
       item.annualBeforeDiscount = item.annual;
       const discountedAnnual = applyDiscount(item.annual, discount);
-      if (item.service === 'tree_shrub') {
+      // AUTO (WaveGuard) discounts are capped at the margin floor for the
+      // services that expose a cost basis: Tree & Shrub and Pest Control.
+      if (item.service === 'tree_shrub' || item.service === 'pest_control') {
         const guarded = applyMarginGuard(item, discountedAnnual, discount.effectiveDiscount || 0);
         item.preDiscountAnnual = item.annualBeforeDiscount;
         item.requestedDiscountPct = discount.effectiveDiscount || 0;
@@ -1274,6 +1297,41 @@ function generateEstimate(input) {
     };
   }
 
+  // Warn-only margin check on the manual discount stack. Manual owner discounts
+  // are intentionally NOT capped (loss-leader / goodwill pricing is allowed),
+  // but we surface a hard warning + per-line audit when a manual discount drops
+  // a guarded service below the margin floor. The manual discount is a single
+  // pooled amount, so each line's share is distributed proportionally to its
+  // post-WaveGuard annual.
+  const manualMarginWarnings = [];
+  if (manualDiscountAmount > 0 && manualDiscountableRecurringAnnual > 0) {
+    for (const item of manualEligibleItems) {
+      const guard = guardedLineCost(item);
+      if (!guard || guard.cost < 0) continue;
+      const { cost: allInCost, floor: marginFloor } = guard;
+      const lineAnnualAfterWG = item.annualAfterDiscount || item.annual || 0;
+      if (lineAnnualAfterWG <= 0) continue;
+      const lineManualCut = manualDiscountAmount * (lineAnnualAfterWG / manualDiscountableRecurringAnnual);
+      const lineFinalAnnual = Math.round((lineAnnualAfterWG - lineManualCut) * 100) / 100;
+      const lineMargin = lineFinalAnnual > 0 ? (lineFinalAnnual - allInCost) / lineFinalAnnual : -1;
+      if (lineMargin < marginFloor) {
+        item.manualMarginWarning = true;
+        item.manualFinalAnnual = lineFinalAnnual;
+        item.manualFinalMargin = Math.round(lineMargin * 1000) / 1000;
+        manualMarginWarnings.push({
+          service: item.service,
+          type: 'manual_discount_below_margin_floor',
+          margin: Math.round(lineMargin * 1000) / 1000,
+          marginFloor,
+          finalAnnual: lineFinalAnnual,
+          annualCost: Math.round(allInCost * 100) / 100,
+          manualDiscountShare: Math.round(lineManualCut * 100) / 100,
+          message: `${item.service} manual discount drops margin to ${(lineMargin * 100).toFixed(1)}% (below ${(marginFloor * 100).toFixed(0)}% floor)`,
+        });
+      }
+    }
+  }
+
   const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;
   const recurringMonthlyAfter = Math.round(recurringAnnualAfter / 12 * 100) / 100;
 
@@ -1296,7 +1354,10 @@ function generateEstimate(input) {
   const year2WithRenewal = year2Total + trenchingRenewal;
 
   // ── 7. Validate margins ────────────────────────────────────
-  const marginWarnings = validateEstimateDiscounts(lineItems, waveGuardTier);
+  const marginWarnings = [
+    ...validateEstimateDiscounts(lineItems, waveGuardTier),
+    ...manualMarginWarnings,
+  ];
   const notes = [];
   const lawnCustomQuoteLine = lineItems.find(i => i.customQuoteFlag);
   if (lawnCustomQuoteLine) {

@@ -814,14 +814,19 @@ const RODENT = {
 // ONE-TIME SERVICES
 // ============================================================
 const ONE_TIME = {
-  // One-time pest = recurring quarterly × 1.75 (industry "initial service" norm
-  // is 2–3×; we sit at the low end). Floor $199 reflects the real cost of a
-  // one-time visit: 75–90 min on site (full perimeter + granular + IGR + eave
-  // sweep + interior) at $35/hr loaded labor + initial-dose product + drive +
-  // CAC for a customer who may never bill again. Sweeping and interior spray
-  // are bundled into this price (no opt-out discount on the one-time path).
+  // One-time pest is anchored on what a recurring customer pays to START
+  // service — the quarterly per-app rate PLUS the $99 WaveGuard setup fee —
+  // then marked up by `premiumMultiplier` so a one-time visit is always
+  // strictly MORE expensive than entering the recurring program. This is the
+  // recurring incentive: a one-off caller pays a premium over the committed
+  // customer's first visit, and recurring annual-prepay additionally waives
+  // the $99 setup. Formula: max(floor, (quarterlyPerApp + setupEquivalent) ×
+  // premiumMultiplier). `setupEquivalent` mirrors PEST.initialFee; kept as its
+  // own field so the admin Pricing Logic panel can decouple them if needed.
+  // Floor $199 is a safety net (the formula normally clears it on its own).
   pest: {
-    multiplier: 1.75,
+    setupEquivalent: r(99),
+    premiumMultiplier: 1.20,
     floor: r(199),
   },
   lawn: {

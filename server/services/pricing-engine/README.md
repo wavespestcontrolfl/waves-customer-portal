@@ -82,6 +82,8 @@ Single source of truth for what this engine prices, how, and with what constants
 **Frequency discounts (v1 — currently live):** quarterly 1.00, bimonthly 0.85, monthly 0.70
 **v2 (experimental):** quarterly 1.00, bimonthly 0.88, monthly 0.78
 
+**Margin guard (post-discount):** like Tree & Shrub, recurring pest now enforces the 35% margin floor against **auto** discounts. The WaveGuard tier discount is capped so displayed margin `(annual − costs.annualCost) / annual` never drops below the floor; capped lines return `marginGuardApplied`, `discountCapped`, `requestedDiscountPct`, `actualDiscountPct`, `finalMargin`, `minAnnualForMargin`. **Manual** owner discounts are NOT capped (loss-leader pricing is allowed) — instead they emit a warn-only entry in `summary.marginWarnings` (`type: manual_discount_below_margin_floor`) and set `manualMarginWarning`/`manualFinalMargin` on the line. At default constants the cap never binds (margins sit ~47–61% even at Platinum); it only engages if base is lowered or discounts deepened.
+
 ---
 
 ## 4. Lawn Care
@@ -203,7 +205,7 @@ Palm injection pricing requires explicit `treatmentType` and positive integer `p
 
 Standalone prices (customer not on WaveGuard). Applied via `pricePestControlOneTime` / `priceLawnOneTime` / `priceMosquitoOneTime` in `service-pricing.js`.
 
-**Pest one-time:** `max($199, recurringPrice × 1.75)` — recurring price computed at quarterly cadence as anchor. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $199 floor re-applied.
+**Pest one-time:** `max($199, (quarterlyPerApp + $99 setupEquivalent) × 1.20 premiumMultiplier)`. Always anchored on the **quarterly** per-app rate (== pest line `basePrice`), never a discounted monthly/bimonthly per-app. The model keeps a one-off visit strictly **above** what a recurring customer pays on visit 1 ($99 setup + quarterly rate), so there is a real incentive to commit to recurring (and recurring annual-prepay additionally waives the $99). Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $199 floor re-applied. Constants: `ONE_TIME.pest.{setupEquivalent: $99, premiumMultiplier: 1.20, floor: $199}` (admin-editable via `onetime_pest` config keys `setup_equivalent` / `premium_multiplier` / `floor`; the legacy `multiplier` key is ignored). `premium_multiplier` is validated `> 1` — a non-markup value would let one-time fall to/below the recurring visit-1 cost and is rejected on sync.
 
 **Lawn one-time (per treatment):**
 
@@ -311,5 +313,5 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 - PEST base/floor anchor (market analysis vs historical)
 - TERMITE monitoring subscription pricing
 - RODENT bait subscription pricing
-- ONE_TIME 1.30x multiplier + floor rationale
+- ONE_TIME pest premiumMultiplier (1.20×) + setupEquivalent ($99) + floor rationale
 - TREE_SHRUB 43% target vs 35% global floor
