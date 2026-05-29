@@ -1,6 +1,29 @@
 const lawnHealthRouter = require('../routes/lawn-health');
 const adminLawnAssessmentRouter = require('../routes/admin-lawn-assessment');
 
+describe('recommendation copy-safety gate on direct status promotion', () => {
+  const { CUSTOMER_FACING_STATUSES, customerCopyViolation } = adminLawnAssessmentRouter._test;
+  const UNSAFE = 'High churn risk — escalate before callback.'; // hits the blocklist
+
+  test('every customer-facing status is gated, and unsafe copy is detected for each', () => {
+    expect([...CUSTOMER_FACING_STATUSES].sort()).toEqual(['accepted', 'approved', 'customer_visible']);
+    for (const status of CUSTOMER_FACING_STATUSES) {
+      // PATCH refuses to set this status when the effective copy is unsafe.
+      expect(customerCopyViolation(UNSAFE)).not.toBeNull();
+    }
+  });
+
+  test('non-customer-facing statuses are not customer-facing (no surfacing gate applies)', () => {
+    for (const status of ['draft', 'needs_admin_review', 'dismissed', 'expired']) {
+      expect(CUSTOMER_FACING_STATUSES.has(status)).toBe(false);
+    }
+  });
+
+  test('safe copy passes the gate', () => {
+    expect(customerCopyViolation('Your lawn is responding well — keep watering deeply twice a week.')).toBeNull();
+  });
+});
+
 describe('lawn assessment route contracts', () => {
   test('normalizes LawnIntel benchmark arrays to the customer portal contract', () => {
     const result = lawnHealthRouter._test.normalizeNeighborBenchmark([
