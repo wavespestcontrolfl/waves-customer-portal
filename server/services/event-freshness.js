@@ -59,7 +59,13 @@ const CITY_ZONE_MAP = {
 
 function cityToZone(city) {
   if (!city) return null;
-  const normalized = city.trim().toLowerCase();
+  // Normalize hyphenated slugs ("north-port", "lakewood-ranch", "st-petersburg")
+  // to the space-separated keys CITY_ZONE_MAP uses. The scrape handler stores
+  // kebab-case city slugs and the RSS/iCal coverage_geo fallback is seeded
+  // kebab-case too, so without this every multi-word city returns null →
+  // region_zone stays NULL → geoRelevanceScore defaults to 40 (out-of-area),
+  // systematically demoting exactly the hyperlocal events the digest should lead with.
+  const normalized = city.trim().toLowerCase().replace(/-/g, ' ');
   return CITY_ZONE_MAP[normalized] || null;
 }
 
