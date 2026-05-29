@@ -1765,14 +1765,36 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     });
 
-    // The appointment(s) are committed at this point — respond immediately so
-    // the admin UI isn't held on "Saving…" while best-effort side-effects run.
-    // Everything below was already wrapped as non-blocking/logged-only; the only
-    // change is that it now runs *after* the response instead of blocking it.
-    // This is what was costing ~15-20s: confirmation SMS + Twilio landline
-    // lookups (one network round-trip each, looped for recurring series), plus
-    // tech notifications, tagging, prepay refresh, dispatch broadcast, and
-    // prepaid stamping — none of which affect the response payload.
+    // Prepaid stamping records financial state (the recorded prepayment), not a
+    // best-effort notification, so it MUST be durable before we tell the client
+    // the save succeeded — otherwise the schedule can reload with no
+    // prepaid_amount, and a crash/deploy in the deferred window would silently
+    // drop a prepayment the admin saw succeed. It's a fast local DB write (no
+    // network), so keeping it on the save path does not reintroduce the delay
+    // this PR removes (that delay was Twilio-bound: SMS + landline lookups).
+    if (req.body.prepaid && isRecurring) {
+      try {
+        const { totalAmount, method, note } = req.body.prepaid;
+        if (totalAmount > 0) {
+          await stampSeriesPrepaid(db, {
+            anchorServiceId: svc.id,
+            totalAmount: Number(totalAmount),
+            method: method || 'cash',
+            note: note || null,
+          });
+        }
+      } catch (e) { logger.error(`[schedule] prepaid stamp failed (non-blocking): ${e.message}`); }
+    }
+
+    // The appointment(s) and any prepayment are committed at this point — respond
+    // immediately so the admin UI isn't held on "Saving…" while the remaining
+    // best-effort side-effects run. Everything in the setImmediate block below
+    // was already wrapped as non-blocking/logged-only; the only change is that it
+    // now runs *after* the response instead of blocking it. That deferred work is
+    // what was costing ~15-20s: confirmation SMS + Twilio landline lookups (one
+    // network round-trip each, looped for recurring series), plus the recurring
+    // welcome SMS, tech notification, tagging, prepay-terms refresh, and dispatch
+    // broadcast — none of which affect the response payload or financial state.
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
 
     // ── Post-commit side-effects (fire-and-forget; never fail the request) ──
@@ -1843,20 +1865,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
           await emitDispatchJobUpdate({ jobId: svc.id, actorId: req.technicianId });
         } catch (e) {
           logger.error(`[schedule] dispatch board create broadcast failed: ${e.message}`);
-        }
-
-        if (req.body.prepaid && isRecurring) {
-          try {
-            const { totalAmount, method, note } = req.body.prepaid;
-            if (totalAmount > 0) {
-              await stampSeriesPrepaid(db, {
-                anchorServiceId: svc.id,
-                totalAmount: Number(totalAmount),
-                method: method || 'cash',
-                note: note || null,
-              });
-            }
-          } catch (e) { logger.error(`[schedule] prepaid stamp failed (non-blocking): ${e.message}`); }
         }
       } catch (e) {
         logger.error(`[schedule] post-commit side-effects failed (non-blocking): ${e.message}`);
