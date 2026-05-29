@@ -870,6 +870,7 @@ function mapV1ToLegacyShape(v1Result) {
           autoFiredFromRecurringPest: s.autoFiredFromRecurringPest,
           requestedRoachType: s.requestedRoachType,
           roachType: s.roachType,
+          severity: s.severity,
           measurements: s.measurements,
           measurementWarnings: s.measurementWarnings,
           requiresMeasurement: !!s.requiresMeasurement,

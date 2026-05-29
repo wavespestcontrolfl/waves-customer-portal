@@ -847,6 +847,7 @@ function EstimateToolView() {
     bedbugRooms: "1",
     bedbugMethod: "CHEMICAL",
     bedbugSeverity: "light",
+    germanRoachSeverity: "light",
     bedbugPrepStatus: "ready",
     bedbugOccupancyType: "singleFamily",
     bedbugEquipment: "INHOUSE",
@@ -1717,6 +1718,7 @@ function EstimateToolView() {
           roachType: form.roachType || "REGULAR",
           standaloneRoachTreatment: !!form.svcRoach && form.roachType === "REGULAR",
           germanRoachCleanoutSelected: !!form.svcRoach && form.roachType === "GERMAN",
+          germanRoachSeverity: form.germanRoachSeverity || "light",
           onetimeLawnType: form.otLawnType || "FERT",
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
@@ -1941,6 +1943,7 @@ function EstimateToolView() {
     const inputs = {
       ...form,
       manualDiscount,
+      roachSeverity: form.germanRoachSeverity || "light",
       hasPool: yesNo(form.hasPool),
       hasPoolCage: yesNo(form.hasPoolCage),
       hasLargeDriveway: yesNo(form.hasLargeDriveway),
@@ -3505,10 +3508,22 @@ function EstimateToolView() {
                           value: "REGULAR",
                           label: "Standalone Native Cockroach Treatment",
                         },
-                        { value: "GERMAN", label: "German Roach Cleanout — 3 Visit Program" },
+                        { value: "GERMAN", label: "German Roach Cleanout" },
                       ]}
                     />{" "}
                   </Field>{" "}
+                  {form.roachType === "GERMAN" && (
+                    <Field label="Infestation Severity" style={{ marginBottom: 0, marginTop: 8 }}>
+                      <Select
+                        k="germanRoachSeverity"
+                        options={[
+                          { value: "light", label: "Light — 2 Visits ($350)" },
+                          { value: "moderate", label: "Medium — 3 Visits ($450)" },
+                          { value: "heavy", label: "Heavy — 4 Visits ($550)" },
+                        ]}
+                      />
+                    </Field>
+                  )}
                   {form.roachType === "GERMAN" && (
                     <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
                       German Roach Cleanout is a separate specialty program, not the German version of native cockroach treatment.

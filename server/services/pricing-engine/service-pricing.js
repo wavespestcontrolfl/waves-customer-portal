@@ -4470,32 +4470,32 @@ function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {})
 }
 
 function priceGermanRoach(property, options = {}) {
-  const footprintResolution = resolvePestFootprint(property);
-  const footprint = footprintResolution.footprint;
+  const cfg = SPECIALTY.germanRoach;
   const severityMeta = normalizeRoachSeverity(options.severity);
-  const adj = interpolate(footprint, SPECIALTY.germanRoach.footprintAdj);
-  const price = Math.max(SPECIALTY.germanRoach.floor, SPECIALTY.germanRoach.base + Math.round(adj));
+  // 'severe' collapses into the top (heavy) tier; missing/invalid severity falls
+  // back to the default tier. Footprint is intentionally not consulted.
+  const requestedTier = severityMeta.severity === 'severe' ? 'heavy' : severityMeta.severity;
+  const tierKey = cfg.tiers[requestedTier] ? requestedTier : cfg.defaultSeverity;
+  const tier = cfg.tiers[tierKey];
+  const severityWasDefaulted = !severityMeta.severity || !cfg.tiers[requestedTier];
+  const price = tier.price;
+  const visits = tier.visits;
 
   return {
     service: 'german_roach',
-    label: 'German Roach Cleanout — 3 Visit Program',
+    label: `German Roach Cleanout — ${visits} Visit Program`,
     price,
     source: options.source || 'german_roach_cleanout_selected',
-    pricingModel: 'german_roach_three_visit_cleanout',
-    legacyPricingModel: 'german_roach_multi_visit',
-    severity: severityMeta.severity,
-    severitySource: options.severitySource || (severityMeta.severity ? 'admin' : undefined),
+    pricingModel: 'german_roach_severity_tier_cleanout',
+    legacyPricingModel: 'german_roach_three_visit_cleanout',
+    severity: tierKey,
+    severitySource: options.severitySource || (severityMeta.severity ? 'admin' : 'default'),
+    severityWasDefaulted,
     noRecurringDiscount: true,
-    footprintAdj: Math.round(adj),
-    footprintUsed: footprint,
-    footprintSource: footprintResolution.source,
-    footprintWasDefaulted: footprintResolution.wasDefaulted,
-    requiresManualReview: footprintResolution.requiresManualReview,
-    manualReviewReasons: footprintResolution.manualReviewReasons,
-    warnings: uniqueList([...footprintResolution.warnings, ...severityMeta.warnings]),
-    setupCharge: SPECIALTY.germanRoach.setupCharge,
-    total: price + SPECIALTY.germanRoach.setupCharge,
-    visits: 3,
+    setupCharge: 0,
+    total: price,
+    visits,
+    warnings: uniqueList([...severityMeta.warnings]),
   };
 }
 

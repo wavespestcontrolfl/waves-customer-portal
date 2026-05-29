@@ -1138,6 +1138,7 @@ export function calculateEstimate(inputs) {
     preslabLabelConfirmed,
     foamPoints: _foamPoints,
     roachType,
+    roachSeverity,
     // Service selections (booleans)
     svcLawn,
     svcPest,
@@ -2323,28 +2324,38 @@ export function calculateEstimate(inputs) {
         });
       }
     } else {
-      const germanFootprintAdj = interpolateLinear(footprint, [
-        { at: 800, adj: -40 }, { at: 1200, adj: -20 }, { at: 1500, adj: -10 },
-        { at: 2000, adj: 0 }, { at: 2500, adj: 15 }, { at: 3000, adj: 30 },
-        { at: 4000, adj: 55 }, { at: 5500, adj: 85 },
-      ]);
-      const basePrice = Math.max(400, 450 + Math.round(germanFootprintAdj));
-      const setupCharge = 100;
-      const price = basePrice + setupCharge;
-      const warning = 'German initial knockdown and German Roach 3-visit cleanout are both selected. Verify this is intentional.';
+      // Severity-based, all-in flat pricing — footprint no longer factors in and
+      // there is no separate setup charge. Mirrors server priceGermanRoach.
+      const GERMAN_ROACH_TIERS = {
+        light: { price: 350, visits: 2 },
+        moderate: { price: 450, visits: 3 },
+        heavy: { price: 550, visits: 4 },
+      };
+      const sevAlias = {
+        light: 'light', low: 'light',
+        moderate: 'moderate', medium: 'moderate',
+        heavy: 'heavy', high: 'heavy', severe: 'heavy',
+      };
+      const rawSev = String(roachSeverity || '').trim().toLowerCase();
+      const tierKey = GERMAN_ROACH_TIERS[sevAlias[rawSev]] ? sevAlias[rawSev] : 'light';
+      const tier = GERMAN_ROACH_TIERS[tierKey];
+      const price = tier.price;
+      const visits = tier.visits;
+      const warning = 'German initial knockdown and German Roach Cleanout are both selected. Verify this is intentional.';
       if (R.pestRoachMod === 'GERMAN') {
         addManualReviewReason('german_roach_initial_and_cleanout_both_selected');
         addRoutingWarning(warning);
       }
       specItems.push({
         service: 'german_roach',
-        name: 'German Roach Cleanout — 3 Visit Program',
+        name: `German Roach Cleanout — ${visits} Visit Program`,
         price,
         det: 'Gel+IGR+monitoring',
         source: 'german_roach_cleanout_selected',
-        pricingModel: 'german_roach_three_visit_cleanout',
-        visits: 3,
-        setupCharge,
+        pricingModel: 'german_roach_severity_tier_cleanout',
+        severity: tierKey,
+        visits,
+        setupCharge: 0,
         total: price,
         noRecurringDiscount: true,
         requiresManualReview: R.pestRoachMod === 'GERMAN',
@@ -2597,6 +2608,7 @@ export function calculateEstimate(inputs) {
           autoFiredFromRecurringPest: s.autoFiredFromRecurringPest,
           requestedRoachType: s.requestedRoachType,
           roachType: s.roachType,
+          severity: s.severity,
           noRecurringDiscount: s.noRecurringDiscount,
           taxable: s.taxable,
           taxCategory: s.taxCategory || null,
