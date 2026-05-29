@@ -294,6 +294,47 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.carrierGallons).toBe(2.5);
   });
 
+  test('calculateProductAmount prices seeded protocol rate products from inventory packages', () => {
+    const prodiamine = calculateProductAmount({
+      product: {
+        name: 'Prodiamine 65 WDG',
+        default_rate_per_1000: 0.37,
+        rate_unit: 'oz',
+        best_price: 68.43,
+        container_size: '5 lb',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 1,
+    });
+    const hydretain = calculateProductAmount({
+      product: {
+        name: 'Hydretain Liquid',
+        default_rate_per_1000: 9,
+        rate_unit: 'fl_oz',
+        cost_per_unit: 0.5775,
+        cost_unit: 'fl_oz',
+        container_size: '2.5 gal',
+      },
+      lawnSqft: 10000,
+      carrierGalPer1000: 1,
+    });
+
+    expect(prodiamine).toMatchObject({
+      ratePer1000: 0.37,
+      rateUnit: 'oz',
+      amount: 3.7,
+      materialCost: 3.16,
+      materialCostSource: 'inventory_best_price_package_size',
+    });
+    expect(hydretain).toMatchObject({
+      ratePer1000: 9,
+      rateUnit: 'fl_oz',
+      amount: 90,
+      materialCost: 51.98,
+      materialCostSource: 'inventory_cost_per_unit',
+    });
+  });
+
   test('parseVisitNutrientTargets reads protocol N rate notes', () => {
     expect(parseVisitNutrientTargets('LAST N before blackout. N app @ 0.75 lb N/1K.')).toMatchObject({
       targetNPer1000: 0.75,
