@@ -74,10 +74,17 @@ function _isLawnTopic(s) { return /\b(lawn|grass|turf|st\.?\s*augustine|chinch|m
 
 const BRAND_STYLE = 'Visual style: clean, bright, modern coastal Southwest Florida. Waves brand palette — deep ocean blue and aqua/teal (#0ea5e9) as the primary accents, generous clean white and light gray, with small warm yellow/coral accents ONLY for a highlight or warning. Photorealistic, trustworthy, professional, reassuring — never fear-based. Do NOT show dark, gross, or scary macro pest closeups. No text, words, letters, numbers, watermarks, or logos anywhere in the image (brand placement is added by the site, not baked into the image).';
 
+// Relevance rule (per owner feedback): a pest closeup doesn't help a reader
+// decide to hire — the hero must show what the homeowner is BUYING. The pest
+// name is topical CONTEXT for the scene, never the visual subject.
+const RELEVANCE = 'Relevance is critical: the image must show what the homeowner is buying — the Waves service in action (a uniformed technician at work, a protected SWFL home or yard), the Waves app/estimate/report, or a reassuring clean-home outcome. NEVER make a pest the subject or show a pest closeup, even when the post is about that pest — a homeowner deciding whether to hire wants to see the service and the result, not the bug.';
+
 function buildPrompt({ title, topic, keyword, city, mode }) {
   const subject = keyword || topic || title || 'professional pest control service';
   const blob = `${keyword || ''} ${topic || ''} ${title || ''}`;
-  const base = `A high-quality, photorealistic ${mode === 'social-square' ? 'social media tile' : 'blog hero image'} for "Waves Pest Control," a family-owned Southwest Florida pest control & lawn care company. Subject: ${subject}.`;
+  // The topic is framed as what the post is ABOUT (context for the scene),
+  // not as "render this" — so a pest name never becomes the visual subject.
+  const base = `A high-quality, photorealistic ${mode === 'social-square' ? 'social media tile' : 'blog hero image'} for a "Waves Pest Control" blog post about "${subject}" (Waves is a family-owned Southwest Florida pest control & lawn care company).`;
   const home = city
     ? `a clean, modern ${city}-area Florida home with characteristic SWFL landscaping (palm trees, screened lanai, sandy soil, bright sun)`
     : `a clean, modern Southwest Florida home with palm trees, a screened lanai, and bright tropical landscaping`;
@@ -87,9 +94,9 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
     // Real-Waves-UI reference: estimate flow / customer portal / digital report / service timeline.
     scene = `Scene: a smartphone or tablet held in front of ${home}, its screen showing a clean Waves-style app interface — rounded cards with deep-blue and teal accents — such as a simple multi-step estimate/quote flow OR a customer dashboard with a service-history list, a small property treatment-map thumbnail, and green check icons. The interface should look like a polished, real pest-control website/customer-portal experience, NOT a generic or unrelated app. The screen shows only simple icons, a map pin, checkmarks, and colored shapes — no readable text or numbers on the screen.`;
   } else if (_isPestIdTopic(blob)) {
-    scene = `Scene: a uniformed, professional Waves technician inspecting or treating the exterior of ${home} — foundation, entry points, eaves/soffits — conveying local expertise and trust. Do NOT make a disgusting or scary pest closeup the focus.`;
+    scene = `Scene: a uniformed, professional Waves technician inspecting or treating ${home} — foundation, entry points, eaves/soffits, and yard — i.e. the SERVICE that resolves this post's topic, conveying local expertise and trust. Do not feature the pest itself.`;
   } else {
-    scene = `Setting: ${subject}, shown at ${home} in a clean, trust-building, service-focused way.`;
+    scene = `Scene: the Waves service for this topic, shown at ${home} in a clean, trust-building, service-focused way.`;
   }
   const lawn = _isLawnTopic(blob) ? ' This is a lawn-care topic, so include fresh, healthy green accents while keeping the Waves blue/teal identity present.' : '';
 
@@ -99,7 +106,7 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
   const composition = mode === 'social-square'
     ? `Composition: square 1:1 aspect ratio, 1024x1024.`
     : `Composition: landscape 3:2 aspect ratio, 1536x1024, with clean negative space for an optional text overlay.`;
-  return [base, scene + lawn, composition, BRAND_STYLE].join(' ');
+  return [base, scene + lawn, composition, RELEVANCE, BRAND_STYLE].join(' ');
 }
 
 // ── providers ────────────────────────────────────────────────────────
