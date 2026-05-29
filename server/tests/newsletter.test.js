@@ -189,15 +189,23 @@ describe('event weekLockKey — per-week advisory-lock key', () => {
 describe('event ingestion revivalResetFields — past→future re-date clears freshness', () => {
   const { revivalResetFields } = require('../services/event-ingestion');
 
-  test('CASE is gated on OLD effective date past AND NEW effective date future', () => {
-    const sql = revivalResetFields().normalized_at.toString().toLowerCase();
-    expect(sql).toMatch(/case when/);
+  test('CASE is gated on OLD effective date past AND NEW effective date future, against the ET-midnight cutoff (not now())', () => {
+    const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+    const { sql, bindings } = revivalResetFields().normalized_at.toSQL();
+    const lower = sql.toLowerCase();
+    expect(lower).toMatch(/case when/);
     // OLD side uses the effective date (COALESCE) — not bare start_at — so an
     // in-progress multi-day event (start past, end future) is NOT revived.
-    expect(sql).toMatch(/coalesce\(events_raw\.end_at, events_raw\.start_at\) < now\(\)/);
-    expect(sql).toMatch(/coalesce\(excluded\.end_at, excluded\.start_at\) >= now\(\)/);
+    expect(lower).toMatch(/coalesce\(events_raw\.end_at, events_raw\.start_at\) </);
+    expect(lower).toMatch(/coalesce\(excluded\.end_at, excluded\.start_at\) >=/);
+    // Boundary is the ET-midnight cutoff (same as the expiry sweep) — NOT now() —
+    // so an event manually expired earlier *today* is preserved when re-dated forward.
+    expect(lower).not.toContain('now()');
+    const expected = parseETDateTime(`${etDateString()}T00:00:00`).getTime();
+    expect(bindings.length).toBeGreaterThan(0);
+    bindings.forEach((b) => expect(new Date(b).getTime()).toBe(expected));
     // Preserves the existing value when the condition is false (manual curation).
-    expect(sql).toMatch(/else events_raw\.normalized_at end/);
+    expect(lower).toMatch(/else events_raw\.normalized_at end/);
   });
 
   test('only re-queues via normalized_at — never nulls the NOT NULL freshness_status', () => {

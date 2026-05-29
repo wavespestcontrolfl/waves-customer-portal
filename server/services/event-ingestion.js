@@ -34,7 +34,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -46,17 +46,25 @@ const { etDateString } = require('../utils/datetime-et');
 // whole source pull. Leaving the stale status in place is harmless — the row is
 // excluded for the ~1h until the next normalize run recomputes it.
 //
-// Gated on OLD effective date < now() AND NEW effective date >= now(), where
-// effective date = COALESCE(end_at, start_at) — the SAME effective date the
-// expiry sweep uses. Using the old EFFECTIVE date (not bare start_at) is
-// essential: an in-progress multi-day event (start past, end still future) was
-// never expirable, so it must NOT trip the revival on every upsert — otherwise
-// an admin's manual 'expired' curation of a running exhibit would be undone.
+// Gated on OLD effective date < ET-midnight-today AND NEW effective date >=
+// ET-midnight-today, where effective date = COALESCE(end_at, start_at). Two
+// reasons for the ET-midnight boundary rather than now():
+//   1. Old EFFECTIVE date (not bare start_at): an in-progress multi-day event
+//      (start past, end still future) was never expirable, so it must NOT trip
+//      revival on every upsert and undo an admin's manual 'expired' curation.
+//   2. The SAME ET-midnight cutoff the expiry sweep uses (scheduler.js) and the
+//      digest treats today as upcoming — so an event manually expired earlier
+//      *today* (its effective date is today, not before midnight) is NOT past
+//      by this gate and won't be revived when a source re-dates it forward.
+//      now() would treat earlier-today as past and clobber that curation.
 // EXCLUDED.* is the proposed insert; events_raw.* is the existing row.
-const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < now() AND COALESCE(EXCLUDED.end_at, EXCLUDED.start_at) >= now()';
+const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < :etMidnight AND COALESCE(EXCLUDED.end_at, EXCLUDED.start_at) >= :etMidnight';
 function revivalResetFields() {
+  // ET-midnight-today as a bound timestamptz — identical to the sweep's
+  // parseETDateTime(`${etDateString()}T00:00:00`) (avoids the naive-ISO leak).
+  const etMidnight = parseETDateTime(`${etDateString()}T00:00:00`);
   return {
-    normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`),
+    normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
   };
 }
 
