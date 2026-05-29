@@ -146,24 +146,29 @@ describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked ca
   });
 });
 
-describe('buildRenderFlags — WaveGuard tier badge for recurring lawn', () => {
-  const lawnSection = { isRecurring: true, isPest: false, category: 'lawn_care', setupFee: null, frequencies: [{ serviceCategory: 'lawn_care' }] };
-  const mosquitoSection = { isRecurring: true, isPest: false, category: 'mosquito', setupFee: null, frequencies: [{ serviceCategory: 'mosquito' }] };
+describe('buildRenderFlags — WaveGuard tier badge for recurring services', () => {
+  const sectionFor = (category) => ({ isRecurring: true, isPest: false, category, setupFee: null, frequencies: [{ serviceCategory: category }] });
 
-  test('recurring lawn turns on the WaveGuard tier badge (anchors at Bronze)', () => {
-    const flags = buildRenderFlags({}, [lawnSection], { qualifyingCount: 1 });
-    expect(flags.showWaveGuardTierUi).toBe(true);
-  });
+  test.each(['lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
+    'recurring %s shows the WaveGuard tier badge (anchors at Bronze)',
+    (category) => {
+      const flags = buildRenderFlags({}, [sectionFor(category)], { qualifyingCount: 1 });
+      expect(flags.showWaveGuardTierUi).toBe(true);
+    },
+  );
 
-  test('lawn does NOT enable the pest-only setup fee or perks', () => {
-    const flags = buildRenderFlags({}, [lawnSection], { qualifyingCount: 1 });
+  test('the tier badge does NOT enable pest-only setup fee / perks / add-ons', () => {
+    const flags = buildRenderFlags({}, [sectionFor('lawn_care')], { qualifyingCount: 1 });
     expect(flags.showWaveGuardSetupFee).toBe(false);
     expect(flags.showWaveGuardPerks).toBe(false);
     expect(flags.showPestRecurringAddOns).toBe(false);
   });
 
-  test('scoped to lawn — a mosquito-only estimate still hides the tier badge', () => {
-    const flags = buildRenderFlags({}, [mosquitoSection], { qualifyingCount: 1 });
-    expect(flags.showWaveGuardTierUi).toBe(false);
-  });
+  test.each(['rodent_bait', 'palm_injection'])(
+    'recurring %s stays excluded from the tier badge',
+    (category) => {
+      const flags = buildRenderFlags({}, [sectionFor(category)], { qualifyingCount: 1 });
+      expect(flags.showWaveGuardTierUi).toBe(false);
+    },
+  );
 });

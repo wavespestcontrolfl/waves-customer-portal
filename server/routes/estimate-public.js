@@ -7331,24 +7331,30 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
   };
 }
 
+// Recurring service categories that surface the WaveGuard tier badge (Bronze)
+// on a single-service estimate, like pest. Per owner decision; excludes
+// rodent_bait / palm_injection (not WaveGuard-tier services).
+const TIER_BADGE_RECURRING_CATEGORIES = new Set(['lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
+
 function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
   const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
-  // Recurring lawn shows the WaveGuard tier badge (anchors at Bronze) like pest,
-  // per owner decision. Scoped to lawn — does NOT enable the pest-only setup fee
-  // or perks (those stay gated on hasRecurringPest below).
-  const hasRecurringLawn = services.some((section) => section?.isRecurring && (
-    section?.category === 'lawn_care'
-    || section?.key === 'lawn_care'
-    || (Array.isArray(section?.frequencies) && section.frequencies.some((f) => f?.serviceCategory === 'lawn_care'))
+  // Recurring non-pest services that show the WaveGuard tier badge (anchors at
+  // Bronze) like pest, per owner decision. Tier BADGE only — the pest-only setup
+  // fee, perks, and add-ons stay gated on hasRecurringPest below. rodent/palm are
+  // excluded (not WaveGuard-tier services).
+  const hasTierBadgeRecurringService = services.some((section) => section?.isRecurring && (
+    TIER_BADGE_RECURRING_CATEGORIES.has(section?.category)
+    || TIER_BADGE_RECURRING_CATEGORIES.has(section?.key)
+    || (Array.isArray(section?.frequencies) && section.frequencies.some((f) => TIER_BADGE_RECURRING_CATEGORIES.has(f?.serviceCategory)))
   ));
   const qualifyingCount = Number(combinedRecurring?.qualifyingCount || 0);
   const hasDiscountContext = Number(combinedRecurring?.waveGuardDiscountPct || 0) > 0
     || Number(combinedRecurring?.savingsPerMonth || 0) > 0;
   return {
     showRecurringSummary: combinedRecurring != null,
-    showWaveGuardTierUi: hasRecurringPest || hasRecurringLawn || hasDiscountContext || qualifyingCount > 1,
+    showWaveGuardTierUi: hasRecurringPest || hasTierBadgeRecurringService || hasDiscountContext || qualifyingCount > 1,
     showWaveGuardPerks: hasRecurringPest || qualifyingCount > 1 || hasDiscountContext,
     showWaveGuardSetupFee: hasRecurringPest || hasWaivableSetupFee,
     showPestRecurringAddOns: hasRecurringPest && !payload.quoteRequired,
