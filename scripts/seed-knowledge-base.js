@@ -95,29 +95,40 @@ async function seedTokenCredentials() {
 async function seedCoreKnowledge() {
   const entries = [
     {
-      title: 'Nitrogen Blackout — Sarasota & Manatee Counties',
+      title: 'Nitrogen Blackout — Sarasota, Manatee & Charlotte Counties',
       slug: 'nitrogen-blackout-sarasota-manatee',
       category: 'agronomics',
-      tags: ['nitrogen', 'fertilizer', 'blackout', 'regulation', 'sarasota', 'manatee'],
+      tags: ['nitrogen', 'phosphorus', 'fertilizer', 'blackout', 'regulation', 'sarasota', 'manatee', 'charlotte'],
       confidence: 'high',
+      // Correction (2026-05-28): forceUpdate re-seeds this row in place. The
+      // prior version wrongly excluded Charlotte County; without this the
+      // skip-if-exists loop would leave the stale row live in prod.
+      forceUpdate: true,
       content: `# Nitrogen Blackout — June 1 through September 30
 
-Both Sarasota and Manatee counties prohibit nitrogen-containing fertilizer application from June 1 to September 30 each year.
+Sarasota, Manatee, AND Charlotte counties all prohibit nitrogen- and phosphorus-containing fertilizer application from June 1 to September 30 each year.
 
 ## Key Rules
 - NO nitrogen in ANY form during the blackout window (liquid, granular, slow-release)
+- NO phosphorus during the blackout window
 - Iron-only and micronutrient-only applications ARE allowed during blackout
 - Potassium (0-0-X) products ARE allowed
+- Outside the blackout, ≥50% slow-release nitrogen is required (all three counties)
 - Violation can result in fines and license issues
 
 ## Impact on Lawn Programs
 - Switch to iron + micro treatments (FeSO4, chelated iron) June-September
-- Pre-load nitrogen in late May (last app before June 1)
+- Pre-load nitrogen in late May (last app before June 1) — EXCEPT North Port, where the last app is before APRIL 1 (city ordinance; see North Port Exception below)
 - Resume nitrogen in early October (first app after September 30)
 - Communicate blackout reason to customers proactively — prevents "why is my lawn yellow" calls
 
-## Charlotte County
-Charlotte county does NOT have the same blackout ordinance as of last verification. Verify annually.`,
+## County Scope
+All three Waves service counties — Sarasota, Manatee, and Charlotte — run the same June 1–Sept 30 county blackout. Charlotte County's ordinance (in place since 2008) protects Charlotte Harbor from red-tide / algal-bloom nutrient runoff. Geo note: North Port falls under Sarasota County; Port Charlotte under Charlotte County.
+
+## ⚠ North Port Exception — Blackout Starts April 1
+The City of North Port has its OWN fertilizer ordinance with a LONGER restricted period: April 1 through September 30 (nitrogen AND phosphorus on turf), broader than the June 1–Sept 30 county window. For North Port jobs the LAST nitrogen application is before APRIL 1 (not June 1); resume after September 30. Do NOT apply the June 1 county date to North Port. (Encoded in server/config/protocols.json — "LAST N before Jun 1 blackout (Apr 1 North Port)".)
+
+Sources: charlottecountyfl.gov (One Charlotte One Water) for Charlotte County; cityofnorthport.com fertilizer ordinance for the North Port April 1 start. Verified 2026-05-28.`,
     },
     {
       title: 'Celsius WG — Application Limits',
@@ -378,24 +389,37 @@ The blog content engine and pest pressure matrix pull weather data from two UF/I
   ];
 
   let created = 0;
+  let updated = 0;
   for (const entry of entries) {
-    const existing = await db('knowledge_base').where({ slug: entry.slug }).first();
-    if (existing) {
-      console.log(`  skip (exists): ${entry.slug}`);
-      continue;
-    }
-    await db('knowledge_base').insert({
-      ...entry,
-      tags: JSON.stringify(entry.tags || []),
-      metadata: JSON.stringify(entry.metadata || {}),
+    // forceUpdate is a seed-control flag, not a DB column — strip it.
+    const { forceUpdate, ...row } = entry;
+    const payload = {
+      ...row,
+      tags: JSON.stringify(row.tags || []),
+      metadata: JSON.stringify(row.metadata || {}),
       source: 'seed',
       last_verified_at: new Date(),
       verified_by: 'seed',
-      status: entry.status || 'active',
-    });
+      status: row.status || 'active',
+    };
+    const existing = await db('knowledge_base').where({ slug: entry.slug }).first();
+    if (existing) {
+      if (!forceUpdate) {
+        console.log(`  skip (exists): ${entry.slug}`);
+        continue;
+      }
+      // Re-seed the existing row in place (slug is the stable key, not updated).
+      const { slug, ...updateFields } = payload;
+      await db('knowledge_base').where({ slug: entry.slug }).update(updateFields);
+      updated++;
+      console.log(`  updated (forceUpdate): ${entry.title}`);
+      continue;
+    }
+    await db('knowledge_base').insert(payload);
     created++;
     console.log(`  seeded: ${entry.title}`);
   }
+  if (updated) console.log(`  -> ${updated} existing entr${updated === 1 ? 'y' : 'ies'} updated in place`);
   return created;
 }
 
