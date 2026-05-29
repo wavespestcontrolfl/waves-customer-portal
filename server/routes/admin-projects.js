@@ -1296,25 +1296,67 @@ function resolveWdoInspectionFee(customer, findings) {
   return Number.isFinite(base) && base > 0 ? base : 175; // base bracket (≤2500 sq ft)
 }
 
+function isReusableInvoice(inv) {
+  return inv && !['void', 'paid'].includes(inv.status);
+}
+
+// Persist the project → invoice link so a later dry-run / send / resend reuses
+// the same invoice instead of minting a duplicate. Guarded so it degrades to a
+// no-op in environments where the projects.invoice_id column hasn't migrated.
+async function persistProjectInvoiceLink(project, invoiceId) {
+  if (!invoiceId || project.invoice_id === invoiceId) return;
+  try {
+    await db('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
+    project.invoice_id = invoiceId;
+  } catch (err) {
+    logger.warn(`[projects] could not persist invoice link for ${project.id}: ${err.message}`);
+  }
+}
+
 // Find an invoice already linked to this project, else create a draft. Returns
 // { invoice, created }. Used by the combined report+invoice send.
+//
+// Dedupe order: explicit id → persisted projects.invoice_id → an invoice minted
+// for the same scheduled service / service record → create. The endpoint is hit
+// twice per send (dry-run + send) and can be re-run on resend, and projects may
+// be ad-hoc (no service_record_id / scheduled_service_id), so reuse must not
+// rely on a service linkage alone — every resolved invoice is recorded back on
+// the project.
 async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
   if (invoiceId) {
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
+    await persistProjectInvoiceLink(project, explicit.id);
     return { invoice: explicit, created: false };
   }
 
-  // Reuse a non-paid invoice already attached to the project's service record.
-  if (project.service_record_id) {
-    const linked = await db('invoices')
-      .where({ customer_id: project.customer_id, service_record_id: project.service_record_id })
-      .whereNotIn('status', ['void', 'paid'])
-      .orderBy('created_at', 'desc')
-      .first();
-    if (linked) return { invoice: linked, created: false };
+  // 1. Reuse the invoice already recorded on the project (covers ad-hoc
+  //    projects with no service linkage, and the dry-run → send → resend path).
+  if (project.invoice_id) {
+    const prior = await db('invoices').where({ id: project.invoice_id, customer_id: project.customer_id }).first();
+    if (isReusableInvoice(prior)) return { invoice: prior, created: false };
   }
 
+  // 2. Reuse a non-paid invoice already minted for the same scheduled service
+  //    or service record (mirrors project-completion.findExistingCompletionInvoice).
+  if (project.scheduled_service_id || project.service_record_id) {
+    const linked = await db('invoices')
+      .where({ customer_id: project.customer_id })
+      .whereNotIn('status', ['void', 'paid'])
+      .where(function invoiceLinkage() {
+        if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
+        if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
+      })
+      .orderBy('created_at', 'desc')
+      .first();
+    if (linked) {
+      await persistProjectInvoiceLink(project, linked.id);
+      return { invoice: linked, created: false };
+    }
+  }
+
+  // 3. Create a draft, carrying the scheduled-service / service-record linkage
+  //    forward so completion + future lookups can find it.
   const findings = (() => {
     try { return typeof project.findings === 'string' ? JSON.parse(project.findings) : (project.findings || {}); }
     catch { return {}; }
@@ -1323,6 +1365,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
   const created = await InvoiceService.create({
     customerId: project.customer_id,
     serviceRecordId: project.service_record_id || undefined,
+    scheduledServiceId: project.scheduled_service_id || undefined,
     title: 'WDO Inspection',
     lineItems: [{
       description: 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)',
@@ -1334,7 +1377,9 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
   });
   // Re-fetch so callers get the canonical DB row shape (line_items as JSONB, etc.).
   const fresh = await db('invoices').where({ id: created.id }).first();
-  return { invoice: fresh || created, created: true };
+  const invoice = fresh || created;
+  await persistProjectInvoiceLink(project, invoice.id);
+  return { invoice, created: true };
 }
 
 // Normalize an invoice's line_items into an array for PDF rendering — the
