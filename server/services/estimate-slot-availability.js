@@ -722,14 +722,59 @@ async function buildAsapCapacitySlots(options = {}) {
   return buildAsapCapacitySlotsForTechs({ ...options, techs });
 }
 
+// Reorder a date-sorted slot pool so customers see a spread of distinct
+// days instead of every window on the single soonest date. Without this,
+// the soonest available date (e.g. one busy Sunday) fills all six primary
+// cards and the list reads like "Sunday 10a / Sunday 11a / Sunday 1p /
+// ..." — visually monotonous and hides nearer-term variety on Mon/Wed/etc.
+//
+// Strategy mirrors booking.js curateSlots: one window per day, in
+// chronological order, then a second pass for any remaining capacity. The
+// soonest day's earliest-time slot stays first — that's the "book me ASAP"
+// option, surfaced regardless of route proximity. Input must already be
+// sorted by compareCustomerFacingSlots so each day's bucket is best-first.
+function diversifyByDay(sortedSlots) {
+  if (!Array.isArray(sortedSlots) || sortedSlots.length <= 1) return sortedSlots;
+  const byDate = new Map(); // insertion order = chronological (input is date-asc)
+  for (const slot of sortedSlots) {
+    const date = slot?.date || '';
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(slot);
+  }
+  // Each bucket is time-asc (compareCustomerFacingSlots). The soonest day
+  // (index 0) keeps its earliest window so the first card is always the
+  // genuine ASAP option, regardless of route proximity. Every later day is
+  // rotated by its position so the list leads with a spread of times
+  // (9a, 10a, 11a, 1p, ...) instead of nine identical 9 AM windows — the
+  // same "choice across the day" intent as booking.js curateSlots.
+  const buckets = [...byDate.values()].map((bucket, dayIndex) => {
+    if (dayIndex === 0 || bucket.length <= 1) return bucket;
+    const offset = dayIndex % bucket.length;
+    return [...bucket.slice(offset), ...bucket.slice(0, offset)];
+  });
+  const ordered = [];
+  for (let rank = 0; ordered.length < sortedSlots.length; rank += 1) {
+    let addedThisRank = false;
+    for (const bucket of buckets) {
+      if (bucket[rank]) {
+        ordered.push(bucket[rank]);
+        addedThisRank = true;
+      }
+    }
+    if (!addedThisRank) break;
+  }
+  return ordered;
+}
+
 function selectCustomerFacingSlots(slots, limit) {
   const safeLimit = Math.max(0, Number(limit) || 0);
   if (!safeLimit) return [];
 
-  return (Array.isArray(slots) ? slots : [])
+  const sorted = (Array.isArray(slots) ? slots : [])
     .filter(Boolean)
-    .sort(compareCustomerFacingSlots)
-    .slice(0, safeLimit);
+    .sort(compareCustomerFacingSlots);
+
+  return diversifyByDay(sorted).slice(0, safeLimit);
 }
 
 // Drop any candidate whose rounded display window collides with a real
@@ -1070,6 +1115,7 @@ module.exports = {
     etDateRange,
     splitSlotResults,
     selectCustomerFacingSlots,
+    diversifyByDay,
     compareCustomerFacingSlots,
     spreadWindowsAcrossDay,
     resolveEstimateSlotProfile,
