@@ -208,6 +208,66 @@ describe('waveguard-plan-engine helpers', () => {
     expect(matchCatalogProduct(lines[1], catalog).name).toBe('K-Flow 0-0-25');
   });
 
+  describe('pest protocol de-branding (display strings + lineMeta hints)', () => {
+    const protocols = require('../config/protocols.json');
+    const BRANDS = /Demand CS|Talstar|Alpine WSG|Advion|Gentrol|Contrac/i;
+
+    test('pest primary/secondary stay plain strings (UI/API consumers unaffected) and contain no product brands', () => {
+      for (const visit of protocols.pest.visits) {
+        for (const key of ['primary', 'secondary']) {
+          if (visit[key] == null) continue;
+          expect(typeof visit[key]).toBe('string'); // schema contract preserved
+          expect(visit[key]).not.toMatch(BRANDS);
+        }
+      }
+    });
+
+    test('matchCatalogProduct resolves the product from lineMeta hints despite de-branded text', () => {
+      const catalog = [
+        { id: '1', name: 'Demand CS', cost_per_unit: 5 },
+        { id: '2', name: 'Unrelated Product' },
+      ];
+      const meta = protocols.pest.visits[0].lineMeta['Exterior perimeter band'];
+      const line = { raw: 'Exterior perimeter band', catalogProductHints: meta.catalogProductHints };
+      expect(matchCatalogProduct(line, catalog).name).toBe('Demand CS');
+      expect(meta).toMatchObject({ scope: 'exterior', treatmentApplied: true });
+    });
+
+    test('every lineMeta key matches an actual de-branded line in its visit', () => {
+      for (const visit of protocols.pest.visits) {
+        if (!visit.lineMeta) continue;
+        const lines = new Set(
+          ['primary', 'secondary']
+            .flatMap((k) => String(visit[k] || '').split('\n'))
+            .map((l) => l.trim())
+            .filter(Boolean),
+        );
+        for (const key of Object.keys(visit.lineMeta)) {
+          expect(lines.has(key)).toBe(true);
+        }
+      }
+    });
+
+    test('a de-branded line with no hints does not falsely match a catalog product', () => {
+      const catalog = [{ id: '1', name: 'Demand CS', cost_per_unit: 5 }];
+      const line = { raw: 'Sweep eaves, windows, doors, and lanai frames' };
+      expect(matchCatalogProduct(line, catalog)).toBeNull();
+    });
+
+    test('catalogProductHints are specific brand families, never an ambiguous bare brand', () => {
+      // Bare "Advion"/"Contrac" would match multiple distinct catalog rows
+      // (WDG granular vs roach gel vs ant gel) since hints are the sole match text.
+      const AMBIGUOUS = new Set(['Advion', 'Contrac', 'Gentrol']);
+      for (const visit of protocols.pest.visits) {
+        for (const meta of Object.values(visit.lineMeta || {})) {
+          for (const hint of meta.catalogProductHints || []) {
+            expect(AMBIGUOUS.has(hint)).toBe(false);
+          }
+        }
+      }
+    });
+  });
+
   test('matchCatalogProduct handles protocol shorthand that omits catalog vendor prefix', () => {
     const product = matchCatalogProduct(
       { raw: 'K-Flow 0-0-25 liquid K ($2.18)' },

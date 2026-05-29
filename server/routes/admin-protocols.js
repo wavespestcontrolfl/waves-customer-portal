@@ -114,10 +114,23 @@ function serializeProtocolProduct(product) {
 }
 
 function buildCompletionActions({ lines, products, programKey, visit }) {
+  // De-branded pest visits keep primary/secondary as plain strings (so every
+  // existing string consumer — protocol UI tabs, /match — still works) and
+  // carry per-line metadata here, keyed by the exact de-branded line text.
+  const lineMeta = (visit && typeof visit.lineMeta === 'object' && visit.lineMeta) || {};
   return lines.map((line, index) => {
-    const product = matchCatalogProduct(line, products);
+    const meta = lineMeta[line.raw] || null;
+    // Feed the catalog matcher the brand hints (the display text is de-branded),
+    // so the right product still attaches.
+    const lineForMatch = meta && Array.isArray(meta.catalogProductHints)
+      ? { ...line, catalogProductHints: meta.catalogProductHints }
+      : line;
+    const product = matchCatalogProduct(lineForMatch, products);
     const kind = actionKindForLine(line, product);
-    const label = actionLabel(kind, line, product);
+    // De-branded lines (have lineMeta) display their own text — do NOT run
+    // actionLabel, which appends the matched product's brand name and re-leaks
+    // it. Product stays attached below for selection/material tracking.
+    const label = meta ? line.raw : actionLabel(kind, line, product);
     return {
       id: `${programKey || 'protocol'}_${visit?.visit || 'visit'}_${index}`,
       kind,
@@ -126,8 +139,9 @@ function buildCompletionActions({ lines, products, programKey, visit }) {
       raw: line.raw,
       role: line.role,
       conditional: !!line.conditional,
-      scope: actionScopeForLine(line, product),
-      treatmentApplied: actionTreatmentApplied(kind, line),
+      // Prefer explicit metadata; fall back to the keyword classifier for legacy lines.
+      scope: meta?.scope || actionScopeForLine(line, product),
+      treatmentApplied: meta?.treatmentApplied != null ? meta.treatmentApplied : actionTreatmentApplied(kind, line),
       product: serializeProtocolProduct(product),
     };
   });

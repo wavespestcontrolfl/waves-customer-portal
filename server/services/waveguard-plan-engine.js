@@ -129,9 +129,15 @@ function parseProtocolLines(text, role) {
 }
 
 function matchCatalogProduct(line, products) {
-  const normalizedLine = normalizeProtocolProductText(line.raw);
+  // De-branded pest lines keep brand names out of the display text and supply
+  // them via catalogProductHints (from the visit's lineMeta) so the catalog
+  // product still attaches. Legacy lines fall back to the raw text as before.
+  const matchText = Array.isArray(line.catalogProductHints) && line.catalogProductHints.length
+    ? line.catalogProductHints.join(' ')
+    : line.raw;
+  const normalizedLine = normalizeProtocolProductText(matchText);
   if (!normalizedLine) return null;
-  const lineNpk = parseNpkFromText(line.raw);
+  const lineNpk = parseNpkFromText(matchText);
 
   const candidates = products
     .map((product) => {

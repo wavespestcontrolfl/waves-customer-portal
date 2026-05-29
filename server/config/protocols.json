@@ -949,8 +949,15 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Exterior General Pest Perimeter\nDemand CS or Talstar P perimeter band\nAlpine WSG interior cracks/crevices only if activity is present\nWebster sweep eaves, windows, doors, and lanai frames",
-        "secondary": "Advion WDG or granular bait in landscape beds\nGlue boards in garage or utility areas\nEscalate moisture, exclusion, or sanitation issues in notes",
+        "primary": "Exterior general pest perimeter\nExterior perimeter band\nInterior crack-and-crevice treatment only if activity is present\nSweep eaves, windows, doors, and lanai frames",
+        "secondary": "WDG or granular bait in landscape beds\nGlue boards in garage or utility areas\nEscalate moisture, exclusion, or sanitation issues in notes",
+        "lineMeta": {
+          "Exterior perimeter band": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Demand CS", "Talstar P"] },
+          "Interior crack-and-crevice treatment only if activity is present": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Alpine WSG"] },
+          "Sweep eaves, windows, doors, and lanai frames": { "scope": "exterior", "treatmentApplied": false, "catalogProductHints": ["Webster"] },
+          "WDG or granular bait in landscape beds": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Advion WDG Granular"] },
+          "Glue boards in garage or utility areas": { "scope": "interior", "treatmentApplied": false }
+        },
         "material_cost": "inventory",
         "labor_cost": "standard",
         "tiers": { "bronze": true, "silver": true, "enhanced": true, "premium": true },
@@ -959,8 +966,13 @@
       {
         "visit": 2,
         "month": "Any",
-        "primary": "German Roach Cleanout\nAdvion Cockroach Gel Bait in kitchen, bath, hinges, appliances, and plumbing voids\nAlpine WSG crack-and-crevice treatment\nGentrol IGR point-source or aerosol where label allows",
+        "primary": "German roach cleanout\nCockroach gel bait in kitchen, bath, hinges, appliances, and plumbing voids\nCrack-and-crevice treatment\nInsect growth regulator point-source or aerosol where label allows",
         "secondary": "Vacuum visible aggregation before application\nPlace monitors and document count/location\nSchedule 10-14 day follow-up when live activity is confirmed",
+        "lineMeta": {
+          "Cockroach gel bait in kitchen, bath, hinges, appliances, and plumbing voids": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Advion Cockroach Gel Bait"] },
+          "Crack-and-crevice treatment": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Alpine WSG"] },
+          "Insect growth regulator point-source or aerosol where label allows": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Gentrol IGR"] }
+        },
         "material_cost": "inventory",
         "labor_cost": "elevated",
         "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
@@ -969,8 +981,13 @@
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Ant Service\nIdentify species and trail source before applying\nAdvion Ant Gel or granular bait along active trails\nAlpine WSG exterior/interior non-repellent treatment for ghost ants or trailing ants",
+        "primary": "Ant service\nIdentify species and trail source before applying\nAnt gel or granular bait along active trails\nNon-repellent treatment (interior + exterior) for ghost or trailing ants",
         "secondary": "Treat conducive entry points and moisture sources\nAvoid repellent spray on active trails\nRecheck bait acceptance at callback",
+        "lineMeta": {
+          "Ant gel or granular bait along active trails": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Advion Ant Gel"] },
+          "Non-repellent treatment (interior + exterior) for ghost or trailing ants": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Alpine WSG"] },
+          "Treat conducive entry points and moisture sources": { "scope": "exterior", "treatmentApplied": true }
+        },
         "material_cost": "inventory",
         "labor_cost": "standard",
         "tiers": { "bronze": true, "silver": true, "enhanced": true, "premium": true },
@@ -989,8 +1006,11 @@
       {
         "visit": 5,
         "month": "Any",
-        "primary": "Rodent Monitoring / Bait\nInspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries\nContrac Blox in tamper-resistant stations where label allows\nSnap traps in attic/garage when activity is active",
+        "primary": "Rodent monitoring / bait\nInspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries\nRodenticide blocks in tamper-resistant stations where label allows\nSnap traps in attic/garage when activity is active",
         "secondary": "Document exclusion findings with photos\nEscalate seal-up proposal when entry points are active\nRemove carcasses and reset traps on follow-up",
+        "lineMeta": {
+          "Rodenticide blocks in tamper-resistant stations where label allows": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Contrac Blox"] }
+        },
         "material_cost": "inventory",
         "labor_cost": "elevated",
         "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
