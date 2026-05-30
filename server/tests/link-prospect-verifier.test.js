@@ -45,6 +45,10 @@ describe('link prospect verifier target matching', () => {
     expect(_test.matchesTargetUrl('wavespestcontrol.com', root)).toBe(true);
     expect(_test.matchesTargetUrl('wavespestcontrol.com?utm=1', root)).toBe(true);
     expect(_test.matchesTargetUrl('wavespestcontrol.com#form', root)).toBe(true);
+    // Homepage hit with the slash retained before a query/fragment (stripUrl only
+    // trims trailing slashes) must still match.
+    expect(_test.matchesTargetUrl('wavespestcontrol.com/?utm=1', root)).toBe(true);
+    expect(_test.matchesTargetUrl('wavespestcontrol.com/#form', root)).toBe(true);
     // A child path must NOT count as a homepage backlink.
     expect(_test.matchesTargetUrl('wavespestcontrol.com/pest-control-bradenton-fl/', root)).toBe(false);
     expect(_test.matchesTargetUrl('wavespestcontrol.com/wdo-inspection', root)).toBe(false);
