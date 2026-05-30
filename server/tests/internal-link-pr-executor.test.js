@@ -331,10 +331,11 @@ describe('internal-link dry-run executor helpers', () => {
   });
 
   test('loads source and target pages from GitHub for dryRunTask', async () => {
-    GitHubClient.getFile.mockImplementation(async (file) => ({
-      sha: `${file}-sha`,
-      content: file.includes('termite-swarmers') ? sourceBody : targetBody,
-    }));
+    GitHubClient.getFile.mockImplementation(async (file) =>
+      file.endsWith('.mdx')
+        ? null
+        : { sha: `${file}-sha`, content: file.includes('termite-swarmers') ? sourceBody : targetBody }
+    );
 
     const result = await executor.dryRunTask({
       id: 'task-github',
