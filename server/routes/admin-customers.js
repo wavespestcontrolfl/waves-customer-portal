@@ -1384,7 +1384,7 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
   try {
     const row = await db('scheduled_services')
       .where({ customer_id: req.params.id })
-      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
       .orderBy('scheduled_date', 'desc')
       .orderBy('window_start', 'desc')
       .first(
