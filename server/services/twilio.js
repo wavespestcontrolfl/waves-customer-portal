@@ -499,6 +499,16 @@ const TwilioService = {
           messageType: options.messageType || "manual",
           deliveryStatus: "sent",
         })
+        .then((recorded) => {
+          if (!recorded?.message) return null;
+          return require("./reply-training-capture").captureReplyExampleForMessage(recorded.message, {
+            customerId: options.customerId || null,
+            metadata: {
+              captureSource: "twilio_send_sms",
+              originalMessageType: options.messageType || "manual",
+            },
+          });
+        })
         .catch(() => {});
 
       return { success: true, sid: message.sid, fromNumber };
