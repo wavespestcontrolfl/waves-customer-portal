@@ -151,25 +151,47 @@ async function submitRecap({
   const note = typeof technicianNotes === 'string' ? technicianNotes.trim() : '';
   const recapText = typeof customerRecap === 'string' ? customerRecap.trim() : '';
   const serviceDate = svc.scheduled_date ? String(svc.scheduled_date).split('T')[0] : etDateString();
-  const fromStatus = svc.status;
   // transitionedBy FKs technicians(id) ON DELETE SET NULL — only a tech
   // actor has a valid id; admin operators pass null.
   const transitionedBy = actorType === 'tech' ? (actorId || null) : null;
 
   let recordId;
+  // Concurrency idempotency (Codex P1): scheduled_service_id has only a
+  // non-unique index, so two simultaneous submits (double-tap, browser
+  // retry, admin+tech race) could each pass the existing-record lookup
+  // and insert duplicate service_records + double-text the customer.
+  // We don't reuse service_completion_attempts here because that table is
+  // keyed by service_id and shared with the real /complete flow — a recap
+  // "succeeded" row would make a later genuine completion 409. Instead we
+  // SELECT ... FOR UPDATE the scheduled_services row: concurrent recap
+  // submits serialize on that lock, so the loser observes the winner's
+  // committed status + record and takes the update (not insert) path.
+  // `didComplete` / `createdRecord` gate the one-time customer SMS so a
+  // re-submit on an already-completed visit never re-texts.
+  let didComplete = false;
+  let createdRecord = false;
   await knex.transaction(async (trx) => {
+    // 0. Lock the service row — serializes concurrent recap submissions.
+    const locked = await trx('scheduled_services')
+      .where({ id: serviceId })
+      .forUpdate()
+      .first('status');
+    const lockedStatus = locked?.status || svc.status;
+
     // 1. Status -> completed (skip if already terminal; recap is idempotent).
-    if (!TERMINAL_STATUSES.has(fromStatus)) {
+    if (!TERMINAL_STATUSES.has(lockedStatus)) {
       await transitionJobStatus({
         jobId: serviceId,
-        fromStatus,
+        fromStatus: lockedStatus,
         toStatus: 'completed',
         transitionedBy,
         trx,
       });
+      didComplete = true;
     }
 
-    // 2. Upsert the service_records row keyed by the direct FK.
+    // 2. Upsert the service_records row keyed by the direct FK. Under the
+    // row lock this lookup is race-free — the loser sees the committed row.
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
@@ -198,6 +220,7 @@ async function submitRecap({
         field_flags: JSON.stringify({ recap: true, recap_source: actorType || 'admin' }),
       }).returning('id');
       recordId = inserted[0]?.id || inserted[0];
+      createdRecord = true;
     }
 
     // 3. service_products for the chemicals the tech selected.
@@ -223,10 +246,13 @@ async function submitRecap({
     logger.warn(`[pest-recap] markComplete failed for ${serviceId}: ${err.message}`);
   }
 
-  // 5. Optional customer recap SMS.
+  // 5. Optional customer recap SMS — only the call that actually
+  // completed the visit (or created the record) texts, so a concurrent
+  // double-submit or a later edit-resubmit never re-texts the customer.
+  const shouldSend = didComplete || createdRecord;
   let smsSent = false;
   let smsError = null;
-  if (sendSms && recapText && svc.cust_phone) {
+  if (sendSms && recapText && svc.cust_phone && shouldSend) {
     try {
       const msg = await sendCustomerMessage({
         to: svc.cust_phone,
@@ -244,17 +270,31 @@ async function submitRecap({
       smsError = err.message;
       logger.warn(`[pest-recap] recap SMS failed for ${serviceId}: ${err.message}`);
     }
-  } else if (sendSms && recapText && !svc.cust_phone) {
+  } else if (sendSms && recapText && shouldSend && !svc.cust_phone) {
     smsError = 'no_phone';
+  } else if (sendSms && recapText && !shouldSend) {
+    // Concurrent double-submit / re-submit on an already-completed visit:
+    // the winning call already texted, so this one is a no-op.
+    smsError = 'duplicate_suppressed';
   }
 
   logger.info(
     `[pest-recap] recap committed service=${serviceId} record=${recordId} `
-    + `actor=${actorType} products=${Array.isArray(products) ? products.length : 0} `
+    + `actor=${actorType} completed=${didComplete} created=${createdRecord} `
+    + `products=${Array.isArray(products) ? products.length : 0} `
     + `smsSent=${smsSent}${smsError ? ` smsError=${smsError}` : ''}`,
   );
 
-  return { ok: true, recordId, completed: true, trackCompleted, smsSent, smsError };
+  return {
+    ok: true,
+    recordId,
+    completed: true,
+    created: createdRecord,
+    duplicate: !didComplete && !createdRecord,
+    trackCompleted,
+    smsSent,
+    smsError,
+  };
 }
 
 module.exports = {
