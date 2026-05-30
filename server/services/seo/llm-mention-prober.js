@@ -295,8 +295,8 @@ class LLMMentionProber {
         if (done.has(`${qrow.query}::${platform}`)) continue;
 
         const probe = await this.providers[platform](qrow.query);
-        probed++;
-        if (!probe) continue; // provider unconfigured or errored — leave the slot for a retry next run
+        if (!probe) continue; // provider unconfigured or errored — no API cost, leave the slot for a retry next run
+        probed++; // only real (non-null) probes count against the cost ceiling
 
         const parsed = this.parse(probe);
         const sentiment = parsed.wavesMentioned
