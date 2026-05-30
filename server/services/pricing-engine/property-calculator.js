@@ -206,6 +206,7 @@ function computeTurfArea(input, fallback = {}) {
     hasNonNegativeNumber(input.imperviosSurfacePercent) ||
     hasNonNegativeNumber(input.estimatedBedAreaSf) ||
     hasNonNegativeNumber(input.estimatedBedAreaPercent);
+  const hasExplicitBedArea = hasNonNegativeNumber(input.bedArea);
 
   const hasFallbackTurf =
     fallback.turfSf !== undefined &&
@@ -215,12 +216,24 @@ function computeTurfArea(input, fallback = {}) {
     Number(fallback.turfSf) >= 0;
 
   if (!hasLotBasedTurfFields && hasFallbackTurf) {
+    const hasKnownMaxEstimatedTurfSf = input.maxEstimatedTurfSfKnown === true &&
+      hasNonNegativeNumber(input.maxEstimatedTurfSf);
+    const maxEstimatedTurfSf = hasKnownMaxEstimatedTurfSf ? Number(input.maxEstimatedTurfSf) : 0;
+    const shouldCapFallback = !hasExplicitBedArea && hasKnownMaxEstimatedTurfSf;
+    const fallbackTurfSf = shouldCapFallback
+      ? Math.min(Number(fallback.turfSf), maxEstimatedTurfSf)
+      : Number(fallback.turfSf);
+    const turfFlags = ['FIELD_VERIFY_TURF_SQFT'];
+    if (shouldCapFallback && Number(fallback.turfSf) > maxEstimatedTurfSf) {
+      turfFlags.push('TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX');
+    }
     return {
-      turfSf: Number(fallback.turfSf),
+      turfSf: fallbackTurfSf,
       turfEstimated: true,
       turfConfidence: 'LOW',
       turfBasis: 'legacyHardscapeEstimate',
-      turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
+      turfOpenArea: shouldCapFallback ? maxEstimatedTurfSf : undefined,
+      turfFlags,
     };
   }
 
@@ -239,9 +252,31 @@ function computeTurfArea(input, fallback = {}) {
   const bedArea = hasEstimatedBedPercent
     ? Math.max(0, Math.round(turfOpenArea * (Number(input.estimatedBedAreaPercent) / 100)))
     : (explicitBedArea !== null ? explicitBedArea : Math.round(turfOpenArea * 0.15));
+  const lotFallbackTurfSf = Math.max(0, Math.round(turfOpenArea - bedArea));
+  const hasKnownMaxEstimatedTurfSf = input.maxEstimatedTurfSfKnown === true &&
+    hasNonNegativeNumber(input.maxEstimatedTurfSf);
+  const maxEstimatedTurfSf = hasKnownMaxEstimatedTurfSf ? Number(input.maxEstimatedTurfSf) : 0;
+  if (!hasBedArea && !hasEstimatedBedArea && hasKnownMaxEstimatedTurfSf && lotFallbackTurfSf > maxEstimatedTurfSf) {
+    const overage = lotFallbackTurfSf - maxEstimatedTurfSf;
+    const tolerance = Math.max(
+      PLAUSIBLE_TURF_OVERAGE_TOLERANCE_SF,
+      maxEstimatedTurfSf * PLAUSIBLE_TURF_OVERAGE_TOLERANCE_RATIO
+    );
+    const cappedTurfSf = overage <= tolerance
+      ? maxEstimatedTurfSf
+      : (hasFallbackTurf ? Math.min(Number(fallback.turfSf), maxEstimatedTurfSf) : maxEstimatedTurfSf);
+    return {
+      turfSf: cappedTurfSf,
+      turfEstimated: true,
+      turfConfidence: overage <= tolerance ? 'MEDIUM' : 'LOW',
+      turfBasis: overage <= tolerance || !hasFallbackTurf ? 'plausibleMaxTurfCap' : 'legacyHardscapeEstimate',
+      turfOpenArea: maxEstimatedTurfSf,
+      turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'],
+    };
+  }
 
   return {
-    turfSf: Math.max(0, Math.round(turfOpenArea - bedArea)),
+    turfSf: lotFallbackTurfSf,
     turfEstimated: true,
     turfConfidence: 'LOW',
     turfBasis: 'lotFallback',

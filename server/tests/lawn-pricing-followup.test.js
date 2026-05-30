@@ -163,6 +163,26 @@ describe('lawn pricing production follow-up', () => {
     ]));
   });
 
+  test('lot fallback above plausible outdoor area downgrades to legacy hardscape estimate', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 0,
+      estimatedBedAreaPercent: 10,
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(8139);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfOpenArea).toBe(10435);
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
   test('minor AI turf overages cap to plausible max instead of legacy fallback', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 2000,
