@@ -1486,13 +1486,25 @@ async function loadWdoAddendumPhotos(project) {
 // FDACS PDF *is* the deliverable, so callers must abort the send rather than
 // deliver a report-less or unsigned message. Returns null only for non-WDO
 // projects (which carry no FDACS attachment).
+//
+// This helper is used only by the send paths (the admin preview at /fdacs-pdf
+// calls buildWdoReportPDFBuffer directly), so it also enforces the signature
+// invariant at the build choke-point: an unsigned WDO report can never be
+// turned into a send attachment, regardless of which route (current or future)
+// calls it. The route-level guards still return the clean 422 first; this is a
+// compliance backstop.
 async function buildWdoPdfAttachment(project, customer) {
   if (project?.project_type !== 'wdo_inspection') return null;
+  const signature = loadWdoSignature(project);
+  if (!signature) {
+    const err = new Error('Licensee signature required before sending the WDO report');
+    err.code = 'signature_required';
+    throw err;
+  }
   const [baseApplicator, photos] = await Promise.all([
     resolveProjectApplicator(project),
     loadWdoAddendumPhotos(project),
   ]);
-  const signature = loadWdoSignature(project);
   const applicator = applicatorForReport(baseApplicator, signature);
   const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
   return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
