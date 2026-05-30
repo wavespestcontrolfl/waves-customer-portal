@@ -314,7 +314,7 @@ describe('blog Astro frontmatter validation', () => {
 
     expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-ant-trails-bradenton-/));
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/ant-trails-bradenton.md',
+      path: 'src/content/blog/ant-trails-bradenton.mdx',
       content: expect.stringContaining('Waves Pest Control guidance'),
       message: 'feat(blog): publish ant-trails-bradenton',
       sha: undefined,
@@ -455,7 +455,7 @@ describe('Astro publisher autonomous draft adapter', () => {
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
     });
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/autonomous-ant-control-bradenton.md',
+      path: 'src/content/blog/autonomous-ant-control-bradenton.mdx',
       branch: expect.stringMatching(/^content\/autonomous-autonomous-ant-control-bradenton-/),
       sha: undefined,
     }));

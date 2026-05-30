@@ -328,9 +328,21 @@ class InternalLinkPrExecutor {
   async _loadTargetPage(task) {
     const targetFile = task.target_file || resolveAstroFileForUrl(task.target_url);
     if (!targetFile) throw new Error(`target_file_unresolved:${task.target_url}`);
-    const file = await GitHubClient.getFile(targetFile);
+    // Tolerate the .md->.mdx migration: resolveAstroFileForUrl yields a .md
+    // path, but autonomous BLOG posts are now written as .mdx. Probe .mdx first
+    // for blog targets, then .md. Service/location pages stay .md (single
+    // lookup — no wasted call).
+    const isBlog = String(targetFile).startsWith('src/content/blog/');
+    const base = String(targetFile).replace(/\.mdx?$/, '');
+    const candidates = isBlog ? [`${base}.mdx`, `${base}.md`] : [targetFile];
+    let resolvedPath = null;
+    let file = null;
+    for (const candidate of candidates) {
+      const f = await GitHubClient.getFile(candidate);
+      if (f?.content) { resolvedPath = candidate; file = f; break; }
+    }
     if (!file?.content) throw new Error(`target_file_not_found:${targetFile}`);
-    return { ...pageFromAstroFile(targetFile, file.content, { fallbackUrl: task.target_url }), sha: file.sha || null };
+    return { ...pageFromAstroFile(resolvedPath, file.content, { fallbackUrl: task.target_url }), sha: file.sha || null };
   }
 
   async _persistDryRunResult(taskId, result) {
