@@ -64,6 +64,10 @@ function safePacket(row, rawToken = null) {
   };
 }
 
+function canExposePublicToken(packet) {
+  return ['approved', 'sent', 'viewed'].includes(String(packet?.status || '').toLowerCase());
+}
+
 function coerceInput(body = {}) {
   return {
     turfType: body.turfType || body.turf_type || null,
@@ -217,7 +221,7 @@ router.post('/', async (req, res, next) => {
       status: req.body.approve === true && outline.validation.status !== 'blocked' ? 'approved' : 'draft',
     }));
     res.status(201).json({
-      packet: safePacket(packet, rawToken),
+      packet: safePacket(packet, canExposePublicToken(packet) ? rawToken : null),
       validation: outline.validation,
     });
   } catch (err) {
@@ -388,10 +392,10 @@ router.post('/:id/regenerate', async (req, res, next) => {
     });
 
     res.status(201).json({
-      packet: safePacket(packet, rawToken),
+      packet: safePacket(packet, canExposePublicToken(packet) ? rawToken : null),
       validation: outline.validation,
       sourcePacket: safePacket({ ...sourcePacket, status: revokeOld ? 'revoked' : sourcePacket.status }),
-      publicUrl: publicUrlForToken(rawToken),
+      publicUrl: canExposePublicToken(packet) ? publicUrlForToken(rawToken) : null,
     });
   } catch (err) {
     next(err);
@@ -404,6 +408,9 @@ router.post('/:id/send', async (req, res, next) => {
     if (!packet) return res.status(404).json({ error: 'Service outline not found' });
     if (packet.validation_status === 'blocked') {
       return res.status(422).json({ error: 'Blocked service outlines cannot be sent', validationErrors: packet.validation_errors_json || [] });
+    }
+    if (!canExposePublicToken(packet)) {
+      return res.status(422).json({ error: 'Service outline must be approved before it can be sent' });
     }
     if (packet.revoked_at) return res.status(422).json({ error: 'Revoked service outline cannot be sent' });
     if (packet.expires_at && new Date(packet.expires_at) <= new Date()) {

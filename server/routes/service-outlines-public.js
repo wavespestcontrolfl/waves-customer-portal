@@ -6,6 +6,11 @@ const {
 } = require('../services/lawn-service-outline');
 
 const router = express.Router();
+const PUBLIC_PACKET_STATUSES = new Set(['approved', 'sent', 'viewed']);
+
+function canServePublicPacket(packet) {
+  return packet && PUBLIC_PACKET_STATUSES.has(String(packet.status || '').toLowerCase());
+}
 
 function publicPacket(row) {
   return {
@@ -27,7 +32,7 @@ router.get('/:token', async (req, res, next) => {
       .whereNull('revoked_at')
       .first();
 
-    if (!packet) return res.status(404).json({ error: 'Service outline not found' });
+    if (!packet || !canServePublicPacket(packet)) return res.status(404).json({ error: 'Service outline not found' });
     if (packet.expires_at && new Date(packet.expires_at) <= new Date()) {
       await db('service_outline_packets')
         .where({ id: packet.id })
@@ -40,7 +45,7 @@ router.get('/:token', async (req, res, next) => {
       const [row] = await trx('service_outline_packets')
         .where({ id: packet.id })
         .update({
-          status: packet.status === 'sent' || packet.status === 'approved' || packet.status === 'draft' ? 'viewed' : packet.status,
+          status: packet.status === 'sent' || packet.status === 'approved' ? 'viewed' : packet.status,
           first_viewed_at: firstViewedAt,
           last_viewed_at: trx.fn.now(),
           view_count: trx.raw('view_count + 1'),
@@ -76,7 +81,7 @@ router.post('/:token/cta-click', async (req, res, next) => {
       .whereNull('revoked_at')
       .first();
 
-    if (!packet) return res.status(404).json({ error: 'Service outline not found' });
+    if (!packet || !canServePublicPacket(packet)) return res.status(404).json({ error: 'Service outline not found' });
     if (packet.expires_at && new Date(packet.expires_at) <= new Date()) {
       await db('service_outline_packets')
         .where({ id: packet.id })

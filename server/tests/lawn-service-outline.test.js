@@ -1,5 +1,6 @@
 const {
   buildOutline,
+  currentMonthNumber,
   normalizeTurfType,
   validateContent,
 } = require('../services/lawn-service-outline');
@@ -111,6 +112,11 @@ describe('lawn service outline composer', () => {
       'Banned phrase detected: safe for pets',
       'Banned phrase detected: guaranteed results',
     ]));
+  });
+
+  test('resolves default outline month in Eastern time', () => {
+    expect(currentMonthNumber(new Date('2026-06-01T03:30:00.000Z'))).toBe(5);
+    expect(currentMonthNumber(new Date('2026-06-01T04:30:00.000Z'))).toBe(6);
   });
 
   test('builds May St. Augustine outline with spring focus and conditional protocol language', async () => {

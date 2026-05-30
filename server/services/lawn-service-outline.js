@@ -6,6 +6,7 @@ const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
+const LAWN_SERVICE_TIME_ZONE = 'America/New_York';
 
 const BANNED_PHRASES = [
   'safe for pets',
@@ -120,10 +121,20 @@ function resolveSeasonBand(month) {
   return 'oct_dec';
 }
 
-function currentMonthNumber(date = new Date()) {
+function currentMonthNumber(date = new Date(), timeZone = LAWN_SERVICE_TIME_ZONE) {
   const value = date instanceof Date ? date : new Date(date);
-  if (Number.isNaN(value.getTime())) return new Date().getMonth() + 1;
-  return value.getMonth() + 1;
+  const resolvedDate = Number.isNaN(value.getTime()) ? new Date() : value;
+  try {
+    const month = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      month: 'numeric',
+    }).format(resolvedDate);
+    const numericMonth = Number(month);
+    if (Number.isInteger(numericMonth) && numericMonth >= 1 && numericMonth <= 12) return numericMonth;
+  } catch {
+    // Fall through to the runtime local month if Intl time-zone resolution fails.
+  }
+  return resolvedDate.getMonth() + 1;
 }
 
 function estimateHasLawnService(estimate = {}, estimateData = {}) {
