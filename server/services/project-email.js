@@ -190,6 +190,7 @@ async function sendProjectTemplate({
   idempotencyKey,
   triggerEventId,
   recipient: explicitRecipient = null,
+  attachments = [],
 }) {
   const recipient = explicitRecipient || resolveProjectEmailRecipient(customer);
   if (!isEmailLike(recipient.email)) {
@@ -207,6 +208,7 @@ async function sendProjectTemplate({
       idempotencyKey,
       categories,
       suppressionGroupKey,
+      attachments,
     });
     return normalizeTemplateResult(result);
   } catch (err) {
@@ -247,6 +249,7 @@ async function sendProjectReportReady({
   reportUrl,
   isResend = false,
   idempotencyKey,
+  attachments = [],
 } = {}) {
   const payload = buildProjectPayload({ project, customer, reportUrl });
   const suffix = isResend ? `resend:${new Date().toISOString()}` : `initial:${safeKey(project?.report_token || project?.id)}`;
@@ -259,6 +262,44 @@ async function sendProjectReportReady({
     categories: ['project_report', `project_type_${safeKey(project?.project_type)}`],
     triggerEventId: `project_report.ready:${project?.id || 'unknown'}`,
     idempotencyKey: idempotencyKey || `project.report_ready:${project?.id || 'unknown'}:${suffix}`,
+    attachments,
+  });
+}
+
+/**
+ * Combined "report + invoice" delivery: ONE branded email carrying both the
+ * official report PDF and the invoice PDF, with the report link and the pay
+ * link in the payload. Reuses the existing (seeded) project.report_ready
+ * template so no new template has to ship — the attachments and the extra
+ * payload fields ride along on it.
+ */
+async function sendProjectReportWithInvoice({
+  project,
+  customer,
+  reportUrl,
+  payUrl,
+  invoice,
+  attachments = [],
+  idempotencyKey,
+} = {}) {
+  const payload = {
+    ...buildProjectPayload({ project, customer, reportUrl }),
+    invoice_url: payUrl || '',
+    pay_url: payUrl || '',
+    invoice_number: clean(invoice?.invoice_number),
+    amount_due: invoice?.total != null ? `$${Number(invoice.total).toFixed(2)}` : '',
+  };
+  return sendProjectTemplate({
+    project,
+    customer,
+    templateKey: 'project.report_with_invoice',
+    payload,
+    suppressionGroupKey: SERVICE_GROUP,
+    categories: ['project_report', 'project_report_with_invoice', `project_type_${safeKey(project?.project_type)}`],
+    triggerEventId: `project_report.with_invoice:${project?.id || 'unknown'}`,
+    idempotencyKey: idempotencyKey
+      || `project.report_with_invoice:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
+    attachments,
   });
 }
 
@@ -324,6 +365,7 @@ module.exports = {
   resolveProjectEmailRecipient,
   resolvePortalInviteRecipient,
   sendProjectReportReady,
+  sendProjectReportWithInvoice,
   sendPrepGuide,
   sendPortalInvite,
   _private: {

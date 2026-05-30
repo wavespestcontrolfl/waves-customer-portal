@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
+import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
 
@@ -223,6 +224,45 @@ function formatCustomerAddress(customer) {
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function formatCustomerName(customer) {
+  if (!customer) return '';
+  const first = customer.firstName || customer.first_name || '';
+  const last = customer.lastName || customer.last_name || '';
+  const name = [first, last].filter(Boolean).join(' ').trim();
+  return name || customer.companyName || customer.company_name || '';
+}
+
+// "Jane Doe · (941) 555-0101 · jane@example.com" for the FDACS contact fields.
+function formatCustomerContact(customer) {
+  if (!customer) return '';
+  return [formatCustomerName(customer), customer.phone || '', customer.email || '']
+    .filter(Boolean)
+    .join(' · ');
+}
+
+// Default structure description from the customer's property type, falling back
+// to single-family residential (the common case / sample report wording).
+function formatStructuresInspected(customer) {
+  const type = String(customer?.property_type || customer?.propertyType || '').toLowerCase();
+  if (type.includes('commercial') || type.includes('business')) return 'Commercial structure';
+  return 'Single-family residential structure';
+}
+
+// Populate the WDO contact/address fields from the selected customer. With
+// overwrite=false (on selection) only blank fields are filled so typed values
+// are preserved; the explicit "Fill from customer" button passes overwrite=true.
+function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
+  const address = formatCustomerAddress(customer);
+  const contact = formatCustomerContact(customer);
+  const structures = formatStructuresInspected(customer);
+  const next = { ...prev };
+  if (address && (overwrite || !hasMeaningfulValue(next.property_address))) next.property_address = address;
+  if (contact && (overwrite || !hasMeaningfulValue(next.requested_by))) next.requested_by = contact;
+  if (contact && (overwrite || !hasMeaningfulValue(next.report_sent_to))) next.report_sent_to = contact;
+  if (structures && (overwrite || !hasMeaningfulValue(next.structures_inspected))) next.structures_inspected = structures;
+  return next;
 }
 
 function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
@@ -475,9 +515,10 @@ export default function CreateProjectModal({
 
   useEffect(() => {
     if (projectType !== 'wdo_inspection') return;
-    const address = formatCustomerAddress(selectedCustomer);
-    if (!address) return;
-    setFindings(prev => prev.property_address ? prev : { ...prev, property_address: address });
+    if (!selectedCustomer) return;
+    // Seamlessly fill address + requested-by + report-sent-to from the picked
+    // customer, without clobbering anything the tech already typed.
+    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, false));
   }, [projectType, selectedCustomer]);
 
   function handleFindingChange(key, value) {
@@ -512,13 +553,21 @@ export default function CreateProjectModal({
   }
 
   function fillWdoAddressFromCustomer() {
-    const address = formatCustomerAddress(selectedCustomer);
-    if (!address) return;
-    setFindings(prev => ({ ...prev, property_address: address }));
+    if (!selectedCustomer) return;
+    // Explicit action — overwrite address + contact fields from the customer.
+    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, true));
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
     setFindings(prev => mergeSuggestionsIntoFindings(prev, suggestions, options.overwrite));
+  }
+
+  function applyWdoProfile(profile) {
+    setFindings(prev => applyProfileToWdoFindings(prev, profile, { overwrite: true }));
+  }
+
+  function applyWdoHistory(history) {
+    setFindings(prev => applyHistoryToWdoFindings(prev, history, { overwrite: true }));
   }
 
   async function handleAiDraft() {
@@ -848,9 +897,8 @@ export default function CreateProjectModal({
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
                           const phone = c.phone || '';
                           setCustomerLabel([name, phone].filter(Boolean).join(' · ') || c.id);
-                          const address = formatCustomerAddress(c);
-                          if (projectType === 'wdo_inspection' && address) {
-                            setFindings(prev => ({ ...prev, property_address: address }));
+                          if (projectType === 'wdo_inspection') {
+                            setFindings(prev => applyCustomerToWdoFindings(prev, c, false));
                           }
                           prefillFromScheduledService(c.id);
                         }}
@@ -940,6 +988,8 @@ export default function CreateProjectModal({
                   propertyAddress={findings.property_address || formatCustomerAddress(selectedCustomer)}
                   findings={findings}
                   onApplySuggestions={applyWdoSuggestions}
+                  onApplyProfile={applyWdoProfile}
+                  onApplyHistory={applyWdoHistory}
                   onEvidencePhotoSelected={(file) => queuePhoto(file, 'previous_treatment')}
                   disabled={saving || aiWriting}
                   palette={P}

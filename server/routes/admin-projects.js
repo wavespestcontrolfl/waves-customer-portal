@@ -23,6 +23,7 @@ const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
 const serviceLibrary = require('../services/service-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -34,6 +35,11 @@ const {
   completeProjectBackedService,
   resolveProjectPortalAttachment,
 } = require('../services/project-completion');
+const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
+const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
+const InvoiceService = require('../services/invoice');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -223,6 +229,7 @@ function compactPropertyProfile(profile) {
       ? profile.constructionMaterial
       : null,
     foundationType: profile.foundationType && profile.foundationType !== 'UNKNOWN' ? profile.foundationType : null,
+    roofType: profile.roofType && profile.roofType !== 'UNKNOWN' ? profile.roofType : null,
     sourceUrl,
     confidence: profile._aiConfidence || profile._confidence || profile._dataQuality?.level || null,
   };
@@ -241,6 +248,7 @@ function propertyProfileLines(profile) {
   if (facts.stories) lines.push(`Stories: ${facts.stories}`);
   if (facts.constructionMaterial) lines.push(`Construction: ${facts.constructionMaterial}`);
   if (facts.foundationType) lines.push(`Foundation: ${facts.foundationType}`);
+  if (facts.roofType) lines.push(`Roof: ${facts.roofType}`);
   if (facts.sourceUrl) lines.push(`Source: ${facts.sourceUrl}`);
   if (facts.confidence) lines.push(`Property data confidence: ${facts.confidence}`);
   return lines.length ? lines.join('\n') : '[no property facts found]';
@@ -920,13 +928,27 @@ router.get('/', async (req, res, next) => {
   try {
     const { status, project_type, customer_id, tech_id, limit = 100 } = req.query;
 
+    // Select project columns explicitly, excluding the heavy JSONB blobs the list
+    // never needs (signature data URL up to 2MB, property profile, history) —
+    // pulling p.* would transfer/allocate hundreds of MB for up to 500 rows.
+    const projectCols = await db('projects').columnInfo().catch(() => ({}));
+    const HEAVY_LIST_COLS = new Set(['wdo_signature', 'property_profile', 'wdo_history']);
+    const colNames = Object.keys(projectCols);
+    const lightSelect = colNames.length
+      ? colNames.filter((c) => !HEAVY_LIST_COLS.has(c)).map((c) => `p.${c}`)
+      : ['p.*'];
+    const blobFlags = projectCols.wdo_signature
+      ? [db.raw('(p.wdo_signature IS NOT NULL) AS wdo_signed')]
+      : [];
+
     let q = db('projects as p')
       .leftJoin('customers as c', 'p.customer_id', 'c.id')
       .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
       .leftJoin('service_records as srp', 'p.service_record_id', 'srp.id')
       .leftJoin('scheduled_services as ssp', 'p.scheduled_service_id', 'ssp.id')
       .select(
-        'p.*',
+        ...lightSelect,
+        ...blobFlags,
         'c.first_name', 'c.last_name', 'c.city', 'c.state',
         't.name as tech_name',
       )
@@ -953,12 +975,18 @@ router.get('/', async (req, res, next) => {
       .groupBy('project_id');
     const photoMap = Object.fromEntries(photoCounts.map(x => [x.project_id, Number(x.n)]));
 
-    const projects = await Promise.all(rows.map(async (r) => ({
-        ...r,
+    const projects = await Promise.all(rows.map(async (r) => {
+      // wdo_signed comes from SQL (IS NOT NULL); wdo_signature is no longer
+      // selected. The fallback handles the pre-columnInfo p.* path.
+      const { wdo_signature, wdo_signed, ...rest } = r;
+      return {
+        ...rest,
+        wdo_signed: !!(wdo_signed ?? wdo_signature),
         customer_name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
         report_url: r.report_token ? await projectReportPathForProject(db, r, r) : null,
         photo_count: photoMap[r.id] || 0,
-      })));
+      };
+    }));
 
     res.json({ projects });
   } catch (err) { next(err); }
@@ -1019,9 +1047,35 @@ router.get('/:id', async (req, res, next) => {
       isExpired: project.prep_expires_at ? new Date(project.prep_expires_at) < new Date() : false,
     } : null;
 
+    // Strip the heavy signature image from the detail payload — expose only
+    // the metadata the UI needs (signed state, who, when).
+    const wdoSignature = (() => {
+      let s = project.wdo_signature;
+      if (typeof s === 'string') { try { s = JSON.parse(s); } catch { s = null; } }
+      if (!s || !s.image) return null;
+      return { signed: true, signer_name: s.signer_name || null, signed_at: s.signed_at || null };
+    })();
+
+    const parseJsonCol = (v) => {
+      let p = v;
+      if (typeof p === 'string') { try { p = JSON.parse(p); } catch { p = null; } }
+      return p && typeof p === 'object' ? p : null;
+    };
+    const propertyProfile = parseJsonCol(project.property_profile);
+    const wdoHistory = parseJsonCol(project.wdo_history);
+    // Resolved inspector identity (name + FDACS ID) so the signature pad can
+    // prefill the required FDACS ID-card field for WDO projects.
+    const wdoApplicator = project.project_type === 'wdo_inspection'
+      ? await resolveProjectApplicator(project).catch(() => null)
+      : null;
+
     res.json({
       project: {
         ...project,
+        wdo_signature: wdoSignature,
+        property_profile: propertyProfile,
+        wdo_history: wdoHistory,
+        wdo_applicator: wdoApplicator,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },
@@ -1199,6 +1253,17 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
       previousTreatmentPhoto,
     });
 
+    // Cache the resolved property profile on the project so the specs panel
+    // shows on reload without re-running the (web-search) lookup.
+    if (projectId && result.propertyProfile) {
+      const cols = await db('projects').columnInfo().catch(() => ({}));
+      if (cols.property_profile) {
+        await db('projects').where({ id: projectId })
+          .update({ property_profile: JSON.stringify(result.propertyProfile), updated_at: db.fn.now() })
+          .catch((err) => logger.warn(`[projects] could not cache property profile for ${projectId}: ${err.message}`));
+      }
+    }
+
     logger.info('[projects] WDO intelligence generated', {
       customerId,
       hasPhoto: Boolean(previousTreatmentPhoto),
@@ -1208,6 +1273,81 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
     res.json(result);
   } catch (err) {
     logger.error(`[projects] WDO intelligence failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/wdo-history — research prior WDO treatment + permit
+// history for the property (FDACS Section 4). Opt-in (separate web-search call).
+// Body (JSON): { project_id?, customer_id?, property_address? }. Cached on the
+// project when project_id is supplied.
+// ---------------------------------------------------------------------------
+router.post('/wdo-history', async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+
+    const customerId = req.body?.customer_id || null;
+    const projectId = req.body?.project_id || null;
+    const serviceRecordId = req.body?.service_record_id || null;
+    const scheduledServiceId = req.body?.scheduled_service_id || null;
+    const wantRefresh = req.body?.refresh === true || req.body?.refresh === 'true';
+    let scopedCustomerId = customerId;
+
+    if (projectId) {
+      const project = await db('projects').where({ id: projectId }).first();
+      if (!(await requireProjectAccess(req, res, project))) return;
+      if (project.project_type !== 'wdo_inspection') return res.status(400).json({ error: 'Project is not a WDO inspection' });
+      // Return the cached history unless an explicit refresh is requested — this
+      // opt-in lookup runs up to 8 web searches, so the common reload/retry must
+      // not re-bill an Anthropic call for the same project.
+      if (!wantRefresh) {
+        let cached = project.wdo_history;
+        if (typeof cached === 'string') { try { cached = JSON.parse(cached); } catch { cached = null; } }
+        if (cached && typeof cached === 'object') {
+          return res.json({ history: cached, cached: true });
+        }
+      }
+      scopedCustomerId = project.customer_id || customerId;
+    } else if (!isAdmin(req)) {
+      if (!customerId) return res.status(400).json({ error: 'Customer required for technician WDO history' });
+      // Pass the assigned visit scope (service_record_id / scheduled_service_id)
+      // so an assigned field tech isn't rejected before the project is saved.
+      await validateProjectCreateScope(req, {
+        customer_id: customerId,
+        service_record_id: serviceRecordId,
+        scheduled_service_id: scheduledServiceId,
+      });
+    }
+
+    const customer = scopedCustomerId
+      ? await db('customers').where({ id: scopedCustomerId }).whereNull('deleted_at').first()
+      : null;
+    if (scopedCustomerId && !customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const propertyAddress = cleanOneLine(req.body?.property_address, 500) || formatCustomerPropertyAddress(customer);
+    if (!propertyAddress) return res.status(400).json({ error: 'Property address required' });
+
+    const history = await lookupWdoHistory(propertyAddress);
+    if (!history) {
+      return res.json({ history: null, message: 'No treatment or permit history found — verify on site.' });
+    }
+
+    if (projectId) {
+      const cols = await db('projects').columnInfo().catch(() => ({}));
+      if (cols.wdo_history) {
+        await db('projects').where({ id: projectId })
+          .update({ wdo_history: JSON.stringify(history), updated_at: db.fn.now() })
+          .catch((err) => logger.warn(`[projects] could not cache WDO history for ${projectId}: ${err.message}`));
+      }
+    }
+
+    logger.info('[projects] WDO history generated', {
+      projectId, previousTreatment: history.previousTreatment, confidence: history.confidence,
+    });
+    res.json({ history });
+  } catch (err) {
+    logger.error(`[projects] WDO history failed: ${err.message}`);
     next(err);
   }
 });
@@ -1240,17 +1380,324 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// WDO report PDF + invoice helpers (shared by /send and /send-with-invoice)
+// ---------------------------------------------------------------------------
+function pdfEmailAttachment(filename, buffer) {
+  return {
+    filename,
+    content: buffer.toString('base64'),
+    type: 'application/pdf',
+    disposition: 'attachment',
+  };
+}
+
+function parseFindings(project) {
+  try { return typeof project.findings === 'string' ? JSON.parse(project.findings) : (project.findings || {}); }
+  catch { return {}; }
+}
+
+// Resolve the FDACS Section-1 inspector identity. The WDO findings don't
+// collect the inspector and a plain db('projects') load has no tech_name, so
+// load the technician who performed the project (created_by_tech_id) and use
+// their name + FL applicator license (the individual's ID-card number). An
+// explicit applicator_* finding still wins if present.
+async function resolveProjectApplicator(project) {
+  const findings = parseFindings(project);
+  let name = String(findings.applicator_name || project.tech_name || '').trim();
+  let idCardNo = String(findings.applicator_fdacs_id || '').trim();
+  if ((!name || !idCardNo) && project.created_by_tech_id) {
+    const tech = await db('technicians').where({ id: project.created_by_tech_id }).first().catch(() => null);
+    if (tech) {
+      name = name || String(tech.name || '').trim();
+      idCardNo = idCardNo || String(tech.fl_applicator_license || '').trim();
+    }
+  }
+  return { name, idCardNo };
+}
+
+// Read the captured licensee e-signature off the project (JSONB column).
+function loadWdoSignature(project) {
+  let sig = project.wdo_signature;
+  if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
+  if (!sig || !sig.image) return null;
+  return {
+    image: sig.image,
+    contentType: sig.content_type || 'image/png',
+    signerName: sig.signer_name || '',
+    signerIdCard: sig.signer_id_card || '',
+    signedAt: sig.signed_at || null,
+  };
+}
+
+// The FDACS Print Name / ID Card No must match whoever actually signed, which
+// may differ from the project creator (admin-created WDO, or another cardholder
+// signs in the field). Prefer the captured signer identity over the project
+// technician when a signature is present.
+function applicatorForReport(baseApplicator, signature) {
+  if (!signature) return baseApplicator;
+  return {
+    name: signature.signerName || baseApplicator.name,
+    idCardNo: signature.signerIdCard || baseApplicator.idCardNo,
+  };
+}
+
+// pdf-lib embeds images as-is (no recompression) and we have no image library
+// to downscale, so bound the addendum to keep PDF build memory and the email
+// attachment within provider limits: a max page-count's worth of photos, an
+// oversized-photo skip, and a total-bytes budget.
+const MAX_ADDENDUM_PHOTOS = 16; // 8 addendum pages (2 per page)
+const MAX_ADDENDUM_PHOTO_BYTES = 8 * 1024 * 1024;
+const MAX_ADDENDUM_TOTAL_BYTES = 22 * 1024 * 1024;
+
+// Fetch the project's photos from S3 as buffers for the PDF photo addendum,
+// ordered the way the tech arranged them. Failures on individual photos are
+// skipped so one bad object can't sink the whole report; oversized photos and
+// anything past the count/byte budget are omitted (and logged).
+async function loadWdoAddendumPhotos(project) {
+  const rows = await db('project_photos')
+    .where({ project_id: project.id })
+    .orderBy('sort_order', 'asc')
+    .orderBy('created_at', 'asc')
+    .catch(() => []);
+  const out = [];
+  let totalBytes = 0;
+  for (const ph of rows) {
+    if (out.length >= MAX_ADDENDUM_PHOTOS) {
+      logger.warn(`[projects] addendum photo cap (${MAX_ADDENDUM_PHOTOS}) reached for ${project.id}; ${rows.length - out.length} omitted`);
+      break;
+    }
+    try {
+      const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }));
+      const buffer = await streamToBuffer(object.Body);
+      if (!buffer.length) continue;
+      if (buffer.length > MAX_ADDENDUM_PHOTO_BYTES) {
+        logger.warn(`[projects] addendum photo ${ph.id} skipped — ${buffer.length}B over per-photo cap`);
+        continue;
+      }
+      if (totalBytes + buffer.length > MAX_ADDENDUM_TOTAL_BYTES) {
+        logger.warn(`[projects] addendum byte budget reached for ${project.id}; remaining photos omitted`);
+        break;
+      }
+      // pdf-lib only embeds PNG/JPEG. Skip other accepted upload types (e.g.
+      // WebP, GIF) by magic bytes so they don't consume an addendum slot or
+      // render a "[Photo N unavailable]" placeholder.
+      const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+      const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+      if (!isPng && !isJpeg) {
+        logger.warn(`[projects] addendum photo ${ph.id} skipped — unsupported image format for PDF embedding`);
+        continue;
+      }
+      totalBytes += buffer.length;
+      out.push({ buffer, contentType: object.ContentType || 'image/jpeg', caption: ph.caption || '' });
+    } catch (err) {
+      logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
+    }
+  }
+  return out;
+}
+
+// Build the filled FDACS-13645 PDF (+ signature + photo addendum) for a WDO
+// project as an email attachment. Throws on failure — for a WDO report the
+// FDACS PDF *is* the deliverable, so callers must abort the send rather than
+// deliver a report-less or unsigned message. Returns null only for non-WDO
+// projects (which carry no FDACS attachment).
+//
+// This helper is used only by the send paths (the admin preview at /fdacs-pdf
+// calls buildWdoReportPDFBuffer directly), so it also enforces the signature
+// invariant at the build choke-point: an unsigned WDO report can never be
+// turned into a send attachment, regardless of which route (current or future)
+// calls it. The route-level guards still return the clean 422 first; this is a
+// compliance backstop.
+async function buildWdoPdfAttachment(project, customer) {
+  if (project?.project_type !== 'wdo_inspection') return null;
+  const signature = loadWdoSignature(project);
+  if (!signature) {
+    const err = new Error('Licensee signature required before sending the WDO report');
+    err.code = 'signature_required';
+    throw err;
+  }
+  const [baseApplicator, photos] = await Promise.all([
+    resolveProjectApplicator(project),
+    loadWdoAddendumPhotos(project),
+  ]);
+  const applicator = applicatorForReport(baseApplicator, signature);
+  const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
+  return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
+}
+
+// WDO inspection auto-invoice fee. The tech enters any fee on the form
+// (findings.inspection_fee) — WDO pricing varies by construction (wood frame),
+// new build, prior termite history, etc., so it's a free amount, not fixed
+// tiers. That entry always wins. If it's left blank, fall back to tiering by
+// the structure footprint they entered (≤2500 → $150 · ≤3500 → $200 · >3500 →
+// $250), and if neither is set default to the top $250 tier (conservative;
+// surfaced in the dry-run for the operator to adjust). We never tier on
+// customers.property_sqft (that's lawn area).
+const WDO_FEE_TIERS = [
+  { maxSqFt: 2500, price: 150 },
+  { maxSqFt: 3500, price: 200 },
+  { maxSqFt: Infinity, price: 250 },
+];
+function parseWdoFee(value) {
+  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+  const n = m ? Number(m[1]) : 0;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+function resolveWdoInspectionFee(findings) {
+  const picked = parseWdoFee(findings?.inspection_fee);
+  if (picked > 0) return picked;
+  const sqft = Number(String(findings?.structure_sqft ?? '').replace(/[^0-9.]/g, '')) || 0;
+  if (sqft > 0) {
+    for (const tier of WDO_FEE_TIERS) {
+      if (sqft <= tier.maxSqFt) return tier.price;
+    }
+  }
+  return 250; // nothing picked or measured — top tier, operator adjusts in dry-run
+}
+
+function isReusableInvoice(inv) {
+  return inv && !['void', 'paid'].includes(inv.status);
+}
+
+const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)';
+
+// If a reused invoice is still the auto-created WDO draft (untouched: draft
+// status, our title + single WDO line item) and the resolved fee has since
+// changed (the tech edited inspection_fee / structure_sqft between the dry-run
+// and the send), reprice its line item so we never bill the stale amount. A
+// manually edited invoice (different title/lines) is left untouched.
+async function maybeRepriceWdoDraft(invoice, project) {
+  if (!invoice || invoice.status !== 'draft' || String(invoice.title || '') !== 'WDO Inspection') return invoice;
+  let items = invoice.line_items;
+  if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = null; } }
+  if (!Array.isArray(items) || items.length !== 1) return invoice;
+  if (!String(items[0].description || '').startsWith('WDO Inspection (FDACS')) return invoice;
+
+  const fee = resolveWdoInspectionFee(parseFindings(project));
+  if (Number(items[0].amount ?? items[0].unit_price) === fee) return invoice;
+  try {
+    const updated = await InvoiceService.update(invoice.id, {
+      line_items: [{ description: WDO_INVOICE_LINE_DESCRIPTION, quantity: 1, unit_price: fee, amount: fee }],
+    });
+    return updated || invoice;
+  } catch (err) {
+    logger.warn(`[projects] WDO draft reprice failed for ${invoice.id}: ${err.message}`);
+    return invoice;
+  }
+}
+
+// Persist the project → invoice link so a later dry-run / send / resend reuses
+// the same invoice instead of minting a duplicate. Guarded so it degrades to a
+// no-op in environments where the projects.invoice_id column hasn't migrated.
+async function persistProjectInvoiceLink(project, invoiceId) {
+  if (!invoiceId || project.invoice_id === invoiceId) return;
+  try {
+    await db('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
+    project.invoice_id = invoiceId;
+  } catch (err) {
+    logger.warn(`[projects] could not persist invoice link for ${project.id}: ${err.message}`);
+  }
+}
+
+// Find an invoice already linked to this project, else create a draft. Returns
+// { invoice, created }. Used by the combined report+invoice send.
+//
+// Dedupe order: explicit id → persisted projects.invoice_id → an invoice minted
+// for the same scheduled service / service record → create. The endpoint is hit
+// twice per send (dry-run + send) and can be re-run on resend, and projects may
+// be ad-hoc (no service_record_id / scheduled_service_id), so reuse must not
+// rely on a service linkage alone — every resolved invoice is recorded back on
+// the project.
+async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
+  if (invoiceId) {
+    const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
+    if (!explicit) throw new Error('Invoice not found for this customer');
+    await persistProjectInvoiceLink(project, explicit.id);
+    // This is the normal final-send path (UI posts the previewed draft's id), so
+    // reprice it too if the WDO fee changed since the dry-run. Only the untouched
+    // auto-created draft is affected; a hand-picked/edited invoice is left as-is.
+    return { invoice: await maybeRepriceWdoDraft(explicit, project), created: false };
+  }
+
+  // 1. Reuse the invoice already recorded on the project (covers ad-hoc
+  //    projects with no service linkage, and the dry-run → send → resend path).
+  if (project.invoice_id) {
+    const prior = await db('invoices').where({ id: project.invoice_id, customer_id: project.customer_id }).first();
+    if (isReusableInvoice(prior)) return { invoice: await maybeRepriceWdoDraft(prior, project), created: false };
+  }
+
+  // 2. Reuse a non-paid invoice already minted for the same scheduled service
+  //    or service record (mirrors project-completion.findExistingCompletionInvoice).
+  if (project.scheduled_service_id || project.service_record_id) {
+    const linked = await db('invoices')
+      .where({ customer_id: project.customer_id })
+      .whereNotIn('status', ['void', 'paid'])
+      .where(function invoiceLinkage() {
+        if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
+        if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
+      })
+      .orderBy('created_at', 'desc')
+      .first();
+    if (linked) {
+      await persistProjectInvoiceLink(project, linked.id);
+      return { invoice: await maybeRepriceWdoDraft(linked, project), created: false };
+    }
+  }
+
+  // 3. Create a draft, carrying the scheduled-service / service-record linkage
+  //    forward so completion + future lookups can find it.
+  const fee = resolveWdoInspectionFee(parseFindings(project));
+  const created = await InvoiceService.create({
+    customerId: project.customer_id,
+    serviceRecordId: project.service_record_id || undefined,
+    scheduledServiceId: project.scheduled_service_id || undefined,
+    title: 'WDO Inspection',
+    lineItems: [{
+      description: WDO_INVOICE_LINE_DESCRIPTION,
+      quantity: 1,
+      unit_price: fee,
+      amount: fee,
+    }],
+    notes: `Auto-generated for WDO inspection project ${project.id}.`,
+  });
+  // Re-fetch so callers get the canonical DB row shape (line_items as JSONB, etc.).
+  const fresh = await db('invoices').where({ id: created.id }).first();
+  const invoice = fresh || created;
+  await persistProjectInvoiceLink(project, invoice.id);
+  return { invoice, created: true };
+}
+
+// Normalize an invoice's line_items into an array for PDF rendering — the
+// column may arrive as parsed JSONB (array) or a raw JSON string depending on
+// the driver / code path.
+function normalizeInvoiceLineItemsForPdf(lineItems) {
+  if (Array.isArray(lineItems)) return lineItems;
+  if (typeof lineItems === 'string') {
+    try { const parsed = JSON.parse(lineItems); return Array.isArray(parsed) ? parsed : []; }
+    catch { return []; }
+  }
+  return [];
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/projects/:id/send — generate token, mark sent, notify customer
 // Admin-only (prevents accidental send by tech before review).
 //
 // Notifies the customer via SMS (Twilio) and email (SendGrid) with the
-// public report link. The public token can be generated before delivery,
+// public report link. For WDO inspections, the filled FDACS-13645 PDF is
+// attached to the email. The public token can be generated before delivery,
 // but status only moves to 'sent' after at least one customer channel works.
 // ---------------------------------------------------------------------------
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    // A WDO report is an official FDACS-13645 filing — it must carry the
+    // licensee signature, so block the send until one is captured.
+    if (project.project_type === 'wdo_inspection' && !loadWdoSignature(project)) {
+      return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+    }
 
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
@@ -1294,55 +1741,30 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const typeCfg = getProjectType(project.project_type);
     const typeLabel = typeCfg?.label || 'Service';
     const firstName = customer?.first_name || 'there';
+    const isWdo = project.project_type === 'wdo_inspection';
+
+    // A WDO report's FDACS-13645 PDF rides on the email only, so it can't be
+    // delivered without an email address — fail up front rather than text a bare
+    // link and record the official report as sent.
+    if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
+      return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
+    }
+
+    // Build the FDACS report PDF up-front. For a WDO report this PDF *is* the
+    // deliverable (and is gated as signed), so a build/stamp failure must abort
+    // before any channel send rather than deliver a report-less message.
+    let wdoAttachment = null;
+    try {
+      wdoAttachment = await buildWdoPdfAttachment(updatedProject, customer);
+    } catch (e) {
+      logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
+      return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
+    }
 
     const channels = {};
 
-    // SMS
-    if (customer?.phone) {
-      try {
-        const digits = String(customer.phone).replace(/\D/g, '');
-        const normalized = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
-          : digits.length === 10 ? `+1${digits}`
-          : null;
-        if (!normalized) {
-          channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
-        } else {
-          const smsBody = await renderRequiredSmsTemplate('project_report_ready', {
-            first_name: firstName,
-            project_type: typeLabel,
-            report_url: reportUrl,
-          }, {
-            workflow: 'project_report_ready',
-            entity_type: 'project',
-            entity_id: project.id,
-          });
-          const result = await sendCustomerMessage({
-            to: normalized,
-            body: smsBody,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'support_resolution',
-            customerId: customer.id,
-            identityTrustLevel: 'phone_matches_customer',
-            entryPoint: 'admin_project_report_send',
-            metadata: {
-              original_message_type: 'project_report',
-              project_id: project.id,
-            },
-          });
-          channels.sms = result.sent
-            ? { ok: true }
-            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
-        }
-      } catch (e) {
-        logger.error(`[projects] send sms failed: ${e.message}`);
-        channels.sms = { ok: false, error: e.message };
-      }
-    } else {
-      channels.sms = { ok: false, error: 'No phone on file' };
-    }
-
-    // Email (through editable Waves template library)
+    // Email first (through editable Waves template library). For WDO it carries
+    // the FDACS PDF, so the SMS link is only sent after the email succeeds.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
     if (emailRecipient.email) {
       try {
@@ -1351,6 +1773,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           customer,
           reportUrl,
           isResend: Boolean(project.sent_at || project.status === 'sent'),
+          attachments: wdoAttachment ? [wdoAttachment] : [],
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -1363,15 +1786,63 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       channels.email = { ok: false, error: 'No email on file' };
     }
 
+    // SMS (report link). For WDO, defer until the email (with the FDACS PDF)
+    // succeeds so a failed email can't leave the customer with only a link while
+    // the report is recorded not-sent; for other project types it's independent.
+    const digits = String(customer?.phone || '').replace(/\D/g, '');
+    const normalizedPhone = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
+      : digits.length === 10 ? `+1${digits}` : null;
+    if (!customer?.phone) {
+      channels.sms = { ok: false, error: 'No phone on file' };
+    } else if (!normalizedPhone) {
+      channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
+    } else if (isWdo && !channels.email?.ok) {
+      channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
+    } else {
+      try {
+        const smsBody = await renderRequiredSmsTemplate('project_report_ready', {
+          first_name: firstName,
+          project_type: typeLabel,
+          report_url: reportUrl,
+        }, {
+          workflow: 'project_report_ready',
+          entity_type: 'project',
+          entity_id: project.id,
+        });
+        const result = await sendCustomerMessage({
+          to: normalizedPhone,
+          body: smsBody,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'support_resolution',
+          customerId: customer.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'admin_project_report_send',
+          metadata: {
+            original_message_type: 'project_report',
+            project_id: project.id,
+          },
+        });
+        channels.sms = result.sent
+          ? { ok: true }
+          : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+      } catch (e) {
+        logger.error(`[projects] send sms failed: ${e.message}`);
+        channels.sms = { ok: false, error: e.message };
+      }
+    }
+
     const availableChannels = [
       customer?.phone ? 'sms' : null,
       emailRecipient.email ? 'email' : null,
     ].filter(Boolean);
     const successfulChannelCount = availableChannels.filter(channel => channels[channel]?.ok).length;
-    const deliveryStatus = successfulChannelCount === 0
-      ? 'failed'
-      : successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
-    const delivered = successfulChannelCount > 0;
+    // For WDO the FDACS PDF is email-only, so delivery requires the email to
+    // succeed; for everything else any successful channel counts.
+    const delivered = isWdo ? !!channels.email?.ok : successfulChannelCount > 0;
+    const deliveryStatus = !delivered
+      ? (successfulChannelCount === 0 ? 'failed' : 'partial')
+      : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
     const deliveryUpdate = {
       delivery_channels: channels,
       delivery_status: deliveryStatus,
@@ -1424,6 +1895,403 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 function projectEmailFailureMessage(result) {
   return result?.reason || result?.error || 'Email send blocked/failed';
 }
+
+function normalizeUsPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/projects/:id/fdacs-pdf — preview/download the filled
+// FDACS-13645 WDO inspection report. Admin-only.
+// ---------------------------------------------------------------------------
+router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.project_type !== 'wdo_inspection') {
+      return res.status(400).json({ error: 'FDACS-13645 PDF is only available for WDO inspections' });
+    }
+    const customer = project.customer_id
+      ? await db('customers').where({ id: project.customer_id }).first()
+      : null;
+    const [baseApplicator, photos] = await Promise.all([
+      resolveProjectApplicator(project),
+      loadWdoAddendumPhotos(project),
+    ]);
+    const signature = loadWdoSignature(project);
+    const applicator = applicatorForReport(baseApplicator, signature);
+    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="FDACS-13645-${project.id}.pdf"`);
+    res.send(buffer);
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/:id/wdo-signature — capture the licensee
+// e-signature for a WDO report. Tech or admin (the licensee signs in the
+// field). Body: { signature (PNG/JPEG data URL), signer_name?, signer_id_card?,
+// attestation? }. DELETE clears it.
+// ---------------------------------------------------------------------------
+const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024; // 2MB
+
+router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
+    if (project.project_type !== 'wdo_inspection') {
+      return res.status(400).json({ error: 'Signatures are only captured for WDO inspections' });
+    }
+    const cols = await db('projects').columnInfo().catch(() => ({}));
+    if (!cols.wdo_signature) {
+      return res.status(503).json({ error: 'Signature capture is not available yet (pending migration)' });
+    }
+
+    const image = String(req.body?.signature || '').trim();
+    const m = image.match(/^data:(image\/(?:png|jpeg));base64,(.+)$/i);
+    if (!m) return res.status(400).json({ error: 'signature must be a PNG or JPEG data URL' });
+    const approxBytes = Math.floor((m[2].length * 3) / 4);
+    if (approxBytes > MAX_SIGNATURE_BYTES) {
+      return res.status(413).json({ error: 'Signature image too large (max 2MB)' });
+    }
+    // Validate the decoded bytes are a real PNG/JPEG (magic bytes) so a
+    // malformed data URL can't be saved and later fail silently at stamp time
+    // while the send gate still treats the project as signed.
+    const decoded = Buffer.from(m[2], 'base64');
+    const isPng = decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e && decoded[3] === 0x47;
+    const isJpeg = decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff;
+    if (!isPng && !isJpeg) {
+      return res.status(400).json({ error: 'signature image is not a valid PNG or JPEG' });
+    }
+
+    const applicator = await resolveProjectApplicator(project);
+    const signature = {
+      image,
+      content_type: m[1].toLowerCase(),
+      signer_name: String(req.body?.signer_name || applicator.name || '').trim().slice(0, 120),
+      signer_id_card: String(req.body?.signer_id_card || applicator.idCardNo || '').trim().slice(0, 60),
+      attestation: String(req.body?.attestation || 'I certify I performed this inspection and the findings are accurate.').trim().slice(0, 500),
+      signed_at: new Date().toISOString(),
+      signed_by_tech_id: req.technicianId || null,
+    };
+
+    // The FDACS-13645 requires the licensee's printed name AND ID-card number,
+    // and the send gate treats any saved signature as complete — so require both
+    // here rather than emitting a signed form with a blank ID Card No.
+    if (!signature.signer_name) {
+      return res.status(400).json({ error: "Inspector's printed name is required to sign" });
+    }
+    if (!signature.signer_id_card) {
+      return res.status(400).json({ error: "Inspector's FDACS ID card number is required to sign", code: 'signer_id_required' });
+    }
+
+    await db('projects').where({ id: project.id }).update({ wdo_signature: JSON.stringify(signature), updated_at: db.fn.now() });
+    await logProjectActivity(req, project, 'project_wdo_signed', `WDO report signed by ${signature.signer_name || 'licensee'}`, { signer_name: signature.signer_name });
+    res.json({ ok: true, signed_at: signature.signed_at, signer_name: signature.signer_name });
+  } catch (err) { next(err); }
+});
+
+router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
+    const cols = await db('projects').columnInfo().catch(() => ({}));
+    if (cols.wdo_signature) {
+      await db('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
+    }
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/:id/send-with-invoice — combined delivery.
+// Admin-only. Sends ONE email (filled FDACS-13645 PDF + invoice PDF attached,
+// report link + pay link in the body) and ONE SMS (report link + pay link).
+//
+// Body: { invoice_id?, dry_run?, override_reason? }
+//   - invoice_id : use this existing invoice; otherwise reuse a linked draft
+//                  or auto-create a draft WDO inspection invoice.
+//   - dry_run    : resolve/create the invoice and return its amount WITHOUT
+//                  sending — lets the UI confirm the figure first.
+// ---------------------------------------------------------------------------
+router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
+  // Tracks an invoice claimed as 'sending' so any abort (a throw before the
+  // normal finalize/restore path) releases it instead of stranding it.
+  let claimedInvoice = null;
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    // Enforce the WDO constraint the UI relies on — the auto-created invoice is
+    // a "WDO Inspection" line, so a direct API call on another project type
+    // must not bill the wrong service (mirrors the /fdacs-pdf guard).
+    if (project.project_type !== 'wdo_inspection') {
+      return res.status(400).json({ error: 'Report + invoice send is only available for WDO inspections' });
+    }
+    // Official FDACS-13645 filing — require the licensee signature first.
+    if (!loadWdoSignature(project)) {
+      return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+    }
+    if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
+
+    const customer = await db('customers').where({ id: project.customer_id }).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // The filled FDACS-13645 PDF rides on the email only (SMS can't carry it),
+    // so a WDO report can't be delivered without an email — fail up front rather
+    // than text a bare link and record the official report as sent.
+    if (!ProjectEmail.resolveProjectEmailRecipient(customer).email) {
+      return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
+    }
+
+    // Readiness gate mirrors /send so we never email an incomplete report.
+    const readiness = evaluateProjectSendReadiness({ project, customer });
+    const overrideReason = String(req.body?.override_reason || '').trim();
+    const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
+    if (readiness.missing.length > 0 && !hasReadinessOverride) {
+      return res.status(422).json({ error: 'Project report is missing required details', missing: readiness.missing });
+    }
+
+    const { invoice, created } = await resolveOrCreateProjectInvoice({
+      project,
+      customer,
+      invoiceId: req.body?.invoice_id,
+    });
+
+    // Match the canonical invoice non-sendable statuses (invoice.js): don't
+    // push another pay link for an invoice that's paid, void, mid-send, or has
+    // a bank payment (ACH) already in flight ('processing').
+    if (['paid', 'void', 'processing', 'sending'].includes(invoice.status)) {
+      return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
+    }
+
+    // dry_run: surface the resolved invoice + amount, send nothing.
+    if (req.body?.dry_run) {
+      return res.json({
+        dry_run: true,
+        invoice: {
+          id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          total: invoice.total,
+          status: invoice.status,
+          created,
+        },
+      });
+    }
+
+    // Atomically claim the invoice as 'sending' before any side effects, so two
+    // overlapping send-with-invoice POSTs can't both pass the status check and
+    // deliver duplicate report/pay-link messages (mirrors the InvoiceService
+    // send-claim). Released below if nothing is delivered.
+    const previousInvoiceStatus = invoice.status;
+    const claimedRows = await db('invoices')
+      .where({ id: invoice.id })
+      // Mirror InvoiceService SEND_CLAIMABLE_STATUSES so resending a report for
+      // an opened/overdue invoice works (getByToken flips sent → viewed once
+      // the customer opens the pay link).
+      .whereIn('status', ['draft', 'scheduled', 'sent', 'viewed', 'overdue'])
+      .update({ status: 'sending', updated_at: db.fn.now() });
+    if (!claimedRows) {
+      return res.status(409).json({ error: 'Invoice send already in progress', invoice_id: invoice.id });
+    }
+    claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus };
+
+    // Report link + portal visibility — mirror /send so a token_only WDO report
+    // never leaks into the customer portal via the `portal_visible IS NULL` +
+    // 'sent' legacy-visible path in documents.js.
+    const token = project.report_token || crypto.randomBytes(16).toString('hex');
+    const projectCols = await db('projects').columnInfo().catch(() => ({}));
+    const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
+      logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
+      return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
+    });
+    const tokenUpdate = { report_token: token, updated_at: db.fn.now() };
+    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
+    if (projectCols.portal_visibility) {
+      tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
+    }
+    if (projectCols.portal_attach_policy) {
+      tokenUpdate.portal_attach_policy = portalAttachment.completionProfile?.portalAttachPolicy || project.portal_attach_policy || 'active_portal_customer';
+    }
+    if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
+      tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
+    }
+    await db('projects').where({ id: project.id }).update(tokenUpdate);
+    const refreshed = await db('projects').where({ id: project.id }).first();
+    const reportPath = await projectReportPathForProject(db, refreshed, customer);
+    const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
+
+    // Pay link (short URL, same shape as invoice-email).
+    const domain = publicPortalUrl();
+    const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
+      kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+
+    // Build both PDFs. The FDACS report IS the deliverable here, so if it can't
+    // be built (e.g. signature can't be stamped) abort and release the claim
+    // rather than sending a report-less message.
+    const attachments = [];
+    try {
+      const wdoAttachment = await buildWdoPdfAttachment(refreshed, customer);
+      if (wdoAttachment) attachments.push(wdoAttachment);
+    } catch (e) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      logger.error(`[projects] WDO PDF build failed for ${refreshed.id}: ${e.message}`);
+      return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
+    }
+    try {
+      const invoiceForPdf = { ...invoice, customer, line_items: normalizeInvoiceLineItemsForPdf(invoice.line_items) };
+      const invoiceBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
+      attachments.push(pdfEmailAttachment(`invoice-${invoice.invoice_number}.pdf`, invoiceBuffer));
+    } catch (err) {
+      logger.error(`[projects] invoice PDF build failed for ${invoice.invoice_number}: ${err.message}`);
+    }
+
+    const typeLabel = getProjectType(project.project_type)?.label || 'Report';
+    const firstName = customer.first_name || 'there';
+    const channels = {};
+
+    // ONE email FIRST — it carries the FDACS PDF + invoice PDF and is the
+    // required channel. The pay-link SMS is only sent after the email succeeds,
+    // so a failed email can't leave the customer with a bare pay-link text while
+    // the report is recorded not-sent (and retries can't duplicate that text).
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+    if (emailRecipient.email) {
+      try {
+        const result = await ProjectEmail.sendProjectReportWithInvoice({
+          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+        });
+        channels.email = result.ok
+          ? { ok: true, messageId: result.messageId || null }
+          : { ok: false, error: projectEmailFailureMessage(result) };
+      } catch (e) {
+        logger.error(`[projects] combined send email failed: ${e.message}`);
+        channels.email = { ok: false, error: e.message };
+      }
+    } else {
+      channels.email = { ok: false, error: 'No email on file' };
+    }
+
+    // ONE SMS — report link + pay link, only after the email succeeded. It goes
+    // through the canonical 'payment_link' policy (consent, kill switch, identity
+    // trust, invoiceId). That policy forbids an exact price and caps at 2
+    // segments, so the body omits the dollar amount (it's on the pay page /
+    // invoice PDF) and stays terse.
+    const normalized = normalizeUsPhone(customer.phone);
+    if (!normalized) {
+      channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
+    } else if (!channels.email?.ok) {
+      channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
+    } else {
+      try {
+        const smsBody = `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
+        const result = await sendCustomerMessage({
+          to: normalized,
+          body: smsBody,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'payment_link',
+          customerId: customer.id,
+          invoiceId: invoice.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'admin_project_report_with_invoice',
+          // original_message_type 'invoice' keeps the admin-sms-templates
+          // invoice kill switch applicable to this billing text.
+          metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id },
+        });
+        channels.sms = result.sent ? { ok: true } : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+      } catch (e) {
+        logger.error(`[projects] combined send sms failed: ${e.message}`);
+        channels.sms = { ok: false, error: e.message };
+      }
+    }
+
+    // Mirror /send: only count channels the customer actually has, so an
+    // email-only or SMS-only customer whose one channel succeeds is recorded as
+    // 'sent', not 'partial'.
+    const availableChannels = [
+      customer.phone ? 'sms' : null,
+      emailRecipient.email ? 'email' : null,
+    ].filter(Boolean);
+    const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
+    // The FDACS PDF is email-only, so the WDO report only counts as delivered
+    // when the email succeeds; SMS is a supplementary link. Email failure means
+    // not-sent (claim released below, nothing finalized).
+    const delivered = !!channels.email?.ok;
+    const deliveryStatus = !delivered
+      ? (successfulChannelCount === 0 ? 'failed' : 'partial')
+      : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
+
+    // Finalize the invoice as delivered (it went out alongside the report).
+    // markDeliverySent uses the canonical finalization semantics: it promotes
+    // draft / scheduled / sending → sent and clears scheduled_send_at (and the
+    // scheduled-review fields), so a 'scheduled' invoice can't be re-sent later
+    // by processScheduledSends. It does NOT send anything itself, so the
+    // invoice's own SMS path never fires a second, duplicate text.
+    if (delivered) {
+      await InvoiceService.markDeliverySent(invoice.id, {
+        sms: !!channels.sms?.ok,
+        email: !!channels.email?.ok,
+        source: 'project_report_with_invoice',
+        payUrl,
+      }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
+    } else {
+      // Nothing went out — release the 'sending' claim back to its prior status
+      // so the invoice isn't stranded and can be retried.
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+    }
+
+    if (delivered) {
+      await db('projects').where({ id: project.id }).update({
+        status: 'sent',
+        sent_at: project.sent_at || db.fn.now(),
+        last_delivery_at: db.fn.now(),
+        delivery_channels: channels,
+        delivery_status: deliveryStatus,
+        updated_at: db.fn.now(),
+      });
+    }
+
+    await logProjectActivity(
+      req, project,
+      delivered ? 'project_report_with_invoice_sent' : 'project_report_with_invoice_failed',
+      delivered
+        ? `Report + invoice sent: ${typeLabel} (${invoice.invoice_number})`
+        : `Report + invoice delivery failed: ${typeLabel}`,
+      { report_token: token, invoice_id: invoice.id, invoice_created: created, channels,
+        ...(hasReadinessOverride ? { readiness_override: { reason: overrideReason, missing: readiness.missing } } : {}) },
+    );
+
+    res.json({
+      project_id: project.id,
+      invoice: { id: invoice.id, invoice_number: invoice.invoice_number, total: invoice.total, created },
+      report_url: reportPath || `/report/project/${token}`,
+      pay_url: payUrl,
+      channels,
+      delivery_status: deliveryStatus,
+      sent: delivered,
+    });
+  } catch (err) {
+    // Release the 'sending' claim on any abort so the invoice isn't stranded
+    // (and retries don't 409). No-op if it was already finalized to 'sent'.
+    if (claimedInvoice) {
+      await db('invoices').where({ id: claimedInvoice.id, status: 'sending' })
+        .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
+        .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
+    }
+    if (err?.message === 'Invoice not found for this customer') {
+      return res.status(404).json({ error: err.message });
+    }
+    next(err);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // POST /api/admin/projects/:id/send-prep-guide — send mapped prep email
