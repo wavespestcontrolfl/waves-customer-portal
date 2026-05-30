@@ -1278,11 +1278,43 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
   }
 });
 
+// Process-local TTL cache for the pre-save (no project_id) WDO history path,
+// which has no project row to cache the result on. Keeps a repeated tech/customer
+// lookup for the same property from re-billing the up-to-8-search Anthropic call
+// on every reload. Keyed by normalized address (property history is property-level
+// public-records data, not customer-specific); short TTL since it only needs to
+// span a work session, and process-local is fine on a single instance.
+const WDO_HISTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+const WDO_HISTORY_CACHE_MAX = 500;
+const wdoHistoryAddressCache = new Map(); // normAddress -> { history, expires }
+
+function wdoHistoryCacheKey(address) {
+  return String(address || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+function getCachedWdoHistory(address) {
+  const key = wdoHistoryCacheKey(address);
+  if (!key) return null;
+  const hit = wdoHistoryAddressCache.get(key);
+  if (!hit) return null;
+  if (hit.expires <= Date.now()) { wdoHistoryAddressCache.delete(key); return null; }
+  return hit.history;
+}
+function setCachedWdoHistory(address, history) {
+  const key = wdoHistoryCacheKey(address);
+  if (!key || !history) return;
+  // Bound memory: drop the oldest entry when over cap (Map preserves insertion order).
+  if (wdoHistoryAddressCache.size >= WDO_HISTORY_CACHE_MAX) {
+    const oldest = wdoHistoryAddressCache.keys().next().value;
+    if (oldest !== undefined) wdoHistoryAddressCache.delete(oldest);
+  }
+  wdoHistoryAddressCache.set(key, { history, expires: Date.now() + WDO_HISTORY_CACHE_TTL_MS });
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/admin/projects/wdo-history — research prior WDO treatment + permit
 // history for the property (FDACS Section 4). Opt-in (separate web-search call).
 // Body (JSON): { project_id?, customer_id?, property_address? }. Cached on the
-// project when project_id is supplied.
+// project when project_id is supplied, else in a process-local TTL cache.
 // ---------------------------------------------------------------------------
 router.post('/wdo-history', async (req, res, next) => {
   try {
@@ -1329,6 +1361,15 @@ router.post('/wdo-history', async (req, res, next) => {
     const propertyAddress = cleanOneLine(req.body?.property_address, 500) || formatCustomerPropertyAddress(customer);
     if (!propertyAddress) return res.status(400).json({ error: 'Property address required' });
 
+    // Pre-save path (no project row to cache on): serve a recent in-memory result
+    // for this address unless an explicit refresh is requested, so repeated tech
+    // lookups don't re-bill the web-search call. (The project path already
+    // returned its DB-cached history above.)
+    if (!projectId && !wantRefresh) {
+      const cachedHistory = getCachedWdoHistory(propertyAddress);
+      if (cachedHistory) return res.json({ history: cachedHistory, cached: true });
+    }
+
     const history = await lookupWdoHistory(propertyAddress);
     if (!history) {
       return res.json({ history: null, message: 'No treatment or permit history found — verify on site.' });
@@ -1341,6 +1382,8 @@ router.post('/wdo-history', async (req, res, next) => {
           .update({ wdo_history: JSON.stringify(history), updated_at: db.fn.now() })
           .catch((err) => logger.warn(`[projects] could not cache WDO history for ${projectId}: ${err.message}`));
       }
+    } else {
+      setCachedWdoHistory(propertyAddress, history);
     }
 
     logger.info('[projects] WDO history generated', {
@@ -2007,6 +2050,23 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024; // 2MB
 
+// A valid PNG/JPEG can still be a blank (all-white or fully transparent) canvas,
+// which would flip the WDO send gate to "signed" and emit an officially signed
+// FDACS-13645 with no actual signature. Reject any image with ~zero variance on
+// every channel — a real signature, even a faint one, moves at least one channel
+// well past this floor. Can't decode? Don't block (we already validated the
+// magic bytes); the UI's hasDrawn gate is the primary guard, this is depth.
+async function signatureHasInk(buffer) {
+  try {
+    const sharp = require('sharp');
+    const stats = await sharp(buffer).stats();
+    return stats.channels.some((ch) => ch.stdev > 1.5);
+  } catch (err) {
+    logger.warn(`[projects] signature ink check skipped (decode failed): ${err.message}`);
+    return true;
+  }
+}
+
 router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
@@ -2035,6 +2095,9 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
     const isJpeg = decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff;
     if (!isPng && !isJpeg) {
       return res.status(400).json({ error: 'signature image is not a valid PNG or JPEG' });
+    }
+    if (!(await signatureHasInk(decoded))) {
+      return res.status(400).json({ error: 'Signature looks blank — please sign before saving', code: 'signature_blank' });
     }
 
     const applicator = await resolveProjectApplicator(project);

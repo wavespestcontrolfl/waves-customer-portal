@@ -131,7 +131,10 @@ async function lookupWdoHistory(address, options = {}) {
   const t0 = Date.now();
   try {
     const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // maxRetries: 0 — an SDK retry re-runs the whole web_search budget (max_uses),
+    // so the default of 2 could fan one lookup out to 3x the searches + wall-clock
+    // on a transient 429/5xx. The single attempt already degrades to null on error.
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
     const resp = await client.messages.create({
       model: MODELS.WORKHORSE,
       max_tokens: 1500,
