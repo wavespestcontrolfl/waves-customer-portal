@@ -75,7 +75,12 @@ class InternalLinkPrExecutor {
         continue;
       }
 
-      const sourceCount = sourceCounts.get(task.source_file) || 0;
+      // Key the per-source cap by the RESOLVED path (source.file) so two tasks
+      // for the same post under different extensions (.md + migrated .mdx) count
+      // as one source — otherwise both would write the same file in one PR with
+      // the same base SHA and the second Contents update would conflict.
+      const sourceKey = source.file || task.source_file;
+      const sourceCount = sourceCounts.get(sourceKey) || 0;
       if (sourceCount >= maxLinksPerSource) continue;
       const targetUrl = policy.normalizeInternalUrl(task.target_url || validation.target_canonical_url);
       const targetCount = targetCounts.get(targetUrl) || 0;
@@ -107,7 +112,7 @@ class InternalLinkPrExecutor {
       }
 
       selected.push({ task, source, target, validation, patchedContent, targetUrl });
-      sourceCounts.set(task.source_file, sourceCount + 1);
+      sourceCounts.set(sourceKey, sourceCount + 1);
       targetCounts.set(targetUrl, targetCount + 1);
       if (selected.length >= limit) break;
     }
@@ -564,8 +569,10 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
 function baseResult(task, sourcePage, targetPage) {
   return {
     task_id: task.id || null,
-    source_file: task.source_file || sourcePage?.file || null,
-    target_file: task.target_file || targetPage?.file || null,
+    // Prefer the RESOLVED page path so persisted metadata reflects the actual
+    // file (a post migrated to .mdx), not the stale planned task path.
+    source_file: sourcePage?.file || task.source_file || null,
+    target_file: targetPage?.file || task.target_file || null,
     target_url: task.target_url || targetPage?.url || null,
     anchor_text: task.anchor_text || null,
     executor_version: EXECUTOR_VERSION,
@@ -803,7 +810,7 @@ function internalLinkPrTitle(selected) {
 
 function buildInternalLinkPrBody({ branch, selected }) {
   const rows = selected.map((item, index) => [
-    `${index + 1}. \`${item.task.source_file}\``,
+    `${index + 1}. \`${item.source?.file || item.task.source_file}\``,
     `   - Target: ${item.targetUrl}`,
     `   - Anchor: \`${item.task.anchor_text}\` (${item.validation.anchor_type || 'unknown'})`,
     `   - Relevance: ${item.validation.topical_relevance_score ?? 'n/a'}`,
