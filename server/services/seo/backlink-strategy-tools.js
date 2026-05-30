@@ -12,6 +12,13 @@ function extractDomain(url) {
   try { return new URL(url).hostname.replace('www.', ''); } catch { return null; }
 }
 
+function normalizeDomain(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return null;
+  const parsed = extractDomain(raw) || extractDomain(`https://${raw}`);
+  return parsed || raw.replace(/^www\./, '').replace(/\/+$/, '') || null;
+}
+
 async function executeBacklinkTool(toolName, input) {
   switch (toolName) {
 
@@ -194,7 +201,7 @@ async function executeBacklinkTool(toolName, input) {
       const duplicates = [];
 
       for (const p of prospects) {
-        const domain = p.target_domain || extractDomain(p.target_url || '');
+        const domain = normalizeDomain(p.target_domain) || normalizeDomain(p.target_url);
         if (!domain || !p.target_page) { skipped++; continue; }
 
         const exists = await db('seo_link_prospects')

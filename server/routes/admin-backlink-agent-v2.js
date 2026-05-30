@@ -245,9 +245,9 @@ router.get('/prospects/stats', async (req, res, next) => {
 // POST /api/admin/backlink-agent/prospects — manual add
 router.post('/prospects', async (req, res, next) => {
   try {
-    const { target_url, target_domain, target_page, anchor_planned, link_type, priority, notes } = req.body;
-    const domain = target_domain || extractDomain(target_url);
-    if (!domain) return res.status(400).json({ error: 'target_domain or a valid target_url is required' });
+    const { target_url, target_domain, target_page, anchor_planned, link_type, priority, notes, live_url } = req.body;
+    const domain = target_domain || extractDomain(target_url) || extractDomain(live_url);
+    if (!domain) return res.status(400).json({ error: 'target_domain, target_url, or live_url is required' });
     if (!target_page) return res.status(400).json({ error: 'target_page (our money page) is required' });
 
     const exists = await db('seo_link_prospects').where({ target_domain: domain, target_page }).first();
@@ -257,6 +257,10 @@ router.post('/prospects', async (req, res, next) => {
       target_domain: domain, target_url: target_url || null, target_page,
       anchor_planned: anchor_planned || null, link_type: link_type || null,
       priority: priority || null, notes: notes || null, source: 'manual', owner: req.technician?.name || 'admin',
+      // If the admin supplies a live_url, the link is already placed — seed it so the
+      // verifier sweep (which selects live_url IS NOT NULL) picks it up next run.
+      live_url: live_url || null,
+      ...(live_url ? { status: 'placed' } : {}),
     }).returning('*');
     res.json({ prospect: row });
   } catch (err) { next(err); }
