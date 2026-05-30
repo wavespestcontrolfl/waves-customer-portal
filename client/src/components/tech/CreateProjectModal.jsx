@@ -457,6 +457,23 @@ export default function CreateProjectModal({
     }
   }
 
+  // When a tech looks up and picks a client, pull their most recent scheduled
+  // service and pre-fill the report's service title + date so they don't
+  // re-type what's already on the schedule. Title only fills when still blank
+  // (don't clobber something the tech typed); the date follows the matched
+  // visit since the form otherwise defaults to today.
+  async function prefillFromScheduledService(custId) {
+    if (!custId) return;
+    try {
+      const r = await adminFetch(`/admin/customers/${custId}/latest-scheduled-service`);
+      const d = await r.json();
+      const svc = d?.service;
+      if (!svc) return;
+      if (svc.serviceType) setTitle(prev => (prev && prev.trim()) ? prev : svc.serviceType);
+      if (svc.scheduledDate) setProjectDate(String(svc.scheduledDate).slice(0, 10));
+    } catch { /* non-blocking: tech can still fill these in manually */ }
+  }
+
   function queuePhoto(file, category) {
     setPhotoQueue(prev => [...prev, { file, category, caption: '', id: `q_${Date.now()}_${prev.length}` }]);
   }
@@ -697,6 +714,7 @@ export default function CreateProjectModal({
                           if (projectType === 'wdo_inspection' && address) {
                             setFindings(prev => ({ ...prev, property_address: address }));
                           }
+                          prefillFromScheduledService(c.id);
                         }}
                         style={{
                           width: '100%', textAlign: 'left', background: 'transparent',

@@ -1376,6 +1376,34 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/latest-scheduled-service
+// Lightweight lookup used by the tech project report form: returns the
+// customer's most recent (by date) scheduled service so the form can
+// pre-fill the service title + date. Cancelled visits are ignored.
+router.get('/:id/latest-scheduled-service', async (req, res, next) => {
+  try {
+    const row = await db('scheduled_services')
+      .where({ customer_id: req.params.id })
+      .whereNot('status', 'cancelled')
+      .orderBy('scheduled_date', 'desc')
+      .orderBy('window_start', 'desc')
+      .first(
+        'id',
+        'service_type',
+        db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date"),
+        'status',
+      );
+    res.json({
+      service: row ? {
+        id: row.id,
+        serviceType: row.service_type || null,
+        scheduledDate: row.scheduled_date || null,
+        status: row.status || null,
+      } : null,
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id — full detail
 router.get('/:id', async (req, res, next) => {
   try {
