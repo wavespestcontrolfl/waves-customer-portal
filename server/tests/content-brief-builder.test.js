@@ -15,8 +15,56 @@ const {
   WORD_COUNT_TARGET,
   SERVICE_HUB_LINKS,
   nextWeekday9amET,
+  applyAeoTreatment,
 } = require('../services/content/content-brief-builder')._internals;
 const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
+
+describe('applyAeoTreatment', () => {
+  const base = (pageType) => ({
+    isAeoGap: true,
+    pageType,
+    requiredSections: [...(REQUIRED_SECTIONS[pageType] || [])],
+    schemaTypes: [...(SCHEMA_TYPES[pageType] || [])],
+    voiceConstraints: { tone: 't', forbidden: [], required_phrases: [] },
+  });
+
+  test('non-aeo briefs are untouched', () => {
+    const r = applyAeoTreatment({ ...base('city-service'), isAeoGap: false });
+    expect(r.requiredSections).toEqual(REQUIRED_SECTIONS['city-service']);
+    expect(r.schemaTypes).toEqual(SCHEMA_TYPES['city-service']);
+    expect(r.voiceConstraints.aeo_notes).toBeUndefined();
+  });
+
+  test('city-service aeo_gap: adds direct-answer block + FAQPage + aeo_notes', () => {
+    const r = applyAeoTreatment(base('city-service'));
+    expect(r.requiredSections[0]).toMatch(/direct-answer/i);
+    expect(r.schemaTypes).toContain('FAQPage');
+    expect(Array.isArray(r.voiceConstraints.aeo_notes)).toBe(true);
+  });
+
+  test('does not duplicate FAQ when the page type already requires one', () => {
+    const r = applyAeoTreatment(base('city-service')); // already has "FAQ from customer calls"
+    const faqCount = r.requiredSections.filter((s) => /\bFAQ\b/i.test(s)).length;
+    expect(faqCount).toBe(1);
+  });
+
+  test('refresh aeo_gap: adds FAQ section + FAQPage schema', () => {
+    const r = applyAeoTreatment(base('refresh'));
+    expect(r.requiredSections.some((s) => /\bFAQ\b/i.test(s))).toBe(true);
+    expect(r.schemaTypes).toContain('FAQPage');
+  });
+
+  test('FAQPage is not duplicated if already present', () => {
+    const r = applyAeoTreatment({ ...base('supporting-blog'), schemaTypes: ['Article', 'FAQPage'] });
+    expect(r.schemaTypes.filter((t) => t === 'FAQPage').length).toBe(1);
+  });
+
+  test('ineligible page types (metadata/links/gbp) are untouched even for aeo_gap', () => {
+    const r = applyAeoTreatment(base('metadata'));
+    expect(r.schemaTypes).not.toContain('FAQPage');
+    expect(r.voiceConstraints.aeo_notes).toBeUndefined();
+  });
+});
 
 describe('REQUIRED_SECTIONS map', () => {
   test('each page type produces a non-empty list (except metadata-only)', () => {
