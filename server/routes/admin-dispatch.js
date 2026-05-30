@@ -3078,6 +3078,92 @@ router.get('/products/catalog', async (req, res, next) => {
 });
 
 // =========================================================================
+// PEST CONTROL SERVICE RECAP
+// Lightweight "complete + customer recap" path for pest_control services
+// (the recurring/one-time pest visits that were being forced into the
+// heavy CreateProjectModal). Recap-only completion — no invoicing —
+// writing service_records + service_products and optionally texting the
+// customer. The router runs requireTechOrAdmin (line ~746) so the tech
+// portal reaches these too. See services/pest-recap.js.
+// =========================================================================
+const PestRecap = require('../services/pest-recap');
+
+function recapActor(req) {
+  return {
+    actorType: req.techRole === 'admin' ? 'admin' : 'tech',
+    actorId: req.technicianId || null,
+  };
+}
+
+// Techs may only recap their own assigned services; admins any. Returns
+// true if allowed, otherwise writes the response and returns false.
+async function assertRecapOwnership(req, res) {
+  if (req.techRole === 'admin') return true;
+  const svc = await db('scheduled_services')
+    .where({ id: req.params.serviceId })
+    .first('technician_id');
+  if (!svc) { res.status(404).json({ error: 'Service not found' }); return false; }
+  if (svc.technician_id !== req.technicianId) {
+    res.status(403).json({ error: 'Not assigned to this service' });
+    return false;
+  }
+  return true;
+}
+
+function recapStatusForReason(reason) {
+  if (reason === 'not_found') return 404;
+  // Conflict: pest-control gate, or a cancelled/skipped visit that can't be recapped.
+  if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped') return 409;
+  return 400;
+}
+
+// GET /:serviceId/pest-recap/context — service info + timeline + product catalog.
+router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await PestRecap.buildRecapContext(req.params.serviceId);
+    if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
+    res.json(ctx);
+  } catch (err) { next(err); }
+});
+
+// POST /:serviceId/pest-recap/draft — AI-draft the customer recap copy.
+router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const { technicianNotes, areasTreated } = req.body || {};
+    const result = await PestRecap.draftRecapMessage({
+      serviceId: req.params.serviceId,
+      technicianNotes,
+      areasTreated,
+    });
+    if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /:serviceId/pest-recap — commit the recap (complete, no bill).
+router.post('/:serviceId/pest-recap', async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const { actorType, actorId } = recapActor(req);
+    const { technicianNotes, products, customerRecap, sendSms, clientPestRating } = req.body || {};
+    const result = await PestRecap.submitRecap({
+      serviceId: req.params.serviceId,
+      actorType,
+      actorId,
+      technicianNotes,
+      products,
+      customerRecap,
+      sendSms: !!sendSms,
+      clientPestRating: clientPestRating == null ? null : clientPestRating,
+    });
+    if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
 // RESCHEDULE ENDPOINTS
 // =========================================================================
 const SmartRebooker = require('../services/rebooker');

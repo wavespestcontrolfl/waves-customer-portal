@@ -46,6 +46,7 @@ import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal from '../../components/tech/CreateProjectModal';
+import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
@@ -60,6 +61,32 @@ const DARK = {
 };
 
 const API = import.meta.env.VITE_API_URL || '';
+
+// Pest control services get the lightweight ServiceRecapModal instead of
+// the heavy CreateProjectModal. completionProfile.category is the
+// services-table backed signal (the schedule API attaches it).
+function isPestControlService(service) {
+  return service?.completionProfile?.category === 'pest_control';
+}
+
+// adminFetch-style helper for the tech portal: bearer-token fetch against
+// /api/* that returns parsed JSON and throws on non-2xx. Lets the shared
+// ServiceRecapModal use the same `request(path, options)` contract as the
+// admin surface (which passes adminFetch).
+async function techRequest(path, options = {}) {
+  const token = getAdminAuthToken();
+  const res = await fetch(`${API}/api${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      ...(options.headers || {}),
+    },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+  return data;
+}
 
 // Same socketOrigin shape as TrackPage / useDispatchBoard. Empty
 // string or relative path → undefined → io() defaults to same-origin
@@ -118,6 +145,7 @@ export default function TechHomePage() {
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
+  const [recapService, setRecapService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const techName = getAdminDisplayName('Tech');
@@ -446,7 +474,7 @@ export default function TechHomePage() {
               <ServiceRow
                 key={s.id}
                 service={s}
-                onProject={() => openProjectForService(s)}
+                onProject={() => (isPestControlService(s) ? setRecapService(s) : openProjectForService(s))}
                 onPhotos={() => setPhotoTarget({
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
@@ -476,8 +504,23 @@ export default function TechHomePage() {
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            openProjectForService(service);
+            if (isPestControlService(service)) setRecapService(service);
+            else openProjectForService(service);
           }}
+        />
+      )}
+
+      {recapService && (
+        <ServiceRecapModal
+          theme="dark"
+          service={{
+            id: recapService.id,
+            customerName: recapService.customer_name || recapService.customerName,
+            serviceType: recapService.service_type || recapService.serviceType,
+          }}
+          request={techRequest}
+          onClose={() => setRecapService(null)}
+          onCompleted={() => { setRecapService(null); fetchSchedule(); }}
         />
       )}
 
