@@ -160,8 +160,12 @@ const VOICE_CONSTRAINTS = {
 // an explicit FAQ section, and FAQPage schema. The seo-completion-gate then
 // enforces that requesting FAQPage means a visible FAQ exists, so this is
 // self-reinforcing. Inert outside aeo_gap (gated upstream by GATE_AEO_GAP_MINING).
+//
+// customer-question is intentionally EXCLUDED: that contract already answers
+// the question in the first paragraph (direct answer is built in) and forbids
+// FAQPage schema (deprecated May 2026, per writer-agent-config + quality-gate).
 const AEO_TREATED_PAGE_TYPES = new Set([
-  'city-service', 'customer-question', 'supporting-blog', 'refresh',
+  'city-service', 'supporting-blog', 'refresh',
 ]);
 
 function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, voiceConstraints }) {

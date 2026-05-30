@@ -64,6 +64,13 @@ describe('applyAeoTreatment', () => {
     expect(r.schemaTypes).not.toContain('FAQPage');
     expect(r.voiceConstraints.aeo_notes).toBeUndefined();
   });
+
+  test('customer-question is excluded — it forbids FAQPage and already answers-first', () => {
+    const r = applyAeoTreatment(base('customer-question'));
+    expect(r.schemaTypes).not.toContain('FAQPage');
+    expect(r.requiredSections).toEqual(REQUIRED_SECTIONS['customer-question']);
+    expect(r.voiceConstraints.aeo_notes).toBeUndefined();
+  });
 });
 
 describe('REQUIRED_SECTIONS map', () => {
