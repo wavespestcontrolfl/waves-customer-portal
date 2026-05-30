@@ -6,7 +6,27 @@ const tracker = require('../services/seo/impact-tracker');
 const GitHubClient = require('../services/content-astro/github-client');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { computeVerdict } = tracker;
-const { median, clicksPct, positionDelta, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl } = tracker._internals;
+const { median, clicksPct, positionDelta, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict } = tracker._internals;
+
+describe('aeoVerdict — answer-engine visibility feedback', () => {
+  test('too few observation days → insufficient_data', () => {
+    expect(aeoVerdict({ observedDays: 3, wavesHitDays: 0 }).verdict).toBe('insufficient_data');
+    expect(aeoVerdict({ observedDays: 3, wavesHitDays: 2 }).nowCited).toBeNull();
+  });
+  test('enough days, Waves never cited → still_absent', () => {
+    const r = aeoVerdict({ observedDays: 10, wavesHitDays: 0 });
+    expect(r.verdict).toBe('still_absent');
+    expect(r.nowCited).toBe(false);
+  });
+  test('enough days, Waves cited at least once → now_cited', () => {
+    const r = aeoVerdict({ observedDays: 10, wavesHitDays: 4 });
+    expect(r.verdict).toBe('now_cited');
+    expect(r.nowCited).toBe(true);
+  });
+  test('observedDays exactly at the minimum still produces a verdict', () => {
+    expect(aeoVerdict({ observedDays: 5, wavesHitDays: 1, minObservations: 5 }).verdict).toBe('now_cited');
+  });
+});
 
 describe('impact-tracker pure helpers', () => {
   test('median handles odd/even/empty', () => {

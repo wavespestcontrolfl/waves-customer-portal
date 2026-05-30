@@ -405,6 +405,7 @@ function initScheduledJobs() {
       const ImpactTracker = require('./seo/impact-tracker');
       await ImpactTracker.sweepNewlyLive({});
       await ImpactTracker.checkPending({});
+      await ImpactTracker.checkAeoVisibility({});
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
