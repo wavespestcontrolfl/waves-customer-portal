@@ -75,7 +75,12 @@ class InternalLinkPrExecutor {
         continue;
       }
 
-      const sourceCount = sourceCounts.get(task.source_file) || 0;
+      // Key the per-source cap by the RESOLVED path (source.file) so two tasks
+      // for the same post under different extensions (.md + migrated .mdx) count
+      // as one source — otherwise both would write the same file in one PR with
+      // the same base SHA and the second Contents update would conflict.
+      const sourceKey = source.file || task.source_file;
+      const sourceCount = sourceCounts.get(sourceKey) || 0;
       if (sourceCount >= maxLinksPerSource) continue;
       const targetUrl = policy.normalizeInternalUrl(task.target_url || validation.target_canonical_url);
       const targetCount = targetCounts.get(targetUrl) || 0;
@@ -107,7 +112,7 @@ class InternalLinkPrExecutor {
       }
 
       selected.push({ task, source, target, validation, patchedContent, targetUrl });
-      sourceCounts.set(task.source_file, sourceCount + 1);
+      sourceCounts.set(sourceKey, sourceCount + 1);
       targetCounts.set(targetUrl, targetCount + 1);
       if (selected.length >= limit) break;
     }
@@ -125,7 +130,10 @@ class InternalLinkPrExecutor {
       const commits = [];
       for (const item of selected) {
         const commit = await GitHubClient.putFile({
-          path: item.task.source_file,
+          // item.source.file is the RESOLVED path (handles a source post that
+          // was migrated .md->.mdx after this task was planned); fall back to
+          // the task path for safety.
+          path: item.source.file || item.task.source_file,
           content: item.patchedContent,
           message: `chore(seo): add internal link to ${item.targetUrl}`,
           branch,
@@ -320,17 +328,19 @@ class InternalLinkPrExecutor {
   }
 
   async _loadSourcePage(task) {
-    const file = await GitHubClient.getFile(task.source_file);
-    if (!file?.content) throw new Error(`source_file_not_found:${task.source_file}`);
-    return { ...pageFromAstroFile(task.source_file, file.content), sha: file.sha || null };
+    const resolved = await resolveContentFileByPath(task.source_file);
+    if (!resolved?.file?.content) throw new Error(`source_file_not_found:${task.source_file}`);
+    // page.file carries the RESOLVED path (e.g. a migrated .mdx), so the
+    // write-back below commits to the real file, not the stale task path.
+    return { ...pageFromAstroFile(resolved.path, resolved.file.content), file: resolved.path, sha: resolved.file.sha || null };
   }
 
   async _loadTargetPage(task) {
     const targetFile = task.target_file || resolveAstroFileForUrl(task.target_url);
     if (!targetFile) throw new Error(`target_file_unresolved:${task.target_url}`);
-    const file = await GitHubClient.getFile(targetFile);
-    if (!file?.content) throw new Error(`target_file_not_found:${targetFile}`);
-    return { ...pageFromAstroFile(targetFile, file.content, { fallbackUrl: task.target_url }), sha: file.sha || null };
+    const resolved = await resolveContentFileByPath(targetFile);
+    if (!resolved?.file?.content) throw new Error(`target_file_not_found:${targetFile}`);
+    return { ...pageFromAstroFile(resolved.path, resolved.file.content, { fallbackUrl: task.target_url }), file: resolved.path, sha: resolved.file.sha || null };
   }
 
   async _persistDryRunResult(taskId, result) {
@@ -559,8 +569,10 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
 function baseResult(task, sourcePage, targetPage) {
   return {
     task_id: task.id || null,
-    source_file: task.source_file || sourcePage?.file || null,
-    target_file: task.target_file || targetPage?.file || null,
+    // Prefer the RESOLVED page path so persisted metadata reflects the actual
+    // file (a post migrated to .mdx), not the stale planned task path.
+    source_file: sourcePage?.file || task.source_file || null,
+    target_file: targetPage?.file || task.target_file || null,
     target_url: task.target_url || targetPage?.url || null,
     anchor_text: task.anchor_text || null,
     executor_version: EXECUTOR_VERSION,
@@ -658,6 +670,24 @@ function deriveUrlFromFile(file) {
   const match = normalized.match(/src\/content\/(blog|services|locations)\/(.+?)\.mdx?$/);
   if (!match) return null;
   return `/${match[2]}/`;
+}
+
+// Fetch a content file by path, tolerating the .md->.mdx migration for BLOG
+// posts (autonomous posts are now .mdx; service/location stay .md). Probes
+// .mdx first then .md for blog paths; uses the path as-is otherwise. Returns
+// { path, file } (file = github-client getFile result) or null. Used for both
+// source and target reads so a post migrated to .mdx after a link task was
+// planned still resolves on both sides.
+async function resolveContentFileByPath(filePath) {
+  if (!filePath) return null;
+  const isBlog = String(filePath).startsWith('src/content/blog/');
+  const base = String(filePath).replace(/\.mdx?$/, '');
+  const candidates = isBlog ? [`${base}.mdx`, `${base}.md`] : [filePath];
+  for (const candidate of candidates) {
+    const file = await GitHubClient.getFile(candidate);
+    if (file?.content) return { path: candidate, file };
+  }
+  return null;
 }
 
 function resolveAstroFileForUrl(url) {
@@ -780,7 +810,7 @@ function internalLinkPrTitle(selected) {
 
 function buildInternalLinkPrBody({ branch, selected }) {
   const rows = selected.map((item, index) => [
-    `${index + 1}. \`${item.task.source_file}\``,
+    `${index + 1}. \`${item.source?.file || item.task.source_file}\``,
     `   - Target: ${item.targetUrl}`,
     `   - Anchor: \`${item.task.anchor_text}\` (${item.validation.anchor_type || 'unknown'})`,
     `   - Relevance: ${item.validation.topical_relevance_score ?? 'n/a'}`,

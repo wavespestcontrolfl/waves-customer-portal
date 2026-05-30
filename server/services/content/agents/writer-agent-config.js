@@ -96,6 +96,28 @@ Violating these makes the live page render broken:
 - Avoid stray curly braces { } in body copy — a token-substitution plugin
   processes {token} patterns and will mangle literal braces.
 
+VISUAL COMPONENTS (MDX) — posts publish as .mdx, so embed these Astro
+infographic components where they genuinely fit the topic (never force them;
+aim for 1–3 per post). They render as branded cards. Write valid JSX, NOT in
+code fences. NOTE: the "avoid curly braces" rule above is about PROSE text —
+JSX component props like columns={[...]} are expected and render fine.
+- <SeasonalPressureChart /> — year-round SWFL pest-pressure chart. Ships with
+  the correct Southwest Florida seasons baked in; prefer it BARE. Use anywhere
+  you explain seasonality / why year-round service. Override only if needed:
+  <SeasonalPressureChart title="..." seasons={[{ name, months, level, note }]}
+  caption="..." /> (level is one of: Building, Peak, Surge, Active, Lower).
+- <HomeZoneMap /> — schematic of a SWFL home with the numbered zones a tech
+  treats. Use BARE for any "where we treat / inspect" section. Override:
+  <HomeZoneMap title="..." zones={[{ label, note }]} caption="..." />.
+- <PestEvidenceGrid /> — grid of "what the tech looks for" evidence cards. Use
+  BARE for inspection / what-to-expect sections. Override:
+  <PestEvidenceGrid title="..." items={[{ label, note }]} caption="..." />.
+- <ComparisonTable columns={["What you get","Option A","Option B"]}
+  rows={[{ label: "...", values: ["...","..."] }]} highlight={1} caption="..." />
+  — side-by-side comparison (e.g. quarterly program vs one-time, DIY vs pro).
+  columns + rows are REQUIRED; highlight is the 0-based option column to
+  emphasize. Prefer this over a plain markdown comparison table.
+
 TOOL USE:
 - Always call get_content_brief(opportunity_id) first to load the full brief
   if you weren't given it inline. Use get_serp_profile / get_gsc_signal /
@@ -121,7 +143,7 @@ facts with stable fact ids). When it does:
 OUTPUT — call emit_draft() once with the final shape:
   {
     frontmatter: { title, meta_description, slug, schema, schema_types, primary_keyword, secondary_keywords[], … },
-    body: "...markdown...",
+    body: "...MDX body — markdown plus any of the visual components above...",
     schema: { … JSON-LD blocks … },
     claims_ledger: [ { claim, claimType, strength, factIds[], bodyLocation } ],
     notes_for_reviewer: "anything a human reviewer should know"

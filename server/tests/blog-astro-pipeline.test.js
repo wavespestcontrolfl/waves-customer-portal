@@ -314,7 +314,7 @@ describe('blog Astro frontmatter validation', () => {
 
     expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-ant-trails-bradenton-/));
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/ant-trails-bradenton.md',
+      path: 'src/content/blog/ant-trails-bradenton.mdx',
       content: expect.stringContaining('Waves Pest Control guidance'),
       message: 'feat(blog): publish ant-trails-bradenton',
       sha: undefined,
@@ -455,7 +455,7 @@ describe('Astro publisher autonomous draft adapter', () => {
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
     });
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/autonomous-ant-control-bradenton.md',
+      path: 'src/content/blog/autonomous-ant-control-bradenton.mdx',
       branch: expect.stringMatching(/^content\/autonomous-autonomous-ant-control-bradenton-/),
       sha: undefined,
     }));
@@ -463,6 +463,44 @@ describe('Astro publisher autonomous draft adapter', () => {
       title: 'Blog: Autonomous Ant Control in Bradenton',
     }));
     expect(gh.createIssueComment).toHaveBeenCalledWith(42, expect.stringContaining('@codex review'));
+  });
+
+  test('migrates a legacy .md post to .mdx instead of writing components into Markdown', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    // .mdx does not exist yet; the legacy .md does.
+    gh.getFile.mockImplementation(async (path) =>
+      path.endsWith('.mdx')
+        ? null
+        : { sha: 'legacy-md-sha', path, content: '---\ntitle: Old\n---\nold body' }
+    );
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.deleteFile.mockResolvedValue({});
+    gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77' });
+    gh.createIssueComment.mockResolvedValue({});
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({
+          slug: '/legacy-ant-post/',
+          canonical: 'https://www.wavespestcontrol.com/legacy-ant-post/',
+        }),
+        body: 'Updated guidance.\n\n<SeasonalPressureChart />',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    // Writes the .mdx (no sha — it is a new file), not the legacy .md.
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/legacy-ant-post.mdx',
+      sha: undefined,
+    }));
+    // Deletes the superseded .md so we never leave both.
+    expect(gh.deleteFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/legacy-ant-post.md',
+      sha: 'legacy-md-sha',
+    }));
   });
 
   test('declines unsupported autonomous action types', () => {

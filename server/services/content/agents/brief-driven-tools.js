@@ -154,10 +154,22 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       const { page_url } = input || {};
       if (!page_url) return { error: 'page_url required' };
       try {
-        const filePath = urlToAstroPath(page_url);
-        if (!filePath) return { error: `could not resolve page_url ${page_url} to Astro file` };
-        const file = await gh.getFile(filePath);
-        if (!file) return { error: `Astro file not found: ${filePath}` };
+        const resolvedPath = urlToAstroPath(page_url);
+        if (!resolvedPath) return { error: `could not resolve page_url ${page_url} to Astro file` };
+        // Tolerate the .md->.mdx migration for BLOG posts only (autonomous posts
+        // are now .mdx). Service/location pages stay .md, so only probe .mdx for
+        // blog paths — mirrors resolveExistingAstroFile / resolveContentFileByPath
+        // so a stale same-slug .mdx can't feed the refresh agent the wrong page.
+        const isBlog = String(resolvedPath).startsWith('src/content/blog/');
+        const base = String(resolvedPath).replace(/\.mdx?$/, '');
+        const candidates = isBlog ? [`${base}.mdx`, `${base}.md`] : [resolvedPath];
+        let filePath = null;
+        let file = null;
+        for (const candidate of candidates) {
+          const f = await gh.getFile(candidate);
+          if (f) { filePath = candidate; file = f; break; }
+        }
+        if (!file) return { error: `Astro file not found: ${isBlog ? `${base}.{mdx,md}` : resolvedPath}` };
         // gh.getFile returns { sha, path, content, raw }. The frontmatter
         // parser expects a markdown STRING, not the wrapper object —
         // passing the wrapper yields empty frontmatter and a serialized

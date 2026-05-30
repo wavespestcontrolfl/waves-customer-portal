@@ -388,6 +388,25 @@ async function publishAstro(postId) {
   }
 }
 
+// Resolve an existing content file to its real path, tolerating the .md→.mdx
+// migration. New autonomous blog posts are written as .mdx so they can render
+// MDX infographic components (SeasonalPressureChart, HomeZoneMap, …); legacy
+// and hand-authored posts may still be .md. Given a path or base (with or
+// without extension), try .mdx first, then .md. Returns { path, file } (file =
+// github-client getFile result: { sha, path, content, raw }) or null.
+async function resolveExistingAstroFile(pathOrBase) {
+  if (!pathOrBase) return null;
+  const base = String(pathOrBase).replace(/\.mdx?$/, '');
+  // Only blog posts migrate to .mdx (so they can use MDX components); service
+  // and location pages stay .md, so don't waste a lookup or change their path.
+  const exts = isBlogTarget(`${base}.md`) ? ['.mdx', '.md'] : ['.md'];
+  for (const ext of exts) {
+    const file = await gh.getFile(`${base}${ext}`);
+    if (file) return { path: `${base}${ext}`, file };
+  }
+  return null;
+}
+
 async function publishOrUpdatePage(draft, brief = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
@@ -403,17 +422,31 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const body = String(draft.body || '').trim();
   frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
   const markdown = fm.stringify(frontmatter, `${body}\n`);
-  const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
+  // New autonomous posts are written as .mdx so they can embed MDX infographic
+  // components. If a post already exists as .mdx, update it in place. If a
+  // LEGACY .md post exists at this slug, MIGRATE it to .mdx (the body may carry
+  // MDX-only components that would render broken in a .md file): write the
+  // .mdx and delete the stale .md in the same branch — never leave both.
+  const existingFile = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+  const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
+  const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 
   await gh.createBranch(branch);
-  const existing = await gh.getFile(filePath);
   const fileCommit = await gh.putFile({
     path: filePath,
     content: markdown,
     message: `feat(blog): publish ${slug}`,
     branch,
-    sha: existing ? existing.sha : undefined,
+    sha: existingFile && !isLegacyMd ? existingFile.file.sha : undefined,
   });
+  if (isLegacyMd) {
+    await gh.deleteFile({
+      path: existingFile.path,
+      message: `chore(blog): migrate ${slug} to .mdx`,
+      branch,
+      sha: existingFile.file.sha,
+    });
+  }
 
   const pr = await gh.createPr({
     head: branch,
@@ -444,11 +477,13 @@ async function publishMetadataRewrite(draft, brief = {}) {
   }
 
   const targetUrl = brief.target_url || brief.page_url || draft.page_url;
-  const filePath = draft.file_path || urlToAstroPath(targetUrl);
-  if (!filePath) throw new Error(`could not resolve metadata rewrite target: ${targetUrl || 'missing target_url'}`);
+  const target = draft.file_path || urlToAstroPath(targetUrl);
+  if (!target) throw new Error(`could not resolve metadata rewrite target: ${targetUrl || 'missing target_url'}`);
 
-  const existing = await gh.getFile(filePath);
-  if (!existing) throw new Error(`Astro file not found for metadata rewrite: ${filePath}`);
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) throw new Error(`Astro file not found for metadata rewrite: ${target}`);
+  const filePath = resolved.path;
+  const existing = resolved.file;
 
   const parsed = fm.parse(existing.content);
   const currentFrontmatter = parsed.data || {};
@@ -531,11 +566,13 @@ async function publishRefresh(draft, brief = {}) {
   }
 
   const targetUrl = brief.target_url || brief.page_url || draft.page_url;
-  const filePath = draft.file_path || urlToAstroPath(targetUrl);
-  if (!filePath) throw new Error(`could not resolve refresh target: ${targetUrl || 'missing target_url'}`);
+  const target = draft.file_path || urlToAstroPath(targetUrl);
+  if (!target) throw new Error(`could not resolve refresh target: ${targetUrl || 'missing target_url'}`);
 
-  const existing = await gh.getFile(filePath);
-  if (!existing) throw new Error(`Astro file not found for refresh: ${filePath}`);
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) throw new Error(`Astro file not found for refresh: ${target}`);
+  const filePath = resolved.path;
+  const existing = resolved.file;
 
   const parsed = fm.parse(existing.content);
   const currentFrontmatter = parsed.data || {};
@@ -649,11 +686,11 @@ function canPublishMetadataRewrite(draft, brief = {}) {
  * latter.
  */
 async function getLiveFrontmatter(targetUrlOrPath) {
-  const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
-  if (!filePath) return null;
-  const existing = await gh.getFile(filePath);
-  if (!existing) return null;
-  return fm.parse(existing.content).data || {};
+  const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (!target) return null;
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) return null;
+  return fm.parse(resolved.file.content).data || {};
 }
 
 /**
@@ -664,11 +701,11 @@ async function getLiveFrontmatter(targetUrlOrPath) {
  * publish a refresh without a prior version to compare against).
  */
 async function loadExistingPageBody(targetUrlOrPath) {
-  const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
-  if (!filePath) return null;
-  const existing = await gh.getFile(filePath);
-  if (!existing) return null;
-  const body = fm.parse(existing.content).content || '';
+  const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (!target) return null;
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) return null;
+  const body = fm.parse(resolved.file.content).content || '';
   const word_count = body.split(/\s+/).filter(Boolean).length;
   return { body, word_count };
 }
@@ -766,9 +803,10 @@ async function unpublishAstro(postId) {
   try {
     await gh.createBranch(branch);
 
-    const mdPath = `${ASTRO_BLOG_DIR}/${slug}.md`;
-    const mdFile = await gh.getFile(mdPath);
-    if (!mdFile) throw new Error(`markdown not found on main: ${mdPath}`);
+    const resolved = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+    if (!resolved) throw new Error(`markdown not found on main: ${ASTRO_BLOG_DIR}/${slug}.{mdx,md}`);
+    const mdPath = resolved.path;
+    const mdFile = resolved.file;
 
     await gh.deleteFile({
       path: mdPath,
