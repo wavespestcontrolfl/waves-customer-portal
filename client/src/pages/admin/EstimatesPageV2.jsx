@@ -27,6 +27,7 @@ import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
+import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineComposerModal";
 import PipelineAnalytics, {
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
@@ -408,6 +409,39 @@ function AutomationStatusBadge({ automation }) {
   ].includes(automation.status);
   return (
     <Badge tone={needsReview ? "alert" : "neutral"} title={detail.join(" · ")}>
+      {label}
+    </Badge>
+  );
+}
+
+function LawnOutlineStatusBadge({ outline }) {
+  if (!outline) return null;
+  const status = outline.validationStatus === "blocked" ? "blocked" : outline.status || "draft";
+  const tone = status === "blocked" || outline.stale ? "alert" : ["sent", "viewed"].includes(status) ? "strong" : "neutral";
+  const label = status === "blocked"
+    ? "Outline blocked"
+    : outline.stale
+      ? "Outline stale"
+    : outline.ctaClickCount > 0
+      ? `Outline clicked${outline.ctaClickCount > 1 ? ` ${outline.ctaClickCount}x` : ""}`
+    : status === "viewed"
+      ? `Outline viewed${outline.viewCount > 1 ? ` ${outline.viewCount}x` : ""}`
+      : status === "sent"
+        ? "Outline sent"
+        : status === "revoked"
+          ? "Outline revoked"
+          : "Outline draft";
+  const detail = [
+    outline.turfType && `Turf: ${outline.turfType}`,
+    outline.validationStatus && `Validation: ${outline.validationStatus}`,
+    outline.lastCtaClickedAt && `Estimate clicked ${timeAgo(outline.lastCtaClickedAt)}`,
+    outline.lastViewedAt && `Last viewed ${timeAgo(outline.lastViewedAt)}`,
+    outline.sentAt && `Sent ${timeAgo(outline.sentAt)}`,
+    outline.staleReasons?.length ? `Regenerate: ${outline.staleReasons.join(", ")}` : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <Badge tone={tone} title={detail || undefined}>
+      <ClipboardList size={11} strokeWidth={1.75} aria-hidden />
       {label}
     </Badge>
   );
@@ -1354,6 +1388,60 @@ function timeAgo(d) {
   return `${days}d ago`;
 }
 
+function estimateHasLawnLine(estimate = {}) {
+  const serviceLines = Array.isArray(estimate.serviceLines) ? estimate.serviceLines : [];
+  const haystack = [
+    estimate.serviceInterest,
+    estimate.description,
+    estimate.notes,
+    ...serviceLines,
+  ].join(" ").toLowerCase();
+  return haystack.includes("lawn");
+}
+
+function LawnOutlineQuickButton({ estimate, onClick, compact = false }) {
+  if (!estimateHasLawnLine(estimate)) return null;
+  const outline = estimate.lawnServiceOutline;
+  const clicked = outline?.ctaClickCount > 0;
+  const viewed = outline?.viewCount > 0;
+  const blocked = outline?.validationStatus === "blocked";
+  const stale = outline?.stale;
+  const active = clicked || viewed || ["sent", "viewed"].includes(outline?.status);
+  const title = outline
+    ? [
+        stale && `Stale: ${outline.staleReasons?.join(", ") || "regenerate recommended"}`,
+        clicked && `Estimate clicked ${timeAgo(outline.lastCtaClickedAt)}`,
+        viewed && `Viewed ${outline.viewCount}x`,
+        outline.sentAt && `Sent ${timeAgo(outline.sentAt)}`,
+        outline.productCardCount ? `${outline.productCardCount} product cards` : null,
+        blocked ? "Validation blocked" : null,
+      ].filter(Boolean).join(" · ")
+    : "Generate lawn service outline";
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick?.(estimate);
+      }}
+      aria-label={outline ? "Open lawn service outline" : "Generate lawn service outline"}
+      title={title || "Open lawn service outline"}
+      className={cn(
+        "inline-flex items-center justify-center border-hairline rounded-xs u-focus-ring transition-colors",
+        compact ? "h-11 w-11 sm:h-9 sm:w-9" : "h-9 px-3 gap-1.5 text-12 font-medium",
+        blocked || stale
+          ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
+          : active
+            ? "border-emerald-700 bg-emerald-700 text-white hover:bg-emerald-800"
+            : "border-zinc-300 bg-white text-zinc-800 hover:bg-zinc-50",
+      )}
+    >
+      <ClipboardList size={16} strokeWidth={1.75} aria-hidden />
+      {!compact && <span>{stale ? "Stale" : clicked ? "Clicked" : viewed ? "Viewed" : outline ? "Outline" : "Outline"}</span>}
+    </button>
+  );
+}
+
 const SOURCE_ICON = {
   lead_webhook: { Icon: Globe, title: "Website lead" },
   referral: { Icon: Users, title: "Referral" },
@@ -1375,6 +1463,7 @@ function EstimatePipelineViewV2() {
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
+  const [outlineTarget, setOutlineTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
 
@@ -1651,6 +1740,14 @@ function EstimatePipelineViewV2() {
         />
       )}
 
+      {outlineTarget && (
+        <ServiceOutlineComposerModal
+          estimate={outlineTarget}
+          adminFetch={adminFetch}
+          onClose={() => setOutlineTarget(null)}
+        />
+      )}
+
       {scheduleEstimate && (
         <CreateAppointmentModal
           open
@@ -1815,6 +1912,7 @@ function EstimatePipelineViewV2() {
                           }
                         />
                         <AutomationStatusBadge automation={e.automation} />
+                        <LawnOutlineStatusBadge outline={e.lawnServiceOutline} />
                         {e.confirmedAppointment && (
                           <Badge
                             tone="neutral"
@@ -1847,8 +1945,10 @@ function EstimatePipelineViewV2() {
                     states where it's a real action (draft / sent / viewed);
                     accepted/declined/expired hide it. */}
                     {(e.customerPhone ||
+                      estimateHasLawnLine(e) ||
                       ["draft", "sent", "viewed"].includes(e.status)) && (
                       <div className="flex gap-1.5">
+                        <LawnOutlineQuickButton estimate={e} onClick={setOutlineTarget} compact />
                         {e.customerPhone && (
                           <button
                             type="button"
@@ -2218,6 +2318,17 @@ function EstimatePipelineViewV2() {
                                 navigator.clipboard?.writeText(link);
                               },
                             },
+                            estimateHasLawnLine(e) && {
+                              key: "lawn-outline",
+                              label: "Lawn service outline",
+                              icon: (
+                                <ClipboardList
+                                  size={16}
+                                  strokeWidth={1.75}
+                                />
+                              ),
+                              onClick: () => setOutlineTarget(e),
+                            },
                             {
                               key: "audit",
                               label: "Audit pricing",
@@ -2561,6 +2672,7 @@ function MobileEstimateRow({
   onResend,
   onCopyLink,
   onExtend,
+  onLawnOutline,
   v3Flag = false,
 }) {
   const navigate = useNavigate();
@@ -2646,6 +2758,7 @@ function MobileEstimateRow({
               onLowMargin={() => onAudit?.(estimate, "low_margin")}
             />
             <AutomationStatusBadge automation={estimate.automation} />
+            <LawnOutlineStatusBadge outline={estimate.lawnServiceOutline} />
             {estimate.confirmedAppointment && (
               <span
                 className="text-11 text-ink-tertiary truncate"
@@ -2717,6 +2830,19 @@ function MobileEstimateRow({
                 {automationBadgeLabel(estimate.automation)}
               </span>
             )}
+            {estimate.lawnServiceOutline && (
+              <span
+                className={cn(
+                  "ml-2",
+                  estimate.lawnServiceOutline.validationStatus === "blocked"
+                    ? "text-alert-fg"
+                    : "text-ink-tertiary",
+                )}
+                title={`Outline ${estimate.lawnServiceOutline.status || "draft"} · ${estimate.lawnServiceOutline.validationStatus || "unchecked"}`}
+              >
+                Outline {estimate.lawnServiceOutline.stale ? "stale" : estimate.lawnServiceOutline.ctaClickCount > 0 ? "clicked" : estimate.lawnServiceOutline.status || "draft"}
+              </span>
+            )}
             {estimate.confirmedAppointment && (
               <span
                 className="ml-2"
@@ -2786,6 +2912,7 @@ function MobileEstimateRow({
           <MessageSquare size={16} strokeWidth={1.75} />{" "}
         </a>
       )}
+      <LawnOutlineQuickButton estimate={estimate} onClick={onLawnOutline} compact />
       {/* Trailing actions — Call + Text (when phone) + Overflow. All
       secondary actions live in the overflow sheet so the row stays a
       single 64px scan line. */}
@@ -2844,6 +2971,12 @@ function MobileEstimateRow({
             label: "Copy estimate link",
             icon: <LinkIcon size={16} strokeWidth={1.75} />,
             onClick: () => onCopyLink?.(estimate),
+          },
+          estimateHasLawnLine(estimate) && {
+            key: "lawn-outline",
+            label: "Lawn service outline",
+            icon: <ClipboardList size={16} strokeWidth={1.75} />,
+            onClick: () => onLawnOutline?.(estimate),
           },
           {
             key: "audit",
@@ -2910,6 +3043,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
+  const [outlineTarget, setOutlineTarget] = useState(null);
   const [sort, setSort] = useState("newest");
 
   const refreshEstimates = useCallback(() => {
@@ -3267,6 +3401,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onResend={resendEstimateMobile}
               onCopyLink={copyEstimateLinkMobile}
               onExtend={setExtendTarget}
+              onLawnOutline={setOutlineTarget}
               v3Flag={v3Flag}
             />
           ))}
@@ -3294,6 +3429,13 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
             setExtendTarget(null);
             refreshEstimates();
           }}
+        />
+      )}
+      {outlineTarget && (
+        <ServiceOutlineComposerModal
+          estimate={outlineTarget}
+          adminFetch={adminFetch}
+          onClose={() => setOutlineTarget(null)}
         />
       )}
     </div>

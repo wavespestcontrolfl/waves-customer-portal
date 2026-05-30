@@ -767,6 +767,18 @@ function applicationActiveIngredient(app = {}) {
   return app.product?.active_ingredient || app.activeIngredient || '';
 }
 
+function applicationProductSummary(app = {}) {
+  return app.product?.service_report_summary || app.product?.public_summary || '';
+}
+
+function applicationPrecautionSummary(app = {}) {
+  return app.product?.precaution_summary || '';
+}
+
+function applicationReentrySummary(app = {}) {
+  return app.product?.reentry_summary || '';
+}
+
 function isRenderableTreatmentApplication(app = {}) {
   return String(app.method || '').toLowerCase() !== 'station_check';
 }
@@ -1132,10 +1144,15 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
         <PressureTrendChart points={context.points || []} neighborhood={neighborhood} summary={context.customerSummary} />
       </div>
       {neighborhood?.sampleSize >= 20 && (
-        <div className="pressure-legend">
-          <span>Your home</span>
-          <span>Nearby WaveGuard average</span>
-        </div>
+        <>
+          {neighborhood.customerSummary && (
+            <p className="neighborhood-pressure-summary">{neighborhood.customerSummary}</p>
+          )}
+          <div className="pressure-legend">
+            <span>Your home</span>
+            <span>Nearby WaveGuard average</span>
+          </div>
+        </>
       )}
     </Root>
   );
@@ -2094,8 +2111,12 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const purpose = applicationPurpose(app, data.serviceLine);
             const why = applicationPurposeCopy(app, data.serviceLine);
             const usedIn = applicationZoneText(app, zoneById);
+            const productSummary = applicationProductSummary(app);
+            const precautionSummary = applicationPrecautionSummary(app);
+            const reentrySummary = applicationReentrySummary(app);
             const technicalFacts = [
               epa ? `EPA reg. ${epa}` : null,
+              app.product?.facts_approved ? 'Approved product facts' : null,
               app.rate && app.rateUnit ? `Rate: ${app.rate} ${app.rateUnit}` : null,
               app.totalAmount && app.amountUnit ? `Total: ${app.totalAmount} ${app.amountUnit}` : null,
             ].filter(Boolean);
@@ -2122,6 +2143,12 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                   <div className="sr-cell-label">Why used today</div>
                   <p>{why}</p>
                 </div>
+                {productSummary && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">Product note</div>
+                    <p>{productSummary}</p>
+                  </div>
+                )}
               <details className="solution-detail report-accordion" open={mode !== 'live'}>
                 <summary>
                   <span>More information</span>
@@ -2136,12 +2163,50 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     {applicationTechnicalExplanation(app, data.serviceLine).map((detail) => (
                       <p key={detail}>{detail}</p>
                     ))}
+                    {precautionSummary && <p>{precautionSummary}</p>}
+                    {reentrySummary && <p>{reentrySummary}</p>}
                   </div>
                 </div>
               </details>
             </article>
             );
           })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LawnProgramOverviewCard({ context }) {
+  if (!context) return null;
+  const facts = [
+    context.turfType ? { label: 'Turf program', value: context.turfType } : null,
+    context.referenceAt ? { label: context.contextVerb === 'sent' ? 'Outline sent' : 'Outline recorded', value: formatDate(context.referenceAt) } : null,
+    Number(context.viewCount || 0) > 0 ? { label: 'Client views', value: String(context.viewCount) } : null,
+    Number(context.productCardCount || 0) > 0 ? { label: 'Product facts', value: `${context.productCardCount} reviewed` } : null,
+  ].filter(Boolean);
+
+  return (
+    <section className="report-card lawn-program-overview-card" data-section="lawn-program-overview">
+      <div className="lawn-program-heading">
+        <div className="lawn-program-icon" aria-hidden="true">
+          <FileCheck2 size={20} />
+        </div>
+        <div>
+          <div className="section-eyebrow">Lawn care program</div>
+          <h2>{context.linked ? 'Program overview linked to this report' : 'How this report fits your lawn program'}</h2>
+        </div>
+      </div>
+      <p className="lawn-program-copy">{context.contextCopy}</p>
+      <p className="lawn-program-distinction">{context.distinctionCopy}</p>
+      {facts.length > 0 && (
+        <div className="lawn-program-facts">
+          {facts.map((fact) => (
+            <div className="lawn-program-fact" key={fact.label}>
+              <div className="sr-cell-label">{fact.label}</div>
+              <strong>{fact.value}</strong>
+            </div>
+          ))}
         </div>
       )}
     </section>
@@ -4277,6 +4342,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     trackReportEvent(token, 'service_report_viewed');
   }, [mode, token]);
 
+  useEffect(() => {
+    if (mode !== 'live') return;
+    if (!data.lawnProgramOverview?.packetId) return;
+    trackReportEvent(token, 'service_report_linked_to_outline', {
+      packetId: data.lawnProgramOverview.packetId,
+      estimateId: data.lawnProgramOverview.estimateId || null,
+    });
+  }, [data.lawnProgramOverview?.estimateId, data.lawnProgramOverview?.packetId, mode, token]);
+
   const visitTimelineServiceType = data.coverageServiceType || data.serviceLine || data.serviceType;
   const normalizedVisitTimeline = normalizeVisitTimeline({
     visitTimeline: data.visitTimeline,
@@ -6250,11 +6324,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-width: 1;
           stroke-dasharray: 4 4;
         }
+        .neighborhood-pressure-summary {
+          margin: 10px 0 0;
+          color: var(--report-muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
         .pressure-legend {
           display: flex;
           gap: 16px;
           flex-wrap: wrap;
-          margin-top: 10px;
+          margin-top: 8px;
           color: var(--report-muted);
           font-size: 12px;
         }
@@ -6284,6 +6364,67 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           line-height: 1.2;
           font-weight: 650;
           letter-spacing: 0;
+        }
+        .lawn-program-overview-card {
+          background: #fff;
+        }
+        .lawn-program-heading {
+          display: flex;
+          align-items: flex-start;
+          gap: 12px;
+        }
+        .lawn-program-heading h2 {
+          margin: 3px 0 0;
+        }
+        .lawn-program-icon {
+          width: 42px;
+          height: 42px;
+          border: 1px solid var(--soft-blue-border);
+          border-radius: 10px;
+          background: var(--soft-blue);
+          color: ${B.blueDeeper};
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+        }
+        .lawn-program-copy,
+        .lawn-program-distinction {
+          margin: 14px 0 0;
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.55;
+        }
+        .lawn-program-distinction {
+          padding: 12px;
+          border: 1px solid var(--soft-blue-border);
+          border-radius: 10px;
+          background: var(--soft-blue);
+          color: ${ESTIMATE_BODY};
+          font-size: 14px;
+        }
+        .lawn-program-facts {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 1px;
+          margin-top: 14px;
+          overflow: hidden;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--line);
+        }
+        .lawn-program-fact {
+          min-height: 82px;
+          background: #fff;
+          padding: 12px;
+        }
+        .lawn-program-fact strong {
+          display: block;
+          margin-top: 7px;
+          color: var(--text);
+          font-size: 15px;
+          line-height: 1.25;
+          font-weight: 850;
         }
         .lawn-assessment-layout {
           display: grid;
@@ -6758,7 +6899,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }
           .sr-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-          .sr-grid-2, .sr-grid-3, .sr-advisory, .service-status-grid, .readiness-facts, .supporting-detail-grid, .executive-status-grid, .defense-status-grid, .receipt-grid, .one-thing-detail, .lawn-score-grid, .lawn-assessment-layout { grid-template-columns: 1fr; }
+          .sr-grid-2, .sr-grid-3, .sr-advisory, .service-status-grid, .readiness-facts, .supporting-detail-grid, .executive-status-grid, .defense-status-grid, .receipt-grid, .one-thing-detail, .lawn-score-grid, .lawn-program-facts, .lawn-assessment-layout { grid-template-columns: 1fr; }
           .lawn-trend-chart { justify-self: stretch; max-width: none; }
           .lawn-photo-strip { grid-template-columns: 1fr; }
           .premium-section-header { flex-direction: column; }
@@ -6843,6 +6984,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         </section>
+
+        {data.serviceLine === 'lawn' && (
+          <LawnProgramOverviewCard context={data.lawnProgramOverview} />
+        )}
+
+        {dynamicContext.pressureTrend && (
+          <PressureTrendCard
+            context={dynamicContext.pressureTrend}
+            neighborhood={dynamicContext.neighborhoodPressure}
+            mode={mode}
+            token={token}
+          />
+        )}
 
         {/* Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /

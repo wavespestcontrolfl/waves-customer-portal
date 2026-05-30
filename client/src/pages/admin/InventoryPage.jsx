@@ -113,6 +113,8 @@ export default function InventoryPage() {
   const [searchParams] = useSearchParams();
   const initialTab = [
     "products",
+    "lawnFacts",
+    "lawnContent",
     "price-sync",
     "vendors",
     "approvals",
@@ -142,6 +144,8 @@ export default function InventoryPage() {
 
   const tabs = [
     { key: "products", label: "Products", Icon: Package },
+    { key: "lawnFacts", label: "Lawn Facts", Icon: ShieldCheck },
+    { key: "lawnContent", label: "Lawn Content", Icon: FileText },
     { key: "price-sync", label: "Price Sync", Icon: Store },
     { key: "vendors", label: "Vendors", Icon: Store },
     {
@@ -285,6 +289,8 @@ export default function InventoryPage() {
           setShowAddForm={setShowAddForm}
         />
       )}
+      {tab === "lawnFacts" && <LawnFactsTab showToast={showToast} />}
+      {tab === "lawnContent" && <LawnContentModulesTab showToast={showToast} />}
       {tab === "price-sync" && <PriceSyncTab showToast={showToast} />}
       {tab === "registry" && <RegistryTab showToast={showToast} />}
       {tab === "vendors" && <VendorsTab showToast={showToast} />}
@@ -329,6 +335,458 @@ export default function InventoryPage() {
         <span style={{ color: D.green }}></span>
         <span style={{ color: D.text }}>{toast}</span>{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+function LawnFactsTab({ showToast }) {
+  const [facts, setFacts] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({});
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  const load = useCallback(() => {
+    setLoading(true);
+    adminFetch("/admin/inventory/lawn-outline-facts")
+      .then((data) => {
+        setFacts(data.facts || []);
+        setSummary(data.summary || null);
+      })
+      .catch((err) => showToast(`Load failed: ${err.message}`))
+      .finally(() => setLoading(false));
+  }, [showToast]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const startEdit = (row) => {
+    const p = row.product || {};
+    const suggestion = row.suggestedCopy || {};
+    setEditing(row);
+    setForm({
+      productType: p.productType || row.readiness?.productType || suggestion.productType || "",
+      customerVisibility: p.customerVisibility || "internal_only",
+      contentStatus: p.contentStatus || "draft",
+      epaRegNumber: p.epaRegNumber || "",
+      publicSummary: p.publicSummary || "",
+      portalSummary: p.portalSummary || "",
+      customerSafetySummary: p.customerSafetySummary || "",
+      customerPrecautionSummary: p.customerPrecautionSummary || "",
+      petKidGuidanceText: p.petKidGuidanceText || "",
+      reentrySummary: p.reentrySummary || p.reentryText || "",
+      labelSourceUrl: p.labelSourceUrl || p.labelUrl || "",
+      labelVerifiedAt: p.labelVerifiedAt ? String(p.labelVerifiedAt).slice(0, 10) : "",
+      labelVersion: p.labelVersion || "",
+    });
+  };
+
+  const applySuggestedCopy = () => {
+    if (!editing?.suggestedCopy) return;
+    const suggestion = editing.suggestedCopy;
+    setForm((current) => ({
+      ...current,
+      productType: current.productType || suggestion.productType || "",
+      publicSummary: current.publicSummary || suggestion.publicSummary || "",
+      customerPrecautionSummary: current.customerPrecautionSummary || suggestion.customerPrecautionSummary || "",
+      reentrySummary: current.reentrySummary || suggestion.reentrySummary || "",
+    }));
+  };
+
+  const save = async (approve = false) => {
+    if (!editing?.product?.id) return;
+    try {
+      await adminFetch(`/admin/inventory/lawn-outline-facts/${editing.product.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...form, approve }),
+      });
+      showToast(approve ? "Product fact approved for estimate packets" : "Product fact saved");
+      setEditing(null);
+      load();
+    } catch (err) {
+      showToast(err.message || "Save failed");
+    }
+  };
+
+  const approveRow = async (row) => {
+    if (!row?.product?.id) return;
+    try {
+      await adminFetch(`/admin/inventory/lawn-outline-facts/${row.product.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ approve: true }),
+      });
+      showToast("Product fact approved for estimate packets");
+      load();
+    } catch (err) {
+      showToast(err.message || "Approve failed");
+    }
+  };
+
+  const badge = (status) => {
+    const colors = {
+      approved: [D.green, "#DCFCE7"],
+      ready_to_approve: [D.teal, "#E0F2FE"],
+      needs_facts: [D.amber, "#FEF3C7"],
+      missing_product: [D.red, "#FEE2E2"],
+    };
+    const [fg, bg] = colors[status] || [D.muted, "#F4F4F5"];
+    return <span style={sBadge(bg, fg)}>{String(status || "unknown").replaceAll("_", " ")}</span>;
+  };
+
+  if (loading) return <div style={sCard}>Loading lawn product facts...</div>;
+  const visibleFacts = statusFilter === "all"
+    ? facts
+    : facts.filter((row) => row.readiness?.status === statusFilter);
+  const missingFieldEntries = Object.entries(summary?.missingFields || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+
+  return (
+    <div>
+      <div style={{ ...sCard, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
+        {[
+          ["Protocol Products", summary?.total || 0],
+          ["Approved", summary?.approved || 0],
+          ["Ready", summary?.ready_to_approve || 0],
+          ["Needs Facts", summary?.needs_facts || 0],
+          ["Missing", summary?.missing_product || 0],
+        ].map(([label, value]) => (
+          <div key={label}>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: D.heading }}>{value}</div>
+            <div style={{ fontSize: 10, color: D.muted, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {missingFieldEntries.length > 0 && (
+        <div style={sCard}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 10 }}>Most Common Readiness Gaps</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {missingFieldEntries.map(([field, count]) => (
+              <span key={field} style={sBadge("#FEF3C7", D.amber)}>{field} · {count}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={sCard}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 6 }}>Lawn Estimate Product Facts</div>
+            <div style={{ fontSize: 13, color: D.muted }}>
+              Product cards in lawn service outlines only render from products approved here. Draft or incomplete products stay hidden.
+            </div>
+          </div>
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ ...sInput, minWidth: 190 }}>
+            <option value="all">All statuses</option>
+            <option value="missing_product">Missing product</option>
+            <option value="needs_facts">Needs facts</option>
+            <option value="ready_to_approve">Ready to approve</option>
+            <option value="approved">Approved</option>
+          </select>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thS}>Protocol item</th>
+                <th style={thS}>Used In</th>
+                <th style={thS}>Catalog match</th>
+                <th style={thS}>Status</th>
+                <th style={thS}>Missing</th>
+                <th style={thS}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleFacts.map((row) => (
+                <tr key={row.key || row.needle}>
+                  <td style={tdS}>
+                    <div style={{ fontWeight: 700, color: D.heading }}>{row.needle}</div>
+                    <div style={{ fontSize: 11, color: D.muted }}>{row.expectedCategory}</div>
+                  </td>
+                  <td style={tdS}>
+                    <div style={{ fontSize: 12, color: D.heading }}>{(row.turfTracks || []).join(", ")}</div>
+                    <div style={{ fontSize: 11, color: D.muted }}>{(row.months || []).join(", ")} · {row.referenceCount || 0} refs</div>
+                  </td>
+                  <td style={tdS}>
+                    {row.product ? (
+                      <>
+                        <div style={{ fontWeight: 700, color: D.heading }}>{row.product.name}</div>
+                        <div style={{ fontSize: 11, color: D.muted }}>
+                          {row.product.productType || row.readiness?.productType || "type pending"} · {row.product.contentStatus} · {row.product.customerVisibility}
+                        </div>
+                      </>
+                    ) : (
+                      <span style={{ color: D.red }}>No product match</span>
+                    )}
+                  </td>
+                  <td style={tdS}>{badge(row.readiness?.status)}</td>
+                  <td style={tdS}>
+                    {(row.readiness?.missing || []).length ? (
+                      <ul style={{ margin: 0, paddingLeft: 18, maxWidth: 360 }}>
+                        {row.readiness.missing.map((m) => <li key={m}>{m}</li>)}
+                      </ul>
+                    ) : (
+                      <span style={{ color: D.green }}>Complete</span>
+                    )}
+                  </td>
+                  <td style={tdS}>
+                    {row.product && (
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button type="button" style={sBtn(D.card, D.heading)} onClick={() => startEdit(row)}>Edit</button>
+                        {row.readiness?.eligible && row.readiness?.status !== "approved" && (
+                          <button type="button" style={sBtn(D.green, D.white)} onClick={() => approveRow(row)}>Approve</button>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {visibleFacts.length === 0 && <div style={{ padding: 18, color: D.muted }}>No products match this status.</div>}
+        </div>
+      </div>
+
+      {editing && (
+        <div style={{ ...sCard, borderColor: D.heading }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14 }}>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Product Fact</div>
+              <div style={{ fontSize: 13, color: D.muted }}>{editing.product?.name}</div>
+            </div>
+            <button type="button" style={sBtn(D.card, D.heading)} onClick={() => setEditing(null)}>Close</button>
+          </div>
+          {editing.suggestedCopy && (
+            <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, marginBottom: 14, background: D.bg }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Starter copy</div>
+              <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.6, marginTop: 4 }}>
+                This is draft customer-safe language from the protocol item category. It does not approve EPA numbers, label claims, or product eligibility.
+              </div>
+              <button type="button" style={{ ...sBtn(D.card, D.heading), marginTop: 10 }} onClick={applySuggestedCopy}>Fill empty copy fields</button>
+            </div>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+            {[
+              ["productType", "Product type"],
+              ["customerVisibility", "Visibility"],
+              ["contentStatus", "Content status"],
+              ["epaRegNumber", "EPA registration number"],
+              ["labelSourceUrl", "Label source URL"],
+              ["labelVerifiedAt", "Label verified date"],
+              ["labelVersion", "Label version"],
+            ].map(([key, label]) => (
+              <label key={key} style={{ display: "block" }}>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{label}</div>
+                <input
+                  type={key === "labelVerifiedAt" ? "date" : "text"}
+                  value={form[key] || ""}
+                  onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+                  style={{ ...sInput, width: "100%" }}
+                />
+              </label>
+            ))}
+          </div>
+          {[
+            ["publicSummary", "Public summary"],
+            ["portalSummary", "Portal summary"],
+            ["customerSafetySummary", "Customer safety summary"],
+            ["customerPrecautionSummary", "Customer precaution summary"],
+            ["petKidGuidanceText", "Pet/child guidance"],
+            ["reentrySummary", "Re-entry summary"],
+          ].map(([key, label]) => (
+            <label key={key} style={{ display: "block", marginTop: 12 }}>
+              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{label}</div>
+              <textarea
+                value={form[key] || ""}
+                onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+                style={{ ...sInput, width: "100%", minHeight: 72, resize: "vertical" }}
+              />
+            </label>
+          ))}
+          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+            <button type="button" style={sBtn(D.heading, D.white)} onClick={() => save(false)}>Save</button>
+            <button type="button" style={sBtn(D.green, D.white)} onClick={() => save(true)}>Save + Approve</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LawnContentModulesTab({ showToast }) {
+  const [modules, setModules] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedKey, setSelectedKey] = useState("all");
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({});
+
+  const load = useCallback(() => {
+    setLoading(true);
+    adminFetch("/admin/service-outlines/content-modules")
+      .then((data) => setModules(data.modules || []))
+      .catch((err) => showToast(`Load failed: ${err.message}`))
+      .finally(() => setLoading(false));
+  }, [showToast]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const latest = [];
+  const seen = new Set();
+  for (const module of modules) {
+    if (seen.has(module.key)) continue;
+    seen.add(module.key);
+    latest.push(module);
+  }
+  const keys = ["all", ...latest.map((module) => module.key)];
+  const visible = selectedKey === "all" ? latest : latest.filter((module) => module.key === selectedKey);
+
+  const startEdit = (module) => {
+    setEditing(module);
+    setForm({
+      title: module.title || "",
+      audience: module.audience || "estimate_packet",
+      status: module.status || "draft",
+      plainText: module.plain_text || "",
+      sourceNotes: module.source_notes || "",
+    });
+  };
+
+  const save = async (status = form.status) => {
+    if (!editing?.id) return;
+    try {
+      await adminFetch(`/admin/service-outlines/content-modules/${editing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...form, status }),
+      });
+      showToast(status === "approved" ? "Content module approved" : "Content module saved");
+      setEditing(null);
+      load();
+    } catch (err) {
+      showToast(err.message || "Save failed");
+    }
+  };
+
+  if (loading) return <div style={sCard}>Loading lawn content modules...</div>;
+
+  return (
+    <div>
+      <div style={sCard}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Lawn Outline Content Library</div>
+            <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
+              These approved modules power the public page, estimate packet, and service-report language.
+            </div>
+          </div>
+          <select value={selectedKey} onChange={(e) => setSelectedKey(e.target.value)} style={{ ...sInput, minWidth: 240 }}>
+            {keys.map((key) => (
+              <option key={key} value={key}>{key === "all" ? "All modules" : key}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div style={sCard}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thS}>Key</th>
+                <th style={thS}>Title</th>
+                <th style={thS}>Audience</th>
+                <th style={thS}>Status</th>
+                <th style={thS}>Copy</th>
+                <th style={thS}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((module) => (
+                <tr key={module.id}>
+                  <td style={tdS}>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{module.key}</div>
+                    <div style={{ fontSize: 11, color: D.muted }}>v{module.version}</div>
+                  </td>
+                  <td style={tdS}>{module.title}</td>
+                  <td style={tdS}>{module.audience}</td>
+                  <td style={tdS}>
+                    <span style={sBadge(module.status === "approved" ? "#DCFCE7" : "#FEF3C7", module.status === "approved" ? D.green : D.amber)}>
+                      {module.status}
+                    </span>
+                  </td>
+                  <td style={{ ...tdS, maxWidth: 460 }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical" }}>
+                      {module.plain_text}
+                    </div>
+                  </td>
+                  <td style={tdS}>
+                    <button type="button" style={sBtn(D.card, D.heading)} onClick={() => startEdit(module)}>Edit</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {editing && (
+        <div style={{ ...sCard, borderColor: D.heading }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14 }}>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Content Module</div>
+              <div style={{ fontSize: 13, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{editing.key}</div>
+            </div>
+            <button type="button" style={sBtn(D.card, D.heading)} onClick={() => setEditing(null)}>Close</button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+            <label>
+              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Title</div>
+              <input value={form.title || ""} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} style={{ ...sInput, width: "100%" }} />
+            </label>
+            <label>
+              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Audience</div>
+              <select value={form.audience || "estimate_packet"} onChange={(e) => setForm((f) => ({ ...f, audience: e.target.value }))} style={{ ...sInput, width: "100%" }}>
+                <option value="public">Public</option>
+                <option value="estimate_packet">Estimate packet</option>
+                <option value="service_report">Service report</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <label>
+              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Status</div>
+              <select value={form.status || "draft"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={{ ...sInput, width: "100%" }}>
+                <option value="draft">Draft</option>
+                <option value="review">Review</option>
+                <option value="approved">Approved</option>
+                <option value="deprecated">Deprecated</option>
+                <option value="retired">Retired</option>
+              </select>
+            </label>
+          </div>
+          <label style={{ display: "block", marginTop: 12 }}>
+            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Approved copy</div>
+            <textarea
+              value={form.plainText || ""}
+              onChange={(e) => setForm((f) => ({ ...f, plainText: e.target.value }))}
+              style={{ ...sInput, width: "100%", minHeight: 140, resize: "vertical" }}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 12 }}>
+            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Source notes</div>
+            <textarea
+              value={form.sourceNotes || ""}
+              onChange={(e) => setForm((f) => ({ ...f, sourceNotes: e.target.value }))}
+              style={{ ...sInput, width: "100%", minHeight: 72, resize: "vertical" }}
+            />
+          </label>
+          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+            <button type="button" style={sBtn(D.heading, D.white)} onClick={() => save()}>Save</button>
+            <button type="button" style={sBtn(D.green, D.white)} onClick={() => save("approved")}>Save + Approve</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -51,8 +51,10 @@ const adminPushRoutes = require('./routes/admin-push');
 const adminCustomerRoutes = require('./routes/admin-customers');
 const adminDashboardRoutes = require('./routes/admin-dashboard');
 const adminEstimateRoutes = require('./routes/admin-estimates');
+const adminServiceOutlineRoutes = require('./routes/admin-service-outlines');
 const adminPropertyLookupRoutes = require('./routes/admin-property-lookup');
 const estimatePublicRoutes = require('./routes/estimate-public');
+const serviceOutlinePublicRoutes = require('./routes/service-outlines-public');
 const publicQuoteRoutes = require('./routes/public-quote');
 const publicPropertyLookupRoutes = require('./routes/public-property-lookup');
 const adminReviewRoutes = require('./routes/admin-reviews');
@@ -270,10 +272,12 @@ app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/command-center', require('./routes/admin-command-center'));
 app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/estimates', adminEstimateRoutes);
+app.use('/api/admin/service-outlines', adminServiceOutlineRoutes);
 app.use('/api/admin/estimates', require('./routes/admin-estimate-slots'));
 app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
+app.use('/api/service-outlines', serviceOutlinePublicRoutes);
 // Customer-facing estimate URL. Service slugs render the SPA quote wizard;
 // everything else remains a server-rendered accepted-estimate token.
 app.get('/estimate/:token', (req, res, next) => {

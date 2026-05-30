@@ -48,6 +48,12 @@ const {
   leadEstimateAutoSendConfigFromEnv,
   previewLeadEstimateAutoSendAudit,
 } = require('../services/lead-estimate-auto-send');
+const {
+  CONTENT_LIBRARY_VERSION,
+  PRODUCT_REGISTRY_VERSION,
+  PROTOCOL_VERSION,
+  TEMPLATE_VERSION,
+} = require('../services/lawn-service-outline');
 
 const ESTIMATE_LIST_LIMIT = 500;
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
@@ -683,6 +689,85 @@ router.get('/', async (req, res, next) => {
       clickStats = new Map(rows.map((r) => [r.entity_id, r]));
     }
 
+    let outlineByEstimateId = new Map();
+    if (ids.length) {
+      try {
+        const outlineRows = await db('service_outline_packets')
+          .whereIn('estimate_id', ids)
+          .orderBy('created_at', 'desc')
+          .select(
+            'id',
+            'estimate_id',
+            'status',
+            'validation_status',
+            'turf_type',
+            'sent_at',
+            'first_viewed_at',
+            'last_viewed_at',
+            'view_count',
+            'revoked_at',
+            'expires_at',
+            'created_at',
+            'summary_json',
+            'content_json',
+            'content_library_version',
+            'protocol_version',
+            'product_registry_version',
+            'template_version',
+          );
+        const outlineIds = outlineRows.map((row) => row.id).filter(Boolean);
+        let outlineEventStats = new Map();
+        if (outlineIds.length) {
+          const eventRows = await db('service_outline_events')
+            .whereIn('packet_id', outlineIds)
+            .whereIn('event_type', ['cta_clicked'])
+            .groupBy('packet_id')
+            .select('packet_id')
+            .count({ cta_click_count: '*' })
+            .max({ last_cta_clicked_at: 'created_at' });
+          outlineEventStats = new Map(eventRows.map((row) => [row.packet_id, row]));
+        }
+        for (const row of outlineRows) {
+          if (!row.estimate_id || outlineByEstimateId.has(row.estimate_id)) continue;
+          const stats = outlineEventStats.get(row.id) || {};
+          const staleReasons = [
+            row.content_library_version !== CONTENT_LIBRARY_VERSION ? 'content library updated' : null,
+            row.protocol_version !== PROTOCOL_VERSION ? 'protocol updated' : null,
+            row.product_registry_version !== PRODUCT_REGISTRY_VERSION ? 'product facts updated' : null,
+            row.template_version !== TEMPLATE_VERSION ? 'template updated' : null,
+          ].filter(Boolean);
+          outlineByEstimateId.set(row.estimate_id, {
+            id: row.id,
+            status: row.status,
+            validationStatus: row.validation_status,
+            turfType: row.turf_type,
+            sentAt: row.sent_at,
+            firstViewedAt: row.first_viewed_at,
+            lastViewedAt: row.last_viewed_at,
+            viewCount: row.view_count || 0,
+            revokedAt: row.revoked_at,
+            expiresAt: row.expires_at,
+            createdAt: row.created_at,
+            ctaClickCount: Number(stats.cta_click_count || 0),
+            lastCtaClickedAt: stats.last_cta_clicked_at || null,
+            productCardCount: Number(row.summary_json?.productCardCount || row.content_json?.productCards?.length || 0),
+            contentLibraryVersion: row.content_library_version,
+            protocolVersion: row.protocol_version,
+            productRegistryVersion: row.product_registry_version,
+            templateVersion: row.template_version,
+            currentContentLibraryVersion: CONTENT_LIBRARY_VERSION,
+            currentProtocolVersion: PROTOCOL_VERSION,
+            currentProductRegistryVersion: PRODUCT_REGISTRY_VERSION,
+            currentTemplateVersion: TEMPLATE_VERSION,
+            stale: staleReasons.length > 0,
+            staleReasons,
+          });
+        }
+      } catch (err) {
+        logger.warn(`[admin-estimates] service outline summary unavailable: ${err.message}`);
+      }
+    }
+
     // Cross-reference confirmed appointments so the UI can flag estimates
     // whose customer is already on the schedule. Two paths in priority order:
     //   1) Linked: call-recording-processor stitches the scheduled_services.id
@@ -823,6 +908,7 @@ router.get('/', async (req, res, next) => {
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
           pricingRisk: pricingRiskById.get(e.id) || null,
+          lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
         };
       }),
     });
