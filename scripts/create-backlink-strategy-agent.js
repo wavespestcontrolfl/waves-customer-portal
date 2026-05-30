@@ -15,25 +15,42 @@ const { BACKLINK_STRATEGY_AGENT_CONFIG } = require('../server/services/seo/backl
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!API_KEY) { console.error('Set ANTHROPIC_API_KEY'); process.exit(1); }
 
+const API_HEADERS = {
+  'x-api-key': API_KEY,
+  'anthropic-version': '2023-06-01',
+  'anthropic-beta': 'managed-agents-2026-04-01',
+  'content-type': 'application/json',
+};
+
+async function apiFetch(path, options = {}) {
+  const res = await fetch(`https://api.anthropic.com/v1${path}`, {
+    ...options,
+    headers: API_HEADERS,
+  });
+  if (!res.ok) {
+    throw new Error(`API error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
 async function syncAgent() {
   const agentId = process.env.BACKLINK_STRATEGY_AGENT_ID;
   const updating = Boolean(agentId);
   console.log(`${updating ? 'Updating' : 'Creating'} Backlink Strategy Agent...\n`);
 
-  const res = await fetch(`https://api.anthropic.com/v1/agents${updating ? `/${agentId}` : ''}`, {
+  let body = BACKLINK_STRATEGY_AGENT_CONFIG;
+  if (updating) {
+    const current = await apiFetch(`/agents/${agentId}`);
+    body = {
+      ...BACKLINK_STRATEGY_AGENT_CONFIG,
+      version: current.version,
+    };
+  }
+
+  const agent = await apiFetch(`/agents${updating ? `/${agentId}` : ''}`, {
     method: 'POST',
-    headers: {
-      'x-api-key': API_KEY,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'managed-agents-2026-04-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(BACKLINK_STRATEGY_AGENT_CONFIG),
+    body: JSON.stringify(body),
   });
-
-  if (!res.ok) { console.error(`API error ${res.status}:`, await res.text()); process.exit(1); }
-
-  const agent = await res.json();
   console.log(`Agent ID:  ${agent.id}`);
   console.log(`Name:      ${agent.name}`);
   console.log(`Tools:     ${agent.tools?.length || 0}`);
