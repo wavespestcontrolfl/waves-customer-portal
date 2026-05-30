@@ -37,11 +37,17 @@ const OWNED_DOMAINS = Array.from(new Set([
   'wavespestcontrol.com',
   ...(twilioNumbers.domainTracking || []).map(d => d.domain),
   ...(twilioNumbers.lawnDomainTracking || []).map(d => d.domain),
-].filter(Boolean)));
-const WAVES_HOST_RE = new RegExp(
-  OWNED_DOMAINS.map(d => d.replace(/[.]/g, '\\.')).join('|'),
-  'i',
-);
+].filter(Boolean).map(d => String(d).toLowerCase())));
+
+// Owned-domain match on the URL *hostname* with exact-host-or-subdomain
+// boundaries — never a substring of the full URL, so `?source=wavespestcontrol.com`
+// and superdomains like `wavespestcontrol.com.evil.example` are not counted.
+function isOwnedUrl(u) {
+  let host;
+  try { host = new URL(u).hostname.toLowerCase().replace(/^www\./, ''); } catch { return false; }
+  return OWNED_DOMAINS.some(d => host === d || host.endsWith(`.${d}`));
+}
+
 const COMPETITORS = [
   'turner pest', 'hoskins', 'orkin', 'terminix', 'truly nolen',
   'hometeam', 'arrow environmental', 'nozzle nolen', 'massey services',
@@ -216,7 +222,7 @@ class LLMMentionProber {
     // Citations: union of provider-native + URLs parsed from prose.
     const inlineUrls = (text.match(URL_RE) || []).map(u => u.replace(/[.,)]+$/, ''));
     const citedUrls = Array.from(new Set([...(probe.citedUrls || []), ...inlineUrls]));
-    const wavesCitedUrls = citedUrls.filter(u => WAVES_HOST_RE.test(u));
+    const wavesCitedUrls = citedUrls.filter(isOwnedUrl);
 
     return {
       wavesMentioned,
