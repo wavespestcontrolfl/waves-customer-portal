@@ -1,4 +1,4 @@
-const migration = require('../models/migrations/20260530000011_lawn_outline_product_facts_seed');
+const migration = require('../models/migrations/20260530000022_lawn_outline_product_facts_seed');
 
 function fakeKnex({ existingByAlias = {} } = {}) {
   const inserted = [];
