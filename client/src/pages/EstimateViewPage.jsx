@@ -1013,14 +1013,16 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
             border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
           }}
         >{usingExistingAppointment ? 'Confirm setup' : 'Confirm booking'}</button>
-        <button
-          type="button"
-          onClick={onCancel}
-          style={{
-            padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-            border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-          }}
-        >Go back</button>
+        {!usingExistingAppointment ? (
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{
+              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            }}
+          >Go back</button>
+        ) : null}
       </div>
     </div>
   );
@@ -1662,6 +1664,19 @@ export default function EstimateViewPage() {
 
       {ctaPhase === 'review' && reservation ? (
         <>
+          {existingAppointment ? (
+            <>
+              <ExistingAppointmentCard appointment={existingAppointment} />
+              <PaymentPreferenceButtons
+                onSelect={handlePaymentChoice}
+                disabled={false}
+                serviceMode={serviceMode}
+                setupFee={pricing.setupFee || null}
+                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                invoiceMode={!!estimate.billByInvoice}
+              />
+            </>
+          ) : null}
           <ReviewPhase
             slotId={selectedSlotId}
             existingAppointment={existingAppointment}
