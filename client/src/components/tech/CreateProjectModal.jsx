@@ -308,6 +308,84 @@ export default function CreateProjectModal({
   const [photoQueue, setPhotoQueue] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
 
+  // --- Draft auto-save (localStorage) ---
+  // Mirrors the completion-form draft pattern: debounced save of the typed
+  // fields so a half-written report survives navigating away. Photos are File
+  // objects and can't be serialized, so they're not part of the draft.
+  const draftScope = defaultScheduledServiceId
+    ? `sched_${defaultScheduledServiceId}`
+    : defaultServiceRecordId
+      ? `rec_${defaultServiceRecordId}`
+      : 'new';
+  const draftKey = `waves_project_draft_${draftScope}`;
+  const draftReadyRef = useRef(false);
+  const [savedDraft, setSavedDraft] = useState(null);
+  const [showDraftPrompt, setShowDraftPrompt] = useState(false);
+
+  // Load any saved draft on open and offer to restore it.
+  useEffect(() => {
+    draftReadyRef.current = false;
+    setSavedDraft(null);
+    setShowDraftPrompt(false);
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) {
+        const draft = JSON.parse(raw);
+        if (draft && typeof draft === 'object') {
+          setSavedDraft(draft);
+          setShowDraftPrompt(true);
+        }
+      }
+    } catch {
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    } finally {
+      draftReadyRef.current = true;
+    }
+  }, [draftKey]);
+
+  // Debounced auto-save of the typed fields. Held off while the restore
+  // prompt is showing so we don't clobber the saved draft before the tech
+  // chooses, and skipped entirely when the form is still empty.
+  useEffect(() => {
+    if (!draftReadyRef.current || showDraftPrompt) return;
+    const hasContent = Boolean(
+      projectType
+      || customerId
+      || (title && title.trim())
+      || (recommendations && recommendations.trim())
+      || Object.values(findings).some((v) => String(v || '').trim()),
+    );
+    if (!hasContent) return;
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(draftKey, JSON.stringify({
+          savedAt: new Date().toISOString(),
+          projectType, customerId, customerLabel, projectDate, title, findings, recommendations,
+        }));
+      } catch { /* quota / serialization — non-blocking */ }
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [draftKey, showDraftPrompt, projectType, customerId, customerLabel, projectDate, title, findings, recommendations]);
+
+  function restoreDraft() {
+    const d = savedDraft;
+    if (!d) return;
+    if (d.projectType) setProjectType(d.projectType);
+    if (d.customerId) setCustomerId(d.customerId);
+    if (d.customerLabel) setCustomerLabel(d.customerLabel);
+    if (d.projectDate) setProjectDate(d.projectDate);
+    setTitle(d.title || '');
+    setFindings(d.findings && typeof d.findings === 'object' ? d.findings : {});
+    setRecommendations(d.recommendations || '');
+    setShowDraftPrompt(false);
+  }
+
+  function discardDraft() {
+    try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    setSavedDraft(null);
+    setShowDraftPrompt(false);
+  }
+
   useEffect(() => {
     adminFetch('/admin/projects/types')
       .then(r => r.json())
@@ -566,6 +644,7 @@ export default function CreateProjectModal({
         }
       }
 
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       if (onCreated) onCreated(data.project);
       onClose?.();
     } catch (e) {
@@ -638,6 +717,42 @@ export default function CreateProjectModal({
 
         {/* Body */}
         <div style={{ padding: isEstimateStyle ? 24 : 16, display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 18 : 16 }}>
+          {/* Restore saved draft */}
+          {showDraftPrompt && (
+            <div style={{
+              background: theme === 'light' ? P.card : P.bg,
+              border: `1px solid ${P.accent}`,
+              borderRadius: 10, padding: 12,
+              display: 'flex', flexDirection: 'column', gap: 10,
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: P.heading }}>
+                Restore saved draft?
+              </div>
+              <div style={{ fontSize: 11, color: P.muted }}>
+                Saved {savedDraft?.savedAt ? new Date(savedDraft.savedAt).toLocaleString() : 'recently'}
+                {' '}· photos aren’t saved and will need to be re-added.
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={restoreDraft}
+                  style={{
+                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 800,
+                    background: P.accent, color: P.accentText, border: 'none', cursor: 'pointer',
+                  }}
+                >Restore</button>
+                <button
+                  type="button"
+                  onClick={discardDraft}
+                  style={{
+                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                    background: 'transparent', color: P.text, border: `1px solid ${P.border}`, cursor: 'pointer',
+                  }}
+                >Discard</button>
+              </div>
+            </div>
+          )}
+
           {/* Project type */}
           <div>
             <label style={labelStyle}>Project type *</label>
