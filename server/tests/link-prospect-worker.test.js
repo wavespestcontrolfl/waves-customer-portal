@@ -29,4 +29,12 @@ describe('link prospect worker — report mapping', () => {
     expect(p.claimed_by).toBeNull();
     expect(p.notes).toBe('form changed');
   });
+
+  test('placed without live_url maps to live_url=null (why report() rejects it)', () => {
+    // The pure mapper has no I/O context to reject; report() guards this so a
+    // placed row never lands with live_url=null (verifier-invisible, unclaimable).
+    const p = mapReportToPatch('placed', {});
+    expect(p.status).toBe('placed');
+    expect(p.live_url).toBeNull();
+  });
 });

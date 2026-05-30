@@ -40,7 +40,9 @@ async function claim({ n = 10, type = 'signup' } = {}) {
       .whereIn('id', rows.map((r) => r.id))
       .update({ claimed_at: now, claimed_by: WORKER, updated_at: now });
 
-    return rows.map((r) => ({ ...r, claimed_at: now, claimed_by: WORKER }));
+    // lease_token = the claim timestamp; the worker echoes it back in /report so
+    // a late report from a swept/reclaimed lease can't clobber a newer claim.
+    return rows.map((r) => ({ ...r, claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() }));
   });
 }
 
@@ -69,16 +71,38 @@ function mapReportToPatch(outcome, body = {}) {
   return { ...release, notes: body.notes || null };
 }
 
-async function report({ prospect_id, outcome, ...body }) {
+async function report({ prospect_id, outcome, lease_token, ...body }) {
+  // A 'placed' report MUST carry a live_url — otherwise the row lands in 'placed'
+  // with live_url=null, which the verifier skips and claim() never re-serves,
+  // permanently stranding it.
+  if (outcome === 'placed' && !body.live_url) {
+    return { ok: false, code: 'live_url_required', error: 'a placed report requires live_url' };
+  }
+  const leaseDate = lease_token ? new Date(lease_token) : null;
+  if (!leaseDate || Number.isNaN(leaseDate.getTime())) {
+    return { ok: false, code: 'lease_required', error: 'valid lease_token required (the claimed_at returned by /claim)' };
+  }
+
   const prospect = await db('seo_link_prospects').where({ id: prospect_id }).first();
-  if (!prospect) return { ok: false, error: 'prospect not found' };
+  if (!prospect) return { ok: false, code: 'not_found', error: 'prospect not found' };
 
   const attempts = (prospect.attempts || 0) + 1;
   const patch = mapReportToPatch(outcome, body);
   // Cap retries so a permanently-failing prospect doesn't churn forever.
   if (outcome === 'failed' && attempts >= MAX_ATTEMPTS) patch.status = 'rejected';
 
-  await db('seo_link_prospects').where({ id: prospect_id }).update({ ...patch, attempts });
+  // Optimistic concurrency: only apply if THIS lease is still current. If the
+  // claim was swept and re-claimed by another worker, claimed_at no longer
+  // matches, the update affects 0 rows, and we reject the stale report.
+  const updated = await db('seo_link_prospects')
+    .where({ id: prospect_id })
+    .where('claimed_at', leaseDate)
+    .update({ ...patch, attempts });
+
+  if (updated === 0) {
+    return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
+  }
+
   logger.info(`[link-worker] report ${prospect_id} outcome=${outcome} attempts=${attempts} -> ${patch.status || prospect.status}`);
   return { ok: true, status: patch.status || prospect.status, attempts };
 }

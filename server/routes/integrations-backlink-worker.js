@@ -36,7 +36,10 @@ router.post('/report', async (req, res, next) => {
       return res.status(400).json({ error: "outcome must be 'placed', 'failed', or 'skipped'" });
     }
     const result = await worker.report(req.body);
-    if (!result.ok) return res.status(404).json(result);
+    if (!result.ok) {
+      const status = { not_found: 404, stale_lease: 409 }[result.code] || 400;
+      return res.status(status).json(result);
+    }
     res.json(result);
   } catch (err) { next(err); }
 });
