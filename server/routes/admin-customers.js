@@ -1337,10 +1337,11 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
           'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at',
         ),
       db('messages')
-        .where({ customer_id: customer.id })
-        .whereIn('channel', ['sms', 'voice'])
-        .orderBy('created_at', 'desc')
-        .select('channel', 'direction', 'created_at', 'body')
+        .join('conversations', 'messages.conversation_id', 'conversations.id')
+        .where('conversations.customer_id', customer.id)
+        .whereIn('messages.channel', ['sms', 'voice'])
+        .orderBy('messages.created_at', 'desc')
+        .select('messages.channel', 'messages.direction', 'messages.created_at', 'messages.body')
         .first()
         .catch(() => null),
     ]);

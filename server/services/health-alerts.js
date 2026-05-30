@@ -310,7 +310,7 @@ async function executeAction(alertId, actionIndex) {
         customer_id: customer.id,
         interaction_type: 'scheduled_call',
         status: 'pending',
-        notes: action.notes || `Health alert follow-up call for ${customer.first_name} ${customer.last_name}`,
+        body: action.notes || `Health alert follow-up call for ${customer.first_name} ${customer.last_name}`,
         created_at: new Date(),
       });
       result = { success: true, message: `Call task created for ${customer.first_name} ${customer.last_name}` };
@@ -333,7 +333,7 @@ async function executeAction(alertId, actionIndex) {
         await db('customer_interactions').insert({
           customer_id: customer.id,
           interaction_type: 'retention_discount',
-          notes: `$${discountAmount} retention credit — Health alert #${alertId}`,
+          body: `$${discountAmount} retention credit — Health alert #${alertId}`,
           created_at: new Date(),
         }).catch(() => {});
         result = { success: true, message: `$${discountAmount} retention credit noted for ${customer.first_name} (manual apply needed)` };
