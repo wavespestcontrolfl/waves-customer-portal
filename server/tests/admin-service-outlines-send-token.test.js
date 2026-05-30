@@ -96,10 +96,12 @@ describe('admin service outline sends', () => {
         customer_name: 'Ava',
       }),
     });
+    const secondaryTokenQuery = chain();
 
     db.mockImplementation((table) => {
       if (table === 'service_outline_packets') return packetQuery;
       if (table === 'estimates') return estimateQuery;
+      if (table === 'service_outline_public_tokens') return secondaryTokenQuery;
       return chain();
     });
     sendCustomerMessage.mockRejectedValueOnce(new Error('provider unavailable'));
@@ -115,7 +117,12 @@ describe('admin service outline sends', () => {
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(packetQuery.update).not.toHaveBeenCalled();
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(secondaryTokenQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      packet_id: 'packet-1',
+      token_hash: expect.any(String),
+      token_last_four: expect.any(String),
+      expires_at: expect.any(Date),
+    }));
   });
 
   test('escapes estimate customer name in service outline email HTML', async () => {
@@ -224,5 +231,7 @@ describe('admin service outline sends', () => {
       token_last_four: expect.any(String),
       expires_at: expect.any(Date),
     }));
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(secondaryTokenQuery.insert.mock.invocationCallOrder[0]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
   });
 });

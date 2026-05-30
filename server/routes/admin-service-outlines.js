@@ -438,17 +438,45 @@ router.post('/:id/send', async (req, res, next) => {
     const canReuseToken = requestedToken && packet.token_hash && hashToken(requestedToken) === packet.token_hash;
     const token = canReuseToken ? requestedToken : createPublicToken();
     const publicUrl = publicUrlForToken(token);
-    const shortUrl = sendSms ? await shortenOrPassthrough(publicUrl, {
-      entityType: 'service_outline',
-      entityId: packet.id,
-      customerId: packet.customer_id || estimate.customer_id || null,
-    }) : publicUrl;
+    const tokenExpiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 45);
+    let tokenPersisted = !!canReuseToken;
+    async function persistGeneratedTokenBeforeDelivery() {
+      if (tokenPersisted) return;
+      await db.transaction(async (trx) => {
+        if (!packet.token_hash) {
+          await trx('service_outline_packets')
+            .where({ id: packet.id })
+            .update({
+              token_hash: hashToken(token),
+              token_last_four: token.slice(-4),
+              token_created_at: trx.fn.now(),
+              expires_at: tokenExpiresAt,
+              updated_at: trx.fn.now(),
+            });
+        } else {
+          await trx('service_outline_public_tokens').insert({
+            packet_id: packet.id,
+            token_hash: hashToken(token),
+            token_last_four: token.slice(-4),
+            token_created_at: trx.fn.now(),
+            expires_at: tokenExpiresAt,
+          });
+        }
+      });
+      tokenPersisted = true;
+    }
     const outcomes = {};
 
     if (sendSms) {
       if (!estimate.customer_phone) {
         outcomes.sms = { ok: false, error: 'No phone on estimate' };
       } else {
+        await persistGeneratedTokenBeforeDelivery();
+        const shortUrl = await shortenOrPassthrough(publicUrl, {
+          entityType: 'service_outline',
+          entityId: packet.id,
+          customerId: packet.customer_id || estimate.customer_id || null,
+        });
         const smsBody = `Waves: Your lawn care program overview is ready: ${shortUrl} Reply STOP to opt out.`;
         outcomes.sms = await sendCustomerMessage({
           to: estimate.customer_phone,
@@ -480,6 +508,7 @@ router.post('/:id/send', async (req, res, next) => {
       } else if (!sendgrid.isConfigured()) {
         outcomes.email = { ok: false, error: 'SendGrid is not configured' };
       } else {
+        await persistGeneratedTokenBeforeDelivery();
         const title = packet.title || 'Your Waves Lawn Care Program Overview';
         const greetingName = escapeHtml(estimate.customer_name || 'there');
         const escapedPublicUrl = escapeHtml(publicUrl);
@@ -507,27 +536,10 @@ router.post('/:id/send', async (req, res, next) => {
         sent_method: hasSuccess ? method : packet.sent_method,
         updated_at: trx.fn.now(),
       };
-      if (hasSuccess && !canReuseToken && !packet.token_hash) {
-        Object.assign(packetUpdate, {
-          token_hash: hashToken(token),
-          token_last_four: token.slice(-4),
-          token_created_at: trx.fn.now(),
-          expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 45),
-        });
-      }
       const [row] = await trx('service_outline_packets')
         .where({ id: packet.id })
         .update(packetUpdate)
         .returning('*');
-      if (hasSuccess && !canReuseToken && packet.token_hash) {
-        await trx('service_outline_public_tokens').insert({
-          packet_id: packet.id,
-          token_hash: hashToken(token),
-          token_last_four: token.slice(-4),
-          token_created_at: trx.fn.now(),
-          expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 45),
-        });
-      }
       if (sendSms) await logEvent(trx, row, 'sent_sms', req, outcomes.sms || {});
       if (sendEmail) await logEvent(trx, row, 'sent_email', req, outcomes.email || {});
       if (!hasSuccess) await logEvent(trx, row, 'failed', req, outcomes);
