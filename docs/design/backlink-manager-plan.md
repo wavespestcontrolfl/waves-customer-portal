@@ -242,24 +242,26 @@ Lease expiry: a sweep returns `claimed_at` older than N hours back to `prospect`
 
 ---
 
-## 6. Strategy agent — feed the board (the brain)
+## 6. Strategy agent — feed the board (the brain) — **SHIPPED (M2)**
 
-The existing `waves-backlink-strategist` already runs audit → gap → discovery → queue →
-outreach-ideas → report. Give it the board as an output target. Two new tools, added to the
-`switch` in `server/services/seo/backlink-strategy-tools.js` and declared in
-`backlink-strategy-agent-config.js`:
+The existing `waves-backlink-strategist` runs audit → gap → discovery → queue → outreach-ideas
+→ report. M2 gives it the board as an output target. Two tools added to the `switch` in
+`server/services/seo/backlink-strategy-tools.js` and declared in `backlink-strategy-agent-config.js`:
 
 ```
-create_link_prospect  → insert into seo_link_prospects (target, target_page,
-                         anchor_planned, link_type, priority, source='strategy_agent').
-                         De-dupes on (target_domain, target_page).
-list_prospects(status) → read board slice for the agent's situational awareness
-                         (e.g. "what's placed-but-not-indexed → re-pitch / re-submit").
+create_link_prospects  → batch insert into seo_link_prospects (target_domain/url, target_page,
+                         anchor_planned, link_type, priority, domain_rating, notes;
+                         source='strategy_agent'). De-dupes on (target_domain, target_page).
+list_prospects(status) → read board slice for situational awareness (called FIRST to avoid
+                         dupes; finds re-work like "live but not indexed" / "lost → re-pitch").
 ```
 
-System-prompt addendum: "End each cycle by writing concrete prospects to the board via
-`create_link_prospect`, not just prose recommendations. Respect the quality gates
-(DA>15, dofollow preferred, no PBN/farm/adult/gambling)."
+(Tool is plural/batch — `create_link_prospects` — matching the existing `add_targets_to_queue`
+convention, so the agent writes many prospects in one call.)
+
+System-prompt addendum (shipped): the agent must `list_prospects` first, then `create_link_prospects`
+for the higher-value lanes (editorial / resource / guest_post / HARO / local partnerships), score
+priority on dual ROI, and keep using `add_targets_to_queue` for bulk Tier 4–5 directory signups.
 
 ---
 
@@ -336,7 +338,7 @@ Env: `HERMES_SERVICE_TOKEN` (claim/report auth), `HERMES_BASE_URL` (if portal ev
 
 - **M1 — Board (no Hermes):** migration + routes + UI + manual add + verifier + GSC indexer.
   Delivers the requested tracker immediately, fed by the strategist + manual entry.
-- **M2 — Strategist feed:** `create_link_prospect` / `list_prospects` tools.
+- **M2 — Strategist feed:** ✅ SHIPPED — `create_link_prospects` / `list_prospects` tools.
 - **M3 — Hermes hands:** claim/report contract + Hermes deployment + approval-gated outreach.
 - **M4 — Cutover:** retire Playwright worker per §11.
 

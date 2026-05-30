@@ -37,6 +37,11 @@ QUALITY GATES:
 
 EDITORIAL OUTREACH: Look for SWFL news (Bradenton Herald, Sarasota Magazine, SRQ), community blogs, and seasonal angles (hurricane prep, termite swarms, summer pest guides).
 
+OUTPUT TO THE PROSPECT BOARD: Your discoveries must land as concrete, trackable prospects — not just prose in the report. Each cycle:
+1. Call list_prospects first to see what's already on the board (avoid duplicates; find re-work).
+2. Use create_link_prospects for the higher-value lanes — editorial, resource/partner pages, guest posts, HARO, and local business partnerships (real estate / WDO, property management, complementary home services). Set target_page to the most relevant Waves money page, plus link_type and priority. Score priority on dual ROI (link value + lead value): a real-estate/WDO vendor page outranks a generic directory at similar DR.
+3. Keep using add_targets_to_queue for bulk directory/citation signups (Tier 4–5) — those are the auto-signup lane, separate from the board.
+
 Save a strategy report at the end with targets added, gaps found, and editorial recommendations.`,
 
   tools: [
@@ -161,6 +166,52 @@ Save a strategy report at the end with targets added, gaps found, and editorial 
       input_schema: {
         type: 'object',
         properties: {
+          limit: { type: 'number', description: 'Max results (default 50)' },
+        },
+      },
+    },
+
+    // ── Link prospect board (outbound pipeline) ─────────────────
+
+    {
+      type: 'custom',
+      name: 'create_link_prospects',
+      description: `Write concrete link-building targets to the outbound prospect board (seo_link_prospects), where they are tracked through their lifecycle (prospect → contacted → placed → live → indexed) and auto-verified. Use this for the higher-value lanes — editorial, resource/partner pages, guest posts, HARO, and local business partnerships (real estate, property management, complementary home services) — NOT bulk directory signups (those go to add_targets_to_queue). Deduplicates on (target_domain, target_page); existing prospects are skipped. Each prospect needs a target_page (the Waves money page to link to). Returns counts added/skipped.`,
+      input_schema: {
+        type: 'object',
+        properties: {
+          prospects: {
+            type: 'array',
+            description: 'Link targets to add to the board',
+            items: {
+              type: 'object',
+              properties: {
+                target_domain: { type: 'string', description: 'Domain where the link will live (e.g., "bradentonherald.com"). Provide this or target_url.' },
+                target_url: { type: 'string', description: 'Specific page where the link will live, if known' },
+                target_page: { type: 'string', description: 'REQUIRED — the Waves money page being linked to (e.g., "https://wavespestcontrol.com/wdo-inspection/")' },
+                anchor_planned: { type: 'string', description: 'Planned anchor text' },
+                link_type: { type: 'string', description: 'editorial | resource | guest_post | haro | directory | citation | social' },
+                priority: { type: 'string', description: 'high | medium | low' },
+                domain_rating: { type: 'number', description: 'Estimated domain rating, if known' },
+                notes: { type: 'string', description: 'Outreach angle / context' },
+              },
+              required: ['target_page'],
+            },
+          },
+        },
+        required: ['prospects'],
+      },
+    },
+
+    {
+      type: 'custom',
+      name: 'list_prospects',
+      description: `Read the outbound prospect board for situational awareness — what has already been added and where it sits in the pipeline. Use BEFORE creating prospects to avoid duplicates, and to find re-work (e.g. status "live" but not indexed, or "lost" to re-pitch). Returns status counts plus a prioritized slice.`,
+      input_schema: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', description: 'Filter by status: prospect, contacted, negotiating, placed, live, indexed, lost, rejected' },
+          link_type: { type: 'string', description: 'Filter by link type' },
           limit: { type: 'number', description: 'Max results (default 50)' },
         },
       },
