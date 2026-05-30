@@ -277,16 +277,6 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
         marginBottom: 10,
       }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{
-            fontSize: 12,
-            color: ESTIMATE_MUTED,
-            letterSpacing: '0.12em',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-            marginBottom: 6,
-          }}>
-            {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
-          </div>
           <h2 style={{
             fontFamily: FONTS.serif,
             fontSize: 28,
@@ -299,6 +289,25 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
             {intelligence.title || copy?.aiTitle || 'Waves AI reviewed your property before pricing this estimate'}
           </h2>
         </div>
+        {/* Blue pill badge — mirrors the server-rendered estimate's
+            .intelligence-badge (background #E3F5FD / color #065A8C / pill).
+            Sits opposite the title in the flex header, exactly like the SSR. */}
+        <span style={{
+          flex: 'none',
+          alignSelf: 'flex-start',
+          padding: '6px 10px',
+          borderRadius: 999,
+          background: '#E3F5FD',
+          color: '#065A8C',
+          fontSize: 12,
+          fontWeight: 800,
+          lineHeight: 1,
+          letterSpacing: 0,
+          textTransform: 'uppercase',
+          whiteSpace: 'nowrap',
+        }}>
+          {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
+        </span>
       </div>
 
       <p style={{
