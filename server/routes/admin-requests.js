@@ -118,7 +118,21 @@ router.patch('/:id', async (req, res, next) => {
     if (value.adminNotes !== undefined) patch.admin_notes = stripHtml(value.adminNotes);
     if (value.assignedTechnicianId !== undefined) patch.assigned_technician_id = value.assignedTechnicianId;
 
-    const [updated] = await db('service_requests').where({ id: req.params.id }).update(patch).returning('*');
+    // For a status transition, gate the write on the status we observed so two
+    // concurrent PATCHes to the same target can't both "win": only the writer
+    // that actually flips the status from `existing.status` updates. The loser
+    // matches zero rows, so it never re-stamps updated_at (which would change
+    // the sender's idempotency key) nor sends a duplicate customer email.
+    const updateQuery = db('service_requests').where({ id: req.params.id });
+    if (statusChanged) updateQuery.where({ status: existing.status });
+    const [updated] = await updateQuery.update(patch).returning('*');
+
+    if (statusChanged && !updated) {
+      // Another writer transitioned this request first; surface the current
+      // row without re-notifying.
+      const current = await db('service_requests').where({ id: req.params.id }).first();
+      return res.json({ request: current, statusChanged: false });
+    }
 
     if (statusChanged) {
       // Notify the customer their request moved forward. Fire-and-forget like

@@ -166,6 +166,34 @@ describe('admin requests routes', () => {
     });
   });
 
+  test('concurrent status change that loses the race does not re-notify', async () => {
+    // A second writer reads status "new" but another writer already flipped it,
+    // so the conditional update matches zero rows. We re-read and report no
+    // change instead of sending a duplicate email.
+    const existing = { id: 'req-1', customer_id: 'cust-1', status: 'new', resolved_at: null };
+    const current = { ...existing, status: 'acknowledged' };
+    setDb({
+      service_requests: [
+        makeChain({ first: existing }),     // initial read sees 'new'
+        makeChain({ returning: [] }),        // conditional update matches nothing
+        makeChain({ first: current }),       // re-read shows the winner's row
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests/req-1`, {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'acknowledged' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.statusChanged).toBe(false);
+      expect(body.request).toEqual(current);
+      expect(AccountMembershipEmail.sendRequestUpdated).not.toHaveBeenCalled();
+    });
+  });
+
   test('404 when the request does not exist', async () => {
     setDb({ service_requests: [makeChain({ first: undefined })] });
 
