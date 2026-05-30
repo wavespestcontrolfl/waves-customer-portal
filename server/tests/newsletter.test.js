@@ -32,6 +32,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
+const { pickSurvivor, isCleanCrossSourceCluster, isAutoMergeableCluster, computeSurvivorBackfill } = require('../services/event-dedup');
 const { isEligibleForFreshDigest, cityToZone, weekLockKey } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
@@ -1337,6 +1338,138 @@ describe('newsletter GBP per-location social copy', () => {
 // findDuplicateClusters suggests merges conservatively (same normalized
 // title + ET day + city); rewriteCalendarEventIds keeps planned calendars
 // pointing at the survivor after a merge.
+
+describe('event-dedup pickSurvivor', () => {
+  const ev = (id, o = {}) => ({ id, source_priority_tier: null, image_url: null, event_url: null, pulled_at: null, ...o });
+
+  test('keeps the highest-priority source (lowest priority_tier)', () => {
+    const s = pickSurvivor([ev('a', { source_priority_tier: 3 }), ev('b', { source_priority_tier: 1 }), ev('c', { source_priority_tier: 2 })]);
+    expect(s.id).toBe('b');
+  });
+
+  test('a numbered tier beats a null tier (nulls last)', () => {
+    const s = pickSurvivor([ev('a', { source_priority_tier: null, image_url: 'x' }), ev('b', { source_priority_tier: 4 })]);
+    expect(s.id).toBe('b');
+  });
+
+  test('on equal tier, the more complete row wins (image > url)', () => {
+    const s = pickSurvivor([ev('a', { source_priority_tier: 2, event_url: 'u' }), ev('b', { source_priority_tier: 2, image_url: 'i' })]);
+    expect(s.id).toBe('b');
+  });
+
+  test('on equal tier + completeness, the earliest-pulled row wins', () => {
+    const s = pickSurvivor([
+      ev('a', { source_priority_tier: 2, pulled_at: '2026-05-10T00:00:00Z' }),
+      ev('b', { source_priority_tier: 2, pulled_at: '2026-05-02T00:00:00Z' }),
+    ]);
+    expect(s.id).toBe('b');
+  });
+
+  test('a curated (approved/featured) row beats a higher-priority, more-complete PENDING duplicate', () => {
+    const s = pickSurvivor([
+      ev('a', { admin_status: 'approved', source_priority_tier: 5 }),
+      ev('b', { admin_status: 'pending', source_priority_tier: 1, image_url: 'i', event_url: 'u' }),
+    ]);
+    expect(s.id).toBe('a'); // never drop the human-curated row from the digest
+  });
+
+  test('among equally-curated rows, falls back to priority tier', () => {
+    const s = pickSurvivor([
+      ev('a', { admin_status: 'approved', source_priority_tier: 3 }),
+      ev('b', { admin_status: 'approved', source_priority_tier: 1 }),
+    ]);
+    expect(s.id).toBe('b');
+  });
+
+  test('a featured row beats an approved duplicate from a higher-priority source', () => {
+    const s = pickSurvivor([
+      ev('a', { admin_status: 'approved', source_priority_tier: 1 }),
+      ev('b', { admin_status: 'featured', source_priority_tier: 5 }),
+    ]);
+    expect(s.id).toBe('b'); // explicit 'featured' curation wins over higher-priority 'approved'
+  });
+});
+
+describe('event-dedup isCleanCrossSourceCluster', () => {
+  const ev = (id, source_id) => ({ id, source_id });
+
+  test('true for one row per source across 2+ sources', () => {
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's2')])).toBe(true);
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's2'), ev('c', 's3')])).toBe(true);
+  });
+
+  test('false for a single source (not cross-source)', () => {
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's1')])).toBe(false);
+  });
+
+  test('false when any source contributes 2+ rows (e.g. separate showtimes)', () => {
+    // s1 has two same-day rows + s2 has one — could be legit distinct sessions,
+    // so the whole cluster is left for manual review, never auto-merged.
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's1'), ev('c', 's2')])).toBe(false);
+  });
+
+  test('false for empty / single-element input', () => {
+    expect(isCleanCrossSourceCluster([])).toBe(false);
+    expect(isCleanCrossSourceCluster([ev('a', 's1')])).toBe(false);
+  });
+});
+
+describe('event-dedup isAutoMergeableCluster', () => {
+  const T = '2026-06-10T23:00:00Z';
+  const ev = (id, o = {}) => ({ id, source_id: 's1', venue_name: 'Van Wezel', start_at: T, ...o });
+
+  test('true when ≥2 sources agree on venue AND exact start time', () => {
+    expect(isAutoMergeableCluster([ev('a', { source_id: 's1' }), ev('b', { source_id: 's2' })])).toBe(true);
+  });
+
+  test('false when venues differ (e.g. same-title events at different venues)', () => {
+    expect(isAutoMergeableCluster([
+      ev('a', { source_id: 's1', venue_name: 'Venue A' }),
+      ev('b', { source_id: 's2', venue_name: 'Venue B' }),
+    ])).toBe(false);
+  });
+
+  test('false when start times differ (e.g. matinee vs evening)', () => {
+    expect(isAutoMergeableCluster([
+      ev('a', { source_id: 's1', start_at: '2026-06-10T19:00:00Z' }),
+      ev('b', { source_id: 's2', start_at: '2026-06-10T23:00:00Z' }),
+    ])).toBe(false);
+  });
+
+  test('false when any row has a blank/null venue', () => {
+    expect(isAutoMergeableCluster([ev('a', { source_id: 's1', venue_name: null }), ev('b', { source_id: 's2' })])).toBe(false);
+  });
+
+  test('false when not a clean cross-source cluster (single source)', () => {
+    expect(isAutoMergeableCluster([ev('a', { source_id: 's1' }), ev('b', { source_id: 's1' })])).toBe(false);
+  });
+});
+
+describe('event-dedup computeSurvivorBackfill', () => {
+  test('copies event_url onto a survivor that lacks it (keeps the event eligible)', () => {
+    const survivor = { id: 'a', event_url: null, image_url: 'i' };
+    const losers = [{ id: 'b', event_url: 'https://x/e', image_url: null }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({ event_url: 'https://x/e' });
+  });
+
+  test('copies both event_url and image_url when both missing', () => {
+    const survivor = { id: 'a', event_url: null, image_url: null };
+    const losers = [{ id: 'b', event_url: 'https://x/e' }, { id: 'c', image_url: 'https://x/i' }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({ event_url: 'https://x/e', image_url: 'https://x/i' });
+  });
+
+  test('no backfill when the survivor already has the fields', () => {
+    const survivor = { id: 'a', event_url: 'https://s/e', image_url: 'https://s/i' };
+    const losers = [{ id: 'b', event_url: 'https://x/e', image_url: 'https://x/i' }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({});
+  });
+
+  test('no backfill when no loser has the missing field', () => {
+    const survivor = { id: 'a', event_url: null, image_url: null };
+    const losers = [{ id: 'b', event_url: null, image_url: null }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({});
+  });
+});
 
 describe('event normalizeEventTitle', () => {
   test('strips punctuation, case, and noise words', () => {
