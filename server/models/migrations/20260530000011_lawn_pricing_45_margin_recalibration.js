@@ -93,9 +93,9 @@ async function insertChangelog(knex) {
 
   const identity = {
     version_from: 'v4.3',
-    version_to: 'v4.3-lawn-45-floor',
+    version_to: 'v4.3',
     changed_by: 'codex-2026-05-30',
-    category: 'pricing',
+    category: 'rule',
     summary: 'Recalibrate recurring lawn pricing to a 45% fully loaded floor.',
   };
 
@@ -128,9 +128,9 @@ async function removeChangelog(knex) {
   await knex('pricing_changelog')
     .where({
       version_from: 'v4.3',
-      version_to: 'v4.3-lawn-45-floor',
+      version_to: 'v4.3',
       changed_by: 'codex-2026-05-30',
-      category: 'pricing',
+      category: 'rule',
       summary: 'Recalibrate recurring lawn pricing to a 45% fully loaded floor.',
     })
     .del();
