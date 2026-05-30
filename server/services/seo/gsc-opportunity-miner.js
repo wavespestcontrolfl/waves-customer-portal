@@ -730,6 +730,10 @@ class GscOpportunityMiner {
       rows = await db('seo_llm_mentions as m')
         .leftJoin('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
         .where('m.check_date', '>=', since)
+        // Honor the admin toggle: ignore history from managed queries that have
+        // been deactivated (don't enqueue work the disable was meant to stop).
+        // Unmanaged/legacy rows (no query_id) have no toggle, so keep them.
+        .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
         .select(
           'm.query', 'm.waves_mentioned', 'm.check_date', 'm.competitors_mentioned',
           'q.city as q_city', 'q.service as q_service'
