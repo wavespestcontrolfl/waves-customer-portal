@@ -122,6 +122,14 @@ describe('name heuristic (single first name after signal — call transcripts)',
     expect(text).toBe('this is great, thanks');
     expect(confidence).toBe('high');
   });
+  test('a leading greeting does not consume the real intro keyword ("Hi, My name is John")', () => {
+    // Greetings are excluded as triggers so "Hi" cannot grab "My" and leave
+    // the real first name "John" exposed.
+    const { text } = redact('Hi, My name is John, calling about roaches');
+    expect(text).toContain('My name is [name]');
+    expect(text).not.toContain('John');
+    expect(text).not.toContain('Hi [name]');
+  });
 });
 
 describe('name heuristic (standalone pair, no marker required)', () => {

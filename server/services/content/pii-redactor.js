@@ -71,11 +71,17 @@ const STANDALONE_NAME_PAIR = /\b([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,20})\b/g;
 
 // Single first name after a STRONG self-introduction signal. The pair
 // detector above only fires on first+last; call transcripts are full of
-// bare first-name intros ("Hi, this is Anthony", "my name is John") that
+// bare first-name intros ("this is Anthony", "my name is John") that
 // have no last name and would otherwise survive. The signal word is strong
 // enough evidence to redact a lone capitalized token (allowlist still
 // protects owner/staff/place/brand names like "this is Adam").
-const NAME_SIGNAL_SINGLE = /\b([Mm]y name is|[Tt]his is|[Ii]'?m|[Ii] am|[Nn]ame:|[Ii]t'?s|[Hh]i|[Hh]ello|[Hh]ey)[,]?\s+([A-Z][a-z]{1,15})\b/g;
+//
+// Bare greetings (hi/hello/hey) are deliberately EXCLUDED: they are weak,
+// ambiguous signals (often addressing the agent or preceding the real
+// intro), and including them let a greeting consume the wrong token — e.g.
+// "Hi, My name is John" matched "Hi, My" and left the real name "John".
+// "Hi, this is Anthony" is still covered by the "this is" signal.
+const NAME_SIGNAL_SINGLE = /\b([Mm]y name is|[Tt]his is|[Ii]'?m|[Ii] am|[Nn]ame:|[Ii]t'?s)[,]?\s+([A-Z][a-z]{1,15})\b/g;
 
 // Words that look like names but are common false positives in this
 // domain (pest names, neighborhoods, products, businesses, etc.).
