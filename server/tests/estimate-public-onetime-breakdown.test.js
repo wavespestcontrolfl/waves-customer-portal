@@ -4137,7 +4137,7 @@ describe('public estimate one-time breakdown', () => {
     expect(monthlyForRecurringParts(parts, 'Silver', 13.34)).toBe(225.66);
   });
 
-  test('Lawn V2 recurring rows count for tier but do not receive public percent discounts', () => {
+  test('Lawn V2 recurring rows count for tier and receive public percent discounts', () => {
     const parts = resolveRecurringMonthlyParts({
       monthly_total: 110.3,
       waveguard_tier: 'Silver',
@@ -4167,14 +4167,14 @@ describe('public estimate one-time breakdown', () => {
 
     expect(parts).toEqual(expect.objectContaining({
       baseMonthly: 119,
-      discountableBaseMonthly: 50,
-      nonDiscountableMonthly: 69,
+      discountableBaseMonthly: 119,
+      nonDiscountableMonthly: 0,
       source: 'summed',
     }));
-    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(114);
+    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(107.1);
   });
 
-  test('public recurring services inherit Lawn V2 discount exclusion from engine line items', () => {
+  test('public recurring services upgrade stale Lawn V2 discount exclusions from engine line items', () => {
     const supplemented = withSupplementedRecurringServices({
       result: {
         lineItems: [
@@ -4182,7 +4182,9 @@ describe('public estimate one-time breakdown', () => {
             service: 'lawn_care',
             label: 'Lawn Care',
             annual: 828,
+            annualAfterDiscount: 745.2,
             monthly: 69,
+            monthlyAfterDiscount: 62.1,
             perApp: 92,
             visitsPerYear: 9,
             discount: {
@@ -4208,15 +4210,19 @@ describe('public estimate one-time breakdown', () => {
 
     const lawn = supplemented.result.recurring.services.find((svc) => svc.service === 'lawn_care');
     expect(lawn).toMatchObject({
-      discountable: false,
-      waveGuardDiscountEligible: false,
+      mo: 69,
+      monthly: 69,
+      annual: 828,
+      discountable: true,
+      discountEligible: true,
+      waveGuardDiscountEligible: true,
       waveGuardTierEligible: true,
       countsTowardWaveGuardTier: true,
     });
     expect(lawn.discount).toMatchObject({
-      discountable: false,
-      policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+      discountable: true,
     });
+    expect(lawn.discount.policy).toBeUndefined();
   });
 
   test('preference recalculation combines supplemented services with saved base when service rows are missing', () => {

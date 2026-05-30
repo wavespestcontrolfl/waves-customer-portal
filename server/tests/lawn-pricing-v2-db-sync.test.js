@@ -60,7 +60,7 @@ describe('Lawn Pricing V2 DB sync', () => {
     expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['standard', 'enhanced', 'premium']);
   });
 
-  test('DB-loaded estimate keeps Lawn V2 net floor non-discountable while qualifying for WaveGuard', () => {
+  test('DB-loaded estimate applies WaveGuard discounts to Lawn V2 while qualifying for WaveGuard', () => {
     const estimate = PricingEngine.generateEstimate({
       homeSqFt: 2000,
       stories: 1,
@@ -81,12 +81,13 @@ describe('Lawn Pricing V2 DB sync', () => {
       activeServices: ['pest_control', 'lawn_care'],
     });
     expect(lawn.annual).toBe(828);
-    expect(lawn.annualAfterDiscount).toBe(828);
+    expect(lawn.annualAfterDiscount).toBe(745.2);
+    expect(lawn.monthlyAfterDiscount).toBe(62.1);
     expect(lawn.discount).toMatchObject({
-      discountable: false,
+      discountable: true,
       requestedDiscountPercent: 0.10,
-      appliedDiscountPercent: 0,
-      policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+      appliedDiscountPercent: 0.10,
+      effectiveDiscount: 0.10,
     });
   });
 });

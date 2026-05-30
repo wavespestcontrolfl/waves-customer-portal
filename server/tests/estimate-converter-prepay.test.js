@@ -76,7 +76,7 @@ describe('estimate converter annual prepay amount', () => {
     })).toBe(true);
   });
 
-  test('annual prepay floor includes non-discountable Lawn V2 net floor lines', () => {
+  test('annual prepay floor excludes discountable Lawn V2 lines', () => {
     const estimateData = {
       lineItems: [
         {
@@ -97,7 +97,7 @@ describe('estimate converter annual prepay amount', () => {
       ],
     };
 
-    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(828);
+    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(0);
   });
 
   test('annual prepay floor reads public quote engineResult line items and annual aliases', () => {
@@ -121,6 +121,6 @@ describe('estimate converter annual prepay amount', () => {
       },
     };
 
-    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(828);
+    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(0);
   });
 });

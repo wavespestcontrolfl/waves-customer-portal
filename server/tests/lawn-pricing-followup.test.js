@@ -772,7 +772,7 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.selected.marketAnnual).toBeGreaterThan(lawn.annual);
   });
 
-  test('Lawn V2 is net floor pricing and does not receive WaveGuard percent discounts', () => {
+  test('Lawn V2 receives WaveGuard percent discounts', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4250,
       services: {
@@ -788,17 +788,17 @@ describe('lawn pricing production follow-up', () => {
       activeServices: ['pest_control', 'lawn_care'],
     });
     expect(lawn.annual).toBe(828);
-    expect(lawn.annualAfterDiscount).toBe(828);
+    expect(lawn.annualAfterDiscount).toBe(745.2);
+    expect(lawn.monthlyAfterDiscount).toBe(62.1);
     expect(lawn.discount).toMatchObject({
-      discountable: false,
+      discountable: true,
       requestedDiscountPercent: 0.10,
-      appliedDiscountPercent: 0,
-      effectiveDiscount: 0,
-      policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+      appliedDiscountPercent: 0.10,
+      effectiveDiscount: 0.10,
     });
   });
 
-  test('manual recurring discounts exclude Lawn V2 net floor pricing', () => {
+  test('manual recurring discounts include WaveGuard-discounted Lawn V2 pricing', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4250,
       services: {
@@ -809,10 +809,11 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    expect(lawn.annualAfterDiscount).toBe(828);
-    expect(estimate.summary.manualDiscount.discountableBase).toBe(421.2);
-    expect(estimate.summary.manualDiscount.amount).toBe(42.12);
-    expect(estimate.summary.manualDiscount.excludedServices).toContain('lawn_care_enhanced');
+    expect(lawn.annualAfterDiscount).toBe(745.2);
+    expect(estimate.summary.manualDiscount.discountableBase).toBe(1166.4);
+    expect(estimate.summary.manualDiscount.amount).toBe(116.64);
+    expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
+    expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
   });
 
   test('requesting hidden tier without includeHiddenTiers falls back to enhanced', () => {
