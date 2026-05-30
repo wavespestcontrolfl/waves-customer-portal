@@ -1946,6 +1946,9 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
 //                  sending — lets the UI confirm the figure first.
 // ---------------------------------------------------------------------------
 router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
+  // Tracks an invoice claimed as 'sending' so any abort (a throw before the
+  // normal finalize/restore path) releases it instead of stranding it.
+  let claimedInvoice = null;
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -2021,6 +2024,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (!claimedRows) {
       return res.status(409).json({ error: 'Invoice send already in progress', invoice_id: invoice.id });
     }
+    claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus };
 
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +
@@ -2201,6 +2205,13 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       sent: delivered,
     });
   } catch (err) {
+    // Release the 'sending' claim on any abort so the invoice isn't stranded
+    // (and retries don't 409). No-op if it was already finalized to 'sent'.
+    if (claimedInvoice) {
+      await db('invoices').where({ id: claimedInvoice.id, status: 'sending' })
+        .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
+        .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
+    }
     if (err?.message === 'Invoice not found for this customer') {
       return res.status(404).json({ error: err.message });
     }
