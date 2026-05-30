@@ -47,6 +47,10 @@ function buildToolResultEvent(toolUseId, toolResult, { custom = true } = {}) {
   };
 }
 
+function toolUseIdFromEvent(data = {}) {
+  return data.id || data.custom_tool_use_id || data.tool_use_id;
+}
+
 function sendSessionEvents(sessionId, events) {
   return apiCall('POST', `/sessions/${sessionId}/events`, { events });
 }
@@ -177,16 +181,11 @@ const BacklinkStrategyAgent = {
     let toolsExecuted = [];
     let targetsAdded = 0;
     let gapsFound = 0;
-    let maxIterations = 60; // strategy agent may need lots of tool calls
+    let maxToolCalls = 60; // strategy agent may need lots of tool calls
 
     notify('auditing', 'Agent is auditing the backlink profile...');
 
     for await (const { event, data } of streamSessionEvents(sessionId)) {
-      if (--maxIterations <= 0) {
-        logger.warn(`[backlink-strategy] Hit max iterations for session ${sessionId}`);
-        break;
-      }
-
       if (event === 'assistant' || event === 'text') {
         if (data.text) finalReport += data.text;
         if (data.content) {
@@ -199,9 +198,17 @@ const BacklinkStrategyAgent = {
       const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
       const isLegacyToolUse = event === 'tool_use' || data?.type === 'tool_use';
       if (isCustomToolUse || isLegacyToolUse) {
+        if (--maxToolCalls <= 0) {
+          logger.warn(`[backlink-strategy] Hit max tool calls for session ${sessionId}`);
+          break;
+        }
         const toolName = data.name;
         const toolInput = data.input || {};
-        const toolUseId = data.id;
+        const toolUseId = toolUseIdFromEvent(data);
+        if (!toolUseId) {
+          logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
+          continue;
+        }
 
         const stageMap = {
           get_backlink_dashboard: 'auditing',
@@ -277,4 +284,4 @@ const BacklinkStrategyAgent = {
 };
 
 module.exports = BacklinkStrategyAgent;
-module.exports._test = { buildSessionCreateBody, buildUserMessageEvent, buildToolResultEvent };
+module.exports._test = { buildSessionCreateBody, buildUserMessageEvent, buildToolResultEvent, toolUseIdFromEvent };
