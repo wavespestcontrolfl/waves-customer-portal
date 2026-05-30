@@ -2592,7 +2592,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('/ask');
     expect(html).toContain('ESTIMATE_ASK_TOKEN');
     expect(html).toContain('X-Estimate-Ask-Token');
-    expect(html).not.toContain('class="intelligence-badge"');
+    expect(html).toContain('<span class="intelligence-badge">Waves AI</span>');
     expect(html).toContain('Satellite view of 123 Main St');
     expect(html).toContain('1,800 sq ft');
     expect(html).toContain('<h2 data-mode-only="recurring">Go Waves! Wave Goodbye to Pests!</h2>');
