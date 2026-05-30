@@ -32,6 +32,12 @@ describe('link prospect verifier target matching', () => {
       .toBe('wavespestcontrol.com/wdo-inspection');
   });
 
+  test('source URL reconcile SQL does not contain raw question-mark regex placeholders', () => {
+    expect(_test.SOURCE_URL_COMPARABLE_SQL).not.toContain('?');
+    expect(_test.SOURCE_URL_COMPARABLE_SQL).toContain("'^https://'");
+    expect(_test.SOURCE_URL_COMPARABLE_SQL).toContain("'^http://'");
+  });
+
   test('matches target URLs with true URL boundaries only', () => {
     const expected = 'wavespestcontrol.com/wdo-inspection';
     expect(_test.matchesTargetUrl('wavespestcontrol.com/wdo-inspection?utm=1', expected)).toBe(true);

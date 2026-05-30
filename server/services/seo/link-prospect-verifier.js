@@ -17,6 +17,7 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
+const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
 
 function stripUrl(u) {
   return String(u || '').trim().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
@@ -59,7 +60,7 @@ function backlinkTargetsProspect(link, prospect) {
 async function reconcileFromProfile(prospect) {
   const liveStripped = normalizeComparableUrl(prospect.live_url);
   const rows = await db('seo_backlinks')
-    .whereRaw("regexp_replace(regexp_replace(lower(source_url), '^https?://(www\\.)?', ''), '/+$', '') = ?", [liveStripped.toLowerCase()])
+    .whereRaw(`${SOURCE_URL_COMPARABLE_SQL} = ?`, [liveStripped.toLowerCase()])
     .orderBy('last_checked', 'desc')
     .limit(10);
   return rows.find((row) => backlinkTargetsProspect(row, prospect)) || null;
@@ -179,4 +180,4 @@ async function run({ limit = 200 } = {}) {
 }
 
 module.exports = { run, verifyOne, crawlForLink };
-module.exports._test = { backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl };
+module.exports._test = { backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL };
