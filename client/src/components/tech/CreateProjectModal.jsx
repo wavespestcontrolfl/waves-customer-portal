@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
@@ -286,6 +286,9 @@ export default function CreateProjectModal({
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLabel, setCustomerLabel] = useState(defaultCustomerLabel || '');
   const [selectedCustomer, setSelectedCustomer] = useState(null);
+  // Tracks the most recently requested prefill client so a slow, stale
+  // latest-scheduled-service response can't clobber a newer selection.
+  const prefillCustomerRef = useRef(null);
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -464,9 +467,13 @@ export default function CreateProjectModal({
   // visit since the form otherwise defaults to today.
   async function prefillFromScheduledService(custId) {
     if (!custId) return;
+    prefillCustomerRef.current = custId;
     try {
       const r = await adminFetch(`/admin/customers/${custId}/latest-scheduled-service`);
       const d = await r.json();
+      // Ignore a stale response: if the tech has since picked a different
+      // client, don't overwrite the now-active client's title/date.
+      if (prefillCustomerRef.current !== custId) return;
       const svc = d?.service;
       if (!svc) return;
       if (svc.serviceType) setTitle(prev => (prev && prev.trim()) ? prev : svc.serviceType);
@@ -682,7 +689,7 @@ export default function CreateProjectModal({
                 <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
                 <button
                   type="button"
-                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); }}
+                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; }}
                   style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
                 >Change</button>
               </div>
