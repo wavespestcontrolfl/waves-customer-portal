@@ -30,7 +30,14 @@ function matchesTargetUrl(candidate, expected) {
   if (!candidate || !expected) return false;
   if (candidate === expected) return true;
   if (!candidate.startsWith(expected)) return false;
-  const next = candidate.charAt(expected.length);
+  const rest = candidate.slice(expected.length);
+  // Root/domain-only target (no path, e.g. "wavespestcontrol.com"): accept only
+  // the homepage itself — an optional trailing slash followed by an optional
+  // query/fragment — never a child path. (stripUrl only trims trailing slashes,
+  // so a homepage hit can arrive as ".com/?utm=" or ".com/#form".)
+  if (!expected.includes('/')) return /^\/?(?:[?#].*)?$/.test(rest);
+  // Path target: the next char must be a real URL boundary.
+  const next = rest.charAt(0);
   return next === '/' || next === '?' || next === '#';
 }
 
