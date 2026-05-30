@@ -1373,12 +1373,20 @@ describe('event-dedup pickSurvivor', () => {
     expect(s.id).toBe('a'); // never drop the human-curated row from the digest
   });
 
-  test('among curated rows, still falls back to priority tier', () => {
+  test('among equally-curated rows, falls back to priority tier', () => {
     const s = pickSurvivor([
       ev('a', { admin_status: 'approved', source_priority_tier: 3 }),
-      ev('b', { admin_status: 'featured', source_priority_tier: 1 }),
+      ev('b', { admin_status: 'approved', source_priority_tier: 1 }),
     ]);
     expect(s.id).toBe('b');
+  });
+
+  test('a featured row beats an approved duplicate from a higher-priority source', () => {
+    const s = pickSurvivor([
+      ev('a', { admin_status: 'approved', source_priority_tier: 1 }),
+      ev('b', { admin_status: 'featured', source_priority_tier: 5 }),
+    ]);
+    expect(s.id).toBe('b'); // explicit 'featured' curation wins over higher-priority 'approved'
   });
 });
 

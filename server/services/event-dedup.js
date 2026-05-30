@@ -101,15 +101,17 @@ async function mergeEvents(primaryId, toMerge, opts = {}) {
 
 /**
  * Choose the survivor of a duplicate cluster:
- *   1. a human-curated row (admin_status approved/featured) over an un-curated
- *      one — so the auto-merge never drops a curated event from the digest in
- *      favor of a pending duplicate (the digest only shows approved/featured);
+ *   1. by curation strength — 'featured' (explicit editorial pick) ahead of
+ *      'approved' ahead of anything un-curated — so the auto-merge never demotes
+ *      a featured event to a merely-approved one, nor drops a curated row in
+ *      favor of a pending duplicate (the digest only shows approved/featured,
+ *      and the approved-ids path orders featured first too);
  *   2. then the highest-priority source (lowest priority_tier; nulls last);
  *   3. then the most complete (image > url);
  *   4. then the earliest-pulled (most established).
  */
 function pickSurvivor(events) {
-  const curatedRank = (e) => (['approved', 'featured'].includes(e.admin_status) ? 0 : 1);
+  const curatedRank = (e) => (e.admin_status === 'featured' ? 0 : e.admin_status === 'approved' ? 1 : 2);
   const completeness = (e) => (e.image_url ? 2 : 0) + (e.event_url ? 1 : 0);
   return [...events].sort((a, b) => {
     const cr = curatedRank(a) - curatedRank(b);
