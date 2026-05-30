@@ -890,6 +890,8 @@ function BacklinksTab() {
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [subTab, setSubTab] = useState("overview");
+  const [llmDash, setLlmDash] = useState(null);
+  const [llmScanning, setLlmScanning] = useState(false);
   const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
@@ -900,6 +902,31 @@ function BacklinksTab() {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  // Lazy-load the answer-engine share-of-voice dashboard the first time the
+  // LLM Mentions sub-tab is opened.
+  useEffect(() => {
+    if (subTab !== "llm" || llmDash) return;
+    adminFetch("/admin/seo/llm-mentions")
+      .then(setLlmDash)
+      .catch(() => {});
+  }, [subTab, llmDash]);
+
+  const handleLlmScan = async () => {
+    if (!canRunSeoActions) return;
+    setLlmScanning(true);
+    try {
+      await adminPost("/admin/seo/llm-mentions/scan", {});
+      const [dash, backlinks] = await Promise.all([
+        adminFetch("/admin/seo/llm-mentions").catch(() => null),
+        adminFetch("/admin/seo/backlinks").catch(() => null),
+      ]);
+      if (dash) setLlmDash(dash);
+      if (backlinks) setData(backlinks);
+    } finally {
+      setLlmScanning(false);
+    }
+  };
 
   const handleScan = async () => {
     if (!canRunSeoActions) return;
@@ -1373,84 +1400,301 @@ function BacklinksTab() {
         </Card>
       )}
 
-      {/* LLM Mentions sub-tab */}
+      {/* LLM Mentions sub-tab — answer-engine visibility (AEO) */}
       {subTab === "llm" && (
-        <Card>
-          {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 12,
-            }}
-          >
-            {" "}
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
-              LLM Mentions ({data.llmStats?.wavesMentioned || 0}/
-              {data.llmStats?.total || 0} mentioning Waves)
-            </div>{" "}
-            {canRunSeoActions && (
-              <button
-                onClick={() => adminPost("/admin/seo/backlinks/llm-mentions", {})}
-                style={{
-                  padding: "4px 10px",
-                  borderRadius: 4,
-                  border: `1px solid ${D.teal}`,
-                  background: "transparent",
-                  color: D.teal,
-                  fontSize: 11,
-                  cursor: "pointer",
-                }}
-              >
-                Check Now
-              </button>
-            )}{" "}
-          </div>
-          {(data.llmMentions || []).length === 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Header + scan */}
+          <Card>
             <div
               style={{
-                fontSize: 13,
-                color: D.muted,
-                padding: 20,
-                textAlign: "center",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
               }}
             >
-              {canRunSeoActions
-                ? 'Click "Check Now" to scan LLM responses for Waves mentions'
-                : "No LLM mentions found."}
-            </div>
-          ) : (
-            (data.llmMentions || []).map((m, i) => (
-              <div
-                key={i}
-                style={{
-                  padding: "8px 12px",
-                  background: D.bg,
-                  borderRadius: 6,
-                  marginBottom: 4,
-                  borderLeft: `3px solid ${m.waves_mentioned ? D.green : D.muted}`,
-                }}
-              >
-                {" "}
-                <div style={{ fontSize: 12, color: D.heading }}>
-                  "{m.query}"
-                </div>{" "}
+              <div>
                 <div
+                  style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                >
+                  Answer-Engine Visibility (AEO)
+                </div>
+                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                  {llmDash
+                    ? `${llmDash.summary?.overallShareOfVoice ?? 0}% share of voice · ${llmDash.summary?.queriesTracked ?? 0} queries · ${(llmDash.summary?.platforms || []).length} engines`
+                    : "Loading…"}
+                </div>
+              </div>
+              {canRunSeoActions && (
+                <button
+                  onClick={handleLlmScan}
+                  disabled={llmScanning}
                   style={{
+                    padding: "4px 10px",
+                    borderRadius: 4,
+                    border: `1px solid ${D.teal}`,
+                    background: "transparent",
+                    color: D.teal,
                     fontSize: 11,
-                    color: m.waves_mentioned ? D.green : D.muted,
+                    cursor: llmScanning ? "default" : "pointer",
+                    opacity: llmScanning ? 0.6 : 1,
                   }}
                 >
-                  {m.waves_mentioned
-                    ? "Yes Waves mentioned"
-                    : "— Not mentioned"}{" "}
-                  · {m.llm_platform} · {m.check_date}
-                </div>{" "}
+                  {llmScanning ? "Scanning…" : "Run Scan"}
+                </button>
+              )}
+            </div>
+          </Card>
+
+          {/* Share of voice by engine */}
+          {llmDash?.byPlatform?.length > 0 && (
+            <Card>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Share of Voice by Engine
               </div>
-            ))
+              {llmDash.byPlatform.map((p) => (
+                <div
+                  key={p.platform}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 6,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 130,
+                      fontSize: 11,
+                      color: D.text,
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    {p.platform.replace(/_/g, " ")}
+                  </div>
+                  <div
+                    style={{
+                      flex: 1,
+                      height: 14,
+                      background: D.bg,
+                      borderRadius: 3,
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        borderRadius: 3,
+                        background:
+                          p.shareOfVoice >= 50
+                            ? D.green
+                            : p.shareOfVoice > 0
+                              ? D.amber
+                              : D.muted,
+                        width: `${p.shareOfVoice}%`,
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      width: 70,
+                      fontSize: 11,
+                      color: D.muted,
+                      textAlign: "right",
+                      fontFamily: MONO,
+                    }}
+                  >
+                    {p.shareOfVoice}% ({p.mentioned}/{p.total})
+                  </div>
+                </div>
+              ))}
+            </Card>
           )}
-        </Card>
+
+          {/* Share-of-voice trend */}
+          {llmDash?.trend?.length > 1 && (
+            <Card>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Share-of-Voice Trend ({llmDash.trend.length}d)
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "flex-end",
+                  gap: 2,
+                  height: 48,
+                }}
+              >
+                {llmDash.trend.map((t) => (
+                  <div
+                    key={t.date}
+                    title={`${t.date}: ${t.shareOfVoice}% (${t.mentioned}/${t.total})`}
+                    style={{
+                      flex: 1,
+                      minWidth: 3,
+                      height: `${Math.max(2, t.shareOfVoice)}%`,
+                      background: D.green,
+                      borderRadius: 2,
+                    }}
+                  />
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Cited Waves pages + competitors */}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Cited Waves Pages
+              </div>
+              {(llmDash?.citedPages || []).length === 0 ? (
+                <div style={{ fontSize: 12, color: D.muted }}>
+                  No owned-domain citations yet.
+                </div>
+              ) : (
+                llmDash.citedPages.map((c, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      fontSize: 11,
+                      padding: "3px 0",
+                      color: D.text,
+                    }}
+                  >
+                    <span
+                      style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {c.url}
+                    </span>
+                    <span style={{ color: D.green, fontFamily: MONO }}>
+                      {c.count}
+                    </span>
+                  </div>
+                ))
+              )}
+            </Card>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Competitors Cited
+              </div>
+              {(llmDash?.competitors || []).length === 0 ? (
+                <div style={{ fontSize: 12, color: D.muted }}>
+                  None detected.
+                </div>
+              ) : (
+                llmDash.competitors.map((c, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      fontSize: 11,
+                      padding: "3px 0",
+                      color: D.text,
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    <span>{c.name}</span>
+                    <span style={{ color: D.amber, fontFamily: MONO }}>
+                      {c.count}
+                    </span>
+                  </div>
+                ))
+              )}
+            </Card>
+          </div>
+
+          {/* Latest by query × engine */}
+          <Card>
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: D.heading,
+                marginBottom: 10,
+              }}
+            >
+              Latest by Query × Engine
+            </div>
+            {(llmDash?.grid || data.llmMentions || []).length === 0 ? (
+              <div
+                style={{
+                  fontSize: 13,
+                  color: D.muted,
+                  padding: 20,
+                  textAlign: "center",
+                }}
+              >
+                {canRunSeoActions
+                  ? 'Click "Run Scan" to probe answer engines for Waves mentions'
+                  : "No LLM mentions found."}
+              </div>
+            ) : (
+              (llmDash?.grid || data.llmMentions || []).map((m, i) => (
+                <div
+                  key={i}
+                  style={{
+                    padding: "8px 12px",
+                    background: D.bg,
+                    borderRadius: 6,
+                    marginBottom: 4,
+                    borderLeft: `3px solid ${m.waves_mentioned ? D.green : D.muted}`,
+                  }}
+                >
+                  <div style={{ fontSize: 12, color: D.heading }}>
+                    "{m.query}"
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: m.waves_mentioned ? D.green : D.muted,
+                    }}
+                  >
+                    {m.waves_mentioned
+                      ? `✓ Mentioned${m.rank_position ? ` (rank ${m.rank_position})` : ""}`
+                      : "— Not mentioned"}{" "}
+                    · {m.llm_platform} · {m.check_date}
+                  </div>
+                </div>
+              ))
+            )}
+          </Card>
+        </div>
       )}
 
       {subTab === "prospects" && <LinkBuildingBoard canRun={canRunSeoActions} />}
