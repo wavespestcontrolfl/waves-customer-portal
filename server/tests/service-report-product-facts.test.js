@@ -22,6 +22,7 @@ function makeOutlineKnex(outlineRow) {
       where: jest.fn(() => chain),
       whereNull: jest.fn(() => chain),
       whereIn: jest.fn(() => chain),
+      whereRaw: jest.fn(() => chain),
       orWhereIn: jest.fn(() => chain),
       select: jest.fn(() => chain),
       orderByRaw: jest.fn(() => chain),
@@ -33,6 +34,26 @@ function makeOutlineKnex(outlineRow) {
     });
     return chain;
   });
+}
+
+function makeOutlineKnexWithChains(outlineRow) {
+  const chains = [];
+  const knex = jest.fn((table) => {
+    expect(table).toBe('service_outline_packets');
+    const chain = {
+      where: jest.fn(() => chain),
+      whereNull: jest.fn(() => chain),
+      whereIn: jest.fn(() => chain),
+      whereRaw: jest.fn(() => chain),
+      select: jest.fn(() => chain),
+      orderByRaw: jest.fn(() => chain),
+      first: jest.fn(() => Promise.resolve(outlineRow)),
+    };
+    chains.push(chain);
+    return chain;
+  });
+  knex.chains = chains;
+  return knex;
 }
 
 describe('service report approved product facts', () => {
@@ -151,5 +172,31 @@ describe('lawn service report outline context', () => {
       title: 'Your Waves Lawn Care Program Overview',
     });
     expect(context.distinctionCopy).toContain('what was actually done today');
+  });
+
+  test('does not link customer fallback outlines created after the service date', async () => {
+    const knex = makeOutlineKnexWithChains({
+      id: 'packet-older',
+      title: 'Existing Lawn Program',
+      status: 'approved',
+      estimate_id: null,
+      turf_type: 'bahia',
+      approved_at: '2026-05-15T14:00:00.000Z',
+      summary_json: { turfLabel: 'Bahia' },
+      content_json: {},
+    });
+
+    const context = await loadLawnProgramOverviewContext(knex, {
+      customer_id: 'customer-1',
+      service_date: '2026-05-16',
+    }, 'lawn');
+
+    expect(context.linked).toBe(true);
+    const fallbackQuery = knex.chains[1];
+    expect(fallbackQuery.where).toHaveBeenCalledWith({ customer_id: 'customer-1' });
+    expect(fallbackQuery.whereRaw).toHaveBeenCalledWith(
+      'COALESCE(sent_at, approved_at, created_at) <= ?',
+      ['2026-05-17T03:59:59.000Z'],
+    );
   });
 });

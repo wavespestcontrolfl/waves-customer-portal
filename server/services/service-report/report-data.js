@@ -1224,6 +1224,60 @@ function outlineIsoDate(value) {
   return date.toISOString().slice(0, 10);
 }
 
+function outlineReportReferenceAt(service = {}, scheduledService = {}, structured = {}, serviceData = {}) {
+  return firstValidTimestamp(
+    service.completed_at,
+    service.actual_end_time,
+    service.check_out_time,
+    service.ended_at,
+    structured.serviceCompletedAt,
+    structured.service_completed_at,
+    serviceData.serviceCompletedAt,
+    serviceData.service_completed_at,
+    scheduledService?.completed_at,
+    scheduledService?.actual_end_time,
+    scheduledService?.check_out_time,
+    service.started_at,
+    service.actual_start_time,
+    service.check_in_time,
+    structured.serviceStartedAt,
+    structured.service_started_at,
+    serviceData.serviceStartedAt,
+    serviceData.service_started_at,
+    scheduledService?.started_at,
+    scheduledService?.actual_start_time,
+    scheduledService?.check_in_time,
+    service.service_date ? `${service.service_date}T23:59:59` : null,
+    scheduledService?.service_date ? `${scheduledService.service_date}T23:59:59` : null,
+  );
+}
+
+function selectOutlinePacketColumns(query) {
+  return query.select(
+    'id',
+    'title',
+    'status',
+    'turf_type',
+    'estimate_id',
+    'sent_at',
+    'approved_at',
+    'created_at',
+    'first_viewed_at',
+    'last_viewed_at',
+    'view_count',
+    'content_library_version',
+    'protocol_version',
+    'product_registry_version',
+    'template_version',
+    'summary_json',
+    'content_json',
+  );
+}
+
+function orderOutlinePacketsByReferenceDate(query) {
+  return query.orderByRaw('COALESCE(sent_at, approved_at, created_at) DESC');
+}
+
 async function loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService = null) {
   if (serviceLine !== 'lawn') return null;
   const fallback = lawnProgramFallbackContext();
@@ -1231,41 +1285,32 @@ async function loadLawnProgramOverviewContext(knex, service, serviceLine, schedu
   const serviceData = parseJsonObject(service.service_data);
   const customerId = service.customer_id || service.customerId || scheduledService?.customer_id || null;
   const estimateIds = outlineCandidateEstimateIds(service, scheduledService, structured, serviceData);
+  const reportReferenceAt = outlineReportReferenceAt(service, scheduledService, structured, serviceData);
   if (!customerId && !estimateIds.length) return fallback;
 
   let row = null;
   try {
-    const query = knex('service_outline_packets');
-    if (!query || typeof query.whereNull !== 'function' || typeof query.whereIn !== 'function') return fallback;
-    row = await query
+    const baseQuery = () => knex('service_outline_packets')
       .where({ service_line: 'lawn_care' })
       .whereNull('revoked_at')
-      .whereIn('status', ['approved', 'sent', 'viewed'])
-      .where(function filterOutlineOwner() {
-        if (customerId) this.where('customer_id', customerId);
-        if (estimateIds.length) this.orWhereIn('estimate_id', estimateIds);
-      })
-      .select(
-        'id',
-        'title',
-        'status',
-        'turf_type',
-        'estimate_id',
-        'sent_at',
-        'approved_at',
-        'created_at',
-        'first_viewed_at',
-        'last_viewed_at',
-        'view_count',
-        'content_library_version',
-        'protocol_version',
-        'product_registry_version',
-        'template_version',
-        'summary_json',
-        'content_json',
-      )
-      .orderByRaw('COALESCE(sent_at, approved_at, created_at) DESC')
-      .first();
+      .whereIn('status', ['approved', 'sent', 'viewed']);
+
+    const probe = baseQuery();
+    if (!probe || typeof probe.whereNull !== 'function' || typeof probe.whereIn !== 'function') return fallback;
+
+    if (estimateIds.length) {
+      row = await orderOutlinePacketsByReferenceDate(selectOutlinePacketColumns(baseQuery()
+        .whereIn('estimate_id', estimateIds)))
+        .first();
+    }
+
+    if (!row && customerId) {
+      let fallbackQuery = baseQuery().where({ customer_id: customerId });
+      if (reportReferenceAt && typeof fallbackQuery.whereRaw === 'function') {
+        fallbackQuery = fallbackQuery.whereRaw('COALESCE(sent_at, approved_at, created_at) <= ?', [reportReferenceAt]);
+      }
+      row = await orderOutlinePacketsByReferenceDate(selectOutlinePacketColumns(fallbackQuery)).first();
+    }
   } catch {
     return fallback;
   }
