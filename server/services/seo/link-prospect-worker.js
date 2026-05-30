@@ -55,12 +55,17 @@ function mapReportToPatch(outcome, body = {}) {
   const release = { claimed_at: null, claimed_by: null, updated_at: now };
 
   if (outcome === 'placed') {
+    // Persist a paid-placement cost (e.g. sponsored post) for funnel ROI; only a
+    // valid non-negative number, else null.
+    const n = Number(body.cost);
+    const cost = body.cost != null && Number.isFinite(n) && n >= 0 ? n : null;
     return {
       ...release,
       status: 'placed',
       live_url: body.live_url || null,
       anchor_text: body.claimed_anchor || null,
       evidence_url: body.evidence_url || null,
+      cost,
       notes: body.notes || null,
     };
   }

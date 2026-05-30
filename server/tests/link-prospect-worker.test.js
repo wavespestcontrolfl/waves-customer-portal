@@ -30,6 +30,14 @@ describe('link prospect worker — report mapping', () => {
     expect(p.notes).toBe('form changed');
   });
 
+  test('placed persists a valid cost and nulls an invalid one', () => {
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: 49.99 }).cost).toBe(49.99);
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: '25' }).cost).toBe(25);
+    expect(mapReportToPatch('placed', { live_url: 'https://x' }).cost).toBeNull();
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: -5 }).cost).toBeNull();
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: 'free' }).cost).toBeNull();
+  });
+
   test('placed without live_url maps to live_url=null (why report() rejects it)', () => {
     // The pure mapper has no I/O context to reject; report() guards this so a
     // placed row never lands with live_url=null (verifier-invisible, unclaimable).
