@@ -15,6 +15,7 @@ const { formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients } = require('../customer-contact');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
+const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
 
 const SERVICE_REPORT_FROM_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_REPORT_FROM_NAME = 'Waves Pest Control';
@@ -106,10 +107,6 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
-}
-
-function legacyTemplateFallbackAllowed() {
-  return process.env.NODE_ENV !== 'production';
 }
 
 function pdfAttachment(filename, buffer) {
@@ -287,12 +284,12 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
   ].filter(Boolean);
 
   const subject = hasActionRequiredFinding(findings)
-    ? 'Your Waves report is ready - one recommendation needs attention'
+    ? 'Your Waves report is ready — one recommendation needs attention'
     : dynamicContext.pressureTrend?.direction === 'down'
-      ? 'Your Waves report is ready - pest pressure is down'
+      ? 'Your Waves report is ready — pest pressure is down'
       : exteriorReadyAt
-        ? `Your Waves report is ready - exterior ready at ${exteriorReadyAt}`
-        : `Your Waves service report - ${serviceLine}${serviceDate ? ` ${serviceDate}` : ''}`;
+        ? `Your Waves report is ready — exterior ready at ${exteriorReadyAt}`
+        : `Your Waves service report — ${serviceLine}${serviceDate ? ` ${serviceDate}` : ''}`;
   const html = wrapEmail({
     preheader: `Your Waves service report is ready${serviceDate ? ` for ${serviceDate}` : ''}.`,
     heading: 'Your Waves service report is ready',

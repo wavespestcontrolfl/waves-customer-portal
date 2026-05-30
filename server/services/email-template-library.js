@@ -543,6 +543,15 @@ function shouldRetryExistingMessage(message) {
   return !DEDUPE_STATUSES.has(String(message?.status || '').toLowerCase());
 }
 
+// Postgres unique_violation (email_messages.idempotency_key). Two overlapping
+// callers (e.g. retried Stripe webhooks) can both pass the pre-insert dedupe
+// check, then race on the unique index. The loser should re-read and dedupe
+// cleanly rather than surfacing a raw driver error and a phantom `failed`
+// outcome — the duplicate never reaches SendGrid either way.
+function isUniqueViolation(err) {
+  return !!err && (err.code === '23505' || /duplicate key value/i.test(err.message || ''));
+}
+
 function assertTemplateSendable(template, { test = false } = {}) {
   if (test) return;
   const status = String(template?.status || 'active').toLowerCase();
@@ -763,9 +772,20 @@ async function sendTemplate({
         error_message: reason,
         updated_at: new Date(),
       };
-      const [blocked] = retryMessage
-        ? await db('email_messages').where({ id: retryMessage.id }).update(blockedPayload).returning('*')
-        : await db('email_messages').insert(blockedPayload).returning('*');
+      let blocked;
+      if (retryMessage) {
+        [blocked] = await db('email_messages').where({ id: retryMessage.id }).update(blockedPayload).returning('*');
+      } else {
+        try {
+          [blocked] = await db('email_messages').insert(blockedPayload).returning('*');
+        } catch (err) {
+          if (isUniqueViolation(err) && idempotencyKey) {
+            const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
+            if (existing) return dedupedResultForExistingMessage(existing);
+          }
+          throw err;
+        }
+      }
       return { sent: false, blocked: true, reason, message: blocked, rendered };
     }
   }
@@ -779,9 +799,20 @@ async function sendTemplate({
     queued_at: new Date(),
     updated_at: new Date(),
   };
-  const [message] = retryMessage
-    ? await db('email_messages').where({ id: retryMessage.id }).update(queuedPayload).returning('*')
-    : await db('email_messages').insert(queuedPayload).returning('*');
+  let message;
+  if (retryMessage) {
+    [message] = await db('email_messages').where({ id: retryMessage.id }).update(queuedPayload).returning('*');
+  } else {
+    try {
+      [message] = await db('email_messages').insert(queuedPayload).returning('*');
+    } catch (err) {
+      if (isUniqueViolation(err) && idempotencyKey) {
+        const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
+        if (existing) return dedupedResultForExistingMessage(existing);
+      }
+      throw err;
+    }
+  }
 
   try {
     const result = await sendgrid.sendOne({

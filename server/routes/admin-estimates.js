@@ -28,6 +28,7 @@ const {
   markLinkedLeadEstimateSent,
 } = require('../services/lead-estimate-link');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 const {
   createOrReuseAdminEstimate,
@@ -125,13 +126,6 @@ function currentTierDiscounts() {
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
-}
-
-// SMTP is dev/staging-only. In production, estimate delivery must stay on
-// the email template path so email_messages, suppressions, and render issues
-// remain authoritative.
-function smtpFallbackAllowed() {
-  return process.env.NODE_ENV !== 'production';
 }
 
 function estimateEmailKeyPart(value) {
@@ -299,7 +293,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   const intro = `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
   const html = wrapEmail({
     preheader: priceLine
-      ? `Your Waves estimate is ready - ${priceLine}.`
+      ? `Your Waves estimate is ready — ${priceLine}.`
       : 'Your Waves estimate is ready to review.',
     heading,
     intro,
