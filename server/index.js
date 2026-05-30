@@ -26,6 +26,7 @@ const config = require('./config');
 const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
+const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
 
 // Route imports
 const authRoutes = require('./routes/auth');
@@ -504,6 +505,7 @@ if (config.nodeEnv === 'production') {
     try {
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.set('Content-Type', 'text/html; charset=utf-8');
+      applySensitiveSpaHeaders(req.path, res);
       return res.send(await renderHTML(req.path));
     } catch (err) {
       return next(err);
