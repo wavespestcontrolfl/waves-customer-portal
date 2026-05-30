@@ -77,7 +77,28 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function coerceInput(body = {}) {
+function hasOwn(body, key) {
+  return Object.prototype.hasOwnProperty.call(body || {}, key);
+}
+
+function coerceInput(body = {}, { partial = false } = {}) {
+  if (partial) {
+    const input = {};
+    if (hasOwn(body, 'turfType') || hasOwn(body, 'turf_type')) input.turfType = body.turfType || body.turf_type || null;
+    if (hasOwn(body, 'detailLevel')) input.detailLevel = body.detailLevel || 'standard';
+    if (hasOwn(body, 'includeProductCards')) input.includeProductCards = body.includeProductCards === true;
+    if (hasOwn(body, 'includeProductCategories')) input.includeProductCategories = body.includeProductCategories !== false;
+    if (hasOwn(body, 'includePortalReporting')) input.includePortalReporting = body.includePortalReporting !== false;
+    if (hasOwn(body, 'includeGpsReminders')) input.includeGpsReminders = body.includeGpsReminders !== false;
+    if (hasOwn(body, 'includePublicGuideLink')) input.includePublicGuideLink = body.includePublicGuideLink !== false;
+    if (hasOwn(body, 'includeExclusions')) input.includeExclusions = body.includeExclusions !== false;
+    if (hasOwn(body, 'serviceTier')) input.serviceTier = body.serviceTier || null;
+    if (hasOwn(body, 'month')) input.month = body.month || null;
+    if (hasOwn(body, 'jurisdictionId')) input.jurisdictionId = body.jurisdictionId || null;
+    if (hasOwn(body, 'customerNote')) input.customerNote = body.customerNote || '';
+    return input;
+  }
+
   return {
     turfType: body.turfType || body.turf_type || null,
     detailLevel: body.detailLevel || 'standard',
@@ -370,7 +391,7 @@ router.post('/:id/regenerate', async (req, res, next) => {
     const estimate = sourcePacket.estimate_id ? await loadEstimate(sourcePacket.estimate_id) : null;
     if (!estimate) return res.status(404).json({ error: 'Estimate not found for this outline' });
 
-    const input = { ...inputFromPacket(sourcePacket), ...coerceInput(req.body || {}) };
+    const input = { ...inputFromPacket(sourcePacket), ...coerceInput(req.body || {}, { partial: true }) };
     const outline = await buildOutline({ db, estimate, input });
     const rawToken = createPublicToken();
     const revokeOld = req.body.revokeOld !== false;
