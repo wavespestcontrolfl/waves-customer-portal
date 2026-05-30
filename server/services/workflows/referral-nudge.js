@@ -84,7 +84,7 @@ class ReferralNudge {
 
         await db('customer_interactions').insert({
           customer_id: customerId,
-          type: 'sms_outbound',
+          interaction_type: 'sms_outbound',
           channel: 'sms',
           subject: 'Referral nudge after positive review',
           notes: `Triggered by ${rating}-star review, sent after 4h delay`,

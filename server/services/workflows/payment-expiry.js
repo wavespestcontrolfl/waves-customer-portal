@@ -97,7 +97,7 @@ class PaymentExpiry {
 
         await db('customer_interactions').insert({
           customer_id: card.customer_id,
-          type: 'sms_outbound',
+          interaction_type: 'sms_outbound',
           channel: 'sms',
           subject: 'Payment method expiry notice',
           notes: `Card ****${card.last_four} expires ${expLabel}`,

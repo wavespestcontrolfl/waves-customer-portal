@@ -52,7 +52,7 @@ class MissedAppointment {
 
     await db('customer_interactions').insert({
       customer_id: customerId,
-      type: 'task',
+      interaction_type: 'task',
       channel: 'internal',
       subject: `Recommended outreach: ${totalSkips} missed appointments in 90 days`,
       notes:

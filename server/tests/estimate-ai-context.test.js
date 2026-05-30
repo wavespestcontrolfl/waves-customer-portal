@@ -82,7 +82,7 @@ describe('estimate AI support context', () => {
           category: 'herbicide',
           active_ingredient: 'Thiencarbazone + Iodosulfuron + Dicamba',
           active: true,
-          label_verified: true,
+          label_verified_by: 'waves-admin',
         }],
       }),
       question: 'What is included with lawn care?',

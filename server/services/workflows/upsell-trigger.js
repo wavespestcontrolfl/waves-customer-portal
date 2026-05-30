@@ -96,7 +96,7 @@ class UpsellTrigger {
 
     await db('customer_interactions').insert({
       customer_id: customerId,
-      type: 'sms_outbound',
+      interaction_type: 'sms_outbound',
       channel: 'sms',
       subject: `Upsell — ${tier.label} WaveGuard recommended`,
       notes: `Auto-triggered: ${serviceCount} services, $${totalSpent.toFixed(0)} spent in 12mo`,

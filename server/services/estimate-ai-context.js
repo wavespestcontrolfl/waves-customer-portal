@@ -320,7 +320,7 @@ async function searchProductCatalog(db, terms, productNames = []) {
             .orWhere('moa_group', 'ilike', like);
         }
       })
-      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified')
+      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by')
       .limit(8);
 
     return rows.map((row) => {
@@ -329,7 +329,7 @@ async function searchProductCatalog(db, terms, productNames = []) {
         row.active_ingredient ? `Active ingredient: ${row.active_ingredient}` : '',
         row.moa_group ? `MOA: ${row.moa_group}` : '',
         row.epa_reg_number ? `EPA Reg. No. ${row.epa_reg_number}` : '',
-        row.label_verified === true ? 'Label verified in admin catalog' : '',
+        row.label_verified_by ? 'Label verified in admin catalog' : '',
       ].filter(Boolean);
       return {
         source: 'admin_product_catalog',
@@ -338,7 +338,7 @@ async function searchProductCatalog(db, terms, productNames = []) {
         category: row.category || null,
         activeIngredient: row.active_ingredient || null,
         epaRegNumber: row.epa_reg_number || null,
-        labelVerified: row.label_verified === true,
+        labelVerified: !!row.label_verified_by,
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
