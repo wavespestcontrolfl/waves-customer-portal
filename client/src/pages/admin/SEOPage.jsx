@@ -1488,7 +1488,7 @@ function LinkBuildingBoard({ canRun }) {
   const [view, setView] = useState("all");
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ target_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
+  const [form, setForm] = useState({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
 
   const load = () => {
     const cur = PROSPECT_VIEWS.find((v) => v.key === view);
@@ -1517,11 +1517,11 @@ function LinkBuildingBoard({ canRun }) {
   };
 
   const addProspect = async () => {
-    if (!form.target_page || (!form.target_url)) return;
+    if (!form.target_page || (!form.target_url && !form.live_url)) return;
     setBusy(true);
     try {
       await adminPost("/admin/backlink-agent/prospects", form);
-      setForm({ target_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
+      setForm({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
       setAdding(false);
       load();
     } finally { setBusy(false); }
@@ -1578,8 +1578,9 @@ function LinkBuildingBoard({ canRun }) {
       {/* Add form */}
       {adding && canRun && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          <input style={{ ...inputStyle, flex: "1 1 240px" }} placeholder="Target URL (where the link will live)" value={form.target_url} onChange={(e) => setForm({ ...form, target_url: e.target.value })} />
-          <input style={{ ...inputStyle, flex: "1 1 240px" }} placeholder="Our target page (money page URL)" value={form.target_page} onChange={(e) => setForm({ ...form, target_page: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Prospect site/page URL (planned)" value={form.target_url} onChange={(e) => setForm({ ...form, target_url: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Live URL — if link is already placed" value={form.live_url} onChange={(e) => setForm({ ...form, live_url: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Our target page (money page URL)" value={form.target_page} onChange={(e) => setForm({ ...form, target_page: e.target.value })} />
           <input style={{ ...inputStyle, flex: "1 1 160px" }} placeholder="Planned anchor" value={form.anchor_planned} onChange={(e) => setForm({ ...form, anchor_planned: e.target.value })} />
           <select style={inputStyle} value={form.link_type} onChange={(e) => setForm({ ...form, link_type: e.target.value })}>
             {["editorial", "resource", "guest_post", "haro", "directory", "citation", "social"].map((t) => <option key={t} value={t}>{t}</option>)}
