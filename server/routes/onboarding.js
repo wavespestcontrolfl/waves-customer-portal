@@ -13,6 +13,7 @@ const {
 } = require('../services/billing-cadence');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+const { logAutopay } = require('../services/autopay-log');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -227,7 +228,7 @@ router.post('/:token/setup-intent', loadSession, async (req, res, next) => {
   try {
     const StripeService = require('../services/stripe');
     const stripeConfig = require('../config/stripe-config');
-    const result = await StripeService.createSetupIntent(req.customer.id);
+    const result = await StripeService.createSetupIntent(req.customer.id, 'card_or_bank');
     res.json({ ...result, publishableKey: stripeConfig.publishableKey });
   } catch (err) { next(err); }
 });
@@ -237,11 +238,23 @@ router.post('/:token/setup-intent', loadSession, async (req, res, next) => {
 // =========================================================================
 router.post('/:token/save-card', loadSession, async (req, res, next) => {
   try {
-    const { paymentMethodId } = req.body;
-    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+    const { paymentMethodId, setupIntentId } = req.body;
+    if (!setupIntentId) return res.status(400).json({ error: 'setupIntentId required' });
 
     const StripeService = require('../services/stripe');
     const ConsentService = require('../services/payment-method-consents');
+    const setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+    const setupPaymentMethodId = typeof setupIntent?.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent?.payment_method?.id;
+    const resolvedPaymentMethodId = paymentMethodId || setupPaymentMethodId;
+    if (!setupIntent || setupIntent.status !== 'succeeded' || !resolvedPaymentMethodId || setupPaymentMethodId !== resolvedPaymentMethodId) {
+      return res.status(409).json({
+        error: 'Payment method setup is not complete. Finish verification before enabling Auto Pay.',
+        setupIntentStatus: setupIntent?.status || 'unknown',
+      });
+    }
+
     const hadActiveAutopay = await customerOnAutopay({
       id: req.customer.id,
       autopay_enabled: req.customer.autopay_enabled,
@@ -249,11 +262,28 @@ router.post('/:token/save-card', loadSession, async (req, res, next) => {
       autopay_payment_method_id: req.customer.autopay_payment_method_id,
       ach_status: req.customer.ach_status,
     });
-    const card = await StripeService.savePaymentMethod(req.customer.id, paymentMethodId, {
-      enableAutopay: false,
-      makeDefault: !hadActiveAutopay,
+    const shouldEnableAutopay = !hadActiveAutopay;
+    const card = await StripeService.savePaymentMethod(req.customer.id, resolvedPaymentMethodId, {
+      enableAutopay: shouldEnableAutopay,
+      makeDefault: shouldEnableAutopay,
     });
     if (!hadActiveAutopay) {
+      await db('customers')
+        .where({ id: req.customer.id })
+        .update({
+          autopay_enabled: true,
+          autopay_payment_method_id: card.id,
+          autopay_paused_until: null,
+          autopay_pause_reason: null,
+        });
+      await logAutopay(req.customer.id, 'autopay_enabled', {
+        paymentMethodId: card.id,
+        details: { source: 'onboarding', session_id: req.session.id },
+      });
+      await logAutopay(req.customer.id, 'payment_method_changed', {
+        paymentMethodId: card.id,
+        details: { source: 'onboarding', previous_payment_method_id: req.customer.autopay_payment_method_id || null },
+      });
       PaymentLifecycleEmail.sendPaymentMethodUpdated({
         customerId: req.customer.id,
         newPaymentMethodId: card.id,
@@ -261,6 +291,13 @@ router.post('/:token/save-card', loadSession, async (req, res, next) => {
         idempotencyKey: `payment.method_updated:${req.customer.id}:${card.id}:onboarding:${req.session.id}`,
       }).catch((emailErr) => {
         logger.warn(`[onboarding] payment method update email failed for session ${req.session.id}: ${emailErr.message}`);
+      });
+      PaymentLifecycleEmail.sendAutopayEnabled({
+        customerId: req.customer.id,
+        paymentMethodId: card.id,
+        enabledDate: card.created_at || new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[onboarding] autopay enabled email failed for session ${req.session.id}: ${emailErr.message}`);
       });
     }
 
@@ -271,7 +308,7 @@ router.post('/:token/save-card', loadSession, async (req, res, next) => {
       await ConsentService.recordConsent({
         customerId: req.customer.id,
         paymentMethodId: card.id,
-        stripePaymentMethodId: paymentMethodId,
+        stripePaymentMethodId: resolvedPaymentMethodId,
         source: 'onboarding',
         methodType: card.method_type || 'card',
         ip: req.ip,
