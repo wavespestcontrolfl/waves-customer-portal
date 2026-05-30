@@ -29,7 +29,9 @@ let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some envs */ }
 
 // ── Detection constants ──────────────────────────────────────────────────────
-const WAVES_RE = /waves\s+pest|wavespestcontrol/i;
+// Brand mention in prose — covers both the pest and lawn sides of the business
+// (Waves Pest Control / Waves Lawn Care) plus their primary domains.
+const WAVES_RE = /waves\s+(pest|lawn)|wavespestcontrol|waveslawncare/i;
 // Every owned domain counts as a Waves citation — the hub plus the spoke fleet
 // (bradentonflpestcontrol.com, sarasotaflpestcontrol.com, …) — sourced from the
 // tracking-domain config so it stays in sync as domains are added/removed.
@@ -203,7 +205,16 @@ class LLMMentionProber {
   parse(probe) {
     const text = probe.text || '';
     const lower = text.toLowerCase();
-    const wavesMentioned = WAVES_RE.test(text);
+
+    // Citations: union of provider-native + URLs parsed from prose.
+    const inlineUrls = (text.match(URL_RE) || []).map(u => u.replace(/[.,)]+$/, ''));
+    const citedUrls = Array.from(new Set([...(probe.citedUrls || []), ...inlineUrls]));
+    const wavesCitedUrls = citedUrls.filter(isOwnedUrl);
+
+    // Mentioned if the brand shows up in prose OR any owned domain is cited —
+    // the latter covers lawn/spoke visibility even when the prose names no brand.
+    const brandInText = WAVES_RE.test(text);
+    const wavesMentioned = brandInText || wavesCitedUrls.length > 0;
 
     // Brand ordering → rank position of first Waves reference among brands.
     const positions = [];
@@ -215,18 +226,13 @@ class LLMMentionProber {
       if (idx >= 0) { competitors.push({ name: c, context: text.substring(idx, idx + 120) }); positions.push({ name: c, idx }); }
     }
     positions.sort((a, b) => a.idx - b.idx);
-    const rankPosition = wavesMentioned
+    const rankPosition = brandInText
       ? positions.findIndex(p => p.name === 'waves') + 1
       : null;
 
-    // Citations: union of provider-native + URLs parsed from prose.
-    const inlineUrls = (text.match(URL_RE) || []).map(u => u.replace(/[.,)]+$/, ''));
-    const citedUrls = Array.from(new Set([...(probe.citedUrls || []), ...inlineUrls]));
-    const wavesCitedUrls = citedUrls.filter(isOwnedUrl);
-
     return {
       wavesMentioned,
-      mentionContext: wavesMentioned ? text.substring(Math.max(0, wavesIdx - 60), wavesIdx + 240) : null,
+      mentionContext: brandInText ? text.substring(Math.max(0, wavesIdx - 60), wavesIdx + 240) : null,
       competitors,
       rankPosition: rankPosition && rankPosition > 0 ? rankPosition : null,
       citedUrls,
