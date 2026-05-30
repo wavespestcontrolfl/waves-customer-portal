@@ -1493,12 +1493,19 @@ function LinkBuildingBoard({ canRun }) {
   const load = () => {
     const cur = PROSPECT_VIEWS.find((v) => v.key === view);
     const qs = cur?.statuses?.length === 1 ? `?status=${cur.statuses[0]}` : "";
-    adminFetch(`/admin/backlink-agent/prospects${qs}`)
-      .then((d) => {
-        let rows = d.items || [];
-        if (cur?.statuses && cur.statuses.length > 1) rows = rows.filter((r) => cur.statuses.includes(r.status));
-        setItems(rows);
-      })
+    const request = cur?.statuses?.length > 1
+      ? Promise.all(cur.statuses.map((status) => adminFetch(`/admin/backlink-agent/prospects?status=${status}`)))
+        .then((results) => {
+          const seen = new Set();
+          return results.flatMap((d) => d.items || []).filter((row) => {
+            if (!row?.id || seen.has(row.id)) return false;
+            seen.add(row.id);
+            return true;
+          });
+        })
+      : adminFetch(`/admin/backlink-agent/prospects${qs}`).then((d) => d.items || []);
+    request
+      .then((rows) => setItems(rows))
       .catch(() => setItems([]));
     adminFetch("/admin/backlink-agent/prospects/stats").then(setStats).catch(() => {});
   };
