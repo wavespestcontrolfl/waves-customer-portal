@@ -25,9 +25,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
-const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { classifyServiceIntent } = require('./sms-service-intent');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
   blockIfAutomatedEstimateDuplicate,
@@ -41,22 +39,6 @@ const SERVICE_LABEL = {
   lawn: 'Lawn Care',
   one_time: 'One-Time Service',
 };
-
-const SERVICE_TEMPLATE_KEY = {
-  pest: 'lead_service_pest',
-  lawn: 'lead_service_lawn',
-  one_time: 'lead_service_one_time',
-};
-
-async function renderTemplate(templateKey, vars, context = {}) {
-  try {
-    if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
-      if (body) return body;
-    }
-  } catch { /* fall through */ }
-  return null;
-}
 
 // Heuristic address match: something that starts with a digit + space +
 // letter OR contains a recognizable street suffix. Keeps v1 simple — if
@@ -72,74 +54,6 @@ function looksLikeAddress(body) {
   if (LEADING_NUMBER_RE.test(trimmed)) return true;
   if (/\d/.test(trimmed) && STREET_SUFFIX_RE.test(trimmed)) return true;
   return false;
-}
-
-async function sendBranchReply(customer, interest) {
-  const templateKey = SERVICE_TEMPLATE_KEY[interest];
-  const firstName = customer.first_name || 'there';
-  const body = await renderTemplate(
-    templateKey,
-    { first_name: firstName },
-    { workflow: 'lead_intake_branch_reply', entity_type: 'customer', entity_id: customer.id }
-  );
-  if (!body) {
-    logger.warn(`[lead-intake] ${templateKey} template missing/disabled; branch reply skipped for customer ${customer.id}`);
-    return;
-  }
-  try {
-    const result = await sendCustomerMessage({
-      to: customer.phone,
-      body,
-      channel: 'sms',
-      audience: 'lead',
-      purpose: 'conversational',
-      customerId: customer.id,
-      identityTrustLevel: 'phone_matches_customer',
-      entryPoint: 'lead_intake_branch_reply',
-      metadata: {
-        original_message_type: 'auto_reply',
-        lead_service_interest: interest,
-      },
-    });
-    if (!result.sent) {
-      logger.warn(`[lead-intake] Branch reply blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
-    }
-  } catch (e) {
-    logger.error(`[lead-intake] Branch reply send failed: ${e.message}`);
-  }
-}
-
-async function sendAddressNudge(customer) {
-  const firstName = customer.first_name || 'there';
-  const body = await renderTemplate(
-    'lead_address_needed',
-    { first_name: firstName },
-    { workflow: 'lead_intake_address_needed', entity_type: 'customer', entity_id: customer.id }
-  );
-  if (!body) {
-    logger.warn(`[lead-intake] lead_address_needed template missing/disabled; address nudge skipped for customer ${customer.id}`);
-    return;
-  }
-  try {
-    const result = await sendCustomerMessage({
-      to: customer.phone,
-      body,
-      channel: 'sms',
-      audience: 'lead',
-      purpose: 'conversational',
-      customerId: customer.id,
-      identityTrustLevel: 'phone_matches_customer',
-      entryPoint: 'lead_intake_address_nudge',
-      metadata: {
-        original_message_type: 'auto_reply',
-      },
-    });
-    if (!result.sent) {
-      logger.warn(`[lead-intake] Address nudge blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
-    }
-  } catch (e) {
-    logger.error(`[lead-intake] Address nudge send failed: ${e.message}`);
-  }
 }
 
 async function createOrUpdateDraftEstimate(customer, interest) {
@@ -239,8 +153,6 @@ async function handleIntakeReply(customer, body) {
     });
     customer.lead_service_interest = cls.interest;
 
-    await sendBranchReply(customer, cls.interest);
-
     const hasAddress = !!(customer.address_line1 && String(customer.address_line1).trim());
     if (hasAddress) {
       // Address already on file — create draft + notify immediately.
@@ -261,14 +173,13 @@ async function handleIntakeReply(customer, body) {
       lead_intake_status: 'awaiting_address',
     });
     logger.info(`[lead-intake] Awaiting address from ${customer.first_name} after selecting ${cls.interest}`);
-    return { handled: true, next: 'awaiting_address' };
+    return { handled: false };
   }
 
   // ── State: awaiting_address ────────────────────────────────────────
   if (status === 'awaiting_address') {
     if (!looksLikeAddress(body)) {
-      await sendAddressNudge(customer);
-      return { handled: true, next: 'awaiting_address' };
+      return { handled: false };
     }
 
     const address = body.trim();

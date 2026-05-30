@@ -84,6 +84,36 @@ describe('notification trigger push tags', () => {
     });
   });
 
+  test('bundle quote trigger distinguishes inquiry from self-applied bundle', () => {
+    const inquiry = TRIGGER_REGISTRY.bundle_quote_requested.build({
+      customerName: 'Existing Appointment Demo',
+      suggestedService: 'Lawn Care',
+      previousTier: 'Bronze',
+      estimateId: 'estimate-123',
+    });
+
+    expect(inquiry).toEqual({
+      title: 'Bundle inquiry: Existing Appointment Demo',
+      body: 'Interested in adding Lawn Care to Bronze plan',
+      link: '/admin/estimates?estimateId=estimate-123',
+    });
+
+    const selfApplied = TRIGGER_REGISTRY.bundle_quote_requested.build({
+      customerName: 'Existing Appointment Demo',
+      suggestedService: 'Lawn Care',
+      bundled: true,
+      newTier: 'Silver',
+      newMonthly: 112.5,
+      estimateId: 'estimate-123',
+    });
+
+    expect(selfApplied).toEqual({
+      title: 'Bundle self-applied: Existing Appointment Demo',
+      body: 'Added Lawn Care \u2192 Silver @ $112.50/mo',
+      link: '/admin/estimates?estimateId=estimate-123',
+    });
+  });
+
   test('notification body sanitizer redacts customer contact details across triggers', () => {
     const built = __private.sanitizeBuiltNotification({
       title: 'Admin alert for test@example.com',

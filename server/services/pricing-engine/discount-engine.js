@@ -40,17 +40,12 @@ function roundCurrency(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
-const LAWN_V2_NET_PRICE_SERVICES = new Set([
-  'lawn_care',
+// Tier discount applies to qualifying recurring services. Lawn tier variants
+// resolve to dedicated service keys but share lawn_care's WaveGuard policy.
+const TIER_DISCOUNT_ELIGIBLE = new Set([
+  ...WAVEGUARD.qualifyingServices,
   'lawn_care_enhanced',
   'lawn_care_premium',
-]);
-
-// Tier discount applies to qualifying recurring services except Lawn V2.
-// Lawn still counts toward WaveGuard tier qualification, but its price is
-// already the net 55% collected-margin floor.
-const TIER_DISCOUNT_ELIGIBLE = new Set([
-  ...WAVEGUARD.qualifyingServices.filter(service => service !== 'lawn_care'),
 ]);
 
 function isTierDiscountEligible(serviceKey) {
@@ -85,18 +80,6 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
     totalDiscount: 0,
     discountable: true,
   };
-
-  if (LAWN_V2_NET_PRICE_SERVICES.has(serviceKey)) {
-    result.discountable = false;
-    result.requestedDiscountPercent = waveGuardTier.discount || 0;
-    result.appliedDiscountPercent = 0;
-    result.policy = 'LAWN_V2_NET_55_FLOOR_PRICE';
-    result.appliedDiscounts.push({
-      type: 'policy_exclusion',
-      reason: 'Lawn V2 price is already the net 55% collected-margin floor',
-    });
-    return result;
-  }
 
   // ── Excluded from % discount entirely ──
   if (WAVEGUARD.excludedFromPercentDiscount[serviceKey]) {

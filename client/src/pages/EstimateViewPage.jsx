@@ -277,16 +277,6 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
         marginBottom: 10,
       }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{
-            fontSize: 12,
-            color: ESTIMATE_MUTED,
-            letterSpacing: '0.12em',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-            marginBottom: 6,
-          }}>
-            {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
-          </div>
           <h2 style={{
             fontFamily: FONTS.serif,
             fontSize: 28,
@@ -299,6 +289,25 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
             {intelligence.title || copy?.aiTitle || 'Waves AI reviewed your property before pricing this estimate'}
           </h2>
         </div>
+        {/* Blue pill badge — mirrors the server-rendered estimate's
+            .intelligence-badge (background #E3F5FD / color #065A8C / pill).
+            Sits opposite the title in the flex header, exactly like the SSR. */}
+        <span style={{
+          flex: 'none',
+          alignSelf: 'flex-start',
+          padding: '6px 10px',
+          borderRadius: 999,
+          background: '#E3F5FD',
+          color: '#065A8C',
+          fontSize: 12,
+          fontWeight: 800,
+          lineHeight: 1,
+          letterSpacing: 0,
+          textTransform: 'uppercase',
+          whiteSpace: 'nowrap',
+        }}>
+          {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
+        </span>
       </div>
 
       <p style={{
@@ -932,7 +941,67 @@ function CountdownLine({ secondsRemaining }) {
   );
 }
 
-function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode }) {
+function formatAppointmentLabel(appointment = {}) {
+  const date = appointment.scheduledDate
+    ? new Date(`${appointment.scheduledDate}T12:00:00Z`).toLocaleDateString(undefined, {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'America/New_York',
+    })
+    : '';
+  const time = appointment.windowDisplay || appointment.windowStart || '';
+  return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
+}
+
+function ExistingAppointmentCard({ appointment }) {
+  return (
+    <div style={{
+      background: COLORS.white,
+      borderRadius: 16,
+      padding: 24,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        Existing appointment
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 800, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.3 }}>
+        {formatAppointmentLabel(appointment)}
+      </div>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.45 }}>
+        {appointment?.serviceType || 'Service visit'}
+      </div>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        Your visit is already on the schedule. Choose how you want to pay to approve this estimate.
+      </div>
+    </div>
+  );
+}
+
+function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode }) {
+  const usingExistingAppointment = !!existingAppointment;
+  const paymentLabel = invoiceMode
+    ? 'Invoice due now'
+    : paymentPreference === 'card_on_file'
+      ? 'Pay after each visit'
+      : paymentPreference === 'prepay_annual'
+        ? 'Pay the 12-month plan in full'
+        : 'Pay at the visit';
+  const confirmLabel = usingExistingAppointment
+    ? paymentPreference === 'card_on_file'
+      ? 'Confirm and save card'
+      : paymentPreference === 'prepay_annual'
+        ? 'Confirm annual prepay'
+        : 'Confirm appointment'
+    : 'Confirm booking';
+  const confirmSub = usingExistingAppointment
+    ? paymentPreference === 'card_on_file'
+      ? 'Your existing appointment stays scheduled. next step saves your card for autopay. Service visits are billed after completion.'
+      : paymentPreference === 'prepay_annual'
+        ? 'Your existing appointment stays scheduled. Annual prepay invoice will be reviewed and sent after approval.'
+        : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
+    : '';
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
@@ -940,20 +1009,18 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        Confirm your booking
+        {usingExistingAppointment ? 'Confirm payment setup' : 'Confirm your booking'}
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
-        Pay option: <strong>{
-          invoiceMode ? 'Invoice due now'
-          : paymentPreference === 'card_on_file' ? 'Card on file'
-          : paymentPreference === 'prepay_annual' ? 'Pay the year upfront'
-          : 'At the visit'
-        }</strong>
+        {usingExistingAppointment ? 'Selected payment setup: ' : 'Pay option: '}
+        <strong>{paymentLabel}</strong>{usingExistingAppointment ? '.' : null}
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
-        Slot: {slotId}
+        {usingExistingAppointment
+          ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
+          : `Slot: ${slotId}`}
       </div>
-      <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div>
+      {!usingExistingAppointment ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
         <button
           type="button"
@@ -962,15 +1029,22 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
             padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
             border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
           }}
-        >Confirm booking</button>
-        <button
-          type="button"
-          onClick={onCancel}
-          style={{
-            padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-            border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-          }}
-        >Go back</button>
+        >{confirmLabel}</button>
+        {confirmSub ? (
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
+            {confirmSub}
+          </div>
+        ) : null}
+        {!usingExistingAppointment ? (
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{
+              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            }}
+          >Go back</button>
+        ) : null}
       </div>
     </div>
   );
@@ -1123,7 +1197,7 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
 }
 
 function AcceptanceModeCard({ acceptance }) {
-  if (!acceptance || acceptance.mode === 'standard_slot_pick') return null;
+  if (!acceptance || acceptance.mode === 'standard_slot_pick' || acceptance.mode === 'existing_appointment') return null;
   const title = acceptance.mode === 'quote_required'
     ? 'This treatment needs a custom quote.'
     : 'Waves will help schedule this estimate.';
@@ -1256,6 +1330,8 @@ export default function EstimateViewPage() {
   }, [selected]);
 
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
+  const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
+  const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   const currentFrequency = useMemo(() => {
     const pestSection = services.find((section) => section.key === 'pest_control');
@@ -1369,6 +1445,13 @@ export default function EstimateViewPage() {
   }, [token]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
+    if (existingAppointment) {
+      setPaymentPreference(pref);
+      setReservation({ existingAppointmentId: existingAppointment.id });
+      setCtaPhase('review');
+      setError(null);
+      return;
+    }
     if (!selectedSlotId) return;
     const attemptId = reserveAttemptRef.current + 1;
     reserveAttemptRef.current = attemptId;
@@ -1420,7 +1503,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [existingAppointment, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -1457,7 +1540,8 @@ export default function EstimateViewPage() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          slotId: selectedSlotId,
+          slotId: existingAppointment ? undefined : selectedSlotId,
+          existingAppointmentId: existingAppointment?.id,
           paymentMethodPreference: paymentPreference,
           serviceMode,
           selectedFrequency,
@@ -1492,7 +1576,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('review');
     }
-  }, [loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
+  }, [existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
@@ -1517,7 +1601,6 @@ export default function EstimateViewPage() {
   const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
   const renderFlags = pricing?.renderFlags || {};
-  const acceptance = estimate?.acceptance || { mode: 'standard_slot_pick' };
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
   // Resolve the tier label unconditionally; whether the badge actually renders
   // is decided by per-section eligibility (server-authoritative
@@ -1603,8 +1686,22 @@ export default function EstimateViewPage() {
 
       {ctaPhase === 'review' && reservation ? (
         <>
+          {existingAppointment ? (
+            <>
+              <ExistingAppointmentCard appointment={existingAppointment} />
+              <PaymentPreferenceButtons
+                onSelect={handlePaymentChoice}
+                disabled={false}
+                serviceMode={serviceMode}
+                setupFee={pricing.setupFee || null}
+                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                invoiceMode={!!estimate.billByInvoice}
+              />
+            </>
+          ) : null}
           <ReviewPhase
             slotId={selectedSlotId}
+            existingAppointment={existingAppointment}
             paymentPreference={paymentPreference}
             secondsRemaining={countdownSeconds}
             onConfirm={handleConfirm}
@@ -1739,7 +1836,11 @@ export default function EstimateViewPage() {
             <AcceptanceModeCard acceptance={acceptance} />
           )}
 
-          {canShowSlotPicker && selectedSlotId ? (
+          {existingAppointment ? (
+            <ExistingAppointmentCard appointment={existingAppointment} />
+          ) : null}
+
+          {(existingAppointment || (canShowSlotPicker && selectedSlotId)) ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}

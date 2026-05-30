@@ -1765,71 +1765,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     });
 
-    // Register for appointment reminders.
-    //  - Honors the "Send confirmation SMS" checkbox: admin_manual defaults to true,
-    //    but sendConfirmationSms === false skips the confirmation SMS (reminder row
-    //    is still inserted so 72h/24h reminders fire).
-    try {
-      const AppointmentReminders = require('../services/appointment-reminders');
-      for (const appt of createdAppointments) {
-        try {
-          await AppointmentReminders.registerAppointment(
-            appt.id, customerId,
-            `${appt.date}T${windowStart || '08:00'}`,
-            serviceType, 'admin_manual',
-            { sendConfirmation: !!appt.confirmation }
-          );
-        } catch (e) {
-          logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
-        }
-      }
-    } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
-
-    if (shouldSendNewRecurringWelcome) {
-      try {
-        await sendNewRecurringWelcome({
-          customer,
-          scheduledServiceId: svc.id,
-          recurringPattern,
-          entryPoint: 'admin_recurring_appointment_created',
-          adminUserId: req.technicianId,
-        });
-      } catch (e) {
-        logger.error(`[schedule] new recurring welcome SMS failed (non-blocking): ${e.message}`);
-      }
-    }
-
-    // Optional: push an in-app notification to the assigned tech's PWA queue
-    // (honors the "Notify technician" checkbox — unchecked by default).
-    if (sendTechNotification && resolvedTechId) {
-      try {
-        const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
-        const custName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Customer';
-        const when = `${scheduledDate}${windowStart ? ' @ ' + windowStart : ''}`;
-        await pushTechNote(resolvedTechId, {
-          type: 'new_appointment',
-          message: `New appointment: ${custName} — ${serviceType} on ${when}`,
-          payload: { scheduled_service_id: svc.id, customer_id: customerId, scheduled_date: scheduledDate, window_start: windowStart },
-        });
-      } catch (e) { logger.error(`[schedule] tech notification failed (non-blocking): ${e.message}`); }
-    }
-
-    // Trigger appointment type automations
-    try {
-      const AppointmentTagger = require('../services/appointment-tagger');
-      await AppointmentTagger.onServiceScheduled(svc.id);
-    } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
-
-    await refreshAnnualPrepayTermsForCustomer(customerId);
-
-    // Keep the live dispatch board in sync when a same-day job is created
-    // while dispatchers already have the Board tab open.
-    try {
-      await emitDispatchJobUpdate({ jobId: svc.id, actorId: req.technicianId });
-    } catch (e) {
-      logger.error(`[schedule] dispatch board create broadcast failed: ${e.message}`);
-    }
-
+    // Prepaid stamping records financial state (the recorded prepayment), not a
+    // best-effort notification, so it MUST be durable before we tell the client
+    // the save succeeded — otherwise the schedule can reload with no
+    // prepaid_amount, and a crash/deploy in the deferred window would silently
+    // drop a prepayment the admin saw succeed. It's a fast local DB write (no
+    // network), so keeping it on the save path does not reintroduce the delay
+    // this PR removes (that delay was Twilio-bound: SMS + landline lookups).
     if (req.body.prepaid && isRecurring) {
       try {
         const { totalAmount, method, note } = req.body.prepaid;
@@ -1844,7 +1786,111 @@ router.post('/', requireAdmin, async (req, res, next) => {
       } catch (e) { logger.error(`[schedule] prepaid stamp failed (non-blocking): ${e.message}`); }
     }
 
+    // Register appointment-reminder rows synchronously, BEFORE the response, with
+    // deferConfirmation so the slow Twilio confirmation SMS does NOT run here.
+    //  - Honors the "Send confirmation SMS" checkbox: admin_manual defaults to true,
+    //    but sendConfirmationSms === false skips the confirmation SMS (the reminder
+    //    row is still inserted so 72h/24h reminders fire).
+    //  - The row insert is a fast local DB write; doing it on the save path keeps
+    //    every reminder row durable before the client can act on the response, so
+    //    a same-second cancel/reschedule (which only UPDATE existing rows) can't
+    //    race a not-yet-inserted child row into firing reminders for a cancelled
+    //    or moved visit. Only the Twilio send is deferred below.
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      for (const appt of createdAppointments) {
+        try {
+          await AppointmentReminders.registerAppointment(
+            appt.id, customerId,
+            `${appt.date}T${windowStart || '08:00'}`,
+            serviceType, 'admin_manual',
+            { sendConfirmation: !!appt.confirmation, deferConfirmation: true }
+          );
+        } catch (e) {
+          logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
+        }
+      }
+    } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+
+    // The appointment(s), any prepayment, and all reminder rows are committed at
+    // this point — respond immediately so the admin UI isn't held on "Saving…"
+    // while the remaining best-effort side-effects run. Everything in the
+    // setImmediate block below was already non-blocking/logged-only; the only
+    // change is that it now runs *after* the response. That deferred work is what
+    // was costing ~15-20s: the confirmation SMS + Twilio landline lookup, plus the
+    // recurring welcome SMS, tech notification, tagging, prepay-terms refresh, and
+    // dispatch broadcast — none of which affect the response payload, financial
+    // state, or reminder-row durability.
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
+
+    // ── Post-commit side-effects (fire-and-forget; never fail the request) ──
+    setImmediate(async () => {
+      try {
+        // Fire the deferred confirmation SMS for any appointment that wants one
+        // (the reminder rows were already inserted durably above). This is the
+        // slow, Twilio-bound step: landline lookup + send.
+        try {
+          const AppointmentReminders = require('../services/appointment-reminders');
+          for (const appt of createdAppointments) {
+            if (!appt.confirmation) continue;
+            try {
+              await AppointmentReminders.sendConfirmation(appt.id);
+            } catch (e) {
+              logger.error(`Appointment confirmation SMS failed for ${appt.id}: ${e.message}`);
+            }
+          }
+        } catch (e) { logger.error(`Appointment confirmation SMS failed: ${e.message}`); }
+
+        if (shouldSendNewRecurringWelcome) {
+          try {
+            await sendNewRecurringWelcome({
+              customer,
+              scheduledServiceId: svc.id,
+              recurringPattern,
+              entryPoint: 'admin_recurring_appointment_created',
+              adminUserId: req.technicianId,
+            });
+          } catch (e) {
+            logger.error(`[schedule] new recurring welcome SMS failed (non-blocking): ${e.message}`);
+          }
+        }
+
+        // Optional: push an in-app notification to the assigned tech's PWA queue
+        // (honors the "Notify technician" checkbox — unchecked by default).
+        if (sendTechNotification && resolvedTechId) {
+          try {
+            const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
+            const custName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Customer';
+            const when = `${scheduledDate}${windowStart ? ' @ ' + windowStart : ''}`;
+            await pushTechNote(resolvedTechId, {
+              type: 'new_appointment',
+              message: `New appointment: ${custName} — ${serviceType} on ${when}`,
+              payload: { scheduled_service_id: svc.id, customer_id: customerId, scheduled_date: scheduledDate, window_start: windowStart },
+            });
+          } catch (e) { logger.error(`[schedule] tech notification failed (non-blocking): ${e.message}`); }
+        }
+
+        // Trigger appointment type automations
+        try {
+          const AppointmentTagger = require('../services/appointment-tagger');
+          await AppointmentTagger.onServiceScheduled(svc.id);
+        } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
+
+        try {
+          await refreshAnnualPrepayTermsForCustomer(customerId);
+        } catch (e) { logger.error(`[schedule] annual prepay terms refresh failed (non-blocking): ${e.message}`); }
+
+        // Keep the live dispatch board in sync when a same-day job is created
+        // while dispatchers already have the Board tab open.
+        try {
+          await emitDispatchJobUpdate({ jobId: svc.id, actorId: req.technicianId });
+        } catch (e) {
+          logger.error(`[schedule] dispatch board create broadcast failed: ${e.message}`);
+        }
+      } catch (e) {
+        logger.error(`[schedule] post-commit side-effects failed (non-blocking): ${e.message}`);
+      }
+    });
   } catch (err) { next(err); }
 });
 

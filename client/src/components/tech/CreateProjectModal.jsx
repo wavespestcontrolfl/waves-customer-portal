@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
+import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
+import DictationButton from './DictationButton';
 
 const ESTIMATE_BG = '#FAF8F3';
 const ESTIMATE_BORDER = '#E7E2D7';
@@ -224,6 +226,45 @@ function formatCustomerAddress(customer) {
     .trim();
 }
 
+function formatCustomerName(customer) {
+  if (!customer) return '';
+  const first = customer.firstName || customer.first_name || '';
+  const last = customer.lastName || customer.last_name || '';
+  const name = [first, last].filter(Boolean).join(' ').trim();
+  return name || customer.companyName || customer.company_name || '';
+}
+
+// "Jane Doe · (941) 555-0101 · jane@example.com" for the FDACS contact fields.
+function formatCustomerContact(customer) {
+  if (!customer) return '';
+  return [formatCustomerName(customer), customer.phone || '', customer.email || '']
+    .filter(Boolean)
+    .join(' · ');
+}
+
+// Default structure description from the customer's property type, falling back
+// to single-family residential (the common case / sample report wording).
+function formatStructuresInspected(customer) {
+  const type = String(customer?.property_type || customer?.propertyType || '').toLowerCase();
+  if (type.includes('commercial') || type.includes('business')) return 'Commercial structure';
+  return 'Single-family residential structure';
+}
+
+// Populate the WDO contact/address fields from the selected customer. With
+// overwrite=false (on selection) only blank fields are filled so typed values
+// are preserved; the explicit "Fill from customer" button passes overwrite=true.
+function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
+  const address = formatCustomerAddress(customer);
+  const contact = formatCustomerContact(customer);
+  const structures = formatStructuresInspected(customer);
+  const next = { ...prev };
+  if (address && (overwrite || !hasMeaningfulValue(next.property_address))) next.property_address = address;
+  if (contact && (overwrite || !hasMeaningfulValue(next.requested_by))) next.requested_by = contact;
+  if (contact && (overwrite || !hasMeaningfulValue(next.report_sent_to))) next.report_sent_to = contact;
+  if (structures && (overwrite || !hasMeaningfulValue(next.structures_inspected))) next.structures_inspected = structures;
+  return next;
+}
+
 function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
   const allowed = [
     'property_address',
@@ -285,6 +326,9 @@ export default function CreateProjectModal({
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLabel, setCustomerLabel] = useState(defaultCustomerLabel || '');
   const [selectedCustomer, setSelectedCustomer] = useState(null);
+  // Tracks the most recently requested prefill client so a slow, stale
+  // latest-scheduled-service response can't clobber a newer selection.
+  const prefillCustomerRef = useRef(null);
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -303,6 +347,96 @@ export default function CreateProjectModal({
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
+
+  // --- Draft auto-save (localStorage) ---
+  // Mirrors the completion-form draft pattern: debounced save of the typed
+  // fields so a half-written report survives navigating away. Photos are File
+  // objects and can't be serialized, so they're not part of the draft.
+  // Scope unscheduled drafts by the modal's allowed types so a general-project
+  // draft can't bleed into a restricted (e.g. WDO-only) create flow.
+  const allowedTypesScope = allowedProjectTypes && allowedProjectTypes.length
+    ? allowedProjectTypes.slice().sort().join('-')
+    : 'all';
+  const draftScope = defaultScheduledServiceId
+    ? `sched_${defaultScheduledServiceId}`
+    : defaultServiceRecordId
+      ? `rec_${defaultServiceRecordId}`
+      : `new_${allowedTypesScope}`;
+  const draftKey = `waves_project_draft_${draftScope}`;
+  const draftReadyRef = useRef(false);
+  const [savedDraft, setSavedDraft] = useState(null);
+  const [showDraftPrompt, setShowDraftPrompt] = useState(false);
+
+  // Load any saved draft on open and offer to restore it.
+  useEffect(() => {
+    draftReadyRef.current = false;
+    setSavedDraft(null);
+    setShowDraftPrompt(false);
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) {
+        const draft = JSON.parse(raw);
+        if (draft && typeof draft === 'object') {
+          setSavedDraft(draft);
+          setShowDraftPrompt(true);
+        }
+      }
+    } catch {
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    } finally {
+      draftReadyRef.current = true;
+    }
+  }, [draftKey]);
+
+  // Debounced auto-save of the typed fields. Held off while the restore
+  // prompt is showing so we don't clobber the saved draft before the tech
+  // chooses, and skipped entirely when the form is still empty.
+  useEffect(() => {
+    // Stop once the project exists on the server — the server draft is then
+    // the source of truth and a local draft would risk a duplicate on restore.
+    if (!draftReadyRef.current || showDraftPrompt || createdProject) return;
+    const hasContent = Boolean(
+      projectType
+      || customerId
+      || (title && title.trim())
+      || (recommendations && recommendations.trim())
+      || Object.values(findings).some((v) => String(v || '').trim()),
+    );
+    if (!hasContent) return;
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(draftKey, JSON.stringify({
+          savedAt: new Date().toISOString(),
+          projectType, customerId, customerLabel, projectDate, title, findings, recommendations,
+        }));
+      } catch { /* quota / serialization — non-blocking */ }
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [draftKey, showDraftPrompt, createdProject, projectType, customerId, customerLabel, projectDate, title, findings, recommendations]);
+
+  function restoreDraft() {
+    const d = savedDraft;
+    if (!d) return;
+    // Only restore the type (and its findings) if it's permitted in this modal;
+    // findings are type-specific, so drop them when the type isn't restored.
+    const typeAllowed = d.projectType && (!allowedProjectTypes || allowedProjectTypes.includes(d.projectType));
+    if (typeAllowed) {
+      setProjectType(d.projectType);
+      setFindings(d.findings && typeof d.findings === 'object' ? d.findings : {});
+    }
+    if (d.customerId) setCustomerId(d.customerId);
+    if (d.customerLabel) setCustomerLabel(d.customerLabel);
+    if (d.projectDate) setProjectDate(d.projectDate);
+    setTitle(d.title || '');
+    setRecommendations(d.recommendations || '');
+    setShowDraftPrompt(false);
+  }
+
+  function discardDraft() {
+    try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    setSavedDraft(null);
+    setShowDraftPrompt(false);
+  }
 
   useEffect(() => {
     adminFetch('/admin/projects/types')
@@ -381,9 +515,10 @@ export default function CreateProjectModal({
 
   useEffect(() => {
     if (projectType !== 'wdo_inspection') return;
-    const address = formatCustomerAddress(selectedCustomer);
-    if (!address) return;
-    setFindings(prev => prev.property_address ? prev : { ...prev, property_address: address });
+    if (!selectedCustomer) return;
+    // Seamlessly fill address + requested-by + report-sent-to from the picked
+    // customer, without clobbering anything the tech already typed.
+    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, false));
   }, [projectType, selectedCustomer]);
 
   function handleFindingChange(key, value) {
@@ -418,13 +553,21 @@ export default function CreateProjectModal({
   }
 
   function fillWdoAddressFromCustomer() {
-    const address = formatCustomerAddress(selectedCustomer);
-    if (!address) return;
-    setFindings(prev => ({ ...prev, property_address: address }));
+    if (!selectedCustomer) return;
+    // Explicit action — overwrite address + contact fields from the customer.
+    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, true));
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
     setFindings(prev => mergeSuggestionsIntoFindings(prev, suggestions, options.overwrite));
+  }
+
+  function applyWdoProfile(profile) {
+    setFindings(prev => applyProfileToWdoFindings(prev, profile, { overwrite: true }));
+  }
+
+  function applyWdoHistory(history) {
+    setFindings(prev => applyHistoryToWdoFindings(prev, history, { overwrite: true }));
   }
 
   async function handleAiDraft() {
@@ -454,6 +597,27 @@ export default function CreateProjectModal({
     } finally {
       setAiWriting(false);
     }
+  }
+
+  // When a tech looks up and picks a client, pull their most recent scheduled
+  // service and pre-fill the report's service title + date so they don't
+  // re-type what's already on the schedule. Title only fills when still blank
+  // (don't clobber something the tech typed); the date follows the matched
+  // visit since the form otherwise defaults to today.
+  async function prefillFromScheduledService(custId) {
+    if (!custId) return;
+    prefillCustomerRef.current = custId;
+    try {
+      const r = await adminFetch(`/admin/customers/${custId}/latest-scheduled-service`);
+      const d = await r.json();
+      // Ignore a stale response: if the tech has since picked a different
+      // client, don't overwrite the now-active client's title/date.
+      if (prefillCustomerRef.current !== custId) return;
+      const svc = d?.service;
+      if (!svc) return;
+      if (svc.serviceType) setTitle(prev => (prev && prev.trim()) ? prev : svc.serviceType);
+      if (svc.scheduledDate) setProjectDate(String(svc.scheduledDate).slice(0, 10));
+    } catch { /* non-blocking: tech can still fill these in manually */ }
   }
 
   function queuePhoto(file, category) {
@@ -487,6 +651,10 @@ export default function CreateProjectModal({
         data = await r.json();
         if (!r.ok) throw new Error(data?.error || 'Save failed');
         setCreatedProject(data.project);
+        // The project now lives server-side as a draft — it's the source of
+        // truth. Drop the local draft so a later restore can't re-POST a
+        // duplicate (e.g. if photo uploads below fail and the tech reopens).
+        try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       } else {
         const r = await adminFetch(`/admin/projects/${data.project.id}`, {
           method: 'PUT',
@@ -541,6 +709,7 @@ export default function CreateProjectModal({
         }
       }
 
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       if (onCreated) onCreated(data.project);
       onClose?.();
     } catch (e) {
@@ -613,6 +782,42 @@ export default function CreateProjectModal({
 
         {/* Body */}
         <div style={{ padding: isEstimateStyle ? 24 : 16, display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 18 : 16 }}>
+          {/* Restore saved draft */}
+          {showDraftPrompt && (
+            <div style={{
+              background: theme === 'light' ? P.card : P.bg,
+              border: `1px solid ${P.accent}`,
+              borderRadius: 10, padding: 12,
+              display: 'flex', flexDirection: 'column', gap: 10,
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: P.heading }}>
+                Restore saved draft?
+              </div>
+              <div style={{ fontSize: 11, color: P.muted }}>
+                Saved {savedDraft?.savedAt ? new Date(savedDraft.savedAt).toLocaleString() : 'recently'}
+                {' '}· photos aren’t saved and will need to be re-added.
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={restoreDraft}
+                  style={{
+                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 800,
+                    background: P.accent, color: P.accentText, border: 'none', cursor: 'pointer',
+                  }}
+                >Restore</button>
+                <button
+                  type="button"
+                  onClick={discardDraft}
+                  style={{
+                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                    background: 'transparent', color: P.text, border: `1px solid ${P.border}`, cursor: 'pointer',
+                  }}
+                >Discard</button>
+              </div>
+            </div>
+          )}
+
           {/* Project type */}
           <div>
             <label style={labelStyle}>Project type *</label>
@@ -664,7 +869,7 @@ export default function CreateProjectModal({
                 <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
                 <button
                   type="button"
-                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); }}
+                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; }}
                   style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
                 >Change</button>
               </div>
@@ -692,10 +897,10 @@ export default function CreateProjectModal({
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
                           const phone = c.phone || '';
                           setCustomerLabel([name, phone].filter(Boolean).join(' · ') || c.id);
-                          const address = formatCustomerAddress(c);
-                          if (projectType === 'wdo_inspection' && address) {
-                            setFindings(prev => ({ ...prev, property_address: address }));
+                          if (projectType === 'wdo_inspection') {
+                            setFindings(prev => applyCustomerToWdoFindings(prev, c, false));
                           }
+                          prefillFromScheduledService(c.id);
                         }}
                         style={{
                           width: '100%', textAlign: 'left', background: 'transparent',
@@ -783,6 +988,8 @@ export default function CreateProjectModal({
                   propertyAddress={findings.property_address || formatCustomerAddress(selectedCustomer)}
                   findings={findings}
                   onApplySuggestions={applyWdoSuggestions}
+                  onApplyProfile={applyWdoProfile}
+                  onApplyHistory={applyWdoHistory}
                   onEvidencePhotoSelected={(file) => queuePhoto(file, 'previous_treatment')}
                   disabled={saving || aiWriting}
                   palette={P}
@@ -821,6 +1028,7 @@ export default function CreateProjectModal({
                     inputStyle={inputStyle}
                     products={productCatalog}
                     onProductSelect={(product) => handleProductSelect(field.key, product)}
+                    palette={P}
                   />
                 </div>
               ))}
@@ -870,13 +1078,21 @@ export default function CreateProjectModal({
                     Include recent customer calls/texts/emails in AI draft
                   </label>
                 )}
-                <textarea
-                  value={recommendations}
-                  onChange={(e) => setRecommendations(e.target.value)}
-                  rows={6}
-                  placeholder="Tap quick actions, write raw notes, or use AI draft to create the client-facing report sections."
-                  style={{ ...inputStyle, resize: 'vertical', minHeight: 132 }}
-                />
+                <div style={{ position: 'relative' }}>
+                  <textarea
+                    value={recommendations}
+                    onChange={(e) => setRecommendations(e.target.value)}
+                    rows={6}
+                    placeholder="Tap quick actions, write raw notes, or use AI draft to create the client-facing report sections."
+                    style={{ ...inputStyle, resize: 'vertical', minHeight: 132, paddingRight: 44 }}
+                  />
+                  <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
+                    <DictationButton
+                      palette={P}
+                      onAppend={(text) => setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text)}
+                    />
+                  </div>
+                </div>
               </div>
 
               {/* Photos */}
@@ -889,6 +1105,7 @@ export default function CreateProjectModal({
                   onAdd={queuePhoto}
                   palette={P}
                   inputStyle={inputStyle}
+                  theme={theme}
                 />
               </div>
             </>
@@ -989,7 +1206,28 @@ function QuickProjectActions({ projectType, palette: P, onPick }) {
   );
 }
 
-function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle }) {
+function PhotoIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+      <circle cx="12" cy="13" r="4" />
+    </svg>
+  );
+}
+
+function LibraryIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+}
+
+function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle, theme }) {
   const [selectedCategory, setSelectedCategory] = useState(categories?.[0] || '');
 
   function handleFiles(e) {
@@ -1002,24 +1240,34 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
     setQueue(q => q.filter(item => item.id !== id));
   }
 
+  const addButtonStyle = {
+    flex: 1,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+    padding: '10px 12px', borderRadius: 8, background: P.accent, color: P.accentText,
+    fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
+  };
+  const libraryButtonStyle = {
+    ...addButtonStyle,
+    background: theme === 'light' ? P.card : P.bg,
+    color: P.text,
+    border: `1px solid ${P.border}`,
+  };
+
   return (
     <div>
+      <select
+        value={selectedCategory}
+        onChange={(e) => setSelectedCategory(e.target.value)}
+        style={{ ...inputStyle, width: '100%', padding: '8px 10px', fontSize: 12, marginBottom: 8 }}
+      >
+        {categories.map(cat => (
+          <option key={cat} value={cat}>{cat.replace(/_/g, ' ')}</option>
+        ))}
+      </select>
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-        <select
-          value={selectedCategory}
-          onChange={(e) => setSelectedCategory(e.target.value)}
-          style={{ ...inputStyle, flex: 1, padding: '8px 10px', fontSize: 12 }}
-        >
-          {categories.map(cat => (
-            <option key={cat} value={cat}>{cat.replace(/_/g, ' ')}</option>
-          ))}
-        </select>
-        <label style={{
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          padding: '8px 14px', borderRadius: 8, background: P.accent, color: P.accentText,
-          fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
-        }}>
-          + Add
+        {/* Take a photo — opens the camera directly on mobile */}
+        <label style={addButtonStyle}>
+          <PhotoIcon /> Camera
           <input
             type="file"
             accept="image/*"
@@ -1029,11 +1277,22 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
             style={{ display: 'none' }}
           />
         </label>
+        {/* Choose from photo library — no capture attribute so the gallery opens */}
+        <label style={libraryButtonStyle}>
+          <LibraryIcon /> Library
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={handleFiles}
+            style={{ display: 'none' }}
+          />
+        </label>
       </div>
 
       {queue.length === 0 ? (
         <div style={{ fontSize: 11, color: P.muted, padding: '10px 0' }}>
-          No photos yet — pick a category and tap Add.
+          No photos yet — pick a category, then Camera or Library.
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

@@ -142,6 +142,7 @@ function estimateLineItemsFromData(estimateData = {}) {
 
 function isNonDiscountableRecurringLine(item = {}) {
   const annual = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
+  if (recurringServiceKey(item) === 'lawn_care') return false;
   return annual > 0 && (
     item.discountable === false ||
     item.discount?.discountable === false ||

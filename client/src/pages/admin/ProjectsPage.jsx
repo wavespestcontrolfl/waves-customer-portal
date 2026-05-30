@@ -4,6 +4,9 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
+import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
+import useIsMobile from "../../hooks/useIsMobile";
+import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
 import { COLORS, FONTS } from "../../theme-brand";
 
@@ -917,6 +920,7 @@ export default function ProjectsPage() {
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [createMode, setCreateMode] = useState(null);
   const [error, setError] = useState("");
+  const isMobile = useIsMobile(900);
   const isAdmin = getAdminRole() === "admin";
 
   const loadProjects = useCallback(async () => {
@@ -1037,12 +1041,22 @@ export default function ProjectsPage() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: selected ? "1fr 1.4fr" : "1fr",
+          // On phones the master-detail can't sit side by side — stack to one
+          // column, and when a project is open show only the detail (full width)
+          // so its title/photos aren't squished into a sliver. The detail's
+          // close (X) returns to the list.
+          gridTemplateColumns: !isMobile && selected ? "1fr 1.4fr" : "1fr",
           gap: 16,
         }}
       >
-        {/* List */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {/* List — hidden on mobile while a detail is open */}
+        <div
+          style={{
+            display: isMobile && selected ? "none" : "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
           {showRegularProjects &&
             (loading ? (
               <div style={{ padding: 24, color: D.muted }}>Loading…</div>
@@ -1427,6 +1441,9 @@ function ProjectDetail({
   const hasPrepGuide = project
     ? PROJECT_TYPES_WITH_PREP_GUIDES.has(project.project_type)
     : false;
+  // WDO reports can't be sent until the licensee signature is captured.
+  const wdoNeedsSignature =
+    project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
 
   useEffect(() => {
     if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
@@ -1557,6 +1574,80 @@ function ProjectDetail({
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSendWithInvoice() {
+    if (!canAdminActions) {
+      setError("Admin access required to send project reports.");
+      return;
+    }
+    const readiness = evaluateProjectReadiness({
+      project: { ...project, title: editTitle },
+      typeCfg,
+      findings: editFindings,
+      recommendations: editRecs,
+      projectDate: editProjectDate,
+    });
+    let overrideReason = "";
+    if (readiness.missing.length) {
+      const lines = readiness.missing.map((item) => `Missing: ${item.label}`);
+      if (!confirm(`This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`)) return;
+      overrideReason =
+        window.prompt("Enter the admin override reason for sending this incomplete report:")?.trim() || "";
+      if (!overrideReason) return;
+    }
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await saveDirtyProjectEdits("Could not save project before sending");
+      // dry_run first so the operator can confirm the invoice amount.
+      const preview = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
+        method: "POST",
+        body: { dry_run: true, ...(overrideReason ? { override_reason: overrideReason } : {}) },
+      });
+      const pv = await readJsonResponse(preview, "Could not prepare invoice");
+      const inv = pv.invoice || {};
+      const amount = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : "the amount shown";
+      const verb = inv.created ? "Create and send" : "Send";
+      // A brand-new WDO has no invoice number yet (the draft is created on send),
+      // so only name the number when the preview resolved an existing invoice.
+      const invoiceLabel = inv.invoice_number ? ` ${inv.invoice_number}` : "";
+      if (
+        !confirm(
+          `${verb} invoice${invoiceLabel} for ${amount} together with the WDO report?\n\n` +
+            `The customer gets one email (FDACS-13645 report PDF + invoice PDF) and one text (report + pay links).`,
+        )
+      ) {
+        setSaving(false);
+        return;
+      }
+      const r = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
+        method: "POST",
+        body: {
+          // Only an existing invoice carries an id from the preview; a new WDO
+          // (id null) routes to the server's locked create path on send.
+          ...(inv.id ? { invoice_id: inv.id } : {}),
+          ...(overrideReason ? { override_reason: overrideReason } : {}),
+        },
+      });
+      const d = await readJsonResponse(r, "Could not send report + invoice");
+      if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);
+      setDelivery(d.channels || null);
+      if (d.sent === false) {
+        setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
+      } else {
+        setNotice(
+          `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
+        );
+      }
+      await load();
+      onChanged?.();
+    } catch (e) {
+      setError(e.message || "Could not send report + invoice");
     } finally {
       setSaving(false);
     }
@@ -1860,6 +1951,16 @@ function ProjectDetail({
     setDirty(true);
   }
 
+  function applyWdoProfile(profile) {
+    setEditFindings((f) => applyProfileToWdoFindings(f, profile, { overwrite: true }));
+    setDirty(true);
+  }
+
+  function applyWdoHistory(history) {
+    setEditFindings((f) => applyHistoryToWdoFindings(f, history, { overwrite: true }));
+    setDirty(true);
+  }
+
   if (loading || !project) {
     return (
       <div
@@ -1932,6 +2033,7 @@ function ProjectDetail({
               color: ESTIMATE_TEXT,
               marginTop: 4,
               lineHeight: 1.1,
+              overflowWrap: "anywhere",
             }}
           >
             {project.title || typeCfg?.label || "Project"}
@@ -2130,6 +2232,10 @@ function ProjectDetail({
             }
             findings={editFindings}
             onApplySuggestions={applyWdoSuggestions}
+            onApplyProfile={applyWdoProfile}
+            onApplyHistory={applyWdoHistory}
+            initialProfile={project.property_profile || null}
+            initialHistory={project.wdo_history || null}
             onEvidencePhotoSelected={handleEvidencePhotoSelected}
             disabled={saving || aiWriting}
             palette={{
@@ -2491,6 +2597,17 @@ function ProjectDetail({
         )}
         <ProjectHistoryPanel activity={data.activity || []} />{" "}
       </div>
+      {canAdminActions && project.project_type === WDO_TYPE && project.status !== "closed" && (
+        <div style={{ padding: "0 16px" }}>
+          <WdoSignaturePad
+            projectId={project.id}
+            signature={project.wdo_signature}
+            defaultSignerName={project.wdo_applicator?.name || project.tech_name || ""}
+            defaultSignerIdCard={project.wdo_applicator?.idCardNo || ""}
+            onChanged={() => load({ preserveEdits: true })}
+          />
+        </div>
+      )}
       {/* Footer actions */}
       <div
         style={{
@@ -2577,8 +2694,9 @@ function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving}
-              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+              disabled={saving || wdoNeedsSignature}
+              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              title={wdoNeedsSignature ? "Capture the licensee signature first" : undefined}
             >
               Resend report
             </button>
@@ -2589,10 +2707,24 @@ function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving}
-              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+              disabled={saving || wdoNeedsSignature}
+              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              title={wdoNeedsSignature ? "Capture the licensee signature first" : undefined}
             >
               Send report
+            </button>
+          )}
+        {canAdminActions &&
+          project.project_type === WDO_TYPE &&
+          project.status !== "closed" && (
+            <button
+              type="button"
+              onClick={handleSendWithInvoice}
+              disabled={saving || wdoNeedsSignature}
+              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              title={wdoNeedsSignature ? "Capture the licensee signature first" : "Send the filled FDACS-13645 report and an invoice together via email + text"}
+            >
+              Send report + invoice
             </button>
           )}
       </div>{" "}
@@ -2605,6 +2737,8 @@ const PROJECT_ACTIVITY_LABELS = {
   project_updated: "Updated",
   project_report_sent: "Sent",
   project_report_resent: "Resent",
+  project_report_with_invoice_sent: "Report + invoice sent",
+  project_report_with_invoice_failed: "Report + invoice failed",
   project_prep_guide_sent: "Prep guide sent",
   project_prep_guide_failed: "Prep guide failed",
   project_portal_invite_sent: "Portal invite sent",

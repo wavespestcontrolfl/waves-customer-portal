@@ -104,6 +104,9 @@ function attachPalmCountMetadata(result, resolution) {
 
 const MANUAL_RECURRING_DISCOUNT_ELIGIBLE = new Set([
   'pest_control',
+  'lawn_care',
+  'lawn_care_enhanced',
+  'lawn_care_premium',
   'mosquito',
   'tree_shrub',
 ]);

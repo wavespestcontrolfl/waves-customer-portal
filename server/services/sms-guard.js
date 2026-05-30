@@ -38,6 +38,13 @@ const BROKEN_RENDER_SUBSTRINGS = [
   '1970',
 ];
 
+const BLOCKED_OUTBOUND_PATTERNS = [
+  {
+    reason: 'blocked-autopay-pre-charge-waveguard',
+    re: /\bWaveGuard\s+auto-pay\s+will\s+process\b/i,
+  },
+];
+
 function hasBrokenRender(body) {
   const lower = body.toLowerCase();
   for (const s of BROKEN_RENDER_SUBSTRINGS) {
@@ -46,6 +53,13 @@ function hasBrokenRender(body) {
   // Standalone "null" word (not "nullify" / "annull") — tighter match than
   // a naive indexOf so we don't reject legit words containing "null".
   if (/\bnull\b/i.test(body)) return 'null';
+  return null;
+}
+
+function findBlockedOutboundPattern(body) {
+  for (const pattern of BLOCKED_OUTBOUND_PATTERNS) {
+    if (pattern.re.test(body)) return pattern.reason;
+  }
   return null;
 }
 
@@ -88,6 +102,11 @@ function validateOutbound(body, options = {}) {
     return { ok: false, reason: `broken-render:${broken}` };
   }
 
+  const blockedPattern = findBlockedOutboundPattern(body);
+  if (blockedPattern) {
+    return { ok: false, reason: blockedPattern };
+  }
+
   if (options.messageType !== 'internal_alert') {
     const stale = findStaleMonth(body, options.now);
     if (stale) {
@@ -98,4 +117,4 @@ function validateOutbound(body, options = {}) {
   return { ok: true };
 }
 
-module.exports = { validateOutbound, findStaleMonth, hasBrokenRender };
+module.exports = { validateOutbound, findStaleMonth, hasBrokenRender, findBlockedOutboundPattern };

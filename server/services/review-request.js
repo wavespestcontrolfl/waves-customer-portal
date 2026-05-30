@@ -88,11 +88,18 @@ function calculateReviewSendTime(completedAt, serviceType) {
     return atHour(addETDays(date, 1), targetHour);
   }
 
+  function normalizeReviewSendWindow(sendAt) {
+    const p = etParts(sendAt);
+    if (p.hour < 9) return atHour(sendAt, 10);
+    if (p.hour >= 17) return nextDayAtHour(sendAt, 10);
+    return sendAt;
+  }
+
   function addMins(date, mins) {
     return new Date(date.getTime() + (mins + jitter()) * 60000);
   }
 
-  const EVENING = 18.5; // 6:30 PM — golden window
+  const LATE_AFTERNOON = 16.5; // 4:30 PM — last review-request window
   const MORNING = 10; // 10:00 AM
 
   const svc = (serviceType || "").toLowerCase();
@@ -101,7 +108,7 @@ function calculateReviewSendTime(completedAt, serviceType) {
 
   // Mosquito / WaveGuard: delay until evening when they're outside enjoying the yard
   if (svc.includes("mosquito") || svc.includes("waveguard")) {
-    if (hour < 16) return atHour(completedAt, EVENING);
+    if (hour < 15) return atHour(completedAt, LATE_AFTERNOON);
     return nextDayAtHour(completedAt, MORNING);
   }
 
@@ -112,16 +119,14 @@ function calculateReviewSendTime(completedAt, serviceType) {
     svc.includes("shrub") ||
     svc.includes("dethatch")
   ) {
-    if (hour < 16) return atHour(completedAt, EVENING); // same evening
+    if (hour < 15) return atHour(completedAt, LATE_AFTERNOON); // same afternoon
     return nextDayAtHour(completedAt, MORNING); // next morning
   }
 
   // WDO / first-time inspections: high anxiety → high relief, capture it fast
   if (svc.includes("wdo")) {
     const send = addMins(completedAt, 90);
-    // Guard: never after 8 PM ET
-    if (etParts(send).hour >= 20) return nextDayAtHour(completedAt, MORNING);
-    return send;
+    return normalizeReviewSendWindow(send);
   }
 
   // ── Day-of-week overrides ──────────────────────────────────
@@ -138,9 +143,9 @@ function calculateReviewSendTime(completedAt, serviceType) {
 
   // ── Default time-of-day logic ──────────────────────────────
 
-  if (hour >= 7 && hour < 12) return addMins(completedAt, 120); // morning: 2-hour delay
-  if (hour >= 12 && hour < 15) return addMins(completedAt, 90); // early afternoon: 90 min
-  if (hour >= 15 && hour < 17) return atHour(completedAt, EVENING); // late afternoon: 6:30 PM
+  if (hour >= 7 && hour < 12) return normalizeReviewSendWindow(addMins(completedAt, 120)); // morning: 2-hour delay
+  if (hour >= 12 && hour < 15) return normalizeReviewSendWindow(addMins(completedAt, 90)); // early afternoon: 90 min
+  if (hour >= 15 && hour < 17) return nextDayAtHour(completedAt, MORNING); // late afternoon: next morning
   // After 5 PM or before 7 AM — next morning 10 AM
   return nextDayAtHour(completedAt, MORNING);
 }
@@ -1026,6 +1031,7 @@ const ReviewService = {
 
 ReviewService.__private = {
   retryAtForDeferredSend,
+  calculateReviewSendTime,
 };
 
 module.exports = ReviewService;

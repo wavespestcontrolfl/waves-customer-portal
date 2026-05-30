@@ -163,6 +163,104 @@ describe('lawn pricing production follow-up', () => {
     ]));
   });
 
+  test('lot fallback above plausible outdoor area downgrades to legacy hardscape estimate', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 0,
+      estimatedBedAreaPercent: 10,
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(8139);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfOpenArea).toBe(10435);
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('estimated zero bed area with a real footprint still caps impossible lot fallback', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 10,
+      estimatedBedAreaSf: 0,
+      bedAreaSource: 'estimated',
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(8139);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfOpenArea).toBe(10435);
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('translated estimated zero bed area still caps when copied into bedArea', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 10,
+      estimatedBedAreaSf: 0,
+      bedArea: 0,
+      bedAreaSource: 'estimated',
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(8139);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfOpenArea).toBe(10435);
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('positive estimated bed area preserves explicit lot fallback math', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 0,
+      estimatedBedAreaSf: 500,
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(9500);
+    expect(property.turfBasis).toBe('lotFallback');
+    expect(property.turfOpenArea).toBe(10000);
+    expect(property.turfFlags).toEqual(['FIELD_VERIFY_TURF_SQFT']);
+  });
+
+  test('positive estimated bed area alias preserves explicit lot fallback math', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 0,
+      bedArea: 500,
+      bedAreaSource: 'estimated',
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(9500);
+    expect(property.turfBasis).toBe('lotFallback');
+    expect(property.turfOpenArea).toBe(10000);
+    expect(property.turfFlags).toEqual(['FIELD_VERIFY_TURF_SQFT']);
+  });
+
   test('minor AI turf overages cap to plausible max instead of legacy fallback', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 2000,
@@ -674,7 +772,7 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.selected.marketAnnual).toBeGreaterThan(lawn.annual);
   });
 
-  test('Lawn V2 is net floor pricing and does not receive WaveGuard percent discounts', () => {
+  test('Lawn V2 receives WaveGuard percent discounts', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4250,
       services: {
@@ -690,17 +788,17 @@ describe('lawn pricing production follow-up', () => {
       activeServices: ['pest_control', 'lawn_care'],
     });
     expect(lawn.annual).toBe(828);
-    expect(lawn.annualAfterDiscount).toBe(828);
+    expect(lawn.annualAfterDiscount).toBe(745.2);
+    expect(lawn.monthlyAfterDiscount).toBe(62.1);
     expect(lawn.discount).toMatchObject({
-      discountable: false,
+      discountable: true,
       requestedDiscountPercent: 0.10,
-      appliedDiscountPercent: 0,
-      effectiveDiscount: 0,
-      policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
+      appliedDiscountPercent: 0.10,
+      effectiveDiscount: 0.10,
     });
   });
 
-  test('manual recurring discounts exclude Lawn V2 net floor pricing', () => {
+  test('manual recurring discounts include WaveGuard-discounted Lawn V2 pricing', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4250,
       services: {
@@ -711,10 +809,11 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    expect(lawn.annualAfterDiscount).toBe(828);
-    expect(estimate.summary.manualDiscount.discountableBase).toBe(421.2);
-    expect(estimate.summary.manualDiscount.amount).toBe(42.12);
-    expect(estimate.summary.manualDiscount.excludedServices).toContain('lawn_care_enhanced');
+    expect(lawn.annualAfterDiscount).toBe(745.2);
+    expect(estimate.summary.manualDiscount.discountableBase).toBe(1166.4);
+    expect(estimate.summary.manualDiscount.amount).toBe(116.64);
+    expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
+    expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
   });
 
   test('requesting hidden tier without includeHiddenTiers falls back to enhanced', () => {

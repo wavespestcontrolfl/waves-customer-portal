@@ -468,6 +468,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // THU–SUN 2PM ET — Missed-tick catch-up for the Thursday-7AM autopilot. If
+  // the process was down at 7AM Thursday, the weekly draft never got created.
+  // Re-run autoDraftFlagship ONLY for a week that was NEVER ATTEMPTED (no
+  // calendar row, or status 'planned'). A deliberately-deleted draft (status
+  // 'drafted' with a null send_id) is left alone so it can't silently reappear,
+  // and drafted/scheduled/sent/skipped weeks are already handled. The autopilot's
+  // own advisory lock + dedupe make a catch-up invocation safe if it races the
+  // 7AM run. Runs daily Thu–Sun so a mid-week recovery still lands the draft.
+  // A catch-up that hard-fails preflight persists a 'skipped' row, so the
+  // following day's tick retires the week instead of re-running + re-notifying.
+  // =========================================================================
+  cron.schedule('0 14 * * 4,5,6,0', async () => {
+    try {
+      const { getCurrentNewsletterThursday } = require('./event-freshness');
+      const weekOf = getCurrentNewsletterThursday();
+      const cal = await db('newsletter_calendar').where('week_of', weekOf).first();
+      // Only catch up weeks that were never attempted.
+      if (cal && cal.status !== 'planned') return;
+      const { autoDraftFlagship } = require('./newsletter-autopilot');
+      const result = await autoDraftFlagship();
+      logger.info(`[newsletter-autopilot-catchup] ${result.skipped ? 'skipped' : 'drafted'}: ${result.reason || result.sendId}`);
+    } catch (err) {
+      logger.error(`[newsletter-autopilot-catchup] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM ET — Newsletter indexability decay: noindex stale event digests
   // Event digest archive pages older than 30 days add nothing to search —
   // stale "This Weekend in SWFL" content just dilutes the index. Flips
@@ -513,6 +540,41 @@ function initScheduledJobs() {
       if (count > 0) logger.info(`[event-expiry] Marked ${count} past event(s) expired`);
     } catch (err) {
       logger.error(`[event-expiry] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 5:45AM ET — Cross-source duplicate auto-merge. Ingest dedupes only on
+  // (source_id, external_id), so the same real-world event pulled from two feeds
+  // becomes two rows and could both reach a digest. Cluster upcoming events
+  // (normalized title + ET day + city — conservative, near-zero false positives)
+  // and collapse each cluster into one survivor (highest-priority source, then
+  // most complete). Runs after the 5AM normalize + 5:30AM expire, before the
+  // Thursday-7AM autopilot, so the lineup it sees is already de-duplicated.
+  // =========================================================================
+  cron.schedule('45 5 * * *', async () => {
+    try {
+      const { autoMergeDuplicates } = require('./event-dedup');
+      await autoMergeDuplicates();
+    } catch (err) {
+      logger.error(`[event-dedup] auto-merge run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3AM ET — Purge stale double-opt-in pending subscribers. A 'pending'
+  // row whose confirmation link aged past the purge window (30d) never
+  // confirmed; delete it so the table doesn't accrue dead rows and the email is
+  // free for a fresh signup. (The link already stops confirming after 7d via
+  // the lookupByToken TTL.)
+  // =========================================================================
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      const { purgeStalePendingSubscribers } = require('./newsletter-subscribers');
+      const removed = await purgeStalePendingSubscribers();
+      if (removed > 0) logger.info(`[newsletter] Purged ${removed} stale pending subscriber(s)`);
+    } catch (err) {
+      logger.error(`[newsletter-pending-purge] failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
