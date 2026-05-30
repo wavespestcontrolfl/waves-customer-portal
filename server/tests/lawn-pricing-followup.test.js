@@ -183,6 +183,84 @@ describe('lawn pricing production follow-up', () => {
     ]));
   });
 
+  test('estimated zero bed area with a real footprint still caps impossible lot fallback', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 10,
+      estimatedBedAreaSf: 0,
+      bedAreaSource: 'estimated',
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(8139);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfOpenArea).toBe(10435);
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('translated estimated zero bed area still caps when copied into bedArea', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 10,
+      estimatedBedAreaSf: 0,
+      bedArea: 0,
+      bedAreaSource: 'estimated',
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(8139);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfOpenArea).toBe(10435);
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('positive estimated bed area preserves explicit lot fallback math', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 0,
+      estimatedBedAreaSf: 500,
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(9500);
+    expect(property.turfBasis).toBe('lotFallback');
+    expect(property.turfOpenArea).toBe(10000);
+    expect(property.turfFlags).toEqual(['FIELD_VERIFY_TURF_SQFT']);
+  });
+
+  test('positive estimated bed area alias preserves explicit lot fallback math', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 0,
+      bedArea: 500,
+      bedAreaSource: 'estimated',
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBe(9500);
+    expect(property.turfBasis).toBe('lotFallback');
+    expect(property.turfOpenArea).toBe(10000);
+    expect(property.turfFlags).toEqual(['FIELD_VERIFY_TURF_SQFT']);
+  });
+
   test('minor AI turf overages cap to plausible max instead of legacy fallback', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 2000,

@@ -256,7 +256,16 @@ function computeTurfArea(input, fallback = {}) {
   const hasKnownMaxEstimatedTurfSf = input.maxEstimatedTurfSfKnown === true &&
     hasNonNegativeNumber(input.maxEstimatedTurfSf);
   const maxEstimatedTurfSf = hasKnownMaxEstimatedTurfSf ? Number(input.maxEstimatedTurfSf) : 0;
-  if (!hasBedArea && !hasEstimatedBedArea && hasKnownMaxEstimatedTurfSf && lotFallbackTurfSf > maxEstimatedTurfSf) {
+  const hasRealFootprint = toPositiveNumber(input.footprintSqFt ?? input.footprint) > 0 ||
+    toPositiveNumber(input.homeSqFt) > 0;
+  const bedAreaSource = String(input.bedAreaSource || '').trim().toLowerCase();
+  const estimatedBedAreaValue = hasEstimatedBedArea
+    ? Number(input.estimatedBedAreaSf)
+    : (hasBedArea && bedAreaSource === 'estimated' ? Number(input.bedArea) : null);
+  const hasEstimatedBedAreaValue = estimatedBedAreaValue !== null && Number.isFinite(estimatedBedAreaValue);
+  const hasZeroEstimatedBedArea = hasEstimatedBedAreaValue && estimatedBedAreaValue === 0;
+  const hasManualBedArea = hasBedArea && bedAreaSource !== 'estimated';
+  if (!hasManualBedArea && (!hasEstimatedBedAreaValue || (hasZeroEstimatedBedArea && hasRealFootprint)) && hasKnownMaxEstimatedTurfSf && lotFallbackTurfSf > maxEstimatedTurfSf) {
     const overage = lotFallbackTurfSf - maxEstimatedTurfSf;
     const tolerance = Math.max(
       PLAUSIBLE_TURF_OVERAGE_TOLERANCE_SF,
