@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
+import DictationButton from './DictationButton';
 
 const ESTIMATE_BG = '#FAF8F3';
 const ESTIMATE_BORDER = '#E7E2D7';
@@ -285,6 +286,9 @@ export default function CreateProjectModal({
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLabel, setCustomerLabel] = useState(defaultCustomerLabel || '');
   const [selectedCustomer, setSelectedCustomer] = useState(null);
+  // Tracks the most recently requested prefill client so a slow, stale
+  // latest-scheduled-service response can't clobber a newer selection.
+  const prefillCustomerRef = useRef(null);
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -454,6 +458,27 @@ export default function CreateProjectModal({
     } finally {
       setAiWriting(false);
     }
+  }
+
+  // When a tech looks up and picks a client, pull their most recent scheduled
+  // service and pre-fill the report's service title + date so they don't
+  // re-type what's already on the schedule. Title only fills when still blank
+  // (don't clobber something the tech typed); the date follows the matched
+  // visit since the form otherwise defaults to today.
+  async function prefillFromScheduledService(custId) {
+    if (!custId) return;
+    prefillCustomerRef.current = custId;
+    try {
+      const r = await adminFetch(`/admin/customers/${custId}/latest-scheduled-service`);
+      const d = await r.json();
+      // Ignore a stale response: if the tech has since picked a different
+      // client, don't overwrite the now-active client's title/date.
+      if (prefillCustomerRef.current !== custId) return;
+      const svc = d?.service;
+      if (!svc) return;
+      if (svc.serviceType) setTitle(prev => (prev && prev.trim()) ? prev : svc.serviceType);
+      if (svc.scheduledDate) setProjectDate(String(svc.scheduledDate).slice(0, 10));
+    } catch { /* non-blocking: tech can still fill these in manually */ }
   }
 
   function queuePhoto(file, category) {
@@ -664,7 +689,7 @@ export default function CreateProjectModal({
                 <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
                 <button
                   type="button"
-                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); }}
+                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; }}
                   style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
                 >Change</button>
               </div>
@@ -696,6 +721,7 @@ export default function CreateProjectModal({
                           if (projectType === 'wdo_inspection' && address) {
                             setFindings(prev => ({ ...prev, property_address: address }));
                           }
+                          prefillFromScheduledService(c.id);
                         }}
                         style={{
                           width: '100%', textAlign: 'left', background: 'transparent',
@@ -821,6 +847,7 @@ export default function CreateProjectModal({
                     inputStyle={inputStyle}
                     products={productCatalog}
                     onProductSelect={(product) => handleProductSelect(field.key, product)}
+                    palette={P}
                   />
                 </div>
               ))}
@@ -870,13 +897,21 @@ export default function CreateProjectModal({
                     Include recent customer calls/texts/emails in AI draft
                   </label>
                 )}
-                <textarea
-                  value={recommendations}
-                  onChange={(e) => setRecommendations(e.target.value)}
-                  rows={6}
-                  placeholder="Tap quick actions, write raw notes, or use AI draft to create the client-facing report sections."
-                  style={{ ...inputStyle, resize: 'vertical', minHeight: 132 }}
-                />
+                <div style={{ position: 'relative' }}>
+                  <textarea
+                    value={recommendations}
+                    onChange={(e) => setRecommendations(e.target.value)}
+                    rows={6}
+                    placeholder="Tap quick actions, write raw notes, or use AI draft to create the client-facing report sections."
+                    style={{ ...inputStyle, resize: 'vertical', minHeight: 132, paddingRight: 44 }}
+                  />
+                  <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
+                    <DictationButton
+                      palette={P}
+                      onAppend={(text) => setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text)}
+                    />
+                  </div>
+                </div>
               </div>
 
               {/* Photos */}
@@ -889,6 +924,7 @@ export default function CreateProjectModal({
                   onAdd={queuePhoto}
                   palette={P}
                   inputStyle={inputStyle}
+                  theme={theme}
                 />
               </div>
             </>
@@ -989,7 +1025,28 @@ function QuickProjectActions({ projectType, palette: P, onPick }) {
   );
 }
 
-function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle }) {
+function PhotoIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+      <circle cx="12" cy="13" r="4" />
+    </svg>
+  );
+}
+
+function LibraryIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+}
+
+function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle, theme }) {
   const [selectedCategory, setSelectedCategory] = useState(categories?.[0] || '');
 
   function handleFiles(e) {
@@ -1002,24 +1059,34 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
     setQueue(q => q.filter(item => item.id !== id));
   }
 
+  const addButtonStyle = {
+    flex: 1,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+    padding: '10px 12px', borderRadius: 8, background: P.accent, color: P.accentText,
+    fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
+  };
+  const libraryButtonStyle = {
+    ...addButtonStyle,
+    background: theme === 'light' ? P.card : P.bg,
+    color: P.text,
+    border: `1px solid ${P.border}`,
+  };
+
   return (
     <div>
+      <select
+        value={selectedCategory}
+        onChange={(e) => setSelectedCategory(e.target.value)}
+        style={{ ...inputStyle, width: '100%', padding: '8px 10px', fontSize: 12, marginBottom: 8 }}
+      >
+        {categories.map(cat => (
+          <option key={cat} value={cat}>{cat.replace(/_/g, ' ')}</option>
+        ))}
+      </select>
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-        <select
-          value={selectedCategory}
-          onChange={(e) => setSelectedCategory(e.target.value)}
-          style={{ ...inputStyle, flex: 1, padding: '8px 10px', fontSize: 12 }}
-        >
-          {categories.map(cat => (
-            <option key={cat} value={cat}>{cat.replace(/_/g, ' ')}</option>
-          ))}
-        </select>
-        <label style={{
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          padding: '8px 14px', borderRadius: 8, background: P.accent, color: P.accentText,
-          fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
-        }}>
-          + Add
+        {/* Take a photo — opens the camera directly on mobile */}
+        <label style={addButtonStyle}>
+          <PhotoIcon /> Camera
           <input
             type="file"
             accept="image/*"
@@ -1029,11 +1096,22 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
             style={{ display: 'none' }}
           />
         </label>
+        {/* Choose from photo library — no capture attribute so the gallery opens */}
+        <label style={libraryButtonStyle}>
+          <LibraryIcon /> Library
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={handleFiles}
+            style={{ display: 'none' }}
+          />
+        </label>
       </div>
 
       {queue.length === 0 ? (
         <div style={{ fontSize: 11, color: P.muted, padding: '10px 0' }}>
-          No photos yet — pick a category and tap Add.
+          No photos yet — pick a category, then Camera or Library.
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
