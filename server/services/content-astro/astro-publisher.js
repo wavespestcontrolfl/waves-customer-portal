@@ -487,11 +487,24 @@ async function publishMetadataRewrite(draft, brief = {}) {
 
   const parsed = fm.parse(existing.content);
   const currentFrontmatter = parsed.data || {};
+  const newTitle = String(draft.title || '').trim();
+  const newMeta = String(draft.meta_description || '').trim();
   const nextFrontmatter = {
     ...currentFrontmatter,
-    title: String(draft.title || '').trim(),
-    meta_description: String(draft.meta_description || '').trim(),
+    title: newTitle,
+    meta_description: newMeta,
   };
+
+  // Bump the freshness field the live page already uses (services: `modified`;
+  // blog v2: `updated`) so sitemap lastmod updates and Google recrawls the
+  // rewritten title/meta — these are high-SEO-value edits. Only when something
+  // actually changed; mirrors publishRefresh and avoids fake-freshness churn.
+  if (newTitle !== String(currentFrontmatter.title || '').trim()
+    || newMeta !== String(currentFrontmatter.meta_description || '').trim()) {
+    const today = dateOnly(new Date());
+    if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
+    else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
+  }
 
   // Blog targets must stay schema-valid after a metadata rewrite (e.g.
   // meta_description 115-160). Non-blog pages use a different contract.

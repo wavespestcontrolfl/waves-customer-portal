@@ -290,9 +290,13 @@ class CustomerInsightsMiner {
 
     finalized.sort((a, b) => b.total_count - a.total_count);
 
-    // Persist only clusters meeting size threshold.
+    // Drop single-mention noise: one customer saying something once is not an
+    // insight. We intentionally do NOT gate at customerClusterMinSize (10) here
+    // — clusters of 2-9 still feed the decision-router's partial customer-demand
+    // credit and the quality gate's FAQ anchoring, both of which read persisted
+    // rows. The minSize threshold remains the FULL-credit bar, applied downstream.
     let persisted = 0;
-    if (persist) persisted = await this.persist(finalized.filter((c) => c.total_count >= 1));
+    if (persist) persisted = await this.persist(finalized.filter((c) => c.total_count >= 2));
 
     return {
       eligibility_summary: eligibility,

@@ -467,7 +467,10 @@ class AutonomousRunner {
     const needsUniquenessGate = brief.page_type === 'city-service' || brief.page_type === 'customer-question';
     const needsBlogUniqueness = !needsUniquenessGate
       && (brief.page_type === 'supporting-blog' || run.action_type === 'new_supporting_blog')
-      && envBool('AUTONOMOUS_CONTENT_BLOG_UNIQUENESS', false);
+      // Default ON: blog dedup is the primary anti-scaled-content gate for the
+      // highest-volume content type. Set AUTONOMOUS_CONTENT_BLOG_UNIQUENESS=false
+      // to explicitly disable (fail open) rather than relying on an unset env.
+      && envBool('AUTONOMOUS_CONTENT_BLOG_UNIQUENESS', true);
     let uniquenessResult = { ok: true, skipped: 'not_applicable' };
     if (!uniquenessGate && (needsUniquenessGate || needsBlogUniqueness)) {
       uniquenessResult = { ok: false, error: 'uniqueness_gate_unavailable' };
@@ -632,8 +635,12 @@ class AutonomousRunner {
       run.quality_gate_result = qualityResult;
     }
 
-    const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed !== false
-      && prePublishVisibilityResult.passed !== false;
+    // Require an explicit pass from every gate. `=== true` (not `!== false`)
+    // so a gate that returns a malformed/missing `passed` shape fails CLOSED
+    // rather than slipping through as a silent pass. Both results above are
+    // always initialized with an explicit boolean `passed`.
+    const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed === true
+      && prePublishVisibilityResult.passed === true;
 
     // 6. Trust-build check. AUTO_PUBLISH_<ACTION_TYPE>=true skips the human
     // trust-build ramp once every quality gate has passed; the canary
@@ -991,6 +998,10 @@ class AutonomousRunner {
     const protectedPages = getProtectedPages();
     if (!protectedPages?.isProtected) return null;
     const target = protectedPageCandidateUrl(opp, brief);
+    // No resolvable target: nothing to check here. An in-place editor (rewrite/
+    // refresh) that reaches publish without a target still fails closed at the
+    // publish step (the handler throws a deterministic "could not resolve
+    // target" error and the run is parked for review).
     if (!target) return null;
     let prot;
     try {
@@ -1704,8 +1715,25 @@ function protectedPageCandidateUrl(opp = {}, brief = null) {
 }
 
 function protectedBriefTargetUrl(opp = {}, brief = null) {
-  if (!brief || !protectedCityServiceGuardApplies(opp, brief)) return null;
+  // Resolve the URL the action will actually edit so the protected-page check
+  // sees the same target the handler does. City-service actions derive it; the
+  // in-place editors (rewrite/refresh) carry it on the brief (target_url||
+  // page_url) even when opp.page_url is empty — without this a refresh/rewrite
+  // on a non-city-service money page is checked against `null` (i.e. skipped).
+  if (!brief) return null;
+  if (!protectedCityServiceGuardApplies(opp, brief) && !actionEditsExistingPage(opp, brief)) return null;
   return brief.target_url || brief.page_url || null;
+}
+
+// Actions that edit an already-published page IN PLACE (vs. creating a new one).
+// For these, an unresolvable target must fail CLOSED — we can't confirm it isn't
+// a protected money page. NOTE: add_internal_links is intentionally excluded —
+// its target_url is the link DESTINATION (which may legitimately be a money
+// page), not the page being edited; its source files get their own protection
+// via the internal-link executor's indexability/canonical checks.
+const EDITING_ACTION_TYPES = new Set(['rewrite_title_meta', 'refresh_existing_page']);
+function actionEditsExistingPage(opp = {}, brief = null) {
+  return EDITING_ACTION_TYPES.has(brief?.action_type || opp.action_type);
 }
 
 function protectedPagePatch(prot = {}) {
