@@ -545,11 +545,32 @@ function shouldRetryExistingMessage(message) {
 
 // Postgres unique_violation (email_messages.idempotency_key). Two overlapping
 // callers (e.g. retried Stripe webhooks) can both pass the pre-insert dedupe
-// check, then race on the unique index. The loser should re-read and dedupe
-// cleanly rather than surfacing a raw driver error and a phantom `failed`
-// outcome — the duplicate never reaches SendGrid either way.
+// check, then race on the unique index. The loser should resolve against the
+// winner's row rather than surfacing a raw driver error — the duplicate never
+// reaches SendGrid either way.
 function isUniqueViolation(err) {
   return !!err && (err.code === '23505' || /duplicate key value/i.test(err.message || ''));
+}
+
+// Resolve a collision on the idempotency-key insert. The collision only fires
+// when our own pre-insert check saw no row, so the winner's row was created
+// concurrently: a terminal status means the winner already finished (return a
+// clean dedupe), but a still-`queued`/`failed` row is in-flight — its insert
+// precedes the SendGrid call — so returning `dedupedResultForExistingMessage`
+// would report a false non-send (callers treat sent===false as blocked). For
+// that case raise a retryable collision instead; on retry the row is terminal
+// and dedupes cleanly. Re-throws non-collision errors untouched.
+async function resolveIdempotencyCollision(err, idempotencyKey) {
+  if (!isUniqueViolation(err) || !idempotencyKey) throw err;
+  const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
+  if (existing && !shouldRetryExistingMessage(existing)) {
+    return dedupedResultForExistingMessage(existing);
+  }
+  const collision = new Error(`email send already in progress for idempotency key ${idempotencyKey}`);
+  collision.code = 'EMAIL_SEND_IN_PROGRESS';
+  collision.status = 409;
+  collision.retryable = true;
+  throw collision;
 }
 
 function assertTemplateSendable(template, { test = false } = {}) {
@@ -779,11 +800,7 @@ async function sendTemplate({
         try {
           [blocked] = await db('email_messages').insert(blockedPayload).returning('*');
         } catch (err) {
-          if (isUniqueViolation(err) && idempotencyKey) {
-            const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
-            if (existing) return dedupedResultForExistingMessage(existing);
-          }
-          throw err;
+          return await resolveIdempotencyCollision(err, idempotencyKey);
         }
       }
       return { sent: false, blocked: true, reason, message: blocked, rendered };
@@ -806,11 +823,7 @@ async function sendTemplate({
     try {
       [message] = await db('email_messages').insert(queuedPayload).returning('*');
     } catch (err) {
-      if (isUniqueViolation(err) && idempotencyKey) {
-        const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
-        if (existing) return dedupedResultForExistingMessage(existing);
-      }
-      throw err;
+      return await resolveIdempotencyCollision(err, idempotencyKey);
     }
   }
 

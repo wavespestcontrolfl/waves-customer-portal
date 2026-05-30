@@ -649,6 +649,50 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('sendTemplate surfaces a retryable collision when the winner is still in-flight', async () => {
+    // Collision where the winner's row is still `queued` (its insert precedes
+    // the SendGrid call). Reporting a clean dedupe here would be a false
+    // non-send — callers treat sent===false as blocked. Raise a retryable
+    // collision instead; the caller retries once the winner reaches a terminal
+    // status.
+    const inFlightWinner = {
+      id: 'msg-inflight',
+      status: 'queued',
+      idempotency_key: 'estimate.extension_notice:est-inflight',
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const uniqueViolationInsert = chain({});
+    uniqueViolationInsert.returning = jest.fn(async () => {
+      const err = new Error('duplicate key value violates unique constraint "email_messages_idempotency_key_unique"');
+      err.code = '23505';
+      throw err;
+    });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: undefined }),         // pre-insert dedupe check: nothing yet
+        uniqueViolationInsert,               // queued insert loses the race -> 23505
+        chain({ first: inFlightWinner }),    // re-read: winner still in flight
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'inflight@example.com',
+      payload: {
+        first_name: 'Ina',
+        estimate_url: 'https://example.com/estimate/est-inflight',
+        expires_at: 'June 12',
+      },
+      idempotencyKey: 'estimate.extension_notice:est-inflight',
+    })).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS', retryable: true });
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('sendTemplate refuses paused templates before queueing', async () => {
     setDbQueues({
       email_templates: [chain({ first: serviceTemplate({ status: 'paused', active_version_id: 'ver-1' }) })],
