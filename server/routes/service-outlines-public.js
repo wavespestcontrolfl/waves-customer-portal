@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const {
   hashNullable,
@@ -7,9 +8,39 @@ const {
 
 const router = express.Router();
 const PUBLIC_PACKET_STATUSES = new Set(['approved', 'sent', 'viewed']);
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
+const outlineLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+const outlineEventLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many service outline events. Please try again in a minute.' },
+});
+
+router.use(outlineLimiter);
 
 function canServePublicPacket(packet) {
   return packet && PUBLIC_PACKET_STATUSES.has(String(packet.status || '').toLowerCase());
+}
+
+function setPublicPacketHeaders(res) {
+  res.set('X-Robots-Tag', 'noindex, noarchive');
+  res.set('Cache-Control', 'no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+}
+
+function normalizeTokenParam(req) {
+  const token = String(req.params.token || '').trim();
+  return TOKEN_RE.test(token) ? token : '';
 }
 
 function publicPacket(row) {
@@ -26,7 +57,10 @@ function publicPacket(row) {
 
 router.get('/:token', async (req, res, next) => {
   try {
-    const tokenHash = hashToken(req.params.token);
+    setPublicPacketHeaders(res);
+    const token = normalizeTokenParam(req);
+    if (!token) return res.status(404).json({ error: 'Service outline not found' });
+    const tokenHash = hashToken(token);
     const packet = await db('service_outline_packets')
       .where({ token_hash: tokenHash })
       .whereNull('revoked_at')
@@ -66,16 +100,18 @@ router.get('/:token', async (req, res, next) => {
       return [row];
     });
 
-    res.set('X-Robots-Tag', 'noindex, noarchive');
     res.json({ packet: publicPacket(updated) });
   } catch (err) {
     next(err);
   }
 });
 
-router.post('/:token/cta-click', async (req, res, next) => {
+router.post('/:token/cta-click', outlineEventLimiter, async (req, res, next) => {
   try {
-    const tokenHash = hashToken(req.params.token);
+    setPublicPacketHeaders(res);
+    const token = normalizeTokenParam(req);
+    if (!token) return res.status(404).json({ error: 'Service outline not found' });
+    const tokenHash = hashToken(token);
     const packet = await db('service_outline_packets')
       .where({ token_hash: tokenHash })
       .whereNull('revoked_at')

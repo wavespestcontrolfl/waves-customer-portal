@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
 const express = require('express');
 const db = require('../models/db');
 const serviceOutlinesPublic = require('../routes/service-outlines-public');
+const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 function chain(overrides = {}) {
   return {
@@ -62,10 +63,18 @@ describe('public service outline packets', () => {
     }));
 
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/service-outlines/raw-token`);
+      const res = await fetch(`${baseUrl}/service-outlines/${VALID_TOKEN}`);
       expect(res.status).toBe(404);
     });
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('404s malformed tokens before querying packet data', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/service-outlines/not-a-real-token`);
+      expect(res.status).toBe(404);
+    });
+    expect(db).not.toHaveBeenCalledWith('service_outline_packets');
   });
 
   test('serves approved outline packets and marks them viewed', async () => {
@@ -93,7 +102,7 @@ describe('public service outline packets', () => {
     });
 
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/service-outlines/raw-token`);
+      const res = await fetch(`${baseUrl}/service-outlines/${VALID_TOKEN}`);
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.packet).toMatchObject({ id: 'packet-1', status: 'viewed' });
