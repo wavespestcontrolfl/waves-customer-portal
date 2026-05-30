@@ -18,6 +18,12 @@ const WEIGHTS = {
   contentGap: 15,
   conversionIntent: 15,
   refreshLift: 15,
+  // Answer-engine (LLM) visibility gap. Sized like gscOpportunity so an
+  // aeo_gap only clears minScoreToAct (75) when the gap is strong — persistent
+  // absence on a GSC-demanded city×service where competitors are being cited.
+  // Scaled by gap_strength (0.5–1.0) in scoreOpportunity, so weak/no-competitor
+  // gaps stay below the floor.
+  aeoGap: 35,
   leadQuality: 20,
   closeRate: 15,
   revenueRealization: 20,
