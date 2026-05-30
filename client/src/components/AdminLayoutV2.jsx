@@ -51,6 +51,7 @@ import {
   Bot,
   Database,
   DatabaseZap,
+  Inbox,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags } from "../hooks/useFeatureFlag";
@@ -97,6 +98,7 @@ const NAV_SECTIONS = [
         icon: MessageSquare,
         label: "SMS/Call",
       },
+      { path: "/admin/requests", icon: Inbox, label: "Requests" },
       { path: "/admin/reviews", icon: Star, label: "Reviews" },
       { path: "/admin/referrals", icon: Gift, label: "Referrals" },
       { path: "/admin/email", icon: Mail, label: "Email" },
