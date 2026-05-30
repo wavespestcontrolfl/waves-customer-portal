@@ -1299,8 +1299,11 @@ async function loadLawnProgramOverviewContext(knex, service, serviceLine, schedu
     if (!probe || typeof probe.whereNull !== 'function' || typeof probe.whereIn !== 'function') return fallback;
 
     if (estimateIds.length) {
-      row = await orderOutlinePacketsByReferenceDate(selectOutlinePacketColumns(baseQuery()
-        .whereIn('estimate_id', estimateIds)))
+      let estimateQuery = baseQuery().whereIn('estimate_id', estimateIds);
+      if (reportReferenceAt && typeof estimateQuery.whereRaw === 'function') {
+        estimateQuery = estimateQuery.whereRaw('COALESCE(sent_at, approved_at, created_at) <= ?', [reportReferenceAt]);
+      }
+      row = await orderOutlinePacketsByReferenceDate(selectOutlinePacketColumns(estimateQuery))
         .first();
     }
 

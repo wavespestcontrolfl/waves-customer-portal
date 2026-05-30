@@ -199,4 +199,31 @@ describe('lawn service report outline context', () => {
       ['2026-05-17T03:59:59.000Z'],
     );
   });
+
+  test('does not link estimate outlines created after the service date', async () => {
+    const knex = makeOutlineKnexWithChains({
+      id: 'packet-estimate',
+      title: 'Estimate Lawn Program',
+      status: 'sent',
+      estimate_id: 'estimate-1',
+      turf_type: 'st_augustine',
+      sent_at: '2026-05-15T14:00:00.000Z',
+      summary_json: { turfLabel: 'St. Augustine' },
+      content_json: {},
+    });
+
+    const context = await loadLawnProgramOverviewContext(knex, {
+      customer_id: 'customer-1',
+      service_date: '2026-05-16',
+      service_data: JSON.stringify({ estimateId: 'estimate-1' }),
+    }, 'lawn');
+
+    expect(context.linked).toBe(true);
+    const estimateQuery = knex.chains[1];
+    expect(estimateQuery.whereIn).toHaveBeenCalledWith('estimate_id', ['estimate-1']);
+    expect(estimateQuery.whereRaw).toHaveBeenCalledWith(
+      'COALESCE(sent_at, approved_at, created_at) <= ?',
+      ['2026-05-17T03:59:59.000Z'],
+    );
+  });
 });
