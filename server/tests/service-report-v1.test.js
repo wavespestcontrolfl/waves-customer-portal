@@ -2312,7 +2312,7 @@ describe('service report v1', () => {
       },
     });
 
-    expect(email.subject).toContain('Your Waves service report - Residential Pest Control');
+    expect(email.subject).toContain('Your Waves service report — Residential Pest Control');
     expect(email.html).toContain('https://portal.wavespestcontrol.com/report/token-1');
     expect(email.html).toContain('Exterior re-entry');
     expect(email.html).toContain('30 min');
