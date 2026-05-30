@@ -1527,7 +1527,10 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
     await persistProjectInvoiceLink(project, explicit.id);
-    return { invoice: explicit, created: false };
+    // This is the normal final-send path (UI posts the previewed draft's id), so
+    // reprice it too if the WDO fee changed since the dry-run. Only the untouched
+    // auto-created draft is affected; a hand-picked/edited invoice is left as-is.
+    return { invoice: await maybeRepriceWdoDraft(explicit, project), created: false };
   }
 
   // 1. Reuse the invoice already recorded on the project (covers ad-hoc
