@@ -809,6 +809,35 @@ describe('protected-page guard', () => {
     expect(result.skip_reason).toBe('protected_page:protected_check_error');
     expect(queue.pendingReview).toHaveBeenCalledWith('opp_protected_err', 'protected_page:protected_check_error', { claimToken: claimedAt });
   });
+
+  test('the guard\'s own RETURNED error verdict (no throw) is also tagged is_error', async () => {
+    // protected-pages.js catches registry failures itself and RETURNS
+    // { protected:true, reason:'protected_check_error', source:'error' } — the
+    // common DB-error path. The runner must tag this the same as a throw.
+    const protectedPages = {
+      isProtected: jest.fn().mockResolvedValue({
+        protected: true,
+        reason: 'protected_check_error',
+        source: 'error',
+        detail: 'registry read failed',
+      }),
+    };
+    const runner = loadRunnerWith({ queue: { claimNext: jest.fn() }, briefBuilder: { compose: jest.fn() }, protectedPages });
+
+    const verdict = await runner._checkProtectedPage({
+      action_type: 'create_or_refresh_city_service_page',
+      service: 'pest',
+      city: 'Sarasota',
+    });
+
+    expect(verdict).toMatchObject({
+      protected: true,
+      reason: 'protected_check_error',
+      source: 'error',
+      is_error: true,
+    });
+    expect(verdict.detail).toContain('registry read failed');
+  });
 });
 
 describe('runNext claim failures', () => {

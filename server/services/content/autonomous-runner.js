@@ -996,13 +996,22 @@ class AutonomousRunner {
     try {
       prot = await protectedPages.isProtected(target, { db });
     } catch (err) {
-      // Fail closed (treat as protected), but tag this as an ERROR — not a
-      // by-design money-page skip — so it's distinguishable in autonomous_runs
-      // and can alert the operator. A silently-swallowed guard error reads as a
-      // routine skip and would never be noticed.
-      logger.error(`[autonomous-runner] protected-page check threw for ${target}: ${err.message}`);
-      prot = { protected: true, reason: 'protected_check_error', is_error: true, detail: err.message };
-      await this._alertEngineError('protected_check_error', `Protected-page check errored for ${target}: ${err.message}`).catch(() => {});
+      // The guard normally catches its own registry failures and RETURNS an
+      // error verdict (see below); this catch is the belt-and-suspenders path
+      // for an unexpected throw. Fail closed with the same error shape.
+      prot = { protected: true, reason: 'protected_check_error', source: 'error', detail: err.message };
+    }
+    // Normalize the ERROR case from BOTH paths into one place: a thrown check
+    // (caught above) AND the guard's own returned failure
+    // (protected-pages.js fails closed with reason:'protected_check_error',
+    // source:'error'). Either is an engine ERROR, not a by-design money-page
+    // skip — tag is_error so it's distinguishable in autonomous_runs, log it,
+    // and optionally alert the operator. Still fails closed regardless.
+    const isError = !!prot && (prot.reason === 'protected_check_error' || prot.source === 'error');
+    if (isError && !prot.is_error) {
+      prot = { ...prot, is_error: true };
+      logger.error(`[autonomous-runner] protected-page check errored for ${target}: ${prot.detail || 'unknown'}`);
+      await this._alertEngineError('protected_check_error', `Protected-page check errored for ${target}: ${prot.detail || 'unknown'}`).catch(() => {});
     }
     return { ...prot, checked_url: target };
   }
