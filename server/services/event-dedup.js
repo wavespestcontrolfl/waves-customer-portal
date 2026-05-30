@@ -30,9 +30,15 @@ const EVENT_MERGE_LOCK_KEY = 778001;
  * from the queue + digest), and any newsletter_calendar.event_ids referencing
  * them are rewritten to the primary. Throws (rolls back) on a merge conflict.
  *
+ * opts.backfill — optional partial field map applied to the primary inside the
+ *   txn before the losers are merged away (the auto-pass uses it to copy
+ *   digest-required fields like event_url from a loser when the survivor lacks
+ *   them, so a merge never makes an otherwise-eligible event disappear). The
+ *   manual route passes nothing → behavior unchanged.
+ *
  * @returns {Promise<{ merged:number, calendarsUpdated:number }>}
  */
-async function mergeEvents(primaryId, toMerge) {
+async function mergeEvents(primaryId, toMerge, opts = {}) {
   const ids = [...new Set((toMerge || []).filter((id) => id && id !== primaryId))];
   if (ids.length === 0) return { merged: 0, calendarsUpdated: 0 };
   const mergeMap = new Map(ids.map((id) => [id, primaryId]));
@@ -51,6 +57,14 @@ async function mergeEvents(primaryId, toMerge) {
       .first();
     if (!lockedPrimary) throw new Error('merge conflict: primary event no longer exists — rolled back');
     if (lockedPrimary.merged_into) throw new Error('merge conflict: primary was concurrently merged into another event — rolled back');
+
+    // Backfill digest-required/quality fields onto the survivor BEFORE the
+    // losers are rejected, so the merge never drops the only row that carried
+    // event_url (which isEligibleForFreshDigest hard-requires) and make a real
+    // event disappear. Caller computes which fields the survivor is missing.
+    if (opts.backfill && Object.keys(opts.backfill).length > 0) {
+      await trx('events_raw').where({ id: primaryId }).update({ ...opts.backfill, updated_at: new Date() });
+    }
 
     // Conditional on merged_into IS NULL — if a concurrent merge claimed a row
     // between caller validation and here, fewer rows update and we roll back.
@@ -125,6 +139,27 @@ function isCleanCrossSourceCluster(events) {
   return distinct >= 2 && distinct === sourceIds.length;
 }
 
+// Fields the survivor must carry to stay digest-eligible/complete. event_url is
+// hard-required by isEligibleForFreshDigest; image_url is a quality/score field.
+const BACKFILL_FIELDS = ['event_url', 'image_url'];
+
+/**
+ * Compute the fields to copy onto the survivor from the losers: for each
+ * BACKFILL_FIELD the survivor is missing, take the first loser that has it.
+ * Ensures a merge can't drop the only row that carried event_url (which would
+ * make an otherwise-eligible event vanish from the digest).
+ */
+function computeSurvivorBackfill(survivor, losers) {
+  const out = {};
+  for (const field of BACKFILL_FIELDS) {
+    if (!survivor[field]) {
+      const donor = (losers || []).find((e) => e[field]);
+      if (donor) out[field] = donor[field];
+    }
+  }
+  return out;
+}
+
 /**
  * Cron pass: cluster upcoming, un-merged, non-rejected events and merge each
  * cluster into its survivor. Conservative clustering (title + ET day + city)
@@ -153,10 +188,14 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
     if (!isCleanCrossSourceCluster(cluster.events)) continue;
 
     const survivor = pickSurvivor(cluster.events);
-    const losers = cluster.events.filter((e) => e.id !== survivor.id).map((e) => e.id);
+    const loserRows = cluster.events.filter((e) => e.id !== survivor.id);
+    const losers = loserRows.map((e) => e.id);
     if (losers.length === 0) continue;
+    // Carry event_url/image_url onto the survivor from a loser if it lacks them,
+    // so collapsing the cluster can't drop the only event_url-bearing row.
+    const backfill = computeSurvivorBackfill(survivor, loserRows);
     try {
-      const { merged } = await mergeEvents(survivor.id, losers);
+      const { merged } = await mergeEvents(survivor.id, losers, { backfill });
       if (merged > 0) { mergedEvents += merged; mergedClusters += 1; }
     } catch (err) {
       // One cluster's conflict (e.g. a concurrent manual merge) must not abort
@@ -170,4 +209,4 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
   return { clustersFound: clusters.length, mergedClusters, mergedEvents };
 }
 
-module.exports = { mergeEvents, pickSurvivor, isCleanCrossSourceCluster, autoMergeDuplicates, EVENT_MERGE_LOCK_KEY };
+module.exports = { mergeEvents, pickSurvivor, isCleanCrossSourceCluster, computeSurvivorBackfill, autoMergeDuplicates, EVENT_MERGE_LOCK_KEY };

@@ -32,7 +32,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
-const { pickSurvivor, isCleanCrossSourceCluster } = require('../services/event-dedup');
+const { pickSurvivor, isCleanCrossSourceCluster, computeSurvivorBackfill } = require('../services/event-dedup');
 const { isEligibleForFreshDigest, cityToZone, weekLockKey } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
@@ -1403,6 +1403,32 @@ describe('event-dedup isCleanCrossSourceCluster', () => {
   test('false for empty / single-element input', () => {
     expect(isCleanCrossSourceCluster([])).toBe(false);
     expect(isCleanCrossSourceCluster([ev('a', 's1')])).toBe(false);
+  });
+});
+
+describe('event-dedup computeSurvivorBackfill', () => {
+  test('copies event_url onto a survivor that lacks it (keeps the event eligible)', () => {
+    const survivor = { id: 'a', event_url: null, image_url: 'i' };
+    const losers = [{ id: 'b', event_url: 'https://x/e', image_url: null }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({ event_url: 'https://x/e' });
+  });
+
+  test('copies both event_url and image_url when both missing', () => {
+    const survivor = { id: 'a', event_url: null, image_url: null };
+    const losers = [{ id: 'b', event_url: 'https://x/e' }, { id: 'c', image_url: 'https://x/i' }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({ event_url: 'https://x/e', image_url: 'https://x/i' });
+  });
+
+  test('no backfill when the survivor already has the fields', () => {
+    const survivor = { id: 'a', event_url: 'https://s/e', image_url: 'https://s/i' };
+    const losers = [{ id: 'b', event_url: 'https://x/e', image_url: 'https://x/i' }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({});
+  });
+
+  test('no backfill when no loser has the missing field', () => {
+    const survivor = { id: 'a', event_url: null, image_url: null };
+    const losers = [{ id: 'b', event_url: null, image_url: null }];
+    expect(computeSurvivorBackfill(survivor, losers)).toEqual({});
   });
 });
 
