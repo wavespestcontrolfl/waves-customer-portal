@@ -9,6 +9,7 @@ const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
 const ConsentService = require('../services/payment-method-consents');
 const logger = require('../services/logger');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
+const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 
 /**
  * Public pay routes — no auth required.
@@ -252,9 +253,12 @@ router.post('/:token/confirm', async (req, res, next) => {
     // `processing` until Stripe emits payment_intent.succeeded, so the
     // webhook sends the receipt after funds clear.
     if (paymentRecord.status === 'paid') {
-      InvoiceService.sendReceipt(invoice.id).catch(err => {
-        logger.error(`[pay-v2] Receipt send failed: ${err.message}`);
+      await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+        invoiceId: invoice.id,
+        stripePaymentIntentId: paymentIntentId,
+        source: 'pay_confirm',
       });
+      ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
     }
 
     res.json({

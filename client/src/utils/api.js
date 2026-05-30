@@ -209,10 +209,10 @@ class ApiClient {
     });
   }
 
-  saveStripeCard(paymentMethodId) {
+  saveStripeCard(paymentMethodId, setupIntentId) {
     return this.request('/billing/cards', {
       method: 'POST',
-      body: JSON.stringify({ paymentMethodId }),
+      body: JSON.stringify({ paymentMethodId, setupIntentId }),
     });
   }
 

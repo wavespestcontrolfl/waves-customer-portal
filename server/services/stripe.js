@@ -120,7 +120,7 @@ const StripeService = {
    * Create a SetupIntent for saving a card or bank account.
    * The frontend uses this clientSecret to confirm via Stripe.js.
    * @param {string} customerId — Waves customer UUID
-   * @param {string} [paymentMethodType] — 'card' or 'us_bank_account'
+   * @param {string} [paymentMethodType] — 'card', 'us_bank_account', or 'card_or_bank'
    * @returns {{ clientSecret: string, setupIntentId: string }}
    */
   async createSetupIntent(customerId, paymentMethodType = 'card') {
@@ -131,7 +131,9 @@ const StripeService = {
 
     const paymentMethodTypes = paymentMethodType === 'us_bank_account'
       ? ['us_bank_account']
-      : ['card'];
+      : paymentMethodType === 'card_or_bank'
+        ? ['card', 'us_bank_account']
+        : ['card'];
 
     try {
       const setupIntent = await stripe.setupIntents.create({
@@ -276,6 +278,13 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) return null;
     return stripe.paymentIntents.retrieve(paymentIntentId, options);
+  },
+
+  async retrieveSetupIntent(setupIntentId, options = {}) {
+    if (!setupIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.retrieve(setupIntentId, options);
   },
 
   // =========================================================================
@@ -820,17 +829,17 @@ const StripeService = {
         logger.error(`[annual-prepay] activation failed for card-on-file invoice ${invoiceId}: ${err.message}`);
       }
 
-      setImmediate(async () => {
-        try {
-          const InvoiceService = require('./invoice');
-          const result = await InvoiceService.sendReceipt(invoiceId);
-          if (result?.sent === false && result.reason !== 'already-sent') {
-            logger.warn(`[stripe] Card-on-file receipt not sent for invoice ${invoice.invoice_number}: ${result.reason}`);
-          }
-        } catch (err) {
-          logger.error(`[stripe] Card-on-file receipt failed for invoice ${invoice.invoice_number}: ${err.message}`);
-        }
-      });
+      try {
+        const ReceiptDeliveryQueue = require('./receipt-delivery-queue');
+        await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+          invoiceId,
+          stripePaymentIntentId: paymentIntent.id,
+          source: 'card_on_file',
+        });
+        ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
+      } catch (err) {
+        logger.error(`[stripe] Card-on-file receipt queue failed for invoice ${invoice.invoice_number}: ${err.message}`);
+      }
     }
 
     return {

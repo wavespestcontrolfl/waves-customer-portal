@@ -8,6 +8,13 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
+import {
+  buildSetupIntentReturnUrl,
+  clearReturnedSetupIntent,
+  getReturnedSetupIntent,
+  redirectToSetupIntentAction,
+  setupIntentIncompleteMessage,
+} from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
@@ -2926,6 +2933,7 @@ function BillingTab({ customer }) {
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
   const cardMountRef = useRef(null);
+  const processedSetupReturnRef = useRef(false);
 
   const refreshCards = () => api.getCards().then(d => setCards(d.cards)).catch(console.error);
 
@@ -2957,6 +2965,26 @@ function BillingTab({ customer }) {
   useEffect(() => {
     loadBilling();
   }, [loadBilling]);
+
+  useEffect(() => {
+    if (processedSetupReturnRef.current) return;
+    const returned = getReturnedSetupIntent('portal_add_card');
+    if (!returned) return;
+
+    processedSetupReturnRef.current = true;
+    setStripeLoading(true);
+    setStripeError('');
+    api.saveStripeCard(null, returned.setupIntentId)
+      .then(async () => {
+        clearReturnedSetupIntent();
+        setShowAddCard(false);
+        await refreshCards();
+      })
+      .catch((err) => {
+        setStripeError(err.message || 'Failed to finish bank account setup');
+      })
+      .finally(() => setStripeLoading(false));
+  }, []);
 
   const handleAddCard = async () => {
     setStripeLoading(true);
@@ -2994,6 +3022,7 @@ function BillingTab({ customer }) {
     try {
       const { error, setupIntent } = await stripeRef.current.confirmSetup({
         elements: elementsRef.current,
+        confirmParams: { return_url: buildSetupIntentReturnUrl('portal_add_card') },
         redirect: 'if_required',
       });
       if (error) {
@@ -3001,8 +3030,14 @@ function BillingTab({ customer }) {
         setStripeLoading(false);
         return;
       }
+      if (redirectToSetupIntentAction(setupIntent)) return;
+      if (!setupIntent || setupIntent.status !== 'succeeded') {
+        setStripeError(setupIntentIncompleteMessage('saving'));
+        setStripeLoading(false);
+        return;
+      }
       if (setupIntent && setupIntent.payment_method) {
-        await api.saveStripeCard(setupIntent.payment_method);
+        await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
       }
       setShowAddCard(false);
       paymentElementRef.current = null;

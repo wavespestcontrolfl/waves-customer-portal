@@ -96,7 +96,7 @@ router.get('/processor', async (req, res, next) => {
 router.post('/cards/setup-intent', async (req, res, next) => {
   try {
     const schema = Joi.object({
-      paymentMethodType: Joi.string().valid('card', 'us_bank_account').default('card'),
+      paymentMethodType: Joi.string().valid('card', 'us_bank_account', 'card_or_bank').default('card'),
     });
 
     const { paymentMethodType } = await schema.validateAsync(req.body);
@@ -119,10 +119,22 @@ router.post('/cards', async (req, res, next) => {
   try {
     const schema = Joi.object({
       // Stripe: paymentMethodId from confirmed SetupIntent
-      paymentMethodId: Joi.string().required(),
+      paymentMethodId: Joi.string().allow(null, '').optional(),
+      setupIntentId: Joi.string().required(),
     });
 
-    const { paymentMethodId } = await schema.validateAsync(req.body);
+    const { paymentMethodId, setupIntentId } = await schema.validateAsync(req.body);
+    const setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+    const setupPaymentMethodId = typeof setupIntent?.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent?.payment_method?.id;
+    const resolvedPaymentMethodId = paymentMethodId || setupPaymentMethodId;
+    if (!setupIntent || setupIntent.status !== 'succeeded' || !resolvedPaymentMethodId || setupPaymentMethodId !== resolvedPaymentMethodId) {
+      return res.status(409).json({
+        error: 'Payment method setup is not complete. Finish verification before enabling Auto Pay.',
+        setupIntentStatus: setupIntent?.status || 'unknown',
+      });
+    }
 
     const currentAutopayMethod = await db('payment_methods')
       .where({
@@ -138,7 +150,7 @@ router.post('/cards', async (req, res, next) => {
     // customer-facing Auto Pay card explicitly selects and enables the
     // payment method through /api/billing/autopay after save. If another
     // method already powers autopay, keep it as the default until then.
-    const card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId, {
+    const card = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
       enableAutopay: false,
       makeDefault: !currentAutopayMethod,
     });
@@ -151,7 +163,7 @@ router.post('/cards', async (req, res, next) => {
       await ConsentService.recordConsent({
         customerId: req.customerId,
         paymentMethodId: card.id,
-        stripePaymentMethodId: paymentMethodId,
+        stripePaymentMethodId: resolvedPaymentMethodId,
         source: 'portal_add_card',
         methodType: card.method_type || 'card',
         ip: req.ip,

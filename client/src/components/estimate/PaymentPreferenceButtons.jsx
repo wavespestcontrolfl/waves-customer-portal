@@ -59,7 +59,9 @@ export default function PaymentPreferenceButtons({
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
-        : 'Choose autopay setup to be billed after each completed service visit.';
+        : 'Choose pay-after-visit setup to be billed after each completed service visit through autopay.';
+  const cardNextStep = 'Next: confirm your booking. If card setup is required, we send you to the secure setup screen after confirmation.';
+  const prepayNextStep = 'Next: confirm annual prepay. No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.';
 
   if (invoiceMode) {
     return (

@@ -1558,7 +1558,13 @@ const InvoiceService = {
         "zip",
       )
       .first();
-    return { ...invoice, customer };
+    const activePaymentPlan = await db("payment_plans")
+      .where({ invoice_id: id })
+      .where("status", "active")
+      .orderBy("created_at", "desc")
+      .first()
+      .catch(() => null);
+    return { ...invoice, customer, active_payment_plan: activePaymentPlan };
   },
 
   async list({
@@ -1671,6 +1677,20 @@ const InvoiceService = {
           WHERE customer_id = invoices.customer_id AND is_default = true
           LIMIT 1
         ) AS card_on_file`),
+      db.raw(`(
+          SELECT json_build_object(
+            'id', pp.id,
+            'payment_amount', pp.payment_amount,
+            'payment_frequency', pp.payment_frequency,
+            'next_payment_date', pp.next_payment_date,
+            'total_balance', pp.total_balance,
+            'status', pp.status
+          )
+          FROM payment_plans pp
+          WHERE pp.invoice_id = invoices.id AND pp.status = 'active'
+          ORDER BY pp.created_at DESC
+          LIMIT 1
+        ) AS active_payment_plan`),
     );
 
     if (sort === "oldest") {
