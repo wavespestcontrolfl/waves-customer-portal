@@ -205,6 +205,151 @@ function mapProduct(product, vendorPricing = []) {
     rainfastMinutes: product.rainfast_minutes || null,
     labelUrl: product.label_url || null,
     sdsUrl: product.sds_url || null,
+    productType: product.product_type || null,
+    manufacturer: product.manufacturer || null,
+    fertilizerAnalysis: product.fertilizer_analysis || null,
+    labelSourceUrl: product.label_source_url || null,
+    labelVerifiedAt: product.label_verified_at || null,
+    labelVersion: product.label_version || null,
+    approvedForPublicPage: product.approved_for_public_page === true,
+    approvedForEstimatePacket: product.approved_for_estimate_packet === true,
+    approvedForServiceReport: product.approved_for_service_report === true,
+    customerPrecautionSummary: product.customer_precaution_summary || null,
+    reentrySummary: product.reentry_summary || null,
+    serviceReportSummary: product.service_report_summary || null,
+    useConditions: product.use_conditions || null,
+    heatRestrictions: product.heat_restrictions || null,
+    irrigationNotes: product.irrigation_notes || null,
+    localRuleSensitivity: product.local_rule_sensitivity === true,
+  };
+}
+
+const LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
+  { key: 'prodiamine_65_wdg', label: 'Prodiamine 65 WDG', aliases: ['Prodiamine 65 WDG', 'Prodiamine'], type: 'pesticide', category: 'pre-emergent herbicide' },
+  { key: 'celsius_wg', label: 'Celsius WG', aliases: ['Celsius WG', 'Celsius'], type: 'pesticide', category: 'post-emergent herbicide' },
+  { key: 'sedgehammer_plus', label: 'SedgeHammer Plus', aliases: ['Sedgehammer Plus', 'SedgeHammer Plus', 'Sedgehammer', 'SedgeHammer'], type: 'pesticide', category: 'sedge herbicide' },
+  { key: 'headway', label: 'Headway', aliases: ['Headway G', 'Headway'], type: 'pesticide', category: 'fungicide' },
+  { key: 'lesco_24_0_11', label: 'LESCO 24-0-11', aliases: ['LESCO 24-0-11', '24-0-11'], type: 'fertilizer', category: 'fertilizer' },
+  { key: 'lesco_24_2_11', label: 'LESCO 24-2-11', aliases: ['LESCO 24-2-11', '24-2-11'], type: 'fertilizer', category: 'fertilizer' },
+  { key: 'chelated_iron', label: 'Chelated Iron Plus', aliases: ['Chelated Iron Plus', 'Chelated Iron'], type: 'fertilizer', category: 'iron and micronutrient support' },
+  { key: 'high_mn_combo', label: 'High Mn Combo', aliases: ['High Mn Combo', 'High Mn'], type: 'fertilizer', category: 'micronutrient support' },
+  { key: 'medallion_sc', label: 'Medallion SC', aliases: ['Medallion SC', 'Medallion'], type: 'pesticide', category: 'fungicide' },
+  { key: 'acelepryn_xtra', label: 'Acelepryn Xtra', aliases: ['Acelepryn Xtra', 'Acelepryn'], type: 'pesticide', category: 'insecticide' },
+  { key: 'speedzone_southern', label: 'SpeedZone Southern', aliases: ['SpeedZone Southern', 'SpeedZone'], type: 'pesticide', category: 'post-emergent herbicide' },
+  { key: 'k_flow', label: 'K-Flow 0-0-25', aliases: ['K-Flow 0-0-25', 'K-Flow'], type: 'fertilizer', category: 'potassium support' },
+  { key: 'primo_maxx', label: 'Primo Maxx', aliases: ['Primo Maxx', 'Primo'], type: 'pesticide', category: 'plant growth regulator' },
+  { key: 'dismiss', label: 'Dismiss', aliases: ['Dismiss NXT', 'Dismiss'], type: 'pesticide', category: 'sedge herbicide' },
+  { key: 'carbonpro_l', label: 'CarbonPro-L', aliases: ['CarbonPro-L', 'CarbonPro', 'LESCO CarbonPro'], type: 'biostimulant', category: 'soil amendment / biostimulant' },
+  { key: 'hydretain', label: 'Hydretain', aliases: ['Hydretain'], type: 'wetting_agent', category: 'moisture manager' },
+  { key: 'talstar', label: 'Talstar', aliases: ['Talstar P', 'Talstar'], type: 'pesticide', category: 'insecticide' },
+  { key: 'arena_50_wdg', label: 'Arena 50 WDG', aliases: ['Arena 50 WDG', 'Arena'], type: 'pesticide', category: 'insecticide' },
+  { key: 'atrazine_4l', label: 'Atrazine 4L', aliases: ['Atrazine 4L', 'Atrazine'], type: 'pesticide', category: 'herbicide' },
+  { key: 'three_way', label: 'Three-Way', aliases: ['Three-Way', 'Three Way'], type: 'pesticide', category: 'herbicide' },
+  { key: 'bio_kmag', label: 'LESCO 0-0-18 Bio KMAG', aliases: ['LESCO 0-0-18 Bio KMAG', 'Bio KMAG', 'KMAG'], type: 'fertilizer', category: 'potassium and magnesium support' },
+  { key: 'lesco_elite_0_0_28', label: 'LESCO Elite 0-0-28', aliases: ['LESCO Elite 0-0-28', 'Elite 0-0-28', '0-0-28'], type: 'fertilizer', category: 'potassium support' },
+  { key: 'armada_50_wdg', label: 'Armada 50 WDG', aliases: ['Armada 50 WDG', 'Armada'], type: 'pesticide', category: 'fungicide' },
+  { key: 'bifen_it', label: 'Bifen I/T', aliases: ['Bifen I/T', 'Bifen'], type: 'pesticide', category: 'insecticide' },
+  { key: 'dylox_420_sl', label: 'Dylox 420 SL', aliases: ['Dylox 420 SL', 'Dylox'], type: 'pesticide', category: 'insecticide' },
+  { key: 'topchoice', label: 'Topchoice Granular Insecticide', aliases: ['Topchoice Granular Insecticide', 'Topchoice'], type: 'pesticide', category: 'fire ant insecticide' },
+  { key: 'drive_xlr8', label: 'Drive XLR8', aliases: ['Drive XLR8'], type: 'pesticide', category: 'post-emergent herbicide' },
+  { key: 'torque_sc', label: 'Torque SC', aliases: ['Torque SC', 'Torque'], type: 'pesticide', category: 'fungicide' },
+  { key: 'dispatch', label: 'Dispatch wetting agent', aliases: ['Dispatch wetting agent', 'Dispatch'], type: 'wetting_agent', category: 'wetting agent' },
+  { key: 'anuew_ez', label: 'Anuew EZ', aliases: ['Anuew EZ', 'Anuew'], type: 'pesticide', category: 'plant growth regulator' },
+  { key: 'green_flo_ca', label: 'Green Flo 6-0-0 Ca', aliases: ['Green Flo 6-0-0', 'Green Flo'], type: 'fertilizer', category: 'calcium support' },
+  { key: 'green_flo_phyte', label: 'Green Flo Phyte Plus 0-0-26', aliases: ['Green Flo Phyte Plus', 'Phyte Plus'], type: 'fertilizer', category: 'phosphite and potassium support' },
+  { key: 'moisture_manager', label: 'Moisture Manager', aliases: ['Moisture Manager'], type: 'wetting_agent', category: 'wetting agent' },
+];
+
+function normalizeProtocolText(value) {
+  return String(value || '').toLowerCase();
+}
+
+function protocolProductReferences(definition) {
+  const refs = [];
+  for (const [trackKey, track] of Object.entries(protocols.lawn || {})) {
+    for (const visit of track.visits || []) {
+      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes].filter(Boolean).join('\n'));
+      if (definition.aliases.some((alias) => text.includes(normalizeProtocolText(alias)))) {
+        refs.push({
+          turf: trackKey,
+          month: visit.month,
+          visit: visit.visit,
+        });
+      }
+    }
+  }
+  return refs;
+}
+
+function rowPriority(row) {
+  const statusRank = {
+    missing_product: 0,
+    needs_facts: 1,
+    ready_to_approve: 2,
+    approved: 3,
+  };
+  return statusRank[row.readiness?.status] ?? 9;
+}
+
+function suggestedLawnFactCopy(definition, product) {
+  const name = product?.name || definition.label;
+  const category = definition.category || product?.category || 'lawn care product';
+  const pesticideCopy = definition.type === 'pesticide'
+    ? 'When this pesticide product is used, the technician follows the product label and service report instructions. People and pets should remain off treated areas until the application has dried, unless the label or technician instructions require a longer interval.'
+    : 'When this product is used, follow the service report instructions for watering, access, or other customer action items.';
+  return {
+    productType: product?.product_type || definition.type,
+    publicSummary: `${name} may be used as part of the ${category} portion of the lawn program when turf type, season, weather, site conditions, label directions, and local rules allow.`,
+    customerPrecautionSummary: pesticideCopy,
+    reentrySummary: definition.type === 'pesticide'
+      ? 'Follow the product label and technician service report before re-entering treated areas.'
+      : 'Follow the technician service report for any product-specific instructions.',
+  };
+}
+
+function inferProductType(product = {}) {
+  if (product.product_type) return product.product_type;
+  const category = String(product.category || '').toLowerCase();
+  if (/(herbicide|insecticide|fungicide|pgr|growth)/.test(category)) return 'pesticide';
+  if (category.includes('fertilizer')) return 'fertilizer';
+  if (category.includes('wetting')) return 'wetting_agent';
+  return 'other';
+}
+
+function validEpaRegNumber(value) {
+  const text = String(value || '').trim();
+  return !!text && !/^(n\/a|not epa|not epa-registered fertilizer|none)$/i.test(text);
+}
+
+function lawnFactReadiness(product) {
+  if (!product) return {
+    status: 'missing_product',
+    missing: ['Product not found in catalog'],
+    warnings: [],
+    eligible: false,
+  };
+  const missing = [];
+  const warnings = [];
+  const productType = inferProductType(product);
+  const visibility = product.customer_visibility || 'internal_only';
+  const contentStatus = product.content_status || 'draft';
+  if (!['public', 'portal_only'].includes(visibility)) missing.push('Customer visibility must be public or portal-only');
+  if (!['approved_for_public', 'approved_for_portal', 'approved'].includes(contentStatus)) missing.push('Content status must be approved');
+  if (!product.label_verified_at) missing.push('Label verification date is required');
+  if (!(product.public_summary || product.portal_summary)) missing.push('Public or portal summary is required');
+  if (!(product.customer_safety_summary || product.customer_precaution_summary || product.pet_kid_guidance_text)) {
+    missing.push('Customer safety or precaution copy is required');
+  }
+  if (productType === 'pesticide' && !validEpaRegNumber(product.epa_reg_number)) {
+    missing.push('EPA registration number is required for pesticide products');
+  }
+  if (!product.product_type) warnings.push(`Product type inferred as ${productType}`);
+  return {
+    status: missing.length ? 'needs_facts' : product.approved_for_estimate_packet ? 'approved' : 'ready_to_approve',
+    missing,
+    warnings,
+    eligible: missing.length === 0,
+    productType,
   };
 }
 
@@ -549,6 +694,149 @@ router.get('/', async (req, res, next) => {
       total: parseInt(totalCount),
     });
   } catch (err) { next(err); }
+});
+
+// =========================================================================
+// GET /lawn-outline-facts — protocol product fact readiness for estimate packets
+// =========================================================================
+router.get('/lawn-outline-facts', async (req, res, next) => {
+  try {
+    const rows = [];
+    for (const definition of LAWN_PROTOCOL_PRODUCT_DEFINITIONS) {
+      const references = protocolProductReferences(definition);
+      if (!references.length) continue;
+      let product = null;
+      for (const alias of definition.aliases) {
+        product = await db('products_catalog')
+          .whereILike('name', `%${alias}%`)
+          .select(
+            'id',
+            'name',
+            'category',
+            'product_type',
+            'manufacturer',
+            'active_ingredient',
+            'epa_reg_number',
+            'customer_visibility',
+            'content_status',
+            'public_summary',
+            'portal_summary',
+            'customer_safety_summary',
+            'customer_precaution_summary',
+            'pet_kid_guidance_text',
+            'reentry_text',
+            'reentry_summary',
+            'label_url',
+            'label_source_url',
+            'label_verified_at',
+            'label_version',
+            'approved_for_public_page',
+            'approved_for_estimate_packet',
+            'approved_for_service_report',
+            'review_due_at',
+            'updated_at',
+          )
+          .first();
+        if (product) break;
+      }
+      const readiness = lawnFactReadiness(product);
+      rows.push({
+        key: definition.key,
+        needle: definition.label,
+        expectedType: definition.type,
+        expectedCategory: definition.category,
+        aliases: definition.aliases,
+        references,
+        referenceCount: references.length,
+        turfTracks: [...new Set(references.map((ref) => ref.turf))],
+        months: [...new Set(references.map((ref) => ref.month))],
+        product: product ? mapProduct(product) : null,
+        readiness,
+        suggestedCopy: suggestedLawnFactCopy(definition, product),
+      });
+    }
+    rows.sort((a, b) => rowPriority(a) - rowPriority(b) || b.referenceCount - a.referenceCount || a.needle.localeCompare(b.needle));
+    const missingFields = {};
+    for (const row of rows) {
+      for (const item of row.readiness.missing || []) {
+        missingFields[item] = (missingFields[item] || 0) + 1;
+      }
+    }
+    const summary = rows.reduce((acc, row) => {
+      acc.total += 1;
+      acc[row.readiness.status] = (acc[row.readiness.status] || 0) + 1;
+      return acc;
+    }, { total: 0, approved: 0, ready_to_approve: 0, needs_facts: 0, missing_product: 0 });
+    summary.missingFields = missingFields;
+    res.json({ facts: rows, summary });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// PATCH /lawn-outline-facts/:id — update public fact fields and optionally approve
+// =========================================================================
+router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
+  try {
+    const product = await db('products_catalog').where({ id: req.params.id }).first();
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    const allowed = {
+      productType: 'product_type',
+      manufacturer: 'manufacturer',
+      activeIngredient: 'active_ingredient',
+      epaRegNumber: 'epa_reg_number',
+      customerVisibility: 'customer_visibility',
+      contentStatus: 'content_status',
+      publicSummary: 'public_summary',
+      portalSummary: 'portal_summary',
+      customerSafetySummary: 'customer_safety_summary',
+      customerPrecautionSummary: 'customer_precaution_summary',
+      petKidGuidanceText: 'pet_kid_guidance_text',
+      reentryText: 'reentry_text',
+      reentrySummary: 'reentry_summary',
+      labelUrl: 'label_url',
+      labelSourceUrl: 'label_source_url',
+      labelVerifiedAt: 'label_verified_at',
+      labelVersion: 'label_version',
+      serviceReportSummary: 'service_report_summary',
+      heatRestrictions: 'heat_restrictions',
+      irrigationNotes: 'irrigation_notes',
+      localRuleSensitivity: 'local_rule_sensitivity',
+    };
+    const update = { updated_at: new Date() };
+    for (const [camel, snake] of Object.entries(allowed)) {
+      if (req.body[camel] !== undefined) update[snake] = req.body[camel] === '' ? null : req.body[camel];
+    }
+    if (!update.product_type) update.product_type = inferProductType({ ...product, ...update });
+
+    const candidate = { ...product, ...update };
+    const readiness = lawnFactReadiness(candidate);
+    if (req.body.approve === true) {
+      if (!readiness.eligible) {
+        return res.status(422).json({
+          error: 'Product fact is not ready for estimate-packet approval',
+          readiness,
+        });
+      }
+      update.approved_for_estimate_packet = true;
+      update.approved_for_public_page = true;
+      update.approved_for_service_report = true;
+      update.approved_by = req.technicianId || null;
+      update.approved_at = new Date();
+    }
+    const [updated] = await db('products_catalog')
+      .where({ id: product.id })
+      .update(update)
+      .returning('*');
+    res.json({
+      product: mapProduct(updated),
+      readiness: lawnFactReadiness(updated),
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // =========================================================================

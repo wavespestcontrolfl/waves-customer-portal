@@ -1,8 +1,8 @@
 // Compatibility placeholder.
 //
-// This migration name exists in the local migration history, but the source
-// file was missing from the migrations directory. Keep it as a no-op so Knex
-// can validate migration history and continue applying later migrations.
+// This migration filename exists in migration history on main as a no-op.
+// Keep it inert so databases that already recorded it remain valid. The real
+// lawn outline product fact seed now lives in 20260530000022_lawn_outline_product_facts_seed.js.
 
 exports.up = async function up() {};
 

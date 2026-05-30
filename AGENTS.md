@@ -259,7 +259,11 @@ finding and warns on P1. Reviewers must return JSON matching
   filters email-only blocks, server-side interpolation, generic 404),
   `/api/public/products` (read-only export; returns only active +
   customer_visibility=public + content_status=approved_for_public products;
-  excludes pricing, vendor, SKU, dilution, MOA, inventory fields).
+  excludes pricing, vendor, SKU, dilution, MOA, inventory fields),
+  `/api/service-outlines/:token` (approved/sent/viewed packets only,
+  43-char base64url token format gate, 60 req/min read limit, 120 req/min
+  CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
+  generic 404 for missing, draft, revoked, or malformed tokens).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
