@@ -465,6 +465,44 @@ describe('Astro publisher autonomous draft adapter', () => {
     expect(gh.createIssueComment).toHaveBeenCalledWith(42, expect.stringContaining('@codex review'));
   });
 
+  test('migrates a legacy .md post to .mdx instead of writing components into Markdown', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    // .mdx does not exist yet; the legacy .md does.
+    gh.getFile.mockImplementation(async (path) =>
+      path.endsWith('.mdx')
+        ? null
+        : { sha: 'legacy-md-sha', path, content: '---\ntitle: Old\n---\nold body' }
+    );
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.deleteFile.mockResolvedValue({});
+    gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77' });
+    gh.createIssueComment.mockResolvedValue({});
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({
+          slug: '/legacy-ant-post/',
+          canonical: 'https://www.wavespestcontrol.com/legacy-ant-post/',
+        }),
+        body: 'Updated guidance.\n\n<SeasonalPressureChart />',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    // Writes the .mdx (no sha — it is a new file), not the legacy .md.
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/legacy-ant-post.mdx',
+      sha: undefined,
+    }));
+    // Deletes the superseded .md so we never leave both.
+    expect(gh.deleteFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/legacy-ant-post.md',
+      sha: 'legacy-md-sha',
+    }));
+  });
+
   test('declines unsupported autonomous action types', () => {
     expect(AstroPublisher.canPublishDraftBrief({
       type: 'draft',

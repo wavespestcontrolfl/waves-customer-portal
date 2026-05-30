@@ -423,10 +423,13 @@ async function publishOrUpdatePage(draft, brief = {}) {
   frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
   const markdown = fm.stringify(frontmatter, `${body}\n`);
   // New autonomous posts are written as .mdx so they can embed MDX infographic
-  // components; if a file already exists under either extension, update it in
-  // place (preserve its extension — never create a duplicate alongside it).
+  // components. If a post already exists as .mdx, update it in place. If a
+  // LEGACY .md post exists at this slug, MIGRATE it to .mdx (the body may carry
+  // MDX-only components that would render broken in a .md file): write the
+  // .mdx and delete the stale .md in the same branch — never leave both.
   const existingFile = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
-  const filePath = existingFile ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
+  const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
+  const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 
   await gh.createBranch(branch);
   const fileCommit = await gh.putFile({
@@ -434,8 +437,16 @@ async function publishOrUpdatePage(draft, brief = {}) {
     content: markdown,
     message: `feat(blog): publish ${slug}`,
     branch,
-    sha: existingFile ? existingFile.file.sha : undefined,
+    sha: existingFile && !isLegacyMd ? existingFile.file.sha : undefined,
   });
+  if (isLegacyMd) {
+    await gh.deleteFile({
+      path: existingFile.path,
+      message: `chore(blog): migrate ${slug} to .mdx`,
+      branch,
+      sha: existingFile.file.sha,
+    });
+  }
 
   const pr = await gh.createPr({
     head: branch,
