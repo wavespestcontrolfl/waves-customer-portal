@@ -312,11 +312,16 @@ export default function CreateProjectModal({
   // Mirrors the completion-form draft pattern: debounced save of the typed
   // fields so a half-written report survives navigating away. Photos are File
   // objects and can't be serialized, so they're not part of the draft.
+  // Scope unscheduled drafts by the modal's allowed types so a general-project
+  // draft can't bleed into a restricted (e.g. WDO-only) create flow.
+  const allowedTypesScope = allowedProjectTypes && allowedProjectTypes.length
+    ? allowedProjectTypes.slice().sort().join('-')
+    : 'all';
   const draftScope = defaultScheduledServiceId
     ? `sched_${defaultScheduledServiceId}`
     : defaultServiceRecordId
       ? `rec_${defaultServiceRecordId}`
-      : 'new';
+      : `new_${allowedTypesScope}`;
   const draftKey = `waves_project_draft_${draftScope}`;
   const draftReadyRef = useRef(false);
   const [savedDraft, setSavedDraft] = useState(null);
@@ -370,12 +375,17 @@ export default function CreateProjectModal({
   function restoreDraft() {
     const d = savedDraft;
     if (!d) return;
-    if (d.projectType) setProjectType(d.projectType);
+    // Only restore the type (and its findings) if it's permitted in this modal;
+    // findings are type-specific, so drop them when the type isn't restored.
+    const typeAllowed = d.projectType && (!allowedProjectTypes || allowedProjectTypes.includes(d.projectType));
+    if (typeAllowed) {
+      setProjectType(d.projectType);
+      setFindings(d.findings && typeof d.findings === 'object' ? d.findings : {});
+    }
     if (d.customerId) setCustomerId(d.customerId);
     if (d.customerLabel) setCustomerLabel(d.customerLabel);
     if (d.projectDate) setProjectDate(d.projectDate);
     setTitle(d.title || '');
-    setFindings(d.findings && typeof d.findings === 'object' ? d.findings : {});
     setRecommendations(d.recommendations || '');
     setShowDraftPrompt(false);
   }
