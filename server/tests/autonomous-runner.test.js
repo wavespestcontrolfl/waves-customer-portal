@@ -562,23 +562,54 @@ describe('runDaily batching', () => {
   });
 
   test.each(['failed', 'failed_agent', 'failed_publish'])(
-    'stops the batch on retryable %s outcomes to avoid reclaiming the same top opportunity',
+    'halts the batch after the consecutive-failure cap on persistent %s outcomes',
     async (outcome) => {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
     runner.runNext = jest.fn().mockResolvedValue({
       outcome,
-      failure_message: 'brief_compose:temporary dependency unavailable',
+      failure_message: 'brief_compose:dependency unavailable',
     });
     runner._appendToDailyDigest = jest.fn(async () => {});
 
     const result = await runner.runDaily({ limit: 5 });
 
-    expect(runner.runNext).toHaveBeenCalledTimes(1);
+    // Default AUTONOMOUS_CONTENT_MAX_CONSECUTIVE_FAILURES = 2: a persistent
+    // failure no longer abandons the whole day after one hiccup, but a broken
+    // engine still stops fast (2 attempts, not the full limit of 5).
+    expect(runner.runNext).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       outcome,
-      count: 1,
+      count: 2,
       limit: 5,
+      failures: 2,
+    });
+  });
+
+  test('continues to the next opportunity past a failure, excluding the failed one', async () => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner.runNext = jest.fn()
+      .mockResolvedValueOnce({ outcome: 'failed_agent', failure_message: 'dispatch:transient blip', opportunity_id: 'opp_poison' })
+      .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'new_supporting_blog', opportunity_id: 'opp_2' })
+      .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    // The single failure should NOT stop the batch — the counter resets after
+    // the subsequent success, and the loop drains until the queue empties.
+    expect(runner.runNext).toHaveBeenCalledTimes(3);
+    // The failed opportunity must be excluded from subsequent claims so the
+    // released-to-pending poison row isn't just re-served at the top.
+    expect(runner.runNext).toHaveBeenNthCalledWith(1, { excludeIds: [] });
+    expect(runner.runNext).toHaveBeenNthCalledWith(2, { excludeIds: ['opp_poison'] });
+    expect(runner.runNext).toHaveBeenNthCalledWith(3, { excludeIds: ['opp_poison'] });
+    expect(result).toMatchObject({
+      outcome: 'skipped_no_opportunity',
+      count: 3,
+      limit: 5,
+      failures: 1,
     });
   });
 });
@@ -733,6 +764,79 @@ describe('protected-page guard', () => {
     expect(briefBuilder.compose).not.toHaveBeenCalled();
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
     expect(queue.pendingReview).toHaveBeenCalledWith('opp_protected_city_service', 'protected_page:money_page', { claimToken: claimedAt });
+  });
+
+  test('a thrown protected-page check fails closed and is tagged is_error (not a routine skip)', async () => {
+    const protectedPages = {
+      isProtected: jest.fn().mockRejectedValue(new Error('db timeout')),
+    };
+    const runner = loadRunnerWith({ queue: { claimNext: jest.fn() }, briefBuilder: { compose: jest.fn() }, protectedPages });
+
+    const verdict = await runner._checkProtectedPage({
+      action_type: 'create_or_refresh_city_service_page',
+      service: 'pest',
+      city: 'Sarasota',
+    });
+
+    expect(verdict).toMatchObject({
+      protected: true,
+      reason: 'protected_check_error',
+      is_error: true,
+    });
+    expect(verdict.detail).toContain('db timeout');
+  });
+
+  test('a thrown protected-page check still routes the run to review (fail-closed)', async () => {
+    const claimedAt = new Date('2026-05-28T13:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_protected_err',
+        action_type: 'create_or_refresh_city_service_page',
+        page_url: null,
+        service: 'pest',
+        city: 'Sarasota',
+        claimed_at: claimedAt,
+      }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const protectedPages = { isProtected: jest.fn().mockRejectedValue(new Error('db timeout')) };
+    const runner = loadRunnerWith({ queue, briefBuilder: { compose: jest.fn() }, dispatcher: { runWithBrief: jest.fn() }, protectedPages });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('protected_page:protected_check_error');
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_protected_err', 'protected_page:protected_check_error', { claimToken: claimedAt });
+  });
+
+  test('the guard\'s own RETURNED error verdict (no throw) is also tagged is_error', async () => {
+    // protected-pages.js catches registry failures itself and RETURNS
+    // { protected:true, reason:'protected_check_error', source:'error' } — the
+    // common DB-error path. The runner must tag this the same as a throw.
+    const protectedPages = {
+      isProtected: jest.fn().mockResolvedValue({
+        protected: true,
+        reason: 'protected_check_error',
+        source: 'error',
+        detail: 'registry read failed',
+      }),
+    };
+    const runner = loadRunnerWith({ queue: { claimNext: jest.fn() }, briefBuilder: { compose: jest.fn() }, protectedPages });
+
+    const verdict = await runner._checkProtectedPage({
+      action_type: 'create_or_refresh_city_service_page',
+      service: 'pest',
+      city: 'Sarasota',
+    });
+
+    expect(verdict).toMatchObject({
+      protected: true,
+      reason: 'protected_check_error',
+      source: 'error',
+      is_error: true,
+    });
+    expect(verdict.detail).toContain('registry read failed');
   });
 });
 

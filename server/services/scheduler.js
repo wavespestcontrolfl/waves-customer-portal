@@ -351,6 +351,23 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Content decay/cannibalization failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 7:15AM ET — Refresh customer-insight clusters before the opportunity
+  // miner + runner so customer-question pages draw on current first-party data.
+  // Reader against call_log / messages / google_reviews (consent + suppression
+  // gated, PII-redacted); writes ONLY customer_insight_clusters aggregates —
+  // never raw transcripts. Without this the clusters table goes stale (it was
+  // empty in prod until the first manual run). Same gate as the engine.
+  cron.schedule('15 7 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    logger.info('Running: Customer Insights Miner');
+    try {
+      const insightsMiner = require('./content/customer-insights-miner');
+      const result = await insightsMiner.mineAll({ days: 120, persist: true });
+      const persistedCount = Array.isArray(result?.persisted) ? result.persisted.length : (result?.persisted ?? '?');
+      logger.info(`Customer insights mine: ${result?.cluster_count ?? '?'} clusters (${result?.qualifying_count ?? '?'} qualifying), ${persistedCount} persisted`);
+    } catch (err) { logger.error(`Customer insights miner failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 7:30AM ET — Mine fresh GSC opportunities before the 9AM runner.
   // Writes only opportunity_queue rows. The runner still chooses by score and
   // per-lane shadow/canary guards decide whether anything can publish.
@@ -995,6 +1012,39 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Dashboard alerts cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WaveGuard lawn readiness — route-morning protocol preflight snapshot.
+  // Stores the readiness ledger and opens an admin alert when appointments
+  // are blocked by assignment, calibration, inventory, or property gates.
+  // =========================================================================
+  cron.schedule('30 5 * * *', async () => {
+    try {
+      const { runReadinessSnapshot } = require('./lawn-protocol-readiness-cron');
+      const result = await runReadinessSnapshot({ days: 14, limit: 100, source: 'scheduled_daily' });
+      if (!result.skipped) {
+        logger.info(`[lawn-protocol-readiness] ready=${result.ready || 0} warning=${result.warning || 0} blocked=${result.blocked || 0} appointments=${result.appointmentCount || 0}`);
+      }
+    } catch (err) {
+      logger.error(`Lawn protocol readiness snapshot failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WaveGuard inventory forecast — proactive product shortage warning before
+  // readiness starts blocking dispatch.
+  // =========================================================================
+  cron.schedule('45 5 * * *', async () => {
+    try {
+      const { runWaveGuardInventoryForecastCheck } = require('./waveguard-inventory-forecast');
+      const result = await runWaveGuardInventoryForecastCheck({ days: 14, limit: 150, source: 'scheduled_daily' });
+      if (!result.skipped) {
+        logger.info(`[waveguard-inventory-forecast] ok=${result.ok || 0} warning=${result.warning || 0} short=${result.short || 0} unit_mismatch=${result.unit_mismatch || 0} not_tracked=${result.not_tracked || 0} products=${result.productCount || 0}`);
+      }
+    } catch (err) {
+      logger.error(`WaveGuard inventory forecast check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

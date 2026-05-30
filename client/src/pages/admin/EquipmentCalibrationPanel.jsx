@@ -70,6 +70,18 @@ export function computeCarrierRate(testAreaSqft, capturedGallons) {
   return Math.round((g / (a / 1000)) * 1000) / 1000;
 }
 
+function todayInputValue() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function calibrationStatusLabel(status) {
+  if (status === "field_verified") return "Field verified";
+  if (status === "estimated_not_field_verified") {
+    return "Estimated, not field verified";
+  }
+  return status || "Unspecified";
+}
+
 export default function EquipmentCalibrationPanel() {
   const [systems, setSystems] = useState([]);
   const [selectedSystemId, setSelectedSystemId] = useState("");
@@ -82,6 +94,12 @@ export default function EquipmentCalibrationPanel() {
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  const [verifyOpen, setVerifyOpen] = useState(false);
+  const [verifyTestAreaSqft, setVerifyTestAreaSqft] = useState("");
+  const [verifyCapturedGallons, setVerifyCapturedGallons] = useState("");
+  const [verifyDate, setVerifyDate] = useState(todayInputValue());
+  const [verifyNotes, setVerifyNotes] = useState("");
+  const [verifying, setVerifying] = useState(false);
   const [reconciliation, setReconciliation] = useState(null);
   const [reconciliationLoading, setReconciliationLoading] = useState(false);
 
@@ -115,6 +133,7 @@ export default function EquipmentCalibrationPanel() {
   useEffect(() => {
     if (!selectedSystemId) {
       setActiveCalibration(null);
+      setVerifyOpen(false);
       return undefined;
     }
     let cancelled = false;
@@ -138,6 +157,10 @@ export default function EquipmentCalibrationPanel() {
     () => computeCarrierRate(testAreaSqft, capturedGallons),
     [testAreaSqft, capturedGallons],
   );
+  const verificationComputedRate = useMemo(
+    () => computeCarrierRate(verifyTestAreaSqft, verifyCapturedGallons),
+    [verifyTestAreaSqft, verifyCapturedGallons],
+  );
 
   const selectedSystem = systems.find((s) => s.id === selectedSystemId);
   const selectedReconciliationSystem = reconciliation?.systems?.find(
@@ -145,6 +168,11 @@ export default function EquipmentCalibrationPanel() {
   );
 
   const canSave = !!selectedSystemId && computedRate != null && !saving;
+  const canVerify =
+    !!activeCalibration &&
+    verificationComputedRate != null &&
+    !!verifyDate &&
+    !verifying;
 
   const handleSave = async () => {
     if (!canSave) return;
@@ -192,6 +220,36 @@ export default function EquipmentCalibrationPanel() {
       alert("Save failed: " + e.message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleVerifyCalibration = async () => {
+    if (!canVerify) return;
+    setVerifying(true);
+    try {
+      const d = await adminFetch(
+        `/admin/equipment-systems/calibrations/${activeCalibration.id}/verify`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            verified_test_area_sqft: Number(verifyTestAreaSqft),
+            verified_captured_gallons: Number(verifyCapturedGallons),
+            verified_at: `${verifyDate}T12:00:00`,
+            verification_notes: verifyNotes || null,
+          }),
+        },
+      );
+      setActiveCalibration(d.calibration);
+      setVerifyOpen(false);
+      setVerifyTestAreaSqft("");
+      setVerifyCapturedGallons("");
+      setVerifyDate(todayInputValue());
+      setVerifyNotes("");
+      loadReconciliation();
+    } catch (e) {
+      alert("Verification failed: " + e.message);
+    } finally {
+      setVerifying(false);
     }
   };
 
@@ -274,8 +332,31 @@ export default function EquipmentCalibrationPanel() {
               >
                 Current active calibration
               </div>{" "}
-              <div style={{ display: "flex", gap: 16, alignItems: "baseline" }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 16,
+                  alignItems: "baseline",
+                  flexWrap: "wrap",
+                }}
+              >
                 {" "}
+                <div>
+                  {" "}
+                  <span style={{ color: D.muted }}>status:</span>{" "}
+                  <span
+                    style={{
+                      fontWeight: 700,
+                      color:
+                        activeCalibration.calibration_status ===
+                        "field_verified"
+                          ? D.green
+                          : D.amber,
+                    }}
+                  >
+                    {calibrationStatusLabel(activeCalibration.calibration_status)}
+                  </span>{" "}
+                </div>{" "}
                 <div>
                   {" "}
                   <span style={{ color: D.muted }}>carrier:</span>{" "}
@@ -290,6 +371,133 @@ export default function EquipmentCalibrationPanel() {
                   <span>{fmtExpiry(activeCalibration.expires_at)}</span>{" "}
                 </div>{" "}
               </div>{" "}
+              {activeCalibration.verified_at && (
+                <div style={{ marginTop: 6, color: D.muted }}>
+                  Verified {new Date(activeCalibration.verified_at).toLocaleDateString()}
+                  {activeCalibration.verified_test_area_sqft
+                    ? ` over ${activeCalibration.verified_test_area_sqft} sqft`
+                    : ""}
+                  {activeCalibration.verified_captured_gallons
+                    ? ` using ${activeCalibration.verified_captured_gallons} gal`
+                    : ""}
+                </div>
+              )}
+              {activeCalibration.calibration_status !== "field_verified" && (
+                <div style={{ marginTop: 10 }}>
+                  <button
+                    type="button"
+                    onClick={() => setVerifyOpen((v) => !v)}
+                    style={{
+                      ...btnStyle(D.teal),
+                      padding: "8px 12px",
+                      fontSize: 12,
+                    }}
+                  >
+                    {verifyOpen ? "Close verification" : "Verify Calibration"}
+                  </button>
+                </div>
+              )}
+              {verifyOpen && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: 10,
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 8,
+                    background: D.card,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                      gap: 10,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div>
+                      <div style={{ color: D.muted, marginBottom: 4 }}>
+                        Measured sqft
+                      </div>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        step="1"
+                        value={verifyTestAreaSqft}
+                        onChange={(e) => setVerifyTestAreaSqft(e.target.value)}
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div>
+                      <div style={{ color: D.muted, marginBottom: 4 }}>
+                        Measured gallons
+                      </div>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        value={verifyCapturedGallons}
+                        onChange={(e) =>
+                          setVerifyCapturedGallons(e.target.value)
+                        }
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div>
+                      <div style={{ color: D.muted, marginBottom: 4 }}>
+                        Verification date
+                      </div>
+                      <input
+                        type="date"
+                        value={verifyDate}
+                        onChange={(e) => setVerifyDate(e.target.value)}
+                        style={inputStyle}
+                      />
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      marginBottom: 10,
+                      padding: 10,
+                      background: D.bg,
+                      borderRadius: 8,
+                    }}
+                  >
+                    <span style={{ color: D.muted }}>Verified carrier:</span>{" "}
+                    <span style={{ fontFamily: MONO, fontWeight: 800 }}>
+                      {verificationComputedRate != null
+                        ? `${verificationComputedRate} gal/1,000 sqft`
+                        : "—"}
+                    </span>
+                  </div>
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ color: D.muted, marginBottom: 4 }}>
+                      Verification notes
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={verifyNotes}
+                      onChange={(e) => setVerifyNotes(e.target.value)}
+                      style={{ ...inputStyle, resize: "vertical" }}
+                    />
+                  </div>
+                  <div style={{ color: D.muted, marginBottom: 10 }}>
+                    Tech is recorded from the signed-in admin/technician account.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleVerifyCalibration}
+                    disabled={!canVerify}
+                    style={{
+                      ...btnStyle(D.green),
+                      width: "100%",
+                      opacity: canVerify ? 1 : 0.5,
+                    }}
+                  >
+                    {verifying ? "Verifying..." : "Mark Field Verified"}
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div

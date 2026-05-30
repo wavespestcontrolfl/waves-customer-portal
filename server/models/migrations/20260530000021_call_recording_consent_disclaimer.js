@@ -23,7 +23,10 @@
  * only ever reads direction='inbound' rows, where the greeting disclosure is
  * unconditional, so a default of TRUE reflects reality for the miner's universe
  * and keeps future inbound rows eligible without wiring every call_log write
- * path (Studio Flow callbacks + fallback webhook).
+ * path (Studio Flow callbacks + fallback webhook). It also matches the column
+ * already applied to production (this migration ran there as batch 371 with
+ * DEFAULT true); a fresh-DB default of false would diverge from prod and
+ * silently exclude all calls from mining until a backfill.
  *
  * CONTRACT: if a future call path is added that does NOT play a recording
  * disclaimer, it MUST explicitly write this column false for those rows.
