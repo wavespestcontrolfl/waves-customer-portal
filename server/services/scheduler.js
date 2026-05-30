@@ -308,6 +308,14 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Link prospect indexer failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY :15 — release stale Hermes worker claims back to the prospect pool
+  cron.schedule('15 * * * *', async () => {
+    try {
+      const Worker = require('./seo/link-prospect-worker');
+      await Worker.sweepExpiredClaims();
+    } catch (err) { logger.error(`Link prospect claim sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY MONDAY 1:30AM — Full site technical audit
   cron.schedule('30 1 * * 1', async () => {
     if (!isEnabled('seoIntelligence')) return;
