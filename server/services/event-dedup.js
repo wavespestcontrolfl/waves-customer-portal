@@ -205,12 +205,17 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
       'e.source_id', 'e.pulled_at', 'e.admin_status', 'e.venue_name', 's.priority_tier as source_priority_tier',
     );
 
-  const clusters = findDuplicateClusters(events).slice(0, maxClusters);
+  // Filter to auto-mergeable clusters BEFORE applying the cap. The query
+  // feeding findDuplicateClusters is unordered, so capping the raw result
+  // first would let loose, manual-only clusters (mismatched venue/time)
+  // consume the whole budget and starve safe cross-source duplicates that
+  // happen to sort later. Cap the work we actually intend to do instead.
+  const clusters = findDuplicateClusters(events)
+    .filter((c) => isAutoMergeableCluster(c.events))
+    .slice(0, maxClusters);
   let mergedEvents = 0;
   let mergedClusters = 0;
   for (const cluster of clusters) {
-    if (!isAutoMergeableCluster(cluster.events)) continue;
-
     const survivor = pickSurvivor(cluster.events);
     const loserRows = cluster.events.filter((e) => e.id !== survivor.id);
     const losers = loserRows.map((e) => e.id);
