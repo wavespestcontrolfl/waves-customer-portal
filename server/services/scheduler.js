@@ -476,6 +476,8 @@ function initScheduledJobs() {
   // and drafted/scheduled/sent/skipped weeks are already handled. The autopilot's
   // own advisory lock + dedupe make a catch-up invocation safe if it races the
   // 7AM run. Runs daily Thu–Sun so a mid-week recovery still lands the draft.
+  // A catch-up that hard-fails preflight persists a 'skipped' row, so the
+  // following day's tick retires the week instead of re-running + re-notifying.
   // =========================================================================
   cron.schedule('0 14 * * 4,5,6,0', async () => {
     try {

@@ -260,6 +260,27 @@ async function autoDraftFlagship() {
     const reason = preflight.hardFailures.join('; ');
     logger.info(`[newsletter-autopilot] Preflight skip: ${reason}`);
 
+    // Persist a durable 'skipped' marker for this week. Without it, the
+    // preflight-skip path leaves no calendar row (or a 'planned' one), so the
+    // Thu–Sun 2PM catch-up cron treats the week as never-attempted and re-runs
+    // autoDraftFlagship — repeating the work and the skip notification — on
+    // every tick. The catch-up gate only proceeds on a missing/'planned' row,
+    // so a 'skipped' status correctly retires the week. Any operator-planned
+    // topic/event_ids on an existing row are preserved; only the status flips.
+    try {
+      await db('newsletter_calendar')
+        .insert({
+          week_of: weekOf,
+          status: 'skipped',
+          target_send_at: defaultTargetSendAt(weekOf),
+          event_ids: JSON.stringify([]),
+        })
+        .onConflict('week_of')
+        .merge({ status: 'skipped', updated_at: db.fn.now() });
+    } catch (e) {
+      logger.warn(`[newsletter-autopilot] failed to mark week skipped: ${e.message}`);
+    }
+
     // Notify admin with an actionable report (exact counts + next actions).
     try {
       const { triggerNotification } = require('./notification-triggers');
