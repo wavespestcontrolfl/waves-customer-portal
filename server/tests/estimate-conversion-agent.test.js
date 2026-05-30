@@ -81,6 +81,15 @@ describe('estimate conversion agent shadow decisions', () => {
     expect(decision.autoActionsAllowed).toEqual(expect.arrayContaining(['draft_estimate_question_reply']));
   });
 
+  test('does not treat casual start phrasing as a scheduling window', () => {
+    const decision = classifyEstimateSmsIntent(
+      "Turner may be free but they did not even look at the attic space for the boracare! Guess we have to start somewhere",
+      {}
+    );
+    expect(decision.intent).toBeNull();
+    expect(decision.recommendedActions).toEqual([]);
+  });
+
   test('extracts short-code estimate links and normalizes phones', () => {
     expect(extractShortCode('Hello Paul! Your estimate is ready: https://portal.wavespestcontrol.com/l/ek556')).toBe('ek556');
     expect(normalizePhoneLast10('+1 (941) 555-0101')).toBe('9415550101');

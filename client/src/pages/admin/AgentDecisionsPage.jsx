@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, CheckCircle2, Edit3, RefreshCw, ShieldAlert, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, ClipboardList, Edit3, MessageSquare, PhoneCall, RefreshCw, ShieldAlert, UserRound, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -90,12 +90,36 @@ function TextList({ items = [], empty = "-" }) {
   );
 }
 
+function Field({ label, value }) {
+  if (value === null || value === undefined || value === "") return null;
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>{label}</div>
+      <div style={{ fontSize: 13, color: D.text, lineHeight: 1.35 }}>{String(value)}</div>
+    </div>
+  );
+}
+
+function Panel({ icon: Icon, title, children }) {
+  return (
+    <section style={{ display: "grid", gap: 10, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: D.muted, fontWeight: 850 }}>
+        {Icon && <Icon size={16} />}
+        {title}
+      </div>
+      {children}
+    </section>
+  );
+}
+
 export default function AgentDecisionsPage() {
   const [status, setStatus] = useState("pending_review");
   const [data, setData] = useState({ decisions: [], metrics: null });
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState("");
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [correctionNote, setCorrectionNote] = useState("");
@@ -129,6 +153,26 @@ export default function AgentDecisionsPage() {
   useEffect(() => {
     setCorrectionNote("");
     setCorrectedActions(selected?.recommendedActions?.join("\n") || "");
+  }, [selected?.id]);
+
+  useEffect(() => {
+    if (!selected?.id) {
+      setDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setDetailLoading(true);
+    adminFetch(`/admin/agent-decisions/${selected.id}/context`)
+      .then((next) => {
+        if (!cancelled) setDetail(next);
+      })
+      .catch((err) => {
+        if (!cancelled) setDetail({ error: err.message });
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [selected?.id]);
 
   const review = useCallback(async (decision, verdict) => {
@@ -297,6 +341,96 @@ export default function AgentDecisionsPage() {
                   <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Inbound Message</div>
                   <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.inboundMessage || "-"}</div>
                 </section>
+
+                <Panel icon={MessageSquare} title="Conversation Context">
+                  {detailLoading ? (
+                    <div style={{ color: D.muted }}>Loading thread...</div>
+                  ) : detail?.context?.smsThread?.length ? (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {detail.context.smsThread.map((msg) => (
+                        <div key={msg.id} style={{
+                          display: "grid",
+                          gap: 4,
+                          padding: 10,
+                          borderRadius: 8,
+                          background: msg.isTrigger ? "#FEF3C7" : D.bg,
+                          border: `1px solid ${msg.isTrigger ? "#F59E0B" : D.border}`,
+                        }}>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: D.muted, fontWeight: 800 }}>
+                            <span>{msg.direction === "inbound" ? "Customer" : "Waves"}</span>
+                            <span>{timeLabel(msg.createdAt)}</span>
+                            {msg.type && <span>{msg.type}</span>}
+                            {msg.isTrigger && <Chip tone="amber">Trigger</Chip>}
+                          </div>
+                          <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.4 }}>{msg.body || "-"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ color: D.muted }}>No recent SMS thread found.</div>
+                  )}
+                </Panel>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                  <Panel icon={UserRound} title="Customer / Lead / Estimate">
+                    {detail?.error ? (
+                      <div style={{ color: D.red }}>{detail.error}</div>
+                    ) : (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+                        <Field label="Customer" value={[detail?.context?.customer?.first_name, detail?.context?.customer?.last_name].filter(Boolean).join(" ") || selected.customerName} />
+                        <Field label="Phone" value={detail?.context?.customer?.phone || selected.customerPhone || selected.sourceFromPhone} />
+                        <Field label="Address" value={detail?.context?.customer?.address_line1 || detail?.context?.estimate?.address} />
+                        <Field label="City" value={detail?.context?.customer?.city} />
+                        <Field label="WaveGuard" value={detail?.context?.customer?.waveguard_tier || detail?.context?.estimate?.waveguard_tier} />
+                        <Field label="Lead Status" value={detail?.context?.lead?.status || selected.leadStatus} />
+                        <Field label="Estimate Status" value={detail?.context?.estimate?.status || selected.estimateStatus} />
+                        <Field label="Service Interest" value={detail?.context?.lead?.service_interest || detail?.context?.estimate?.service_interest} />
+                      </div>
+                    )}
+                  </Panel>
+
+                  <Panel icon={PhoneCall} title="Recent Calls">
+                    {detailLoading ? (
+                      <div style={{ color: D.muted }}>Loading calls...</div>
+                    ) : detail?.context?.calls?.length ? (
+                      <div style={{ display: "grid", gap: 8 }}>
+                        {detail.context.calls.map((call) => (
+                          <div key={call.id} style={{ display: "grid", gap: 4, borderBottom: `1px solid ${D.border}`, paddingBottom: 8 }}>
+                            <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 800 }}>
+                              <span>{call.direction || "call"}</span>
+                              <span>{timeLabel(call.createdAt)}</span>
+                              {call.outcome && <span>{call.outcome}</span>}
+                            </div>
+                            <div style={{ fontSize: 13, lineHeight: 1.4 }}>{call.synopsis || call.transcription || call.notes || "-"}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ color: D.muted }}>No recent calls found.</div>
+                    )}
+                  </Panel>
+                </div>
+
+                <Panel icon={ClipboardList} title="Recent Service Context">
+                  {detailLoading ? (
+                    <div style={{ color: D.muted }}>Loading services...</div>
+                  ) : detail?.context?.services?.length ? (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {detail.context.services.map((service) => (
+                        <div key={service.id} style={{ display: "grid", gap: 4, borderBottom: `1px solid ${D.border}`, paddingBottom: 8 }}>
+                          <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 800 }}>
+                            <span>{service.serviceType}</span>
+                            <span>{service.serviceDate || timeLabel(service.createdAt)}</span>
+                            <span>{service.status}</span>
+                          </div>
+                          <div style={{ fontSize: 13, lineHeight: 1.4 }}>{service.technicianNotes || "-"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ color: D.muted }}>No recent service records found.</div>
+                  )}
+                </Panel>
 
                 <section style={{ display: "grid", gap: 8 }}>
                   <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Suggested Reply</div>
