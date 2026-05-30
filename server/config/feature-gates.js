@@ -91,6 +91,13 @@ const gates = {
   // rollout — per-action-type trust-build before live publish).
   autonomousContentEngine: isProd ? process.env.GATE_AUTONOMOUS_CONTENT === 'true' : true,
 
+  // aeo_gap opportunity mining — feeds answer-engine (LLM) visibility gaps into
+  // the content engine's opportunity_queue. Default OFF in prod: ships dormant
+  // so it can be enabled (GATE_AEO_GAP_MINING=true) only after the
+  // seo_llm_mentions tracker has several days of data and the opportunities
+  // have been eyeballed. When off, the aeo_gap bucket miner returns [].
+  aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
+
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,
   // which is opt-in in EVERY environment, and sensitive reveal, which is off

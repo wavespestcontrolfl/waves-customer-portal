@@ -151,6 +151,10 @@ describe('gscOpportunityScore', () => {
   test('unknown bucket returns 0', () => {
     expect(gscOpportunityScore('made_up_bucket', 5, 1.0)).toBe(0);
   });
+  test('aeo_gap scales with impressions boost', () => {
+    expect(gscOpportunityScore('aeo_gap', 20, 1.0))
+      .toBeGreaterThan(gscOpportunityScore('aeo_gap', 20, 0.55));
+  });
 });
 
 describe('localRevenueScore', () => {
@@ -215,6 +219,16 @@ describe('actionForOpportunity', () => {
       bucket: 'striking_distance', service: 'pest',
     })).toBe('new_supporting_blog');
   });
+  test('aeo_gap: page present → refresh_existing_page', () => {
+    expect(actionForOpportunity({
+      bucket: 'aeo_gap', page_url: '/pest-control-bradenton-fl/', service: 'pest', city: 'Bradenton',
+    })).toBe('refresh_existing_page');
+  });
+  test('aeo_gap: no page + city+service → city service page', () => {
+    expect(actionForOpportunity({
+      bucket: 'aeo_gap', service: 'pest', city: 'Bradenton',
+    })).toBe('create_or_refresh_city_service_page');
+  });
 });
 
 // ── dedupeKey ───────────────────────────────────────────────────────
@@ -259,6 +273,23 @@ describe('scoreOpportunity', () => {
     const o = { bucket: 'decay_refresh', service: 'pest', page_url: '/x/' };
     const { breakdown } = scoreOpportunity(o, { position: 8, impressions: 300 });
     expect(breakdown.refreshLift).toBe(WEIGHTS.refreshLift);
+  });
+  test('aeo_gap: strong gap (competitors + demand) clears the 75 floor', () => {
+    const o = { bucket: 'aeo_gap', service: 'pest', city: 'Bradenton', page_url: '/pest-control-bradenton-fl/' };
+    const { total, breakdown } = scoreOpportunity(o, { position: 20, impressions: 500, gapStrength: 1.0 });
+    expect(breakdown.aeoGap).toBe(WEIGHTS.aeoGap);
+    expect(total).toBeGreaterThanOrEqual(75);
+  });
+  test('aeo_gap: weak gap (no competitors, thin demand) stays below the floor', () => {
+    const o = { bucket: 'aeo_gap', service: 'lawn', city: 'Venice' };
+    const { total } = scoreOpportunity(o, { position: 20, impressions: 60, gapStrength: 0.5 });
+    expect(total).toBeLessThan(75);
+  });
+  test('aeo_gap bonus scales with gap_strength', () => {
+    const o = { bucket: 'aeo_gap', service: 'pest', city: 'Bradenton' };
+    const weak = scoreOpportunity(o, { position: 20, impressions: 200, gapStrength: 0.5 }).breakdown.aeoGap;
+    const strong = scoreOpportunity(o, { position: 20, impressions: 200, gapStrength: 1.0 }).breakdown.aeoGap;
+    expect(strong).toBeGreaterThan(weak);
   });
   test('higher impressions → higher total score (ceteris paribus)', () => {
     const o = { bucket: 'striking_distance', service: 'pest', query: 'pest control bradenton', city: 'Bradenton' };
