@@ -56,9 +56,14 @@ function mapReportToPatch(outcome, body = {}) {
 
   if (outcome === 'placed') {
     // Persist a paid-placement cost (e.g. sponsored post) for funnel ROI; only a
-    // valid non-negative number, else null.
-    const n = Number(body.cost);
-    const cost = body.cost != null && Number.isFinite(n) && n >= 0 ? n : null;
+    // valid non-negative number, else null. Accept a real number or a non-blank
+    // numeric string ONLY — Number('')/Number('  ')/Number(false)/Number([]) all
+    // coerce to 0, which would record a blank field as a bogus free placement.
+    const raw = body.cost;
+    const isNumericInput = typeof raw === 'number'
+      || (typeof raw === 'string' && raw.trim() !== '');
+    const n = Number(raw);
+    const cost = isNumericInput && Number.isFinite(n) && n >= 0 ? n : null;
     return {
       ...release,
       status: 'placed',

@@ -36,6 +36,13 @@ describe('link prospect worker — report mapping', () => {
     expect(mapReportToPatch('placed', { live_url: 'https://x' }).cost).toBeNull();
     expect(mapReportToPatch('placed', { live_url: 'https://x', cost: -5 }).cost).toBeNull();
     expect(mapReportToPatch('placed', { live_url: 'https://x', cost: 'free' }).cost).toBeNull();
+    // Blank/whitespace/non-numeric-type inputs must NOT coerce to 0.
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: '' }).cost).toBeNull();
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: '   ' }).cost).toBeNull();
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: false }).cost).toBeNull();
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: [] }).cost).toBeNull();
+    // An explicit numeric zero (genuinely free) is kept.
+    expect(mapReportToPatch('placed', { live_url: 'https://x', cost: 0 }).cost).toBe(0);
   });
 
   test('placed without live_url maps to live_url=null (why report() rejects it)', () => {
