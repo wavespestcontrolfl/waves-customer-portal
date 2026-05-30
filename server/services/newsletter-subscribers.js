@@ -9,6 +9,14 @@ const db = require('../models/db');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Double-opt-in confirmation link lifetime. After this, the link no longer
+// confirms (lookupByToken returns 'expired') — a months-old link in an inbox
+// can't silently activate a subscription. Stale 'pending' rows are deleted by
+// purgeStalePendingSubscribers() after a longer window so the table (and the
+// email's eligibility for a fresh signup) doesn't accrue dead pending rows.
+const CONFIRM_TTL_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days — link still confirms
+const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete the row
+
 /**
  * Subscribe (or resubscribe) an email. Idempotent across all call sites.
  *
@@ -182,7 +190,30 @@ async function lookupByToken(token) {
   if (!sub) return { subscriber: null, action: 'not_found' };
   if (sub.status === 'active') return { subscriber: sub, action: 'already_active' };
   if (sub.status === 'unsubscribed') return { subscriber: sub, action: 'unsubscribed' };
+  // pending — but reject an aged-out confirmation link (double-opt-in TTL) so a
+  // months-old link can't silently activate the subscription. confirmByToken
+  // returns this without flipping to active; the confirm page shows the
+  // expired/invalid message.
+  if (sub.confirmation_sent_at
+      && (Date.now() - new Date(sub.confirmation_sent_at).getTime()) > CONFIRM_TTL_MS) {
+    return { subscriber: sub, action: 'expired' };
+  }
   return { subscriber: sub, action: 'pending' };
+}
+
+/**
+ * Delete stale 'pending' subscribers whose confirmation link aged past the
+ * purge window and never confirmed. Frees the email for a fresh signup and
+ * keeps the table from accruing dead double-opt-in rows. Called from a daily
+ * cron. Returns the number of rows removed.
+ */
+async function purgeStalePendingSubscribers() {
+  const cutoff = new Date(Date.now() - PENDING_PURGE_MS);
+  return db('newsletter_subscribers')
+    .where({ status: 'pending' })
+    .whereNotNull('confirmation_sent_at')
+    .where('confirmation_sent_at', '<', cutoff)
+    .del();
 }
 
 /**
@@ -242,4 +273,4 @@ async function linkToCustomer(email) {
   );
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, EMAIL_RE };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

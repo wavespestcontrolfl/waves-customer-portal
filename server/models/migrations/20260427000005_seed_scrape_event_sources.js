@@ -50,7 +50,7 @@ const SCRAPE_SOURCES = [
 ];
 
 exports.up = async function (knex) {
-  await knex('event_sources').insert(SCRAPE_SOURCES);
+  await knex('event_sources').insert(SCRAPE_SOURCES).onConflict('feed_url').ignore();
   console.log(
     `[20260427000005] Seeded ${SCRAPE_SOURCES.length} scrape event_source (Visit Sarasota County canary)`
   );

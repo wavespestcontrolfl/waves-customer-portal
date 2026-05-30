@@ -56,7 +56,7 @@ const ICAL_SOURCES = [
 ];
 
 exports.up = async function (knex) {
-  await knex('event_sources').insert(ICAL_SOURCES);
+  await knex('event_sources').insert(ICAL_SOURCES).onConflict('feed_url').ignore();
   console.log(
     `[20260427000004] Seeded ${ICAL_SOURCES.length} iCal event_sources (Mote Marine, AMI Chamber, Charlotte PAC)`
   );

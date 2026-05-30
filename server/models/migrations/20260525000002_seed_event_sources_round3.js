@@ -123,7 +123,7 @@ const NEW_SOURCES = [
 ];
 
 exports.up = async function (knex) {
-  await knex('event_sources').insert(NEW_SOURCES);
+  await knex('event_sources').insert(NEW_SOURCES).onConflict('feed_url').ignore();
   console.log(
     `[20260525000002] Seeded ${NEW_SOURCES.length} event sources (city calendars, venue feeds, chamber aggregators)`
   );
