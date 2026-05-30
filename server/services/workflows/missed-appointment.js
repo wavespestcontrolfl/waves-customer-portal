@@ -55,7 +55,7 @@ class MissedAppointment {
       interaction_type: 'task',
       channel: 'internal',
       subject: `Recommended outreach: ${totalSkips} missed appointments in 90 days`,
-      notes:
+      body:
         `Customer has skipped ${totalSkips} times in 90 days. Last reason: ${reason}. ` +
         `Recommend a phone call or reviewing/sending the SMS below.\n\n` +
         `Suggested SMS:\n${suggestedSms}`,

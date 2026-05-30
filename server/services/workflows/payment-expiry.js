@@ -100,7 +100,7 @@ class PaymentExpiry {
           interaction_type: 'sms_outbound',
           channel: 'sms',
           subject: 'Payment method expiry notice',
-          notes: `Card ****${card.last_four} expires ${expLabel}`,
+          body: `Card ****${card.last_four} expires ${expLabel}`,
         });
 
         await emailPromise;

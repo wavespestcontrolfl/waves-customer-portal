@@ -651,7 +651,7 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       interaction_type: 'sms_outbound',
       channel: 'sms',
       subject: `Annual prepay renewal - ${daysOut}-day reminder`,
-      notes: `Automated annual prepay renewal reminder sent (${daysOut} days out)`,
+      body: `Automated annual prepay renewal reminder sent (${daysOut} days out)`,
     }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
 
     void sendRenewalEmail();

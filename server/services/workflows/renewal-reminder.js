@@ -108,7 +108,7 @@ class RenewalReminder {
               interaction_type: 'sms_outbound',
               channel: 'sms',
               subject: `${field.label} — ${daysOut}-day reminder`,
-              notes: `Automated renewal reminder sent (${daysOut} days out)`,
+              body: `Automated renewal reminder sent (${daysOut} days out)`,
             });
 
             totalSent++;

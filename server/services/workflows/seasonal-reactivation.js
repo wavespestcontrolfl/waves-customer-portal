@@ -105,7 +105,7 @@ class SeasonalReactivation {
           interaction_type: 'sms_outbound',
           channel: 'sms',
           subject: `Seasonal reactivation — ${seasonal.type}`,
-          notes: `Auto reactivation: ${hookText}`,
+          body: `Auto reactivation: ${hookText}`,
         });
 
         // Update last contact date
