@@ -1269,6 +1269,8 @@ router.post('/wdo-history', async (req, res, next) => {
 
     const customerId = req.body?.customer_id || null;
     const projectId = req.body?.project_id || null;
+    const serviceRecordId = req.body?.service_record_id || null;
+    const scheduledServiceId = req.body?.scheduled_service_id || null;
     const wantRefresh = req.body?.refresh === true || req.body?.refresh === 'true';
     let scopedCustomerId = customerId;
 
@@ -1289,7 +1291,13 @@ router.post('/wdo-history', async (req, res, next) => {
       scopedCustomerId = project.customer_id || customerId;
     } else if (!isAdmin(req)) {
       if (!customerId) return res.status(400).json({ error: 'Customer required for technician WDO history' });
-      await validateProjectCreateScope(req, { customer_id: customerId });
+      // Pass the assigned visit scope (service_record_id / scheduled_service_id)
+      // so an assigned field tech isn't rejected before the project is saved.
+      await validateProjectCreateScope(req, {
+        customer_id: customerId,
+        service_record_id: serviceRecordId,
+        scheduled_service_id: scheduledServiceId,
+      });
     }
 
     const customer = scopedCustomerId
@@ -1655,6 +1663,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const typeCfg = getProjectType(project.project_type);
     const typeLabel = typeCfg?.label || 'Service';
     const firstName = customer?.first_name || 'there';
+    const isWdo = project.project_type === 'wdo_inspection';
+
+    // A WDO report's FDACS-13645 PDF rides on the email only, so it can't be
+    // delivered without an email address — fail up front rather than text a bare
+    // link and record the official report as sent.
+    if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
+      return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
+    }
 
     // Build the FDACS report PDF up-front. For a WDO report this PDF *is* the
     // deliverable (and is gated as signed), so a build/stamp failure must abort
@@ -1741,10 +1757,12 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       emailRecipient.email ? 'email' : null,
     ].filter(Boolean);
     const successfulChannelCount = availableChannels.filter(channel => channels[channel]?.ok).length;
-    const deliveryStatus = successfulChannelCount === 0
-      ? 'failed'
-      : successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
-    const delivered = successfulChannelCount > 0;
+    // For WDO the FDACS PDF is email-only, so delivery requires the email to
+    // succeed; for everything else any successful channel counts.
+    const delivered = isWdo ? !!channels.email?.ok : successfulChannelCount > 0;
+    const deliveryStatus = !delivered
+      ? (successfulChannelCount === 0 ? 'failed' : 'partial')
+      : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
     const deliveryUpdate = {
       delivery_channels: channels,
       delivery_status: deliveryStatus,
@@ -1929,6 +1947,13 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: project.customer_id }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
+    // The filled FDACS-13645 PDF rides on the email only (SMS can't carry it),
+    // so a WDO report can't be delivered without an email — fail up front rather
+    // than text a bare link and record the official report as sent.
+    if (!ProjectEmail.resolveProjectEmailRecipient(customer).email) {
+      return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
+    }
+
     // Readiness gate mirrors /send so we never email an incomplete report.
     const readiness = evaluateProjectSendReadiness({ project, customer });
     const overrideReason = String(req.body?.override_reason || '').trim();
@@ -2095,10 +2120,13 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       emailRecipient.email ? 'email' : null,
     ].filter(Boolean);
     const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
-    const deliveryStatus = successfulChannelCount === 0
-      ? 'failed'
-      : successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
-    const delivered = successfulChannelCount > 0;
+    // The FDACS PDF is email-only, so the WDO report only counts as delivered
+    // when the email succeeds; SMS is a supplementary link. Email failure means
+    // not-sent (claim released below, nothing finalized).
+    const delivered = !!channels.email?.ok;
+    const deliveryStatus = !delivered
+      ? (successfulChannelCount === 0 ? 'failed' : 'partial')
+      : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
 
     // Finalize the invoice as delivered (it went out alongside the report).
     // markDeliverySent uses the canonical finalization semantics: it promotes

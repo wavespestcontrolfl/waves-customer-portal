@@ -100,6 +100,8 @@ export default function WdoIntelligenceBar({
         body: {
           ...(projectId ? { project_id: projectId } : {}),
           ...(customerId ? { customer_id: customerId } : {}),
+          ...(serviceRecordId ? { service_record_id: serviceRecordId } : {}),
+          ...(scheduledServiceId ? { scheduled_service_id: scheduledServiceId } : {}),
           ...(address ? { property_address: address } : {}),
           ...(refresh ? { refresh: true } : {}),
         },
