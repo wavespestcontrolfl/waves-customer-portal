@@ -139,7 +139,9 @@ class DataForSEO {
         device: 'desktop',
         os: 'macos',
       }]);
-      const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+      const result = data?.tasks?.[0]?.result?.[0];
+      if (!result || !Array.isArray(result.items)) return 'unknown';
+      const items = result.items;
       const found = items.some((i) => {
         const u = (i.url || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
         return u === clean || u.startsWith(clean);
@@ -152,3 +154,4 @@ class DataForSEO {
 }
 
 module.exports = new DataForSEO();
+module.exports.DataForSEO = DataForSEO;

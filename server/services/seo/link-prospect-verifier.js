@@ -22,19 +22,39 @@ function stripUrl(u) {
   return String(u || '').trim().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
 }
 
+function normalizeComparableUrl(u) {
+  return stripUrl(u).toLowerCase();
+}
+
+function backlinkTargetsProspect(link, prospect) {
+  const expected = normalizeComparableUrl(prospect.target_page);
+  if (!expected) return false;
+  const candidates = [
+    link.target_url,
+    link.url_to,
+    link.destination_url,
+    link.link_url,
+    link.target_page,
+    link.url,
+  ].map(normalizeComparableUrl).filter(Boolean);
+  return candidates.some((candidate) => candidate === expected || candidate.startsWith(`${expected}/`));
+}
+
 // Find an active inbound link in seo_backlinks that corresponds to this prospect's live_url.
 async function reconcileFromProfile(prospect) {
-  const liveStripped = stripUrl(prospect.live_url);
+  const liveStripped = normalizeComparableUrl(prospect.live_url);
   const rows = await db('seo_backlinks')
     .whereRaw("regexp_replace(regexp_replace(lower(source_url), '^https?://(www\\.)?', ''), '/+$', '') = ?", [liveStripped.toLowerCase()])
     .orderBy('last_checked', 'desc')
-    .limit(1);
-  return rows[0] || null;
+    .limit(10);
+  return rows.find((row) => backlinkTargetsProspect(row, prospect)) || null;
 }
 
 // Best-effort crawl: does live_url contain an <a> to wavespestcontrol.com, and is it dofollow?
-async function crawlForLink(liveUrl) {
+async function crawlForLink(liveUrl, targetPage) {
   try {
+    const expectedTarget = normalizeComparableUrl(targetPage);
+    if (!expectedTarget) return { found: false };
     const controller = new AbortController();
     const to = setTimeout(() => controller.abort(), 12000);
     const res = await fetch(liveUrl, {
@@ -46,10 +66,12 @@ async function crawlForLink(liveUrl) {
     if (!res.ok) return { found: false };
     const html = await res.text();
 
-    // Find anchor tags whose href points at our domain.
+    // Find anchor tags whose href points at the intended Waves target page.
     const anchorRe = /<a\b([^>]*?)href=["']([^"']*wavespestcontrol\.com[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
     let m;
     while ((m = anchorRe.exec(html)) !== null) {
+      const href = normalizeComparableUrl(m[2]);
+      if (href !== expectedTarget && !href.startsWith(`${expectedTarget}/`)) continue;
       const attrs = `${m[1]} ${m[3]}`;
       const relMatch = /rel=["']([^"']*)["']/i.exec(attrs);
       const rel = relMatch ? relMatch[1].toLowerCase() : '';
@@ -91,7 +113,7 @@ async function verifyOne(prospect) {
   }
 
   // 2. Crawl fallback (fresh links not yet in DataForSEO)
-  const crawl = await crawlForLink(prospect.live_url);
+  const crawl = await crawlForLink(prospect.live_url, prospect.target_page);
   if (crawl.found) {
     const patch = {
       is_dofollow: crawl.isDofollow,
@@ -140,3 +162,4 @@ async function run({ limit = 200 } = {}) {
 }
 
 module.exports = { run, verifyOne, crawlForLink };
+module.exports._test = { backlinkTargetsProspect, normalizeComparableUrl };

@@ -291,8 +291,9 @@ router.post('/prospects/:id/recheck', async (req, res, next) => {
     if (!prospect.live_url) return res.status(400).json({ error: 'no live_url to check yet' });
     const Verifier = require('../services/seo/link-prospect-verifier');
     await Verifier.verifyOne(prospect);
+    const verified = await db('seo_link_prospects').where({ id: req.params.id }).first();
     const Indexer = require('../services/seo/link-prospect-indexer');
-    await Indexer.run({ limit: 1 }); // re-indexes oldest-checked; cheap nudge
+    await Indexer.runOne(verified);
     const updated = await db('seo_link_prospects').where({ id: req.params.id }).first();
     res.json({ prospect: updated });
   } catch (err) { next(err); }

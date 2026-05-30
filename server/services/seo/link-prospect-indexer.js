@@ -16,21 +16,10 @@ const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const SearchConsole = require('./search-console');
 
-async function run({ limit = 50 } = {}) {
-  // Only check links we believe are live; oldest index-check first.
-  const prospects = await db('seo_link_prospects')
-    .whereIn('status', ['live', 'indexed'])
-    .whereNotNull('live_url')
-    .orderByRaw('last_index_check NULLS FIRST')
-    .limit(limit);
-
-  if (prospects.length === 0) {
-    logger.info('[link-indexer] no live prospects to check');
-    return { checked: 0, indexed: 0 };
-  }
+async function indexProspects(prospects, targetCache = new Map()) {
+  if (prospects.length === 0) return { checked: 0, indexed: 0 };
 
   // GSC target-page indexation — inspect each unique target page once per run.
-  const targetCache = new Map();
   async function targetIndexed(targetPage) {
     if (!targetPage) return null;
     if (targetCache.has(targetPage)) return targetCache.get(targetPage);
@@ -70,8 +59,38 @@ async function run({ limit = 50 } = {}) {
     }
   }
 
+  return { checked, indexed };
+}
+
+async function run({ limit = 50 } = {}) {
+  // Only check links we believe are live; oldest index-check first.
+  const prospects = await db('seo_link_prospects')
+    .whereIn('status', ['live', 'indexed'])
+    .whereNotNull('live_url')
+    .orderByRaw('last_index_check NULLS FIRST')
+    .limit(limit);
+
+  if (prospects.length === 0) {
+    logger.info('[link-indexer] no live prospects to check');
+    return { checked: 0, indexed: 0 };
+  }
+
+  const { checked, indexed } = await indexProspects(prospects);
+
   logger.info(`[link-indexer] checked ${checked}/${prospects.length}, ${indexed} indexed`);
   return { checked, indexed };
 }
 
-module.exports = { run };
+async function runOne(prospectOrId) {
+  const prospect = typeof prospectOrId === 'object'
+    ? prospectOrId
+    : await db('seo_link_prospects').where({ id: prospectOrId }).first();
+  if (!prospect || !prospect.live_url || !['live', 'indexed'].includes(prospect.status)) {
+    return { checked: 0, indexed: 0 };
+  }
+  const result = await indexProspects([prospect]);
+  logger.info(`[link-indexer] checked selected prospect ${prospect.id}: ${result.indexed} indexed`);
+  return result;
+}
+
+module.exports = { run, runOne };
