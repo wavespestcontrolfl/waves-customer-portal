@@ -1063,6 +1063,11 @@ router.get('/:id', async (req, res, next) => {
     };
     const propertyProfile = parseJsonCol(project.property_profile);
     const wdoHistory = parseJsonCol(project.wdo_history);
+    // Resolved inspector identity (name + FDACS ID) so the signature pad can
+    // prefill the required FDACS ID-card field for WDO projects.
+    const wdoApplicator = project.project_type === 'wdo_inspection'
+      ? await resolveProjectApplicator(project).catch(() => null)
+      : null;
 
     res.json({
       project: {
@@ -1070,6 +1075,7 @@ router.get('/:id', async (req, res, next) => {
         wdo_signature: wdoSignature,
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
+        wdo_applicator: wdoApplicator,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },

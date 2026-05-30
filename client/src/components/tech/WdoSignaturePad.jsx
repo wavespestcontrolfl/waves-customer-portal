@@ -140,6 +140,13 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         placeholder="Licensee / inspector printed name"
         style={{ width: "100%", maxWidth: 360, padding: "7px 10px", fontSize: 14, border: "1px solid #d4d4d8", borderRadius: 8, marginBottom: 8 }}
       />
+      <input
+        type="text"
+        value={signerIdCard}
+        onChange={(e) => setSignerIdCard(e.target.value)}
+        placeholder="FDACS ID card number"
+        style={{ width: "100%", maxWidth: 360, padding: "7px 10px", fontSize: 14, border: "1px solid #d4d4d8", borderRadius: 8, marginBottom: 8 }}
+      />
       <div style={{ position: "relative", width: "100%", maxWidth: 520 }}>
         <canvas
           ref={canvasRef}
