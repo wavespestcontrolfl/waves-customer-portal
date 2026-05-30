@@ -1613,9 +1613,12 @@ function ProjectDetail({
       const inv = pv.invoice || {};
       const amount = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : "the amount shown";
       const verb = inv.created ? "Create and send" : "Send";
+      // A brand-new WDO has no invoice number yet (the draft is created on send),
+      // so only name the number when the preview resolved an existing invoice.
+      const invoiceLabel = inv.invoice_number ? ` ${inv.invoice_number}` : "";
       if (
         !confirm(
-          `${verb} invoice ${inv.invoice_number || ""} for ${amount} together with the WDO report?\n\n` +
+          `${verb} invoice${invoiceLabel} for ${amount} together with the WDO report?\n\n` +
             `The customer gets one email (FDACS-13645 report PDF + invoice PDF) and one text (report + pay links).`,
         )
       ) {
@@ -1625,7 +1628,9 @@ function ProjectDetail({
       const r = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
         method: "POST",
         body: {
-          invoice_id: inv.id,
+          // Only an existing invoice carries an id from the preview; a new WDO
+          // (id null) routes to the server's locked create path on send.
+          ...(inv.id ? { invoice_id: inv.id } : {}),
           ...(overrideReason ? { override_reason: overrideReason } : {}),
         },
       });
