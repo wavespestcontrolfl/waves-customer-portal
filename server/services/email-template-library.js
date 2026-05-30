@@ -552,25 +552,44 @@ function isUniqueViolation(err) {
   return !!err && (err.code === '23505' || /duplicate key value/i.test(err.message || ''));
 }
 
+// A `queued` row is ambiguous: it is either a concurrent send that is still
+// in-flight (its insert precedes the SendGrid call + the later status update)
+// or a stale row abandoned by a crashed attempt. Within this window we treat a
+// queued row as in-flight and must NOT re-send (that would duplicate); past it
+// the row is considered abandoned and may be reclaimed/retried. Mirrors the
+// automation executor's stale-running cutoff.
+const QUEUED_IN_FLIGHT_MS = 2 * 60 * 1000;
+
+function queuedRowInFlight(message, now = Date.now()) {
+  if (String(message?.status || '').toLowerCase() !== 'queued') return false;
+  const queuedAt = message.queued_at ? new Date(message.queued_at).getTime() : null;
+  if (!queuedAt || Number.isNaN(queuedAt)) return false;
+  return now - queuedAt < QUEUED_IN_FLIGHT_MS;
+}
+
+function inFlightCollisionError(idempotencyKey) {
+  const collision = new Error(`email send already in progress for idempotency key ${idempotencyKey}`);
+  collision.code = 'EMAIL_SEND_IN_PROGRESS';
+  collision.status = 409;
+  collision.retryable = true;
+  return collision;
+}
+
 // Resolve a collision on the idempotency-key insert. The collision only fires
 // when our own pre-insert check saw no row, so the winner's row was created
 // concurrently: a terminal status means the winner already finished (return a
-// clean dedupe), but a still-`queued`/`failed` row is in-flight — its insert
-// precedes the SendGrid call — so returning `dedupedResultForExistingMessage`
-// would report a false non-send (callers treat sent===false as blocked). For
-// that case raise a retryable collision instead; on retry the row is terminal
-// and dedupes cleanly. Re-throws non-collision errors untouched.
+// clean dedupe), but a still-`queued`/`failed` row is in-flight — returning
+// `dedupedResultForExistingMessage` would report a false non-send (callers
+// treat sent===false as blocked). For that case raise a retryable collision
+// instead; on retry the row is terminal and dedupes cleanly. Re-throws
+// non-collision errors untouched.
 async function resolveIdempotencyCollision(err, idempotencyKey) {
   if (!isUniqueViolation(err) || !idempotencyKey) throw err;
   const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
   if (existing && !shouldRetryExistingMessage(existing)) {
     return dedupedResultForExistingMessage(existing);
   }
-  const collision = new Error(`email send already in progress for idempotency key ${idempotencyKey}`);
-  collision.code = 'EMAIL_SEND_IN_PROGRESS';
-  collision.status = 409;
-  collision.retryable = true;
-  throw collision;
+  throw inFlightCollisionError(idempotencyKey);
 }
 
 function assertTemplateSendable(template, { test = false } = {}) {
@@ -674,6 +693,14 @@ async function sendTemplate({
     const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
     if (existing && !shouldRetryExistingMessage(existing)) {
       return dedupedResultForExistingMessage(existing);
+    }
+    // A concurrent caller may have committed a `queued` row that is still
+    // mid-flight (queued, not yet dispatched to SendGrid). Reclaiming it as a
+    // retry here would re-send and duplicate, so surface a retryable collision;
+    // the caller retries once the row reaches terminal (or goes stale). Only a
+    // stale/abandoned queued row — or a `failed`/never-sent row — is retried.
+    if (queuedRowInFlight(existing)) {
+      throw inFlightCollisionError(idempotencyKey);
     }
     retryMessage = existing || null;
   }
