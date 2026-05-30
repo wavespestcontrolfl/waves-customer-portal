@@ -13,7 +13,7 @@
 // The `request(path, options)` prop is the surface's fetch helper
 // (adminFetch on admin; a bearer-token wrapper on tech). It must resolve
 // to parsed JSON and throw on non-2xx — matching adminFetch's contract.
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const PALETTES = {
   dark: {
@@ -76,6 +76,10 @@ export default function ServiceRecapModal({
   const [drafting, setDrafting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  // Synchronous re-entrancy guard: a fast double-tap can fire handleSubmit
+  // twice before `submitting` re-renders the disabled button. The server is
+  // idempotent regardless, but this avoids the redundant second request.
+  const submitInFlight = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -127,12 +131,14 @@ export default function ServiceRecapModal({
   }, [base, note, request]);
 
   const handleSubmit = useCallback(async () => {
+    if (submitInFlight.current) return;
     const willSend = sendText && !!message.trim() && !!ctx?.service?.hasPhone;
     if (willSend) {
       const name = ctx?.service?.customerName || 'the customer';
       // eslint-disable-next-line no-alert
       if (!window.confirm(`Text this recap to ${name}?\n\n${message.trim()}`)) return;
     }
+    submitInFlight.current = true;
     setSubmitting(true);
     setError('');
     try {
@@ -158,6 +164,7 @@ export default function ServiceRecapModal({
     } catch (err) {
       setError(err?.message || 'Could not complete recap');
       setSubmitting(false);
+      submitInFlight.current = false;
     }
   }, [base, ctx, message, note, onCompleted, productById, request, selected, sendText]);
 
