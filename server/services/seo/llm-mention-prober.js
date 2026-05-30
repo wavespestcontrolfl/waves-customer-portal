@@ -181,9 +181,15 @@ class LLMMentionProber {
         location_name: 'Bradenton,Florida,United States',
         language_name: 'English',
       }]);
+      // null = not attempted (unconfigured / gate off / request error) → caller
+      // skips, no cost, retries next run. A returned response means the paid
+      // lookup happened, so even "no AI overview present" must be recorded as a
+      // real no-mention observation — otherwise idempotency never fires and the
+      // same paid miss is re-run every day, blowing past MAX_PROBES_PER_RUN.
+      if (data == null) return null;
       const items = data?.tasks?.[0]?.result?.[0]?.items || [];
       const aio = items.find(i => i.type === 'ai_overview');
-      if (!aio) return null;
+      if (!aio) return { text: '', citedUrls: [], model: 'dataforseo:ai_overview', grounded: true };
       const text = JSON.stringify(aio);
       const citedUrls = (aio.references || aio.items || [])
         .map(r => r?.url)
