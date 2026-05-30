@@ -31,6 +31,10 @@ function matchesTargetUrl(candidate, expected) {
   if (candidate === expected) return true;
   if (!candidate.startsWith(expected)) return false;
   const next = candidate.charAt(expected.length);
+  // Root/domain-only target (no path, e.g. "wavespestcontrol.com"): a child
+  // path is NOT a match — only the homepage itself, optionally with a query or
+  // fragment. Otherwise any internal link would falsely satisfy a homepage target.
+  if (!expected.includes('/')) return next === '?' || next === '#';
   return next === '/' || next === '?' || next === '#';
 }
 

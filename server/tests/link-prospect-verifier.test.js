@@ -39,4 +39,14 @@ describe('link prospect verifier target matching', () => {
     expect(_test.matchesTargetUrl('wavespestcontrol.com/wdo-inspection/subpage', expected)).toBe(true);
     expect(_test.matchesTargetUrl('wavespestcontrol.com/wdo-inspection-extra', expected)).toBe(false);
   });
+
+  test('root/homepage target does not match arbitrary subpages', () => {
+    const root = _test.normalizeComparableUrl('https://wavespestcontrol.com/'); // -> 'wavespestcontrol.com'
+    expect(_test.matchesTargetUrl('wavespestcontrol.com', root)).toBe(true);
+    expect(_test.matchesTargetUrl('wavespestcontrol.com?utm=1', root)).toBe(true);
+    expect(_test.matchesTargetUrl('wavespestcontrol.com#form', root)).toBe(true);
+    // A child path must NOT count as a homepage backlink.
+    expect(_test.matchesTargetUrl('wavespestcontrol.com/pest-control-bradenton-fl/', root)).toBe(false);
+    expect(_test.matchesTargetUrl('wavespestcontrol.com/wdo-inspection', root)).toBe(false);
+  });
 });
