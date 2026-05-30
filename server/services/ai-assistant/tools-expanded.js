@@ -339,7 +339,14 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
         db('property_preferences').where('customer_id', customerId).first(),
         db('service_records').where('customer_id', customerId).orderBy('service_date', 'desc').limit(10),
         db('lawn_assessments').where('customer_id', customerId).orderBy('service_date', 'desc').limit(3),
-        db('customer_subscriptions').where({ customer_id: customerId, status: 'active' }),
+        // Active recurring plans. There is no `customer_subscriptions` table —
+        // a customer's recurring services live in scheduled_services
+        // (is_recurring = true, not cancelled). Mirrors the service_type_count
+        // convention in admin-customers.js.
+        db('scheduled_services')
+          .where({ customer_id: customerId, is_recurring: true })
+          .whereNot('status', 'cancelled')
+          .distinct('service_type'),
       ]);
 
       const month = new Date().getMonth() + 1;
