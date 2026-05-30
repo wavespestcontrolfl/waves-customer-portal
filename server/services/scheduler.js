@@ -351,6 +351,23 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Content decay/cannibalization failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 7:15AM ET — Refresh customer-insight clusters before the opportunity
+  // miner + runner so customer-question pages draw on current first-party data.
+  // Reader against call_log / messages / google_reviews (consent + suppression
+  // gated, PII-redacted); writes ONLY customer_insight_clusters aggregates —
+  // never raw transcripts. Without this the clusters table goes stale (it was
+  // empty in prod until the first manual run). Same gate as the engine.
+  cron.schedule('15 7 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    logger.info('Running: Customer Insights Miner');
+    try {
+      const insightsMiner = require('./content/customer-insights-miner');
+      const result = await insightsMiner.mineAll({ days: 120, persist: true });
+      const persistedCount = Array.isArray(result?.persisted) ? result.persisted.length : (result?.persisted ?? '?');
+      logger.info(`Customer insights mine: ${result?.cluster_count ?? '?'} clusters (${result?.qualifying_count ?? '?'} qualifying), ${persistedCount} persisted`);
+    } catch (err) { logger.error(`Customer insights miner failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 7:30AM ET — Mine fresh GSC opportunities before the 9AM runner.
   // Writes only opportunity_queue rows. The runner still chooses by score and
   // per-lane shadow/canary guards decide whether anything can publish.

@@ -57,7 +57,7 @@ class OpportunityQueue {
    * if nothing's available. Caller is responsible for calling complete()
    * or skip() (or letting the stale-claim timeout recover it).
    */
-  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, claimedBy = 'autonomous-runner' } = {}) {
+  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, claimedBy = 'autonomous-runner', excludeIds = [] } = {}) {
     // First, recover stale claims so they're eligible again.
     await this.recoverStaleClaims();
 
@@ -66,6 +66,12 @@ class OpportunityQueue {
     // `notes` column (the migration in #1021 only defines status /
     // skip_reason / timestamps). Audit lives in the logger instead.
     const whereActionType = actionType ? `AND action_type = ?` : '';
+    // excludeIds lets the daily batch skip opportunities that already failed
+    // this run. A failed runNext() releases its claim back to 'pending', so
+    // without this the highest-scored failing row would just be re-claimed
+    // every iteration instead of letting the rest of the queue advance.
+    const exclude = Array.isArray(excludeIds) ? excludeIds.filter((id) => id != null) : [];
+    const whereExclude = exclude.length ? `AND NOT (id = ANY(?))` : '';
 
     const result = await db.raw(
       `UPDATE opportunity_queue
@@ -77,12 +83,15 @@ class OpportunityQueue {
          WHERE status = 'pending'
            AND score >= ?
            ${whereActionType}
+           ${whereExclude}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
        RETURNING *`,
-      [new Date(), minScore].concat(actionType ? [actionType] : [])
+      [new Date(), minScore]
+        .concat(actionType ? [actionType] : [])
+        .concat(exclude.length ? [exclude] : [])
     );
     const row = result.rows?.[0];
     if (row) logger.info(`[opportunity-queue] claimed ${row.id} (${row.bucket}/${row.action_type}, score ${row.score}) by ${claimedBy}`);
