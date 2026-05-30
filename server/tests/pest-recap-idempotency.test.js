@@ -62,7 +62,10 @@ function makeKnex(store) {
       leftJoin: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockReturnThis(),
-      del: jest.fn().mockResolvedValue(1),
+      del: jest.fn(() => {
+        if (table === 'service_products') store.productDeletes = (store.productDeletes || 0) + 1;
+        return Promise.resolve(1);
+      }),
     };
 
     q.first = jest.fn(async () => {
@@ -80,6 +83,7 @@ function makeKnex(store) {
         store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null });
         return { returning: jest.fn().mockResolvedValue([{ id }]) };
       }
+      if (table === 'service_products') store.productInserts = (store.productInserts || 0) + 1;
       return { returning: jest.fn().mockResolvedValue([]) };
     });
 
@@ -204,5 +208,33 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(store.records).toHaveLength(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('re-sending a recap with no products selected preserves recorded chemicals', async () => {
+    // Existing completed record (e.g. reopened to re-send the text). The
+    // modal starts with no products selected, so the submit carries none.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      productDeletes: 0,
+      productInserts: 0,
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Re-sending the recap.',
+      products: [],
+      customerRecap: 'Service complete.',
+      sendSms: true,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // Empty product submit must NOT touch service_products — history intact.
+    expect(store.productDeletes).toBe(0);
+    expect(store.productInserts).toBe(0);
   });
 });

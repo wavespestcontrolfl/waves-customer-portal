@@ -95,6 +95,16 @@ async function buildRecapContext(serviceId, knex = db) {
     .first('id', 'technician_notes', 'status')
     .catch(() => null);
 
+  // Products already recorded on the existing record, so reopening a recap
+  // shows (and preserves) the chemicals already applied instead of starting
+  // from an empty selection.
+  const existingProducts = existingRecord
+    ? await knex('service_products')
+      .where({ service_record_id: existingRecord.id })
+      .select('product_name', 'product_category', 'active_ingredient', 'moa_group')
+      .catch(() => [])
+    : [];
+
   return {
     ok: true,
     eligible,
@@ -110,7 +120,7 @@ async function buildRecapContext(serviceId, knex = db) {
     },
     timeline,
     products,
-    existingRecord: existingRecord || null,
+    existingRecord: existingRecord ? { ...existingRecord, products: existingProducts } : null,
   };
 }
 
@@ -238,8 +248,6 @@ async function submitRecap({
         updated_at: new Date(),
       });
       recordId = existing.id;
-      // Replace prior recap product rows so an edited selection is not additive.
-      await trx('service_products').where({ service_record_id: recordId }).del();
     } else {
       const inserted = await trx('service_records').insert({
         customer_id: svc.customer_id,
@@ -268,7 +276,15 @@ async function submitRecap({
         notes: p.notes || null,
       }))
       .filter((r) => r.product_name);
-    if (productRows.length) await trx('service_products').insert(productRows);
+    // Replace product rows only when this submit specifies a set, so an
+    // explicit re-selection isn't additive. An EMPTY submission must not
+    // wipe the recorded applications: reopening a completed recap to
+    // re-send (the modal starts with no products selected) would otherwise
+    // delete the service's chemical history. Empty = leave existing rows.
+    if (productRows.length) {
+      await trx('service_products').where({ service_record_id: recordId }).del();
+      await trx('service_products').insert(productRows);
+    }
   });
 
   // Cancelled/skipped visit: nothing was written, skip all completion

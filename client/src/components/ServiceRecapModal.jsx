@@ -89,6 +89,21 @@ export default function ServiceRecapModal({
         if (!active) return;
         setCtx(data);
         if (data?.existingRecord?.technician_notes) setNote(data.existingRecord.technician_notes);
+        // Pre-select chemicals already recorded on this visit, matched to the
+        // catalog by name, so re-sending/editing a recap preserves them
+        // instead of starting empty (which would wipe the product history).
+        const recorded = data?.existingRecord?.products || [];
+        if (recorded.length && Array.isArray(data?.products)) {
+          const idByName = new Map(
+            data.products.map((p) => [String(p.name || '').trim().toLowerCase(), p.id]),
+          );
+          const preselect = new Set();
+          recorded.forEach((rp) => {
+            const id = idByName.get(String(rp.product_name || '').trim().toLowerCase());
+            if (id != null) preselect.add(id);
+          });
+          if (preselect.size) setSelected(preselect);
+        }
         if (!data?.service?.hasPhone) setSendText(false);
       } catch (err) {
         if (active) setLoadError(err?.message || 'Failed to load recap');
