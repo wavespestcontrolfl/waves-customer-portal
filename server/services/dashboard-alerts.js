@@ -141,7 +141,38 @@ async function computeDashboardAlerts() {
     }
   } catch (err) { logger.error(`[dashboard-alerts] cards_expiring_7d: ${err.message}`); }
 
-  // 5. Customers at churn risk per the latest health-score snapshot.
+  // 5. Inventory unit cleanup. Bad/missing/ambiguous units undermine
+  // forecast, readiness, closeout deduction, restock receiving, and costing.
+  try {
+    const unitReview = await db('products_catalog')
+      .where(function unitIssue() {
+        this.where(function missingUnit() {
+          this.whereNull('inventory_unit')
+            .where(function hasInventoryValue() {
+              this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
+            });
+        })
+          .orWhereRaw("lower(coalesce(inventory_unit, '')) = 'oz'")
+          .orWhereRaw(`
+            nullif(trim(coalesce(inventory_unit, '')), '') is not null
+            AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
+          `);
+      })
+      .count('* as count')
+      .first();
+    const count = parseInt(unitReview?.count || 0);
+    if (count > 0) {
+      alerts.push({
+        id: 'inventory_unit_review',
+        severity: 'warn',
+        count,
+        label: `${count} inventory product${count === 1 ? '' : 's'} need unit review`,
+        href: '/admin/inventory?tab=unit-review',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] inventory_unit_review: ${err.message}`); }
+
+  // 6. Customers at churn risk per the latest health-score snapshot.
   //    Pulls only the most-recent score per customer so a stale
   //    'critical' score from months ago doesn't keep firing forever.
   try {
@@ -165,6 +196,49 @@ async function computeDashboardAlerts() {
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] churn_at_risk: ${err.message}`); }
+
+  // 7. Persisted admin command-center alerts. These are event-backed
+  // operating alerts created by domain workflows such as WaveGuard lawn
+  // readiness snapshots.
+  try {
+    if (await db.schema.hasTable('admin_alerts')) {
+      const readiness = await db('admin_alerts')
+        .where({ status: 'open', type: 'lawn_protocol_readiness' })
+        .orderBy('last_seen_at', 'desc')
+        .first('severity', 'title', 'href', 'metadata');
+      if (readiness) {
+        const metadata = readiness.metadata || {};
+        const blocked = Number(metadata?.statusCounts?.blocked || 1);
+        alerts.push({
+          id: 'admin_lawn_protocol_readiness',
+          severity: readiness.severity === 'critical' ? 'critical' : 'warn',
+          count: blocked,
+          label: readiness.title || `${blocked} WaveGuard lawn appointment${blocked === 1 ? '' : 's'} blocked`,
+          href: readiness.href || '/admin/lawn-protocol?tab=readiness',
+        });
+      }
+
+      const forecast = await db('admin_alerts')
+        .where({ status: 'open', type: 'waveguard_inventory_forecast' })
+        .orderBy('last_seen_at', 'desc')
+        .first('severity', 'title', 'href', 'metadata');
+      if (forecast) {
+        const metadata = forecast.metadata || {};
+        const counts = metadata?.statusCounts || {};
+        const count = Number(counts.short || 0)
+          + Number(counts.warning || 0)
+          + Number(counts.unit_mismatch || 0)
+          + Number(counts.not_tracked || 0);
+        alerts.push({
+          id: 'admin_waveguard_inventory_forecast',
+          severity: forecast.severity === 'high' || forecast.severity === 'critical' ? 'critical' : 'warn',
+          count: count || 1,
+          label: forecast.title || `${count || 1} WaveGuard inventory forecast warning${count === 1 ? '' : 's'}`,
+          href: forecast.href || '/admin/inventory?tab=forecast',
+        });
+      }
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] admin_lawn_protocol_readiness: ${err.message}`); }
 
   return { asOf: today, alerts };
 }

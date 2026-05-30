@@ -999,6 +999,39 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WaveGuard lawn readiness — route-morning protocol preflight snapshot.
+  // Stores the readiness ledger and opens an admin alert when appointments
+  // are blocked by assignment, calibration, inventory, or property gates.
+  // =========================================================================
+  cron.schedule('30 5 * * *', async () => {
+    try {
+      const { runReadinessSnapshot } = require('./lawn-protocol-readiness-cron');
+      const result = await runReadinessSnapshot({ days: 14, limit: 100, source: 'scheduled_daily' });
+      if (!result.skipped) {
+        logger.info(`[lawn-protocol-readiness] ready=${result.ready || 0} warning=${result.warning || 0} blocked=${result.blocked || 0} appointments=${result.appointmentCount || 0}`);
+      }
+    } catch (err) {
+      logger.error(`Lawn protocol readiness snapshot failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WaveGuard inventory forecast — proactive product shortage warning before
+  // readiness starts blocking dispatch.
+  // =========================================================================
+  cron.schedule('45 5 * * *', async () => {
+    try {
+      const { runWaveGuardInventoryForecastCheck } = require('./waveguard-inventory-forecast');
+      const result = await runWaveGuardInventoryForecastCheck({ days: 14, limit: 150, source: 'scheduled_daily' });
+      if (!result.skipped) {
+        logger.info(`[waveguard-inventory-forecast] ok=${result.ok || 0} warning=${result.warning || 0} short=${result.short || 0} unit_mismatch=${result.unit_mismatch || 0} not_tracked=${result.not_tracked || 0} products=${result.productCount || 0}`);
+      }
+    } catch (err) {
+      logger.error(`WaveGuard inventory forecast check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {

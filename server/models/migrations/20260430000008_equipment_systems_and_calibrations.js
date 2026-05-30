@@ -29,7 +29,7 @@
 // the 110-gallon rigs are real 110-gallon tanks (don't store 100
 // here just because the working fill is usually 100; capacity is a
 // physical fact, working fill is the math the calculator does).
-// FlowZone Typhoon 2.5 backpacks are 4-gallon units per spec.
+// FlowZone Typhoon backpacks are 4-gallon units per spec.
 
 exports.up = async function (knex) {
   // ── equipment_systems ────────────────────────────────────────────
@@ -133,7 +133,7 @@ exports.up = async function (knex) {
     ON equipment_calibrations (equipment_system_id) WHERE active = true
   `);
 
-  // ── Seed: the five spray rigs Waves uses today ───────────────────
+  // ── Seed: the spray rigs Waves uses today ────────────────────────
   // Idempotent: skip seed if any system already exists (re-run safe).
   const existing = await knex('equipment_systems').count('id as cnt').first();
   if (parseInt(existing.cnt, 10) === 0) {
@@ -147,27 +147,11 @@ exports.up = async function (knex) {
         active: true,
       },
       {
-        name: '110-Gallon Spray Tank #2',
+        name: 'Udor KAPPA-18/12V-HP + 110-gal tank #2 - Lawn Gun',
         system_type: 'tank',
         default_application_type: 'broadcast',
         tank_capacity_gal: 110.00,
-        notes: 'Selective turf herbicide / specialty tank — Celsius, sedge products, broadleaf programs.',
-        active: true,
-      },
-      {
-        name: 'FlowZone Typhoon 2.5 #1',
-        system_type: 'backpack',
-        default_application_type: 'spot',
-        tank_capacity_gal: 4.00,
-        notes: 'Selective turf herbicide spot work (Celsius, SedgeHammer).',
-        active: true,
-      },
-      {
-        name: 'FlowZone Typhoon 2.5 #2',
-        system_type: 'backpack',
-        default_application_type: 'spot',
-        tank_capacity_gal: 4.00,
-        notes: 'Insect / fungicide / specialty foliar spot work.',
+        notes: 'Tank #2 electric 12V HP lawn-gun rig. Udor KAPPA-18/12V-HP pump/motor assembly; blackout / 0-N / 0-P / sensitive turf route. Pump capacity is not carrier rate; use calibrated gun output.',
         active: true,
       },
       {
@@ -175,7 +159,7 @@ exports.up = async function (knex) {
         system_type: 'backpack',
         default_application_type: 'spot',
         tank_capacity_gal: 4.00,
-        notes: 'NON-SELECTIVE ONLY — bed-edge / glyphosate. Never use on turf.',
+        notes: 'Spot work backpack. Dedicate tank/labeling by use before herbicide vs non-herbicide work.',
         active: true,
       },
     ]);
