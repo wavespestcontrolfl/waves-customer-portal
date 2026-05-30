@@ -1429,6 +1429,34 @@ describe('public estimate one-time breakdown', () => {
     });
   });
 
+  test('linked existing appointments replace slot-pick acceptance contract', () => {
+    expect(buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: false },
+      existingAppointment: {
+        id: 'svc-123',
+        scheduled_date: '2026-06-03',
+        window_start: '09:00:00',
+        window_end: '11:00:00',
+        window_display: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        service_type: 'Initial Pest Control',
+        status: 'confirmed',
+      },
+    })).toEqual({
+      mode: 'existing_appointment',
+      ctaLabel: 'Confirm payment setup',
+      reason: null,
+      appointment: {
+        id: 'svc-123',
+        scheduledDate: '2026-06-03',
+        windowStart: '09:00',
+        windowEnd: '11:00',
+        windowDisplay: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        serviceType: 'Initial Pest Control',
+        status: 'confirmed',
+      },
+    });
+  });
+
   test('public pricing bundle preserves saved manual recurring discounts', async () => {
     const estimateData = savedAdminEstimateData();
     estimateData.result.manualDiscount = {
@@ -4484,7 +4512,7 @@ describe('public estimate one-time breakdown', () => {
     expect(normalizeAcceptPaymentMethodPreference('deposit_later')).toBeNull();
   });
 
-  test('recurring slot accepts require a setup payment preference', () => {
+  test('recurring appointment accepts require a setup payment preference', () => {
     expect(validateRecurringSlotPaymentPreference({
       slotId: 'slot-123',
       treatAsOneTime: false,
@@ -4515,6 +4543,16 @@ describe('public estimate one-time breakdown', () => {
       treatAsOneTime: false,
       billByInvoice: true,
       paymentMethodPreference: 'pay_at_visit',
+    })).toBeNull();
+    expect(validateRecurringSlotPaymentPreference({
+      existingAppointmentId: 'appointment-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'pay_at_visit',
+    })).toMatch(/Choose card-on-file autopay/);
+    expect(validateRecurringSlotPaymentPreference({
+      existingAppointmentId: 'appointment-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'card_on_file',
     })).toBeNull();
   });
 

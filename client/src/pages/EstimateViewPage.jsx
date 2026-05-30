@@ -932,7 +932,46 @@ function CountdownLine({ secondsRemaining }) {
   );
 }
 
-function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode }) {
+function formatAppointmentLabel(appointment = {}) {
+  const date = appointment.scheduledDate
+    ? new Date(`${appointment.scheduledDate}T12:00:00Z`).toLocaleDateString(undefined, {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'America/New_York',
+    })
+    : '';
+  const time = appointment.windowDisplay || appointment.windowStart || '';
+  return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
+}
+
+function ExistingAppointmentCard({ appointment }) {
+  return (
+    <div style={{
+      background: COLORS.white,
+      borderRadius: 16,
+      padding: 24,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        Existing appointment
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 800, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.3 }}>
+        {formatAppointmentLabel(appointment)}
+      </div>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.45 }}>
+        {appointment?.serviceType || 'Service visit'}
+      </div>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        Your visit is already on the schedule. Choose how you want to pay to approve this estimate.
+      </div>
+    </div>
+  );
+}
+
+function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode }) {
+  const usingExistingAppointment = !!existingAppointment;
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
@@ -940,7 +979,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        Confirm your booking
+        {usingExistingAppointment ? 'Confirm payment setup' : 'Confirm your booking'}
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
         Pay option: <strong>{
@@ -951,9 +990,11 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
         }</strong>
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
-        Slot: {slotId}
+        {usingExistingAppointment
+          ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
+          : `Slot: ${slotId}`}
       </div>
-      <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div>
+      {!usingExistingAppointment ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
         <button
           type="button"
@@ -962,7 +1003,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
             padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
             border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
           }}
-        >Confirm booking</button>
+        >{usingExistingAppointment ? 'Confirm setup' : 'Confirm booking'}</button>
         <button
           type="button"
           onClick={onCancel}
@@ -1123,7 +1164,7 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
 }
 
 function AcceptanceModeCard({ acceptance }) {
-  if (!acceptance || acceptance.mode === 'standard_slot_pick') return null;
+  if (!acceptance || acceptance.mode === 'standard_slot_pick' || acceptance.mode === 'existing_appointment') return null;
   const title = acceptance.mode === 'quote_required'
     ? 'This treatment needs a custom quote.'
     : 'Waves will help schedule this estimate.';
@@ -1256,6 +1297,8 @@ export default function EstimateViewPage() {
   }, [selected]);
 
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
+  const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
+  const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   const currentFrequency = useMemo(() => {
     const pestSection = services.find((section) => section.key === 'pest_control');
@@ -1369,6 +1412,13 @@ export default function EstimateViewPage() {
   }, [token]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
+    if (existingAppointment) {
+      setPaymentPreference(pref);
+      setReservation({ existingAppointmentId: existingAppointment.id });
+      setCtaPhase('review');
+      setError(null);
+      return;
+    }
     if (!selectedSlotId) return;
     const attemptId = reserveAttemptRef.current + 1;
     reserveAttemptRef.current = attemptId;
@@ -1420,7 +1470,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [existingAppointment, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -1457,7 +1507,8 @@ export default function EstimateViewPage() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          slotId: selectedSlotId,
+          slotId: existingAppointment ? undefined : selectedSlotId,
+          existingAppointmentId: existingAppointment?.id,
           paymentMethodPreference: paymentPreference,
           serviceMode,
           selectedFrequency,
@@ -1492,7 +1543,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('review');
     }
-  }, [loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
+  }, [existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
@@ -1517,7 +1568,6 @@ export default function EstimateViewPage() {
   const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
   const renderFlags = pricing?.renderFlags || {};
-  const acceptance = estimate?.acceptance || { mode: 'standard_slot_pick' };
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
   // Resolve the tier label unconditionally; whether the badge actually renders
   // is decided by per-section eligibility (server-authoritative
@@ -1605,6 +1655,7 @@ export default function EstimateViewPage() {
         <>
           <ReviewPhase
             slotId={selectedSlotId}
+            existingAppointment={existingAppointment}
             paymentPreference={paymentPreference}
             secondsRemaining={countdownSeconds}
             onConfirm={handleConfirm}
@@ -1739,7 +1790,11 @@ export default function EstimateViewPage() {
             <AcceptanceModeCard acceptance={acceptance} />
           )}
 
-          {canShowSlotPicker && selectedSlotId ? (
+          {existingAppointment ? (
+            <ExistingAppointmentCard appointment={existingAppointment} />
+          ) : null}
+
+          {(existingAppointment || (canShowSlotPicker && selectedSlotId)) ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}
