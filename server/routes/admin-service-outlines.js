@@ -68,6 +68,15 @@ function canExposePublicToken(packet) {
   return ['approved', 'sent', 'viewed'].includes(String(packet?.status || '').toLowerCase());
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function coerceInput(body = {}) {
   return {
     turfType: body.turfType || body.turf_type || null,
@@ -472,10 +481,12 @@ router.post('/:id/send', async (req, res, next) => {
         outcomes.email = { ok: false, error: 'SendGrid is not configured' };
       } else {
         const title = packet.title || 'Your Waves Lawn Care Program Overview';
+        const greetingName = escapeHtml(estimate.customer_name || 'there');
+        const escapedPublicUrl = escapeHtml(publicUrl);
         const html = `
-          <p>Hi ${estimate.customer_name || 'there'},</p>
+          <p>Hi ${greetingName},</p>
           <p>Your Waves lawn care program overview is ready. It explains what a typical visit includes, how treatments change by season, and how service is documented.</p>
-          <p><a href="${publicUrl}">View your lawn care program overview</a></p>
+          <p><a href="${escapedPublicUrl}">View your lawn care program overview</a></p>
           <p>Waves Pest Control</p>
         `;
         outcomes.email = await sendgrid.sendOne({

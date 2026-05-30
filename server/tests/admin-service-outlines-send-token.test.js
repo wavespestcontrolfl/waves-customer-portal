@@ -34,6 +34,7 @@ jest.mock('../services/logger', () => ({
 const express = require('express');
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const sendgrid = require('../services/sendgrid-mail');
 const adminServiceOutlines = require('../routes/admin-service-outlines');
 
 function chain(overrides = {}) {
@@ -115,5 +116,53 @@ describe('admin service outline sends', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(packetQuery.update).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('escapes estimate customer name in service outline email HTML', async () => {
+    const packetRow = {
+      id: 'packet-1',
+      estimate_id: 'estimate-1',
+      customer_id: 'customer-1',
+      status: 'approved',
+      validation_status: 'passed',
+      token_hash: 'old-token-hash',
+      title: 'Your Waves Lawn Care Program Overview',
+      expires_at: null,
+      revoked_at: null,
+    };
+    const packetQuery = chain({
+      first: jest.fn().mockResolvedValue(packetRow),
+      returning: jest.fn().mockResolvedValue([{ ...packetRow, status: 'sent', sent_at: 'NOW' }]),
+    });
+    const estimateQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'estimate-1',
+        customer_id: 'customer-1',
+        customer_phone: '',
+        customer_email: 'customer@example.com',
+        customer_name: '<img src=x onerror=alert(1)>',
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'service_outline_packets') return packetQuery;
+      if (table === 'estimates') return estimateQuery;
+      return chain();
+    });
+    sendgrid.isConfigured.mockReturnValueOnce(true);
+    sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-1' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/service-outlines/packet-1/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'email' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    const email = sendgrid.sendOne.mock.calls[0][0];
+    expect(email.html).toContain('Hi &lt;img src=x onerror=alert(1)&gt;,');
+    expect(email.html).not.toContain('<img src=x onerror=alert(1)>');
   });
 });
