@@ -6,6 +6,7 @@ const CUSTOMER_PRECAUTION_PESTICIDE = 'When this pesticide product is used, the 
 const REENTRY_PESTICIDE = 'Follow the product label and technician service report before re-entering treated areas.';
 const CUSTOMER_PRECAUTION_SUPPORT = 'When this support product is used, follow the technician service report for watering, access, or other customer action items.';
 const REENTRY_SUPPORT = 'Follow the technician service report for any product-specific instructions.';
+const NON_PESTICIDE_EPA_PLACEHOLDER = 'N/A';
 
 const FACTS = [
   {
@@ -198,13 +199,16 @@ async function findProduct(knex, aliases) {
 async function upsertFact(knex, fact) {
   const existing = await findProduct(knex, fact.aliases);
   const pesticide = fact.product_type === 'pesticide';
+  const epaRegNumber = fact.epa_reg_number
+    || existing?.epa_reg_number
+    || NON_PESTICIDE_EPA_PLACEHOLDER;
   const update = {
     name: existing?.name || fact.name,
     category: existing?.category || fact.category,
     product_type: fact.product_type,
     manufacturer: fact.manufacturer,
     active_ingredient: fact.active_ingredient,
-    epa_reg_number: fact.epa_reg_number,
+    epa_reg_number: epaRegNumber,
     customer_visibility: fact.approve ? 'portal_only' : 'internal_only',
     content_status: fact.approve ? 'approved_for_portal' : 'draft',
     public_summary: fact.public_summary,
