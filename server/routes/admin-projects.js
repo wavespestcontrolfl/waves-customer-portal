@@ -38,6 +38,7 @@ const {
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
+const TaxCalculator = require('../services/tax-calculator');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 
@@ -1589,13 +1590,49 @@ async function maybeRepriceWdoDraft(invoice, project) {
 // Persist the project → invoice link so a later dry-run / send / resend reuses
 // the same invoice instead of minting a duplicate. Guarded so it degrades to a
 // no-op in environments where the projects.invoice_id column hasn't migrated.
-async function persistProjectInvoiceLink(project, invoiceId) {
+// `runner` is the knex transaction when called inside resolveOrCreateProjectInvoice's
+// lock (it must update the projects row on the same connection that holds the
+// FOR UPDATE lock, or it self-deadlocks); defaults to the pooled db otherwise.
+async function persistProjectInvoiceLink(project, invoiceId, runner = db) {
   if (!invoiceId || project.invoice_id === invoiceId) return;
   try {
-    await db('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
+    await runner('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
     project.invoice_id = invoiceId;
   } catch (err) {
     logger.warn(`[projects] could not persist invoice link for ${project.id}: ${err.message}`);
+  }
+}
+
+// Compute the WDO invoice total for the dry-run preview WITHOUT creating an
+// invoice. Mirrors the exact inputs InvoiceService.create uses for this WDO draft
+// so preview == billed: residential customers are never taxed; commercial uses
+// the same county-aware TaxCalculator, keyed on the SAME service type the create
+// path resolves — `serviceData.service_type || title`, i.e. the linked service
+// record's type when the project carries one (invoice.js:576-602, 814-817), else
+// the 'WDO Inspection' title — and the same 7% legacy fallback when it throws
+// (invoice.js:821-826).
+async function previewWdoInvoiceTotals(project, customer, fee) {
+  const subtotal = Math.round((Number(fee) || 0) * 100) / 100;
+  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  if (!isCommercial) return { subtotal, tax_amount: 0, total: subtotal };
+  // Match create's tax key: linked service record's type, else the WDO title.
+  let taxServiceType = 'WDO Inspection';
+  if (project?.service_record_id) {
+    try {
+      const sr = await db('service_records').where({ id: project.service_record_id }).first();
+      if (sr?.service_type) taxServiceType = sr.service_type;
+    } catch (err) {
+      logger.warn(`[projects] WDO preview service-type lookup failed for ${project.id}: ${err.message}`);
+    }
+  }
+  try {
+    const taxResult = await TaxCalculator.calculateTax(customer.id, taxServiceType, subtotal);
+    const tax = Math.round((Number(taxResult?.amount) || 0) * 100) / 100;
+    return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
+  } catch (err) {
+    logger.warn(`[projects] WDO preview tax calc failed for ${customer?.id}: ${err.message}`);
+    const tax = Math.round(subtotal * 0.07 * 100) / 100;
+    return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
   }
 }
 
@@ -1608,7 +1645,7 @@ async function persistProjectInvoiceLink(project, invoiceId) {
 // be ad-hoc (no service_record_id / scheduled_service_id), so reuse must not
 // rely on a service linkage alone — every resolved invoice is recorded back on
 // the project.
-async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
+async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false }) {
   if (invoiceId) {
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
@@ -1619,52 +1656,84 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId }) {
     return { invoice: await maybeRepriceWdoDraft(explicit, project), created: false };
   }
 
-  // 1. Reuse the invoice already recorded on the project (covers ad-hoc
-  //    projects with no service linkage, and the dry-run → send → resend path).
-  if (project.invoice_id) {
-    const prior = await db('invoices').where({ id: project.invoice_id, customer_id: project.customer_id }).first();
-    if (isReusableInvoice(prior)) return { invoice: await maybeRepriceWdoDraft(prior, project), created: false };
-  }
+  // Serialize the reuse-or-create decision on the project row. The endpoint is
+  // hit twice per send (dry-run + send) and can be double-clicked, so two
+  // overlapping POSTs used to race: both fell through the reuse checks (invoice_id
+  // still null) and both called InvoiceService.create, leaving duplicate WDO
+  // drafts (there's no DB uniqueness backstop on projects.invoice_id). A FOR UPDATE
+  // lock makes the loser block until the winner commits the link, then re-read it
+  // and reuse the same invoice. The lock is released on commit.
+  return db.transaction(async (trx) => {
+    const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
+    const linkedInvoiceId = (locked && locked.invoice_id) || project.invoice_id;
 
-  // 2. Reuse a non-paid invoice already minted for the same scheduled service
-  //    or service record (mirrors project-completion.findExistingCompletionInvoice).
-  if (project.scheduled_service_id || project.service_record_id) {
-    const linked = await db('invoices')
-      .where({ customer_id: project.customer_id })
-      .whereNotIn('status', ['void', 'paid'])
-      .where(function invoiceLinkage() {
-        if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
-        if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
-      })
-      .orderBy('created_at', 'desc')
-      .first();
-    if (linked) {
-      await persistProjectInvoiceLink(project, linked.id);
-      return { invoice: await maybeRepriceWdoDraft(linked, project), created: false };
+    // 1. Reuse the invoice already recorded on the project (covers ad-hoc
+    //    projects with no service linkage, and the dry-run → send → resend path).
+    if (linkedInvoiceId) {
+      const prior = await trx('invoices').where({ id: linkedInvoiceId, customer_id: project.customer_id }).first();
+      if (isReusableInvoice(prior)) {
+        project.invoice_id = linkedInvoiceId;
+        return { invoice: await maybeRepriceWdoDraft(prior, project), created: false };
+      }
     }
-  }
 
-  // 3. Create a draft, carrying the scheduled-service / service-record linkage
-  //    forward so completion + future lookups can find it.
-  const fee = resolveWdoInspectionFee(parseFindings(project));
-  const created = await InvoiceService.create({
-    customerId: project.customer_id,
-    serviceRecordId: project.service_record_id || undefined,
-    scheduledServiceId: project.scheduled_service_id || undefined,
-    title: 'WDO Inspection',
-    lineItems: [{
-      description: WDO_INVOICE_LINE_DESCRIPTION,
-      quantity: 1,
-      unit_price: fee,
-      amount: fee,
-    }],
-    notes: `Auto-generated for WDO inspection project ${project.id}.`,
+    // 2. Reuse a non-paid invoice already minted for the same scheduled service
+    //    or service record (mirrors project-completion.findExistingCompletionInvoice).
+    if (project.scheduled_service_id || project.service_record_id) {
+      const linked = await trx('invoices')
+        .where({ customer_id: project.customer_id })
+        .whereNotIn('status', ['void', 'paid'])
+        .where(function invoiceLinkage() {
+          if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
+          if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (linked) {
+        await persistProjectInvoiceLink(project, linked.id, trx);
+        return { invoice: await maybeRepriceWdoDraft(linked, project), created: false };
+      }
+    }
+
+    // 3. Nothing to reuse. On a dry-run, DON'T mint a real draft just to show the
+    //    amount — every cancelled preview would strand an orphan invoice + burn an
+    //    invoice number. Return a non-persisted preview of the fee/total instead;
+    //    `created: true` so the confirm dialog still reads "Create and send", and
+    //    the real (non-dry-run) send below does the actual create.
+    const fee = resolveWdoInspectionFee(parseFindings(project));
+    if (dryRun) {
+      const totals = await previewWdoInvoiceTotals(project, customer, fee);
+      return {
+        invoice: { id: null, invoice_number: null, status: 'preview', ...totals },
+        created: true,
+        preview: true,
+      };
+    }
+
+    // 3b. Real send — create a draft, carrying the scheduled-service / service-record
+    //     linkage forward so completion + future lookups can find it, and record it
+    //     on the project (inside the lock) so the racing/resend POST reuses it.
+    const created = await InvoiceService.create({
+      customerId: project.customer_id,
+      serviceRecordId: project.service_record_id || undefined,
+      scheduledServiceId: project.scheduled_service_id || undefined,
+      title: 'WDO Inspection',
+      lineItems: [{
+        description: WDO_INVOICE_LINE_DESCRIPTION,
+        quantity: 1,
+        unit_price: fee,
+        amount: fee,
+      }],
+      notes: `Auto-generated for WDO inspection project ${project.id}.`,
+    });
+    // Re-fetch so callers get the canonical DB row shape (line_items as JSONB, etc.).
+    // InvoiceService.create auto-commits on the pooled connection (it doesn't touch
+    // the locked projects row, so no lock conflict); the row is visible here.
+    const fresh = await trx('invoices').where({ id: created.id }).first();
+    const invoice = fresh || created;
+    await persistProjectInvoiceLink(project, invoice.id, trx);
+    return { invoice, created: true };
   });
-  // Re-fetch so callers get the canonical DB row shape (line_items as JSONB, etc.).
-  const fresh = await db('invoices').where({ id: created.id }).first();
-  const invoice = fresh || created;
-  await persistProjectInvoiceLink(project, invoice.id);
-  return { invoice, created: true };
 }
 
 // Normalize an invoice's line_items into an array for PDF rendering — the
@@ -2056,10 +2125,15 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return res.status(422).json({ error: 'Project report is missing required details', missing: readiness.missing });
     }
 
+    // Explicit boolean — a stringified `dry_run: "false"` must NOT read as truthy
+    // (and silently preview instead of send), nor `dry_run: 0` send for real.
+    const dryRun = req.body?.dry_run === true || req.body?.dry_run === 'true';
+
     const { invoice, created } = await resolveOrCreateProjectInvoice({
       project,
       customer,
       invoiceId: req.body?.invoice_id,
+      dryRun,
     });
 
     // Match the canonical invoice non-sendable statuses (invoice.js): don't
@@ -2069,8 +2143,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
     }
 
-    // dry_run: surface the resolved invoice + amount, send nothing.
-    if (req.body?.dry_run) {
+    // dry_run: surface the resolved invoice + amount, send nothing and (for a
+    // brand-new WDO) create nothing — `invoice` is a non-persisted preview here.
+    if (dryRun) {
       return res.json({
         dry_run: true,
         invoice: {
