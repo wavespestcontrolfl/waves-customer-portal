@@ -756,6 +756,33 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.margin).toBeGreaterThan(0.50);
   });
 
+  test('reviewed 2,870 sqft estimate stays at 9 applications and Silver-discounted market price', () => {
+    const estimate = generateEstimate(baseInput({
+      homeSqFt: 2720,
+      lotSqFt: 7200,
+      measuredTurfSf: 2870,
+      features: { complexity: 'simple' },
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(estimate.waveGuard).toMatchObject({
+      tier: 'silver',
+      qualifyingCount: 2,
+    });
+    expect(lawn.frequency).toBe(9);
+    expect(lawn.perApp).toBe(73.33);
+    expect(lawn.annual).toBe(660);
+    expect(lawn.annualAfterDiscount).toBe(594);
+    expect(lawn.monthlyAfterDiscount).toBe(49.5);
+    expect(Math.round(lawn.perApp * 0.9 * 100) / 100).toBe(66);
+    expect(lawn.pricingSource).toBe('MARKET_TABLE');
+    expect(lawn.costFloorApplied).toBe(false);
+  });
+
   test('cost floor uses annual material budgets by grass type (not $8/K fallback)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4492 }));
 
