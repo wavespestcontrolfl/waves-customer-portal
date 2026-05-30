@@ -4,6 +4,11 @@ const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et
 const { summarizeLedgerRows } = require('./nutrient-ledger');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { convertToOz, normalizeQuantityToOz } = require('./product-costing');
+const {
+  getProtocolWindowContext,
+  summarizeProtocolContext,
+} = require('./lawn-protocol-operating-layer');
+const { describeInventoryConversion } = require('./inventory-units');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -647,6 +652,131 @@ function summarizeMaterialCost(items = []) {
   };
 }
 
+function numberOrNull(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function stockStatusForProduct(product) {
+  if (!product) return 'unmapped';
+  if (product.active === false) return 'inactive';
+  const onHand = numberOrNull(product.inventory_on_hand);
+  if (onHand == null) return 'not_tracked';
+  if (onHand <= 0) return 'depleted';
+  const threshold = numberOrNull(product.low_stock_threshold);
+  if (threshold != null && onHand <= threshold) return 'low';
+  return 'ok';
+}
+
+function buildProductInventorySnapshot(product, mix = null) {
+  if (!product) return null;
+  const status = stockStatusForProduct(product);
+  const onHand = numberOrNull(product.inventory_on_hand);
+  const threshold = numberOrNull(product.low_stock_threshold);
+  const unit = product.inventory_unit || null;
+  const plannedAmount = numberOrNull(mix?.amount);
+  const plannedAmountUnit = mix?.amountUnit || null;
+  const plannedInventory = plannedAmount && plannedAmountUnit && unit
+    ? describeInventoryConversion(plannedAmount, plannedAmountUnit, unit)
+    : null;
+  const plannedAmountInventoryUnit = plannedInventory?.amount ?? null;
+  let warning = null;
+  if (status === 'inactive') warning = 'Product is inactive in the catalog.';
+  else if (status === 'not_tracked') warning = 'Inventory is not tracked for this product.';
+  else if (status === 'depleted') warning = 'No inventory is currently on hand.';
+  else if (status === 'low') warning = 'Inventory is at or below the low-stock threshold.';
+  else if (plannedInventory && !plannedInventory.convertible) warning = `Cannot convert planned ${plannedAmountUnit} to inventory ${unit}.`;
+  else if (plannedAmountInventoryUnit != null && onHand != null && plannedAmountInventoryUnit > onHand) warning = 'Planned amount exceeds current inventory on hand.';
+
+  return {
+    status,
+    onHand,
+    unit,
+    lowStockThreshold: threshold,
+    plannedAmount,
+    plannedAmountUnit,
+    plannedAmountInventoryUnit,
+    conversionConfidence: plannedInventory?.confidence || (plannedAmount && plannedAmountUnit && unit ? 'needs_review' : null),
+    conversionReason: plannedInventory?.reason || null,
+    warning,
+  };
+}
+
+function summarizeInventoryStatus(items = []) {
+  const warnings = [];
+  const blocks = [];
+  for (const item of items) {
+    if (!item.product) {
+      warnings.push({
+        code: 'inventory_product_unmatched',
+        severity: 'warning',
+        message: `Protocol line is not mapped to inventory: ${item.raw}`,
+      });
+      continue;
+    }
+    const inventory = item.product.inventory || buildProductInventorySnapshot(item.product, item.mix);
+    if (!inventory) continue;
+    const payload = {
+      productId: item.product.id,
+      productName: item.product.name,
+      inventory,
+    };
+    if (inventory.status === 'inactive') {
+      blocks.push({
+        ...payload,
+        code: 'inventory_product_inactive',
+        severity: 'block',
+        message: `${item.product.name} is inactive in products_catalog and cannot be planned.`,
+      });
+    } else if (inventory.status === 'depleted') {
+      blocks.push({
+        ...payload,
+        code: 'inventory_depleted',
+        severity: 'block',
+        message: `${item.product.name} has no inventory on hand.`,
+      });
+    } else if (
+      inventory.plannedAmountInventoryUnit != null
+      && inventory.onHand != null
+      && inventory.plannedAmountInventoryUnit > inventory.onHand
+    ) {
+      blocks.push({
+        ...payload,
+        code: 'inventory_insufficient_stock',
+        severity: 'block',
+        message: `${item.product.name} requires ${inventory.plannedAmountInventoryUnit} ${inventory.unit}, but only ${inventory.onHand} ${inventory.unit} is on hand.`,
+      });
+    } else if (inventory.status === 'low') {
+      warnings.push({
+        ...payload,
+        code: 'inventory_low_stock',
+        severity: 'warning',
+        message: `${item.product.name} is at or below its low-stock threshold.`,
+      });
+    } else if (inventory.status === 'not_tracked') {
+      warnings.push({
+        ...payload,
+        code: 'inventory_not_tracked',
+        severity: 'warning',
+        message: `${item.product.name} does not have inventory_on_hand set.`,
+      });
+    } else if (inventory.conversionReason) {
+      warnings.push({
+        ...payload,
+        code: 'inventory_unit_conversion_review',
+        severity: 'warning',
+        message: `${item.product.name} planned unit cannot be converted to inventory unit (${inventory.plannedAmountUnit || 'unknown'} to ${inventory.unit || 'unknown'}).`,
+      });
+    }
+  }
+  return {
+    status: blocks.length ? 'blocked' : warnings.length ? 'warning' : 'ok',
+    blocks,
+    warnings,
+  };
+}
+
 function buildMixOrder(items) {
   const order = [
     'water_conditioner',
@@ -749,11 +879,13 @@ function summarizeCalibration({ calibration, calibrations, date }) {
       warnings: [],
       options: activeCalibrations.map((row) => ({
         equipmentSystemId: row.equipment_system_id,
+        calibrationId: row.id,
         systemName: row.system_name,
         systemType: row.system_type,
         carrierGalPer1000: row.carrier_gal_per_1000 ? Number(row.carrier_gal_per_1000) : null,
         tankCapacityGal: row.tank_capacity_gal ? Number(row.tank_capacity_gal) : null,
         expiresAt: row.expires_at || null,
+        calibrationStatus: row.calibration_status || null,
       })),
     };
   }
@@ -766,6 +898,14 @@ function summarizeCalibration({ calibration, calibrations, date }) {
       code: 'expired_calibration',
       severity: 'block',
       message: `Calibration for ${selected.system_name || selected.name || 'selected equipment'} is expired.`,
+    });
+  }
+
+  if (selected.calibration_status !== 'field_verified') {
+    blocks.push({
+      code: 'calibration_not_field_verified',
+      severity: 'block',
+      message: `Calibration for ${selected.system_name || selected.name || 'selected equipment'} is not field verified.`,
     });
   }
 
@@ -912,6 +1052,7 @@ async function getProducts(knex) {
       'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at',
+      'active', 'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
     )
     .catch(() => []);
 
@@ -934,6 +1075,32 @@ async function getProducts(knex) {
     ...product,
     aliases: aliasesByProduct[product.id] || [],
   }));
+}
+
+async function getAppointmentSubstitutions(knex, serviceId, products) {
+  if (!(await knex.schema.hasTable('lawn_protocol_product_substitutions'))) return new Map();
+  const rows = await knex('lawn_protocol_product_substitutions as lpps')
+    .leftJoin('products_catalog as op', 'lpps.original_product_id', 'op.id')
+    .leftJoin('products_catalog as sp', 'lpps.substitute_product_id', 'sp.id')
+    .where('lpps.scheduled_service_id', serviceId)
+    .where('lpps.active', true)
+    .select(
+      'lpps.*',
+      'op.name as original_product_name',
+      'sp.name as substitute_product_name',
+    )
+    .catch(() => []);
+  const productById = new Map((products || []).map((product) => [String(product.id), product]));
+  const map = new Map();
+  for (const row of rows) {
+    const substitute = productById.get(String(row.substitute_product_id));
+    if (!substitute) continue;
+    map.set(String(row.original_product_id), {
+      ...row,
+      substitute,
+    });
+  }
+  return map;
 }
 
 function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {
@@ -1052,6 +1219,46 @@ function summarizeAnnualN({ currentN, projectedVisitN, annualNLimit }) {
   };
 }
 
+function summarizeTurfProfileCompleteness(profile) {
+  const required = [
+    { key: 'grass_type', label: 'Turf species' },
+    { key: 'cultivar', label: 'Cultivar' },
+    { key: 'ordinance_zone', label: 'Ordinance zone', fallbackKeys: ['municipality', 'county'] },
+    { key: 'lawn_sqft', label: 'Treatable turf sq ft' },
+    { key: 'irrigation_status', label: 'Irrigation status', fallbackKeys: ['irrigation_type'] },
+    { key: 'soil_test_date', label: 'Soil test date' },
+    { key: 'soil_k_ppm', label: 'Soil K ppm' },
+  ];
+
+  if (!profile) {
+    return {
+      status: 'blocked',
+      missing: required.map(({ key, label }) => ({ key, label })),
+      complete: [],
+      required,
+    };
+  }
+
+  const missing = [];
+  const complete = [];
+  for (const field of required) {
+    const keys = [field.key, ...(field.fallbackKeys || [])];
+    const hasValue = keys.some((key) => {
+      const value = profile[key];
+      return value !== null && value !== undefined && value !== '';
+    });
+    if (hasValue) complete.push({ key: field.key, label: field.label });
+    else missing.push({ key: field.key, label: field.label });
+  }
+
+  return {
+    status: missing.length ? 'incomplete' : 'complete',
+    missing,
+    complete,
+    required,
+  };
+}
+
 async function buildPlanForService(serviceId, options = {}) {
   const knex = options.db || db;
   const now = options.now || new Date();
@@ -1080,17 +1287,25 @@ async function buildPlanForService(serviceId, options = {}) {
     .where({ customer_id: service.customer_id, active: true })
     .first()
     .catch(() => null);
+  const profileCompleteness = summarizeTurfProfileCompleteness(profile);
   const products = await getProducts(knex);
+  const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
   const stressFlags = latestAssessment?.stress_flags || {};
   const ordinances = await getApplicableOrdinances(knex, profile);
   const activeCalibrations = await getActiveCalibrations(knex, {
-    equipmentSystemId: options.equipmentSystemId,
-    calibrationId: options.calibrationId,
+    equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
+    calibrationId: options.calibrationId || service.assigned_calibration_id,
   });
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate);
 
   const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate);
+  const structuredProtocolContext = await getProtocolWindowContext(knex, {
+    serviceDate,
+    grassTrack: trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
+    region: 'swfl',
+  }).catch(() => null);
+  const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const baseLines = parseProtocolLines(visit?.primary, 'base');
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
@@ -1105,42 +1320,19 @@ async function buildPlanForService(serviceId, options = {}) {
   const calibration = calibrationSummary.selected;
   const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
   const lawnSqft = Number(profile?.lawn_sqft || 0);
-  const planItems = candidateItems.map((item) => ({
-    raw: item.raw,
-    role: item.role,
-    conditional: item.conditional,
-    scope: item.scope,
-    conditionFlag: item.conditionFlag,
-    branchGroupId: item.branchGroupId,
-    branch: item.branch || null,
-    areaFactorDefault: item.areaFactorDefault,
-    areaFactorClean: item.areaFactorClean,
-    areaFactorHeavy: item.areaFactorHeavy,
-    areaFactorBroadcast: item.areaFactorBroadcast,
-    selectionReason: item.selectionReason,
-    selected: item.selected,
-    matched: !!item.product,
-    product: item.product ? {
-      id: item.product.id,
-      name: item.product.name,
-      category: item.product.category,
-      activeIngredient: item.product.active_ingredient,
-      groups: getProductGroups(item.product),
-      labelVerifiedAt: item.product.label_verified_at || null,
-      analysis_n: item.product.analysis_n,
-      analysis_p: item.product.analysis_p,
-      analysis_k: item.product.analysis_k,
-      bestPrice: item.product.best_price != null ? Number(item.product.best_price) : null,
-      costPerUnit: item.product.cost_per_unit != null ? Number(item.product.cost_per_unit) : null,
-      costUnit: item.product.cost_unit || null,
-      containerSize: item.product.container_size || null,
-      unitSizeOz: item.product.unit_size_oz != null ? Number(item.product.unit_size_oz) : null,
-      needsPricing: item.product.needs_pricing === true,
-      mixing_order_category: item.product.mixing_order_category,
-      mixing_instructions: item.product.mixing_instructions,
-    } : null,
-    mix: item.product ? calculateProductAmount({
-      product: item.product,
+  const planItems = candidateItems.map((item) => {
+    const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
+    const plannedProduct = substitution?.substitute
+      ? {
+          ...substitution.substitute,
+          default_rate_per_1000: substitution.rate_per_1000 != null
+            ? substitution.rate_per_1000
+            : substitution.substitute.default_rate_per_1000,
+          rate_unit: substitution.rate_unit || substitution.substitute.rate_unit,
+        }
+      : item.product;
+    const mix = plannedProduct ? calculateProductAmount({
+      product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
       areaFactor: effectiveAreaFactor(item, {
@@ -1152,20 +1344,73 @@ async function buildPlanForService(serviceId, options = {}) {
         isFirstYear: options.isFirstYear,
       }),
       ...nutrientTargets,
-    }) : null,
-  }));
+    }) : null;
+    return {
+      raw: item.raw,
+      role: item.role,
+      conditional: item.conditional,
+      scope: item.scope,
+      conditionFlag: item.conditionFlag,
+      branchGroupId: item.branchGroupId,
+      branch: item.branch || null,
+      areaFactorDefault: item.areaFactorDefault,
+      areaFactorClean: item.areaFactorClean,
+      areaFactorHeavy: item.areaFactorHeavy,
+      areaFactorBroadcast: item.areaFactorBroadcast,
+      selectionReason: item.selectionReason,
+      selected: item.selected,
+      matched: !!plannedProduct,
+      product: plannedProduct ? {
+        id: plannedProduct.id,
+        name: plannedProduct.name,
+        category: plannedProduct.category,
+        activeIngredient: plannedProduct.active_ingredient,
+        active: plannedProduct.active !== false,
+        groups: getProductGroups(plannedProduct),
+        labelVerifiedAt: plannedProduct.label_verified_at || null,
+        analysis_n: plannedProduct.analysis_n,
+        analysis_p: plannedProduct.analysis_p,
+        analysis_k: plannedProduct.analysis_k,
+        bestPrice: plannedProduct.best_price != null ? Number(plannedProduct.best_price) : null,
+        costPerUnit: plannedProduct.cost_per_unit != null ? Number(plannedProduct.cost_per_unit) : null,
+        costUnit: plannedProduct.cost_unit || null,
+        containerSize: plannedProduct.container_size || null,
+        unitSizeOz: plannedProduct.unit_size_oz != null ? Number(plannedProduct.unit_size_oz) : null,
+        needsPricing: plannedProduct.needs_pricing === true,
+        mixing_order_category: plannedProduct.mixing_order_category,
+        mixing_instructions: plannedProduct.mixing_instructions,
+        inventory: buildProductInventorySnapshot(plannedProduct, mix),
+      } : null,
+      substitution: substitution ? {
+        id: substitution.id,
+        originalProductId: substitution.original_product_id,
+        originalProductName: substitution.original_product_name,
+        substituteProductId: substitution.substitute_product_id,
+        substituteProductName: substitution.substitute_product_name,
+        reason: substitution.reason || null,
+        approvedByName: substitution.approved_by_name || null,
+        approvedAt: substitution.approved_at || null,
+        ratePer1000: substitution.rate_per_1000 != null ? Number(substitution.rate_per_1000) : null,
+        rateUnit: substitution.rate_unit || null,
+      } : null,
+      mix,
+    };
+  });
   const plannedItems = planItems.filter((item) => item.selected);
   const materialCostSummary = summarizeMaterialCost(plannedItems);
 
-  const ordinanceSummary = summarizeOrdinanceStatus({ date: serviceDate, ordinances, candidateItems: plannedCandidateItems });
+  const ordinanceSummary = summarizeOrdinanceStatus({ date: serviceDate, ordinances, candidateItems: plannedItems });
   const nutrientProjection = calculateNutrients(plannedItems, lawnSqft);
+  const inventorySummary = summarizeInventoryStatus(plannedItems);
   const warnings = [
     ...ordinanceSummary.warnings,
     ...calibrationSummary.warnings,
+    ...inventorySummary.warnings,
   ];
   const blocks = [
     ...ordinanceSummary.blocks,
     ...calibrationSummary.blocks,
+    ...inventorySummary.blocks,
   ];
 
   if (!profile) {
@@ -1173,6 +1418,13 @@ async function buildPlanForService(serviceId, options = {}) {
       code: 'missing_turf_profile',
       severity: 'block',
       message: 'Customer has no active turf profile. Create the profile before planning a WaveGuard treatment.',
+    });
+  }
+  if (profileCompleteness.missing.length) {
+    warnings.push({
+      code: 'turf_profile_incomplete',
+      severity: 'warning',
+      message: `Turf profile is missing: ${profileCompleteness.missing.map((item) => item.label).join(', ')}.`,
     });
   }
   if (profile && !profile.lawn_sqft) {
@@ -1187,6 +1439,13 @@ async function buildPlanForService(serviceId, options = {}) {
       code: 'missing_protocol_visit',
       severity: 'block',
       message: `No WaveGuard protocol visit found for ${trackKey || 'unmapped track'} in ${month}.`,
+    });
+  }
+  if (!structuredProtocol?.window) {
+    warnings.push({
+      code: 'missing_structured_lawn_protocol_window',
+      severity: 'warning',
+      message: 'No structured 10/10 lawn protocol window was found for this date; legacy protocol text is still being used.',
     });
   }
   if (candidateItems.some((item) => !item.product)) {
@@ -1302,11 +1561,13 @@ async function buildPlanForService(serviceId, options = {}) {
         overallScore: latestAssessment.overall_score,
         stressFlags,
       } : null,
+      profileCompleteness,
       warnings,
       blocks,
       managerApprovals,
     },
     protocol: {
+      structured: structuredProtocol,
       objective: visit?.notes || null,
       base: planItems.filter((item) => item.role === 'base'),
       conditional: planItems.filter((item) => item.role === 'conditional'),
@@ -1323,10 +1584,24 @@ async function buildPlanForService(serviceId, options = {}) {
       conditionalOptions: planItems.filter((item) => item.role === 'conditional' && !item.selected),
     },
     equipmentCalibration: calibrationSummary,
+    inventory: inventorySummary,
+    appointmentAssignment: {
+      protocolKey: service.lawn_protocol_key || null,
+      protocolVersion: service.lawn_protocol_version || null,
+      windowKey: service.lawn_protocol_window_key || null,
+      windowTitle: service.lawn_protocol_window_title || null,
+      equipmentSystemId: service.assigned_equipment_system_id || null,
+      calibrationId: service.assigned_calibration_id || null,
+      source: service.lawn_protocol_assignment_source || null,
+      assignedAt: service.lawn_protocol_assigned_at || null,
+    },
     mixingOrder: buildMixOrder(plannedItems),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,
+      requiredProtocolTasks: structuredProtocol?.window?.requiredTasks || [],
+      protocolWindowKey: structuredProtocol?.window?.key || null,
+      protocolWindowTitle: structuredProtocol?.window?.title || null,
       customerRecapPreview: visit
         ? `${month} WaveGuard visit planned for ${track?.name || 'selected turf track'}.`
         : null,
@@ -1357,4 +1632,5 @@ module.exports = {
   isConditionalSelected,
   summarizeCalibration,
   summarizeOrdinanceStatus,
+  summarizeTurfProfileCompleteness,
 };

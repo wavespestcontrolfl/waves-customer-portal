@@ -7,6 +7,7 @@ import {
   Package,
   Percent,
   Plus,
+  ShoppingCart,
   ShieldCheck,
   Store,
 } from "lucide-react";
@@ -119,6 +120,9 @@ export default function InventoryPage() {
     "vendors",
     "approvals",
     "protocols",
+    "forecast",
+    "unit-review",
+    "restock",
     "margins",
     "scrape",
   ].includes(searchParams.get("tab"))
@@ -158,6 +162,15 @@ export default function InventoryPage() {
     },
     { key: "registry", label: "Registry", Icon: ClipboardList },
     { key: "protocols", label: "Protocols", Icon: FileText },
+    { key: "forecast", label: "Forecast", Icon: ShoppingCart },
+    { key: "unit-review", label: "Unit Review", Icon: ClipboardList },
+    {
+      key: "restock",
+      label: stats?.restockRequests?.open > 0
+        ? `Restock (${stats.restockRequests.open})`
+        : "Restock",
+      Icon: ShoppingCart,
+    },
     { key: "margins", label: "Service Margins", Icon: Percent },
     { key: "scrape", label: "Scrape Health", Icon: ShieldCheck },
   ];
@@ -172,7 +185,7 @@ export default function InventoryPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Inventory section"
-        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-8"
+        navGridClassName="grid-cols-2 md:grid-cols-5 xl:grid-cols-10"
         action={
           tab === "products"
             ? {
@@ -228,6 +241,12 @@ export default function InventoryPage() {
               value: stats.approvals?.pending,
               color: stats.approvals?.pending > 0 ? D.amber : D.green,
               action: () => setTab("approvals"),
+            },
+            {
+              label: "Restock",
+              value: stats.restockRequests?.open,
+              color: stats.restockRequests?.open > 0 ? D.amber : D.green,
+              action: () => setTab("restock"),
             },
             {
               label: "Scrape Jobs",
@@ -308,6 +327,9 @@ export default function InventoryPage() {
           }
         />
       )}
+      {tab === "forecast" && <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} />}
+      {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
+      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} />}
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
       <div
@@ -1243,6 +1265,376 @@ function PriceSyncTab({ showToast }) {
   );
 }
 
+function WaveGuardForecastTab({ showToast, onUpdate }) {
+  const [days, setDays] = useState(14);
+  const [forecast, setForecast] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [creatingId, setCreatingId] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await adminFetch(`/admin/inventory/waveguard-forecast?days=${encodeURIComponent(days)}`);
+      setForecast(data.forecast || null);
+    } catch (err) {
+      showToast(`Forecast failed: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [days, showToast]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function createRestock(product) {
+    const qty = Number(product.recommendedOrderQuantity || product.shortfall || 0);
+    if (!qty || qty <= 0) {
+      showToast("No forecasted order quantity for this product");
+      return;
+    }
+    setCreatingId(product.productId);
+    try {
+      const data = await adminFetch(`/admin/inventory/waveguard-forecast/${product.productId}/restock-request`, {
+        method: "POST",
+        body: JSON.stringify({
+          requestedQuantity: qty,
+          unit: product.inventoryUnit || product.demandUnit,
+          targetStock: product.targetStock,
+          neededBy: product.firstShortDate || forecast?.endDate || null,
+          priority: product.priority || (product.status === "short" ? "urgent" : "high"),
+          forecastDays: forecast?.days,
+          committedDemand: product.committedDemand,
+          projectedRemaining: product.projectedRemaining,
+          firstShortDate: product.firstShortDate,
+          reason: `${forecast?.days || days}-day WaveGuard forecast needs ${product.committedDemand} ${product.demandUnit || product.inventoryUnit || ""} of ${product.productName}.`,
+        }),
+      });
+      showToast(data.existing ? "Open restock request already exists" : "Forecast restock request created");
+      onUpdate && onUpdate();
+      await load();
+    } catch (err) {
+      showToast(`Restock request failed: ${err.message}`);
+    } finally {
+      setCreatingId("");
+    }
+  }
+
+  const products = forecast?.products || [];
+  const counts = forecast?.statusCounts || {};
+  const statusColor = (status) => {
+    if (status === "short") return D.red;
+    if (status === "warning" || status === "unit_mismatch") return D.amber;
+    if (status === "not_tracked") return D.muted;
+    return D.green;
+  };
+  const statusLabel = (status) => String(status || "ok").replace(/_/g, " ");
+
+  return (
+    <div style={sCard}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <h3 style={{ margin: 0, color: D.heading }}>WaveGuard Inventory Forecast</h3>
+          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
+            Upcoming lawn protocol demand compared against live product stock.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ ...sInput, width: 130 }}>
+            <option value={7}>7 days</option>
+            <option value={14}>14 days</option>
+            <option value={30}>30 days</option>
+            <option value={60}>60 days</option>
+          </select>
+          <button onClick={load} disabled={loading} style={sBtn(D.card, D.text)}>Refresh</button>
+        </div>
+      </div>
+
+      {forecast && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+          {[
+            { label: "Appointments", value: forecast.serviceCount || 0, color: D.heading },
+            { label: "Products", value: forecast.productCount || 0, color: D.heading },
+            { label: "Short", value: counts.short || 0, color: counts.short ? D.red : D.green },
+            { label: "Warnings", value: counts.warning || 0, color: counts.warning ? D.amber : D.green },
+            { label: "Unit Review", value: counts.unit_mismatch || 0, color: counts.unit_mismatch ? D.amber : D.green },
+          ].map((item) => (
+            <div key={item.label} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 12px", minWidth: 120 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: item.color }}>{item.value}</div>
+              <div style={{ color: D.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>{item.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ color: D.muted, fontSize: 13 }}>Building forecast...</div>
+      ) : products.length === 0 ? (
+        <div style={{ color: D.muted, fontSize: 13 }}>No forecasted WaveGuard product demand in this window.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Product", "Demand", "Stock", "Projected", "Status", "Upcoming", "Action"].map((h) => (
+                  <th key={h} style={thS}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((product) => (
+                <tr key={product.productId}>
+                  <td style={tdS}>
+                    <strong>{product.productName}</strong>
+                    <div style={{ color: D.muted, fontSize: 12 }}>{product.category || "Product"}</div>
+                  </td>
+                  <td style={tdS}>
+                    <strong>{product.committedDemand} {product.demandUnit || product.inventoryUnit || ""}</strong>
+                    <div style={{ color: product.conversionConfidence === "needs_review" ? D.amber : D.muted, fontSize: 12 }}>
+                      {String(product.conversionConfidence || "exact_unit").replace(/_/g, " ")}
+                    </div>
+                    {product.unconvertedDemand > 0 && (
+                      <div style={{ color: D.amber, fontSize: 12 }}>
+                        {product.unconvertedDemand} unit review
+                      </div>
+                    )}
+                  </td>
+                  <td style={tdS}>
+                    {product.onHand ?? "—"} {product.inventoryUnit || ""}
+                    {product.lowStockThreshold != null && (
+                      <div style={{ color: D.muted, fontSize: 12 }}>Low at {product.lowStockThreshold}</div>
+                    )}
+                  </td>
+                  <td style={tdS}>
+                    {product.projectedRemaining ?? "—"} {product.inventoryUnit || ""}
+                    {product.shortfall > 0 && (
+                      <div style={{ color: D.red, fontSize: 12 }}>Short {product.shortfall}</div>
+                    )}
+                  </td>
+                  <td style={tdS}>
+                    <span style={{
+                      padding: "4px 8px",
+                      borderRadius: 999,
+                      border: `1px solid ${statusColor(product.status)}`,
+                      color: statusColor(product.status),
+                      fontSize: 11,
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                    }}>
+                      {statusLabel(product.status)}
+                    </span>
+                    {product.firstShortDate && (
+                      <div style={{ color: D.red, fontSize: 12, marginTop: 4 }}>Blocks by {product.firstShortDate}</div>
+                    )}
+                  </td>
+                  <td style={tdS}>
+                    {(product.appointments || []).slice(0, 3).map((appt) => (
+                      <div key={`${product.productId}-${appt.serviceId}`} style={{ marginBottom: 4 }}>
+                        <strong>{appt.scheduledDate}</strong> · {appt.customerName}
+                        <div style={{ color: D.muted, fontSize: 12 }}>
+                          {appt.amount} {appt.unit}
+                          {appt.inventoryAmount != null && appt.inventoryUnit && appt.inventoryUnit !== appt.unit
+                            ? ` = ${appt.inventoryAmount} ${appt.inventoryUnit}`
+                            : ""}
+                          {" · "}{appt.protocolWindowTitle || appt.serviceType}
+                        </div>
+                      </div>
+                    ))}
+                    {(product.appointments || []).length > 3 && (
+                      <div style={{ color: D.muted, fontSize: 12 }}>+{product.appointments.length - 3} more</div>
+                    )}
+                  </td>
+                  <td style={tdS}>
+                    {["short", "warning"].includes(product.status) ? (
+                      <button
+                        onClick={() => createRestock(product)}
+                        disabled={creatingId === product.productId}
+                        style={sBtn(D.green, D.white)}
+                      >
+                        Request {product.recommendedOrderQuantity} {product.inventoryUnit || product.demandUnit || ""}
+                      </button>
+                    ) : (
+                      <span style={{ color: D.muted }}>No request</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {(forecast?.errors || []).length > 0 && (
+        <div style={{ marginTop: 12, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
+          <div style={{ color: D.amber, fontWeight: 700, fontSize: 13 }}>Plan errors</div>
+          {(forecast.errors || []).slice(0, 5).map((err) => (
+            <div key={err.serviceId} style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
+              {err.scheduledDate} · {err.customerName}: {err.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UnitReviewTab({ showToast }) {
+  const [data, setData] = useState({ products: [], forecastRows: [], counts: {} });
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState("");
+  const [drafts, setDrafts] = useState({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await adminFetch("/admin/inventory/unit-review?days=14");
+      setData(result);
+    } catch (err) {
+      showToast(`Unit review failed: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function fixUnit(product, unit) {
+    const inventoryUnit = unit || drafts[product.id]?.inventoryUnit || product.suggestedUnit;
+    if (!inventoryUnit) {
+      showToast("Choose a unit first");
+      return;
+    }
+    setSavingId(product.id);
+    try {
+      await adminFetch(`/admin/inventory/unit-review/${product.id}/fix`, {
+        method: "POST",
+        body: JSON.stringify({
+          inventoryUnit,
+          convertExistingStock: drafts[product.id]?.convertExistingStock !== false,
+        }),
+      });
+      showToast("Inventory unit updated");
+      await load();
+    } catch (err) {
+      showToast(`Unit fix failed: ${err.message}`);
+    } finally {
+      setSavingId("");
+    }
+  }
+
+  const products = data.products || [];
+  const forecastRows = data.forecastRows || [];
+  const unitChoices = ["fl_oz", "gal", "oz", "lb", "g", "kg", "ml", "l"];
+
+  return (
+    <div style={sCard}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <h3 style={{ margin: 0, color: D.heading }}>Inventory Unit Review</h3>
+          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
+            Clean up unsupported, missing, and ambiguous inventory units before they affect forecast or closeout math.
+          </p>
+        </div>
+        <button onClick={load} disabled={loading} style={sBtn(D.card, D.text)}>Refresh</button>
+      </div>
+
+      {loading ? (
+        <div style={{ color: D.muted, fontSize: 13 }}>Loading unit review...</div>
+      ) : products.length === 0 && forecastRows.length === 0 ? (
+        <div style={{ color: D.green, fontSize: 13 }}>No inventory unit issues found.</div>
+      ) : (
+        <>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Product", "Current", "Issues", "Fix"].map((h) => (
+                    <th key={h} style={thS}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {products.map((product) => {
+                  const draft = drafts[product.id] || {};
+                  return (
+                    <tr key={product.id}>
+                      <td style={tdS}>
+                        <strong>{product.name}</strong>
+                        <div style={{ color: D.muted, fontSize: 12 }}>
+                          {product.category || "Product"} · {product.formulation || "unspecified"}
+                        </div>
+                      </td>
+                      <td style={tdS}>
+                        {product.inventoryOnHand ?? "—"} {product.inventoryUnit || "no unit"}
+                        {product.lowStockThreshold != null && (
+                          <div style={{ color: D.muted, fontSize: 12 }}>Low at {product.lowStockThreshold}</div>
+                        )}
+                      </td>
+                      <td style={tdS}>
+                        {(product.reasons || []).map((reason) => (
+                          <div key={reason.code} style={{ color: reason.severity === "block" ? D.red : D.amber, fontSize: 12, marginBottom: 3 }}>
+                            {reason.message}
+                          </div>
+                        ))}
+                      </td>
+                      <td style={tdS}>
+                        <div style={{ display: "grid", gap: 6, minWidth: 260 }}>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {unitChoices.map((unit) => (
+                              <button
+                                key={unit}
+                                onClick={() => fixUnit(product, unit)}
+                                disabled={savingId === product.id}
+                                style={sBtn(product.suggestedUnit === unit ? D.green : D.card, product.suggestedUnit === unit ? D.white : D.text)}
+                              >
+                                {unit}
+                              </button>
+                            ))}
+                          </div>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <input
+                              value={draft.inventoryUnit ?? ""}
+                              onChange={(e) => setDrafts((prev) => ({ ...prev, [product.id]: { ...(prev[product.id] || {}), inventoryUnit: e.target.value } }))}
+                              style={{ ...sInput, flex: 1 }}
+                              placeholder="custom supported unit"
+                            />
+                            <button onClick={() => fixUnit(product)} disabled={savingId === product.id} style={sBtn(D.teal, D.white)}>Apply</button>
+                          </div>
+                          <label style={{ color: D.muted, fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                            <input
+                              type="checkbox"
+                              checked={draft.convertExistingStock !== false}
+                              onChange={(e) => setDrafts((prev) => ({ ...prev, [product.id]: { ...(prev[product.id] || {}), convertExistingStock: e.target.checked } }))}
+                            />
+                            Convert existing stock and low-stock threshold
+                          </label>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {forecastRows.length > 0 && (
+            <div style={{ marginTop: 16, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
+              <h4 style={{ margin: "0 0 8px", color: D.heading }}>Forecast Unit Review</h4>
+              {forecastRows.map((row) => (
+                <div key={row.productId} style={{ color: D.muted, fontSize: 13, marginBottom: 8 }}>
+                  <strong style={{ color: D.text }}>{row.productName}</strong>: {row.unconvertedDemand} {row.demandUnit || "unknown unit"} could not convert to {row.inventoryUnit || "inventory unit"} across {row.unitMismatchCount} appointment{row.unitMismatchCount === 1 ? "" : "s"}.
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ══════════════════════════════════════════════════════════════
 // PRODUCTS TAB — with inline editing
 // ══════════════════════════════════════════════════════════════
@@ -2057,6 +2449,195 @@ function ProductsTab({
               Next →
             </button>{" "}
           </div>{" "}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RestockRequestsTab({ showToast, onUpdate }) {
+  const [requests, setRequests] = useState([]);
+  const [status, setStatus] = useState("active");
+  const [loading, setLoading] = useState(true);
+  const [receivingId, setReceivingId] = useState("");
+  const [receiveDrafts, setReceiveDrafts] = useState({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(status)}`);
+      setRequests(data.requests || []);
+    } catch (err) {
+      showToast(`Failed to load restock requests: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [status, showToast]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function runAction(request, action) {
+    setReceivingId(request.id);
+    try {
+      const draft = receiveDrafts[request.id] || {};
+      const result = await adminFetch(`/admin/inventory/restock-requests/${request.id}/action`, {
+        method: "POST",
+        body: JSON.stringify({
+          action,
+          quantity: draft.quantity || request.requestedQuantity || null,
+          unit: draft.unit || request.unit || request.inventoryUnit || null,
+          note: draft.note || null,
+        }),
+      });
+      if (action === "receive") {
+        const recheck = result.readinessRecheck;
+        if (recheck?.alertStatus === "resolved") {
+          showToast(`Stock received. Readiness alert resolved (${recheck.resolvedAlerts || 0}).`);
+        } else if (recheck?.blocked != null) {
+          showToast(`Stock received. Readiness rechecked: ${recheck.blocked} blocked remain.`);
+        } else {
+          showToast("Stock received.");
+        }
+      } else {
+        showToast(action === "mark_ordered" ? "Marked ordered" : "Request cancelled");
+      }
+      await load();
+      onUpdate && onUpdate();
+    } catch (err) {
+      showToast(`Failed: ${err.message}`);
+    } finally {
+      setReceivingId("");
+    }
+  }
+
+  return (
+    <div style={sCard}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <h3 style={{ margin: 0, color: D.heading }}>Restock Requests</h3>
+          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
+            Product requests created from readiness and inventory exceptions.
+          </p>
+        </div>
+        <select
+          value={status}
+          onChange={(e) => setStatus(e.target.value)}
+          style={{ ...sInput, width: 160 }}
+        >
+          <option value="active">Open + Ordered</option>
+          <option value="open">Open</option>
+          <option value="ordered">Ordered</option>
+          <option value="received">Received</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="all">All</option>
+        </select>
+      </div>
+      {loading ? (
+        <div style={{ color: D.muted, fontSize: 13 }}>Loading restock requests...</div>
+      ) : requests.length === 0 ? (
+        <div style={{ color: D.muted, fontSize: 13 }}>No restock requests in this view.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Product", "Need", "Source", "Status", "Receive"].map((h) => (
+                  <th key={h} style={thS}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {requests.map((request) => {
+                const draft = receiveDrafts[request.id] || {};
+                return (
+                  <tr key={request.id}>
+                    <td style={tdS}>
+                      <strong>{request.productName}</strong>
+                      <div style={{ color: D.muted, fontSize: 12 }}>
+                        {request.productCategory || "Product"} · live stock {request.liveStock ?? "—"} {request.inventoryUnit || request.unit || ""}
+                      </div>
+                    </td>
+                    <td style={tdS}>
+                      <strong>{request.requestedQuantity ?? "—"} {request.unit || ""}</strong>
+                      <div style={{ color: D.muted, fontSize: 12 }}>
+                        Needed {request.neededBy || "as soon as possible"} · {request.priority}
+                      </div>
+                      {request.vendor && <div style={{ color: D.muted, fontSize: 12 }}>Vendor: {request.vendor}</div>}
+                    </td>
+                    <td style={tdS}>
+                      <div>{request.customerName || request.source}</div>
+                      <div style={{ color: D.muted, fontSize: 12 }}>
+                        {request.scheduledDate || request.createdAt?.slice?.(0, 10)} · {request.serviceType || "inventory"}
+                      </div>
+                      <div style={{ color: D.muted, fontSize: 12 }}>{request.reason}</div>
+                    </td>
+                    <td style={tdS}>
+                      <span style={{
+                        padding: "4px 8px",
+                        borderRadius: 999,
+                        border: `1px solid ${request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber}`,
+                        color: request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                      }}>
+                        {request.status}
+                      </span>
+                      {request.status === "open" && (
+                        <button
+                          onClick={() => runAction(request, "mark_ordered")}
+                          disabled={receivingId === request.id}
+                          style={{ ...sBtn(D.card, D.text), marginTop: 8, display: "block" }}
+                        >
+                          Mark Ordered
+                        </button>
+                      )}
+                    </td>
+                    <td style={tdS}>
+                      {["open", "ordered"].includes(request.status) ? (
+                        <div style={{ display: "grid", gap: 6, minWidth: 220 }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 6 }}>
+                            <input
+                              value={draft.quantity ?? request.requestedQuantity ?? ""}
+                              onChange={(e) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), quantity: e.target.value } }))}
+                              style={sInput}
+                              placeholder="Qty"
+                            />
+                            <input
+                              value={draft.unit ?? request.unit ?? request.inventoryUnit ?? ""}
+                              onChange={(e) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), unit: e.target.value } }))}
+                              style={sInput}
+                              placeholder="Unit"
+                            />
+                          </div>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button
+                              onClick={() => runAction(request, "receive")}
+                              disabled={receivingId === request.id}
+                              style={sBtn(D.green, D.white)}
+                            >
+                              Receive
+                            </button>
+                            <button
+                              onClick={() => runAction(request, "cancel")}
+                              disabled={receivingId === request.id}
+                              style={sBtn(D.card, D.red)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <span style={{ color: D.muted }}>Closed</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

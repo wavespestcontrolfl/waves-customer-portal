@@ -521,9 +521,69 @@ router.post('/backlinks/competitor-gaps', requireAdmin, async (req, res, next) =
 
 router.post('/backlinks/llm-mentions', requireAdmin, async (req, res, next) => {
   try {
-    await BacklinkMonitor.checkLLMMentions();
+    const result = await BacklinkMonitor.checkLLMMentions();
     const mentions = await db('seo_llm_mentions').orderBy('check_date', 'desc').limit(20);
-    res.json({ mentions });
+    res.json({ result, mentions });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// LLM MENTIONS — answer-engine visibility (AEO)
+// =========================================================================
+
+// GET /api/admin/seo/llm-mentions — share-of-voice dashboard
+router.get('/llm-mentions', async (req, res, next) => {
+  try {
+    const prober = require('../services/seo/llm-mention-prober');
+    res.json(await prober.getDashboard());
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/seo/llm-mentions/scan — manually trigger a probe pass
+router.post('/llm-mentions/scan', requireAdmin, async (req, res, next) => {
+  try {
+    const prober = require('../services/seo/llm-mention-prober');
+    const result = await prober.runDaily();
+    res.json({ success: true, result });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/seo/llm-mentions/queries — managed query list
+router.get('/llm-mentions/queries', async (req, res, next) => {
+  try {
+    const queries = await db('seo_llm_mention_queries').orderBy('created_at', 'asc');
+    res.json({ queries });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/seo/llm-mentions/queries — add a query to probe
+router.post('/llm-mentions/queries', requireAdmin, async (req, res, next) => {
+  try {
+    const { query, city, service } = req.body || {};
+    if (!query || !String(query).trim()) {
+      return res.status(400).json({ error: 'query is required' });
+    }
+    const [row] = await db('seo_llm_mention_queries')
+      .insert({ query: String(query).trim(), city: city || null, service: service || null, active: true })
+      .onConflict('query').merge({ active: true, city: city || null, service: service || null })
+      .returning('*');
+    res.json({ query: row });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/seo/llm-mentions/queries/:id — toggle active / edit
+router.patch('/llm-mentions/queries/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const patch = {};
+    if (typeof req.body?.active === 'boolean') patch.active = req.body.active;
+    if (typeof req.body?.query === 'string' && req.body.query.trim()) patch.query = req.body.query.trim();
+    if ('city' in (req.body || {})) patch.city = req.body.city || null;
+    if ('service' in (req.body || {})) patch.service = req.body.service || null;
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'nothing to update' });
+    patch.updated_at = db.fn.now();
+    const [row] = await db('seo_llm_mention_queries').where('id', req.params.id).update(patch).returning('*');
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json({ query: row });
   } catch (err) { next(err); }
 });
 

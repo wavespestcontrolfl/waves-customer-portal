@@ -1601,7 +1601,7 @@ export function calculateEstimate(inputs) {
       const marketPrice = lawnLookup(lp, lsf, freqIdx);
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
       const marketAnnual = marketPrice.monthly * 12;
-      const floorApplied = floorPrice.ann > marketAnnual;
+      const floorApplied = floorPrice.costFloorAnnual > marketAnnual;
       const ann = floorApplied ? floorPrice.ann : marketAnnual;
       const mo = Math.round(ann / 12 * 100) / 100;
       const pa = Math.round(ann / f.v * 100) / 100;

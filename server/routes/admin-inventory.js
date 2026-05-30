@@ -5,6 +5,14 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const {
+  convertInventoryQuantity,
+  describeInventoryConversion,
+  normalizeInventoryUnit,
+  unitDefinition,
+} = require('../services/inventory-units');
 const {
   calcLandedCost,
   costLineFromUsage,
@@ -20,8 +28,63 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function normalizeInventoryUnit(unit) {
-  return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
+function isSupportedInventoryUnit(unit) {
+  return Boolean(String(unit || '').trim() && unitDefinition(unit));
+}
+
+function assertSupportedInventoryUnit(unit, field = 'Inventory unit') {
+  if (!unit) return;
+  if (!isSupportedInventoryUnit(unit)) {
+    const err = new Error(`${field} is not supported`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+function looksLiquidProduct(product = {}) {
+  const text = `${product.name || ''} ${product.category || ''} ${product.subcategory || ''} ${product.formulation || ''} ${product.unit_type || ''}`.toLowerCase();
+  return /\b(liquid|flowable|sc|sl|ec|ew|solution|sprayable|hydretain|talstar|atrazine|dismiss|headway|medallion|primo|acelepryn|dispatch|carbonpro|k-flow)\b/.test(text);
+}
+
+function unitReviewReasons(product = {}) {
+  const reasons = [];
+  const stock = numberOrNull(product.inventory_on_hand);
+  const threshold = numberOrNull(product.low_stock_threshold);
+  const unit = product.inventory_unit || null;
+  if ((stock != null || threshold != null) && !unit) {
+    reasons.push({ code: 'missing_inventory_unit', severity: 'block', message: 'Inventory stock or threshold is set without an inventory unit.' });
+  }
+  if (unit && !isSupportedInventoryUnit(unit)) {
+    reasons.push({ code: 'unsupported_inventory_unit', severity: 'block', message: `${unit} is not a supported inventory unit.` });
+  }
+  if (unit && normalizeInventoryUnit(unit) === 'oz') {
+    reasons.push({
+      code: 'ambiguous_oz_unit',
+      severity: looksLiquidProduct(product) ? 'warn' : 'info',
+      message: looksLiquidProduct(product)
+        ? 'This product looks liquid but inventory is tracked as oz; use fl_oz if it is fluid ounces.'
+        : 'Inventory uses oz, which can be dry ounces or fluid ounces. Confirm this is intentional.',
+    });
+  }
+  return reasons;
+}
+
+function mapUnitReviewProduct(product) {
+  const reasons = unitReviewReasons(product);
+  return {
+    id: product.id,
+    name: product.name,
+    category: product.category || null,
+    subcategory: product.subcategory || null,
+    formulation: product.formulation || null,
+    inventoryOnHand: product.inventory_on_hand != null ? Number(product.inventory_on_hand) : null,
+    inventoryUnit: product.inventory_unit || null,
+    lowStockThreshold: product.low_stock_threshold != null ? Number(product.low_stock_threshold) : null,
+    rateUnit: product.rate_unit || null,
+    unitSizeOz: product.unit_size_oz != null ? Number(product.unit_size_oz) : null,
+    reasons,
+    suggestedUnit: looksLiquidProduct(product) && normalizeInventoryUnit(product.inventory_unit) === 'oz' ? 'fl_oz' : null,
+  };
 }
 
 function csvEscape(value) {
@@ -308,6 +371,241 @@ function protocolTemplateCounts() {
     mosquito: (protocols.pest?.visits || []).filter((v) => String(v.primary || '').toLowerCase().includes('mosquito')).length,
     rodent: (protocols.pest?.visits || []).filter((v) => String(v.primary || '').toLowerCase().includes('rodent')).length,
     tree_shrub: (protocols.tree_shrub?.visits || []).length,
+  };
+}
+
+async function syncLawnReadinessAfterRestock() {
+  if (!(await db.schema.hasTable('admin_alerts'))) return null;
+
+  const { buildReadinessQueue } = require('../services/lawn-protocol-readiness-cron');
+  const queue = await buildReadinessQueue({ days: 14, limit: 100 });
+  const blocked = Number(queue.statusCounts?.blocked || 0);
+  const warning = Number(queue.statusCounts?.warning || 0);
+  const appointmentCount = queue.appointments?.length || 0;
+  const now = new Date();
+  const metadata = {
+    source: 'inventory_restock_receive_recheck',
+    recheckedAt: now.toISOString(),
+    scanStartDate: queue.startDate,
+    scanEndDate: queue.endDate,
+    days: queue.days,
+    statusCounts: queue.statusCounts,
+  };
+
+  if (blocked === 0) {
+    const resolvedAlerts = await db('admin_alerts')
+      .where({ type: 'lawn_protocol_readiness', status: 'open' })
+      .update({
+        status: 'resolved',
+        resolved_at: now,
+        last_seen_at: now,
+        description: 'Resolved after inventory restock readiness recheck.',
+        metadata: JSON.stringify(metadata),
+        updated_at: now,
+      });
+    return {
+      alertStatus: 'resolved',
+      blocked,
+      warning,
+      appointmentCount,
+      resolvedAlerts,
+      updatedAlerts: 0,
+    };
+  }
+
+  const updatedAlerts = await db('admin_alerts')
+    .where({ type: 'lawn_protocol_readiness', status: 'open' })
+    .update({
+      severity: blocked >= 5 ? 'critical' : 'high',
+      title: `WaveGuard readiness: ${blocked} blocked appointment${blocked === 1 ? '' : 's'}`,
+      description: `${blocked} of ${appointmentCount} upcoming WaveGuard lawn appointment${appointmentCount === 1 ? '' : 's'} remain blocked after inventory restock recheck. ${warning} appointment${warning === 1 ? '' : 's'} have warnings.`,
+      href: '/admin/lawn-protocol?tab=readiness',
+      last_seen_at: now,
+      metadata: JSON.stringify(metadata),
+      updated_at: now,
+    });
+
+  return {
+    alertStatus: updatedAlerts > 0 ? 'still_blocked' : 'no_open_alert',
+    blocked,
+    warning,
+    appointmentCount,
+    resolvedAlerts: 0,
+    updatedAlerts,
+  };
+}
+
+function summarizeForecastStatus(row) {
+  if (row.unitMismatchCount > 0) return 'unit_mismatch';
+  if (row.onHand == null) return 'not_tracked';
+  if (row.committedDemand <= 0) return 'ok';
+  if (row.onHand < row.committedDemand) return 'short';
+  if (row.lowStockThreshold != null && row.projectedRemaining <= row.lowStockThreshold) return 'warning';
+  return 'ok';
+}
+
+function forecastPriority(status, firstShortDate) {
+  if (status === 'short') return firstShortDate ? 'urgent' : 'high';
+  if (status === 'warning') return 'high';
+  if (status === 'unit_mismatch' || status === 'not_tracked') return 'normal';
+  return 'low';
+}
+
+async function buildWaveGuardInventoryForecast({ days = 14, limit = 150 } = {}) {
+  const safeDays = Math.max(1, Math.min(90, Number(days || 14)));
+  const safeLimit = Math.max(1, Math.min(300, Number(limit || 150)));
+  const startDate = etDateString();
+  const endDate = etDateString(addETDays(new Date(), safeDays));
+  const services = await db('scheduled_services as ss')
+    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
+    .leftJoin('technicians as t', 'ss.technician_id', 't.id')
+    .whereBetween('ss.scheduled_date', [startDate, endDate])
+    .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled', 'void'])
+    .whereNotNull('c.waveguard_tier')
+    .where(function lawnService() {
+      this.whereILike('ss.service_type', '%lawn%')
+        .orWhereILike('ss.service_type', '%fertiliz%')
+        .orWhereILike('ss.service_type', '%turf%');
+    })
+    .select(
+      'ss.id',
+      'ss.customer_id',
+      'ss.service_type',
+      'ss.scheduled_date',
+      'ss.window_start',
+      'c.first_name',
+      'c.last_name',
+      'c.address_line1',
+      'c.city',
+      'c.waveguard_tier',
+      't.name as technician_name',
+    )
+    .orderBy('ss.scheduled_date', 'asc')
+    .orderBy('ss.window_start', 'asc')
+    .limit(safeLimit);
+
+  const productMap = new Map();
+  const errors = [];
+
+  function ensureRow(product, inventory, demandUnit) {
+    const key = String(product.id);
+    if (!productMap.has(key)) {
+      productMap.set(key, {
+        productId: product.id,
+        productName: product.name,
+        category: product.category || null,
+        inventoryUnit: inventory?.unit || null,
+        demandUnit: demandUnit || inventory?.unit || null,
+        onHand: inventory?.onHand != null ? Number(inventory.onHand) : null,
+        lowStockThreshold: inventory?.lowStockThreshold != null ? Number(inventory.lowStockThreshold) : null,
+        committedDemand: 0,
+        unconvertedDemand: 0,
+        unitMismatchCount: 0,
+        conversionConfidence: 'exact_unit',
+        appointments: [],
+        mismatchAppointments: [],
+        firstShortDate: null,
+      });
+    }
+    return productMap.get(key);
+  }
+
+  for (const service of services) {
+    try {
+      const plan = await buildPlanForService(service.id, { db });
+      const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
+      for (const item of plan?.mixCalculator?.items || []) {
+        if (!item?.product?.id) continue;
+        const amount = numberOrNull(item.mix?.amount);
+        if (!amount || amount <= 0) continue;
+        const inventory = item.product.inventory || {};
+        const amountUnit = item.mix?.amountUnit || item.mix?.rateUnit || inventory.unit || null;
+        const row = ensureRow(item.product, inventory, amountUnit);
+        const appointment = {
+          serviceId: service.id,
+          customerId: service.customer_id,
+          customerName,
+          serviceType: service.service_type,
+          scheduledDate: service.scheduled_date,
+          city: service.city,
+          waveguardTier: service.waveguard_tier,
+          protocolWindowTitle: plan?.protocol?.structured?.window?.title || plan?.closeout?.protocolWindowTitle || null,
+          amount,
+          unit: amountUnit,
+          inventoryUnit: row.inventoryUnit || amountUnit,
+          substitution: item.substitution || null,
+        };
+        const conversion = describeInventoryConversion(amount, amountUnit, row.inventoryUnit || amountUnit);
+        appointment.inventoryAmount = conversion.amount;
+        appointment.conversionConfidence = conversion.confidence;
+        if (conversion.convertible && conversion.amount != null) {
+          row.committedDemand = Number((row.committedDemand + conversion.amount).toFixed(4));
+          if (conversion.confidence !== 'exact_unit') row.conversionConfidence = conversion.confidence;
+          row.appointments.push(appointment);
+        } else {
+          row.unconvertedDemand = Number((row.unconvertedDemand + amount).toFixed(4));
+          row.unitMismatchCount += 1;
+          row.conversionConfidence = 'needs_review';
+          row.mismatchAppointments.push(appointment);
+        }
+      }
+    } catch (err) {
+      errors.push({
+        serviceId: service.id,
+        scheduledDate: service.scheduled_date,
+        customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer',
+        message: err.message || 'Forecast plan failed',
+      });
+    }
+  }
+
+  const products = Array.from(productMap.values()).map((row) => {
+    row.projectedRemaining = row.onHand != null
+      ? Number((row.onHand - row.committedDemand).toFixed(4))
+      : null;
+    let runningDemand = 0;
+    for (const appointment of row.appointments.slice().sort((a, b) => String(a.scheduledDate).localeCompare(String(b.scheduledDate)))) {
+      runningDemand = Number((runningDemand + Number(appointment.inventoryAmount || appointment.amount || 0)).toFixed(4));
+      if (row.onHand != null && runningDemand > row.onHand) {
+        row.firstShortDate = appointment.scheduledDate;
+        break;
+      }
+    }
+    row.status = summarizeForecastStatus(row);
+    row.shortfall = row.onHand != null
+      ? Math.max(0, Number((row.committedDemand - row.onHand).toFixed(4)))
+      : null;
+    const targetBuffer = row.lowStockThreshold != null
+      ? row.lowStockThreshold
+      : Number((row.committedDemand * 0.25).toFixed(4));
+    row.targetStock = Number((row.committedDemand + targetBuffer).toFixed(4));
+    row.recommendedOrderQuantity = row.onHand != null
+      ? Math.max(0, Number((row.targetStock - row.onHand).toFixed(4)))
+      : Number((row.committedDemand || row.targetStock || 0).toFixed(4));
+    row.priority = forecastPriority(row.status, row.firstShortDate);
+    return row;
+  }).sort((a, b) => {
+    const rank = { short: 0, warning: 1, unit_mismatch: 2, not_tracked: 3, ok: 4 };
+    return (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
+      || String(a.firstShortDate || a.appointments[0]?.scheduledDate || '').localeCompare(String(b.firstShortDate || b.appointments[0]?.scheduledDate || ''))
+      || a.productName.localeCompare(b.productName);
+  });
+
+  const statusCounts = products.reduce((acc, product) => {
+    acc[product.status] = (acc[product.status] || 0) + 1;
+    return acc;
+  }, { ok: 0, warning: 0, short: 0, unit_mismatch: 0, not_tracked: 0 });
+
+  return {
+    startDate,
+    endDate,
+    days: safeDays,
+    serviceCount: services.length,
+    productCount: products.length,
+    statusCounts,
+    products,
+    errors,
+    generatedAt: new Date().toISOString(),
   };
 }
 
@@ -1663,6 +1961,7 @@ router.post('/:productId/adjust', async (req, res, next) => {
         err.statusCode = 400;
         throw err;
       }
+      assertSupportedInventoryUnit(inventoryUnit);
 
       if (
         product.inventory_unit
@@ -1886,6 +2185,16 @@ router.get('/stats', async (req, res, next) => {
       );
       scrapeStats = s;
     } catch { /* table not created yet */ }
+    let restockOpen = 0;
+    try {
+      if (await db.schema.hasTable('product_restock_requests')) {
+        const row = await db('product_restock_requests')
+          .whereIn('status', ['open', 'ordered'])
+          .count('* as count')
+          .first();
+        restockOpen = parseInt(row?.count || 0);
+      }
+    } catch { /* table not created yet */ }
 
     res.json({
       products: {
@@ -1898,8 +2207,367 @@ router.get('/stats', async (req, res, next) => {
       vendors: { total: parseInt(vendorStats.total_vendors), scrapingEnabled: parseInt(vendorStats.scraping_enabled) },
       approvals: { pending: parseInt(approvalStats.pending || 0), approved: parseInt(approvalStats.approved || 0), rejected: parseInt(approvalStats.rejected || 0) },
       scrapeJobs: { total: parseInt(scrapeStats.total_jobs || 0), completed: parseInt(scrapeStats.completed || 0), failed: parseInt(scrapeStats.failed || 0) },
+      restockRequests: { open: restockOpen },
     });
   } catch (err) { next(err); }
+});
+
+// GET /waveguard-forecast — projected WaveGuard product demand from upcoming lawn appointments.
+router.get('/waveguard-forecast', async (req, res, next) => {
+  try {
+    const forecast = await buildWaveGuardInventoryForecast({
+      days: req.query.days || 14,
+      limit: req.query.limit || 150,
+    });
+    res.json({ forecast });
+  } catch (err) { next(err); }
+});
+
+// POST /waveguard-forecast/:productId/restock-request — create a restock request from projected demand.
+router.post('/waveguard-forecast/:productId/restock-request', async (req, res, next) => {
+  try {
+    if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
+    const product = await db('products_catalog').where({ id: req.params.productId }).first();
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    const actor = req.technicianId || req.technician?.id || null;
+    const actorName = req.technician?.name || req.technician?.email || null;
+    const requestedQuantity = numberOrNull(req.body?.requestedQuantity);
+    const unit = String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim();
+    if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
+      return res.status(400).json({ error: 'Requested quantity and unit are required' });
+    }
+    assertSupportedInventoryUnit(unit);
+
+    const existing = await db('product_restock_requests')
+      .where({ product_id: product.id })
+      .whereIn('status', ['open', 'ordered'])
+      .where('source', 'waveguard_inventory_forecast')
+      .first();
+    if (existing && req.body?.allowDuplicate !== true) {
+      return res.json({ success: true, existing: true, restockRequest: existing });
+    }
+
+    const now = new Date();
+    const [restockRequest] = await db('product_restock_requests')
+      .insert({
+        product_id: product.id,
+        status: 'open',
+        priority: String(req.body?.priority || 'high').toLowerCase(),
+        requested_quantity: requestedQuantity,
+        unit,
+        current_stock: numberOrNull(product.inventory_on_hand),
+        target_stock: numberOrNull(req.body?.targetStock),
+        vendor: product.best_vendor || null,
+        needed_by: req.body?.neededBy || null,
+        reason: String(req.body?.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
+        source: 'waveguard_inventory_forecast',
+        created_by: actor,
+        created_by_name: actorName,
+        metadata: {
+          forecastDays: numberOrNull(req.body?.forecastDays),
+          committedDemand: numberOrNull(req.body?.committedDemand),
+          projectedRemaining: numberOrNull(req.body?.projectedRemaining),
+          firstShortDate: req.body?.firstShortDate || null,
+        },
+        created_at: now,
+        updated_at: now,
+      })
+      .returning('*');
+    res.json({ success: true, existing: false, restockRequest });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    if (err.code === '23514') return res.status(400).json({ error: 'Invalid priority or request status' });
+    next(err);
+  }
+});
+
+// GET /unit-review — products and forecast rows with inventory unit issues.
+router.get('/unit-review', async (req, res, next) => {
+  try {
+    const products = await db('products_catalog')
+      .where(function unitIssue() {
+        this.where(function missingUnit() {
+          this.whereNull('inventory_unit')
+            .where(function hasInventoryValue() {
+              this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
+            });
+        })
+          .orWhereRaw("lower(coalesce(inventory_unit, '')) = 'oz'")
+          .orWhereRaw(`
+            nullif(trim(coalesce(inventory_unit, '')), '') is not null
+            AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
+          `);
+      })
+      .select(
+        'id',
+        'name',
+        'category',
+        'subcategory',
+        'formulation',
+        'inventory_on_hand',
+        'inventory_unit',
+        'low_stock_threshold',
+        'rate_unit',
+        'unit_size_oz',
+      )
+      .orderBy('name')
+      .limit(250);
+
+    const forecast = await buildWaveGuardInventoryForecast({
+      days: req.query.days || 14,
+      limit: req.query.limit || 150,
+    }).catch((err) => ({ error: err.message, products: [] }));
+    const forecastRows = (forecast.products || [])
+      .filter((row) => row.status === 'unit_mismatch' || row.conversionConfidence === 'needs_review')
+      .map((row) => ({
+        productId: row.productId,
+        productName: row.productName,
+        inventoryUnit: row.inventoryUnit,
+        demandUnit: row.demandUnit,
+        unconvertedDemand: row.unconvertedDemand,
+        unitMismatchCount: row.unitMismatchCount,
+        appointments: row.mismatchAppointments || [],
+      }));
+
+    res.json({
+      products: products.map(mapUnitReviewProduct),
+      forecastRows,
+      forecastError: forecast.error || null,
+      counts: {
+        products: products.length,
+        forecastRows: forecastRows.length,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /unit-review/:productId/fix — normalize a product inventory unit.
+router.post('/unit-review/:productId/fix', async (req, res, next) => {
+  try {
+    const nextUnit = String(req.body?.inventoryUnit || '').trim();
+    const convertExistingStock = req.body?.convertExistingStock !== false;
+    assertSupportedInventoryUnit(nextUnit);
+
+    const updated = await db.transaction(async (trx) => {
+      const product = await trx('products_catalog')
+        .where({ id: req.params.productId })
+        .forUpdate()
+        .first();
+      if (!product) {
+        const err = new Error('Product not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const currentUnit = product.inventory_unit || null;
+      const stockBefore = numberOrNull(product.inventory_on_hand);
+      const thresholdBefore = numberOrNull(product.low_stock_threshold);
+      let stockAfter = stockBefore;
+      let thresholdAfter = thresholdBefore;
+      let conversion = null;
+
+      if (convertExistingStock && currentUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(nextUnit)) {
+        stockAfter = stockBefore != null ? convertInventoryQuantity(stockBefore, currentUnit, nextUnit) : null;
+        thresholdAfter = thresholdBefore != null ? convertInventoryQuantity(thresholdBefore, currentUnit, nextUnit) : null;
+        if ((stockBefore != null && stockAfter == null) || (thresholdBefore != null && thresholdAfter == null)) {
+          const err = new Error(`Cannot convert existing inventory from ${currentUnit} to ${nextUnit}`);
+          err.statusCode = 400;
+          throw err;
+        }
+        conversion = {
+          fromUnit: currentUnit,
+          toUnit: nextUnit,
+          stockBefore,
+          stockAfter,
+          thresholdBefore,
+          thresholdAfter,
+        };
+      }
+
+      await trx('products_catalog').where({ id: product.id }).update({
+        inventory_unit: nextUnit,
+        inventory_on_hand: stockAfter,
+        low_stock_threshold: thresholdAfter,
+        updated_at: new Date(),
+      });
+
+      if (conversion && stockBefore != null) {
+        const stockBeforeInNextUnit = convertInventoryQuantity(stockBefore, currentUnit, nextUnit);
+        await trx('product_inventory_movements').insert({
+          product_id: product.id,
+          movement_type: 'correction',
+          quantity: Number(((stockAfter || 0) - (stockBeforeInNextUnit || 0)).toFixed(4)),
+          unit: nextUnit,
+          stock_before: stockBeforeInNextUnit,
+          stock_after: stockAfter || 0,
+          metadata: {
+            source: 'inventory_unit_review_fix',
+            reason: 'Inventory unit normalization',
+            conversion,
+            adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
+          },
+        });
+      }
+
+      return trx('products_catalog').where({ id: product.id }).first();
+    });
+
+    res.json({ success: true, product: mapProduct(updated) });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// GET /restock-requests — product restock request queue.
+router.get('/restock-requests', async (req, res, next) => {
+  try {
+    if (!(await db.schema.hasTable('product_restock_requests'))) {
+      return res.json({ requests: [] });
+    }
+    const status = String(req.query.status || 'open').toLowerCase();
+    let query = db('product_restock_requests as prr')
+      .leftJoin('products_catalog as pc', 'prr.product_id', 'pc.id')
+      .leftJoin('scheduled_services as ss', 'prr.scheduled_service_id', 'ss.id')
+      .leftJoin('customers as c', 'prr.customer_id', 'c.id')
+      .select(
+        'prr.*',
+        'pc.name as product_name',
+        'pc.category as product_category',
+        'pc.inventory_on_hand',
+        'pc.inventory_unit',
+        'pc.best_vendor',
+        'ss.scheduled_date',
+        'ss.service_type',
+        'c.first_name',
+        'c.last_name',
+        'c.address_line1',
+        'c.city',
+      )
+      .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
+      .orderByRaw('prr.needed_by asc nulls last')
+      .orderBy('prr.created_at', 'desc')
+      .limit(Math.max(1, Math.min(200, Number(req.query.limit || 100))));
+    if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
+    const rows = await query;
+    res.json({
+      requests: rows.map((row) => ({
+        id: row.id,
+        productId: row.product_id,
+        productName: row.product_name,
+        productCategory: row.product_category,
+        status: row.status,
+        priority: row.priority,
+        requestedQuantity: row.requested_quantity != null ? Number(row.requested_quantity) : null,
+        unit: row.unit,
+        currentStock: row.current_stock != null ? Number(row.current_stock) : null,
+        liveStock: row.inventory_on_hand != null ? Number(row.inventory_on_hand) : null,
+        inventoryUnit: row.inventory_unit,
+        targetStock: row.target_stock != null ? Number(row.target_stock) : null,
+        vendor: row.vendor || row.best_vendor || null,
+        neededBy: row.needed_by,
+        reason: row.reason,
+        source: row.source,
+        scheduledServiceId: row.scheduled_service_id,
+        scheduledDate: row.scheduled_date,
+        serviceType: row.service_type,
+        customerName: `${row.first_name || ''} ${row.last_name || ''}`.trim() || null,
+        address: row.address_line1,
+        city: row.city,
+        createdByName: row.created_by_name,
+        createdAt: row.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /restock-requests/:id/action — update request status and optionally receive stock.
+router.post('/restock-requests/:id/action', async (req, res, next) => {
+  try {
+    if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
+    const action = String(req.body?.action || '').toLowerCase();
+    if (!['mark_ordered', 'receive', 'cancel'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
+    const request = await db('product_restock_requests').where({ id: req.params.id }).first();
+    if (!request) return res.status(404).json({ error: 'Restock request not found' });
+    const actor = req.technicianId || req.technician?.id || null;
+    const result = await db.transaction(async (trx) => {
+      if (action === 'mark_ordered') {
+        const [updated] = await trx('product_restock_requests')
+          .where({ id: request.id })
+          .update({ status: 'ordered', updated_at: new Date() })
+          .returning('*');
+        return { request: updated };
+      }
+      if (action === 'cancel') {
+        const [updated] = await trx('product_restock_requests')
+          .where({ id: request.id })
+          .update({ status: 'cancelled', closed_by: actor, closed_at: new Date(), updated_at: new Date() })
+          .returning('*');
+        return { request: updated };
+      }
+      const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first();
+      if (!product) {
+        const err = new Error('Product not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const quantity = numberOrNull(req.body?.quantity) ?? numberOrNull(request.requested_quantity);
+      const unit = String(req.body?.unit || request.unit || product.inventory_unit || '').trim();
+      if (!quantity || quantity <= 0 || !unit) {
+        const err = new Error('Receive quantity and unit are required');
+        err.statusCode = 400;
+        throw err;
+      }
+      const inventoryUnit = product.inventory_unit || unit;
+      const received = describeInventoryConversion(quantity, unit, inventoryUnit);
+      if (!received.convertible || received.amount == null) {
+        const err = new Error(`Cannot convert receive unit ${unit} to inventory unit ${inventoryUnit}`);
+        err.statusCode = 400;
+        throw err;
+      }
+      const stockBefore = numberOrNull(product.inventory_on_hand) || 0;
+      const stockAfter = Number((stockBefore + received.amount).toFixed(4));
+      await trx('products_catalog').where({ id: product.id }).update({
+        inventory_on_hand: stockAfter,
+        inventory_unit: inventoryUnit,
+        updated_at: new Date(),
+      });
+      const [movement] = await trx('product_inventory_movements').insert({
+        product_id: product.id,
+        movement_type: 'restock',
+        quantity: received.amount,
+        unit: inventoryUnit,
+        stock_before: stockBefore,
+        stock_after: stockAfter,
+        metadata: {
+          source: 'restock_request_receive',
+          restockRequestId: request.id,
+          note: req.body?.note || null,
+          adjustedBy: actor,
+          enteredQuantity: quantity,
+          enteredUnit: unit,
+          conversionConfidence: received.confidence,
+        },
+      }).returning('*');
+      const [updated] = await trx('product_restock_requests')
+        .where({ id: request.id })
+        .update({ status: 'received', closed_by: actor, closed_at: new Date(), updated_at: new Date() })
+        .returning('*');
+      return { request: updated, movement };
+    });
+    let readinessRecheck = null;
+    if (action === 'receive') {
+      try {
+        readinessRecheck = await syncLawnReadinessAfterRestock();
+      } catch (recheckErr) {
+        logger.warn(`[admin-inventory] restock readiness recheck failed: ${recheckErr.message}`);
+        readinessRecheck = { error: recheckErr.message };
+      }
+    }
+    res.json({ success: true, ...result, readinessRecheck });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // ── Helper: recalculate best price for a product ──
@@ -1942,6 +2610,7 @@ router.post('/', async (req, res, next) => {
     if ((initialStock != null || lowStock != null) && !inventoryUnit) {
       return res.status(400).json({ error: 'Inventory unit is required when stock values are set' });
     }
+    assertSupportedInventoryUnit(inventoryUnit);
 
     const product = await db.transaction(async (trx) => {
       const [inserted] = await trx('products_catalog').insert({
@@ -2064,6 +2733,7 @@ router.put('/:id', async (req, res, next) => {
     if ((nextStock != null || nextThreshold != null) && !nextUnit) {
       return res.status(400).json({ error: 'Inventory unit is required when stock values are set' });
     }
+    assertSupportedInventoryUnit(nextUnit);
 
     if (req.body.inventoryUnit !== undefined) upd.inventory_unit = nextUnit;
     if (req.body.lowStockThreshold !== undefined) upd.low_stock_threshold = nextThreshold;
