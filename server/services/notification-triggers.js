@@ -245,6 +245,21 @@ const TRIGGER_REGISTRY = {
       link: p.estimateId ? `/admin/estimates/${p.estimateId}` : '/admin/estimates',
     }),
   },
+  bundle_quote_requested: {
+    label: 'Bundle quote requested',
+    category: 'estimate',
+    priority: 'high',
+    group: 'Leads & Sales',
+    build: (p) => ({
+      title: p.bundled
+        ? `Bundle self-applied: ${p.customerName || 'Customer'}`
+        : `Bundle inquiry: ${p.customerName || 'Customer'}`,
+      body: p.bundled
+        ? `Added ${p.suggestedService || 'service'} → ${p.newTier || p.tier || 'new tier'} @ $${Number(p.newMonthly || 0).toFixed(2)}/mo`
+        : `Interested in adding ${p.suggestedService || 'a service'} to ${p.previousTier || p.tier || 'current'} plan`,
+      link: p.estimateId ? `/admin/estimates?estimateId=${encodeURIComponent(p.estimateId)}` : '/admin/estimates',
+    }),
+  },
   credential_expiring_soon: {
     label: 'Credential expiring within 60 days',
     category: 'credential',

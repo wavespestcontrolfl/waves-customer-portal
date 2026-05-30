@@ -5,7 +5,7 @@
  * Copy shifts when serviceMode='one_time' - the customer is booking a
  * single visit, so framing changes.
  *
- * Third "Pay the year upfront" button renders when the server marks the
+ * Third annual prepay button renders when the server marks the
  * recurring service mix as annual-prepay eligible. Older pricing bundles can
  * still surface it through a waivable setupFee.
  * Selection encodes as 'prepay_annual' - the server treats it like
@@ -48,7 +48,9 @@ export default function PaymentPreferenceButtons({
     lineHeight: 1.45,
     marginTop: 8,
     padding: '0 2px',
+    textAlign: 'center',
   };
+  const optionWrap = { textAlign: 'center' };
 
   const cardOnFileLabel = isOneTime ? 'Book visit' : 'Choose pay-after-visit setup';
   const fineprint = offerPrepay
@@ -124,7 +126,7 @@ export default function PaymentPreferenceButtons({
       </div>
 
       <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-        <div>
+        <div style={optionWrap}>
           <button
             type="button"
             disabled={disabled}
@@ -134,14 +136,14 @@ export default function PaymentPreferenceButtons({
           <div style={optionNote}>Billed after each completed service through autopay.</div>
         </div>
         {offerPrepay && (
-          <div>
+          <div style={optionWrap}>
             <button
               type="button"
               disabled={disabled}
               onClick={() => onSelect('prepay_annual')}
               style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
             >
-              Pay the year upfront
+              Pay the 12-month plan in full
             </button>
             <div style={optionNote}>
               {waivableSetupFee
