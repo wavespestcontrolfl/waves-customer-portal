@@ -1604,24 +1604,33 @@ async function persistProjectInvoiceLink(project, invoiceId, runner = db) {
 }
 
 // Compute the WDO invoice total for the dry-run preview WITHOUT creating an
-// invoice. Mirrors invoice.js's single-source tax rule: residential customers
-// are never taxed; commercial uses the same county-aware TaxCalculator the real
-// create calls (with the same 'WDO Inspection' service label), so the previewed
-// amount matches what gets billed.
-async function previewWdoInvoiceTotals(customer, fee) {
+// invoice. Mirrors the exact inputs InvoiceService.create uses for this WDO draft
+// so preview == billed: residential customers are never taxed; commercial uses
+// the same county-aware TaxCalculator, keyed on the SAME service type the create
+// path resolves — `serviceData.service_type || title`, i.e. the linked service
+// record's type when the project carries one (invoice.js:576-602, 814-817), else
+// the 'WDO Inspection' title — and the same 7% legacy fallback when it throws
+// (invoice.js:821-826).
+async function previewWdoInvoiceTotals(project, customer, fee) {
   const subtotal = Math.round((Number(fee) || 0) * 100) / 100;
   const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
   if (!isCommercial) return { subtotal, tax_amount: 0, total: subtotal };
+  // Match create's tax key: linked service record's type, else the WDO title.
+  let taxServiceType = 'WDO Inspection';
+  if (project?.service_record_id) {
+    try {
+      const sr = await db('service_records').where({ id: project.service_record_id }).first();
+      if (sr?.service_type) taxServiceType = sr.service_type;
+    } catch (err) {
+      logger.warn(`[projects] WDO preview service-type lookup failed for ${project.id}: ${err.message}`);
+    }
+  }
   try {
-    const taxResult = await TaxCalculator.calculateTax(customer.id, 'WDO Inspection', subtotal);
+    const taxResult = await TaxCalculator.calculateTax(customer.id, taxServiceType, subtotal);
     const tax = Math.round((Number(taxResult?.amount) || 0) * 100) / 100;
     return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
   } catch (err) {
     logger.warn(`[projects] WDO preview tax calc failed for ${customer?.id}: ${err.message}`);
-    // Mirror invoice.js's commercial TaxCalculator-failure fallback (the 7% legacy
-    // path at invoice.js:821-826) so the previewed total still matches what
-    // InvoiceService.create would bill on the same failure — never preview $250
-    // and then send $267.50.
     const tax = Math.round(subtotal * 0.07 * 100) / 100;
     return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
   }
@@ -1693,7 +1702,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     //    the real (non-dry-run) send below does the actual create.
     const fee = resolveWdoInspectionFee(parseFindings(project));
     if (dryRun) {
-      const totals = await previewWdoInvoiceTotals(customer, fee);
+      const totals = await previewWdoInvoiceTotals(project, customer, fee);
       return {
         invoice: { id: null, invoice_number: null, status: 'preview', ...totals },
         created: true,
