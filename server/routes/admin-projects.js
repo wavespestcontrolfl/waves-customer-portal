@@ -1685,52 +1685,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     const channels = {};
 
-    // SMS
-    if (customer?.phone) {
-      try {
-        const digits = String(customer.phone).replace(/\D/g, '');
-        const normalized = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
-          : digits.length === 10 ? `+1${digits}`
-          : null;
-        if (!normalized) {
-          channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
-        } else {
-          const smsBody = await renderRequiredSmsTemplate('project_report_ready', {
-            first_name: firstName,
-            project_type: typeLabel,
-            report_url: reportUrl,
-          }, {
-            workflow: 'project_report_ready',
-            entity_type: 'project',
-            entity_id: project.id,
-          });
-          const result = await sendCustomerMessage({
-            to: normalized,
-            body: smsBody,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'support_resolution',
-            customerId: customer.id,
-            identityTrustLevel: 'phone_matches_customer',
-            entryPoint: 'admin_project_report_send',
-            metadata: {
-              original_message_type: 'project_report',
-              project_id: project.id,
-            },
-          });
-          channels.sms = result.sent
-            ? { ok: true }
-            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
-        }
-      } catch (e) {
-        logger.error(`[projects] send sms failed: ${e.message}`);
-        channels.sms = { ok: false, error: e.message };
-      }
-    } else {
-      channels.sms = { ok: false, error: 'No phone on file' };
-    }
-
-    // Email (through editable Waves template library)
+    // Email first (through editable Waves template library). For WDO it carries
+    // the FDACS PDF, so the SMS link is only sent after the email succeeds.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
     if (emailRecipient.email) {
       try {
@@ -1750,6 +1706,52 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
     } else {
       channels.email = { ok: false, error: 'No email on file' };
+    }
+
+    // SMS (report link). For WDO, defer until the email (with the FDACS PDF)
+    // succeeds so a failed email can't leave the customer with only a link while
+    // the report is recorded not-sent; for other project types it's independent.
+    const digits = String(customer?.phone || '').replace(/\D/g, '');
+    const normalizedPhone = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
+      : digits.length === 10 ? `+1${digits}` : null;
+    if (!customer?.phone) {
+      channels.sms = { ok: false, error: 'No phone on file' };
+    } else if (!normalizedPhone) {
+      channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
+    } else if (isWdo && !channels.email?.ok) {
+      channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
+    } else {
+      try {
+        const smsBody = await renderRequiredSmsTemplate('project_report_ready', {
+          first_name: firstName,
+          project_type: typeLabel,
+          report_url: reportUrl,
+        }, {
+          workflow: 'project_report_ready',
+          entity_type: 'project',
+          entity_id: project.id,
+        });
+        const result = await sendCustomerMessage({
+          to: normalizedPhone,
+          body: smsBody,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'support_resolution',
+          customerId: customer.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'admin_project_report_send',
+          metadata: {
+            original_message_type: 'project_report',
+            project_id: project.id,
+          },
+        });
+        channels.sms = result.sent
+          ? { ok: true }
+          : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+      } catch (e) {
+        logger.error(`[projects] send sms failed: ${e.message}`);
+        channels.sms = { ok: false, error: e.message };
+      }
     }
 
     const availableChannels = [
@@ -2062,13 +2064,38 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const firstName = customer.first_name || 'there';
     const channels = {};
 
-    // ONE SMS — report link + pay link. Because it carries the pay link, it
-    // goes through the canonical 'payment_link' policy (consent, kill switch,
-    // identity trust, invoiceId requirement). That policy forbids an exact
-    // price and caps at 2 segments, so the body omits the dollar amount (it's
-    // on the pay page / invoice PDF) and stays terse.
+    // ONE email FIRST — it carries the FDACS PDF + invoice PDF and is the
+    // required channel. The pay-link SMS is only sent after the email succeeds,
+    // so a failed email can't leave the customer with a bare pay-link text while
+    // the report is recorded not-sent (and retries can't duplicate that text).
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+    if (emailRecipient.email) {
+      try {
+        const result = await ProjectEmail.sendProjectReportWithInvoice({
+          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+        });
+        channels.email = result.ok
+          ? { ok: true, messageId: result.messageId || null }
+          : { ok: false, error: projectEmailFailureMessage(result) };
+      } catch (e) {
+        logger.error(`[projects] combined send email failed: ${e.message}`);
+        channels.email = { ok: false, error: e.message };
+      }
+    } else {
+      channels.email = { ok: false, error: 'No email on file' };
+    }
+
+    // ONE SMS — report link + pay link, only after the email succeeded. It goes
+    // through the canonical 'payment_link' policy (consent, kill switch, identity
+    // trust, invoiceId). That policy forbids an exact price and caps at 2
+    // segments, so the body omits the dollar amount (it's on the pay page /
+    // invoice PDF) and stays terse.
     const normalized = normalizeUsPhone(customer.phone);
-    if (normalized) {
+    if (!normalized) {
+      channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
+    } else if (!channels.email?.ok) {
+      channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
+    } else {
       try {
         const smsBody = `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
         const result = await sendCustomerMessage({
@@ -2090,26 +2117,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         logger.error(`[projects] combined send sms failed: ${e.message}`);
         channels.sms = { ok: false, error: e.message };
       }
-    } else {
-      channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
-    }
-
-    // ONE email — both PDFs attached.
-    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
-    if (emailRecipient.email) {
-      try {
-        const result = await ProjectEmail.sendProjectReportWithInvoice({
-          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-        });
-        channels.email = result.ok
-          ? { ok: true, messageId: result.messageId || null }
-          : { ok: false, error: projectEmailFailureMessage(result) };
-      } catch (e) {
-        logger.error(`[projects] combined send email failed: ${e.message}`);
-        channels.email = { ok: false, error: e.message };
-      }
-    } else {
-      channels.email = { ok: false, error: 'No email on file' };
     }
 
     // Mirror /send: only count channels the customer actually has, so an
