@@ -23,4 +23,10 @@ describe('backlink strategy managed agent session payload', () => {
       content: [{ type: 'text', text: JSON.stringify({ added: 2 }) }],
     });
   });
+
+  test('reads tool use ids from all managed-agent event shapes', () => {
+    expect(_test.toolUseIdFromEvent({ id: 'id_1' })).toBe('id_1');
+    expect(_test.toolUseIdFromEvent({ custom_tool_use_id: 'custom_1' })).toBe('custom_1');
+    expect(_test.toolUseIdFromEvent({ tool_use_id: 'legacy_1' })).toBe('legacy_1');
+  });
 });
