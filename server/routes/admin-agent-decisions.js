@@ -46,6 +46,8 @@ function mapDecision(row) {
     customerId: row.customer_id,
     customerName: customerName || input?.estimate?.customer_name || input?.customer?.name || null,
     customerPhone: row.customer_phone || null,
+    sourceFromPhone: row.sms_from_phone || null,
+    sourceToPhone: row.sms_to_phone || null,
     leadId: row.lead_id,
     leadStatus: row.lead_status || null,
     estimateId: row.estimate_id,
@@ -77,8 +79,146 @@ function mapDecision(row) {
   };
 }
 
+function normalizePhoneLast10(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+function compactRecord(row, keys) {
+  if (!row) return null;
+  return Object.fromEntries(keys.map((key) => [key, row[key]]).filter(([, value]) => (
+    value !== null && value !== undefined && value !== ''
+  )));
+}
+
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
+}
+
+function applyPhoneOrCustomerFilter(q, { customerId, phone }) {
+  const last10 = normalizePhoneLast10(phone);
+  q.where(function filterByIdentity() {
+    if (customerId) this.where('customer_id', customerId);
+    if (last10) {
+      this.orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10]);
+    }
+  });
+}
+
+async function loadDecision(id) {
+  const row = await db('agent_decisions as ad')
+    .leftJoin('customers as c', 'ad.customer_id', 'c.id')
+    .leftJoin('leads as l', 'ad.lead_id', 'l.id')
+    .leftJoin('estimates as e', 'ad.estimate_id', 'e.id')
+    .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+    .where('ad.id', id)
+    .select(
+      'ad.*',
+      'c.first_name as customer_first_name',
+      'c.last_name as customer_last_name',
+      'c.phone as customer_phone',
+      'l.status as lead_status',
+      'e.status as estimate_status',
+      'e.waveguard_tier as estimate_waveguard_tier',
+      's.message_body as sms_message_body',
+      's.from_phone as sms_from_phone',
+      's.to_phone as sms_to_phone'
+    )
+    .first();
+  return row ? mapDecision(row) : null;
+}
+
+async function loadDecisionContext(decision) {
+  const input = decision.inputSnapshot || {};
+  const phone = decision.customerPhone || decision.sourceFromPhone || input?.sms?.from || input?.sms?.from_phone || null;
+  const customerId = decision.customerId || null;
+
+  const [
+    customer,
+    lead,
+    estimate,
+    smsRows,
+    callRows,
+    serviceRows,
+  ] = await Promise.all([
+    customerId ? db('customers').where({ id: customerId }).first() : null,
+    decision.leadId ? db('leads').where({ id: decision.leadId }).first() : null,
+    decision.estimateId ? db('estimates').where({ id: decision.estimateId }).first() : null,
+    (async () => {
+      if (!(customerId || normalizePhoneLast10(phone))) return [];
+      const q = db('sms_log')
+        .select('id', 'direction', 'from_phone', 'to_phone', 'message_body', 'message_type', 'status', 'created_at')
+        .orderBy('created_at', 'desc')
+        .limit(18);
+      applyPhoneOrCustomerFilter(q, { customerId, phone });
+      const rows = await q;
+      return rows.reverse();
+    })(),
+    (async () => {
+      if (!(customerId || normalizePhoneLast10(phone))) return [];
+      const q = db('call_log')
+        .select('*')
+        .orderBy('created_at', 'desc')
+        .limit(6);
+      applyPhoneOrCustomerFilter(q, { customerId, phone });
+      return q;
+    })(),
+    customerId ? db('service_records')
+      .where({ customer_id: customerId })
+      .select('*')
+      .orderByRaw('COALESCE(service_date, created_at) DESC')
+      .limit(6) : [],
+  ]);
+
+  return {
+    customer: compactRecord(customer, [
+      'id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
+      'waveguard_tier', 'monthly_rate', 'active', 'created_at',
+    ]),
+    lead: compactRecord(lead, [
+      'id', 'status', 'lead_type', 'source', 'service_interest', 'waveguard_tier',
+      'estimate_id', 'next_follow_up_at', 'notes', 'created_at', 'updated_at',
+    ]),
+    estimate: compactRecord(estimate, [
+      'id', 'status', 'customer_name', 'customer_phone', 'customer_email', 'address',
+      'category', 'service_interest', 'waveguard_tier', 'monthly_total', 'annual_total',
+      'onetime_total', 'bill_by_invoice', 'sent_at', 'viewed_at', 'last_viewed_at',
+      'accepted_at', 'scheduled_at', 'created_at', 'updated_at',
+    ]),
+    smsThread: smsRows.map((row) => ({
+      id: row.id,
+      direction: row.direction,
+      fromPhone: row.from_phone,
+      toPhone: row.to_phone,
+      body: row.message_body,
+      type: row.message_type,
+      status: row.status,
+      createdAt: row.created_at,
+      isTrigger: row.id === decision.smsLogId,
+    })),
+    calls: callRows.map((row) => ({
+      id: row.id,
+      direction: row.direction,
+      status: row.status,
+      fromPhone: row.from_phone,
+      toPhone: row.to_phone,
+      outcome: row.call_outcome || row.disposition || null,
+      synopsis: row.lead_synopsis || row.ai_summary || null,
+      transcription: row.transcription || null,
+      notes: row.notes || null,
+      createdAt: row.created_at,
+    })),
+    services: serviceRows.map((row) => ({
+      id: row.id,
+      serviceDate: row.service_date,
+      serviceType: row.service_type,
+      status: row.status,
+      technicianNotes: row.technician_notes,
+      fieldFlags: parseJson(row.field_flags, row.field_flags || null),
+      createdAt: row.created_at,
+    })),
+  };
 }
 
 router.get('/', async (req, res, next) => {
@@ -106,7 +246,9 @@ router.get('/', async (req, res, next) => {
         'l.status as lead_status',
         'e.status as estimate_status',
         'e.waveguard_tier as estimate_waveguard_tier',
-        's.message_body as sms_message_body'
+        's.message_body as sms_message_body',
+        's.from_phone as sms_from_phone',
+        's.to_phone as sms_to_phone'
       )
       .orderBy('ad.created_at', 'desc')
       .limit(limit);
@@ -133,6 +275,22 @@ router.get('/', async (req, res, next) => {
     }
 
     res.json({ decisions: rows.map(mapDecision), metrics, missingTable: false });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/:id/context', async (req, res, next) => {
+  try {
+    if (!(await tableExists('agent_decisions'))) {
+      return res.status(409).json({ error: 'agent_decisions table has not been migrated yet' });
+    }
+
+    const decision = await loadDecision(req.params.id);
+    if (!decision) return res.status(404).json({ error: 'Decision not found' });
+
+    const context = await loadDecisionContext(decision);
+    res.json({ decision, context });
   } catch (err) {
     next(err);
   }

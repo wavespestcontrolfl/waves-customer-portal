@@ -9,7 +9,7 @@ const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed
 const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up'];
 
 const ACCEPTANCE_RE = /\b(give (you|your team) a try|want to start|ready to start|let'?s (do it|move forward|get started)|go ahead|sign me up|i'?ll move forward|i think i will|start (the )?service|move forward with)\b/i;
-const SCHEDULE_WINDOW_RE = /\b(week of|next week|couple weeks?|any time|start (on|the|that)?|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+const SCHEDULE_WINDOW_RE = /\b(week of|next week|couple weeks?|any time|start (on|the week of|that week|next week|for|service)|january|february|march|april|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
 const HOME_QUESTION_RE = /\b(do i need to be home|need to be home|have to be home|do we need to be there|access to the exterior)\b/i;
 const SERVICE_QUESTION_RE = /\b(typical visit|outline of the service|what'?s included|does it include|sweep|sweeping|webs?|lanai|cage|front door|entry points?|shrubs?)\b/i;
 const GENERAL_ESTIMATE_QUESTION_RE = /\b(how much|fees?|price|pricing|cost|bundle|bundled|add that|add .*later|come inside|inside|safe for pets?|new estimate|proceed with (a )?service)\b|\?/i;
