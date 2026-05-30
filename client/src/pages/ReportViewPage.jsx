@@ -1263,6 +1263,124 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   );
 }
 
+function LawnProtocolCard({ protocol }) {
+  const window = protocol?.window;
+  if (!protocol || !window) return null;
+  const tasks = Array.isArray(window.requiredTasks) ? window.requiredTasks : [];
+  const products = Array.isArray(protocol.products) ? protocol.products : [];
+  const complianceGate = (protocol.gates || []).find((gate) => gate.type === 'ordinance');
+  const serviceNote = window.customerNoteTemplates?.[0];
+  const equipment = protocol.equipment || {};
+  const calibration = protocol.calibration || {};
+  const application = protocol.application || {};
+  const assignment = protocol.assignment || {};
+  const inventory = application.inventory || {};
+  const substitutions = Array.isArray(application.substitutions) ? application.substitutions : [];
+  const appliedCarrier = application.carrierGalPer1000 ?? calibration.carrierGalPer1000 ?? window.defaultCarrierGalPer1000;
+  const sourceLabel = protocol.source === 'completion_ledger'
+    ? 'Completed visit'
+    : protocol.source === 'appointment_assignment'
+      ? 'Assigned appointment'
+      : 'Seasonal protocol';
+
+  return (
+    <section className="sr-section lawn-protocol-section" id="lawn-protocol">
+      <h2>Seasonal lawn protocol</h2>
+      <p>{window.goal || 'Today’s lawn visit followed the current St. Augustine seasonal protocol for this property.'}</p>
+      <div className="sr-grid-3">
+        <div className="sr-cell">
+          <div className="sr-cell-label">Program window</div>
+          <div className="sr-cell-value">{window.title}</div>
+        </div>
+        <div className="sr-cell">
+          <div className="sr-cell-label">Production mode</div>
+          <div className="sr-cell-value">{String(window.productionMode || '').replace(/_/g, ' ') || 'Protocol route'}</div>
+        </div>
+        <div className="sr-cell">
+          <div className="sr-cell-label">Carrier target</div>
+          <div className="sr-cell-value">{appliedCarrier ? `${appliedCarrier} gal / 1,000 sq ft` : 'Scout or premium route'}</div>
+        </div>
+        <div className="sr-cell">
+          <div className="sr-cell-label">Report source</div>
+          <div className="sr-cell-value">{sourceLabel}</div>
+        </div>
+        <div className="sr-cell">
+          <div className="sr-cell-label">Equipment</div>
+          <div className="sr-cell-value">{equipment.systemName || 'Calibrated equipment'}</div>
+        </div>
+        <div className="sr-cell">
+          <div className="sr-cell-label">Calibration</div>
+          <div className="sr-cell-value">
+            {calibration.status === 'field_verified' ? 'Field verified' : formatEnumLabel(calibration.status || 'Recorded')}
+          </div>
+        </div>
+      </div>
+      {(application.treatedSqft || application.totalCarrierGal || calibration.verifiedAt || assignment.assignedAt) && (
+        <div className="supporting-detail-card" style={{ marginTop: 12 }}>
+          <div className="sr-cell-label">Application record</div>
+          <p>
+            {[
+              application.treatedSqft ? `${Number(application.treatedSqft).toLocaleString()} sq ft treated` : null,
+              application.totalCarrierGal ? `${application.totalCarrierGal} gallons carrier used` : null,
+              inventory.deductedCount ? `${inventory.deductedCount} inventory deduction${inventory.deductedCount === 1 ? '' : 's'} recorded` : null,
+              calibration.verifiedAt ? `calibration verified ${formatDate(calibration.verifiedAt)}` : null,
+              assignment.assignedAt && !application.treatedSqft ? `assigned ${formatDate(assignment.assignedAt)}` : null,
+            ].filter(Boolean).join(' · ')}
+          </p>
+        </div>
+      )}
+      {complianceGate && (
+        <div className="supporting-detail-card" style={{ marginTop: 12 }}>
+          <div className="sr-cell-label">Compliance gate</div>
+          <p>{complianceGate.ruleText}</p>
+        </div>
+      )}
+      {tasks.length > 0 && (
+        <div className="supporting-detail-card" style={{ marginTop: 12 }}>
+          <div className="sr-cell-label">Field checks tied to this visit</div>
+          <p>{tasks.map((task) => formatEnumLabel(task)).join(', ')}</p>
+        </div>
+      )}
+      {application.expectedResponse?.window && (
+        <div className="supporting-detail-card" style={{ marginTop: 12 }}>
+          <div className="sr-cell-label">What we are watching next</div>
+          <p>{application.expectedResponse.window}</p>
+        </div>
+      )}
+      {substitutions.length > 0 && (
+        <div className="supporting-detail-card" style={{ marginTop: 12 }}>
+          <div className="sr-cell-label">Approved product substitution</div>
+          <p>
+            {substitutions.map((sub) => (
+              `${sub.substituteProductName || 'Approved substitute'} used in place of ${sub.originalProductName || 'the planned product'}`
+            )).join(' · ')}
+          </p>
+        </div>
+      )}
+      {products.length > 0 && (
+        <details className="solution-detail report-accordion">
+          <summary>
+            <span>Protocol products and gates</span>
+            <span className="accordion-action">Details</span>
+          </summary>
+          <div className="accordion-body solution-detail-body">
+            {products.slice(0, 8).map((product) => (
+              <div className="solution-product-detail" key={product.id || product.productName}>
+                <div className="solution-product-name">{product.productName}</div>
+                <p>
+                  {formatEnumLabel(product.role)}
+                  {product.ratePer1000 != null ? ` · ${product.ratePer1000} ${product.rateUnit || ''}/1,000 sq ft` : ' · label-rate or condition-gated'}
+                </p>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      {serviceNote && <p className="smart-status-detail">{serviceNote}</p>}
+    </section>
+  );
+}
+
 function TechnicianVisitLine({ data }) {
   const technician = data.technician || {};
   const name = technician.name || data.technicianName || 'Your Waves technician';
@@ -2076,6 +2194,14 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   if (!applications.length) return null;
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
+  const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
+    ? data.dynamicContext.lawnProtocol.application.substitutions
+    : [];
+  const substitutionByName = new Map(
+    substitutions
+      .filter((sub) => sub.substituteProductName)
+      .map((sub) => [String(sub.substituteProductName).toLowerCase(), sub]),
+  );
 
   return (
     <section className="sr-section applied-products-section" id="products-applied">
@@ -2094,10 +2220,12 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const purpose = applicationPurpose(app, data.serviceLine);
             const why = applicationPurposeCopy(app, data.serviceLine);
             const usedIn = applicationZoneText(app, zoneById);
+            const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
               epa ? `EPA reg. ${epa}` : null,
               app.rate && app.rateUnit ? `Rate: ${app.rate} ${app.rateUnit}` : null,
               app.totalAmount && app.amountUnit ? `Total: ${app.totalAmount} ${app.amountUnit}` : null,
+              substitution ? `Approved substitute for ${substitution.originalProductName || 'planned protocol product'}` : null,
             ].filter(Boolean);
             return (
               <article className="applied-product-card product-group-card" key={app.id || `${productName}-${index}`}>
@@ -2120,7 +2248,11 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                 </div>
                 <div className="product-why">
                   <div className="sr-cell-label">Why used today</div>
-                  <p>{why}</p>
+                  <p>
+                    {substitution
+                      ? `This approved seasonal equivalent was used for today's protocol window. ${why}`
+                      : why}
+                  </p>
                 </div>
               <details className="solution-detail report-accordion" open={mode !== 'live'}>
                 <summary>
@@ -6843,6 +6975,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         </section>
+
+        <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />
+
+        {dynamicContext.pressureTrend && (
+          <PressureTrendCard
+            context={dynamicContext.pressureTrend}
+            neighborhood={dynamicContext.neighborhoodPressure}
+            mode={mode}
+            token={token}
+          />
+        )}
 
         {/* Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /

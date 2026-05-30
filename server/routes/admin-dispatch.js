@@ -38,6 +38,10 @@ const { buildNoActivityFinding } = require('../services/service-report/no-activi
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const { uploadServicePhotoDataUrls } = require('../services/service-photos');
 const {
+  recordLawnProtocolCompletion,
+  normalizeCompletionForStructuredNotes,
+} = require('../services/lawn-protocol-completion');
+const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
 } = require('../services/service-completion-profiles');
@@ -51,6 +55,11 @@ const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
+const {
+  INVENTORY_UNITS,
+  convertInventoryQuantity,
+  normalizeInventoryUnit,
+} = require('../services/inventory-units');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -279,6 +288,7 @@ function calibrationLockoutBlocks(plan) {
     'missing_calibration',
     'equipment_selection_required',
     'expired_calibration',
+    'calibration_not_field_verified',
   ]);
   return (plan?.equipmentCalibration?.blocks || [])
     .filter((block) => lockoutCodes.has(block.code));
@@ -296,6 +306,15 @@ function blackoutLockoutBlocks(plan) {
 function annualNLockoutBlocks(plan) {
   return (plan?.propertyGate?.blocks || [])
     .filter((block) => block.code === 'annual_n_budget_exceeded');
+}
+
+function inventoryPlanLockoutBlocks(plan) {
+  return (plan?.inventory?.blocks || [])
+    .filter((block) => [
+      'inventory_product_inactive',
+      'inventory_depleted',
+      'inventory_insufficient_stock',
+    ].includes(block.code));
 }
 
 function toETNoonServiceDate(value) {
@@ -383,6 +402,59 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   return blocks;
 }
 
+async function actualProductInventoryBlocks(submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
+  if (!productIds.length) return [];
+
+  const catalogProducts = await db('products_catalog')
+    .whereIn('id', productIds)
+    .select('id', 'name', 'active', 'inventory_on_hand', 'inventory_unit')
+    .catch(() => []);
+  const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
+  const blocks = [];
+
+  for (const submitted of submittedProducts || []) {
+    if (!submitted?.productId) continue;
+    const product = productById.get(String(submitted.productId));
+    if (!product) continue;
+    if (product.active === false) {
+      blocks.push({
+        code: 'actual_inventory_product_inactive',
+        severity: 'block',
+        productId: product.id,
+        productName: product.name,
+        message: `${product.name} is inactive and cannot be completed.`,
+      });
+      continue;
+    }
+    if (product.inventory_on_hand == null || product.inventory_on_hand === '') continue;
+    const stockOnHand = Number(product.inventory_on_hand);
+    if (!Number.isFinite(stockOnHand)) continue;
+    const amount = submitted.totalAmount != null && submitted.totalAmount !== ''
+      ? Number(submitted.totalAmount)
+      : null;
+    const amountUnit = submitted.amountUnit || submitted.rateUnit || null;
+    if (!amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) continue;
+    const inventoryUnit = product.inventory_unit || amountUnit;
+    const required = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
+    if (required == null) continue;
+    if (required > stockOnHand) {
+      blocks.push({
+        code: 'actual_inventory_insufficient_stock',
+        severity: 'block',
+        productId: product.id,
+        productName: product.name,
+        requiredAmount: required,
+        stockOnHand,
+        unit: inventoryUnit,
+        message: `${product.name} requires ${required} ${inventoryUnit}, but only ${stockOnHand} ${inventoryUnit} is on hand.`,
+      });
+    }
+  }
+
+  return blocks;
+}
+
 function normalizeTankCleanout(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const lastProductInTank = String(input.lastProductInTank || input.last_product_in_tank || '').trim().slice(0, 160);
@@ -440,49 +512,6 @@ function tankCleanoutWarnings(cleanout, selectedCalibration) {
     }];
   }
   return [];
-}
-
-function normalizeInventoryUnit(unit) {
-  return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
-}
-
-const INVENTORY_UNITS = {
-  fl_oz: { dimension: 'volume', factor: 1 },
-  floz: { dimension: 'volume', factor: 1 },
-  gal: { dimension: 'volume', factor: 128 },
-  gallon: { dimension: 'volume', factor: 128 },
-  gallons: { dimension: 'volume', factor: 128 },
-  qt: { dimension: 'volume', factor: 32 },
-  quart: { dimension: 'volume', factor: 32 },
-  pt: { dimension: 'volume', factor: 16 },
-  pint: { dimension: 'volume', factor: 16 },
-  ml: { dimension: 'volume', factor: 0.033814 },
-  l: { dimension: 'volume', factor: 33.814 },
-  liter: { dimension: 'volume', factor: 33.814 },
-  oz: { dimension: 'ambiguous', factor: 1 },
-  ounce: { dimension: 'ambiguous', factor: 1 },
-  ounces: { dimension: 'ambiguous', factor: 1 },
-  lb: { dimension: 'weight', factor: 16 },
-  lbs: { dimension: 'weight', factor: 16 },
-  pound: { dimension: 'weight', factor: 16 },
-  g: { dimension: 'weight', factor: 0.035274 },
-  gram: { dimension: 'weight', factor: 0.035274 },
-  kg: { dimension: 'weight', factor: 35.274 },
-};
-
-function convertInventoryQuantity(amount, fromUnit, toUnit) {
-  const n = Number(amount);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const from = normalizeInventoryUnit(fromUnit);
-  const to = normalizeInventoryUnit(toUnit);
-  if (!from || !to || from === to) return n;
-  const fromDef = INVENTORY_UNITS[from];
-  const toDef = INVENTORY_UNITS[to];
-  if (!fromDef || !toDef) return null;
-  const fromDimension = fromDef.dimension === 'ambiguous' ? toDef.dimension : fromDef.dimension;
-  const toDimension = toDef.dimension === 'ambiguous' ? fromDef.dimension : toDef.dimension;
-  if (fromDimension !== toDimension) return null;
-  return Number(((n * fromDef.factor) / toDef.factor).toFixed(4));
 }
 
 function calculateInventoryCost({ product, deductedAmount, inventoryUnit, amount, amountUnit }) {
@@ -576,6 +605,12 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
+  if (insufficient) {
+    const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
+    err.statusCode = 400;
+    err.code = 'waveguard_inventory_lockout';
+    throw err;
+  }
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
     deductedAmount,
@@ -1389,6 +1424,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       formStartedAt,
       invoiceAlreadySent = false,
       lawnAssessmentId = null,
+      lawnProtocolCompletion = null,
       completionPhotos = [],
       clientPestRating = null,
     } = req.body;
@@ -1445,6 +1481,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardNLimitApproval = null;
     let waveguardManagerApproval = null;
     let waveguardTankCleanout = null;
+    let waveguardPlan = null;
     let inventoryDeductions = [];
     let waveguardEquipmentSystemId = equipmentSystemId || null;
     let waveguardCalibrationId = calibrationId || null;
@@ -1467,6 +1504,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
+      waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
+    }
+    if (!waveguardCalibrationId && svc.assigned_calibration_id) {
+      waveguardCalibrationId = svc.assigned_calibration_id;
+    }
 
     const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch((err) => {
       logger.warn(`[dispatch] completion profile lookup failed for ${svc.id}: ${err.message}`);
@@ -1534,9 +1577,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
       const plan = await buildPlanForService(svc.id, {
-        equipmentSystemId: equipmentSystemId || null,
-        calibrationId: calibrationId || null,
+        equipmentSystemId: waveguardEquipmentSystemId || null,
+        calibrationId: waveguardCalibrationId || null,
       });
+      waveguardPlan = plan;
       const calibrationBlocks = calibrationLockoutBlocks(plan);
       if (calibrationBlocks.length) {
         const validationErr = new Error('Equipment calibration lockout');
@@ -1599,6 +1643,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             message: block.message,
           })),
         };
+      }
+      const inventoryBlocks = [
+        ...inventoryPlanLockoutBlocks(plan),
+        ...await actualProductInventoryBlocks(products),
+      ];
+      if (inventoryBlocks.length) {
+        const validationErr = new Error('WaveGuard inventory lockout');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+        return res.status(400).json({
+          error: 'Inventory lockout',
+          code: 'waveguard_inventory_lockout',
+          details: inventoryBlocks.map((block) => block.message),
+          blocks: inventoryBlocks,
+        });
       }
       const managerApprovalCheck = await evaluateWaveGuardManagerApprovals(db, {
         customerId: svc.customer_id,
@@ -1932,6 +1990,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .catch(() => null);
 
         // 2. service_products — children of the service_record.
+        const insertedServiceProducts = [];
         if (products?.length) {
           const seenProductIds = new Set();
           const validRateUnits = new Set(['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
@@ -2016,6 +2075,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
+            insertedServiceProducts.push(serviceProduct);
 
             await recordServiceProductNutrients(trx, {
               customerId: svc.customer_id,
@@ -2038,6 +2098,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
 
+        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+          const protocolCompletion = await recordLawnProtocolCompletion(trx, {
+            service: svc,
+            serviceRecord: record,
+            plan: waveguardPlan,
+            serviceProducts: insertedServiceProducts,
+            completionInput: {
+              ...(lawnProtocolCompletion || {}),
+              inventoryDeductions,
+            },
+            equipmentSystemId: waveguardEquipmentSystemId,
+            calibrationId: waveguardCalibrationId,
+            serviceDate: completionEndedAt,
+          });
+          if (protocolCompletion) {
+            record.structured_notes = {
+              ...(record.structured_notes || structuredNotes),
+              lawnProtocolCompletion: normalizeCompletionForStructuredNotes(protocolCompletion),
+            };
+            await trx('service_records')
+              .where({ id: record.id })
+              .update({ structured_notes: serializeJsonb(record.structured_notes) });
+          }
+        }
+
         if (inventoryDeductions.length) {
           record.structured_notes = {
             ...(record.structured_notes || {}),
@@ -2051,7 +2136,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // 3. Lifecycle timestamps the route owns. transitionJobStatus
         // owns status + updated_at; we own the service timing columns
         // on the same row.
-        await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
+        const scheduledServiceUpdate = { ...lifecycleUpdates };
+        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+          const structured = waveguardPlan.protocol.structured;
+          const window = structured.window || {};
+          scheduledServiceUpdate.lawn_protocol_key = structured.protocolKey || null;
+          scheduledServiceUpdate.lawn_protocol_version = structured.version || null;
+          scheduledServiceUpdate.lawn_protocol_window_key = window.key || null;
+          scheduledServiceUpdate.lawn_protocol_window_title = window.title || null;
+          scheduledServiceUpdate.assigned_equipment_system_id = waveguardEquipmentSystemId || null;
+          scheduledServiceUpdate.assigned_calibration_id = waveguardCalibrationId || null;
+          scheduledServiceUpdate.lawn_protocol_assignment_source = 'dispatch_closeout';
+          scheduledServiceUpdate.lawn_protocol_assigned_by = req.technicianId || null;
+          scheduledServiceUpdate.lawn_protocol_assigned_at = completionEndedAt;
+          scheduledServiceUpdate.lawn_protocol_assignment_snapshot = serializeJsonb({
+            protocol: {
+              key: structured.protocolKey || null,
+              version: structured.version || null,
+              windowKey: window.key || null,
+              windowTitle: window.title || null,
+              goal: window.goal || null,
+            },
+            equipment: {
+              systemId: waveguardEquipmentSystemId || null,
+              calibrationId: waveguardCalibrationId || null,
+              carrierGalPer1000: waveguardPlan.mixCalculator?.carrierGalPer1000 || null,
+            },
+          });
+        }
+        await trx('scheduled_services').where({ id: svc.id }).update(scheduledServiceUpdate);
 
         // 5. Status flip via the canonical sole-writer.
         await transitionJobStatus({
