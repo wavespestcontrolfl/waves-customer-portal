@@ -21,6 +21,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const MODELS = require('../../config/models');
+const twilioNumbers = require('../../config/twilio-numbers');
 const { etDateString } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 
@@ -29,7 +30,18 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some 
 
 // ── Detection constants ──────────────────────────────────────────────────────
 const WAVES_RE = /waves\s+pest|wavespestcontrol/i;
-const WAVES_HOST_RE = /wavespestcontrol\.com/i;
+// Every owned domain counts as a Waves citation — the hub plus the spoke fleet
+// (bradentonflpestcontrol.com, sarasotaflpestcontrol.com, …) — sourced from the
+// tracking-domain config so it stays in sync as domains are added/removed.
+const OWNED_DOMAINS = Array.from(new Set([
+  'wavespestcontrol.com',
+  ...(twilioNumbers.domainTracking || []).map(d => d.domain),
+  ...(twilioNumbers.lawnDomainTracking || []).map(d => d.domain),
+].filter(Boolean)));
+const WAVES_HOST_RE = new RegExp(
+  OWNED_DOMAINS.map(d => d.replace(/[.]/g, '\\.')).join('|'),
+  'i',
+);
 const COMPETITORS = [
   'turner pest', 'hoskins', 'orkin', 'terminix', 'truly nolen',
   'hometeam', 'arrow environmental', 'nozzle nolen', 'massey services',
@@ -276,7 +288,11 @@ class LLMMentionProber {
           : 'neutral';
         if (parsed.wavesMentioned) wavesHits++;
 
-        await db('seo_llm_mentions').insert({
+        // onConflict ignore is the race backstop: two overlapping runs (e.g.
+        // scheduler on multiple pods + an admin scan) both build `done` before
+        // either insert, so the unique (query, llm_platform, check_date) index
+        // is what actually prevents duplicate same-day observations.
+        const ins = await db('seo_llm_mentions').insert({
           query_id: qrow.id || null,
           batch_id: batchId,
           llm_platform: platform,
@@ -292,8 +308,8 @@ class LLMMentionProber {
           model_version: probe.model,
           grounded: !!probe.grounded,
           check_date: checkDate,
-        });
-        inserted++;
+        }).onConflict(['query', 'llm_platform', 'check_date']).ignore();
+        if (ins.rowCount !== 0) inserted++;
       }
       if (probed >= MAX_PROBES_PER_RUN) break;
     }

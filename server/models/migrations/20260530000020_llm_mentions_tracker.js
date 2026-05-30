@@ -34,6 +34,27 @@ exports.up = async function up(knex) {
     await addIndex('waves_mentioned', 'idx_llm_mentions_waves');
     await addIndex('query_id', 'idx_llm_mentions_query');
     await addIndex('batch_id', 'idx_llm_mentions_batch');
+
+    // The legacy button-driven path had no idempotency, so collapse any
+    // pre-existing same-day duplicates (keep the earliest) before enforcing
+    // uniqueness — the constraint is what makes overlapping runDaily() passes
+    // (multi-pod scheduler + admin scan) safe via onConflict().ignore().
+    await knex.raw(`
+      DELETE FROM seo_llm_mentions
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT id, row_number() OVER (
+            PARTITION BY query, llm_platform, check_date ORDER BY created_at
+          ) AS rn
+          FROM seo_llm_mentions
+          WHERE query IS NOT NULL AND llm_platform IS NOT NULL AND check_date IS NOT NULL
+        ) t WHERE t.rn > 1
+      )
+    `);
+    try {
+      await knex.schema.alterTable('seo_llm_mentions', (t) =>
+        t.unique(['query', 'llm_platform', 'check_date'], { indexName: 'uq_llm_mentions_query_platform_date' }));
+    } catch { /* already exists */ }
   }
 
   const hasQueries = await knex.schema.hasTable('seo_llm_mention_queries');
@@ -78,6 +99,10 @@ exports.down = async function down(knex) {
   await knex.schema.dropTableIfExists('seo_llm_mention_queries');
   const hasMentions = await knex.schema.hasTable('seo_llm_mentions');
   if (hasMentions) {
+    try {
+      await knex.schema.alterTable('seo_llm_mentions', (t) =>
+        t.dropUnique(['query', 'llm_platform', 'check_date'], 'uq_llm_mentions_query_platform_date'));
+    } catch { /* not present */ }
     await knex.schema.alterTable('seo_llm_mentions', (t) => {
       t.dropColumn('query_id');
       t.dropColumn('batch_id');
