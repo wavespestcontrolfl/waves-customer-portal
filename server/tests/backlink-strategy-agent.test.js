@@ -29,4 +29,12 @@ describe('backlink strategy managed agent session payload', () => {
     expect(_test.toolUseIdFromEvent({ custom_tool_use_id: 'custom_1' })).toBe('custom_1');
     expect(_test.toolUseIdFromEvent({ tool_use_id: 'legacy_1' })).toBe('legacy_1');
   });
+
+  test('normalizes string and object stop reasons', () => {
+    expect(_test.stopReasonFromEvent({ stop_reason: 'end_turn' })).toEqual({ type: 'end_turn' });
+    expect(_test.stopReasonFromEvent({ stop_reason: { type: 'requires_action', event_ids: ['evt_1'] } })).toEqual({
+      type: 'requires_action',
+      event_ids: ['evt_1'],
+    });
+  });
 });
