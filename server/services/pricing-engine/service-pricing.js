@@ -1804,11 +1804,9 @@ function priceLawnCare(property, options = {}) {
     }
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPriceFor55;
-    const costFloorApplied = !!useLawnCostFloor;
-    const perApp = costFloorApplied
-      ? Math.ceil(costFloorAnnual / tc.freq)
-      : Math.round(marketAnnual / tc.freq * 100) / 100;
-    const ann = costFloorApplied ? perApp * tc.freq : marketAnnual;
+    const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
+    const ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
+    const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
       tier: t,
       index: tc.index,

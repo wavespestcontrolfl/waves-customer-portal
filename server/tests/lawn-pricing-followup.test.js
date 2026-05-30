@@ -659,8 +659,9 @@ describe('lawn pricing production follow-up', () => {
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
     expect(lawn.customQuoteFlag).toBe(true);
-    expect(lawn.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
-    expect(lawn.marketAnnual).toBeGreaterThan(0);
+    expect(lawn.pricingBasis).toBe('FORTY_FIVE_MARGIN_FLOOR');
+    expect(lawn.selected.pricingBasis).toBe('FORTY_FIVE_MARGIN_FLOOR');
+    expect(lawn.selected.marketSource).toBe('EXTRAPOLATED_TABLE');
     expect(estimate.notes).toContainEqual({
       type: 'LAWN_CUSTOM_QUOTE',
       text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
@@ -739,6 +740,22 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.tiers[0].label).toBe('4 Applications');
   });
 
+  test('small lawn pricing uses market table when it is above the 45% floor', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2720,
+      lotSqFt: 7200,
+      measuredTurfSf: 2870,
+      features: { complexity: 'simple' },
+    }));
+    const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+
+    expect(lawn.selected.perApp).toBe(73.33);
+    expect(Math.round(lawn.selected.perApp * 0.9 * 100) / 100).toBe(66);
+    expect(lawn.selected.costFloorApplied).toBe(false);
+    expect(lawn.selected.costFloorAnnual).toBeLessThan(lawn.selected.marketAnnual);
+    expect(lawn.margin).toBeGreaterThan(0.50);
+  });
+
   test('cost floor uses annual material budgets by grass type (not $8/K fallback)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4492 }));
 
@@ -746,30 +763,33 @@ describe('lawn pricing production follow-up', () => {
     const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9 });
     const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9 });
 
-    // St. Augustine enhanced at 4,492 sqft uses the 55% collected-margin floor.
-    expect(stAug.selected.perApp).toBe(95);
+    // St. Augustine enhanced at 4,492 sqft uses the 45% collected-margin floor.
+    expect(stAug.selected.perApp).toBe(78);
+    expect(stAug.selected.costFloorApplied).toBe(true);
 
-    // Bermuda enhanced at 4,492 sqft uses the 55% collected-margin floor.
-    expect(bermuda.selected.perApp).toBe(95);
+    // Bermuda enhanced remains market-table priced because market is above the floor.
+    expect(bermuda.selected.perApp).toBe(80);
+    expect(bermuda.selected.costFloorApplied).toBe(false);
 
-    // Zoysia enhanced at 4,492 sqft has a slightly higher material budget.
-    expect(zoysia.selected.perApp).toBe(97);
+    // Zoysia enhanced has a higher material budget but still lands below market.
+    expect(zoysia.selected.perApp).toBe(80);
+    expect(zoysia.selected.costFloorApplied).toBe(false);
   });
 
-  test('dense route St. Augustine enhanced quote uses 55% floor as final customer price', () => {
+  test('dense route St. Augustine enhanced quote uses 45% floor as final customer price', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4250 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    expect(lawn.selected.perApp).toBe(92);
-    expect(lawn.annual).toBe(828);
-    expect(lawn.monthly).toBe(69);
+    expect(lawn.selected.perApp).toBe(76);
+    expect(lawn.annual).toBe(684);
+    expect(lawn.monthly).toBe(57);
     expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
     expect(lawn.costs.total).toBeLessThan(372);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(826);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(827);
-    expect(lawn.margin).toBeGreaterThanOrEqual(0.55);
-    expect(lawn.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
-    expect(lawn.selected.marketAnnual).toBeGreaterThan(lawn.annual);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(675);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(676);
+    expect(lawn.margin).toBeGreaterThanOrEqual(0.45);
+    expect(lawn.pricingBasis).toBe('FORTY_FIVE_MARGIN_FLOOR');
+    expect(lawn.selected.marketAnnual).toBeLessThan(lawn.annual);
   });
 
   test('Lawn V2 receives WaveGuard percent discounts', () => {
@@ -787,9 +807,9 @@ describe('lawn pricing production follow-up', () => {
       qualifyingCount: 2,
       activeServices: ['pest_control', 'lawn_care'],
     });
-    expect(lawn.annual).toBe(828);
-    expect(lawn.annualAfterDiscount).toBe(745.2);
-    expect(lawn.monthlyAfterDiscount).toBe(62.1);
+    expect(lawn.annual).toBe(684);
+    expect(lawn.annualAfterDiscount).toBe(615.6);
+    expect(lawn.monthlyAfterDiscount).toBe(51.3);
     expect(lawn.discount).toMatchObject({
       discountable: true,
       requestedDiscountPercent: 0.10,
@@ -809,9 +829,9 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    expect(lawn.annualAfterDiscount).toBe(745.2);
-    expect(estimate.summary.manualDiscount.discountableBase).toBe(1166.4);
-    expect(estimate.summary.manualDiscount.amount).toBe(116.64);
+    expect(lawn.annualAfterDiscount).toBe(615.6);
+    expect(estimate.summary.manualDiscount.discountableBase).toBe(1036.8);
+    expect(estimate.summary.manualDiscount.amount).toBe(103.68);
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
   });

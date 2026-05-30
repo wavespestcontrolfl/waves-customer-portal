@@ -266,7 +266,7 @@ REVENUE CAPABILITIES:
 
 ANALYSIS STYLE:
 - Always include the vs-previous-period change when showing topline numbers
-- Flag service lines below 55% gross margin target
+- Flag service lines below the active margin floor
 - RPMH (revenue per man-hour) is a key efficiency metric — $120+/hr = good, <$100 = needs attention
 - Use the $35/hr loaded labor rate as the cost baseline
 - When comparing periods, highlight the biggest mover (positive or negative)
@@ -979,7 +979,7 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'tech_perf', group: 'Analyze', label: 'Tech RPMH', prompt: 'Rank technicians by revenue per man-hour' },
       { id: 'top_customers', group: 'Analyze', label: 'Top 10 Customers', prompt: 'Who are our top 10 customers by revenue this month?' },
       { id: 'ad_roi', group: 'Analyze', label: 'Ad ROI', prompt: "What's our ad attribution? ROAS and CAC by channel?" },
-      { id: 'low_margin', group: 'Watch', label: 'Low Margin Alert', prompt: 'Which service lines are below our 55% margin target?' },
+      { id: 'low_margin', group: 'Watch', label: 'Low Margin Alert', prompt: 'Which service lines are below our active margin floor?' },
     ] });
   } else if (context === 'tech') {
     res.json({ actions: [

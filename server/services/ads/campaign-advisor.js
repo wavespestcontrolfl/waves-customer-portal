@@ -155,7 +155,7 @@ BUSINESS CONTEXT:
 - Main site: wavespestcontrol.com + 9 domain-specific microsites
 - 3 technicians (Adam, Jose, Jacob), max ~8 services per tech per day
 - WaveGuard membership tiers: Bronze/Silver/Gold/Platinum with 0/10/15/20% discounts
-- Recurring services have $35/hr loaded labor cost, target 55% gross margin
+- Recurring lawn services use $35/hr loaded labor cost and a 45% fully loaded floor
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}
 - Competes with Turner, Nozzle Nolen, HomeTeam in SWFL market
 

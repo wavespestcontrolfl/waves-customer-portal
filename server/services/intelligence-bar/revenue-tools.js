@@ -220,10 +220,11 @@ async function getServiceLinePnl(period = 'month') {
     services: data.services,
     hours: Math.round(data.hours * 10) / 10,
     avg_job_revenue: data.services > 0 ? Math.round(data.revenue / data.services) : 0,
-    below_margin_target: data.revenue > 0 && ((data.revenue - data.cost) / data.revenue * 100) < 55,
+    below_margin_floor: data.revenue > 0 && ((data.revenue - data.cost) / data.revenue * 100) < 45,
+    below_margin_target: data.revenue > 0 && ((data.revenue - data.cost) / data.revenue * 100) < 45,
   })).sort((a, b) => b.revenue - a.revenue);
 
-  return { period: p, service_lines: lines, margin_target: '55%' };
+  return { period: p, service_lines: lines, margin_floor: '45%', margin_target: '50-55%' };
 }
 
 
