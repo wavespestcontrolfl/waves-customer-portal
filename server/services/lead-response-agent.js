@@ -23,13 +23,12 @@ const db = require('../models/db');
 const { executeLeadTool } = require('./lead-response-tools');
 const { getBreaker } = require('./intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('./intelligence-bar/tool-events');
-const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
 // Tools whose failure means the agent is working with incomplete context.
 // If any of these fail, we won't let the agent auto-send a personalized SMS —
-// we swap to a safe generic ack and queue the draft for Virginia/Adam.
+// queue the draft for Virginia/Adam.
 const CRITICAL_CONTEXT_TOOLS = new Set([
   'get_customer_context',
   'check_existing_estimates',
@@ -206,81 +205,28 @@ const LeadResponseAgent = {
           const toolStartedAt = Date.now();
 
           // Pre-send quality check: if critical context is missing, don't
-          // let the agent auto-send a personalized SMS. Swap to a safe
-          // generic acknowledgment and queue the draft for human review.
+          // let the agent auto-send a personalized SMS. Queue the draft for
+          // human review without sending a generic customer acknowledgment.
           if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
-            logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Falling back to safe generic response.`);
-            const safeMessage = await renderRequiredSmsTemplate('lead_safe_ack', {
-              first_name: lead.name?.split(' ')[0] || 'there',
-            }, {
-              workflow: 'lead_safe_ack',
-              entity_type: lead.leadId ? 'lead' : 'customer',
-              entity_id: lead.leadId || lead.customerId,
-            });
+            logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Queueing draft for human review.`);
             try {
               await executeLeadTool('queue_for_adam', {
                 lead_id: lead.leadId,
                 customer_id: lead.customerId,
-                reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Generic ack sent; please review and follow up.`,
-                draft_message: toolInput.message || '',
+                reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Please review and follow up.`,
+                draft_response: toolInput.message || '',
               });
-              // Send the safe generic message directly. send_lead_response
-              // can now return non-thrown blocked/failed outcomes (consent
-              // block, suppression, provider failure) — capture the actual
-              // result instead of assuming success.
-              const safeResult = await executeLeadTool('send_lead_response', {
-                lead_id: lead.leadId,
-                customer_id: lead.customerId,
-                message: safeMessage,
-              });
-              if (safeResult && safeResult.sent === true) {
-                toolResult = {
-                  sent: true,
-                  fallback: true,
-                  note: 'Sent safe generic ack and queued full draft for human review due to missing context.',
-                };
-                actionTaken = 'safe_fallback_sent';
-              } else if (safeResult && safeResult.blocked === true) {
-                // Wrapper-policy block (e.g. opt-out). Lead is already
-                // queued for Adam; the missed ack is recorded so ops
-                // triage sees the lead didn't go silent — we just
-                // couldn't text. Not a system failure (no breaker bump).
-                toolResult = {
-                  sent: false,
-                  fallback: true,
-                  blocked: true,
-                  code: safeResult.code,
-                  reason: safeResult.reason,
-                  note: 'Queued for Adam; safe-ack SMS blocked by middleware (consent/suppression/voice).',
-                };
-                actionTaken = 'safe_fallback_blocked_queued';
-              } else {
-                // Provider failure on the fallback send. Lead is still
-                // queued for Adam — that's the real backstop. Surface
-                // failed/error in toolResult AND flip the local `failed`
-                // flag so the API event at the bottom of the loop gets
-                // is_error:true, recordToolEvent logs success:false, and
-                // the breaker bumps on repeated fallback-provider outages
-                // (codex P1 round-5: previous version only set
-                // toolResult.failed, leaving local `failed` unset, so
-                // fallback provider failures were silently reported as
-                // successful tool runs and never tripped the breaker).
-                toolResult = {
-                  sent: false,
-                  fallback: true,
-                  failed: true,
-                  error: (safeResult && safeResult.error) || 'fallback send failed',
-                  note: 'Queued for Adam; safe-ack SMS provider failure.',
-                };
-                actionTaken = 'safe_fallback_failed_queued';
-                failed = true;
-                toolError = toolResult.error;
-                leadToolBreaker.recordFailure();
-              }
+              toolResult = {
+                sent: false,
+                queued: true,
+                autoSendSuppressed: true,
+                note: 'Queued for human review due to missing context; no fallback SMS sent.',
+              };
+              actionTaken = 'auto_send_suppressed_queued';
             } catch (err) {
-              toolResult = { error: `Safe fallback failed: ${err.message}` };
+              toolResult = { error: `Human-review queue failed: ${err.message}` };
               failed = true;
-              logger.error(`[lead-agent] Safe fallback failed: ${err.message}`);
+              logger.error(`[lead-agent] Human-review queue failed: ${err.message}`);
             }
           } else if (leadToolBreaker.isTripped()) {
             toolResult = leadToolBreaker.fastFailResult();
