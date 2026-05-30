@@ -2764,6 +2764,14 @@ function renderPage(token, estimate, estData) {
   const hasRealOneTime = realOneTimeRows.length > 0;
   const oneTimeRows = realOneTimeRows;
   const oneTimeRowsTotal = hasRealOneTime ? separatelyBilledOneTimeTotal : onetimeTotal;
+  const oneTimeItemsCardHtml = oneTimeRows ? `
+  <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
+    <h3>${isOneTimeOnly ? 'Service details' : 'One-time items (billed separately)'}</h3>
+    <table>${oneTimeRows}
+      <tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
+    </table>
+    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
+  </div>` : '';
 
   const perksHtml = (hasOnlyLawnCareServices
     ? LAWN_CARE_PERKS
@@ -3085,11 +3093,11 @@ function renderPage(token, estimate, estData) {
   .pay-pref-grid.options{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
   @media(max-width:560px){.pay-pref-grid,.pay-pref-grid.options{grid-template-columns:1fr}}
   .pay-pref-choice{display:flex;flex-direction:column;gap:8px}
-  .pay-pref-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:4px;width:100%}
+  .pay-pref-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:14px;text-align:center;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;width:100%}
   .pay-pref-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
   .pay-pref-btn[disabled]{opacity:.5;cursor:not-allowed}
   .pay-pref-btn .pay-pref-title{font-size:14px;font-weight:600;color:#1B2C5B}
-  .pay-pref-note{font-size:13px;color:#6B7280;line-height:1.45;padding:0 2px}
+  .pay-pref-note{font-size:13px;color:#6B7280;line-height:1.45;padding:0 2px;text-align:center}
   .pay-pref-choice[hidden]{display:none}
   .pay-pref-btn[hidden]+.pay-pref-note{display:none}
   .pay-pref-btn[aria-pressed="true"]{box-shadow:0 0 0 3px rgba(27,44,91,.16)}
@@ -3219,6 +3227,7 @@ ${shellTopBar()}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
     ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
+    ${oneTimeItemsCardHtml}
   </div>
 
   ${aiBlockHtml}
@@ -3273,21 +3282,12 @@ ${shellTopBar()}
       ${existingAppointment ? '<div class="reservation-banner"><span>Appointment already scheduled</span></div>' : '<div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>'}
       ${existingAppointment ? '<div class="review-payment-summary" id="existing-review-pay-summary" aria-live="polite"></div>' : ''}
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
+        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${existingAppointment ? '' : escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">${existingAppointment ? '' : 'You will be taken to a secure Stripe page to add your card.'}</span></button>
         ${existingAppointment ? '' : '<button type="button" class="pay-pref-btn" data-change-booking-pick><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>'}
       </div>
     </div>
   </section>
   `}
-
-  ${oneTimeRows ? `
-  <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
-    <h3>${isOneTimeOnly ? 'Service details' : 'One-time items (billed separately)'}</h3>
-    <table>${oneTimeRows}
-      <tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
-    </table>
-    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
-  </div>` : ''}
 
   ${quoteRequired || isOneTimeOnly ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
@@ -5509,14 +5509,7 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
     // heads-up — either the customer wants a bundle we couldn't auto-apply,
     // or they've just self-served a tier upgrade and we should follow up.
     try {
-      const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate',
-        bundled ? `Bundle self-applied: ${estimate.customer_name}` : `Bundle inquiry: ${estimate.customer_name}`,
-        bundled
-          ? `Added ${bundled.addedService} → ${bundled.tier} @ $${bundled.newMonthly}/mo`
-          : `Interested in adding ${suggestedService || 'a service'} to ${estimate.waveguard_tier || 'Bronze'} plan`,
-        { icon: '\u{1F4E6}', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
-      );
+      await fireBundleQuoteRequestedNotification({ estimate, suggestedService, bundled });
     } catch (e) { logger.error(`[estimate] Bundle inquiry notification failed: ${e.message}`); }
 
     res.json({ success: true, bundled });
@@ -6286,6 +6279,22 @@ function buildAcceptOfficeFallback({
     return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard annual prepay${amountText}. Invoice follow-up needed.`;
   }
   return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Onboarding link sent.`;
+}
+
+async function fireBundleQuoteRequestedNotification({ estimate, suggestedService, bundled }, triggerFn) {
+  if (!estimate) return null;
+  const trigger = triggerFn || require('../services/notification-triggers').triggerNotification;
+  return trigger('bundle_quote_requested', {
+    estimateId: estimate.id,
+    customerId: estimate.customer_id || null,
+    customerName: estimate.customer_name || 'Customer',
+    suggestedService: suggestedService || 'a service',
+    bundled: !!bundled,
+    previousTier: estimate.waveguard_tier || 'Bronze',
+    previousMonthly: Number(estimate.monthly_total || 0),
+    newTier: bundled?.tier || null,
+    newMonthly: bundled?.newMonthly ?? null,
+  });
 }
 
 function buildAcceptNotificationPayload({
@@ -8325,6 +8334,7 @@ module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
+module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
 module.exports.renderEditableSmsTemplate = renderEditableSmsTemplate;

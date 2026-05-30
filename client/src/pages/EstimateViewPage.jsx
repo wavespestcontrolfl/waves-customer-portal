@@ -981,6 +981,27 @@ function ExistingAppointmentCard({ appointment }) {
 
 function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode }) {
   const usingExistingAppointment = !!existingAppointment;
+  const paymentLabel = invoiceMode
+    ? 'Invoice due now'
+    : paymentPreference === 'card_on_file'
+      ? 'Pay after each visit'
+      : paymentPreference === 'prepay_annual'
+        ? 'Pay the 12-month plan in full'
+        : 'Pay at the visit';
+  const confirmLabel = usingExistingAppointment
+    ? paymentPreference === 'card_on_file'
+      ? 'Confirm and save card'
+      : paymentPreference === 'prepay_annual'
+        ? 'Confirm annual prepay'
+        : 'Confirm appointment'
+    : 'Confirm booking';
+  const confirmSub = usingExistingAppointment
+    ? paymentPreference === 'card_on_file'
+      ? 'Your existing appointment stays scheduled. next step saves your card for autopay. Service visits are billed after completion.'
+      : paymentPreference === 'prepay_annual'
+        ? 'Your existing appointment stays scheduled. Annual prepay invoice will be reviewed and sent after approval.'
+        : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
+    : '';
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
@@ -991,12 +1012,8 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
         {usingExistingAppointment ? 'Confirm payment setup' : 'Confirm your booking'}
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
-        Pay option: <strong>{
-          invoiceMode ? 'Invoice due now'
-          : paymentPreference === 'card_on_file' ? 'Card on file'
-          : paymentPreference === 'prepay_annual' ? 'Pay the year upfront'
-          : 'At the visit'
-        }</strong>
+        {usingExistingAppointment ? 'Selected payment setup: ' : 'Pay option: '}
+        <strong>{paymentLabel}</strong>{usingExistingAppointment ? '.' : null}
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
         {usingExistingAppointment
@@ -1012,7 +1029,12 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
             padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
             border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
           }}
-        >{usingExistingAppointment ? 'Confirm setup' : 'Confirm booking'}</button>
+        >{confirmLabel}</button>
+        {confirmSub ? (
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
+            {confirmSub}
+          </div>
+        ) : null}
         {!usingExistingAppointment ? (
           <button
             type="button"
