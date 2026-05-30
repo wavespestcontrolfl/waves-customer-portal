@@ -162,6 +162,25 @@ describe('lawn service report outline context', () => {
     expect(context.contextCopy).toContain('sent on 2026-05-30');
   });
 
+  test('formats outline reference dates in Eastern time', async () => {
+    const context = await loadLawnProgramOverviewContext(makeOutlineKnex({
+      id: 'packet-1',
+      title: 'Your Waves Lawn Care Program Overview',
+      status: 'sent',
+      estimate_id: 'estimate-1',
+      turf_type: 'st_augustine',
+      sent_at: '2026-06-02T01:30:00.000Z',
+      summary_json: { turfLabel: 'St. Augustine' },
+      content_json: {},
+    }), {
+      customer_id: 'customer-1',
+      service_data: JSON.stringify({ estimateId: 'estimate-1' }),
+    }, 'lawn');
+
+    expect(context.contextCopy).toContain('sent on 2026-06-01');
+    expect(context.contextCopy).not.toContain('sent on 2026-06-02');
+  });
+
   test('returns limited context for lawn reports without an outline', async () => {
     const context = await loadLawnProgramOverviewContext(makeOutlineKnex(null), {
       customer_id: 'customer-1',

@@ -23,7 +23,7 @@ const {
   formatTechnicianForCustomer,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
-const { parseETDateTime } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 let PhotoService = null;
 try {
@@ -1221,7 +1221,7 @@ function outlineIsoDate(value) {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toISOString().slice(0, 10);
+  return etDateString(date);
 }
 
 function outlineReportReferenceAt(service = {}, scheduledService = {}, structured = {}, serviceData = {}) {
