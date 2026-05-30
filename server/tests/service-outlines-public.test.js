@@ -163,4 +163,38 @@ describe('public service outline packets', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'viewed' }));
   });
+
+  test('does not count CTA telemetry against the read limiter', async () => {
+    const packet = {
+      id: 'packet-1',
+      status: 'viewed',
+      title: 'Your Waves Lawn Care Program Overview',
+      content_json: { cta: { estimatePath: '/estimate/1' } },
+      summary_json: {},
+      customer_id: 'customer-1',
+      revoked_at: null,
+      expires_at: null,
+    };
+    const readChain = chain({ first: jest.fn().mockResolvedValue(packet) });
+    const insertChain = chain();
+    db.mockImplementation((table) => {
+      if (table === 'service_outline_events') return insertChain;
+      if (table === 'service_outline_packets') return readChain;
+      return chain();
+    });
+
+    await withServer(async (baseUrl) => {
+      const responses = [];
+      for (let i = 0; i < 61; i += 1) {
+        responses.push(await fetch(`${baseUrl}/service-outlines/${VALID_TOKEN}/cta-click`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ cta: 'view_estimate', target: '/estimate/1' }),
+        }));
+      }
+      expect(responses.every((res) => res.status === 204)).toBe(true);
+    });
+
+    expect(insertChain.insert).toHaveBeenCalledTimes(61);
+  });
 });

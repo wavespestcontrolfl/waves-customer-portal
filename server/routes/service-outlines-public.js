@@ -26,8 +26,6 @@ const outlineEventLimiter = rateLimit({
   message: { error: 'Too many service outline events. Please try again in a minute.' },
 });
 
-router.use(outlineLimiter);
-
 function canServePublicPacket(packet) {
   return packet && PUBLIC_PACKET_STATUSES.has(String(packet.status || '').toLowerCase());
 }
@@ -79,7 +77,7 @@ function tokenExpiresAt(packet, tokenRecord) {
   return tokenRecord?.expires_at || packet?.expires_at || null;
 }
 
-router.get('/:token', async (req, res, next) => {
+router.get('/:token', outlineLimiter, async (req, res, next) => {
   try {
     setPublicPacketHeaders(res);
     const token = normalizeTokenParam(req);
