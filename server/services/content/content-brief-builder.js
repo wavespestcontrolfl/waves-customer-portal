@@ -153,6 +153,46 @@ const VOICE_CONSTRAINTS = {
   ],
 };
 
+// Answer-engine (AEO) treatment. When a brief originates from an aeo_gap
+// opportunity — a city×service that answer engines (ChatGPT/Gemini/Claude/AI
+// Overview) are NOT citing Waves for — overlay extractability requirements so
+// the page can actually be quoted: a self-contained direct-answer block up top,
+// an explicit FAQ section, and FAQPage schema. The seo-completion-gate then
+// enforces that requesting FAQPage means a visible FAQ exists, so this is
+// self-reinforcing. Inert outside aeo_gap (gated upstream by GATE_AEO_GAP_MINING).
+//
+// customer-question is intentionally EXCLUDED: that contract already answers
+// the question in the first paragraph (direct answer is built in) and forbids
+// FAQPage schema (deprecated May 2026, per writer-agent-config + quality-gate).
+const AEO_TREATED_PAGE_TYPES = new Set([
+  'city-service', 'supporting-blog', 'refresh',
+]);
+
+function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, voiceConstraints }) {
+  if (!isAeoGap || !AEO_TREATED_PAGE_TYPES.has(pageType)) {
+    return { requiredSections, schemaTypes, voiceConstraints };
+  }
+  const sections = [...requiredSections];
+  if (!sections.some((s) => /direct-answer/i.test(s))) {
+    sections.unshift(
+      'direct-answer block (40–60 words, self-contained, answers the core query in the opening — written to be quoted verbatim by an answer engine)'
+    );
+  }
+  if (!sections.some((s) => /\bFAQ\b/i.test(s))) {
+    sections.push('FAQ section (3–5 Q/A pairs phrased exactly how a SWFL homeowner would ask an AI assistant)');
+  }
+  const schema = Array.from(new Set([...schemaTypes, 'FAQPage']));
+  const voice = {
+    ...voiceConstraints,
+    aeo_notes: [
+      'Name Waves Pest Control in one unambiguous sentence near the top (licensed/insured SWFL pest & lawn company) so the entity is clear to an answer engine.',
+      'Answer the core question in the first 1–2 sentences — direct answer before context.',
+      'Write self-contained, factual sentences (no "as mentioned above") so any paragraph stands alone when extracted.',
+    ],
+  };
+  return { requiredSections: sections, schemaTypes: schema, voiceConstraints: voice };
+}
+
 // Canonical URL slug component per service for city-service pages.
 // pest → "pest-control" (so URL is /pest-control-bradenton-fl/)
 // lawn → "lawn-care" (NOT lawn-control — that's not a real page)
@@ -382,6 +422,15 @@ class ContentBriefBuilder {
   _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null }) {
     const pageType = decision.page_type;
 
+    // Overlay answer-engine extractability requirements for aeo_gap briefs.
+    const aeo = applyAeoTreatment({
+      isAeoGap: opportunity.bucket === 'aeo_gap',
+      pageType,
+      requiredSections: REQUIRED_SECTIONS[pageType] || [],
+      schemaTypes: SCHEMA_TYPES[pageType] || [],
+      voiceConstraints: VOICE_CONSTRAINTS,
+    });
+
     return {
       facts_pack: factsPack,
       opportunity_id: opportunity.id,
@@ -441,8 +490,8 @@ class ContentBriefBuilder {
           }
         : null,
 
-      required_sections: REQUIRED_SECTIONS[pageType] || [],
-      schema_types: SCHEMA_TYPES[pageType] || [],
+      required_sections: aeo.requiredSections,
+      schema_types: aeo.schemaTypes,
       internal_links_to_add: this._internalLinksFor(opportunity, pageType),
       seo_requirements: buildSeoRequirements({
         page_type: pageType,
@@ -451,7 +500,7 @@ class ContentBriefBuilder {
         service: opportunity.service || null,
       }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
-      voice_constraints: VOICE_CONSTRAINTS,
+      voice_constraints: aeo.voiceConstraints,
 
       publish_window: nextWeekday9amET().toISOString(),
       human_review_required: decision.human_review_required,
@@ -566,4 +615,5 @@ module.exports._internals = {
   SERVICE_HUB_LINKS,
   buildSeoRequirements,
   nextWeekday9amET,
+  applyAeoTreatment,
 };
