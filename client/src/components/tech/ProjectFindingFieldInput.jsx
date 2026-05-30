@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import AddressAutocomplete from '../AddressAutocomplete';
 import { adminFetch } from '../../lib/adminFetch';
+import DictationButton from './DictationButton';
+
+// Append a dictated chunk to an existing field value with a single space.
+function appendDictation(current, chunk) {
+  const base = String(current || '');
+  return base.trim() ? `${base.replace(/\s+$/, '')} ${chunk}` : chunk;
+}
 
 const ESTIMATE_INPUT_STYLE = {
   minHeight: 48,
@@ -413,6 +420,7 @@ export default function ProjectFindingFieldInput({
   inputStyle,
   products = [],
   onProductSelect,
+  palette,
 }) {
   if (field.type === 'address') {
     return (
@@ -491,27 +499,40 @@ export default function ProjectFindingFieldInput({
 
   if (field.type === 'textarea') {
     return (
-      <textarea
-        id={id}
-        name={name}
-        value={value || ''}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={field.placeholder || ''}
-        rows={3}
-        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE, resize: 'vertical', minHeight: 92 }}
-      />
+      <div style={{ position: 'relative' }}>
+        <textarea
+          id={id}
+          name={name}
+          value={value || ''}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={field.placeholder || ''}
+          rows={3}
+          style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE, resize: 'vertical', minHeight: 92, paddingRight: 44 }}
+        />
+        <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
+          <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
+        </div>
+      </div>
     );
   }
 
+  const isDateOrTime = field.type === 'date' || field.type === 'time';
   return (
-    <input
-      id={id}
-      name={name}
-      type={field.type === 'date' || field.type === 'time' ? field.type : 'text'}
-      value={value || ''}
-      onChange={(event) => onChange(event.target.value)}
-      placeholder={field.placeholder || ''}
-      style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE }}
-    />
+    <div style={{ position: 'relative' }}>
+      <input
+        id={id}
+        name={name}
+        type={isDateOrTime ? field.type : 'text'}
+        value={value || ''}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={field.placeholder || ''}
+        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE, ...(isDateOrTime ? {} : { paddingRight: 44 }) }}
+      />
+      {!isDateOrTime && (
+        <div style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)' }}>
+          <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
+        </div>
+      )}
+    </div>
   );
 }
