@@ -141,6 +141,28 @@ function isCleanCrossSourceCluster(events) {
   return distinct >= 2 && distinct === sourceIds.length;
 }
 
+const normalizeVenue = (v) => String(v || '').trim().toLowerCase();
+
+/**
+ * Whether a cluster is safe to merge UNATTENDED. findDuplicateClusters matches
+ * on title + ET day + city only — not enough for an automated reject, because
+ * two genuinely different same-title events (e.g. "Trivia Night" at different
+ * venues, or a matinee vs an evening showing) would group together. On top of
+ * the pure cross-source check, require the rows to also agree on a non-empty
+ * venue AND the exact start_at instant — a same-title/day/city/venue/time match
+ * across ≥2 sources is almost certainly one real event. Anything looser
+ * (different/blank venue, different time) is left for the manual
+ * /events/duplicates review rather than auto-rejected.
+ */
+function isAutoMergeableCluster(events) {
+  if (!isCleanCrossSourceCluster(events)) return false;
+  const venues = events.map((e) => normalizeVenue(e.venue_name));
+  if (venues.some((v) => !v) || new Set(venues).size !== 1) return false;
+  const starts = events.map((e) => (e.start_at ? new Date(e.start_at).getTime() : NaN));
+  if (starts.some((t) => Number.isNaN(t)) || new Set(starts).size !== 1) return false;
+  return true;
+}
+
 // Fields the survivor must carry to stay digest-eligible/complete. event_url is
 // hard-required by isEligibleForFreshDigest; image_url is a quality/score field.
 const BACKFILL_FIELDS = ['event_url', 'image_url'];
@@ -180,14 +202,14 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
     .where('e.start_at', '<=', endET)
     .select(
       'e.id', 'e.title', 'e.start_at', 'e.city', 'e.image_url', 'e.event_url',
-      'e.source_id', 'e.pulled_at', 'e.admin_status', 's.priority_tier as source_priority_tier',
+      'e.source_id', 'e.pulled_at', 'e.admin_status', 'e.venue_name', 's.priority_tier as source_priority_tier',
     );
 
   const clusters = findDuplicateClusters(events).slice(0, maxClusters);
   let mergedEvents = 0;
   let mergedClusters = 0;
   for (const cluster of clusters) {
-    if (!isCleanCrossSourceCluster(cluster.events)) continue;
+    if (!isAutoMergeableCluster(cluster.events)) continue;
 
     const survivor = pickSurvivor(cluster.events);
     const loserRows = cluster.events.filter((e) => e.id !== survivor.id);
@@ -211,4 +233,4 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
   return { clustersFound: clusters.length, mergedClusters, mergedEvents };
 }
 
-module.exports = { mergeEvents, pickSurvivor, isCleanCrossSourceCluster, computeSurvivorBackfill, autoMergeDuplicates, EVENT_MERGE_LOCK_KEY };
+module.exports = { mergeEvents, pickSurvivor, isCleanCrossSourceCluster, isAutoMergeableCluster, computeSurvivorBackfill, autoMergeDuplicates, EVENT_MERGE_LOCK_KEY };

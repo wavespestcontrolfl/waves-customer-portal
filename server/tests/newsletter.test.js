@@ -32,7 +32,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
-const { pickSurvivor, isCleanCrossSourceCluster, computeSurvivorBackfill } = require('../services/event-dedup');
+const { pickSurvivor, isCleanCrossSourceCluster, isAutoMergeableCluster, computeSurvivorBackfill } = require('../services/event-dedup');
 const { isEligibleForFreshDigest, cityToZone, weekLockKey } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
@@ -1411,6 +1411,37 @@ describe('event-dedup isCleanCrossSourceCluster', () => {
   test('false for empty / single-element input', () => {
     expect(isCleanCrossSourceCluster([])).toBe(false);
     expect(isCleanCrossSourceCluster([ev('a', 's1')])).toBe(false);
+  });
+});
+
+describe('event-dedup isAutoMergeableCluster', () => {
+  const T = '2026-06-10T23:00:00Z';
+  const ev = (id, o = {}) => ({ id, source_id: 's1', venue_name: 'Van Wezel', start_at: T, ...o });
+
+  test('true when ≥2 sources agree on venue AND exact start time', () => {
+    expect(isAutoMergeableCluster([ev('a', { source_id: 's1' }), ev('b', { source_id: 's2' })])).toBe(true);
+  });
+
+  test('false when venues differ (e.g. same-title events at different venues)', () => {
+    expect(isAutoMergeableCluster([
+      ev('a', { source_id: 's1', venue_name: 'Venue A' }),
+      ev('b', { source_id: 's2', venue_name: 'Venue B' }),
+    ])).toBe(false);
+  });
+
+  test('false when start times differ (e.g. matinee vs evening)', () => {
+    expect(isAutoMergeableCluster([
+      ev('a', { source_id: 's1', start_at: '2026-06-10T19:00:00Z' }),
+      ev('b', { source_id: 's2', start_at: '2026-06-10T23:00:00Z' }),
+    ])).toBe(false);
+  });
+
+  test('false when any row has a blank/null venue', () => {
+    expect(isAutoMergeableCluster([ev('a', { source_id: 's1', venue_name: null }), ev('b', { source_id: 's2' })])).toBe(false);
+  });
+
+  test('false when not a clean cross-source cluster (single source)', () => {
+    expect(isAutoMergeableCluster([ev('a', { source_id: 's1' }), ev('b', { source_id: 's1' })])).toBe(false);
   });
 });
 
