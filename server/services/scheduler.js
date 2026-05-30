@@ -468,6 +468,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // THU–SUN 2PM ET — Missed-tick catch-up for the Thursday-7AM autopilot. If
+  // the process was down at 7AM Thursday, the weekly draft never got created.
+  // Re-run autoDraftFlagship ONLY for a week that was NEVER ATTEMPTED (no
+  // calendar row, or status 'planned'). A deliberately-deleted draft (status
+  // 'drafted' with a null send_id) is left alone so it can't silently reappear,
+  // and drafted/scheduled/sent/skipped weeks are already handled. The autopilot's
+  // own advisory lock + dedupe make a catch-up invocation safe if it races the
+  // 7AM run. Runs daily Thu–Sun so a mid-week recovery still lands the draft.
+  // =========================================================================
+  cron.schedule('0 14 * * 4,5,6,0', async () => {
+    try {
+      const { getCurrentNewsletterThursday } = require('./event-freshness');
+      const weekOf = getCurrentNewsletterThursday();
+      const cal = await db('newsletter_calendar').where('week_of', weekOf).first();
+      // Only catch up weeks that were never attempted.
+      if (cal && cal.status !== 'planned') return;
+      const { autoDraftFlagship } = require('./newsletter-autopilot');
+      const result = await autoDraftFlagship();
+      logger.info(`[newsletter-autopilot-catchup] ${result.skipped ? 'skipped' : 'drafted'}: ${result.reason || result.sendId}`);
+    } catch (err) {
+      logger.error(`[newsletter-autopilot-catchup] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM ET — Newsletter indexability decay: noindex stale event digests
   // Event digest archive pages older than 30 days add nothing to search —
   // stale "This Weekend in SWFL" content just dilutes the index. Flips
