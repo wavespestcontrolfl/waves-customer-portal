@@ -86,13 +86,20 @@ async function mergeEvents(primaryId, toMerge) {
 }
 
 /**
- * Choose the survivor of a duplicate cluster: keep the row from the
- * highest-priority source (lowest priority_tier; nulls last), then the most
- * complete (image > url), then the earliest-pulled (most established).
+ * Choose the survivor of a duplicate cluster:
+ *   1. a human-curated row (admin_status approved/featured) over an un-curated
+ *      one — so the auto-merge never drops a curated event from the digest in
+ *      favor of a pending duplicate (the digest only shows approved/featured);
+ *   2. then the highest-priority source (lowest priority_tier; nulls last);
+ *   3. then the most complete (image > url);
+ *   4. then the earliest-pulled (most established).
  */
 function pickSurvivor(events) {
+  const curatedRank = (e) => (['approved', 'featured'].includes(e.admin_status) ? 0 : 1);
   const completeness = (e) => (e.image_url ? 2 : 0) + (e.event_url ? 1 : 0);
   return [...events].sort((a, b) => {
+    const cr = curatedRank(a) - curatedRank(b);
+    if (cr !== 0) return cr;
     const ta = a.source_priority_tier == null ? Infinity : Number(a.source_priority_tier);
     const tb = b.source_priority_tier == null ? Infinity : Number(b.source_priority_tier);
     if (ta !== tb) return ta - tb;
@@ -122,13 +129,19 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
     .where('e.start_at', '<=', endET)
     .select(
       'e.id', 'e.title', 'e.start_at', 'e.city', 'e.image_url', 'e.event_url',
-      'e.source_id', 'e.pulled_at', 's.priority_tier as source_priority_tier',
+      'e.source_id', 'e.pulled_at', 'e.admin_status', 's.priority_tier as source_priority_tier',
     );
 
   const clusters = findDuplicateClusters(events).slice(0, maxClusters);
   let mergedEvents = 0;
   let mergedClusters = 0;
   for (const cluster of clusters) {
+    // findDuplicateClusters groups by title+day+city only — it does NOT require
+    // multiple sources. A single feed emitting two legit same-day/same-title
+    // rows (e.g. separate showtimes with different external_ids) must NOT be
+    // auto-merged. This feature is for CROSS-source dupes, so require ≥2 sources.
+    if (new Set(cluster.events.map((e) => e.source_id)).size < 2) continue;
+
     const survivor = pickSurvivor(cluster.events);
     const losers = cluster.events.filter((e) => e.id !== survivor.id).map((e) => e.id);
     if (losers.length === 0) continue;
