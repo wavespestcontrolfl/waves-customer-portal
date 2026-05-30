@@ -36,6 +36,14 @@ const COMPETITORS = [
 ];
 const URL_RE = /https?:\/\/[^\s)<>\]"']+/gi;
 
+// pg returns jsonb columns already parsed as JS arrays/objects, but legacy rows
+// (and string inserts) may still be strings — normalize either shape to an array.
+function asJsonArray(val) {
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') { try { const p = JSON.parse(val); return Array.isArray(p) ? p : []; } catch { return []; } }
+  return [];
+}
+
 // Cost guard — hard ceiling on probes per run regardless of query × platform math.
 const MAX_PROBES_PER_RUN = Number(process.env.LLM_MENTIONS_MAX_PROBES || 200);
 
@@ -337,9 +345,7 @@ class LLMMentionProber {
     // Which Waves pages get cited (across the recent window).
     const pageCites = {};
     for (const r of rows) {
-      let urls = [];
-      try { urls = JSON.parse(r.waves_cited_urls || '[]'); } catch { /* legacy */ }
-      for (const u of urls) pageCites[u] = (pageCites[u] || 0) + 1;
+      for (const u of asJsonArray(r.waves_cited_urls)) pageCites[u] = (pageCites[u] || 0) + 1;
     }
     const citedPages = Object.entries(pageCites)
       .map(([url, count]) => ({ url, count }))
@@ -349,9 +355,7 @@ class LLMMentionProber {
     // Competitor presence across the grid.
     const compCount = {};
     for (const r of grid) {
-      let comps = [];
-      try { comps = JSON.parse(r.competitors_mentioned || '[]'); } catch { /* legacy */ }
-      for (const c of comps) compCount[c.name] = (compCount[c.name] || 0) + 1;
+      for (const c of asJsonArray(r.competitors_mentioned)) compCount[c.name] = (compCount[c.name] || 0) + 1;
     }
     const competitors = Object.entries(compCount)
       .map(([name, count]) => ({ name, count }))
