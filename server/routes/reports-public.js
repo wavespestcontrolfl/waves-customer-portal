@@ -80,6 +80,7 @@ const ALLOWED_REPORT_EVENTS = new Set([
   'pressure_trend_viewed',
   'pressure_trend_expanded',
   'lawn_assessment_viewed',
+  'service_report_linked_to_outline',
   'property_defense_status_viewed',
   'bug_file_viewed',
   'why_activity_viewed',
