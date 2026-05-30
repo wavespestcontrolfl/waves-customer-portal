@@ -13,7 +13,7 @@ exports.up = async function up(knex) {
     version_from: 'v4.3',
     version_to: 'v4.3',
     changed_by: 'codex-2026-05-30',
-    category: 'documentation',
+    category: 'docs',
     summary: 'Refresh one-time pest DB-synced pricing regression baselines.',
   };
 
@@ -48,7 +48,7 @@ exports.down = async function down(knex) {
       version_from: 'v4.3',
       version_to: 'v4.3',
       changed_by: 'codex-2026-05-30',
-      category: 'documentation',
+      category: 'docs',
       summary: 'Refresh one-time pest DB-synced pricing regression baselines.',
     })
     .del();

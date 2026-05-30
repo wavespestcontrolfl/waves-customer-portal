@@ -95,7 +95,7 @@ async function insertChangelog(knex) {
     version_from: 'v4.3',
     version_to: 'v4.3-lawn-45-floor',
     changed_by: 'codex-2026-05-30',
-    category: 'pricing_policy',
+    category: 'pricing',
     summary: 'Recalibrate recurring lawn pricing to a 45% fully loaded floor.',
   };
 
@@ -130,7 +130,7 @@ async function removeChangelog(knex) {
       version_from: 'v4.3',
       version_to: 'v4.3-lawn-45-floor',
       changed_by: 'codex-2026-05-30',
-      category: 'pricing_policy',
+      category: 'pricing',
       summary: 'Recalibrate recurring lawn pricing to a 45% fully loaded floor.',
     })
     .del();
