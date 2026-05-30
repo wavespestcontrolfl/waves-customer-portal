@@ -222,8 +222,8 @@ async function upsertEmail(parsed) {
     emailData.is_archived = true;
     emailData.classification = 'spam';
     emailData.auto_action = 'blocked_sender_trashed';
-    await db('emails').insert(emailData).onConflict('gmail_id').ignore();
-    return true; // counted as new but auto-handled
+    const blockedInsert = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('id');
+    return blockedInsert.length > 0; // true only if this sync actually inserted it (else a concurrent sync won)
   }
 
   const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');

@@ -26,6 +26,7 @@ exports.up = async function up(knex) {
     knex.schema.hasColumn('customer_interactions', 'notes'),
     knex.schema.hasColumn('customer_interactions', 'status'),
   ]);
+  if (hasChannel && hasNotes && hasStatus) return;
 
   await knex.schema.alterTable('customer_interactions', (t) => {
     if (!hasChannel) t.string('channel', 30); // 'sms' | 'email' | 'voice' | 'internal' | 'lead_source'
@@ -42,6 +43,7 @@ exports.down = async function down(knex) {
     knex.schema.hasColumn('customer_interactions', 'notes'),
     knex.schema.hasColumn('customer_interactions', 'status'),
   ]);
+  if (!hasChannel && !hasNotes && !hasStatus) return;
 
   await knex.schema.alterTable('customer_interactions', (t) => {
     if (hasChannel) t.dropColumn('channel');
