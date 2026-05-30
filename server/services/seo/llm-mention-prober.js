@@ -22,7 +22,11 @@ const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const MODELS = require('../../config/models');
 const twilioNumbers = require('../../config/twilio-numbers');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
+
+// Trend/share-of-voice window. Fetch by date range rather than a fixed row cap
+// so a busy query set (≈queries × platforms rows/day) can't truncate history.
+const TREND_DAYS = 30;
 const { isEnabled } = require('../../config/feature-gates');
 
 let Anthropic = null;
@@ -335,9 +339,10 @@ class LLMMentionProber {
    * competitor presence, and which Waves pages get cited.
    */
   async getDashboard() {
+    const since = etDateString(addETDays(new Date(), -(TREND_DAYS - 1)));
     const rows = await db('seo_llm_mentions')
-      .orderBy('check_date', 'desc')
-      .limit(500);
+      .where('check_date', '>=', since)
+      .orderBy('check_date', 'desc');
 
     // Latest row per (query, platform) for the current-state grid.
     const latest = new Map();
@@ -368,7 +373,7 @@ class LLMMentionProber {
     const trend = Array.from(trendMap.values())
       .map(t => ({ ...t, shareOfVoice: t.total ? Math.round((t.mentioned / t.total) * 100) : 0 }))
       .sort((a, b) => a.date.localeCompare(b.date))
-      .slice(-30);
+      .slice(-TREND_DAYS);
 
     // Which Waves pages get cited (across the recent window).
     const pageCites = {};
