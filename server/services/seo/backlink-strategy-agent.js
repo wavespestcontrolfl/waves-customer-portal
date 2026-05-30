@@ -16,9 +16,39 @@ const { executeBacklinkTool } = require('./backlink-strategy-tools');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BACKLINK_STRATEGY_AGENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ID;
+const BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID
+  || process.env.MANAGED_AGENT_ENVIRONMENT_ID;
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
 const REQUIRED_TOOL_NAMES = ['list_prospects', 'create_link_prospects'];
+
+function buildSessionCreateBody(agentId, environmentId) {
+  return { agent: agentId, environment_id: environmentId };
+}
+
+function buildUserMessageEvent(text) {
+  return { type: 'user.message', content: [{ type: 'text', text }] };
+}
+
+function buildToolResultEvent(toolUseId, toolResult, { custom = true } = {}) {
+  if (custom) {
+    return {
+      type: 'user.custom_tool_result',
+      custom_tool_use_id: toolUseId,
+      content: [{ type: 'text', text: JSON.stringify(toolResult) }],
+      ...(toolResult?.error ? { is_error: true } : {}),
+    };
+  }
+  return {
+    type: 'tool_result',
+    tool_use_id: toolUseId,
+    content: [{ type: 'text', text: JSON.stringify(toolResult) }],
+  };
+}
+
+function sendSessionEvents(sessionId, events) {
+  return apiCall('POST', `/sessions/${sessionId}/events`, { events });
+}
 
 async function apiCall(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -39,7 +69,7 @@ async function apiCall(method, path, body) {
 }
 
 async function* streamSessionEvents(sessionId) {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/events?stream=true`, {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/events/stream`, {
     headers: {
       'x-api-key': ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
@@ -104,8 +134,8 @@ const BacklinkStrategyAgent = {
    * @returns {object} { sessionId, report, targetsAdded, gapsFound, durationSeconds }
    */
   async run(opts = {}) {
-    if (!ANTHROPIC_API_KEY || !BACKLINK_STRATEGY_AGENT_ID) {
-      throw new Error('Missing ANTHROPIC_API_KEY or BACKLINK_STRATEGY_AGENT_ID');
+    if (!ANTHROPIC_API_KEY || !BACKLINK_STRATEGY_AGENT_ID || !BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID) {
+      throw new Error('Missing ANTHROPIC_API_KEY, BACKLINK_STRATEGY_AGENT_ID, or BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID/MANAGED_AGENT_ENVIRONMENT_ID');
     }
 
     const startTime = Date.now();
@@ -132,17 +162,15 @@ const BacklinkStrategyAgent = {
     notify('starting', 'Creating backlink strategy session...');
     await this.assertAgentConfigSynced();
 
-    const session = await apiCall('POST', '/sessions', {
-      agent_id: BACKLINK_STRATEGY_AGENT_ID,
-    });
+    const session = await apiCall('POST', '/sessions', buildSessionCreateBody(
+      BACKLINK_STRATEGY_AGENT_ID,
+      BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID
+    ));
 
     const sessionId = session.id;
     logger.info(`[backlink-strategy] Session created: ${sessionId}`);
 
-    await apiCall('POST', `/sessions/${sessionId}/events`, {
-      type: 'user',
-      content: [{ type: 'text', text: prompt }],
-    });
+    await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
 
     let finalReport = '';
     let toolsExecuted = [];
@@ -167,7 +195,9 @@ const BacklinkStrategyAgent = {
         }
       }
 
-      if (event === 'tool_use' || data?.type === 'tool_use') {
+      const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
+      const isLegacyToolUse = event === 'tool_use' || data?.type === 'tool_use';
+      if (isCustomToolUse || isLegacyToolUse) {
         const toolName = data.name;
         const toolInput = data.input || {};
         const toolUseId = data.id;
@@ -199,6 +229,9 @@ const BacklinkStrategyAgent = {
           if (toolName === 'add_targets_to_queue' && toolResult.added) {
             targetsAdded += toolResult.added;
           }
+          if (toolName === 'create_link_prospects' && toolResult.added) {
+            targetsAdded += toolResult.added;
+          }
           if (toolName === 'scan_competitor_gaps' && toolResult.gaps) {
             gapsFound += toolResult.gaps;
           }
@@ -209,18 +242,17 @@ const BacklinkStrategyAgent = {
 
         toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
 
-        await apiCall('POST', `/sessions/${sessionId}/events`, {
-          type: 'tool_result',
-          tool_use_id: toolUseId,
-          content: [{ type: 'text', text: JSON.stringify(toolResult) }],
-        });
+        await sendSessionEvents(sessionId, [
+          buildToolResultEvent(toolUseId, toolResult, { custom: isCustomToolUse }),
+        ]);
       }
 
-      if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') {
+      const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
+      if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || stopReason === 'end_turn') {
         break;
       }
 
-      if (event === 'error') {
+      if (event === 'error' || event === 'session.error') {
         logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
         break;
       }
@@ -244,3 +276,4 @@ const BacklinkStrategyAgent = {
 };
 
 module.exports = BacklinkStrategyAgent;
+module.exports._test = { buildSessionCreateBody, buildUserMessageEvent, buildToolResultEvent };
