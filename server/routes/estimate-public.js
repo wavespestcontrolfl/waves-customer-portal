@@ -1283,6 +1283,9 @@ function recurringServiceKey(svc = {}) {
 
 function recurringServiceReceivesTierDiscount(svc = {}) {
   const key = recurringServiceKey(svc);
+  if (key === 'lawn_care') {
+    return svc.excludeFromPctDiscount !== true;
+  }
   if (
     svc.discountable === false ||
     svc.discount?.discountable === false ||
@@ -1544,9 +1547,17 @@ function recurringServicesWithSupplements(estResult = {}) {
     estResult.lineItems.forEach((item) => {
       const key = recurringServiceKey(item);
       if (!RECURRING_LINE_SERVICES.has(key)) return;
-      const annual = firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
-      const monthly = firstPositiveNumber(item.monthlyAfterDiscount, item.monthlyAfterCredits, item.monthly, item.mo, annual ? annual / 12 : null);
+      const annual = key === 'lawn_care'
+        ? firstPositiveNumber(item.annualBeforeDiscount, item.annual, item.ann)
+        : firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
+      const monthly = key === 'lawn_care'
+        ? firstPositiveNumber(item.monthlyBeforeDiscount, item.monthly, item.mo, annual ? annual / 12 : null)
+        : firstPositiveNumber(item.monthlyAfterDiscount, item.monthlyAfterCredits, item.monthly, item.mo, annual ? annual / 12 : null);
       if (!(annual > 0 || monthly > 0)) return;
+      const itemDiscount = key === 'lawn_care'
+        ? { ...(item.discount || {}), discountable: true }
+        : item.discount;
+      if (key === 'lawn_care' && itemDiscount) delete itemDiscount.policy;
       upsertSupplement(key, {
         service: key,
         name: item.displayName || item.label || recurringServiceDisplayName(key),
@@ -1559,10 +1570,10 @@ function recurringServicesWithSupplements(estResult = {}) {
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(item),
         waveGuardTierEligible: item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false,
         countsTowardWaveGuardTier: item.countsTowardWaveGuardTier !== false,
-        discountable: item.discountable ?? item.discount?.discountable,
-        discountEligible: item.discountEligible,
+        discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
+        discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
-        discount: item.discount,
+        discount: itemDiscount,
         pricingVersion: item.pricingVersion,
         pricingSource: item.pricingSource,
       });

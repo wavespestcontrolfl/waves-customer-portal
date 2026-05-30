@@ -1625,17 +1625,16 @@ export function calculateEstimate(inputs) {
       mo: selectedLawn.mo,
       perTreatment: selectedLawn.pa,
       visitsPerYear: selectedLawn.v,
-      discountable: false,
-      discountEligible: false,
-      waveGuardDiscountEligible: false,
+      discountable: true,
+      discountEligible: true,
+      waveGuardDiscountEligible: true,
       waveGuardTierEligible: true,
       countsTowardWaveGuardTier: true,
       discount: {
-        discountable: false,
+        discountable: true,
         requestedDiscountPercent: 0,
         appliedDiscountPercent: 0,
         effectiveDiscount: 0,
-        policy: 'LAWN_V2_NET_55_FLOOR_PRICE',
       },
       pricingVersion: selectedLawn.costs?.pricingVersion || LAWN_PRICING_V2.pricingVersion,
       pricingSource: selectedLawn.pricingSource,
@@ -2440,7 +2439,7 @@ export function calculateEstimate(inputs) {
   // Track per-line revenue for margin check
   const lineItems = [];
   const selectedRecurringLawn = R.lawn ? (R.lawn.find(t => t.recommended) || R.lawn.find(t => t.v === 9) || R.lawn[1]) : null;
-  if (selectedRecurringLawn) { ac++; ra += selectedRecurringLawn.ann; lineItems.push({ name: 'Lawn Care', service: 'lawn_care', ann: selectedRecurringLawn.ann, discountable: false }); }
+  if (selectedRecurringLawn) { ac++; ra += selectedRecurringLawn.ann; lineItems.push({ name: 'Lawn Care', service: 'lawn_care', ann: selectedRecurringLawn.ann, discountable: true }); }
   if (R.pest) { ac++; ra += R.pest.ann; lineItems.push({ name: 'Pest Control', service: 'pest_control', ann: R.pest.ann, discountable: true }); }
   if (R.ts) { ac++; ra += R.ts[1].ann; lineItems.push({ name: 'Tree & Shrub', service: 'tree_shrub', ann: R.ts[1].ann, discountable: true }); }
   // Palm Injection intentionally excluded from WaveGuard tier count + discounted total —
