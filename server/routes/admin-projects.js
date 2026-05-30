@@ -1618,7 +1618,12 @@ async function previewWdoInvoiceTotals(customer, fee) {
     return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
   } catch (err) {
     logger.warn(`[projects] WDO preview tax calc failed for ${customer?.id}: ${err.message}`);
-    return { subtotal, tax_amount: 0, total: subtotal };
+    // Mirror invoice.js's commercial TaxCalculator-failure fallback (the 7% legacy
+    // path at invoice.js:821-826) so the previewed total still matches what
+    // InvoiceService.create would bill on the same failure — never preview $250
+    // and then send $267.50.
+    const tax = Math.round(subtotal * 0.07 * 100) / 100;
+    return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
   }
 }
 
