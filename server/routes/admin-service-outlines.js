@@ -436,18 +436,6 @@ router.post('/:id/send', async (req, res, next) => {
     }) : publicUrl;
     const outcomes = {};
 
-    if (!canReuseToken) {
-      await db('service_outline_packets')
-        .where({ id: packet.id })
-        .update({
-          token_hash: hashToken(token),
-          token_last_four: token.slice(-4),
-          token_created_at: db.fn.now(),
-          expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 45),
-          updated_at: db.fn.now(),
-        });
-    }
-
     if (sendSms) {
       if (!estimate.customer_phone) {
         outcomes.sms = { ok: false, error: 'No phone on estimate' };
@@ -502,14 +490,23 @@ router.post('/:id/send', async (req, res, next) => {
 
     const hasSuccess = (outcomes.sms?.sent === true) || !!outcomes.email?.messageId;
     const [updated] = await db.transaction(async (trx) => {
+      const packetUpdate = {
+        status: hasSuccess ? 'sent' : packet.status,
+        sent_at: hasSuccess ? trx.fn.now() : packet.sent_at,
+        sent_method: hasSuccess ? method : packet.sent_method,
+        updated_at: trx.fn.now(),
+      };
+      if (hasSuccess && !canReuseToken) {
+        Object.assign(packetUpdate, {
+          token_hash: hashToken(token),
+          token_last_four: token.slice(-4),
+          token_created_at: trx.fn.now(),
+          expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 45),
+        });
+      }
       const [row] = await trx('service_outline_packets')
         .where({ id: packet.id })
-        .update({
-          status: hasSuccess ? 'sent' : packet.status,
-          sent_at: hasSuccess ? trx.fn.now() : packet.sent_at,
-          sent_method: hasSuccess ? method : packet.sent_method,
-          updated_at: trx.fn.now(),
-        })
+        .update(packetUpdate)
         .returning('*');
       if (sendSms) await logEvent(trx, row, 'sent_sms', req, outcomes.sms || {});
       if (sendEmail) await logEvent(trx, row, 'sent_email', req, outcomes.email || {});
@@ -518,8 +515,8 @@ router.post('/:id/send', async (req, res, next) => {
     });
 
     res.json({
-      packet: safePacket(updated, token),
-      publicUrl,
+      packet: safePacket(updated, hasSuccess || canReuseToken ? token : null),
+      publicUrl: hasSuccess || canReuseToken ? publicUrl : null,
       outcomes,
     });
   } catch (err) {
