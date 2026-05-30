@@ -31,6 +31,10 @@ function statusTone(status) {
   return status === "passed" ? "strong" : "neutral";
 }
 
+function isSendablePacketStatus(status) {
+  return ["approved", "sent", "viewed"].includes(String(status || "").toLowerCase());
+}
+
 function validationIcon(status) {
   if (status === "passed") return <CheckCircle2 size={16} strokeWidth={1.75} />;
   return <AlertTriangle size={16} strokeWidth={1.75} />;
@@ -222,7 +226,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
     try {
       let active = await ensurePacket();
       if (!active?.id) return;
-      if (active.status !== "approved") {
+      if (!isSendablePacketStatus(active.status)) {
         const approved = await adminFetch(`/admin/service-outlines/${active.id}/approve`, { method: "POST" });
         active = approved.packet || active;
         setPacket(active);
