@@ -202,4 +202,113 @@ router.get('/strategy/reports', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// LINK PROSPECTS — outbound link-building board (Backlink Manager M1)
+// =========================================================================
+
+const PROSPECT_STATUSES = ['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed', 'lost', 'rejected'];
+
+// GET /api/admin/backlink-agent/prospects — board list (filters + pagination)
+router.get('/prospects', async (req, res, next) => {
+  try {
+    const { status, source, link_type, q, page = 1, limit = 100 } = req.query;
+    let query = db('seo_link_prospects');
+    if (status) query = query.where({ status });
+    if (source) query = query.where({ source });
+    if (link_type) query = query.where({ link_type });
+    if (q) query = query.where((b) => b.whereILike('target_domain', `%${q}%`).orWhereILike('target_page', `%${q}%`));
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const items = await query.clone()
+      .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
+      .orderBy('domain_rating', 'desc')
+      .limit(parseInt(limit)).offset(offset);
+    res.json({ items });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/backlink-agent/prospects/stats — board KPIs
+router.get('/prospects/stats', async (req, res, next) => {
+  try {
+    const rows = await db('seo_link_prospects').select('status').count('* as c').groupBy('status');
+    const byStatus = {};
+    rows.forEach((r) => { byStatus[r.status] = parseInt(r.c); });
+    const live = byStatus.live || 0;
+    const indexed = byStatus.indexed || 0;
+    res.json({
+      byStatus,
+      total: rows.reduce((s, r) => s + parseInt(r.c), 0),
+      indexingRate: (live + indexed) > 0 ? Math.round((indexed / (live + indexed)) * 100) : 0,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/prospects — manual add
+router.post('/prospects', async (req, res, next) => {
+  try {
+    const { target_url, target_domain, target_page, anchor_planned, link_type, priority, notes, live_url } = req.body;
+    const domain = target_domain || extractDomain(target_url) || extractDomain(live_url);
+    if (!domain) return res.status(400).json({ error: 'target_domain, target_url, or live_url is required' });
+    if (!target_page) return res.status(400).json({ error: 'target_page (our money page) is required' });
+
+    const exists = await db('seo_link_prospects').where({ target_domain: domain, target_page }).first();
+    if (exists) return res.status(409).json({ error: 'prospect already exists for this domain + target page', id: exists.id });
+
+    const [row] = await db('seo_link_prospects').insert({
+      target_domain: domain, target_url: target_url || null, target_page,
+      anchor_planned: anchor_planned || null, link_type: link_type || null,
+      priority: priority || null, notes: notes || null, source: 'manual', owner: req.technician?.name || 'admin',
+      // If the admin supplies a live_url, the link is already placed — seed it so the
+      // verifier sweep (which selects live_url IS NOT NULL) picks it up next run.
+      live_url: live_url || null,
+      ...(live_url ? { status: 'placed' } : {}),
+    }).returning('*');
+    res.json({ prospect: row });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/backlink-agent/prospects/:id — edit
+router.patch('/prospects/:id', async (req, res, next) => {
+  try {
+    const allowed = ['status', 'priority', 'link_type', 'anchor_planned', 'live_url', 'target_page', 'target_url', 'domain_rating', 'owner', 'notes', 'placement_date'];
+    const patch = {};
+    for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
+    if ('status' in patch && !PROSPECT_STATUSES.includes(patch.status)) {
+      return res.status(400).json({ error: `invalid status; must be one of ${PROSPECT_STATUSES.join(', ')}` });
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no editable fields supplied' });
+    patch.updated_at = new Date();
+    const [row] = await db('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
+    if (!row) return res.status(404).json({ error: 'prospect not found' });
+    res.json({ prospect: row });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/prospects/:id/recheck — verify + index this one now
+router.post('/prospects/:id/recheck', async (req, res, next) => {
+  try {
+    const prospect = await db('seo_link_prospects').where({ id: req.params.id }).first();
+    if (!prospect) return res.status(404).json({ error: 'prospect not found' });
+    if (!prospect.live_url) return res.status(400).json({ error: 'no live_url to check yet' });
+    const Verifier = require('../services/seo/link-prospect-verifier');
+    await Verifier.verifyOne(prospect);
+    const verified = await db('seo_link_prospects').where({ id: req.params.id }).first();
+    const Indexer = require('../services/seo/link-prospect-indexer');
+    await Indexer.runOne(verified);
+    const updated = await db('seo_link_prospects').where({ id: req.params.id }).first();
+    res.json({ prospect: updated });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/prospects/verify — run the verifier sweep (background)
+router.post('/prospects/verify', async (req, res, next) => {
+  try {
+    const { limit = 200 } = req.body;
+    const Verifier = require('../services/seo/link-prospect-verifier');
+    Verifier.run({ limit: parseInt(limit) })
+      .then((r) => logger.info(`[link-verifier] manual run: ${JSON.stringify(r)}`))
+      .catch((e) => logger.error(`[link-verifier] manual run failed: ${e.message}`));
+    res.json({ started: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

@@ -969,6 +969,7 @@ function BacklinksTab() {
             { key: "citations", label: "Citations" },
             { key: "gaps", label: "Competitor Gaps" },
             { key: "llm", label: "LLM Mentions" },
+            { key: "prospects", label: "Link Building" },
             { key: "agent", label: "Agent" },
           ].map((t) => (
             <button
@@ -1452,7 +1453,191 @@ function BacklinksTab() {
         </Card>
       )}
 
+      {subTab === "prospects" && <LinkBuildingBoard canRun={canRunSeoActions} />}
       {subTab === "agent" && <BacklinkAgentPanel />}
+    </div>
+  );
+}
+
+// =========================================================================
+// LINK BUILDING BOARD — outbound prospect pipeline (Backlink Manager M1)
+// =========================================================================
+const PROSPECT_VIEWS = [
+  { key: "all", label: "All", statuses: null },
+  { key: "outreach", label: "Needs outreach", statuses: ["prospect", "contacted", "negotiating"] },
+  { key: "placed", label: "In progress", statuses: ["placed"] },
+  { key: "notindexed", label: "Live · not indexed", statuses: ["live"] },
+  { key: "indexed", label: "Indexed", statuses: ["indexed"] },
+  { key: "lost", label: "Lost", statuses: ["lost"] },
+];
+
+const PROSPECT_STATUS_COLOR = {
+  prospect: D.muted,
+  contacted: D.amber,
+  negotiating: D.amber,
+  placed: D.teal,
+  live: D.green,
+  indexed: D.green,
+  lost: D.red,
+  rejected: D.red,
+};
+
+function LinkBuildingBoard({ canRun }) {
+  const [items, setItems] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [view, setView] = useState("all");
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
+
+  const load = () => {
+    const cur = PROSPECT_VIEWS.find((v) => v.key === view);
+    const qs = cur?.statuses?.length === 1 ? `?status=${cur.statuses[0]}` : "";
+    const request = cur?.statuses?.length > 1
+      ? Promise.all(cur.statuses.map((status) => adminFetch(`/admin/backlink-agent/prospects?status=${status}`)))
+        .then((results) => {
+          const seen = new Set();
+          return results.flatMap((d) => d.items || []).filter((row) => {
+            if (!row?.id || seen.has(row.id)) return false;
+            seen.add(row.id);
+            return true;
+          });
+        })
+      : adminFetch(`/admin/backlink-agent/prospects${qs}`).then((d) => d.items || []);
+    request
+      .then((rows) => setItems(rows))
+      .catch(() => setItems([]));
+    adminFetch("/admin/backlink-agent/prospects/stats").then(setStats).catch(() => {});
+  };
+
+  useEffect(load, [view]);
+
+  const runVerify = async () => {
+    if (!canRun) return;
+    setBusy(true);
+    try { await adminPost("/admin/backlink-agent/prospects/verify", {}); } finally { setBusy(false); }
+  };
+
+  const recheck = async (id) => {
+    setBusy(true);
+    try { await adminPost(`/admin/backlink-agent/prospects/${id}/recheck`, {}); load(); } finally { setBusy(false); }
+  };
+
+  const addProspect = async () => {
+    if (!form.target_page || (!form.target_url && !form.live_url)) return;
+    setBusy(true);
+    try {
+      await adminPost("/admin/backlink-agent/prospects", form);
+      setForm({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
+      setAdding(false);
+      load();
+    } finally { setBusy(false); }
+  };
+
+  if (items === null) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading link prospects...</div>;
+
+  const inputStyle = { padding: "6px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 13, background: D.white, color: D.text };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* KPIs */}
+      {stats && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {[
+            ["Prospects", stats.total],
+            ["Placed", stats.byStatus?.placed || 0],
+            ["Live", stats.byStatus?.live || 0],
+            ["Indexed", stats.byStatus?.indexed || 0],
+            ["Lost", stats.byStatus?.lost || 0],
+            ["Indexing rate", `${stats.indexingRate || 0}%`],
+          ].map(([label, val]) => (
+            <div key={label} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 14px", minWidth: 96 }}>
+              <div style={{ fontSize: 18, fontWeight: 600, color: D.heading }}>{val}</div>
+              <div style={{ fontSize: 11, color: D.muted }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* View filters + actions */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {PROSPECT_VIEWS.map((v) => (
+            <button key={v.key} onClick={() => setView(v.key)}
+              style={{ padding: "5px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12,
+                background: view === v.key ? D.teal : D.bg, color: view === v.key ? D.white : D.muted, whiteSpace: "nowrap" }}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+        {canRun && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setAdding((a) => !a)} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${D.teal}`, background: D.teal, color: D.white, fontSize: 12, cursor: "pointer" }}>
+              + Add prospect
+            </button>
+            <button onClick={runVerify} disabled={busy} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${D.teal}`, background: "transparent", color: D.teal, fontSize: 12, cursor: "pointer", opacity: busy ? 0.5 : 1 }}>
+              {busy ? "Verifying..." : "Verify now"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Add form */}
+      {adding && canRun && (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Prospect site/page URL (planned)" value={form.target_url} onChange={(e) => setForm({ ...form, target_url: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Live URL — if link is already placed" value={form.live_url} onChange={(e) => setForm({ ...form, live_url: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Our target page (money page URL)" value={form.target_page} onChange={(e) => setForm({ ...form, target_page: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 160px" }} placeholder="Planned anchor" value={form.anchor_planned} onChange={(e) => setForm({ ...form, anchor_planned: e.target.value })} />
+          <select style={inputStyle} value={form.link_type} onChange={(e) => setForm({ ...form, link_type: e.target.value })}>
+            {["editorial", "resource", "guest_post", "haro", "directory", "citation", "social"].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select style={inputStyle} value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
+            {["high", "medium", "low"].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+          <button onClick={addProspect} disabled={busy} style={{ padding: "6px 14px", borderRadius: 6, border: "none", background: D.green, color: D.white, fontSize: 12, cursor: "pointer" }}>Save</button>
+        </div>
+      )}
+
+      {/* Table */}
+      {items.length === 0 ? (
+        <Card style={{ padding: 30, textAlign: "center" }}><div style={{ color: D.muted }}>No prospects in this view.</div></Card>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: D.muted, borderBottom: `1px solid ${D.border}` }}>
+                {["Target", "Our page", "Anchor", "Type", "Follow", "Indexed", "Status", "DR", ""].map((h) => (
+                  <th key={h} style={{ padding: "8px 10px", fontWeight: 500, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((p) => (
+                <tr key={p.id} style={{ borderBottom: `1px solid ${D.border}`, color: D.text }}>
+                  <td style={{ padding: "8px 10px", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {p.live_url ? <a href={p.live_url} target="_blank" rel="noreferrer" style={{ color: D.teal }}>{p.target_domain}</a> : p.target_domain}
+                  </td>
+                  <td style={{ padding: "8px 10px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", color: D.muted }}>{(p.target_page || "").replace(/^https?:\/\/[^/]+/, "")}</td>
+                  <td style={{ padding: "8px 10px" }}>{p.anchor_text || <span style={{ color: D.muted }}>{p.anchor_planned || "—"}</span>}</td>
+                  <td style={{ padding: "8px 10px", color: D.muted }}>{p.link_type || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{p.is_dofollow == null ? "—" : p.is_dofollow ? <span style={{ color: D.green }}>dofollow</span> : <span style={{ color: D.amber }}>nofollow</span>}</td>
+                  <td style={{ padding: "8px 10px" }}>
+                    <span style={{ color: p.indexing_status === "indexed" ? D.green : p.indexing_status === "not_checked" ? D.muted : D.amber }}>
+                      {p.indexing_status === "not_checked" ? "—" : p.indexing_status}
+                    </span>
+                  </td>
+                  <td style={{ padding: "8px 10px" }}><span style={{ color: PROSPECT_STATUS_COLOR[p.status] || D.muted, fontWeight: 500 }}>{p.status}</span></td>
+                  <td style={{ padding: "8px 10px", color: D.muted }}>{p.domain_rating ?? "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>
+                    {p.live_url && <button onClick={() => recheck(p.id)} disabled={busy} style={{ padding: "3px 8px", borderRadius: 5, border: `1px solid ${D.border}`, background: "transparent", color: D.teal, fontSize: 11, cursor: "pointer" }}>Recheck</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
