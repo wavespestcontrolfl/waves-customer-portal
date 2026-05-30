@@ -138,8 +138,13 @@ async function addColumnIfMissing(knex, table, column, build) {
   await knex.schema.alterTable(table, (t) => build(t));
 }
 
+async function createTableIfMissing(knex, table, build) {
+  if (await knex.schema.hasTable(table)) return;
+  await knex.schema.createTable(table, build);
+}
+
 exports.up = async function up(knex) {
-  await knex.schema.createTable('lawn_service_content_modules', (t) => {
+  await createTableIfMissing(knex, 'lawn_service_content_modules', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('key', 120).notNullable();
     t.string('title', 180).notNullable();
@@ -158,7 +163,7 @@ exports.up = async function up(knex) {
     t.index(['key', 'status'], 'idx_lawn_service_content_modules_key_status');
   });
 
-  await knex.schema.createTable('jurisdiction_fertilizer_rules', (t) => {
+  await createTableIfMissing(knex, 'jurisdiction_fertilizer_rules', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('jurisdiction_id', 120).notNullable();
     t.string('jurisdiction_name', 160).notNullable();
@@ -188,7 +193,7 @@ exports.up = async function up(knex) {
     t.index(['county', 'municipality'], 'idx_jurisdiction_fertilizer_rules_area');
   });
 
-  await knex.schema.createTable('service_outline_packets', (t) => {
+  await createTableIfMissing(knex, 'service_outline_packets', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('customer_id').nullable().references('id').inTable('customers').onDelete('SET NULL');
     t.uuid('lead_id').nullable().references('id').inTable('leads').onDelete('SET NULL');
@@ -239,7 +244,7 @@ exports.up = async function up(knex) {
     t.index('token_hash', 'idx_service_outline_packets_token_hash');
   });
 
-  await knex.schema.createTable('service_outline_events', (t) => {
+  await createTableIfMissing(knex, 'service_outline_events', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('packet_id').notNullable().references('id').inTable('service_outline_packets').onDelete('CASCADE');
     t.uuid('customer_id').nullable().references('id').inTable('customers').onDelete('SET NULL');
@@ -256,7 +261,7 @@ exports.up = async function up(knex) {
     t.index(['estimate_id', 'created_at'], 'idx_service_outline_events_estimate_created');
   });
 
-  await knex.schema.createTable('service_outline_packet_products', (t) => {
+  await createTableIfMissing(knex, 'service_outline_packet_products', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('packet_id').notNullable().references('id').inTable('service_outline_packets').onDelete('CASCADE');
     t.uuid('product_id').nullable().references('id').inTable('products_catalog').onDelete('SET NULL');
@@ -269,7 +274,7 @@ exports.up = async function up(knex) {
     t.index(['packet_id'], 'idx_service_outline_packet_products_packet');
   });
 
-  await knex.schema.createTable('packet_admin_edits', (t) => {
+  await createTableIfMissing(knex, 'packet_admin_edits', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('packet_id').notNullable().references('id').inTable('service_outline_packets').onDelete('CASCADE');
     t.uuid('edited_by').nullable();
