@@ -126,6 +126,29 @@ class DataForSEO {
       enable_javascript: true,
     }]);
   }
+
+  // Is an (external) URL in Google's index? Uses a `site:` SERP lookup.
+  // Returns 'indexed' | 'not_indexed' | 'unknown' (call failed / not configured).
+  async checkIndexed(url) {
+    try {
+      const clean = String(url).replace(/^https?:\/\//, '').replace(/\/$/, '');
+      const data = await this.request('/serp/google/organic/live/advanced', [{
+        keyword: `site:${clean}`,
+        location_name: 'Bradenton,Florida,United States',
+        language_name: 'English',
+        device: 'desktop',
+        os: 'macos',
+      }]);
+      const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+      const found = items.some((i) => {
+        const u = (i.url || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+        return u === clean || u.startsWith(clean);
+      });
+      return found ? 'indexed' : 'not_indexed';
+    } catch {
+      return 'unknown';
+    }
+  }
 }
 
 module.exports = new DataForSEO();

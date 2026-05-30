@@ -289,6 +289,25 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 4:30AM — Link prospect verifier (live/follow reconcile + crawl fallback)
+  cron.schedule('30 4 * * *', async () => {
+    logger.info('Running: Link prospect verifier');
+    try {
+      const Verifier = require('./seo/link-prospect-verifier');
+      await Verifier.run();
+    } catch (err) { logger.error(`Link prospect verifier failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 5:00AM — Link prospect indexer (linking-page index via DataForSEO + target-page via GSC)
+  cron.schedule('0 5 * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: Link prospect indexer');
+    try {
+      const Indexer = require('./seo/link-prospect-indexer');
+      await Indexer.run();
+    } catch (err) { logger.error(`Link prospect indexer failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY MONDAY 1:30AM — Full site technical audit
   cron.schedule('30 1 * * 1', async () => {
     if (!isEnabled('seoIntelligence')) return;

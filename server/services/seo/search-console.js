@@ -481,6 +481,30 @@ class SearchConsoleService {
       period: { days: periodDays, since },
     };
   }
+
+  /**
+   * URL Inspection — works ONLY for URLs within our verified property (SITE_URL).
+   * Use for confirming our own target/money pages are indexed; NOT for third-party
+   * linking pages (Google won't inspect URLs outside the property).
+   * Returns { ok, coverageState, verdict, indexed } — `indexed` is a coarse boolean.
+   */
+  async inspectUrl(inspectionUrl) {
+    const ready = await this.init();
+    if (!ready) return { ok: false, error: 'gsc_not_configured' };
+    try {
+      const res = await this.webmasters.urlInspection.index.inspect({
+        requestBody: { inspectionUrl, siteUrl: SITE_URL },
+      });
+      const idx = res?.data?.inspectionResult?.indexStatusResult || {};
+      const coverageState = idx.coverageState || null;
+      const verdict = idx.verdict || null; // PASS | NEUTRAL | FAIL
+      const indexed = verdict === 'PASS' || /\bindexed\b/i.test(coverageState || '');
+      return { ok: true, coverageState, verdict, indexed };
+    } catch (err) {
+      logger.warn(`[GSC] urlInspection failed for ${inspectionUrl}: ${err.message}`);
+      return { ok: false, error: err.message };
+    }
+  }
 }
 
 module.exports = new SearchConsoleService();
