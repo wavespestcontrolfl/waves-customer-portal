@@ -191,6 +191,52 @@ function hhmm(value) {
   return value ? String(value).slice(0, 5) : '';
 }
 
+function parseEstimateDataSafe(estimate = {}) {
+  const raw = estimate.estimate_data;
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) || {}; } catch { return {}; }
+  }
+  return raw || {};
+}
+
+function shapeLinkedAppointment(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    scheduledDate: dateOnly(row.scheduled_date),
+    windowStart: hhmm(row.window_start),
+    windowEnd: hhmm(row.window_end),
+    windowDisplay: row.window_display || null,
+    serviceType: row.service_type || 'Service visit',
+    status: row.status || null,
+  };
+}
+
+async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
+  const conn = opts.database || db;
+  const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
+  const data = estData || parseEstimateDataSafe(estimate);
+  const linkedId = data?.scheduled_service_id ? String(data.scheduled_service_id) : '';
+  const today = etDateString();
+
+  const q = conn('scheduled_services')
+    .whereIn('status', ['pending', 'confirmed'])
+    .where('scheduled_date', '>=', today)
+    .where((builder) => {
+      if (linkedId) builder.where('id', linkedId);
+      if (estimate.id) builder.orWhere('source_estimate_id', estimate.id);
+    })
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('window_start', 'asc');
+
+  if (requestedId) q.where('id', requestedId);
+  const row = await q.first();
+  if (!row) return null;
+  if (requestedId && String(row.id) !== requestedId) return null;
+  return row;
+}
+
 async function renderTemplate(templateKey, vars, fallback, context = {}) {
   const body = await renderEditableSmsTemplate(templateKey, vars, context);
   return body || fallback;
@@ -1182,9 +1228,11 @@ function recurringServiceKey(svc = {}) {
 
 function recurringServiceReceivesTierDiscount(svc = {}) {
   const key = recurringServiceKey(svc);
-  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
   if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
-  return true;
+  if (PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true || svc.excludeFromPctDiscount === true) return false;
+  if (PRICING_WAVEGUARD.qualifyingServices.includes(key)) return true;
+  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false) return false;
+  return false;
 }
 
 function recurringServiceReceivesManualDiscount(svc = {}) {
@@ -2425,6 +2473,7 @@ function renderPage(token, estimate, estData) {
   const annualPrepayWaivesMembership = showMembershipFee;
   const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
   const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
+  const existingAppointment = est.existingAppointment || null;
   const prepayMembershipSummaryHtml = showMembershipFee
     ? (annualPrepayWaivesMembership
       ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
@@ -2450,7 +2499,8 @@ function renderPage(token, estimate, estData) {
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
         </div>
         <p class="billing-small">${showMembershipFee && firstServiceVisitTotal > 0 ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; your first service visit bills after completion at <span data-first-visit-copy-total>${fmtMoney(firstServiceVisitTotal)}</span>.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
-        <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
+        <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Pay at the visit</button>
+        <p class="billing-small">Next: pick a time, then confirm. If card setup is required, we send you to the secure setup screen after confirmation.</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
@@ -2466,7 +2516,8 @@ function renderPage(token, estimate, estData) {
         </div>
         <p class="billing-small">No payment is charged on this page. Your annual prepay invoice totals <span data-prepay-copy-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</span> and is prepared after approval.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
-        <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Choose annual prepay setup</button>
+        <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
+        <p class="billing-small">Next: pick a time, then confirm. No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.</p>
       </div>` : ''}
     </div>
   </section>` : '';
@@ -2879,6 +2930,14 @@ function renderPage(token, estimate, estData) {
   .billing-total-row span{font-size:13px;color:#6B7280;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
   .billing-total-row strong{font-family:'Source Serif 4',Georgia,serif;font-size:28px;font-weight:600;color:#1B2C5B;white-space:nowrap}
   .billing-small{font-size:12px!important;color:#6B7280!important;line-height:1.5!important}
+  .payment-setup-summary{border:1px solid #D8E7F0;border-radius:12px;background:#F8FCFE;padding:14px 16px;margin:0 0 18px;display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .payment-setup-summary-main{min-width:0}
+  .payment-setup-summary-kicker{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#6B7280;margin-bottom:5px}
+  .payment-setup-summary-title{font-size:16px;font-weight:800;color:#1B2C5B;line-height:1.25;margin-bottom:4px}
+  .payment-setup-summary-body{font-size:13px;color:#3F4A65;line-height:1.5}
+  .payment-setup-summary-change{border:1px solid #CFE7F5;background:#fff;color:#1B2C5B;border-radius:8px;padding:8px 10px;font:800 12px/1 Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+  .payment-setup-summary-change:hover{border-color:${ESTIMATE_BUTTON_BLUE}}
+  @media(max-width:560px){.payment-setup-summary{display:block}.payment-setup-summary-change{margin-top:12px;width:100%}}
   .prefs-card h2{margin-bottom:4px}
   .prefs-list{margin-top:14px;display:flex;flex-direction:column;gap:10px}
   .pref-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;transition:all .15s;box-shadow:0 3px 10px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.05)}
@@ -2897,6 +2956,10 @@ function renderPage(token, estimate, estData) {
   .switch input:disabled+.slider{opacity:.5;cursor:not-allowed}
   .booking-card h2{font-family:Inter,system-ui,sans-serif;font-size:22px;font-weight:600;letter-spacing:0;color:#1B2C5B;margin:0 0 8px;line-height:1.2}
   .booking-card .card-sub{font-size:14px;color:#6B7280;margin:0 0 20px;line-height:1.55}
+  .existing-appt-card{border:1px solid #E2E8F0;border-radius:12px;background:#fff;padding:14px 16px;margin-bottom:18px}
+  .existing-appt-kicker{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6B7280;margin-bottom:6px}
+  .existing-appt-title{font-size:18px;font-weight:800;color:#1B2C5B;line-height:1.3}
+  .existing-appt-sub{font-size:14px;color:#3F4A65;margin-top:4px;line-height:1.4}
   .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
   .slot-list{display:grid;gap:10px}
   .slot-more{margin-top:10px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;overflow:hidden}
@@ -3067,11 +3130,28 @@ ${shellTopBar()}
   </button>` : ''}
 
   ${locked ? '' : `
-  <section class="card booking-card" id="booking-card"${requirePaymentSetupBeforeSlots && !isOneTimeOnly ? ' style="display:none"' : ''}>
+  <section class="card booking-card" id="booking-card"${existingAppointment ? '' : (requirePaymentSetupBeforeSlots && !isOneTimeOnly ? ' style="display:none"' : '')}>
     <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
-    <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
-    <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
-    <div id="pay-pref-area" style="display:none">
+    ${existingAppointment ? `
+      <p class="card-sub">Your visit is already on the schedule. Choose how you want to pay to approve this estimate.</p>
+      <div class="existing-appt-card">
+        <div class="existing-appt-kicker">Existing appointment</div>
+        <div class="existing-appt-title">${escapeHtml(existingAppointment.windowDisplay || `${existingAppointment.scheduledDate}${existingAppointment.windowStart ? ` at ${existingAppointment.windowStart}` : ''}`)}</div>
+        <div class="existing-appt-sub">${escapeHtml(existingAppointment.serviceType || pageCopy.aggregateDayLabel || 'Service visit')}</div>
+      </div>
+    ` : `
+      <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
+      <div id="payment-setup-summary" class="payment-setup-summary" style="display:none">
+        <div class="payment-setup-summary-main">
+          <div class="payment-setup-summary-kicker">Selected payment setup</div>
+          <div class="payment-setup-summary-title" id="payment-setup-summary-title">Payment setup selected</div>
+          <div class="payment-setup-summary-body" id="payment-setup-summary-body">Review the invoice setup, then choose a service window.</div>
+        </div>
+        <button type="button" class="payment-setup-summary-change" id="change-payment-setup-btn">Change payment option</button>
+      </div>
+      <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
+    `}
+    <div id="pay-pref-area" style="${existingAppointment ? '' : 'display:none'}">
       <h3 id="pay-pref-heading" style="margin:20px 0 4px">${escapeHtml(pageCopy.payPrefHeading)}</h3>
       <p class="card-sub" id="pay-pref-subhead" style="margin:0">${escapeHtml(billingLede)}</p>
       <div class="pay-pref-grid options">
@@ -3081,10 +3161,10 @@ ${shellTopBar()}
       </div>
     </div>
     <div id="review-area" style="display:none">
-      <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
+      ${existingAppointment ? '<div class="reservation-banner"><span>Appointment already scheduled</span></div>' : '<div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>'}
       <div class="pay-pref-grid">
         <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
-        <button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
+        <button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">${existingAppointment ? 'Choose a different payment option.' : 'Release this slot and choose a different time or payment option.'}</span></button>
       </div>
     </div>
   </section>
@@ -3166,6 +3246,8 @@ ${shellQuestionsBar()}
   const PRICE_PERIOD_WORD = ${JSON.stringify(recurringPricePeriodWord)};
   const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
   const RECURRING_PAY_PREF_HEADING = ${JSON.stringify(pageCopy.payPrefHeading)};
+  const BOOKING_TITLE = ${JSON.stringify(pageCopy.bookingTitle)};
+  const BOOKING_SUBHEAD = ${JSON.stringify(pageCopy.bookingSubhead)};
   const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
   const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
@@ -3367,6 +3449,7 @@ ${shellQuestionsBar()}
   // Shared state for the booking card. Each step transitions the visible
   // sub-section. Reservation auto-expires server-side after 15 min; the
   // client countdown is cosmetic but matches the backend hold.
+  const EXISTING_APPOINTMENT_ID = ${JSON.stringify(existingAppointment?.id || null)};
   const bookingState = {
     selectedSlotId: null,
     selectedSlotLabel: null,
@@ -3409,6 +3492,60 @@ ${shellQuestionsBar()}
     const el = document.querySelector('[data-prepay-invoice-total]');
     const text = el && String(el.textContent || '').trim();
     return text || fmt(ANNUAL_PREPAY_INVOICE_TOTAL);
+  }
+
+  function firstVisitTotalText() {
+    const el = document.querySelector('[data-first-visit-total]');
+    const text = el && String(el.textContent || '').trim();
+    return text || 'after completion';
+  }
+
+  function updatePaymentSetupSummary(pref) {
+    const summary = document.getElementById('payment-setup-summary');
+    if (!summary) return;
+    const bookingTitle = document.getElementById('booking-title');
+    const bookingSubhead = document.querySelector('#booking-card > .card-sub');
+    const title = document.getElementById('payment-setup-summary-title');
+    const body = document.getElementById('payment-setup-summary-body');
+    if (bookingTitle) bookingTitle.textContent = 'Review your invoice setup';
+    if (pref === 'prepay_annual') {
+      if (bookingSubhead) bookingSubhead.textContent = 'Annual prepay is selected. Review the invoice setup, then choose a service window.';
+      if (title) title.textContent = 'Annual prepay invoice';
+      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is prepared after approval; choose a service window to continue.';
+    } else {
+      if (bookingSubhead) bookingSubhead.textContent = 'Pay at the visit is selected. Review the setup, then choose a service window.';
+      if (title) title.textContent = 'Pay at the visit';
+      if (body) body.textContent = 'No payment is charged here. Your first service visit bills after completion at ' + firstVisitTotalText() + '; choose a service window to continue.';
+    }
+    summary.style.display = '';
+    if (location.hash !== '#invoice-setup') {
+      history.pushState(null, '', '#invoice-setup');
+    }
+  }
+
+  function resetPaymentSetupSummary() {
+    const summary = document.getElementById('payment-setup-summary');
+    if (summary) summary.style.display = 'none';
+    const bookingTitle = document.getElementById('booking-title');
+    const bookingSubhead = document.querySelector('#booking-card > .card-sub');
+    if (bookingTitle) bookingTitle.textContent = BOOKING_TITLE;
+    if (bookingSubhead) bookingSubhead.textContent = BOOKING_SUBHEAD;
+  }
+
+  function returnToPaymentSetupChoices() {
+    bookingState.pendingPref = null;
+    bookingState.pickedPref = null;
+    syncPaymentSetupCards();
+    resetPaymentSetupSummary();
+    const setupCard = document.getElementById('payment-setup-card');
+    if (setupCard) {
+      setupCard.style.display = '';
+      try { setupCard.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      catch (e) { setupCard.scrollIntoView(true); }
+    }
+    if (!EXISTING_APPOINTMENT_ID && bookingRequiresPaymentSetup()) {
+      hideBookingCardUntilSetup();
+    }
   }
 
   function ensureBookingCardVisible() {
@@ -3456,11 +3593,18 @@ ${shellQuestionsBar()}
     bookingState.pendingPref = pref;
     bookingState.pickedPref = null;
     syncPaymentSetupCards();
+    updatePaymentSetupSummary(pref);
+    const setupCard = document.getElementById('payment-setup-card');
+    if (setupCard) setupCard.style.display = 'none';
+    if (EXISTING_APPOINTMENT_ID) {
+      pickExistingAppointmentPref(pref);
+      return;
+    }
     scrollToBookingCard();
     if (bookingState.selectedSlotId) {
       pickPaymentPref(pref);
     } else {
-      toast(pref === 'prepay_annual' ? 'Annual prepay selected. Pick a time to continue.' : 'Pay-after-visit selected. Pick a time to continue.');
+      toast(pref === 'prepay_annual' ? 'Annual prepay selected. Pick a time to continue.' : 'Pay at the visit selected. Pick a time to continue.');
     }
   }
 
@@ -3703,6 +3847,7 @@ ${shellQuestionsBar()}
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
       syncPaymentSetupCards();
       // Swap UI: hide slot list + pay pref, show review
+      resetPaymentSetupSummary();
       document.getElementById('slot-area').style.display = 'none';
       document.getElementById('pay-pref-area').style.display = 'none';
       const reviewArea = document.getElementById('review-area');
@@ -3732,6 +3877,28 @@ ${shellQuestionsBar()}
       bookingState.pickedPref = null;
       syncPaymentSetupCards();
     }
+  }
+
+  function pickExistingAppointmentPref(pref) {
+    bookingState.pendingPref = pref;
+    bookingState.pickedPref = pref;
+    syncPaymentSetupCards();
+    const payArea = document.getElementById('pay-pref-area');
+    const reviewArea = document.getElementById('review-area');
+    if (payArea) payArea.style.display = 'none';
+    if (reviewArea) reviewArea.style.display = '';
+    const confirmBtn = document.getElementById('confirm-book-btn');
+    if (confirmBtn) confirmBtn.disabled = false;
+    const title = document.getElementById('confirm-book-title');
+    const sub = document.getElementById('confirm-book-sub');
+    if (pref === 'prepay_annual') {
+      if (title) title.textContent = 'Confirm annual prepay';
+      if (sub) sub.textContent = 'Your existing appointment stays scheduled. Annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.';
+    } else {
+      if (title) title.textContent = CARD_CONFIRM_TITLE;
+      if (sub) sub.textContent = 'Your existing appointment stays scheduled. ' + CARD_CONFIRM_SUB;
+    }
+    if (reviewArea) reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   function startReservationCountdown(expiresAt) {
@@ -3775,15 +3942,20 @@ ${shellQuestionsBar()}
     syncPaymentSetupCards();
     setBookingChoiceControlsDisabled(false);
     document.getElementById('review-area').style.display = 'none';
-    document.getElementById('slot-area').style.display = '';
+    const slotArea = document.getElementById('slot-area');
+    if (slotArea) slotArea.style.display = '';
     const payArea = document.getElementById('pay-pref-area');
     const confirmBtn = document.getElementById('confirm-book-btn');
     if (confirmBtn) confirmBtn.disabled = false;
     if (payArea) {
-      payArea.style.display = 'none';
+      payArea.style.display = EXISTING_APPOINTMENT_ID ? '' : 'none';
       document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
     }
+    if (EXISTING_APPOINTMENT_ID) return;
     if (bookingRequiresPaymentSetup()) {
+      const setupCard = document.getElementById('payment-setup-card');
+      if (setupCard) setupCard.style.display = '';
+      resetPaymentSetupSummary();
       hideBookingCardUntilSetup();
     } else {
       // Reload slots to reflect any changes since the first fetch
@@ -3800,6 +3972,10 @@ ${shellQuestionsBar()}
         paymentMethodPreference: bookingState.pickedPref,
         serviceMode: bookingState.serviceMode,
       };
+      if (EXISTING_APPOINTMENT_ID) {
+        payload.existingAppointmentId = EXISTING_APPOINTMENT_ID;
+        delete payload.slotId;
+      }
       if (bookingState.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
         payload.selectedFrequency = DEFAULT_RECURRING_FREQUENCY;
       }
@@ -3851,6 +4027,10 @@ ${shellQuestionsBar()}
   const changeBookingPickBtn = document.getElementById('change-booking-pick-btn');
   if (changeBookingPickBtn) {
     changeBookingPickBtn.addEventListener('click', cancelReservation);
+  }
+  const changePaymentSetupBtn = document.getElementById('change-payment-setup-btn');
+  if (changePaymentSetupBtn) {
+    changePaymentSetupBtn.addEventListener('click', returnToPaymentSetupChoices);
   }
 
   // Kick off the slot fetch if the booking card is on the page (i.e.,
@@ -4092,6 +4272,7 @@ async function handleEstimateView(req, res, next) {
     }
 
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData);
     let pricingBundleForView = null;
     try {
       pricingBundleForView = await buildPricingBundle(estimate);
@@ -4128,6 +4309,7 @@ async function handleEstimateView(req, res, next) {
       satelliteUrl: estimate.satellite_url || null,
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
+      existingAppointment: shapeLinkedAppointment(linkedAppointment),
     }, estData);
   } catch (err) { next(err); }
 }
@@ -4158,6 +4340,10 @@ router.put('/:token/accept', async (req, res, next) => {
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
     const slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
+    const existingAppointmentId = req.body && typeof req.body.existingAppointmentId === 'string' ? req.body.existingAppointmentId.trim() : '';
+    if (slotId && existingAppointmentId) {
+      return res.status(400).json({ error: 'Choose either a new slot or the existing appointment, not both' });
+    }
     const paymentMethodPreference = normalizeAcceptPaymentMethodPreference(req.body?.paymentMethodPreference);
     // Billing term is a separate concept from payment method. "prepay_annual"
     // means the customer is paying for 12 months upfront, which waives the
@@ -4221,6 +4407,19 @@ router.put('/:token/accept', async (req, res, next) => {
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const rawEstData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
+    const existingAppointmentRow = existingAppointmentId
+      ? await findLinkedUpcomingAppointment(estimate, estData, { appointmentId: existingAppointmentId })
+      : null;
+    if (existingAppointmentId && !existingAppointmentRow) {
+      return res.status(409).json({ error: 'existing appointment is not linked to this active estimate' });
+    }
+    if (
+      existingAppointmentRow?.customer_id
+      && estimate.customer_id
+      && String(existingAppointmentRow.customer_id) !== String(estimate.customer_id)
+    ) {
+      return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
+    }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundle = await buildPricingBundle(estimateForPricing);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
@@ -4495,6 +4694,30 @@ router.put('/:token/accept', async (req, res, next) => {
           }
           throw commitErr;
         }
+      }
+      if (existingAppointmentRow && customerId) {
+        if (
+          existingAppointmentRow.customer_id
+          && String(existingAppointmentRow.customer_id) !== String(customerId)
+        ) {
+          const err = new Error('existing appointment belongs to a different customer');
+          err.status = 409;
+          throw err;
+        }
+        const updates = {
+          source_estimate_id: estimate.id,
+          customer_id: existingAppointmentRow.customer_id || customerId,
+          reservation_expires_at: null,
+          payment_method_preference: paymentMethodPreference,
+        };
+        if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
+          updates.estimated_price = Number(visitEstimatedPrice);
+        }
+        await trx('scheduled_services')
+          .where({ id: existingAppointmentRow.id })
+          .whereIn('status', ['pending', 'confirmed'])
+          .update(updates);
+        reservationCommitted = true;
       }
 
       let onboardingToken = null;
@@ -7113,12 +7336,20 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   };
 }
 
-function buildEstimateAcceptanceContract({ quoteRequirement = {} } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
       ctaLabel: 'Call Waves',
       reason: quoteRequirement.reason || 'quote_required',
+    };
+  }
+  if (existingAppointment) {
+    return {
+      mode: 'existing_appointment',
+      ctaLabel: 'Confirm payment setup',
+      reason: null,
+      appointment: shapeLinkedAppointment(existingAppointment),
     };
   }
   return {
@@ -7566,6 +7797,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const pricingBundle = await buildPricingBundle(estimate);
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -7574,7 +7806,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || []
     );
-    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement });
+    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement, existingAppointment: linkedAppointment });
     const intelligence = buildWaveGuardIntelligencePayload(
       {
         ...estimate,

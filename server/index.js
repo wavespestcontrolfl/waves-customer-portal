@@ -651,6 +651,22 @@ httpServer.listen(PORT, () => {
       setInterval(runPdfQueue, 60 * 1000).unref();
     }
 
+    {
+      const runReceiptDeliveryQueue = async () => {
+        try {
+          const { processDueReceiptDeliveryJobs } = require('./services/receipt-delivery-queue');
+          const summary = await processDueReceiptDeliveryJobs({ limit: 10 });
+          if (summary.claimed || summary.recovered) {
+            logger.info(`[receipt-delivery-queue] processed ${summary.claimed} job(s): ${summary.succeeded} succeeded, ${summary.failed} failed, ${summary.recovered} recovered`);
+          }
+        } catch (err) {
+          logger.error(`[receipt-delivery-queue] processor failed: ${err.message}`);
+        }
+      };
+      setTimeout(runReceiptDeliveryQueue, 30 * 1000).unref();
+      setInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
+    }
+
     // Process unprocessed call recordings every 10 minutes (safety net)
     setInterval(async () => {
       try {

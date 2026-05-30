@@ -284,7 +284,7 @@ export default function AutopayCard({ onStateChange }) {
     setAddingCard(true);
     setStripeReady(false);
     try {
-      const setupData = await api.createSetupIntent('card');
+      const setupData = await api.createSetupIntent('card_or_bank');
       const stripe = await loadStripeJs(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });

@@ -1429,6 +1429,34 @@ describe('public estimate one-time breakdown', () => {
     });
   });
 
+  test('linked existing appointments replace slot-pick acceptance contract', () => {
+    expect(buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: false },
+      existingAppointment: {
+        id: 'svc-123',
+        scheduled_date: '2026-06-03',
+        window_start: '09:00:00',
+        window_end: '11:00:00',
+        window_display: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        service_type: 'Initial Pest Control',
+        status: 'confirmed',
+      },
+    })).toEqual({
+      mode: 'existing_appointment',
+      ctaLabel: 'Confirm payment setup',
+      reason: null,
+      appointment: {
+        id: 'svc-123',
+        scheduledDate: '2026-06-03',
+        windowStart: '09:00',
+        windowEnd: '11:00',
+        windowDisplay: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        serviceType: 'Initial Pest Control',
+        status: 'confirmed',
+      },
+    });
+  });
+
   test('public pricing bundle preserves saved manual recurring discounts', async () => {
     const estimateData = savedAdminEstimateData();
     estimateData.result.manualDiscount = {
@@ -2088,8 +2116,17 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(html).toContain('id="payment-setup-card"');
-    expect(html).toContain('Choose pay-after-visit setup');
-    expect(html).toContain('Choose annual prepay setup');
+    expect(html).toContain('Pay at the visit');
+    expect(html).toContain('Annual prepay');
+    expect(html).toContain('If card setup is required, we send you to the secure setup screen after confirmation.');
+    expect(html).toContain('No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.');
+    expect(html).toContain('id="payment-setup-summary"');
+    expect(html).toContain('id="change-payment-setup-btn"');
+    expect(html).toContain('function updatePaymentSetupSummary(pref)');
+    expect(html).toContain("bookingTitle.textContent = 'Review your invoice setup'");
+    expect(html).toContain("history.pushState(null, '', '#invoice-setup')");
+    expect(html).toContain("if (setupCard) setupCard.style.display = 'none';");
+    expect(html).toContain("changePaymentSetupBtn.addEventListener('click', returnToPaymentSetupChoices)");
     expect(html).toContain('<section class="card booking-card" id="booking-card" style="display:none">');
     expect(html).toContain('const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = true;');
     expect(html).toContain('function bookingRequiresPaymentSetup()');
@@ -4107,6 +4144,30 @@ describe('public estimate one-time breakdown', () => {
     expect(monthlyForRecurringParts(parts, 'Silver')).toBe(239);
     expect(monthlyForRecurringParts(parts, 'Silver', 6.67)).toBe(232.33);
     expect(monthlyForRecurringParts(parts, 'Silver', 13.34)).toBe(225.66);
+  });
+
+  test('canonical lawn rows receive WaveGuard discount even when saved row has stale false flag', () => {
+    const parts = resolveRecurringMonthlyParts({
+      monthly_total: 164.7,
+      waveguard_tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { service: 'pest_control', name: 'Pest Control', mo: 36 },
+            { service: 'lawn_care', name: 'Lawn Care', mo: 147, waveGuardDiscountEligible: false },
+          ],
+        },
+      },
+    });
+
+    expect(parts).toEqual(expect.objectContaining({
+      baseMonthly: 183,
+      discountableBaseMonthly: 183,
+      nonDiscountableMonthly: 0,
+      source: 'summed',
+    }));
+    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(164.7);
   });
 
   test('preference recalculation combines supplemented services with saved base when service rows are missing', () => {

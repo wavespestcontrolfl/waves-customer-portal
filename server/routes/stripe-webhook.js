@@ -19,6 +19,7 @@ const { computeChargeAmount } = require('../services/stripe-pricing');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
 
 // Build a "First Last" string from a customer row, falling back to phone
@@ -766,41 +767,19 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   //   receipt_sent_at (which only stamps after SMS).
   //
   // Channels run independently — a missing phone / missing email skips
-  // that channel but the other still fires. Fire-and-forget: a Twilio or
-  // SendGrid outage shouldn't make Stripe retry the whole webhook.
-  //
-  // Wait until enrichment + save-card persistence below have a chance
-  // to run by deferring to setImmediate, so card_brand / card_last_four
-  // are populated when the receipt template renders {card_line}.
+  // that channel but the other still fires. The durable queue keeps a
+  // retryable record instead of losing the send when Twilio/SendGrid or
+  // this process hiccups after Stripe has already been acknowledged.
   if (invoiceUpdated > 0) {
-    setImmediate(async () => {
-      try {
-        const paidInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
-        if (!paidInvoice) return;
-        const InvoiceService = require('../services/invoice');
-        const { sendReceiptEmail } = require('../services/invoice-email');
-
-        const smsResult = await InvoiceService.sendReceipt(paidInvoice.id)
-          .catch((err) => ({ sent: false, reason: err.message }));
-        if (smsResult?.sent === false && smsResult.reason !== 'already-sent') {
-          logger.warn(`[stripe-webhook] Receipt SMS not sent for invoice ${paidInvoice.invoice_number}: ${smsResult.reason}`);
-        }
-
-        const emailResult = await sendReceiptEmail(paidInvoice.id, {
-          idempotencyKey: `receipt_email_auto:${paidInvoice.id}`,
-        }).catch((err) => ({ ok: false, error: err.message }));
-        if (!emailResult?.ok) {
-          // 'No receipt recipient email' is the expected no-email-on-file case
-          // and not actionable; everything else (suppression, send failure) is.
-          const reason = emailResult?.error || 'unknown';
-          if (reason !== 'No receipt recipient email') {
-            logger.warn(`[stripe-webhook] Receipt email not sent for invoice ${paidInvoice.invoice_number}: ${reason}`);
-          }
-        }
-      } catch (err) {
-        logger.error(`[stripe-webhook] Auto-receipt failed for PI ${piId}: ${err.message}`, { stack: err.stack });
-      }
-    });
+    const paidInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+    if (paidInvoice) {
+      await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+        invoiceId: paidInvoice.id,
+        stripePaymentIntentId: piId,
+        source: 'stripe_webhook',
+      });
+      ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    }
   }
 
   // ── Card-present enrichment (Tap to Pay on iPhone) ─────────

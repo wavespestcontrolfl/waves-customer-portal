@@ -96,7 +96,7 @@ router.get('/processor', async (req, res, next) => {
 router.post('/cards/setup-intent', async (req, res, next) => {
   try {
     const schema = Joi.object({
-      paymentMethodType: Joi.string().valid('card', 'us_bank_account').default('card'),
+      paymentMethodType: Joi.string().valid('card', 'us_bank_account', 'card_or_bank').default('card'),
     });
 
     const { paymentMethodType } = await schema.validateAsync(req.body);

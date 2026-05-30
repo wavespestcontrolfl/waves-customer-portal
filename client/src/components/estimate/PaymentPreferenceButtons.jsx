@@ -43,14 +43,16 @@ export default function PaymentPreferenceButtons({
     opacity: disabled ? 0.65 : 1,
   };
 
-  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Choose pay-after-visit setup';
+  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Pay at the visit';
   const fineprint = offerPrepay
     ? 'Choose autopay to be billed after each completed service visit, or annual prepay to approve the 12-month plan up front with setup included.'
     : invoiceMode
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
-        : 'Choose autopay setup to be billed after each completed service visit.';
+        : 'Choose pay at the visit to be billed after each completed service visit.';
+  const cardNextStep = 'Next: confirm your booking. If card setup is required, we send you to the secure setup screen after confirmation.';
+  const prepayNextStep = 'Next: confirm annual prepay. No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.';
 
   if (invoiceMode) {
     return (
@@ -117,27 +119,37 @@ export default function PaymentPreferenceButtons({
       </div>
 
       <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => onSelect('card_on_file')}
-          style={{ ...btnBase, background: ACTION_BG, color: W.white }}
-        >{cardOnFileLabel}</button>
-        {offerPrepay && (
+        <div>
           <button
             type="button"
             disabled={disabled}
-            onClick={() => onSelect('prepay_annual')}
-            style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
-          >
-            Pay the year upfront
-            <span style={{
-              display: 'block', fontSize: 12, fontWeight: 500,
-              color: 'rgba(255,255,255,0.9)', marginTop: 2,
-            }}>
-              {waivableSetupFee ? `Save $${waivableSetupFee.amount} setup fee` : '12-month invoice after approval'}
-            </span>
-          </button>
+            onClick={() => onSelect('card_on_file')}
+            style={{ ...btnBase, background: ACTION_BG, color: W.white }}
+          >{cardOnFileLabel}</button>
+          <div style={{ fontSize: 12, color: W.textCaption, marginTop: 8, lineHeight: 1.45 }}>
+            {cardNextStep}
+          </div>
+        </div>
+        {offerPrepay && (
+          <div>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onSelect('prepay_annual')}
+              style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
+            >
+              Pay the year upfront
+              <span style={{
+                display: 'block', fontSize: 12, fontWeight: 500,
+                color: 'rgba(255,255,255,0.9)', marginTop: 2,
+              }}>
+                {waivableSetupFee ? `Save $${waivableSetupFee.amount} setup fee` : '12-month invoice after approval'}
+              </span>
+            </button>
+            <div style={{ fontSize: 12, color: W.textCaption, marginTop: 8, lineHeight: 1.45 }}>
+              {prepayNextStep}
+            </div>
+          </div>
         )}
       </div>
 
