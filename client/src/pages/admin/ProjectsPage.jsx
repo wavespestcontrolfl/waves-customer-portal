@@ -2597,7 +2597,8 @@ function ProjectDetail({
           <WdoSignaturePad
             projectId={project.id}
             signature={project.wdo_signature}
-            defaultSignerName={project.tech_name || ""}
+            defaultSignerName={project.wdo_applicator?.name || project.tech_name || ""}
+            defaultSignerIdCard={project.wdo_applicator?.idCardNo || ""}
             onChanged={() => load({ preserveEdits: true })}
           />
         </div>

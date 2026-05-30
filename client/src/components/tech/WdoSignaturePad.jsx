@@ -7,11 +7,12 @@ import { adminFetch } from "../../lib/adminFetch";
  * can be sent, so this gates the send buttons upstream. Draws to a canvas,
  * exports a PNG data URL, and POSTs to /admin/projects/:id/wdo-signature.
  */
-export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", onChanged }) {
+export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const hasDrawn = useRef(false);
   const [signerName, setSignerName] = useState(defaultSignerName);
+  const [signerIdCard, setSignerIdCard] = useState(defaultSignerIdCard);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(!signature?.signed);
@@ -64,13 +65,14 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   async function save() {
     if (!hasDrawn.current) { setError("Please sign in the box above."); return; }
     if (!signerName.trim()) { setError("Enter the licensee / inspector name."); return; }
+    if (!signerIdCard.trim()) { setError("Enter the inspector's FDACS ID card number."); return; }
     setSaving(true);
     setError("");
     try {
       const dataUrl = canvasRef.current.toDataURL("image/png");
       const r = await adminFetch(`/admin/projects/${projectId}/wdo-signature`, {
         method: "POST",
-        body: { signature: dataUrl, signer_name: signerName.trim() },
+        body: { signature: dataUrl, signer_name: signerName.trim(), signer_id_card: signerIdCard.trim() },
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));

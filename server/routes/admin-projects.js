@@ -1472,6 +1472,15 @@ async function loadWdoAddendumPhotos(project) {
         logger.warn(`[projects] addendum byte budget reached for ${project.id}; remaining photos omitted`);
         break;
       }
+      // pdf-lib only embeds PNG/JPEG. Skip other accepted upload types (e.g.
+      // WebP, GIF) by magic bytes so they don't consume an addendum slot or
+      // render a "[Photo N unavailable]" placeholder.
+      const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+      const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+      if (!isPng && !isJpeg) {
+        logger.warn(`[projects] addendum photo ${ph.id} skipped — unsupported image format for PDF embedding`);
+        continue;
+      }
       totalBytes += buffer.length;
       out.push({ buffer, contentType: object.ContentType || 'image/jpeg', caption: ph.caption || '' });
     } catch (err) {
@@ -1963,6 +1972,16 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       signed_at: new Date().toISOString(),
       signed_by_tech_id: req.technicianId || null,
     };
+
+    // The FDACS-13645 requires the licensee's printed name AND ID-card number,
+    // and the send gate treats any saved signature as complete — so require both
+    // here rather than emitting a signed form with a blank ID Card No.
+    if (!signature.signer_name) {
+      return res.status(400).json({ error: "Inspector's printed name is required to sign" });
+    }
+    if (!signature.signer_id_card) {
+      return res.status(400).json({ error: "Inspector's FDACS ID card number is required to sign", code: 'signer_id_required' });
+    }
 
     await db('projects').where({ id: project.id }).update({ wdo_signature: JSON.stringify(signature), updated_at: db.fn.now() });
     await logProjectActivity(req, project, 'project_wdo_signed', `WDO report signed by ${signature.signer_name || 'licensee'}`, { signer_name: signature.signer_name });
