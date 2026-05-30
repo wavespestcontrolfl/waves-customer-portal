@@ -1804,7 +1804,13 @@ router.get('/calendar', async (req, res, next) => {
 
     const rowMap = {};
     for (const r of rows) {
-      rowMap[r.week_of instanceof Date ? r.week_of.toISOString().split('T')[0] : r.week_of] = r;
+      // pg returns the week_of DATE as a local-midnight JS Date. Key off its
+      // LOCAL parts, not toISOString() — toISOString is UTC and would shift the
+      // calendar day on a server ahead of UTC (the keys here are ET YYYY-MM-DD).
+      const wk = r.week_of instanceof Date
+        ? `${r.week_of.getFullYear()}-${String(r.week_of.getMonth() + 1).padStart(2, '0')}-${String(r.week_of.getDate()).padStart(2, '0')}`
+        : r.week_of;
+      rowMap[wk] = r;
     }
 
     // Build response with placeholders for missing weeks

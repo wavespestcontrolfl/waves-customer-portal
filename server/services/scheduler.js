@@ -562,6 +562,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3AM ET — Purge stale double-opt-in pending subscribers. A 'pending'
+  // row whose confirmation link aged past the purge window (30d) never
+  // confirmed; delete it so the table doesn't accrue dead rows and the email is
+  // free for a fresh signup. (The link already stops confirming after 7d via
+  // the lookupByToken TTL.)
+  // =========================================================================
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      const { purgeStalePendingSubscribers } = require('./newsletter-subscribers');
+      const removed = await purgeStalePendingSubscribers();
+      if (removed > 0) logger.info(`[newsletter] Purged ${removed} stale pending subscriber(s)`);
+    } catch (err) {
+      logger.error(`[newsletter-pending-purge] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Automation runner. Fires the next step of any enrollment
   // whose next_send_at has passed. Indexed query on automation_enrollments.
   // =========================================================================

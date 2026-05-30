@@ -99,7 +99,7 @@ const SCRAPE_SOURCES = [
 ];
 
 exports.up = async function (knex) {
-  await knex('event_sources').insert(SCRAPE_SOURCES);
+  await knex('event_sources').insert(SCRAPE_SOURCES).onConflict('feed_url').ignore();
   console.log(
     `[20260427000007] Seeded ${SCRAPE_SOURCES.length} scrape event_sources (round 2: Visit Tampa Bay, Visit Venice, Visit St. Pete-Clearwater, Pure Florida, Bradenton CVB)`
   );
