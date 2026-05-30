@@ -20,6 +20,15 @@ const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
 const SERVICE_REPORT_FROM_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_REPORT_FROM_NAME = 'Waves Pest Control';
 
+// Mirror the service.report_ready template's suppression semantics so this
+// legacy direct-send fallback honors the same email_suppressions rows the
+// template path does (global bounce/spam/do_not_email + the service group).
+const SERVICE_REPORT_GROUP_KEY = 'service_operational';
+const SERVICE_REPORT_SUPPRESSION_TEMPLATE = {
+  send_stream: 'service_operational',
+  suppression_group_key: 'service_operational',
+};
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -167,7 +176,7 @@ async function sendLegacyServiceReportEmail({
       return { sent: true, deduped: true, message: existing };
     }
 
-    const snapshot = {
+    const baseSnapshot = {
       provider: 'sendgrid',
       template_key: 'service.report_ready.legacy',
       trigger_event_id: idempotencyKey,
@@ -181,18 +190,39 @@ async function sendLegacyServiceReportEmail({
       html_snapshot: email.html,
       text_snapshot: email.text,
       categories: JSON.stringify(['service_report_v1']),
-      status: 'queued',
-      provider_message_id: null,
-      sent_at: null,
-      error_message: null,
       idempotency_key: idempotencyKey,
       queued_at: new Date(),
       updated_at: new Date(),
     };
-    const rows = existing
-      ? await db('email_messages').where({ id: existing.id }).update(snapshot).returning('*')
-      : await db('email_messages').insert(snapshot).returning('*');
-    message = rows?.[0] || existing || snapshot;
+
+    const persistSnapshot = async (overrides) => {
+      const snapshot = { ...baseSnapshot, ...overrides };
+      const rows = existing
+        ? await db('email_messages').where({ id: existing.id }).update(snapshot).returning('*')
+        : await db('email_messages').insert(snapshot).returning('*');
+      return rows?.[0] || existing || snapshot;
+    };
+
+    // Honor suppressions before sending — the template path checks these but
+    // this direct fallback previously skipped them, so a bounced/unsubscribed
+    // address could still receive a legacy report. Record a blocked ledger row.
+    const suppression = await EmailTemplateLibrary.activeSuppressionFor(
+      SERVICE_REPORT_SUPPRESSION_TEMPLATE,
+      recipient.email,
+      SERVICE_REPORT_GROUP_KEY,
+    );
+    if (suppression) {
+      const reason = `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
+      const blocked = await persistSnapshot({ status: 'blocked', error_message: reason });
+      return { blocked: true, reason, message: blocked };
+    }
+
+    message = await persistSnapshot({
+      status: 'queued',
+      provider_message_id: null,
+      sent_at: null,
+      error_message: null,
+    });
   } catch (err) {
     if (!isEmailMessageSchemaMissing(err)) throw err;
     ledgerAvailable = false;

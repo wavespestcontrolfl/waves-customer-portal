@@ -11,6 +11,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  activeSuppressionFor: jest.fn(() => null),
 }));
 jest.mock('../services/service-report/pdf-queue', () => ({
   enqueuePdfRenderRetry: jest.fn(),
@@ -256,5 +257,35 @@ describe('service report email recipient delivery', () => {
     expect(emailMessageRows.map((row) => row.idempotency_key)).toEqual([
       'service_report_ready:record-1:service_contact',
     ]);
+  });
+
+  test('legacy fallback blocks a suppressed recipient before sending', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+
+    // Both recipients fall through to the legacy path; the suppressed one must
+    // never reach SendGrid and must be recorded as a blocked ledger row.
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('active template not found'));
+    EmailTemplateLibrary.activeSuppressionFor.mockImplementation((_template, email) =>
+      Promise.resolve(email === 'owner@example.com'
+        ? { suppression_type: 'bounce', group_key: null }
+        : null));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'legacy-tenant' });
+
+    const result = await sendServiceReportV1Email('record-1', {
+      token: 'token-1',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.recipientCount).toBe(1);
+    expect(result.blockedCount).toBe(1);
+    expect(result.messageIds).toEqual(['legacy-tenant']);
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: 'tenant@example.com' }));
+
+    const ownerRow = emailMessageRows.find((row) => row.recipient_email_snapshot === 'owner@example.com');
+    expect(ownerRow?.status).toBe('blocked');
+    expect(ownerRow?.error_message).toMatch(/^Suppressed: bounce/);
   });
 });
