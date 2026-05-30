@@ -1404,7 +1404,20 @@ function loadWdoSignature(project) {
     image: sig.image,
     contentType: sig.content_type || 'image/png',
     signerName: sig.signer_name || '',
+    signerIdCard: sig.signer_id_card || '',
     signedAt: sig.signed_at || null,
+  };
+}
+
+// The FDACS Print Name / ID Card No must match whoever actually signed, which
+// may differ from the project creator (admin-created WDO, or another cardholder
+// signs in the field). Prefer the captured signer identity over the project
+// technician when a signature is present.
+function applicatorForReport(baseApplicator, signature) {
+  if (!signature) return baseApplicator;
+  return {
+    name: signature.signerName || baseApplicator.name,
+    idCardNo: signature.signerIdCard || baseApplicator.idCardNo,
   };
 }
 
@@ -1438,11 +1451,12 @@ async function loadWdoAddendumPhotos(project) {
 // projects (which carry no FDACS attachment).
 async function buildWdoPdfAttachment(project, customer) {
   if (project?.project_type !== 'wdo_inspection') return null;
-  const [applicator, photos] = await Promise.all([
+  const [baseApplicator, photos] = await Promise.all([
     resolveProjectApplicator(project),
     loadWdoAddendumPhotos(project),
   ]);
   const signature = loadWdoSignature(project);
+  const applicator = applicatorForReport(baseApplicator, signature);
   const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
   return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
 }
@@ -1839,11 +1853,12 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
-    const [applicator, photos] = await Promise.all([
+    const [baseApplicator, photos] = await Promise.all([
       resolveProjectApplicator(project),
       loadWdoAddendumPhotos(project),
     ]);
     const signature = loadWdoSignature(project);
+    const applicator = applicatorForReport(baseApplicator, signature);
     const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="FDACS-13645-${project.id}.pdf"`);
