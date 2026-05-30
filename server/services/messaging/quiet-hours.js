@@ -1,5 +1,7 @@
 const DEFAULT_START_HOUR = 8;
 const DEFAULT_END_HOUR = 20;
+const DEFAULT_REVIEW_REQUEST_START_HOUR = 9;
+const DEFAULT_REVIEW_REQUEST_END_HOUR = 17;
 const TIME_ZONE = 'America/New_York';
 
 const QUIET_ENFORCED_PURPOSES = new Set([
@@ -112,9 +114,21 @@ function shouldEnforceQuietHours(input, policy) {
   return QUIET_ENFORCED_PURPOSES.has(input.purpose);
 }
 
-function nextAllowedSendAt(fromDate = new Date()) {
-  const startHour = intEnv('SMS_FL_QUIET_START_HOUR', DEFAULT_START_HOUR);
-  const endHour = intEnv('SMS_FL_QUIET_END_HOUR', DEFAULT_END_HOUR);
+function quietWindowFor(input) {
+  if (input?.purpose === 'review_request') {
+    return {
+      startHour: intEnv('SMS_REVIEW_REQUEST_START_HOUR', DEFAULT_REVIEW_REQUEST_START_HOUR),
+      endHour: intEnv('SMS_REVIEW_REQUEST_END_HOUR', DEFAULT_REVIEW_REQUEST_END_HOUR),
+    };
+  }
+  return {
+    startHour: intEnv('SMS_FL_QUIET_START_HOUR', DEFAULT_START_HOUR),
+    endHour: intEnv('SMS_FL_QUIET_END_HOUR', DEFAULT_END_HOUR),
+  };
+}
+
+function nextAllowedSendAt(fromDate = new Date(), input = null) {
+  const { startHour, endHour } = quietWindowFor(input);
   const candidate = new Date(fromDate.getTime());
   candidate.setUTCSeconds(0, 0);
 
@@ -131,8 +145,7 @@ function nextAllowedSendAt(fromDate = new Date()) {
 
 function checkFloridaQuietHours(input, policy, now = new Date()) {
   if (!shouldEnforceQuietHours(input, policy)) return { ok: true };
-  const startHour = intEnv('SMS_FL_QUIET_START_HOUR', DEFAULT_START_HOUR);
-  const endHour = intEnv('SMS_FL_QUIET_END_HOUR', DEFAULT_END_HOUR);
+  const { startHour, endHour } = quietWindowFor(input);
   const parts = etParts(now);
 
   if (isFederalHolidayET(now)) {
@@ -140,7 +153,7 @@ function checkFloridaQuietHours(input, policy, now = new Date()) {
       ok: false,
       code: 'QUIET_HOURS_HOLD',
       reason: 'Florida SMS quiet-hours policy holds non-urgent sends on federal holidays.',
-      nextAllowedAt: nextAllowedSendAt(now),
+      nextAllowedAt: nextAllowedSendAt(now, input),
     };
   }
 
@@ -149,7 +162,7 @@ function checkFloridaQuietHours(input, policy, now = new Date()) {
       ok: false,
       code: 'QUIET_HOURS_HOLD',
       reason: `Florida SMS quiet-hours policy allows non-urgent sends from ${startHour}:00 to ${endHour}:00 ET.`,
-      nextAllowedAt: nextAllowedSendAt(now),
+      nextAllowedAt: nextAllowedSendAt(now, input),
     };
   }
 
@@ -161,5 +174,5 @@ module.exports = {
   shouldEnforceQuietHours,
   nextAllowedSendAt,
   isFederalHolidayET,
-  _internals: { etParts, federalHolidayKeys },
+  _internals: { etParts, federalHolidayKeys, quietWindowFor },
 };

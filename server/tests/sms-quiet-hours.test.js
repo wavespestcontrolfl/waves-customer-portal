@@ -3,6 +3,7 @@ const {
   isFederalHolidayET,
   nextAllowedSendAt,
 } = require('../services/messaging/quiet-hours');
+const { etParts } = require('../utils/datetime-et');
 
 function input(purpose) {
   return {
@@ -33,6 +34,35 @@ describe('Florida SMS quiet-hours policy', () => {
       { requireConsent: 'transactional' },
       new Date('2026-05-25T02:30:00Z')
     )).toEqual({ ok: true });
+  });
+
+  test('blocks review requests before 9 AM and at or after 5 PM ET', () => {
+    const policy = { requireConsent: 'transactional' };
+
+    expect(checkFloridaQuietHours(
+      input('review_request'),
+      policy,
+      new Date('2026-05-26T12:59:00Z') // 8:59 AM ET
+    )).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD' });
+
+    expect(checkFloridaQuietHours(
+      input('review_request'),
+      policy,
+      new Date('2026-05-26T20:59:00Z') // 4:59 PM ET
+    )).toEqual({ ok: true });
+
+    const eveningHold = checkFloridaQuietHours(
+      input('review_request'),
+      policy,
+      new Date('2026-05-26T23:49:00Z') // 7:49 PM ET
+    );
+    expect(eveningHold).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD' });
+    expect(etParts(eveningHold.nextAllowedAt)).toMatchObject({
+      year: 2026,
+      month: 5,
+      day: 27,
+      hour: 9,
+    });
   });
 
   test('blocks non-urgent sends on federal holidays', () => {
