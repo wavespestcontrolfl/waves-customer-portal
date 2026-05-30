@@ -802,13 +802,35 @@ class AutonomousRunner {
    */
   async runDaily({ limit = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
+    // A single transient failure (e.g. a flaky agent dispatch) used to abort
+    // the whole batch, leaving the rest of the day's queue untouched. Instead,
+    // continue past an isolated failure and only bail when failures stack up —
+    // a genuinely broken engine still stops fast, but one hiccup doesn't waste
+    // the day. Bounded by batchLimit and the downstream per-day/week publish
+    // caps, so continuing can't over-publish.
+    const maxConsecutiveFailures = envInt('AUTONOMOUS_CONTENT_MAX_CONSECUTIVE_FAILURES', 2);
     const runs = [];
+    let consecutiveFailures = 0;
+    let failuresSeen = 0;
     for (let i = 0; i < batchLimit; i += 1) {
       const run = await this.runNext();
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
-      if (String(run.outcome || '').startsWith('failed')) break;
+      if (String(run.outcome || '').startsWith('failed')) {
+        consecutiveFailures += 1;
+        failuresSeen += 1;
+        if (consecutiveFailures >= maxConsecutiveFailures) {
+          logger.warn(`[autonomous-runner] runDaily halting batch after ${consecutiveFailures} consecutive failed runs (last: ${run.failure_message || run.outcome})`);
+          break;
+        }
+        logger.warn(`[autonomous-runner] runDaily continuing past transient failure (${run.failure_message || run.outcome}); ${consecutiveFailures}/${maxConsecutiveFailures} consecutive`);
+        continue;
+      }
+      consecutiveFailures = 0;
+    }
+    if (failuresSeen > 0) {
+      logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
     }
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
@@ -817,6 +839,7 @@ class AutonomousRunner {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
       limit: batchLimit,
+      failures: failuresSeen,
       runs,
     };
   }
@@ -966,10 +989,36 @@ class AutonomousRunner {
     try {
       prot = await protectedPages.isProtected(target, { db });
     } catch (err) {
-      logger.warn(`[autonomous-runner] protected-page check threw: ${err.message}`);
-      prot = { protected: true, reason: 'protected_check_error', detail: err.message };
+      // Fail closed (treat as protected), but tag this as an ERROR — not a
+      // by-design money-page skip — so it's distinguishable in autonomous_runs
+      // and can alert the operator. A silently-swallowed guard error reads as a
+      // routine skip and would never be noticed.
+      logger.error(`[autonomous-runner] protected-page check threw for ${target}: ${err.message}`);
+      prot = { protected: true, reason: 'protected_check_error', is_error: true, detail: err.message };
+      await this._alertEngineError('protected_check_error', `Protected-page check errored for ${target}: ${err.message}`).catch(() => {});
     }
     return { ...prot, checked_url: target };
+  }
+
+  /**
+   * Surface a hard engine error (a thrown guard, not a by-design skip) to the
+   * operator. Opt-in via AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT=true; routed as
+   * an internal_alert so it respects the OWNER_SMS_DISABLED kill switch. Best
+   * effort — never let an alert failure affect the run.
+   */
+  async _alertEngineError(code, message) {
+    if (!envBool('AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT', false)) return;
+    try {
+      const twilio = require('../twilio');
+      const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+      await twilio.sendSMS(ownerPhone, `Waves content engine error [${code}]: ${message}`, {
+        messageType: 'internal_alert',
+        link: '/admin/seo',
+      });
+      logger.info(`[autonomous-runner] engine-error alert sent: ${code}`);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] engine-error alert failed: ${err.message}`);
+    }
   }
 
   async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
