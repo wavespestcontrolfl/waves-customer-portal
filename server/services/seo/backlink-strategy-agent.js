@@ -18,6 +18,7 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BACKLINK_STRATEGY_AGENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ID;
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
+const REQUIRED_TOOL_NAMES = ['list_prospects', 'create_link_prospects'];
 
 async function apiCall(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -77,6 +78,18 @@ async function* streamSessionEvents(sessionId) {
 }
 
 const BacklinkStrategyAgent = {
+  async assertAgentConfigSynced() {
+    const agent = await apiCall('GET', `/agents/${BACKLINK_STRATEGY_AGENT_ID}`);
+    const configuredTools = new Set((agent.tools || []).map((tool) => tool && tool.name).filter(Boolean));
+    const missingTools = REQUIRED_TOOL_NAMES.filter((name) => !configuredTools.has(name));
+    if (missingTools.length) {
+      throw new Error(
+        `BACKLINK_STRATEGY_AGENT_ID=${BACKLINK_STRATEGY_AGENT_ID} is missing required M2 tools: ${missingTools.join(', ')}. `
+        + 'Run `npm run backlink:sync-strategy-agent` with ANTHROPIC_API_KEY before running the strategist.'
+      );
+    }
+    return { ok: true, agentId: agent.id, requiredTools: REQUIRED_TOOL_NAMES };
+  },
 
   /**
    * Run the weekly backlink strategy cycle.
@@ -117,6 +130,7 @@ const BacklinkStrategyAgent = {
     prompt += '\n\nAt the end, save your strategy report using the save_strategy_report tool.';
 
     notify('starting', 'Creating backlink strategy session...');
+    await this.assertAgentConfigSynced();
 
     const session = await apiCall('POST', '/sessions', {
       agent_id: BACKLINK_STRATEGY_AGENT_ID,
@@ -168,6 +182,8 @@ const BacklinkStrategyAgent = {
           add_targets_to_queue: 'adding targets',
           get_queue_status: 'reviewing queue',
           get_completed_profiles: 'reviewing profiles',
+          list_prospects: 'reviewing prospects',
+          create_link_prospects: 'adding prospects',
           check_search_volume: 'checking keywords',
           check_llm_mentions: 'checking LLM visibility',
           save_strategy_report: 'saving report',

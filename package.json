@@ -39,6 +39,7 @@
     "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js",
     "content:registry:live-status": "node server/scripts/check-content-registry-live-status.js",
     "content:registry:archive-stale": "node server/scripts/archive-stale-blog-rows.js",
+    "backlink:sync-strategy-agent": "node scripts/create-backlink-strategy-agent.js",
     "seo:pipeline:run": "node server/scripts/run-seo-pipeline.js",
     "seo:pipeline:worker": "node server/scripts/run-seo-pipeline-worker.js",
     "audit:waveguard-materials": "node server/scripts/audit-waveguard-protocol-material-costs.js",
