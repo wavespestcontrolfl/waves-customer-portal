@@ -3112,7 +3112,8 @@ async function assertRecapOwnership(req, res) {
 
 function recapStatusForReason(reason) {
   if (reason === 'not_found') return 404;
-  if (reason === 'not_pest_control') return 409;
+  // Conflict: pest-control gate, or a cancelled/skipped visit that can't be recapped.
+  if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped') return 409;
   return 400;
 }
 

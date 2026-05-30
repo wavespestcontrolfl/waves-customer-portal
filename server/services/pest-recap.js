@@ -32,10 +32,15 @@ const { etDateString } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
 
-// Statuses we will not re-transition out of. A re-recap on an already
-// completed visit still updates the record + can re-send, but never
-// regresses the status machine.
-const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped']);
+// A re-recap on an already-`completed` visit is idempotent: skip the
+// status transition but still refresh the record (and re-send if asked).
+const COMPLETED_STATUS = 'completed';
+
+// `cancelled`/`skipped` visits are NOT completable. A recap on them must be
+// rejected before any artifact is written — otherwise we'd emit a
+// "completed" service_records row, mark the tracker complete, and text the
+// customer for a visit the status machine says never happened (Codex P1).
+const NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped']);
 
 async function loadServiceWithCustomer(serviceId, knex = db) {
   return knex('scheduled_services')
@@ -162,6 +167,9 @@ async function submitRecap({
   // Whether THIS submit is the one that gets to send the recap text.
   // Decided under the row lock so concurrent submits can't both send.
   let willSendSms = false;
+  // Set under the lock if the visit can't be recapped (cancelled/skipped);
+  // the transaction aborts having written nothing and we return ok:false.
+  let rejectReason = null;
   // Concurrency idempotency (Codex P1): scheduled_service_id has only a
   // non-unique index, so two simultaneous submits (double-tap, browser
   // retry, admin+tech race) could each pass the existing-record lookup
@@ -185,8 +193,17 @@ async function submitRecap({
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
 
-    // 1. Status -> completed (skip if already terminal; recap is idempotent).
-    if (!TERMINAL_STATUSES.has(lockedStatus)) {
+    // 0b. Reject a recap on a cancelled/skipped visit before writing any
+    //     artifact. Returning here aborts the transaction body with nothing
+    //     written (no transition, no record, no products, no SMS).
+    if (NON_COMPLETABLE_STATUSES.has(lockedStatus)) {
+      rejectReason = `service_${lockedStatus}`;
+      return;
+    }
+
+    // 1. Status -> completed. Skip only when already completed (idempotent
+    //    re-recap); any other non-terminal status transitions now.
+    if (lockedStatus !== COMPLETED_STATUS) {
       await transitionJobStatus({
         jobId: serviceId,
         fromStatus: lockedStatus,
@@ -253,6 +270,13 @@ async function submitRecap({
       .filter((r) => r.product_name);
     if (productRows.length) await trx('service_products').insert(productRows);
   });
+
+  // Cancelled/skipped visit: nothing was written, skip all completion
+  // side effects (track-complete, SMS) and report the rejection.
+  if (rejectReason) {
+    logger.info(`[pest-recap] recap rejected service=${serviceId} reason=${rejectReason}`);
+    return { ok: false, reason: rejectReason };
+  }
 
   // 4. Customer-facing track_state -> complete (best-effort, post-trx).
   let trackCompleted = false;

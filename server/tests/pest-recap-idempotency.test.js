@@ -182,4 +182,27 @@ describe('pest recap idempotency (Codex P1)', () => {
     // No duplicate record created.
     expect(store.records).toHaveLength(1);
   });
+
+  test('a cancelled visit is rejected — no record, no track-complete, no SMS', async () => {
+    const store = { serviceStatus: 'cancelled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'admin',
+      actorId: null,
+      technicianNotes: 'Should not be written.',
+      products: [{ product_name: 'Termidor' }],
+      customerRecap: 'Service complete.',
+      sendSms: true,
+      knex,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('service_cancelled');
+    // No completed artifacts emitted for a cancelled visit.
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(store.records).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });
