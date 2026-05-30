@@ -26,6 +26,14 @@ function normalizeComparableUrl(u) {
   return stripUrl(u).toLowerCase();
 }
 
+function matchesTargetUrl(candidate, expected) {
+  if (!candidate || !expected) return false;
+  if (candidate === expected) return true;
+  if (!candidate.startsWith(expected)) return false;
+  const next = candidate.charAt(expected.length);
+  return next === '/' || next === '?' || next === '#';
+}
+
 function backlinkTargetsProspect(link, prospect) {
   const expected = normalizeComparableUrl(prospect.target_page);
   if (!expected) return false;
@@ -37,7 +45,7 @@ function backlinkTargetsProspect(link, prospect) {
     link.target_page,
     link.url,
   ].map(normalizeComparableUrl).filter(Boolean);
-  return candidates.some((candidate) => candidate === expected || candidate.startsWith(`${expected}/`));
+  return candidates.some((candidate) => matchesTargetUrl(candidate, expected));
 }
 
 // Find an active inbound link in seo_backlinks that corresponds to this prospect's live_url.
@@ -71,7 +79,7 @@ async function crawlForLink(liveUrl, targetPage) {
     let m;
     while ((m = anchorRe.exec(html)) !== null) {
       const href = normalizeComparableUrl(m[2]);
-      if (href !== expectedTarget && !href.startsWith(`${expectedTarget}/`)) continue;
+      if (!matchesTargetUrl(href, expectedTarget)) continue;
       const attrs = `${m[1]} ${m[3]}`;
       const relMatch = /rel=["']([^"']*)["']/i.exec(attrs);
       const rel = relMatch ? relMatch[1].toLowerCase() : '';
@@ -164,4 +172,4 @@ async function run({ limit = 200 } = {}) {
 }
 
 module.exports = { run, verifyOne, crawlForLink };
-module.exports._test = { backlinkTargetsProspect, normalizeComparableUrl };
+module.exports._test = { backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl };
