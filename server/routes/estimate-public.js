@@ -3072,10 +3072,15 @@ function renderPage(token, estimate, estData) {
   .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
   .pay-pref-grid.options{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
   @media(max-width:560px){.pay-pref-grid,.pay-pref-grid.options{grid-template-columns:1fr}}
-  .pay-pref-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:4px}
+  .pay-pref-choice{display:flex;flex-direction:column;gap:8px}
+  .pay-pref-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:4px;width:100%}
   .pay-pref-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
   .pay-pref-btn[disabled]{opacity:.5;cursor:not-allowed}
   .pay-pref-btn .pay-pref-title{font-size:14px;font-weight:600;color:#1B2C5B}
+  .pay-pref-note{font-size:13px;color:#6B7280;line-height:1.45;padding:0 2px}
+  .pay-pref-choice[hidden]{display:none}
+  .pay-pref-btn[hidden]+.pay-pref-note{display:none}
+  .pay-pref-btn[aria-pressed="true"]{box-shadow:0 0 0 3px rgba(27,44,91,.16)}
   .pay-pref-btn .pay-pref-sub{font-size:12px;color:#6B7280;line-height:1.45}
   .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .pay-pref-btn.primary .pay-pref-title{color:#fff}
@@ -3084,6 +3089,7 @@ function renderPage(token, estimate, estData) {
   .pay-pref-btn.prepay .pay-pref-title{color:#fff}
   .pay-pref-btn.prepay .pay-pref-sub{color:rgba(255,255,255,.85)}
   .reservation-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:#065F46;border-radius:10px;padding:12px 14px;font-size:13px;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .review-payment-summary{font-size:14px;color:#374151;line-height:1.45;margin:12px 0 0;font-weight:600}
   .reservation-banner .countdown{font-family:'Source Serif 4',Georgia,serif;font-weight:500;color:#065F46;font-size:15px}
   table{width:100%;border-collapse:collapse}
   td{padding:10px 0;border-bottom:1px solid #E7E2D7;vertical-align:top;font-size:14px}
@@ -3240,16 +3246,23 @@ ${shellTopBar()}
       <h3 id="pay-pref-heading" style="margin:20px 0 4px">${escapeHtml(pageCopy.payPrefHeading)}</h3>
       <p class="card-sub" id="pay-pref-subhead" style="margin:0">${escapeHtml(billingLede)}</p>
       <div class="pay-pref-grid options">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">${escapeHtml(pageCopy.payPrefCardTitle)}</span><span class="pay-pref-sub">${escapeHtml(pageCopy.payPrefCardSub)}</span></button>
-        <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
-        ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">${escapeHtml(pageCopy.prepayTitle)}</span><span class="pay-pref-sub">${escapeHtml(pageCopy.prepayButtonSub)}</span></button>` : ''}
+        <div class="pay-pref-choice">
+          <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">${escapeHtml(pageCopy.payPrefCardTitle)}</span></button>
+          <div class="pay-pref-note">${escapeHtml(pageCopy.payPrefCardSub)}</div>
+        </div>
+        <div class="pay-pref-choice">
+          <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span></button>
+          <div class="pay-pref-note" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</div>
+        </div>
+        ${showMembershipFee ? `<div class="pay-pref-choice"><button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">${escapeHtml(pageCopy.prepayTitle)}</span></button><div class="pay-pref-note">${escapeHtml(pageCopy.prepayButtonSub)}</div></div>` : ''}
       </div>
     </div>
     <div id="review-area" style="display:none">
       ${existingAppointment ? '<div class="reservation-banner"><span>Appointment already scheduled</span></div>' : '<div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>'}
+      ${existingAppointment ? '<div class="review-payment-summary" id="existing-review-pay-summary" aria-live="polite"></div>' : ''}
       <div class="pay-pref-grid">
         <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
-        <button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">${existingAppointment ? 'Choose a different payment option.' : 'Release this slot and choose a different time or payment option.'}</span></button>
+        ${existingAppointment ? '' : '<button type="button" class="pay-pref-btn" data-change-booking-pick><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>'}
       </div>
     </div>
   </section>
@@ -3700,6 +3713,10 @@ ${shellQuestionsBar()}
     if (prepayBtn) {
       prepayBtn.hidden = isOneTime;
     }
+    [cardBtn, visitBtn, prepayBtn].forEach((btn) => {
+      const choice = btn && btn.closest('.pay-pref-choice');
+      if (choice) choice.hidden = !!btn.hidden;
+    });
     if (heading) heading.textContent = isOneTime ? 'Book your visit' : RECURRING_PAY_PREF_HEADING;
     if (subhead) {
       subhead.textContent = isOneTime
@@ -3913,21 +3930,28 @@ ${shellQuestionsBar()}
     syncPaymentSetupCards();
     const payArea = document.getElementById('pay-pref-area');
     const reviewArea = document.getElementById('review-area');
-    if (payArea) payArea.style.display = 'none';
+    if (payArea) payArea.style.display = '';
     if (reviewArea) reviewArea.style.display = '';
     const confirmBtn = document.getElementById('confirm-book-btn');
     if (confirmBtn) confirmBtn.disabled = false;
     const title = document.getElementById('confirm-book-title');
     const sub = document.getElementById('confirm-book-sub');
+    const summary = document.getElementById('existing-review-pay-summary');
+    document.querySelectorAll('[data-pay-pref]').forEach((btn) => {
+      btn.setAttribute('aria-pressed', btn.dataset.payPref === pref ? 'true' : 'false');
+    });
     if (pref === 'prepay_annual') {
       if (title) title.textContent = 'Confirm annual prepay';
       if (sub) sub.textContent = 'Your existing appointment stays scheduled. Annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.';
+      if (summary) summary.textContent = 'Selected payment setup: Pay the 12-month plan in full.';
     } else if (pref === 'pay_at_visit') {
       if (title) title.textContent = 'Confirm appointment';
       if (sub) sub.textContent = 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.';
+      if (summary) summary.textContent = 'Selected payment setup: Pay at the visit.';
     } else {
       if (title) title.textContent = CARD_CONFIRM_TITLE;
       if (sub) sub.textContent = 'Your existing appointment stays scheduled. ' + CARD_CONFIRM_SUB;
+      if (summary) summary.textContent = 'Selected payment setup: Pay after each visit.';
     }
     if (reviewArea) reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -3994,6 +4018,7 @@ ${shellQuestionsBar()}
   async function confirmBooking() {
     const btn = document.getElementById('confirm-book-btn');
     if (btn) btn.disabled = true;
+    setBookingChoiceControlsDisabled(true);
     try {
       const payload = {
         slotId: bookingState.selectedSlotId,
@@ -4037,6 +4062,7 @@ ${shellQuestionsBar()}
     } catch (e) {
       toast('Could not confirm. Call ${COMPANY.phone} if this keeps happening.');
       if (btn) btn.disabled = false;
+      setBookingChoiceControlsDisabled(false);
     }
   }
 
@@ -4058,10 +4084,9 @@ ${shellQuestionsBar()}
   if (confirmBookBtn) {
     confirmBookBtn.addEventListener('click', confirmBooking);
   }
-  const changeBookingPickBtn = document.getElementById('change-booking-pick-btn');
-  if (changeBookingPickBtn) {
-    changeBookingPickBtn.addEventListener('click', cancelReservation);
-  }
+  document.querySelectorAll('[data-change-booking-pick]').forEach((b) => {
+    b.addEventListener('click', cancelReservation);
+  });
 
   // Kick off the slot fetch if the booking card is on the page (i.e.,
   // estimate is not yet accepted/expired).

@@ -42,6 +42,13 @@ export default function PaymentPreferenceButtons({
     border: 'none', textAlign: 'center', width: '100%',
     opacity: disabled ? 0.65 : 1,
   };
+  const optionNote = {
+    fontSize: 13,
+    color: W.textCaption,
+    lineHeight: 1.45,
+    marginTop: 8,
+    padding: '0 2px',
+  };
 
   const cardOnFileLabel = isOneTime ? 'Book visit' : 'Choose pay-after-visit setup';
   const fineprint = offerPrepay
@@ -117,27 +124,31 @@ export default function PaymentPreferenceButtons({
       </div>
 
       <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => onSelect('card_on_file')}
-          style={{ ...btnBase, background: ACTION_BG, color: W.white }}
-        >{cardOnFileLabel}</button>
-        {offerPrepay && (
+        <div>
           <button
             type="button"
             disabled={disabled}
-            onClick={() => onSelect('prepay_annual')}
-            style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
-          >
-            Pay the year upfront
-            <span style={{
-              display: 'block', fontSize: 12, fontWeight: 500,
-              color: 'rgba(255,255,255,0.9)', marginTop: 2,
-            }}>
-              {waivableSetupFee ? `Save $${waivableSetupFee.amount} setup fee` : '12-month invoice after approval'}
-            </span>
-          </button>
+            onClick={() => onSelect('card_on_file')}
+            style={{ ...btnBase, background: ACTION_BG, color: W.white }}
+          >{cardOnFileLabel}</button>
+          <div style={optionNote}>Billed after each completed service through autopay.</div>
+        </div>
+        {offerPrepay && (
+          <div>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onSelect('prepay_annual')}
+              style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
+            >
+              Pay the year upfront
+            </button>
+            <div style={optionNote}>
+              {waivableSetupFee
+                ? `Approve annual prepay and the setup is included at no charge.`
+                : '12-month invoice after approval.'}
+            </div>
+          </div>
         )}
       </div>
 
