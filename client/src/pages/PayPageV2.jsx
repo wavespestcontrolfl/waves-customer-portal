@@ -197,6 +197,67 @@ function DetailBlock({ label, children }) {
   );
 }
 
+function IconBadge({ name, tone = 'brand' }) {
+  const tones = {
+    brand: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
+    gold: { bg: '#FFF7CC', color: '#7A5A00', border: '#F5D54F' },
+    quiet: { bg: '#FAF8F3', color: 'var(--text-muted)', border: '#E7E2D7' },
+  };
+  const t = tones[tone] || tones.brand;
+  return (
+    <span style={{
+      width: 38,
+      height: 38,
+      borderRadius: 8,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0,
+      color: t.color,
+      background: t.bg,
+      border: `1px solid ${t.border}`,
+    }}>
+      <Icon name={name} size={18} strokeWidth={2} />
+    </span>
+  );
+}
+
+function MetaTile({ icon, label, value, sub, tone = 'brand' }) {
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'auto minmax(0, 1fr)',
+      gap: 12,
+      alignItems: 'center',
+      padding: 14,
+      borderRadius: 8,
+      border: '1px solid var(--border)',
+      background: '#FFFFFF',
+      minWidth: 0,
+    }}>
+      <IconBadge name={icon} tone={tone} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ ...eyebrow, marginBottom: 4 }}>{label}</div>
+        <div style={{
+          fontSize: 15,
+          fontWeight: 850,
+          color: 'var(--text)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {value}
+        </div>
+        {sub && (
+          <div style={{ marginTop: 3, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.35 }}>
+            {sub}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SummaryRow({ label, value, strong, muted }) {
   return (
     <div style={{
@@ -596,8 +657,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <Icon name="card" size={17} strokeWidth={2} />
         </span>
         <span>
-          A credit card surcharge of up to 3% may apply. The exact surcharge and total will be shown before payment.
-          Debit cards, prepaid cards, and bank transfers have no added card surcharge.
+          Credit cards may add up to 3%. You will see the exact total before payment. Debit cards, prepaid cards,
+          and bank transfers have no added card surcharge.
         </span>
       </div>
 
@@ -917,6 +978,7 @@ export default function PayPageV2() {
   const dueLabel = invoice.dueDate ? fmtDate(invoice.dueDate) : null;
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
+  const invoiceStatusLabel = isOverdue ? 'Overdue' : dueLabel ? `Due ${dueLabel}` : 'Due now';
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -940,57 +1002,93 @@ export default function PayPageV2() {
           </div>
         )}
 
-        <div className="waves-billing-grid">
-          <BrandCard padding={28}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 18 }}>
+        <div className="waves-pay-hero">
+          <div className="waves-pay-hero-copy">
+            <div style={{ ...eyebrow, color: 'rgba(255,255,255,0.72)', marginBottom: 10 }}>
+              Invoice {invoice.invoiceNumber}
+            </div>
+            <SerifHeading style={{ marginBottom: 8, color: '#FFFFFF' }}>Review and pay</SerifHeading>
+            <div style={{ color: 'rgba(255,255,255,0.78)', fontSize: 15, lineHeight: 1.5 }}>
+              {serviceLabel}
+              {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
+            </div>
+          </div>
+          <div className="waves-pay-hero-total">
+            <div style={{ ...eyebrow, color: 'rgba(27,44,91,0.72)', marginBottom: 8 }}>Amount due</div>
+            <div style={{ fontSize: 38, lineHeight: 1, fontWeight: 900, color: 'var(--text)', fontFamily: FONTS.body }}>
+              {fmtCurrency(invoice.total)}
+            </div>
+            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end' }}>
+              <StatusPill tone={isOverdue ? 'overdue' : 'due'}>
+                {invoiceStatusLabel}
+              </StatusPill>
+            </div>
+          </div>
+        </div>
+
+        <div className="waves-pay-single">
+          <BrandCard padding={24}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', flexWrap: 'wrap', marginBottom: 18 }}>
               <div>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>Invoice {invoice.invoiceNumber}</div>
-                <SerifHeading style={{ marginBottom: 8 }}>Review and pay</SerifHeading>
-                <div style={{ fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                <div style={{ ...eyebrow, marginBottom: 8 }}>Invoice details</div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: 'var(--text)', lineHeight: 1.2 }}>
                   {serviceLabel}
-                  {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
+                </div>
+                <div style={{ marginTop: 5, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                  Billed to {fullName(customer)}
                 </div>
               </div>
-              <StatusPill tone={isOverdue ? 'overdue' : 'due'}>
-                {isOverdue ? 'Overdue' : dueLabel ? `Due ${dueLabel}` : 'Due now'}
-              </StatusPill>
+              <a
+                href={`${API_BASE}/pay/${token}/invoice.pdf`}
+                style={{
+                  minHeight: 40,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  border: '1px solid var(--border-strong)',
+                  color: 'var(--brand)',
+                  textDecoration: 'none',
+                  fontSize: 14,
+                  fontWeight: 800,
+                  background: '#FFFFFF',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                <Icon name="document" size={16} strokeWidth={2} />
+                Invoice PDF
+              </a>
+            </div>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gap: 10,
+              marginBottom: 20,
+            }}>
+              <MetaTile
+                icon="clock"
+                label="Due date"
+                value={dueLabel || 'Due now'}
+                sub={isOverdue ? 'Payment requested' : 'Open invoice'}
+                tone={isOverdue ? 'quiet' : 'gold'}
+              />
+              <MetaTile
+                icon="calendar"
+                label="Service date"
+                value={serviceDateLabel || 'Not listed'}
+                sub={service.techName ? `Technician: ${service.techName}` : null}
+              />
             </div>
 
             <div style={{
               ...subtlePanel,
               padding: 18,
-              marginBottom: 18,
-              display: 'grid',
-              gridTemplateColumns: 'minmax(0, 1fr) auto',
-              gap: 18,
-              alignItems: 'center',
-            }}>
-              <div>
-                <div style={eyebrow}>Amount due</div>
-                <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
-                  {fmtCurrency(invoice.total)}
-                </div>
-              </div>
-              <span style={{
-                width: 42,
-                height: 42,
-                borderRadius: 8,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'var(--brand)',
-                background: '#FFFFFF',
-                border: '1px solid var(--border)',
-              }}>
-                <Icon name="document" size={20} strokeWidth={2} />
-              </span>
-            </div>
-
-            <div style={{
+              marginBottom: 20,
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
-              gap: 16,
-              marginBottom: 20,
+              gap: 18,
             }}>
               <DetailBlock label="Billed to">
                 <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
@@ -1098,7 +1196,7 @@ export default function PayPageV2() {
               </div>
             )}
 
-            <div style={{ ...subtlePanel, padding: 16 }}>
+            <div style={{ ...subtlePanel, padding: 16, marginBottom: 24 }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -1109,31 +1207,7 @@ export default function PayPageV2() {
               <SummaryRow label="Total due" value={fmtCurrency(invoice.total)} strong />
             </div>
 
-            <div style={{ marginTop: 16 }}>
-              <a
-                href={`${API_BASE}/pay/${token}/invoice.pdf`}
-                style={{
-                  minHeight: 40,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--brand)',
-                  textDecoration: 'none',
-                  fontSize: 14,
-                  fontWeight: 800,
-                  background: '#FFFFFF',
-                }}
-              >
-                <Icon name="document" size={16} strokeWidth={2} />
-                Invoice PDF
-              </a>
-            </div>
-          </BrandCard>
-
-          <BrandCard padding={24} style={{ position: 'sticky', top: 84 }}>
+            <div className="waves-pay-payment-panel">
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -1143,14 +1217,46 @@ export default function PayPageV2() {
             }}>
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
-                <div style={{ fontSize: 20, fontWeight: 850, color: 'var(--text)', lineHeight: 1.2 }}>
+                <div style={{ fontSize: 26, fontWeight: 900, color: 'var(--text)', lineHeight: 1 }}>
                   {fmtCurrency(invoice.total)}
+                </div>
+                <div style={{ marginTop: 6, fontSize: 14, color: 'var(--text-muted)' }}>
+                  {invoiceStatusLabel}
                 </div>
               </div>
               <StatusPill tone="secure">
                 <Icon name="lock" size={13} strokeWidth={2} />
                 Secure
               </StatusPill>
+            </div>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+              gap: 8,
+              marginBottom: 16,
+            }}>
+              {[
+                ['shield', 'Stripe'],
+                ['lock', 'Encrypted'],
+                ['phone', 'Support'],
+              ].map(([icon, label]) => (
+                <div key={label} style={{
+                  minHeight: 58,
+                  borderRadius: 8,
+                  border: '1px solid var(--border)',
+                  background: '#FAF8F3',
+                  display: 'grid',
+                  placeItems: 'center',
+                  gap: 3,
+                  color: 'var(--text-muted)',
+                  fontSize: 12,
+                  fontWeight: 800,
+                }}>
+                  <Icon name={icon} size={16} strokeWidth={2} />
+                  <span>{label}</span>
+                </div>
+              ))}
             </div>
 
             {paymentError && (
@@ -1185,6 +1291,7 @@ export default function PayPageV2() {
                 Loading payment form…
               </div>
             )}
+            </div>
           </BrandCard>
         </div>
 
