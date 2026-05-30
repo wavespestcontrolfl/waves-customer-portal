@@ -120,7 +120,7 @@ router.get('/overview', async (req, res, next) => {
     const alerts = [];
     Object.entries(byLine).forEach(([line, data]) => {
       const margin = data.revenue > 0 ? ((data.revenue - data.cost) / data.revenue * 100) : 0;
-      if (margin < 55) alerts.push({ type: 'low_margin', severity: 'warning', message: `${line} averaging ${margin.toFixed(1)}% margin — below 55% target` });
+      if (margin < 45) alerts.push({ type: 'low_margin', severity: 'warning', message: `${line} averaging ${margin.toFixed(1)}% margin — below 45% floor` });
     });
     Object.entries(byTech).forEach(([tech, data]) => {
       const rpmh = data.hours > 0 ? data.revenue / data.hours : 0;

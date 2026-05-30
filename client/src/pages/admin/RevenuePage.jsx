@@ -632,7 +632,7 @@ export default function RevenuePage() {
                     }}
                   >
                     {s.margin}%
-                    {s.margin < 55 && (
+                    {s.margin < 45 && (
                       <span
                         style={{
                           display: "inline-block",
@@ -643,7 +643,7 @@ export default function RevenuePage() {
                           marginLeft: 6,
                           verticalAlign: "middle",
                         }}
-                        title="Below 55% target"
+                        title="Below 45% floor"
                       />
                     )}
                   </td>{" "}
@@ -672,7 +672,7 @@ export default function RevenuePage() {
               marginRight: 6,
             }}
           />
-          55% margin target
+          45% margin floor
         </div>{" "}
       </div>
       {/* Tier Analysis Table */}
