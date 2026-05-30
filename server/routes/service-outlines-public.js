@@ -55,22 +55,50 @@ function publicPacket(row) {
   };
 }
 
+async function loadPacketForTokenHash(tokenHash) {
+  const primaryPacket = await db('service_outline_packets')
+    .where({ token_hash: tokenHash })
+    .whereNull('revoked_at')
+    .first();
+  if (primaryPacket) return { packet: primaryPacket, tokenRecord: null };
+
+  const tokenRecord = await db('service_outline_public_tokens')
+    .where({ token_hash: tokenHash })
+    .whereNull('revoked_at')
+    .first();
+  if (!tokenRecord) return { packet: null, tokenRecord: null };
+
+  const packet = await db('service_outline_packets')
+    .where({ id: tokenRecord.packet_id })
+    .whereNull('revoked_at')
+    .first();
+  return { packet, tokenRecord };
+}
+
+function tokenExpiresAt(packet, tokenRecord) {
+  return tokenRecord?.expires_at || packet?.expires_at || null;
+}
+
 router.get('/:token', async (req, res, next) => {
   try {
     setPublicPacketHeaders(res);
     const token = normalizeTokenParam(req);
     if (!token) return res.status(404).json({ error: 'Service outline not found' });
     const tokenHash = hashToken(token);
-    const packet = await db('service_outline_packets')
-      .where({ token_hash: tokenHash })
-      .whereNull('revoked_at')
-      .first();
+    const { packet, tokenRecord } = await loadPacketForTokenHash(tokenHash);
 
     if (!packet || !canServePublicPacket(packet)) return res.status(404).json({ error: 'Service outline not found' });
-    if (packet.expires_at && new Date(packet.expires_at) <= new Date()) {
-      await db('service_outline_packets')
-        .where({ id: packet.id })
-        .update({ status: 'expired', updated_at: db.fn.now() });
+    const expiresAt = tokenExpiresAt(packet, tokenRecord);
+    if (expiresAt && new Date(expiresAt) <= new Date()) {
+      if (tokenRecord) {
+        await db('service_outline_public_tokens')
+          .where({ id: tokenRecord.id })
+          .update({ revoked_at: db.fn.now(), updated_at: db.fn.now() });
+      } else {
+        await db('service_outline_packets')
+          .where({ id: packet.id })
+          .update({ status: 'expired', updated_at: db.fn.now() });
+      }
       return res.status(410).json({ error: 'Service outline link has expired' });
     }
 
@@ -112,16 +140,20 @@ router.post('/:token/cta-click', outlineEventLimiter, async (req, res, next) => 
     const token = normalizeTokenParam(req);
     if (!token) return res.status(404).json({ error: 'Service outline not found' });
     const tokenHash = hashToken(token);
-    const packet = await db('service_outline_packets')
-      .where({ token_hash: tokenHash })
-      .whereNull('revoked_at')
-      .first();
+    const { packet, tokenRecord } = await loadPacketForTokenHash(tokenHash);
 
     if (!packet || !canServePublicPacket(packet)) return res.status(404).json({ error: 'Service outline not found' });
-    if (packet.expires_at && new Date(packet.expires_at) <= new Date()) {
-      await db('service_outline_packets')
-        .where({ id: packet.id })
-        .update({ status: 'expired', updated_at: db.fn.now() });
+    const expiresAt = tokenExpiresAt(packet, tokenRecord);
+    if (expiresAt && new Date(expiresAt) <= new Date()) {
+      if (tokenRecord) {
+        await db('service_outline_public_tokens')
+          .where({ id: tokenRecord.id })
+          .update({ revoked_at: db.fn.now(), updated_at: db.fn.now() });
+      } else {
+        await db('service_outline_packets')
+          .where({ id: packet.id })
+          .update({ status: 'expired', updated_at: db.fn.now() });
+      }
       return res.status(410).json({ error: 'Service outline link has expired' });
     }
 

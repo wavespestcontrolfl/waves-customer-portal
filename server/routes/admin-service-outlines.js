@@ -507,7 +507,7 @@ router.post('/:id/send', async (req, res, next) => {
         sent_method: hasSuccess ? method : packet.sent_method,
         updated_at: trx.fn.now(),
       };
-      if (hasSuccess && !canReuseToken) {
+      if (hasSuccess && !canReuseToken && !packet.token_hash) {
         Object.assign(packetUpdate, {
           token_hash: hashToken(token),
           token_last_four: token.slice(-4),
@@ -519,6 +519,15 @@ router.post('/:id/send', async (req, res, next) => {
         .where({ id: packet.id })
         .update(packetUpdate)
         .returning('*');
+      if (hasSuccess && !canReuseToken && packet.token_hash) {
+        await trx('service_outline_public_tokens').insert({
+          packet_id: packet.id,
+          token_hash: hashToken(token),
+          token_last_four: token.slice(-4),
+          token_created_at: trx.fn.now(),
+          expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 45),
+        });
+      }
       if (sendSms) await logEvent(trx, row, 'sent_sms', req, outcomes.sms || {});
       if (sendEmail) await logEvent(trx, row, 'sent_email', req, outcomes.email || {});
       if (!hasSuccess) await logEvent(trx, row, 'failed', req, outcomes);

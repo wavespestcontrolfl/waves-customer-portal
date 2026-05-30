@@ -110,4 +110,57 @@ describe('public service outline packets', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'viewed' }));
   });
+
+  test('serves approved outline packets through secondary resend tokens', async () => {
+    const packet = {
+      id: 'packet-1',
+      status: 'sent',
+      title: 'Your Waves Lawn Care Program Overview',
+      content_json: { title: 'Overview' },
+      summary_json: { turfType: 'st_augustine' },
+      revoked_at: null,
+      expires_at: null,
+      first_viewed_at: null,
+      view_count: 0,
+    };
+    const primaryMissChain = chain({ first: jest.fn().mockResolvedValue(null) });
+    const secondaryTokenChain = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'token-1',
+        packet_id: 'packet-1',
+        expires_at: null,
+        revoked_at: null,
+      }),
+    });
+    const packetByIdChain = chain({ first: jest.fn().mockResolvedValue(packet) });
+    const updateChain = chain({
+      update: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ ...packet, status: 'viewed', view_count: 1 }]),
+    });
+    const insertChain = chain();
+    let packetReads = 0;
+
+    db.mockImplementation((table) => {
+      if (table === 'service_outline_public_tokens') return secondaryTokenChain;
+      if (table === 'service_outline_events') return insertChain;
+      if (table === 'service_outline_packets') {
+        packetReads += 1;
+        if (packetReads === 1) return primaryMissChain;
+        if (packetReads === 2) return packetByIdChain;
+        return updateChain;
+      }
+      return chain();
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/service-outlines/${VALID_TOKEN}`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.packet).toMatchObject({ id: 'packet-1', status: 'viewed' });
+    });
+
+    expect(secondaryTokenChain.first).toHaveBeenCalledTimes(1);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'viewed' }));
+  });
 });

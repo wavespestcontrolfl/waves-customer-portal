@@ -165,4 +165,64 @@ describe('admin service outline sends', () => {
     expect(email.html).toContain('Hi &lt;img src=x onerror=alert(1)&gt;,');
     expect(email.html).not.toContain('<img src=x onerror=alert(1)>');
   });
+
+  test('stores a resend token without overwriting the existing packet token hash', async () => {
+    const packetRow = {
+      id: 'packet-1',
+      estimate_id: 'estimate-1',
+      customer_id: 'customer-1',
+      status: 'sent',
+      validation_status: 'passed',
+      token_hash: 'existing-token-hash',
+      token_last_four: 'old1',
+      title: 'Your Waves Lawn Care Program Overview',
+      expires_at: null,
+      revoked_at: null,
+    };
+    const packetQuery = chain({
+      first: jest.fn().mockResolvedValue(packetRow),
+      returning: jest.fn().mockResolvedValue([{ ...packetRow, sent_at: 'NOW' }]),
+    });
+    const estimateQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'estimate-1',
+        customer_id: 'customer-1',
+        customer_phone: '',
+        customer_email: 'customer@example.com',
+        customer_name: 'Ava',
+      }),
+    });
+    const secondaryTokenQuery = chain();
+
+    db.mockImplementation((table) => {
+      if (table === 'service_outline_packets') return packetQuery;
+      if (table === 'estimates') return estimateQuery;
+      if (table === 'service_outline_public_tokens') return secondaryTokenQuery;
+      return chain();
+    });
+    sendgrid.isConfigured.mockReturnValueOnce(true);
+    sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-1' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/service-outlines/packet-1/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'email' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.publicUrl).toContain('/service-outlines/');
+    });
+
+    expect(packetQuery.update).toHaveBeenCalledWith(expect.not.objectContaining({
+      token_hash: expect.any(String),
+      token_last_four: expect.any(String),
+    }));
+    expect(secondaryTokenQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      packet_id: 'packet-1',
+      token_hash: expect.any(String),
+      token_last_four: expect.any(String),
+      expires_at: expect.any(Date),
+    }));
+  });
 });
