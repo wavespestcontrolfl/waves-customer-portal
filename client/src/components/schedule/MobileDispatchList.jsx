@@ -244,7 +244,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
             {techInitial && (
-              <div className="relative" ref={techBtnRef}>
+              <div className="relative flex flex-1 min-w-0" ref={techBtnRef}>
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); setShowTechPicker(!showTechPicker); }}
