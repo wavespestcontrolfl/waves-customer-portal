@@ -43,20 +43,23 @@ describe('lawn pricing golden master', () => {
     }
   });
 
-  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $92 / $828 / $69.00', () => {
+  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $76 / $684 / $57.00', () => {
     const r = priceLawnCare({ turfSf: 4250 }, { track: 'st_augustine', tier: 'enhanced' });
-    expect(r.perApp).toBe(92);
-    expect(r.annual).toBe(828);
-    expect(r.monthly).toBe(69);
-    expect(r.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_55_FLOOR');
+    expect(r.perApp).toBe(76);
+    expect(r.annual).toBe(684);
+    expect(r.monthly).toBe(57);
+    expect(r.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_45_FLOOR');
     // Annual is source-of-truth; monthly is derived and must reconcile within ¢.
     expect(Math.abs(r.monthly * 12 - r.annual)).toBeLessThanOrEqual(0.5);
   });
 
-  it('every recurring case prices off the 55% cost floor (no market-table override)', () => {
+  it('every recurring case uses either the market table or the 45% floor, whichever is higher', () => {
     for (const c of cases) {
-      expect(c.out.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
-      expect(c.out.pricingSource).toBe('COST_FLOOR');
+      expect(['TABLE_INTERPOLATION', 'EXTRAPOLATED_ABOVE_TABLE_MAX', 'FORTY_FIVE_MARGIN_FLOOR'])
+        .toContain(c.out.pricingBasis);
+      expect(['MARKET_TABLE', 'EXTRAPOLATED_TABLE', 'COST_FLOOR'])
+        .toContain(c.out.pricingSource);
+      expect(c.out.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_45_FLOOR');
     }
   });
 });
