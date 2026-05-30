@@ -586,12 +586,12 @@ describe('runDaily batching', () => {
     });
   });
 
-  test('continues past an isolated transient failure instead of abandoning the day', async () => {
+  test('continues to the next opportunity past a failure, excluding the failed one', async () => {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
     runner.runNext = jest.fn()
-      .mockResolvedValueOnce({ outcome: 'failed_agent', failure_message: 'dispatch:transient blip' })
-      .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'new_supporting_blog' })
+      .mockResolvedValueOnce({ outcome: 'failed_agent', failure_message: 'dispatch:transient blip', opportunity_id: 'opp_poison' })
+      .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'new_supporting_blog', opportunity_id: 'opp_2' })
       .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
     runner._appendToDailyDigest = jest.fn(async () => {});
 
@@ -600,6 +600,11 @@ describe('runDaily batching', () => {
     // The single failure should NOT stop the batch — the counter resets after
     // the subsequent success, and the loop drains until the queue empties.
     expect(runner.runNext).toHaveBeenCalledTimes(3);
+    // The failed opportunity must be excluded from subsequent claims so the
+    // released-to-pending poison row isn't just re-served at the top.
+    expect(runner.runNext).toHaveBeenNthCalledWith(1, { excludeIds: [] });
+    expect(runner.runNext).toHaveBeenNthCalledWith(2, { excludeIds: ['opp_poison'] });
+    expect(runner.runNext).toHaveBeenNthCalledWith(3, { excludeIds: ['opp_poison'] });
     expect(result).toMatchObject({
       outcome: 'skipped_no_opportunity',
       count: 3,

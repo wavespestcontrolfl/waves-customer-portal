@@ -118,7 +118,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [] } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -136,7 +136,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore });
+      opp = await queue.claimNext({ minScore, excludeIds });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -812,19 +812,26 @@ class AutonomousRunner {
     const runs = [];
     let consecutiveFailures = 0;
     let failuresSeen = 0;
+    // A failed runNext() releases its claim back to 'pending', so the queue
+    // would re-serve the same top opportunity on the next iteration. Exclude
+    // already-failed opportunities for the rest of THIS batch so a single
+    // poison row can't starve the lower-scored queue (it's still eligible on
+    // the next cron, where its claim was released to pending).
+    const failedOppIds = [];
     for (let i = 0; i < batchLimit; i += 1) {
-      const run = await this.runNext();
+      const run = await this.runNext({ excludeIds: [...failedOppIds] });
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
       if (String(run.outcome || '').startsWith('failed')) {
         consecutiveFailures += 1;
         failuresSeen += 1;
+        if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
         if (consecutiveFailures >= maxConsecutiveFailures) {
           logger.warn(`[autonomous-runner] runDaily halting batch after ${consecutiveFailures} consecutive failed runs (last: ${run.failure_message || run.outcome})`);
           break;
         }
-        logger.warn(`[autonomous-runner] runDaily continuing past transient failure (${run.failure_message || run.outcome}); ${consecutiveFailures}/${maxConsecutiveFailures} consecutive`);
+        logger.warn(`[autonomous-runner] runDaily continuing to the next opportunity past a failure (${run.failure_message || run.outcome}); ${consecutiveFailures}/${maxConsecutiveFailures} consecutive, ${failedOppIds.length} excluded`);
         continue;
       }
       consecutiveFailures = 0;
