@@ -19,6 +19,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatDateOnly } = require('../utils/date-only');
 const { getInvoiceEmailRecipients, getReceiptEmailRecipients } = require('./customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -39,15 +40,6 @@ function getTransporter() {
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
-}
-
-// SMTP is dev/staging-only — in production we hard-fail rather than bypass
-// the email_messages audit row and email_suppressions check. A
-// template-missing error in prod is a migration bug; SendGrid unconfigured
-// in prod is a deploy bug; both should page operators, not fall through to
-// a silent SMTP delivery that the system can't see.
-function smtpFallbackAllowed() {
-  return process.env.NODE_ENV !== 'production';
 }
 
 function pdfAttachment(filename, buffer) {
@@ -293,7 +285,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const memoHtml = memo
     ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${memoEscaped}</div>`
     : '';
-  const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.${memoHtml ? '' : ''}`;
+  const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
   const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;
   const cardText = (payment?.card_brand && payment?.card_last_four)
     ? `${payment.card_brand.toUpperCase()} ···· ${payment.card_last_four}`

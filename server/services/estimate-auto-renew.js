@@ -23,6 +23,7 @@ const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
 const RENEWAL_DAYS = 7;
 
@@ -36,15 +37,6 @@ async function renderTemplate(templateKey, vars, context = {}) {
     throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
   }
   throw new Error(`SMS template ${templateKey} is missing or inactive`);
-}
-
-// SMTP is dev/staging-only — in production we hard-fail rather than bypass
-// the email_messages audit row and email_suppressions check. A
-// template-missing error in prod is a migration bug; SendGrid unconfigured
-// in prod is a deploy bug; both should page operators, not fall through to
-// a silent SMTP delivery that the system can't see.
-function smtpFallbackAllowed() {
-  return process.env.NODE_ENV !== 'production';
 }
 
 function canFallbackFromTemplateEmailError(err) {

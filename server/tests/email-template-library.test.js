@@ -554,6 +554,9 @@ describe('email template library rendering', () => {
       idempotency_key: 'estimate.extension_notice:est-queued',
       error_message: null,
       subject_snapshot: 'Stale queued subject',
+      // Queued well outside the in-flight window: an abandoned/crashed attempt,
+      // safe to reclaim and resend.
+      queued_at: new Date(Date.now() - 60 * 60 * 1000),
     };
     const queuedMessage = {
       ...staleQueuedMessage,
@@ -598,6 +601,133 @@ describe('email template library rendering', () => {
       sent: true,
       message: sentMessage,
     }));
+  });
+
+  test('sendTemplate dedupes a concurrent idempotency-key insert collision instead of throwing', async () => {
+    // Two overlapping callers both pass the pre-insert dedupe check (the row
+    // does not exist yet), then race on the unique index. The loser hits a
+    // 23505 on insert; it must re-read and return a clean dedupe rather than
+    // surfacing a raw driver error — and must NOT double-send.
+    const winnerMessage = {
+      id: 'msg-winner',
+      status: 'sent',
+      provider_message_id: 'sg-winner',
+      idempotency_key: 'estimate.extension_notice:est-race',
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const uniqueViolationInsert = chain({});
+    uniqueViolationInsert.returning = jest.fn(async () => {
+      const err = new Error('duplicate key value violates unique constraint "email_messages_idempotency_key_unique"');
+      err.code = '23505';
+      throw err;
+    });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: undefined }),       // pre-insert dedupe check: nothing yet
+        uniqueViolationInsert,             // queued insert loses the race -> 23505
+        chain({ first: winnerMessage }),   // re-read after collision -> the winner's row
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'race@example.com',
+      payload: {
+        first_name: 'Ray',
+        estimate_url: 'https://example.com/estimate/est-race',
+        expires_at: 'June 12',
+      },
+      idempotencyKey: 'estimate.extension_notice:est-race',
+    });
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({
+      deduped: true,
+      sent: true,
+      message: winnerMessage,
+    }));
+  });
+
+  test('sendTemplate surfaces a retryable collision when the winner is still in-flight', async () => {
+    // Collision where the winner's row is still `queued` (its insert precedes
+    // the SendGrid call). Reporting a clean dedupe here would be a false
+    // non-send — callers treat sent===false as blocked. Raise a retryable
+    // collision instead; the caller retries once the winner reaches a terminal
+    // status.
+    const inFlightWinner = {
+      id: 'msg-inflight',
+      status: 'queued',
+      idempotency_key: 'estimate.extension_notice:est-inflight',
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const uniqueViolationInsert = chain({});
+    uniqueViolationInsert.returning = jest.fn(async () => {
+      const err = new Error('duplicate key value violates unique constraint "email_messages_idempotency_key_unique"');
+      err.code = '23505';
+      throw err;
+    });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: undefined }),         // pre-insert dedupe check: nothing yet
+        uniqueViolationInsert,               // queued insert loses the race -> 23505
+        chain({ first: inFlightWinner }),    // re-read: winner still in flight
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'inflight@example.com',
+      payload: {
+        first_name: 'Ina',
+        estimate_url: 'https://example.com/estimate/est-inflight',
+        expires_at: 'June 12',
+      },
+      idempotencyKey: 'estimate.extension_notice:est-inflight',
+    })).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS', retryable: true });
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('sendTemplate does not resend when a concurrent queued row is still in-flight', async () => {
+    // The wider race: a concurrent caller already committed a `queued` row that
+    // is mid-flight. The pre-insert lookup finds it; reclaiming it as a retry
+    // would re-send and duplicate. A recently-queued row must raise a retryable
+    // collision instead of being resent.
+    const recentlyQueued = {
+      id: 'msg-recent',
+      status: 'queued',
+      idempotency_key: 'estimate.extension_notice:est-recent',
+      error_message: null,
+      subject_snapshot: 'Your estimate expires June 12',
+      queued_at: new Date(), // just queued -> in-flight
+    };
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [chain({ first: recentlyQueued })], // pre-insert lookup only; we bail before insert
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'recent@example.com',
+      payload: {
+        first_name: 'Ren',
+        estimate_url: 'https://example.com/estimate/est-recent',
+        expires_at: 'June 12',
+      },
+      idempotencyKey: 'estimate.extension_notice:est-recent',
+    })).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS', retryable: true });
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('sendTemplate refuses paused templates before queueing', async () => {
