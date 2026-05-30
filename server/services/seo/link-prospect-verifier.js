@@ -52,17 +52,17 @@ async function reconcileFromProfile(prospect) {
 
 // Best-effort crawl: does live_url contain an <a> to wavespestcontrol.com, and is it dofollow?
 async function crawlForLink(liveUrl, targetPage) {
+  let to = null;
   try {
     const expectedTarget = normalizeComparableUrl(targetPage);
     if (!expectedTarget) return { found: false };
     const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(), 12000);
+    to = setTimeout(() => controller.abort(), 12000);
     const res = await fetch(liveUrl, {
       signal: controller.signal,
       redirect: 'follow',
       headers: { 'User-Agent': 'WavesBacklinkVerifier/1.0 (+https://wavespestcontrol.com)' },
     });
-    clearTimeout(to);
     if (!res.ok) return { found: false };
     const html = await res.text();
 
@@ -82,6 +82,8 @@ async function crawlForLink(liveUrl, targetPage) {
     return { found: false };
   } catch (err) {
     return { found: false, error: err.message };
+  } finally {
+    if (to) clearTimeout(to);
   }
 }
 

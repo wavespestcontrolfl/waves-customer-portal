@@ -10,6 +10,21 @@ const logger = require('../logger');
 
 const BASE_URL = 'https://api.dataforseo.com/v3';
 
+function normalizeIndexedUrl(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '');
+}
+
+function hasUrlBoundary(candidate, clean) {
+  if (!candidate.startsWith(clean)) return false;
+  const next = candidate.charAt(clean.length);
+  return next === '/' || next === '?' || next === '#';
+}
+
 class DataForSEO {
   constructor() {
     this.login = process.env.DATAFORSEO_LOGIN;
@@ -131,7 +146,7 @@ class DataForSEO {
   // Returns 'indexed' | 'not_indexed' | 'unknown' (call failed / not configured).
   async checkIndexed(url) {
     try {
-      const clean = String(url).replace(/^https?:\/\//, '').replace(/\/$/, '');
+      const clean = normalizeIndexedUrl(url);
       const data = await this.request('/serp/google/organic/live/advanced', [{
         keyword: `site:${clean}`,
         location_name: 'Bradenton,Florida,United States',
@@ -143,8 +158,8 @@ class DataForSEO {
       if (!result || !Array.isArray(result.items)) return 'unknown';
       const items = result.items;
       const found = items.some((i) => {
-        const u = (i.url || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
-        return u === clean || u.startsWith(clean);
+        const u = normalizeIndexedUrl(i.url || '');
+        return u === clean || hasUrlBoundary(u, clean);
       });
       return found ? 'indexed' : 'not_indexed';
     } catch {
@@ -155,3 +170,4 @@ class DataForSEO {
 
 module.exports = new DataForSEO();
 module.exports.DataForSEO = DataForSEO;
+module.exports._test = { hasUrlBoundary, normalizeIndexedUrl };
