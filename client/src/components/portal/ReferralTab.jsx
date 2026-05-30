@@ -184,7 +184,7 @@ export default function ReferralTab({ customerId, customerName, token }) {
         <div style={{ fontSize: 16, fontWeight: 600, color: C.text, marginBottom: 12 }}>How It Works</div>
         {[
           { step: '1', title: 'Share Your Link', desc: 'Send your personal referral link to friends, family, or neighbors.' },
-          { step: '2', title: 'They Sign Up', desc: `When they become a Waves customer, you earn $${(data.rewardPerReferral || 50).toFixed(2)} in credit.` },
+          { step: '2', title: 'They Sign Up', desc: `When they become a Waves customer, you earn $${(data.rewardPerReferral || 25).toFixed(2)} in credit.` },
           { step: '3', title: 'Earn Rewards', desc: 'Credits are applied to your account after their first service. Hit milestones for bonus rewards!' },
         ].map(s => (
           <div key={s.step} style={{ display: 'flex', gap: 14, marginBottom: 14 }}>

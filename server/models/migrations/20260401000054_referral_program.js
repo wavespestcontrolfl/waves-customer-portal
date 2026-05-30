@@ -103,7 +103,7 @@ exports.up = async function (knex) {
   try {
     const settings = [
       ['reward_per_click_cents', '50'],
-      ['reward_per_referral_cents', '5000'],
+      ['reward_per_referral_cents', '2500'],
       ['min_payout_cents', '1000'],
       ['auto_approve_referrals', 'false'],
       ['payout_methods', '["invoice_credit","service_credit","cash"]'],

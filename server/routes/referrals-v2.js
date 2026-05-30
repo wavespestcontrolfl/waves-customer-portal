@@ -118,6 +118,7 @@ router.get('/', async (req, res, next) => {
         convertedAt: r.converted_at,
       })),
       rewardPerReferral: settings.referrer_reward_cents / 100,
+      refereeDiscount: settings.referee_discount_cents / 100,
     });
   } catch (err) { next(err); }
 });
@@ -127,6 +128,7 @@ router.get('/', async (req, res, next) => {
 // =========================================================================
 router.get('/stats', async (req, res, next) => {
   try {
+    const settings = await engine.getSettings();
     const promoter = await db('referral_promoters').where({ customer_id: req.customerId }).first();
 
     if (!promoter) {
@@ -135,10 +137,11 @@ router.get('/stats', async (req, res, next) => {
         totalEarned: 0,
         referralCode: null,
         enrolled: false,
+        rewardPerReferral: settings.referrer_reward_cents / 100,
+        refereeDiscount: settings.referee_discount_cents / 100,
       });
     }
 
-    const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
 
     res.json({
@@ -150,6 +153,8 @@ router.get('/stats', async (req, res, next) => {
       referralLink,
       milestoneLevel: promoter.milestone_level || 'none',
       enrolled: true,
+      rewardPerReferral: settings.referrer_reward_cents / 100,
+      refereeDiscount: settings.referee_discount_cents / 100,
     });
   } catch (err) { next(err); }
 });

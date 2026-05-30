@@ -1132,10 +1132,15 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
         <PressureTrendChart points={context.points || []} neighborhood={neighborhood} summary={context.customerSummary} />
       </div>
       {neighborhood?.sampleSize >= 20 && (
-        <div className="pressure-legend">
-          <span>Your home</span>
-          <span>Nearby WaveGuard average</span>
-        </div>
+        <>
+          {neighborhood.customerSummary && (
+            <p className="neighborhood-pressure-summary">{neighborhood.customerSummary}</p>
+          )}
+          <div className="pressure-legend">
+            <span>Your home</span>
+            <span>Nearby WaveGuard average</span>
+          </div>
+        </>
       )}
     </Root>
   );
@@ -6250,11 +6255,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-width: 1;
           stroke-dasharray: 4 4;
         }
+        .neighborhood-pressure-summary {
+          margin: 10px 0 0;
+          color: var(--report-muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
         .pressure-legend {
           display: flex;
           gap: 16px;
           flex-wrap: wrap;
-          margin-top: 10px;
+          margin-top: 8px;
           color: var(--report-muted);
           font-size: 12px;
         }
@@ -6843,6 +6854,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         </section>
+
+        {dynamicContext.pressureTrend && (
+          <PressureTrendCard
+            context={dynamicContext.pressureTrend}
+            neighborhood={dynamicContext.neighborhoodPressure}
+            mode={mode}
+            token={token}
+          />
+        )}
 
         {/* Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /

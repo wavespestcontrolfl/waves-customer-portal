@@ -59,7 +59,7 @@ exports.up = async function (knex) {
     lead_id: () => (t) => t.uuid('lead_id'),
     service_interest: () => (t) => t.string('service_interest'),
     source: () => (t) => t.string('source', 30).defaultTo('portal'),
-    referrer_reward_amount: () => (t) => t.decimal('referrer_reward_amount', 10, 2).defaultTo(50),
+    referrer_reward_amount: () => (t) => t.decimal('referrer_reward_amount', 10, 2).defaultTo(25),
     referrer_reward_status: () => (t) => t.string('referrer_reward_status', 20).defaultTo('pending'),
     referee_discount_applied: () => (t) => t.boolean('referee_discount_applied').defaultTo(false),
     converted_tier: () => (t) => t.string('converted_tier'),
@@ -145,7 +145,7 @@ exports.up = async function (knex) {
       t.integer('id').primary().defaultTo(1);
       t.boolean('program_active').defaultTo(true);
       t.string('base_url', 500).defaultTo('https://wavespestcontrol.com/r/');
-      t.integer('referrer_reward_cents').defaultTo(5000);
+      t.integer('referrer_reward_cents').defaultTo(2500);
       t.integer('referee_discount_cents').defaultTo(2500);
       t.integer('bonus_silver_cents').defaultTo(5000);
       t.integer('bonus_gold_cents').defaultTo(7500);
