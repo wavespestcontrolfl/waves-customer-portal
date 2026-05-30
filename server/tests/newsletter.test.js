@@ -32,7 +32,7 @@ const { preflightDigest } = require('../services/newsletter-autopilot');
 const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../services/newsletter-analytics');
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
-const { pickSurvivor } = require('../services/event-dedup');
+const { pickSurvivor, isCleanCrossSourceCluster } = require('../services/event-dedup');
 const { isEligibleForFreshDigest, cityToZone, weekLockKey } = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
@@ -1379,6 +1379,30 @@ describe('event-dedup pickSurvivor', () => {
       ev('b', { admin_status: 'featured', source_priority_tier: 1 }),
     ]);
     expect(s.id).toBe('b');
+  });
+});
+
+describe('event-dedup isCleanCrossSourceCluster', () => {
+  const ev = (id, source_id) => ({ id, source_id });
+
+  test('true for one row per source across 2+ sources', () => {
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's2')])).toBe(true);
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's2'), ev('c', 's3')])).toBe(true);
+  });
+
+  test('false for a single source (not cross-source)', () => {
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's1')])).toBe(false);
+  });
+
+  test('false when any source contributes 2+ rows (e.g. separate showtimes)', () => {
+    // s1 has two same-day rows + s2 has one — could be legit distinct sessions,
+    // so the whole cluster is left for manual review, never auto-merged.
+    expect(isCleanCrossSourceCluster([ev('a', 's1'), ev('b', 's1'), ev('c', 's2')])).toBe(false);
+  });
+
+  test('false for empty / single-element input', () => {
+    expect(isCleanCrossSourceCluster([])).toBe(false);
+    expect(isCleanCrossSourceCluster([ev('a', 's1')])).toBe(false);
   });
 });
 

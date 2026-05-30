@@ -112,6 +112,20 @@ function pickSurvivor(events) {
 }
 
 /**
+ * Whether a duplicate cluster is safe to auto-merge: it must be a PURE
+ * cross-source duplicate — exactly one row per source across ≥2 distinct
+ * sources. findDuplicateClusters groups by title+ET-day+city only, so a cluster
+ * can contain two rows from the SAME feed (e.g. separate showtimes/sessions with
+ * different external_ids) which may be legit distinct events. If any source
+ * contributes more than one row, leave the whole cluster for manual review.
+ */
+function isCleanCrossSourceCluster(events) {
+  const sourceIds = (Array.isArray(events) ? events : []).map((e) => e.source_id);
+  const distinct = new Set(sourceIds).size;
+  return distinct >= 2 && distinct === sourceIds.length;
+}
+
+/**
  * Cron pass: cluster upcoming, un-merged, non-rejected events and merge each
  * cluster into its survivor. Conservative clustering (title + ET day + city)
  * keeps false positives near zero. Bounded to the forward window + a per-run cap.
@@ -136,11 +150,7 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
   let mergedEvents = 0;
   let mergedClusters = 0;
   for (const cluster of clusters) {
-    // findDuplicateClusters groups by title+day+city only — it does NOT require
-    // multiple sources. A single feed emitting two legit same-day/same-title
-    // rows (e.g. separate showtimes with different external_ids) must NOT be
-    // auto-merged. This feature is for CROSS-source dupes, so require ≥2 sources.
-    if (new Set(cluster.events.map((e) => e.source_id)).size < 2) continue;
+    if (!isCleanCrossSourceCluster(cluster.events)) continue;
 
     const survivor = pickSurvivor(cluster.events);
     const losers = cluster.events.filter((e) => e.id !== survivor.id).map((e) => e.id);
@@ -160,4 +170,4 @@ async function autoMergeDuplicates({ windowDays = 90, maxClusters = 100 } = {}) 
   return { clustersFound: clusters.length, mergedClusters, mergedEvents };
 }
 
-module.exports = { mergeEvents, pickSurvivor, autoMergeDuplicates, EVENT_MERGE_LOCK_KEY };
+module.exports = { mergeEvents, pickSurvivor, isCleanCrossSourceCluster, autoMergeDuplicates, EVENT_MERGE_LOCK_KEY };
