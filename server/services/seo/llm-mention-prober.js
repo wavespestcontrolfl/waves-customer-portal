@@ -124,7 +124,9 @@ class LLMMentionProber {
 
   async probeGemini(query) {
     if (!process.env.GEMINI_API_KEY) return null;
-    const model = process.env.GEMINI_MENTIONS_MODEL || 'gemini-2.0-flash';
+    // gemini-2.0-flash is retired ("no longer available to new users", 404).
+    // 2.5-flash is the current stable grounding-capable model; override via env.
+    const model = process.env.GEMINI_MENTIONS_MODEL || 'gemini-2.5-flash';
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
       const res = await fetch(url, {
