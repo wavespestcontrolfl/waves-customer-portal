@@ -101,6 +101,37 @@ describe('name heuristic (signal prefix)', () => {
   });
 });
 
+describe('name heuristic (single first name after signal — call transcripts)', () => {
+  test('redacts a lone first name after "this is" (no last name)', () => {
+    const { text, confidence } = redact('Waves Pest Control, this is Adam. Hi, this is Anthony.');
+    expect(text).toContain('this is [name]');
+    expect(text).toContain('Adam'); // owner stays (allowlist)
+    expect(text).not.toContain('Anthony');
+    expect(confidence).toBe('medium');
+  });
+  test('redacts "my name is X" and "it\'s X"', () => {
+    expect(redact('my name is John, calling about roaches').text).toContain('my name is [name]');
+    expect(redact("it's Jeff with the pool company").text).toContain("it's [name]");
+  });
+  test('does not redact allowlisted tokens after a signal ("this is Adam", "this is Sarasota")', () => {
+    expect(redact('Hey, this is Adam').text).toContain('Adam');
+    expect(redact('this is Sarasota calling').text).toContain('Sarasota');
+  });
+  test('does not fire on a lowercase word after the signal ("this is great")', () => {
+    const { text, confidence } = redact('this is great, thanks');
+    expect(text).toBe('this is great, thanks');
+    expect(confidence).toBe('high');
+  });
+  test('a leading greeting does not consume the real intro keyword ("Hi, My name is John")', () => {
+    // Greetings are excluded as triggers so "Hi" cannot grab "My" and leave
+    // the real first name "John" exposed.
+    const { text } = redact('Hi, My name is John, calling about roaches');
+    expect(text).toContain('My name is [name]');
+    expect(text).not.toContain('John');
+    expect(text).not.toContain('Hi [name]');
+  });
+});
+
 describe('name heuristic (standalone pair, no marker required)', () => {
   test('redacts standalone name pair after sign-off marker', () => {
     const { text } = redact('Thanks for the help — Sincerely, John Carpenter');
