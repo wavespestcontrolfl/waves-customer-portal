@@ -1481,4 +1481,3 @@ The strongest first release is:
 5. Secure tokenized client packet
 6. SMS/email send with consent controls
 7. Post-service report integration
-
