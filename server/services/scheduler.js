@@ -279,6 +279,16 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`AI Overview tracking failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:00AM — LLM mention probe (ChatGPT/Gemini/Claude/AI Overview)
+  cron.schedule('0 3 * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: LLM mention probe');
+    try {
+      const prober = require('./seo/llm-mention-prober');
+      await prober.runDaily();
+    } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY SUNDAY 3:30AM — Backlink scan
   cron.schedule('30 3 * * 0', async () => {
     if (!isEnabled('seoIntelligence')) return;
