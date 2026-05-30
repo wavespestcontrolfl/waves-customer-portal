@@ -6,11 +6,16 @@
  *   node server/scripts/export-reply-training-fixtures.js
  *   node server/scripts/export-reply-training-fixtures.js --scenario=scheduling --limit=100
  *   node server/scripts/export-reply-training-fixtures.js --output=/tmp/reply-fixtures.json
+ *   node server/scripts/export-reply-training-fixtures.js --output=server/fixtures/reply-training/local.json --allow-pii
  */
 
 const fs = require('fs/promises');
 const path = require('path');
 const db = require('../models/db');
+const {
+  DEFAULT_REPLY_FIXTURE_OUTPUT,
+  assertSafeReplyFixtureOutput,
+} = require('../services/reply-training-export-path');
 const { buildReplyFixtureDocument } = require('../services/reply-training-fixtures');
 
 const ARGS = Object.fromEntries(
@@ -23,7 +28,8 @@ const ARGS = Object.fromEntries(
 
 const LIMIT = Math.max(1, Math.min(1000, Number.parseInt(ARGS.limit || '200', 10) || 200));
 const SCENARIO = String(ARGS.scenario || '').trim();
-const OUT = ARGS.output || path.join(__dirname, '..', 'fixtures', 'reply-training', 'customer_reply_sms.captured.json');
+const ALLOW_PII = ARGS['allow-pii'] === true || ARGS.allowPii === true;
+const OUT = assertSafeReplyFixtureOutput(ARGS.output, { allowPii: ALLOW_PII });
 
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
@@ -48,6 +54,7 @@ async function tableExists(name) {
 
     console.log(`Exported ${document.caseCount} customer reply fixture(s)`);
     console.log(`Output: ${OUT}`);
+    if (!ARGS.output) console.log(`Default output is outside the repository: ${DEFAULT_REPLY_FIXTURE_OUTPUT}`);
     await db.destroy();
   } catch (err) {
     console.error(`Reply fixture export failed: ${err.message}`);

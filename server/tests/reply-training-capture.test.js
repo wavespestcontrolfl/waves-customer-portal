@@ -1,3 +1,5 @@
+const path = require('path');
+
 const {
   _internals: {
     classifyScenario,
@@ -8,6 +10,11 @@ const {
   buildReplyFixtureDocument,
   fixtureFromReplyExample,
 } = require('../services/reply-training-fixtures');
+const {
+  DEFAULT_REPLY_FIXTURE_OUTPUT,
+  assertSafeReplyFixtureOutput,
+  isPathInside,
+} = require('../services/reply-training-export-path');
 
 describe('reply training capture', () => {
   test('captures only admin-authored outbound SMS replies with body text', () => {
@@ -99,5 +106,15 @@ describe('reply training capture', () => {
       workflow: 'customer_reply_sms',
       caseCount: 1,
     });
+  });
+
+  test('keeps raw reply fixture exports outside the repo unless explicitly allowed', () => {
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const repoLocalOutput = path.join(repoRoot, 'server', 'fixtures', 'reply-training', 'local.json');
+
+    expect(isPathInside(repoRoot, DEFAULT_REPLY_FIXTURE_OUTPUT)).toBe(false);
+    expect(assertSafeReplyFixtureOutput(undefined, { repoRoot })).toBe(path.resolve(DEFAULT_REPLY_FIXTURE_OUTPUT));
+    expect(() => assertSafeReplyFixtureOutput(repoLocalOutput, { repoRoot })).toThrow(/--allow-pii/);
+    expect(assertSafeReplyFixtureOutput(repoLocalOutput, { repoRoot, allowPii: true })).toBe(repoLocalOutput);
   });
 });
