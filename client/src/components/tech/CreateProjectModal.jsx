@@ -352,7 +352,9 @@ export default function CreateProjectModal({
   // prompt is showing so we don't clobber the saved draft before the tech
   // chooses, and skipped entirely when the form is still empty.
   useEffect(() => {
-    if (!draftReadyRef.current || showDraftPrompt) return;
+    // Stop once the project exists on the server — the server draft is then
+    // the source of truth and a local draft would risk a duplicate on restore.
+    if (!draftReadyRef.current || showDraftPrompt || createdProject) return;
     const hasContent = Boolean(
       projectType
       || customerId
@@ -370,7 +372,7 @@ export default function CreateProjectModal({
       } catch { /* quota / serialization — non-blocking */ }
     }, 700);
     return () => clearTimeout(timer);
-  }, [draftKey, showDraftPrompt, projectType, customerId, customerLabel, projectDate, title, findings, recommendations]);
+  }, [draftKey, showDraftPrompt, createdProject, projectType, customerId, customerLabel, projectDate, title, findings, recommendations]);
 
   function restoreDraft() {
     const d = savedDraft;
@@ -600,6 +602,10 @@ export default function CreateProjectModal({
         data = await r.json();
         if (!r.ok) throw new Error(data?.error || 'Save failed');
         setCreatedProject(data.project);
+        // The project now lives server-side as a draft — it's the source of
+        // truth. Drop the local draft so a later restore can't re-POST a
+        // duplicate (e.g. if photo uploads below fail and the tech reopens).
+        try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       } else {
         const r = await adminFetch(`/admin/projects/${data.project.id}`, {
           method: 'PUT',
