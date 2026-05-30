@@ -16,9 +16,15 @@ const { executeBacklinkTool } = require('./backlink-strategy-tools');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BACKLINK_STRATEGY_AGENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ID;
+const BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID
+  || process.env.MANAGED_AGENT_ENVIRONMENT_ID;
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
 const REQUIRED_TOOL_NAMES = ['list_prospects', 'create_link_prospects'];
+
+function buildSessionCreateBody(agentId, environmentId) {
+  return { agent: agentId, environment_id: environmentId };
+}
 
 async function apiCall(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -104,8 +110,8 @@ const BacklinkStrategyAgent = {
    * @returns {object} { sessionId, report, targetsAdded, gapsFound, durationSeconds }
    */
   async run(opts = {}) {
-    if (!ANTHROPIC_API_KEY || !BACKLINK_STRATEGY_AGENT_ID) {
-      throw new Error('Missing ANTHROPIC_API_KEY or BACKLINK_STRATEGY_AGENT_ID');
+    if (!ANTHROPIC_API_KEY || !BACKLINK_STRATEGY_AGENT_ID || !BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID) {
+      throw new Error('Missing ANTHROPIC_API_KEY, BACKLINK_STRATEGY_AGENT_ID, or BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID/MANAGED_AGENT_ENVIRONMENT_ID');
     }
 
     const startTime = Date.now();
@@ -132,9 +138,10 @@ const BacklinkStrategyAgent = {
     notify('starting', 'Creating backlink strategy session...');
     await this.assertAgentConfigSynced();
 
-    const session = await apiCall('POST', '/sessions', {
-      agent_id: BACKLINK_STRATEGY_AGENT_ID,
-    });
+    const session = await apiCall('POST', '/sessions', buildSessionCreateBody(
+      BACKLINK_STRATEGY_AGENT_ID,
+      BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID
+    ));
 
     const sessionId = session.id;
     logger.info(`[backlink-strategy] Session created: ${sessionId}`);
@@ -244,3 +251,4 @@ const BacklinkStrategyAgent = {
 };
 
 module.exports = BacklinkStrategyAgent;
+module.exports._test = { buildSessionCreateBody };
