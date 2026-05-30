@@ -144,6 +144,119 @@ describe('lawn pricing production follow-up', () => {
     }));
   });
 
+  test('pricing rejects AI turf estimates above plausible lot outdoor area', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      estimatedTurfSf: 12605,
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+
+    expect(property.turfSf).toBeLessThan(12605);
+    expect(property.turfSf).toBe(8139);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfConfidence).toBe('LOW');
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('minor AI turf overages cap to plausible max instead of legacy fallback', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      estimatedTurfSf: 7200,
+    }));
+
+    expect(property.turfSf).toBe(7125);
+    expect(property.turfBasis).toBe('plausibleMaxTurfCap');
+    expect(property.turfConfidence).toBe('MEDIUM');
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('top-level pool cage and landscape flags reduce inferred turf area', () => {
+    const plain = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+    }));
+    const withTopLevelFlags = calculatePropertyProfile(baseInput({
+      homeSqFt: 2576,
+      stories: 1,
+      lotSqFt: 14006,
+      pool: 'YES',
+      poolCage: 'YES',
+      hasLargeDriveway: true,
+      shrubDensity: 'HEAVY',
+      treeDensity: 'HEAVY',
+      landscapeComplexity: 'COMPLEX',
+      features: {},
+    }));
+
+    expect(withTopLevelFlags.features.pool).toBe(true);
+    expect(withTopLevelFlags.features.poolCage).toBe(true);
+    expect(withTopLevelFlags.features.largeDriveway).toBe(true);
+    expect(withTopLevelFlags.features.shrubs).toBe('heavy');
+    expect(withTopLevelFlags.features.trees).toBe('heavy');
+    expect(withTopLevelFlags.features.complexity).toBe('complex');
+    expect(withTopLevelFlags.hardscape).toBe(plain.hardscape + 900);
+    expect(withTopLevelFlags.turfSf).toBeLessThan(plain.turfSf);
+  });
+
+  test('top-level feature selections override nested false defaults', () => {
+    const property = calculatePropertyProfile(baseInput({
+      poolCage: 'YES',
+      hasLargeDriveway: true,
+      nearWater: 'ADJACENT',
+      attachedGarage: true,
+      features: {
+        pool: false,
+        poolCage: false,
+        largeDriveway: false,
+        nearWater: false,
+        attachedGarage: false,
+      },
+    }));
+
+    expect(property.features.pool).toBe(true);
+    expect(property.features.poolCage).toBe(true);
+    expect(property.features.largeDriveway).toBe(true);
+    expect(property.features.nearWater).toBe(true);
+    expect(property.features.attachedGarage).toBe(true);
+  });
+
+  test('zero plausible turf max still rejects positive AI turf estimates', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 9000,
+      stories: 1,
+      lotSqFt: 9500,
+      estimatedTurfSf: 5000,
+    }));
+
+    expect(property.turfSf).toBe(0);
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfFlags).toEqual(expect.arrayContaining([
+      'FIELD_VERIFY_TURF_SQFT',
+      'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX',
+    ]));
+  });
+
+  test('graduated water proximity feature values remain water-adjacent', () => {
+    const property = calculatePropertyProfile(baseInput({
+      features: { nearWater: 'ADJACENT' },
+    }));
+
+    expect(property.features.nearWater).toBe(true);
+    expect(property.nearWater).toBe('CLOSE');
+  });
+
   test('correct imperviousSurfacePercent overrides legacy typo and legacy typo still works', () => {
     const currentWins = calculatePropertyProfile(baseInput({
       homeSqFt: 0,

@@ -14,9 +14,10 @@
  * pipeline (admin-job-expenses.js) already wires it and Twilio MMS requires
  * a publicly fetchable URL anyway (Railway volume would need a new proxy).
  *
- * Size cap: 5MB per file, max 5 files per message. Twilio MMS limit is 5MB
- * per attachment and 10 mediaUrls per message; we keep 5 to stay well under
- * the size ceiling.
+ * Size cap: 5MB per file, max 10 files per message — Twilio MMS allows up to
+ * 10 mediaUrls per message. Twilio also caps a message at 5MB total across all
+ * media (not per file); that aggregate budget is enforced at send time in the
+ * /sms route (and pre-flighted client-side in the composer).
  *
  * Mimetype allowlist is images only for v1 — PDFs deliver inconsistently
  * across carriers, audio notes have higher friction than value.
@@ -33,7 +34,7 @@ const { createAttachmentToken } = require('../services/sms-media');
 
 router.use(adminAuthenticate, requireAdmin);
 
-const MAX_PER_MESSAGE = 5;
+const MAX_PER_MESSAGE = 10;
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5MB per Twilio MMS
 const ALLOWED_MIMES = new Set([
   'image/jpeg',

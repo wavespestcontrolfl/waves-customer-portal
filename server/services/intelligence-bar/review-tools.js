@@ -9,7 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, startOfETMonth, etMonthStart, parseETDateTime } = require('../../utils/datetime-et');
 
 const REVIEW_TOOLS = [
   {
@@ -156,7 +156,7 @@ async function getReviewStats() {
   const [totals, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
     reviews.clone().select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).first(),
     reviews.clone().whereNull('review_reply').whereNotNull('review_text').count('* as count').first(),
-    reviews.clone().where('review_created_at', '>=', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()).count('* as count').first(),
+    reviews.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
     reviews.clone().select('location_id', db.raw('COUNT(*) as count'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).groupBy('location_id'),
     reviews.clone().select('star_rating', db.raw('COUNT(*) as count')).groupBy('star_rating').orderBy('star_rating', 'desc'),
   ]);
@@ -366,7 +366,11 @@ async function triggerReviewRequest(input) {
   if (!customer) return { error: 'Customer not found' };
   if (!customer.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
 
-  // Check if already sent recently
+  // Check if already sent recently. "Last 30 days" is a rolling DURATION, not a
+  // calendar boundary, so compare created_at (a UTC timestamp) against the exact
+  // instant 30×24h ago — both sides are UTC instants, so there's no ET leak. A
+  // bare ET date string here would be read as midnight in the session tz and
+  // wrongly block a request sent early on the cutoff date (Codex #1378 P2).
   const recent = await db('review_requests')
     .where({ customer_id: customer.id })
     .where('created_at', '>=', new Date(Date.now() - 30 * 86400000).toISOString())
@@ -438,13 +442,17 @@ async function getReviewTrends(months) {
   const now = new Date();
 
   for (let i = months - 1; i >= 0; i--) {
-    const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
+    // ET-calendar month window as a half-open instant range [monthStart, nextMonthStart).
+    // The old `new Date(y, m, 0)` upper bound was UTC-anchored AND landed on the last
+    // day at 00:00, truncating most of that day; the half-open ET range fixes both.
+    const start = parseETDateTime(`${etMonthStart(now, -i)}T00:00`);
+    const end = parseETDateTime(`${etMonthStart(now, -i + 1)}T00:00`);
     const label = start.toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'America/New_York' });
 
     const stats = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
-      .whereBetween('review_created_at', [start.toISOString(), end.toISOString()])
+      .where('review_created_at', '>=', start.toISOString())
+      .where('review_created_at', '<', end.toISOString())
       .select(
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),

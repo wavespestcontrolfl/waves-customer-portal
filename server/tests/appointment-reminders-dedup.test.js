@@ -408,7 +408,12 @@ describe('appointment reminder cron delivery windows', () => {
     });
     const markSent = chain();
 
-    const appointmentReminderQueries = [reminderList, markSent];
+    // checkAndSendReminders first runs a recovery sweep for stranded deferred
+    // confirmations (confirmation_sent=false) before the main reminder pass.
+    const strandedConfirmations = chain({
+      select: jest.fn().mockResolvedValue([]),
+    });
+    const appointmentReminderQueries = [strandedConfirmations, reminderList, markSent];
     const customerQueries = [customerQuery, landlineQuery];
 
     db.mockImplementation((table) => {

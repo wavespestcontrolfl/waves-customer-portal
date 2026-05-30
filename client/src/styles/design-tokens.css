@@ -21,15 +21,12 @@
   --slate-100:           #F1F5F9;
   --white:               #FFFFFF;
 
-  /* ── Semantic ── */
-  --success:             #16A34A;
-  --success-light:       #DCFCE7;
-  --warning:             #F0A500;
-  --warning-light:       #FEF7E0;
-  --danger:              #C0392B;
-  --danger-light:        #FDECEA;
-  --info:                #0A7EC2;
-  --info-light:          #E8F4FC;
+  /* ── Semantic ──
+     Semantic colors live in brand-tokens.css, which main.jsx imports after this
+     file and is the authoritative source for --success / --danger. The copies
+     that used to sit here were always overridden by that cascade (dead), and
+     --success-light/--warning/--warning-light/--danger-light/--info/--info-light
+     had zero usages. Removed to keep a single source of truth. */
 
   /* ── Layout ── */
   --sidebar-width:       240px;

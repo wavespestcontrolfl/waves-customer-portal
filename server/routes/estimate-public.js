@@ -181,6 +181,21 @@ function bookingServiceFor(name) {
   return { id: 'pest_control', label: 'Pest Control' };
 }
 
+// Customer-facing service name for the post-booking confirmation SMS.
+// Prefer the specific one-time service the customer actually scheduled
+// (e.g. "German Roach Cleanout") over the generic booking bucket that
+// bookingServiceFor collapses roach/specialty services into — that bucket
+// is correct for routing the /book link's ?service= param but reads wrong
+// as confirmation copy once a real appointment exists. Falls back to the
+// estimate's service_interest, then the supplied bucket label.
+function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
+  const specific = (Array.isArray(oneTimeList) ? oneTimeList[0]?.name : '')
+    || estimate?.service_interest
+    || fallbackLabel
+    || '';
+  return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
+}
+
 function dateOnly(value) {
   if (!value) return '';
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -4652,6 +4667,7 @@ router.put('/:token/accept', async (req, res, next) => {
       try {
         if (treatAsOneTime) {
           const primarySvc = oneTimeBookingService || bookingServiceFor(oneTimeList[0]?.name || '');
+          const confirmedServiceLabel = confirmationServiceLabel(oneTimeList, estimate, primarySvc.label);
           if (bookingUrl) {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
@@ -4694,7 +4710,7 @@ router.put('/:token/accept', async (req, res, next) => {
               'appointment_confirmation',
               {
                 first_name: firstName,
-                service_type: primarySvc.label,
+                service_type: confirmedServiceLabel,
                 date: serviceDate,
                 time: timeWindow,
               },
@@ -4718,7 +4734,7 @@ router.put('/:token/accept', async (req, res, next) => {
                 metadata: { original_message_type: 'appointment_confirmation' },
               });
               if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-              logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+              logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${confirmedServiceLabel}`);
             }
           }
         } else if (annualPrepaySelected) {
@@ -8088,6 +8104,7 @@ module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
+module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
