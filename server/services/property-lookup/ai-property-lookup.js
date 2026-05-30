@@ -184,7 +184,9 @@ async function lookupStoriesFromAI(address, hints = {}, options = {}) {
   try {
     // Lazy-require so module load doesn't depend on the SDK in test contexts.
     const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // maxRetries: 0 — a retry re-runs the full web_search budget; avoid the
+    // default 2x-3x cost/latency multiplier on transient errors (degrades to null).
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
 
     const resp = await client.messages.create({
       model: MODELS.WORKHORSE,
@@ -577,7 +579,9 @@ async function lookupPropertyFromAI(address) {
 
   try {
     const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // maxRetries: 0 — a retry re-runs the full web_search budget; avoid the
+    // default 2x-3x cost/latency multiplier on transient errors (degrades to null).
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
 
     const resp = await client.messages.create({
       model: MODELS.WORKHORSE,
