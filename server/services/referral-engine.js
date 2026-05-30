@@ -486,7 +486,7 @@ async function confirmFirstService(customerId) {
   if (!matchedReferral) return null;
 
   const settings = await getSettings();
-  const rewardCents = Math.round((matchedReferral.referrer_reward_amount || 50) * 100);
+  const rewardCents = Math.round((matchedReferral.referrer_reward_amount || 25) * 100);
 
   // Update referral
   await db('referrals').where({ id: matchedReferral.id }).update({
@@ -587,7 +587,7 @@ async function getSettings() {
   return {
     program_active: true,
     base_url: normalizeReferralBaseUrl(DEFAULT_REFERRAL_BASE_URL),
-    referrer_reward_cents: 5000,
+    referrer_reward_cents: 2500,
     referee_discount_cents: 2500,
     bonus_silver_cents: 5000,
     bonus_gold_cents: 7500,

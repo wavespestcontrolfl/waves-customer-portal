@@ -177,7 +177,7 @@ router.patch('/:id/status', async (req, res, next) => {
     if (status === 'converted') {
       upd.converted_at = new Date();
       const settings = await db('referral_settings').where({ key: 'reward_per_referral_cents' }).first();
-      upd.reward_amount_cents = rewardAmountCents || parseInt(settings?.value || '5000');
+      upd.reward_amount_cents = rewardAmountCents || parseInt(settings?.value || '2500');
 
       // Credit the promoter
       const referral = await db('referrals').where({ id: req.params.id }).first();
