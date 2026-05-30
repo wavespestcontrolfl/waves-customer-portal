@@ -928,13 +928,27 @@ router.get('/', async (req, res, next) => {
   try {
     const { status, project_type, customer_id, tech_id, limit = 100 } = req.query;
 
+    // Select project columns explicitly, excluding the heavy JSONB blobs the list
+    // never needs (signature data URL up to 2MB, property profile, history) —
+    // pulling p.* would transfer/allocate hundreds of MB for up to 500 rows.
+    const projectCols = await db('projects').columnInfo().catch(() => ({}));
+    const HEAVY_LIST_COLS = new Set(['wdo_signature', 'property_profile', 'wdo_history']);
+    const colNames = Object.keys(projectCols);
+    const lightSelect = colNames.length
+      ? colNames.filter((c) => !HEAVY_LIST_COLS.has(c)).map((c) => `p.${c}`)
+      : ['p.*'];
+    const blobFlags = projectCols.wdo_signature
+      ? [db.raw('(p.wdo_signature IS NOT NULL) AS wdo_signed')]
+      : [];
+
     let q = db('projects as p')
       .leftJoin('customers as c', 'p.customer_id', 'c.id')
       .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
       .leftJoin('service_records as srp', 'p.service_record_id', 'srp.id')
       .leftJoin('scheduled_services as ssp', 'p.scheduled_service_id', 'ssp.id')
       .select(
-        'p.*',
+        ...lightSelect,
+        ...blobFlags,
         'c.first_name', 'c.last_name', 'c.city', 'c.state',
         't.name as tech_name',
       )
@@ -962,12 +976,12 @@ router.get('/', async (req, res, next) => {
     const photoMap = Object.fromEntries(photoCounts.map(x => [x.project_id, Number(x.n)]));
 
     const projects = await Promise.all(rows.map(async (r) => {
-      // Drop the heavy signature blob (a base64 data URL up to 2MB) from list
-      // payloads — expose only a boolean. The detail route returns metadata.
-      const { wdo_signature, ...rest } = r;
+      // wdo_signed comes from SQL (IS NOT NULL); wdo_signature is no longer
+      // selected. The fallback handles the pre-columnInfo p.* path.
+      const { wdo_signature, wdo_signed, ...rest } = r;
       return {
         ...rest,
-        wdo_signed: !!wdo_signature,
+        wdo_signed: !!(wdo_signed ?? wdo_signature),
         customer_name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
         report_url: r.report_token ? await projectReportPathForProject(db, r, r) : null,
         photo_count: photoMap[r.id] || 0,
@@ -1421,9 +1435,18 @@ function applicatorForReport(baseApplicator, signature) {
   };
 }
 
+// pdf-lib embeds images as-is (no recompression) and we have no image library
+// to downscale, so bound the addendum to keep PDF build memory and the email
+// attachment within provider limits: a max page-count's worth of photos, an
+// oversized-photo skip, and a total-bytes budget.
+const MAX_ADDENDUM_PHOTOS = 16; // 8 addendum pages (2 per page)
+const MAX_ADDENDUM_PHOTO_BYTES = 8 * 1024 * 1024;
+const MAX_ADDENDUM_TOTAL_BYTES = 22 * 1024 * 1024;
+
 // Fetch the project's photos from S3 as buffers for the PDF photo addendum,
 // ordered the way the tech arranged them. Failures on individual photos are
-// skipped so one bad object can't sink the whole report.
+// skipped so one bad object can't sink the whole report; oversized photos and
+// anything past the count/byte budget are omitted (and logged).
 async function loadWdoAddendumPhotos(project) {
   const rows = await db('project_photos')
     .where({ project_id: project.id })
@@ -1431,11 +1454,25 @@ async function loadWdoAddendumPhotos(project) {
     .orderBy('created_at', 'asc')
     .catch(() => []);
   const out = [];
+  let totalBytes = 0;
   for (const ph of rows) {
+    if (out.length >= MAX_ADDENDUM_PHOTOS) {
+      logger.warn(`[projects] addendum photo cap (${MAX_ADDENDUM_PHOTOS}) reached for ${project.id}; ${rows.length - out.length} omitted`);
+      break;
+    }
     try {
       const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }));
       const buffer = await streamToBuffer(object.Body);
       if (!buffer.length) continue;
+      if (buffer.length > MAX_ADDENDUM_PHOTO_BYTES) {
+        logger.warn(`[projects] addendum photo ${ph.id} skipped — ${buffer.length}B over per-photo cap`);
+        continue;
+      }
+      if (totalBytes + buffer.length > MAX_ADDENDUM_TOTAL_BYTES) {
+        logger.warn(`[projects] addendum byte budget reached for ${project.id}; remaining photos omitted`);
+        break;
+      }
+      totalBytes += buffer.length;
       out.push({ buffer, contentType: object.ContentType || 'image/jpeg', caption: ph.caption || '' });
     } catch (err) {
       logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
