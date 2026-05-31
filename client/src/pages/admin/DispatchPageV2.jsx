@@ -93,10 +93,13 @@ const InsightsPanel = lazy(
 );
 
 const ACTIVE_MOBILE_COMPLETION_STATUSES = new Set(["en_route", "on_site"]);
+const PRE_SERVICE_STATUSES = new Set(["pending", "confirmed", "rescheduled"]);
 
 function shouldOpenMobileCompletion(service) {
-  return ACTIVE_MOBILE_COMPLETION_STATUSES.has(
-    String(service?.status || "").toLowerCase(),
+  const status = String(service?.status || "").toLowerCase();
+  return (
+    ACTIVE_MOBILE_COMPLETION_STATUSES.has(status) ||
+    PRE_SERVICE_STATUSES.has(status)
   );
 }
 
