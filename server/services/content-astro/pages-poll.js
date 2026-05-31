@@ -119,7 +119,7 @@ function normalizeSha(value) {
   return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
 }
 
-async function pollPost(post) {
+async function pollPost(post, { allowMerge = true } = {}) {
   if (post.astro_status === 'merged') return pollLivePost(post);
   if (!post.astro_branch_name) return { skipped: true, reason: 'no branch' };
   try {
@@ -135,6 +135,14 @@ async function pollPost(post) {
       });
 
       if (post.astro_status === 'pr_open' && post.publish_status === 'publishing') {
+        if (!allowMerge) {
+          // Per-poll auto-merge cap reached — defer this merge to the next tick
+          // so we don't squash N PRs to main at once (each merge rebuilds the
+          // whole Cloudflare Pages fleet). The poll runs every 2 min, so the
+          // backlog drains quickly.
+          logger.info(`[pages-poll] auto-merge deferred for ${post.slug || post.id} (per-poll cap reached); retries next tick`);
+          return { ok: true, url, mergeDeferred: true };
+        }
         try {
           const { mergeAstro } = require('./astro-publisher');
           await mergeAstro(post.id);
@@ -241,12 +249,25 @@ async function pollPending() {
     .whereNotNull('astro_branch_name')
     .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha');
 
+  // Cap auto-merges per tick so a batch of simultaneously-green PRs doesn't all
+  // squash to main at once (each merge rebuilds the whole Cloudflare Pages
+  // fleet). Build-status polling + the merged→live transition are unaffected;
+  // only the merge action is throttled, and deferred merges retry next tick.
+  const rawMax = parseInt(process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL, 10);
+  const maxAutoMerges = Number.isFinite(rawMax) && rawMax >= 0 ? rawMax : 2;
+
   const results = [];
+  let autoMerges = 0;
+  let deferred = 0;
   for (const post of pending) {
-    results.push({ id: post.id, branch: post.astro_branch_name, ...(await pollPost(post)) });
+    const r = await pollPost(post, { allowMerge: autoMerges < maxAutoMerges });
+    if (r.autoMerged) autoMerges += 1;
+    if (r.mergeDeferred) deferred += 1;
+    results.push({ id: post.id, branch: post.astro_branch_name, ...r });
   }
-  logger.info(`[pages-poll] polled ${results.length} blog publish states`);
-  return { count: results.length, results };
+  const note = deferred > 0 ? ` (${autoMerges} merged, ${deferred} deferred past cap ${maxAutoMerges})` : '';
+  logger.info(`[pages-poll] polled ${results.length} blog publish states${note}`);
+  return { count: results.length, results, autoMerges, deferred };
 }
 
 module.exports = {
