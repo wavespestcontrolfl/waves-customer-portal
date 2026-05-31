@@ -1837,10 +1837,15 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       err.code = 'invoice_build_failed';
       throw err;
     }
-    // Derive the scheduled-service linkage from the project, falling back to the
-    // service record's own scheduled_service_id (an ad-hoc project may not carry
-    // it). Without a scheduled service there's no priced line set to bill from.
-    const scheduledServiceId = project.scheduled_service_id || serviceRecord.scheduled_service_id;
+    // Derive the scheduled-service linkage for pricing from the LINKED SERVICE
+    // RECORD first, falling back to the project's own scheduled_service_id (an
+    // ad-hoc project's service record may not carry one). The report is tied to
+    // project.service_record_id, so its visit — serviceRecord.scheduled_service_id
+    // — is the authoritative appointment to bill from; project.scheduled_service_id
+    // is a separate denormalized link that, if it disagrees, would price the
+    // invoice off a different appointment than the one being reported on. Without
+    // any scheduled service there's no priced line set to bill from.
+    const scheduledServiceId = serviceRecord.scheduled_service_id || project.scheduled_service_id;
     const built = scheduledServiceId
       ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
           fallbackDescription: serviceRecord.service_type || getProjectType(project.project_type)?.label || 'Service visit',
