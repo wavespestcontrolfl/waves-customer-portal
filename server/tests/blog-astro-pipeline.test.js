@@ -16,6 +16,8 @@ jest.mock('../services/content-astro/github-client', () => ({
   getPr: jest.fn(),
   mergePr: jest.fn(),
   deleteFile: jest.fn(),
+  closePr: jest.fn(),
+  deleteRef: jest.fn(),
 }));
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
@@ -781,7 +783,7 @@ describe('Astro publisher hero image republish', () => {
 describe('Astro publisher idempotency guard', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  test.each(['pr_open', 'unpublish_pending', 'build_failed'])(
+  test.each(['pr_open', 'unpublish_pending'])(
     'refuses to open a second PR when one is already in flight (status %s)',
     async (status) => {
       const post = {
@@ -798,6 +800,37 @@ describe('Astro publisher idempotency guard', () => {
       expect(read.update).not.toHaveBeenCalled();
     },
   );
+
+  test('build_failed retry closes + deletes the stale PR/branch before republishing (no orphan)', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'build_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'open', merged: false });
+
+    // Fails later (minimal post isn't schema-valid, no gh publish mocks), but
+    // NOT with the in-flight error — the retry is allowed and cleanup runs first.
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+  });
+
+  test('build_failed retry does not close an already-merged/closed PR', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'build_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'closed', merged: true });
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+    expect(gh.closePr).not.toHaveBeenCalled();
+    // The branch is still deleted (a stale ref left from the failed build).
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+  });
 
   test('allows republish from a non-in-flight status (e.g. publish_failed)', async () => {
     const post = {

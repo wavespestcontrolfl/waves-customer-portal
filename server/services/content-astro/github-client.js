@@ -186,6 +186,21 @@ async function getPr(number) {
   return ghFetch(`/repos/${owner}/${repo}/pulls/${number}`);
 }
 
+async function closePr(number) {
+  const { owner, repo } = env();
+  return ghFetch(`/repos/${owner}/${repo}/pulls/${number}`, {
+    method: 'PATCH',
+    body: { state: 'closed' },
+  });
+}
+
+async function deleteRef(branch) {
+  const { owner, repo } = env();
+  return ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+    method: 'DELETE',
+  });
+}
+
 async function verifyAccess() {
   const { owner, repo } = env();
   const out = await ghFetch(`/repos/${owner}/${repo}`);
@@ -209,5 +224,7 @@ module.exports = {
   listPrReviews,
   mergePr,
   getPr,
+  closePr,
+  deleteRef,
   verifyAccess,
 };
