@@ -156,6 +156,36 @@ describe('blog Astro frontmatter validation', () => {
     expect(result.errors.join('\n')).toMatch(/post_type must be one of/);
   });
 
+  // The validator is ajv-backed (draft-2020); these lock the human-readable
+  // error contract callers/UX depend on through the ajv→message mapping.
+  test('reports a missing required field', () => {
+    const fm = validFrontmatter();
+    delete fm.title;
+    const result = validateBlogFrontmatter(fm);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/title is required/);
+  });
+
+  test('rejects an unknown top-level field (additionalProperties:false)', () => {
+    const result = validateBlogFrontmatter(validFrontmatter({ bogus_field: 'x' }));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/bogus_field is not allowed/);
+  });
+
+  test('reports a meta_description over the max length', () => {
+    const result = validateBlogFrontmatter(validFrontmatter({ meta_description: 'x'.repeat(200) }));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/meta_description must be at most \d+ characters/);
+  });
+
+  test('reports a nested field error with a dotted path (author.bio_url)', () => {
+    const result = validateBlogFrontmatter(validFrontmatter({
+      author: { name: 'Adam Benetti', role: 'Owner', fdacs_license: 'JB1234', years_swfl: 10, bio_url: 12345 },
+    }));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/author\.bio_url must be string/);
+  });
+
   test('maps pest-family legacy tags to the required pest-control category', async () => {
     const data = await AstroPublisher.buildFrontmatter({
       title: 'Ant Pressure in Palmetto',
