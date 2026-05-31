@@ -86,7 +86,9 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
-const CHIP_OBSERVATIONS = [
+// Completion-panel quick-entry chips are service-aware: pest-line services get
+// a pest-focused list, lawn services keep their original (lawn-inclusive) list.
+const CHIP_OBSERVATIONS_PEST = [
   "Pest activity noted",
   "Ant trails observed",
   "Roach activity (live/dead)",
@@ -101,8 +103,35 @@ const CHIP_OBSERVATIONS = [
   "Property access issue",
   "Customer concern discussed",
 ];
-const CHIP_RECOMMENDATIONS = [
+const CHIP_OBSERVATIONS_LAWN = [
+  "Pest activity noted",
+  "Standing water found",
+  "Irrigation issue",
+  "Rodent signs",
+  "Lawn stress/dry patches",
+  "Fungus visible",
+  "Weeds spreading",
+  "Property access issue",
+  "Customer concern discussed",
+  "Debris in gutters",
+  "Ant trails observed",
+  "Roach activity (live/dead)",
+  "Spider webs/egg sacs",
+  "Wasp/bee nests found",
+  "Moisture/conducive conditions",
+  "Entry points identified",
+  "Conducive vegetation against structure",
+];
+const CHIP_RECOMMENDATIONS_PEST = [
   "Callback recommended",
+  "Follow-up in 2 weeks",
+  "Schedule interior next visit",
+  "Bait station replacement",
+  "Customer wants estimate",
+];
+const CHIP_RECOMMENDATIONS_LAWN = [
+  "Callback recommended",
+  "Irrigation adjustment needed",
   "Follow-up in 2 weeks",
   "Schedule interior next visit",
   "Bait station replacement",
@@ -7660,7 +7689,7 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add observation...</option>
-                {CHIP_OBSERVATIONS.map((chip) => (
+                {(isLawn ? CHIP_OBSERVATIONS_LAWN : CHIP_OBSERVATIONS_PEST).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -7676,7 +7705,7 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add recommendation...</option>
-                {CHIP_RECOMMENDATIONS.map((chip) => (
+                {(isLawn ? CHIP_RECOMMENDATIONS_LAWN : CHIP_RECOMMENDATIONS_PEST).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -9449,7 +9478,7 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add observation...</option>
-                {CHIP_OBSERVATIONS.map((chip) => (
+                {(isLawn ? CHIP_OBSERVATIONS_LAWN : CHIP_OBSERVATIONS_PEST).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -9467,7 +9496,7 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add recommendation...</option>
-                {CHIP_RECOMMENDATIONS.map((chip) => (
+                {(isLawn ? CHIP_RECOMMENDATIONS_LAWN : CHIP_RECOMMENDATIONS_PEST).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
