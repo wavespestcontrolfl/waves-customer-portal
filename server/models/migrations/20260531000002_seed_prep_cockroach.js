@@ -57,6 +57,7 @@ const TEMPLATE = {
   optional: [
     'customer_name',
     'customer_portal_url',
+    'prep_url',
     'project_type',
     'project_title',
     'service_date',
@@ -88,7 +89,7 @@ function blocks(t) {
     { type: 'heading', content: 'How to prepare' },
     ...t.steps.map((content) => ({ type: 'paragraph', content })),
     { type: 'callout', content: t.note },
-    { type: 'cta', label: 'Open customer portal', url_variable: 'customer_portal_url' },
+    { type: 'cta', label: 'Open prep guide', url_variable: 'prep_url' },
     { type: 'small_note', content: 'Questions or need help? Reply to this email and our team will be happy to help.' },
     { type: 'signature', content: 'Thank you, The Waves Team' },
   ];
