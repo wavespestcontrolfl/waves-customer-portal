@@ -6,10 +6,13 @@ import {
   ExternalLink,
   FileText,
   GitPullRequest,
+  Lightbulb,
   Link2,
   RefreshCw,
   RotateCcw,
   Search,
+  Sparkles,
+  UploadCloud,
   XCircle,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -130,6 +133,9 @@ export default function AutonomousContentReviewPage() {
   const [linkReviewNote, setLinkReviewNote] = useState("");
   const [actionPending, setActionPending] = useState("");
   const [linkActionPending, setLinkActionPending] = useState("");
+  const [ideaData, setIdeaData] = useState(null);
+  const [ideaLoading, setIdeaLoading] = useState(true);
+  const [ideaActionPending, setIdeaActionPending] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -159,9 +165,33 @@ export default function AutonomousContentReviewPage() {
     }
   };
 
+  const loadIdeas = async () => {
+    setIdeaLoading(true);
+    setError("");
+    try {
+      // Blog ideas live in the legacy blog pipeline (blog_posts), separate from
+      // the opportunity queue. Surface idea + draft rows here so the backlog can
+      // be generated + published from the same review surface. Drafts first
+      // (closer to publish), then ideas.
+      const [ideas, drafts] = await Promise.all([
+        adminFetch("/admin/content/blog?status=idea&sort=created_at&order=desc&limit=100"),
+        adminFetch("/admin/content/blog?status=draft&sort=created_at&order=desc&limit=100"),
+      ]);
+      setIdeaData({
+        posts: [...(drafts.posts || []), ...(ideas.posts || [])],
+        counts: ideas.counts || drafts.counts || {},
+      });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIdeaLoading(false);
+    }
+  };
+
   useEffect(() => {
     load();
     loadLinks();
+    loadIdeas();
   }, []);
 
   useEffect(() => {
@@ -215,6 +245,24 @@ export default function AutonomousContentReviewPage() {
     }
   };
 
+  const runIdeaAction = async (id, action) => {
+    if (!id || ideaActionPending) return;
+    setIdeaActionPending(`${action}:${id}`);
+    setError("");
+    try {
+      if (action === "generate") {
+        await adminFetch(`/admin/content/blog/${id}/generate`, { method: "POST" });
+      } else if (action === "publish") {
+        await adminFetch(`/admin/content/blog/${id}/publish-astro`, { method: "POST" });
+      }
+      await loadIdeas();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIdeaActionPending("");
+    }
+  };
+
   const submitLinkDecision = async (decision) => {
     if (!selectedLinkId || linkActionPending) return;
     setLinkActionPending(decision);
@@ -250,13 +298,15 @@ export default function AutonomousContentReviewPage() {
   const pendingCount = counts.pending_review || 0;
   const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
   const reviewActions = selected?.review_actions || {};
+  const ideaPosts = ideaData?.posts || [];
+  const ideaCounts = ideaData?.counts || {};
 
   return (
     <div style={{ minHeight: "100%", background: D.bg, padding: 24 }}>
       <AdminCommandHeader
         title="Autonomous Content Review"
         icon={Bot}
-        actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: () => { load(); loadLinks(); }, disabled: loading || linkLoading, variant: "secondary" }]}
+        actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: () => { load(); loadLinks(); loadIdeas(); }, disabled: loading || linkLoading || ideaLoading, variant: "secondary" }]}
       />
 
       {error && (
@@ -269,9 +319,10 @@ export default function AutonomousContentReviewPage() {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
         <TabButton active={view === "content"} icon={Bot} label="Content Queue" onClick={() => setView("content")} />
         <TabButton active={view === "links"} icon={Link2} label="Internal Links" onClick={() => setView("links")} />
+        <TabButton active={view === "ideas"} icon={Lightbulb} label="Blog Ideas" onClick={() => setView("ideas")} />
       </div>
 
-      {view === "content" ? (
+      {view === "content" && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
             <Kpi label="Pending Review" value={pendingCount} tone={pendingCount > 0 ? "amber" : "green"} />
@@ -478,7 +529,9 @@ export default function AutonomousContentReviewPage() {
         </aside>
       </div>
         </>
-      ) : (
+      )}
+
+      {view === "links" && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
             <Kpi label="Candidates" value={linkCounts.patch_candidate || 0} tone={(linkCounts.patch_candidate || 0) > 0 ? "amber" : "green"} />
@@ -634,6 +687,80 @@ export default function AutonomousContentReviewPage() {
                 </div>
               )}
             </aside>
+          </div>
+        </>
+      )}
+
+      {view === "ideas" && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+            <Kpi label="Ideas" value={ideaCounts.idea || 0} tone={(ideaCounts.idea || 0) > 0 ? "amber" : "green"} />
+            <Kpi label="Drafts (ready to publish)" value={ideaCounts.draft || 0} tone={(ideaCounts.draft || 0) > 0 ? "amber" : undefined} />
+            <Kpi label="Published" value={ideaCounts.published || 0} tone="green" />
+          </div>
+
+          <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
+            <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
+              <Lightbulb size={16} strokeWidth={2} />
+              <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Blog Ideas &amp; Drafts</div>
+            </div>
+            {ideaLoading ? (
+              <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>Loading...</div>
+            ) : ideaPosts.length === 0 ? (
+              <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>No blog ideas or drafts in the backlog.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
+                  <thead>
+                    <tr>
+                      {["Title", "Topic", "City", "Status", ""].map((h) => (
+                        <th key={h || "actions"} style={{ textAlign: h ? "left" : "right", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 800, borderBottom: `1px solid ${D.border}` }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ideaPosts.map((p) => (
+                      <tr key={p.id} style={{ background: D.card }}>
+                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top", maxWidth: 440 }}>
+                          <div style={{ color: D.heading, fontWeight: 750, fontSize: 13, lineHeight: 1.3 }}>{p.title || "Untitled"}</div>
+                          {p.keyword && <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>kw: {p.keyword}</div>}
+                        </td>
+                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>{p.tag ? <Chip>{p.tag}</Chip> : "—"}</td>
+                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top", fontSize: 12, color: D.text }}>{p.city || "—"}</td>
+                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}><Chip tone={p.status === "draft" ? "amber" : undefined}>{p.status}</Chip></td>
+                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
+                          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                            {p.status === "idea" && (
+                              <ActionButton
+                                icon={Sparkles}
+                                label="Generate"
+                                tone="green"
+                                disabled={!!ideaActionPending}
+                                pending={ideaActionPending === `generate:${p.id}`}
+                                onClick={() => runIdeaAction(p.id, "generate")}
+                              />
+                            )}
+                            {p.status === "draft" && (
+                              <ActionButton
+                                icon={UploadCloud}
+                                label="Publish PR"
+                                tone="green"
+                                disabled={!!ideaActionPending}
+                                pending={ideaActionPending === `publish:${p.id}`}
+                                onClick={() => runIdeaAction(p.id, "publish")}
+                              />
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+          <div style={{ marginTop: 12, fontSize: 12, color: D.muted, lineHeight: 1.5 }}>
+            Generate writes a full draft (content + meta) via the blog writer; Publish PR opens a review-only Astro PR (Codex + content guardrails run before merge). Ideas come from the blog idea generator, independent of GSC demand.
           </div>
         </>
       )}
