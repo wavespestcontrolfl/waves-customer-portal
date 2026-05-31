@@ -93,16 +93,11 @@ const InsightsPanel = lazy(
 );
 
 const ACTIVE_MOBILE_COMPLETION_STATUSES = new Set(["en_route", "on_site"]);
-const PRE_SERVICE_STATUSES = new Set(["pending", "confirmed", "rescheduled"]);
-
-function canOpenMobileCompletion(service) {
-  const status = String(service?.status || "").toLowerCase();
-  if (ACTIVE_MOBILE_COMPLETION_STATUSES.has(status)) return true;
-  return PRE_SERVICE_STATUSES.has(status);
-}
 
 function shouldOpenMobileCompletion(service) {
-  return canOpenMobileCompletion(service);
+  return ACTIVE_MOBILE_COMPLETION_STATUSES.has(
+    String(service?.status || "").toLowerCase(),
+  );
 }
 
 function isProjectBackedCompletion(service) {
@@ -2264,14 +2259,6 @@ export default function DispatchPageV2({
             }
           }}
           onSubmit={handleCompleteSubmit}
-          onViewDetails={
-            isMobile
-              ? (svc) => {
-                  setCompletingService(null);
-                  setDetailService(svc);
-                }
-              : undefined
-          }
         />
       )}
       {projectService && (

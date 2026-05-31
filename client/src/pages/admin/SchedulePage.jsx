@@ -5011,13 +5011,7 @@ function normalizeProductArea(product = {}, serviceType = "") {
   };
 }
 
-export function CompletionPanel({
-  service,
-  products,
-  onClose,
-  onSubmit,
-  onViewDetails,
-}) {
+export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [notes, setNotes] = useState("");
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
