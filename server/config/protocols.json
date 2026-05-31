@@ -949,10 +949,12 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Exterior general pest perimeter\nExterior perimeter band\nInterior crack-and-crevice treatment only if activity is present\nSweep eaves, windows, doors, and lanai frames",
+        "primary": "Exterior general pest perimeter\nExterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to perimeter (6-ft band + crack & crevice)\nInterior crack-and-crevice treatment only if activity is present\nSweep eaves, windows, doors, and lanai frames",
         "secondary": "WDG or granular bait in landscape beds\nGlue boards in garage or utility areas\nEscalate moisture, exclusion, or sanitation issues in notes",
         "lineMeta": {
           "Exterior perimeter band": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Demand CS", "Talstar P"] },
+          "Applied repellent solution with surfactant to perimeter": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Talstar P", "Demand CS"] },
+          "Applied non-repellent solution to perimeter (6-ft band + crack & crevice)": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Alpine WSG"] },
           "Interior crack-and-crevice treatment only if activity is present": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Alpine WSG"] },
           "Sweep eaves, windows, doors, and lanai frames": { "scope": "exterior", "treatmentApplied": false, "catalogProductHints": ["Webster"] },
           "WDG or granular bait in landscape beds": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Advion WDG Granular"] },
