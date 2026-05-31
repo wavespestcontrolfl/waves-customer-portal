@@ -57,7 +57,23 @@ async function latestProductionDeploymentForPost(post) {
   const { project } = cfEnv();
   const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=production&per_page=25`);
   const list = Array.isArray(res?.result) ? res.result : [];
-  return list.find((deploy) => deploymentMatchesMergedPost(deploy, post)) || null;
+  const eligible = list.filter((deploy) => deploymentMatchesMergedPost(deploy, post));
+  if (eligible.length <= 1) return eligible[0] || null;
+
+  // More than one production deploy falls in the match window (a busy push
+  // window). Prefer an exact commit match; otherwise the deploy triggered
+  // CLOSEST to the merge, so a later unrelated merge's deploy isn't mistaken
+  // for ours (the old `.find` on the newest-first list could pick it).
+  const wantedSha = normalizeSha(post.astro_commit_sha);
+  if (wantedSha) {
+    const exact = eligible.find((d) => normalizeSha(deploymentCommitSha(d)) === wantedSha);
+    if (exact) return exact;
+  }
+  const mergedAt = timestampMs(post.astro_merged_at);
+  if (mergedAt == null) return eligible[0];
+  return eligible
+    .map((d) => ({ d, delta: Math.abs((deploymentTimestampMs(d) ?? mergedAt) - mergedAt) }))
+    .sort((a, b) => a.delta - b.delta)[0].d;
 }
 
 function extractStatus(deploy) {
@@ -85,7 +101,16 @@ function deploymentMatchesMergedPost(deploy, post) {
 
   const mergedAt = timestampMs(post.astro_merged_at);
   const deployedAt = deploymentTimestampMs(deploy);
-  return mergedAt != null && deployedAt != null && deployedAt >= mergedAt - 120000;
+  if (mergedAt == null || deployedAt == null) return false;
+  // Bounded window: at/after the merge (minus clock-skew tolerance) AND within
+  // a plausible build-completion window after it. The previous check had only
+  // the lower bound, so ANY later production deploy (a subsequent unrelated
+  // merge) matched and could flip this post live prematurely. Upper bound is
+  // generous (default 60m > the hub's 30–45m build lag) and env-tunable.
+  const SKEW_MS = 120000;
+  const maxAge = Number(process.env.CF_DEPLOY_MATCH_MAX_AGE_MS);
+  const MAX_AGE_MS = Number.isFinite(maxAge) && maxAge > 0 ? maxAge : 3600000;
+  return deployedAt >= mergedAt - SKEW_MS && deployedAt <= mergedAt + MAX_AGE_MS;
 }
 
 function deploymentCommitSha(deploy) {
