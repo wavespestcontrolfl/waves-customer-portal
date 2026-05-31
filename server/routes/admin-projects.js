@@ -1781,30 +1781,59 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       return { invoice, created: true };
     }
 
-    // Non-WDO service reports bill what the visit actually was, so the draft is
-    // built from the linked service record's scheduled-service pricing
-    // (InvoiceService.createFromService). Unlike WDO there's no cheap synthetic
-    // fee to preview, and replaying the full discount/tax math here would risk
-    // drift from create(), so we mint the real draft on BOTH the dry-run and the
-    // send. That's safe: the draft is persisted + linked to the project, so a
-    // re-preview or the follow-up send reuses the SAME draft (reuse path 1
-    // above) — a cancelled preview leaves at most one legitimate draft per
-    // project, never duplicates.
+    // Non-WDO service reports bill what the visit actually was, so the draft's
+    // line items come from the linked service record's scheduled-service pricing.
+    // Unlike WDO there's no cheap synthetic fee to preview, and replaying the
+    // full discount/tax math outside create() would risk drift, so we mint the
+    // real draft on BOTH the dry-run and the send. That's safe: the draft is
+    // persisted + linked to the project, so a re-preview or the follow-up send
+    // reuses the SAME draft (reuse path 1 above) — a cancelled preview leaves at
+    // most one legitimate draft per project, never duplicates.
     if (!project.service_record_id) {
       const err = new Error('This service report isn’t linked to a completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
-      err.code = 'no_service_record';
+      err.code = 'invoice_build_failed';
       throw err;
     }
-    const built = await InvoiceService.createFromService(
-      project.service_record_id,
-      project.customer_id,
-      {
-        scheduledServiceId: project.scheduled_service_id || undefined,
-        notes: `Auto-generated for ${getProjectType(project.project_type)?.label || 'service'} project ${project.id}.`,
-      },
-    );
-    const builtFresh = await trx('invoices').where({ id: built.id }).first();
-    const builtInvoice = builtFresh || built;
+    const serviceRecord = await trx('service_records')
+      .where({ id: project.service_record_id, customer_id: project.customer_id })
+      .first();
+    if (!serviceRecord) {
+      const err = new Error('The visit linked to this report wasn’t found for this customer, so an invoice can’t be built automatically.');
+      err.code = 'invoice_build_failed';
+      throw err;
+    }
+    // Derive the scheduled-service linkage from the project, falling back to the
+    // service record's own scheduled_service_id (an ad-hoc project may not carry
+    // it). Without a scheduled service there's no priced line set to bill from.
+    const scheduledServiceId = project.scheduled_service_id || serviceRecord.scheduled_service_id;
+    const built = scheduledServiceId
+      ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
+          fallbackDescription: serviceRecord.service_type || getProjectType(project.project_type)?.label || 'Service visit',
+        })
+      : { lineItems: [], discountIds: [] };
+    // Sum the non-discount (positive) lines — a draft with no positive lines
+    // would bill $0, which means the visit has no pricing to invoice from. Fail
+    // with an actionable message instead of minting a $0 orphan draft.
+    const positiveTotal = (built.lineItems || []).reduce(
+      (sum, item) => (Number(item.amount) > 0 ? sum + Number(item.amount) : sum), 0);
+    if (positiveTotal <= 0) {
+      const err = new Error('The linked visit has no pricing, so an invoice can’t be built automatically. Add pricing on the appointment (or create the invoice from the visit) first — it will be reused here.');
+      err.code = 'invoice_build_failed';
+      throw err;
+    }
+    const createdNonWdo = await InvoiceService.create({
+      customerId: project.customer_id,
+      serviceRecordId: project.service_record_id,
+      scheduledServiceId: scheduledServiceId || undefined,
+      lineItems: built.lineItems,
+      discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
+      // The scheduled-service lines carry stored discount amounts; trust them so
+      // the draft total matches the appointment (mirrors createFromService).
+      trustedStoredDiscountSources: ['scheduled_service'],
+      notes: `Auto-generated for ${getProjectType(project.project_type)?.label || 'service'} project ${project.id}.`,
+    });
+    const builtFresh = await trx('invoices').where({ id: createdNonWdo.id }).first();
+    const builtInvoice = builtFresh || createdNonWdo;
     await persistProjectInvoiceLink(project, builtInvoice.id, trx);
     return { invoice: builtInvoice, created: true };
   });
@@ -2461,6 +2490,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     if (err?.message === 'Invoice not found for this customer') {
       return res.status(404).json({ error: err.message });
+    }
+    // The invoice couldn't be auto-built from the visit (no linked visit / no
+    // derivable pricing) — surface the actionable reason as a 422 rather than an
+    // opaque 500.
+    if (err?.code === 'invoice_build_failed') {
+      return res.status(422).json({ error: err.message, code: err.code });
     }
     next(err);
   }
