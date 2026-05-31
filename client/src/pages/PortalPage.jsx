@@ -2920,6 +2920,7 @@ function BillingTab({ customer }) {
   const [yearFilter, setYearFilter] = useState('All');
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
+  const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const compact = useIsMobile(760);
@@ -2952,6 +2953,7 @@ function BillingTab({ customer }) {
         setAutopay(autopayData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
+          setBillingSmsEnabled(!!prefsData.billingReminder);
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
         }
         setLoading(false);
@@ -3332,7 +3334,11 @@ function BillingTab({ customer }) {
 
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
-    api.updateNotificationPrefs({ billingEmail: billingEmail || '', paymentConfirmationSms: paymentSmsEnabled })
+    api.updateNotificationPrefs({
+      billingEmail: billingEmail || '',
+      billingReminder: billingSmsEnabled,
+      paymentConfirmationSms: paymentSmsEnabled,
+    })
       .then(() => setBillingPrefsSaving(false))
       .catch(() => setBillingPrefsSaving(false));
   };
@@ -3776,6 +3782,34 @@ function BillingTab({ customer }) {
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Billing reminder texts</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBillingSmsEnabled(!billingSmsEnabled)}
+            aria-label={`Billing reminder texts ${billingSmsEnabled ? 'enabled' : 'disabled'}`}
+            style={{
+              width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
+              background: billingSmsEnabled ? B.green : B.grayLight,
+              position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
+            }}
+          >
+            <div style={{
+              width: 22, height: 22, borderRadius: 11, background: '#fff',
+              position: 'absolute', top: 5,
+              left: billingSmsEnabled ? 24 : 2,
+              transition: 'left 0.2s ease',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+            }} />
+          </button>
+        </div>
+
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
+        }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Payment confirmation texts</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
           </div>
@@ -3786,7 +3820,7 @@ function BillingTab({ customer }) {
             style={{
               width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
               background: paymentSmsEnabled ? B.green : B.grayLight,
-              position: 'relative', transition: 'background 0.2s ease',
+              position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
             }}
           >
             <div style={{
