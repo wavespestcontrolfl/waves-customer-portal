@@ -847,6 +847,37 @@ describe('Astro publisher hero image republish', () => {
     expect(gh.createPr).toHaveBeenCalled();
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open' }));
   });
+
+  test('blocks a legacy rodent post (topic on `tag`) that ships an FAQ section', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Keeping Rats Out of Bradenton Homes',
+      slug: 'rats-out-of-bradenton-homes',
+      meta_description: 'Bradenton homeowners can use this guide to spot early rodent activity, seal entry points, and know when professional rodent control is worth calling.',
+      keyword: 'rodent control Bradenton',
+      tag: 'Rodents', // legacy topic lives on `tag`, not category
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,eA==',
+      hero_image_alt: 'Rodent exclusion around a Bradenton home',
+      content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
+  });
 });
 
 describe('Astro publisher idempotency guard', () => {

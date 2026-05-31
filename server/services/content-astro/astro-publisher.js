@@ -375,7 +375,14 @@ async function publishAstro(postId) {
     // P0/P1 here too — body + editable meta are checked.
     const guardrails = contentGuardrails.evaluate(
       { body, frontmatter: data },
-      { domains: data.domains, service: post.category || null, primaryKeyword: post.keyword || data.primary_keyword || null },
+      {
+        domains: data.domains,
+        // Legacy BlogWriter rows carry the topic on `tag` (e.g. "Rodents",
+        // "Bed Bugs"), not category — pass it so the FAQ-blocked-service guard
+        // actually covers rodent/termite/bed-bug/etc. posts.
+        service: post.category || post.tag || null,
+        primaryKeyword: post.keyword || data.primary_keyword || null,
+      },
     );
     if (!guardrails.pass) {
       const blocking = guardrails.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');

@@ -83,6 +83,21 @@ describe('content-guardrails', () => {
     expect(r.pass).toBe(true);
   });
 
+  test.each(['Rodents', 'Bed Bugs', 'Cockroaches', 'Spiders', 'Termites', 'Lawn Pests'])(
+    'FAQ on a blocked service matches the legacy display tag "%s"',
+    (tag) => {
+      const r = guardrails.evaluate({ body: '## Frequently Asked Questions\nQ: ...' }, { service: tag });
+      expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
+    },
+  );
+
+  test('FAQ on an allowed display tag (Mosquitoes/Ants) is still fine', () => {
+    for (const tag of ['Mosquitoes', 'Ants', 'Pest Control']) {
+      const r = guardrails.evaluate({ body: '## FAQ\nQ: ...' }, { service: tag });
+      expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
+    }
+  });
+
   test('keyword stuffing is a P2 warning (non-blocking)', () => {
     const kw = 'pest control sarasota';
     const body = (`${kw} `).repeat(20) + 'filler '.repeat(40);
