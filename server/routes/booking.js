@@ -322,6 +322,204 @@ router.get('/config', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Furthest out a customer can browse/search for a slot. The default window
+// stays narrow (advance_days_max, ~14d); this only opens up when the customer
+// explicitly picks a later date or searches via the Waves AI bar.
+const MAX_BOOKING_HORIZON_DAYS = 90;
+
+// A slot counts as "nearby" (route-efficient) when its detour is small enough
+// to earn one of the proximity reasons — i.e. a tech is already working close
+// by. Drives the soft "no route near you that day yet" messaging downstream.
+const NEARBY_DETOUR_MINUTES = 15;
+
+// Whole-hour windows offered on a day with no existing stops, so a customer
+// who picks/searches an otherwise-empty day gets real choice across the open
+// block instead of just the 8 AM gap start. Skips noon (lunch is reserved).
+const OPEN_DAY_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
+
+function inTimeOfDay(startTimeHHMM, timeOfDay) {
+  if (!timeOfDay || timeOfDay === 'any') return true;
+  const min = timeToMin(startTimeHHMM);
+  if (timeOfDay === 'morning') return min < 12 * 60;
+  // afternoon + evening both land inside the 12pm–5pm working window
+  return min >= 12 * 60;
+}
+
+// Resolve service coordinates from any of: explicit lat/lng, a linked estimate's
+// customer, a free-text address, or a city's service-zone center. Shared by
+// /availability and /find-slots.
+async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
+  let resolvedLat = lat ? parseFloat(lat) : null;
+  let resolvedLng = lng ? parseFloat(lng) : null;
+
+  if ((!resolvedLat || !resolvedLng) && estimate_id) {
+    const est = await db('estimates').where('id', estimate_id).first();
+    if (est?.customer_id) {
+      const c = await db('customers').where('id', est.customer_id)
+        .select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
+      if (c?.latitude && c?.longitude) {
+        resolvedLat = parseFloat(c.latitude);
+        resolvedLng = parseFloat(c.longitude);
+      } else if (c) {
+        const addr = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
+        if (addr) {
+          const geo = await geocodeAddress(addr);
+          resolvedLat = geo.lat; resolvedLng = geo.lng;
+        }
+      }
+    }
+  }
+
+  if ((!resolvedLat || !resolvedLng) && address) {
+    const geo = await geocodeAddress(address);
+    resolvedLat = geo.lat; resolvedLng = geo.lng;
+  }
+
+  if ((!resolvedLat || !resolvedLng) && city) {
+    const zone = await fallbackZoneCenter(city);
+    if (zone) { resolvedLat = zone.lat; resolvedLng = zone.lng; }
+  }
+
+  return { lat: resolvedLat, lng: resolvedLng };
+}
+
+// Core availability builder. Runs the route-aware slot finder over [rangeFrom,
+// rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
+// curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
+// 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false }) {
+  const result = await findAvailableSlots({
+    lat,
+    lng,
+    durationMinutes: duration,
+    dateFrom: rangeFrom,
+    dateTo: rangeTo,
+    dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
+    dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
+    topN: 200,
+  });
+
+  // Enforce max_self_books_per_day — filter out dates already at cap
+  const maxPerDay = config.max_self_books_per_day ?? 3;
+  const slotGridMinutes = 60;
+  const dayStartMin = timeToMin(config.day_start || '08:00');
+  const dayEndMin = timeToMin(config.day_end || '17:00');
+  const lunchStart = timeToMin(config.lunch_start || '12:00');
+  const lunchEnd = timeToMin(config.lunch_end || '13:00');
+  const bookingCounts = await db('self_booked_appointments')
+    .whereNot('status', 'cancelled')
+    .whereBetween('date', [rangeFrom, rangeTo])
+    .select('date')
+    .count('* as count')
+    .groupBy('date');
+  const fullDays = new Set(
+    bookingCounts.filter(r => parseInt(r.count) >= maxPerDay)
+      .map(r => (typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0]))
+  );
+
+  const fmt = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  const candidateMap = new Map();
+  const addCandidate = (slot, startMin) => {
+    const endMin = startMin + duration;
+    if (!isWholeHour(startMin)) return;
+    if (startMin < dayStartMin || endMin > dayEndMin) return;
+    // Lunch windows are reserved for route health and should never be self-booked.
+    if (startMin < lunchEnd && endMin > lunchStart) return;
+    const startTime = fmt(startMin);
+    if (!inTimeOfDay(startTime, timeOfDay)) return;
+    const key = `${slot.date}|${startTime}`;
+    // result.slots is score-sorted, so the first candidate to claim a date+time
+    // is the most route-efficient one — keep it.
+    if (candidateMap.has(key)) return;
+    const labels = dateLabels(slot.date);
+    candidateMap.set(key, {
+      date: slot.date,
+      ...labels,
+      start_time: startTime,
+      end_time: fmt(endMin),
+      start_label: minToTime12(startMin),
+      end_label: minToTime12(endMin),
+      detour_minutes: slot.detour_minutes,
+      reason: proximityReason(slot.detour_minutes),
+      technician_id: slot.technician.id,
+      rank: slot.rank,
+      score: slot.score,
+      startTime24: startTime,
+      endTime24: fmt(endMin),
+      start: minToTime12(startMin),
+      end: minToTime12(endMin),
+    });
+  };
+
+  for (const slot of (result.slots || [])) {
+    if (fullDays.has(slot.date)) continue;
+    if (expandOpenDays && (slot.stops_that_day || 0) === 0) {
+      // Open day (no stops yet for this tech) — offer the whole block of hourly
+      // windows so the customer can pick any time, not just the gap's earliest
+      // start. These carry the gap's (large) detour, so they read as
+      // "Available time slot" and keep the day flagged not-nearby.
+      for (const win of OPEN_DAY_WINDOWS) addCandidate(slot, timeToMin(win));
+    } else {
+      // Route scoring returns minute-level travel offsets; customers see clean windows.
+      const rawStartMin = timeToMin(slot.start_time);
+      addCandidate(slot, cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes));
+    }
+  }
+  const candidates = [...candidateMap.values()].sort(compareRankedSlots);
+  const curatedSlots = curateSlots(candidates, today);
+
+  // Group slots by date, anonymize tech, add reason + best_fit flag, dedupe (one slot per day+start)
+  const byDate = new Map();
+  for (const slot of candidates) {
+    const key = slot.date;
+    if (!byDate.has(key)) byDate.set(key, []);
+    const bucket = byDate.get(key);
+    bucket.push({
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      start_label: slot.start_label,
+      end_label: slot.end_label,
+      detour_minutes: slot.detour_minutes,
+      reason: proximityReason(slot.detour_minutes),
+      // Opaque identifiers the confirm step will replay
+      technician_id: slot.technician_id,
+      rank: slot.rank,
+      // Legacy aliases (existing BookingPage reads these)
+      startTime24: slot.start_time,
+      endTime24: slot.end_time,
+      start: minToTime12(timeToMin(slot.start_time)),
+      end: minToTime12(timeToMin(slot.end_time)),
+    });
+  }
+
+  // Sort each day's slots chronologically; mark best_fit on the single globally-top-ranked slot per day
+  const days = [];
+  for (const [date, slots] of byDate.entries()) {
+    slots.sort((a, b) => a.start_time.localeCompare(b.start_time));
+    const best = slots.reduce((acc, s) => (acc == null || s.rank < acc.rank ? s : acc), null);
+    const labels = dateLabels(date);
+    // Default landing keeps the tight 4-per-day cap; a specific-date / AI
+    // search opens it up so the customer sees the full block of options.
+    const perDayCap = expandOpenDays ? 8 : 4;
+    const cappedSlots = slots.map(s => ({ ...s, is_best_fit: s === best })).slice(0, perDayCap);
+    days.push({
+      date,
+      ...labels,
+      // A day is "nearby" when at least one of its slots is route-efficient.
+      nearby: cappedSlots.some(s => s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES),
+      slots: cappedSlots,
+    });
+  }
+  days.sort((a, b) => a.date.localeCompare(b.date));
+
+  return {
+    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, ...slot }) => slot),
+    days,
+    nearby: days.some(d => d.nearby),
+    total_feasible: result.total_feasible || 0,
+  };
+}
+
 // GET /api/booking/availability
 //   query: lat, lng, address, city, service_type, duration_minutes, date_from, date_to
 router.get('/availability', async (req, res, next) => {
@@ -344,175 +542,124 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    // Resolve coordinates
-    let resolvedLat = lat ? parseFloat(lat) : null;
-    let resolvedLng = lng ? parseFloat(lng) : null;
-
-    if ((!resolvedLat || !resolvedLng) && estimate_id) {
-      const est = await db('estimates').where('id', estimate_id).first();
-      if (est?.customer_id) {
-        const c = await db('customers').where('id', est.customer_id)
-          .select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
-        if (c?.latitude && c?.longitude) {
-          resolvedLat = parseFloat(c.latitude);
-          resolvedLng = parseFloat(c.longitude);
-        } else if (c) {
-          const addr = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
-          if (addr) {
-            const geo = await geocodeAddress(addr);
-            resolvedLat = geo.lat; resolvedLng = geo.lng;
-          }
-        }
-      }
-    }
-
-    if ((!resolvedLat || !resolvedLng) && address) {
-      const geo = await geocodeAddress(address);
-      resolvedLat = geo.lat; resolvedLng = geo.lng;
-    }
-
-    if ((!resolvedLat || !resolvedLng) && city) {
-      const zone = await fallbackZoneCenter(city);
-      if (zone) { resolvedLat = zone.lat; resolvedLng = zone.lng; }
-    }
-
+    const { lat: resolvedLat, lng: resolvedLng } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
 
     // Default date window from config — anchored to ET calendar days so the
-    // window doesn't shift by a day between 8 PM ET and midnight UTC.
+    // window doesn't shift by a day between 8 PM ET and midnight UTC. A
+    // caller-supplied range is honored but clamped to the 90-day horizon so a
+    // "Find more dates" / specific-date request can reach further out.
     const today = new Date();
-    const defaultFrom = etDateString(addETDays(today, config.advance_days_min ?? 1));
+    const minDate = etDateString(addETDays(today, config.advance_days_min ?? 1));
+    const maxDate = etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS));
     const defaultTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
-    const rangeFrom = date_from || defaultFrom;
-    const rangeTo = date_to || defaultTo;
+    const clamp = (d, fallback) => {
+      if (!d) return fallback;
+      if (d < minDate) return minDate;
+      if (d > maxDate) return maxDate;
+      return d;
+    };
+    const rangeFrom = clamp(date_from, minDate);
+    let rangeTo = clamp(date_to, defaultTo);
+    if (rangeTo < rangeFrom) rangeTo = rangeFrom;
 
     const duration = duration_minutes
       ? parseInt(duration_minutes)
       : (config.slot_duration_minutes || 60);
 
-    const result = await findAvailableSlots({
-      lat: resolvedLat,
-      lng: resolvedLng,
-      durationMinutes: duration,
-      dateFrom: rangeFrom,
-      dateTo: rangeTo,
-      dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
-      dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
-      topN: 200,
+    const availability = await buildBookingAvailability({
+      lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
+      // "expand=open" widens otherwise-empty days into full hourly windows — used
+      // when the customer browses a specific date / "Find more dates".
+      expandOpenDays: req.query.expand === 'open',
     });
 
-    // Enforce max_self_books_per_day — filter out dates already at cap
-    const maxPerDay = config.max_self_books_per_day ?? 3;
-    const slotGridMinutes = 60;
-    const dayStartMin = timeToMin(config.day_start || '08:00');
-    const dayEndMin = timeToMin(config.day_end || '17:00');
-    const lunchStart = timeToMin(config.lunch_start || '12:00');
-    const lunchEnd = timeToMin(config.lunch_end || '13:00');
-    const bookingCounts = await db('self_booked_appointments')
-      .whereNot('status', 'cancelled')
-      .whereBetween('date', [
-        rangeFrom,
-        rangeTo,
-      ])
-      .select('date')
-      .count('* as count')
-      .groupBy('date');
-    const fullDays = new Set(
-      bookingCounts.filter(r => parseInt(r.count) >= maxPerDay)
-        .map(r => (typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0]))
-    );
-
-    const candidateMap = new Map();
-    for (const slot of (result.slots || [])) {
-      if (fullDays.has(slot.date)) continue;
-      const rawStartMin = timeToMin(slot.start_time);
-      // Route scoring returns minute-level travel offsets; customers should see clean booking windows.
-      const startMin = cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes);
-      const endMin = startMin + duration;
-      if (!isWholeHour(startMin)) continue;
-      if (endMin > dayEndMin) continue;
-      // Lunch windows are reserved for route health and should never be self-booked.
-      if (startMin < lunchEnd && endMin > lunchStart) continue;
-      const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
-      const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-      const key = `${slot.date}|${startTime}`;
-      if (candidateMap.has(key)) continue;
-      const labels = dateLabels(slot.date);
-      candidateMap.set(key, {
-        date: slot.date,
-        ...labels,
-        start_time: startTime,
-        end_time: endTime,
-        start_label: minToTime12(startMin),
-        end_label: minToTime12(endMin),
-        detour_minutes: slot.detour_minutes,
-        reason: proximityReason(slot.detour_minutes),
-        technician_id: slot.technician.id,
-        rank: slot.rank,
-        score: slot.score,
-        startTime24: startTime,
-        endTime24: endTime,
-        start: minToTime12(startMin),
-        end: minToTime12(endMin),
-      });
-    }
-    const candidates = [...candidateMap.values()].sort(compareRankedSlots);
-    const curatedSlots = curateSlots(candidates, today);
-
-    // Group slots by date, anonymize tech, add reason + best_fit flag, dedupe (one slot per day+start)
-    const byDate = new Map();
-    for (const slot of candidates) {
-      const key = slot.date;
-      if (!byDate.has(key)) byDate.set(key, []);
-      const bucket = byDate.get(key);
-      bucket.push({
-        start_time: slot.start_time,
-        end_time: slot.end_time,
-        start_label: slot.start_label,
-        end_label: slot.end_label,
-        detour_minutes: slot.detour_minutes,
-        reason: proximityReason(slot.detour_minutes),
-        // Opaque identifiers the confirm step will replay
-        technician_id: slot.technician_id,
-        rank: slot.rank,
-        // Legacy aliases (existing BookingPage reads these)
-        startTime24: slot.start_time,
-        endTime24: slot.end_time,
-        start: minToTime12(timeToMin(slot.start_time)),
-        end: minToTime12(timeToMin(slot.end_time)),
-      });
-    }
-
-    // Sort each day's slots chronologically; mark best_fit on the single globally-top-ranked slot per day
-    const days = [];
-    for (const [date, slots] of byDate.entries()) {
-      slots.sort((a, b) => a.start_time.localeCompare(b.start_time));
-      const best = slots.reduce((acc, s) => (acc == null || s.rank < acc.rank ? s : acc), null);
-      const labels = dateLabels(date);
-      days.push({
-        date,
-        ...labels,
-        slots: slots.map(s => ({
-          ...s,
-          is_best_fit: s === best,
-        })).slice(0, 4), // max 4 slots per day
-      });
-    }
-    days.sort((a, b) => a.date.localeCompare(b.date));
-
     res.json({
-      slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, ...slot }) => slot),
-      days,
+      slots: availability.slots,
+      days: availability.days,
+      nearby: availability.nearby,
       lat: resolvedLat,
       lng: resolvedLng,
       duration_minutes: duration,
       service_type: service_type || null,
-      total_feasible: result.total_feasible || 0,
+      total_feasible: availability.total_feasible,
     });
   } catch (err) {
     logger.error('[booking:availability] failed:', err);
+    next(err);
+  }
+});
+
+// POST /api/booking/find-slots — Waves AI date/time search.
+//   body: { query, lat, lng, address, city, estimate_id, service_type, duration_minutes }
+//   Parses the natural-language "when" into a date window + time-of-day, then
+//   returns the matching open slots (same shape as /availability) plus a short
+//   summary line and a `nearby` flag for the soft route-density message.
+router.post('/find-slots', async (req, res, next) => {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('selfBooking')) {
+      return res.status(503).json({ error: 'Self-scheduling coming soon' });
+    }
+
+    const {
+      query, lat, lng, address, city, estimate_id,
+      service_type, duration_minutes,
+    } = req.body || {};
+    const cleanQuery = String(query || '').trim();
+    if (!cleanQuery) return res.status(400).json({ error: 'query required' });
+    if (cleanQuery.length > 500) return res.status(400).json({ error: 'query too long' });
+
+    const config = (await db('booking_config').first()) || {
+      advance_days_min: 1, advance_days_max: 14,
+      slot_duration_minutes: 60,
+      day_start: '08:00', day_end: '17:00',
+      max_self_books_per_day: 3,
+    };
+
+    const { lat: resolvedLat, lng: resolvedLng } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    if (!resolvedLat || !resolvedLng) {
+      return res.status(400).json({ error: 'address, lat/lng, or city required' });
+    }
+
+    const today = new Date();
+    const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
+    const when = await parseWhen(cleanQuery, {
+      now: today,
+      minDaysOut: config.advance_days_min ?? 1,
+      maxDaysOut: MAX_BOOKING_HORIZON_DAYS,
+      defaultWindowDays: config.advance_days_max ?? 14,
+    });
+
+    const duration = duration_minutes
+      ? parseInt(duration_minutes)
+      : (config.slot_duration_minutes || 60);
+
+    const availability = await buildBookingAvailability({
+      lat: resolvedLat, lng: resolvedLng, duration,
+      rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
+      timeOfDay: when.timeOfDay,
+      expandOpenDays: true,
+    });
+
+    const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
+    res.json({
+      summary: summarizeWindow(when, { count: slotCount, nearby: availability.nearby }),
+      understood: when.understood,
+      window: { date_from: when.dateFrom, date_to: when.dateTo },
+      time_of_day: when.timeOfDay,
+      nearby: availability.nearby,
+      slots: availability.slots,
+      days: availability.days,
+      lat: resolvedLat,
+      lng: resolvedLng,
+      duration_minutes: duration,
+      service_type: service_type || null,
+    });
+  } catch (err) {
+    logger.error('[booking:find-slots] failed:', err);
     next(err);
   }
 });

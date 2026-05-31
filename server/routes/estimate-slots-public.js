@@ -34,7 +34,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { getAvailableSlots } = require('../services/estimate-slot-availability');
+const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const {
   handleEstimateAsk,
@@ -88,8 +88,17 @@ router.get('/:token/available-slots', async (req, res) => {
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
-    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 14) {
+    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 90) {
       opts.windowDays = windowDays;
+    }
+    // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      opts.dateFrom = date;
+      opts.dateTo = date;
+    }
+    if (typeof req.query.timeOfDay === 'string' && req.query.timeOfDay.trim()) {
+      opts.timeOfDay = req.query.timeOfDay.trim();
     }
     opts.serviceMode = resolveSlotServiceMode(estimate, req.query.serviceMode);
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
@@ -130,6 +139,57 @@ const askLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many questions. Please try again in a minute.' },
+});
+
+// Bound the Waves AI date/time search (each call spends one cheap model call).
+const findSlotsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many searches. Please try again in a minute.' },
+});
+
+// POST /:token/find-slots — Waves AI date/time search for the estimate page.
+//   Body: { query, serviceMode?, selectedFrequency? }. Returns the same
+//   primary/expander slot shape as /available-slots, plus a summary + nearby
+//   flag. Token in the URL is the only gate (read-only, like /available-slots).
+router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const query = typeof req.body?.query === 'string' ? req.body.query.trim() : '';
+  if (!query) return res.status(400).json({ error: 'query required' });
+  if (query.length > 500) return res.status(400).json({ error: 'query too long' });
+
+  try {
+    const estimate = await db('estimates')
+      .where({ token })
+      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+    if (!estimate) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
+    const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
+      ? req.body.selectedFrequency.trim()
+      : '';
+    try {
+      const result = await findEstimateSlots(estimate.id, { query, serviceMode, selectedFrequency });
+      return res.json(result);
+    } catch (svcErr) {
+      if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      if (svcErr.code === 'ESTIMATE_TERMINAL') {
+        return res.status(409).json({ error: 'Estimate is no longer active' });
+      }
+      throw svcErr;
+    }
+  } catch (err) {
+    logger.error(`[estimate-slots-public:find-slots] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'unable to search availability', retry: true });
+  }
 });
 
 router.post('/:token/ask', askLimiter, (req, res, next) => {
