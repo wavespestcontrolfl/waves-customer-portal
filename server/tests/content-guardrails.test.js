@@ -98,6 +98,17 @@ describe('content-guardrails', () => {
     }
   });
 
+  test('FAQ check evaluates ALL service fields — blocked topic on tag while category is broad', () => {
+    // [category, tag] — category is the non-blocked broad value, tag is blocked.
+    const r = guardrails.evaluate({ body: '## Frequently Asked Questions\nQ: ...' }, { service: ['pest-control', 'Rodents'] });
+    expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('FAQ check with array of only-allowed services passes', () => {
+    const r = guardrails.evaluate({ body: '## FAQ\nQ: ...' }, { service: ['pest-control', 'Mosquitoes'] });
+    expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
+  });
+
   test('keyword stuffing is a P2 warning (non-blocking)', () => {
     const kw = 'pest control sarasota';
     const body = (`${kw} `).repeat(20) + 'filler '.repeat(40);

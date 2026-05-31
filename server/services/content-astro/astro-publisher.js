@@ -378,9 +378,10 @@ async function publishAstro(postId) {
       {
         domains: data.domains,
         // Legacy BlogWriter rows carry the topic on `tag` (e.g. "Rodents",
-        // "Bed Bugs"), not category — pass it so the FAQ-blocked-service guard
-        // actually covers rodent/termite/bed-bug/etc. posts.
-        service: post.category || post.tag || null,
+        // "Bed Bugs"), while `category` may be the broad Astro value
+        // ("pest-control"). Pass BOTH so the FAQ-blocked-service guard sees the
+        // real topic regardless of which field holds it.
+        service: [post.category, post.tag],
         primaryKeyword: post.keyword || data.primary_keyword || null,
       },
     );

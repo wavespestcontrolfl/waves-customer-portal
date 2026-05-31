@@ -855,7 +855,8 @@ describe('Astro publisher hero image republish', () => {
       slug: 'rats-out-of-bradenton-homes',
       meta_description: 'Bradenton homeowners can use this guide to spot early rodent activity, seal entry points, and know when professional rodent control is worth calling.',
       keyword: 'rodent control Bradenton',
-      tag: 'Rodents', // legacy topic lives on `tag`, not category
+      category: 'pest-control', // broad Astro category…
+      tag: 'Rodents', // …real topic lives on `tag`
       post_type: 'location',
       service_areas_tag: ['Bradenton'],
       related_services: [],

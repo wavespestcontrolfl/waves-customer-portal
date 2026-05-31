@@ -70,16 +70,23 @@ function brandTokenFinding(body, domains) {
   return null;
 }
 
-// Normalize a service/topic string to candidate FAQ_BLOCKED_SERVICES ids. The
+// Normalize service/topic value(s) to candidate FAQ_BLOCKED_SERVICES ids. The
 // ids are lowercase/singular/hyphenated ('rodent', 'bed-bug'), but legacy blog
 // `tag` values are display-cased plurals ("Rodents", "Bed Bugs", "Cockroaches").
-// Lowercase, hyphenate spaces, and try de-pluralized forms so those match.
+// Accepts a string OR an array of fields (e.g. [category, tag]) so a row whose
+// `category` is the broad Astro value ("pest-control") but whose real topic is
+// on `tag` ("Rodents") is still covered. Lowercase, hyphenate spaces, and try
+// de-pluralized forms so those match.
 function blockedServiceCandidates(service) {
-  const base = String(service || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
-  if (!base) return [];
-  const out = new Set([base]);
-  if (base.endsWith('es')) out.add(base.slice(0, -2)); // Cockroaches → cockroach
-  if (base.endsWith('s')) out.add(base.slice(0, -1)); // Rodents → rodent, Bed Bugs → bed-bug
+  const raw = Array.isArray(service) ? service : [service];
+  const out = new Set();
+  for (const s of raw) {
+    const base = String(s || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+    if (!base) continue;
+    out.add(base);
+    if (base.endsWith('es')) out.add(base.slice(0, -2)); // Cockroaches → cockroach
+    if (base.endsWith('s')) out.add(base.slice(0, -1)); // Rodents → rodent, Bed Bugs → bed-bug
+  }
   return [...out];
 }
 
@@ -87,7 +94,8 @@ function faqBlockedFinding(body, service) {
   const isBlocked = blockedServiceCandidates(service).some((c) => FAQ_BLOCKED_SERVICES.has(c));
   if (!isBlocked) return null;
   if (/\b(faq|frequently asked|common questions)\b/i.test(String(body || ''))) {
-    return finding('P0', 'FAQ_BLOCKED_SERVICE', `Service "${service}" is on the FAQ-blocked list — remove the FAQ section.`);
+    const label = Array.isArray(service) ? service.filter(Boolean).join('/') : service;
+    return finding('P0', 'FAQ_BLOCKED_SERVICE', `Service "${label}" is on the FAQ-blocked list — remove the FAQ section.`);
   }
   return null;
 }
