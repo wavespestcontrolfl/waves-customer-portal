@@ -11,6 +11,8 @@
  * payload for future A/B testing.
  */
 import { useEffect, useState } from 'react';
+import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
+import CalendarDatePicker from '../booking/CalendarDatePicker';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -89,12 +91,22 @@ export default function SlotPicker({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showMore, setShowMore] = useState(false);
+  // Custom date/time finder — Waves AI search + 90-day "Find more dates" calendar
+  const [searchData, setSearchData] = useState(null);
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [pickedDate, setPickedDate] = useState(null);
+  const [pickedData, setPickedData] = useState(null);
+  const [pickedLoading, setPickedLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setShowMore(false);
+    setSearchData(null);
+    setShowCalendar(false);
+    setPickedDate(null);
+    setPickedData(null);
     const params = new URLSearchParams();
     params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     params.set('windowDays', '14');
@@ -108,6 +120,113 @@ export default function SlotPicker({
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
   }, [token, refreshSignal, serviceMode, selectedFrequency]);
+
+  // ── custom date/time finder ──
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const browseMin = toYmd(new Date());
+  const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
+
+  const freqParams = () => {
+    const p = new URLSearchParams();
+    p.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
+    if (serviceMode !== 'one_time' && selectedFrequency) p.set('selectedFrequency', selectedFrequency);
+    return p;
+  };
+
+  const runAiSearch = async (query) => {
+    const res = await fetch(`${API_BASE}/public/estimates/${token}/find-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, serviceMode, selectedFrequency }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || 'search failed');
+    setPickedDate(null);
+    setShowCalendar(false);
+    setSearchData(body);
+    return { summary: body.summary };
+  };
+
+  const onPickCalendarDate = async (date) => {
+    setSearchData(null);
+    setPickedDate(date);
+    setPickedData(null);
+    setPickedLoading(true);
+    try {
+      const p = freqParams();
+      p.set('date', date);
+      const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
+      setPickedData(res.ok ? await res.json() : { primary: [], expander: [] });
+    } catch {
+      setPickedData({ primary: [], expander: [] });
+    } finally {
+      setPickedLoading(false);
+    }
+  };
+
+  const SoftRouteBanner = () => (
+    <div style={{
+      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
+      padding: '10px 12px', fontSize: 14, color: '#9A3412', marginBottom: 10, lineHeight: 1.4,
+    }}>
+      No route near you that day yet — here&apos;s what&apos;s close.
+    </div>
+  );
+
+  const renderSlotList = (payload) => {
+    const list = [...(payload?.primary || []), ...(payload?.expander || [])];
+    if (list.length === 0) {
+      return (
+        <div style={{ fontSize: 14, color: W.textBody }}>
+          No open times then. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a> and we&apos;ll fit you in.
+        </div>
+      );
+    }
+    const nearby = payload?.nearby ?? list.some((s) => s.routeOptimal);
+    return (
+      <>
+        {!nearby ? <SoftRouteBanner /> : null}
+        {list.map((slot) => (
+          <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
+        ))}
+      </>
+    );
+  };
+
+  const finder = (
+    <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16, display: 'grid', gap: 14 }}>
+      <WavesAIScheduleSearch
+        theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white, inputBg: W.offWhite }}
+        onSearch={runAiSearch}
+      />
+      {searchData ? <div>{renderSlotList(searchData)}</div> : null}
+      <button
+        type="button"
+        onClick={() => setShowCalendar((v) => !v)}
+        style={{
+          padding: '10px 16px', background: 'transparent', color: W.blueDeeper,
+          border: `1px solid ${W.blueDeeper}`, borderRadius: 12, cursor: 'pointer',
+          fontSize: 14, fontWeight: 600, width: '100%',
+        }}
+      >
+        {showCalendar ? 'Hide calendar' : 'Find more dates'}
+      </button>
+      {showCalendar ? (
+        <div style={{ display: 'grid', gap: 12 }}>
+          <CalendarDatePicker
+            theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white }}
+            minDate={browseMin}
+            maxDate={browseMax}
+            selectedDate={pickedDate}
+            onPick={onPickCalendarDate}
+          />
+          {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption }}>Loading times…</div> : null}
+          {pickedData ? <div>{renderSlotList(pickedData)}</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
 
   if (loading) {
     return (
@@ -136,11 +255,14 @@ export default function SlotPicker({
 
   if (allSlots.length === 0) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
-        <div style={{ fontSize: 14, color: W.textBody }}>
-          No open slots in the next 14 days. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call us</a> and we'll fit you in.
+      <>
+        <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, color: W.textBody }}>
+            No open slots in the next 14 days — try searching a specific date below, or <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>call us</a> and we&apos;ll fit you in.
+          </div>
         </div>
-      </div>
+        {finder}
+      </>
     );
   }
 
@@ -148,6 +270,7 @@ export default function SlotPicker({
   const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
 
   return (
+    <>
     <div style={{ background: W.white, borderRadius: 14, padding: 32, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
       <div style={{
         fontSize: 30,
@@ -189,5 +312,7 @@ export default function SlotPicker({
         </>
       ) : null}
     </div>
+    {finder}
+    </>
   );
 }
