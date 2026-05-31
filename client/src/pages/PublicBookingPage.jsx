@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
@@ -57,6 +57,7 @@ export default function PublicBookingPage() {
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [pickedDate, setPickedDate] = useState(null);
+  const latestPickedDateRef = useRef(null);
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -261,10 +262,14 @@ export default function PublicBookingPage() {
   };
 
   const onPickDate = async (date) => {
+    latestPickedDateRef.current = date;
     setSearchResult(null);
     setPickedDate(date);
     setBrowseDays(null);
-    if (!date) return;
+    if (!date) {
+      setBrowseLoading(false);
+      return;
+    }
     setBrowseLoading(true);
     try {
       const params = new URLSearchParams({
@@ -278,11 +283,13 @@ export default function PublicBookingPage() {
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json();
+      if (latestPickedDateRef.current !== date) return;
       setBrowseDays(data.days || []);
     } catch {
+      if (latestPickedDateRef.current !== date) return;
       setBrowseDays([]);
     } finally {
-      setBrowseLoading(false);
+      if (latestPickedDateRef.current === date) setBrowseLoading(false);
     }
   };
 
