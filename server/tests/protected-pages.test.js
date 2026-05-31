@@ -1,4 +1,5 @@
 const protectedPages = require('../services/content/protected-pages');
+const knex = require('knex')({ client: 'pg' });
 
 describe('protected-pages pattern layer', () => {
   test('pest-control city hub is a protected money page', () => {
@@ -57,5 +58,24 @@ describe('protected-pages registry layer', () => {
     const r = await protectedPages.isProtected('/rodent-control-sarasota-fl/', { db });
     expect(r.protected).toBe(true);
     expect(r.reason).toBe('protected_check_error');
+  });
+
+  // Regression: a literal `?` in the whereRaw regex (`https?`) was parsed by
+  // knex as a 2nd positional bind placeholder, so the real query threw
+  // "Expected 1 bindings, saw 2" and fail-closed every non-pattern URL as
+  // protected_check_error. The prior mocks never exercised the SQL/bindings;
+  // this builds the query with a REAL knex(pg) builder so a mismatch throws.
+  test('registry query is built with valid placeholder/binding parity (real knex)', async () => {
+    let built = null;
+    const db = (table) => ({
+      whereRaw: (sql, bindings) => {
+        built = knex(table).whereRaw(sql, bindings).toString(); // throws on binding mismatch
+        return { first: async () => null };
+      },
+    });
+    const r = await protectedPages.isProtected('/lawn-care-sarasota-fl/', { db });
+    expect(r).toEqual({ protected: false }); // built cleanly → not the fail-closed error path
+    expect(built).toContain('https{0,1}'); // fixed regex, no literal ?
+    expect(built).toContain("LOWER('lawn-care-sarasota-fl')"); // the one real binding
   });
 });

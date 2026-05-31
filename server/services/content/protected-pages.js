@@ -74,8 +74,16 @@ async function isProtected(url, { db } = {}) {
   if (db) {
     const path = normalizePath(url);
     try {
+      // NOTE: the host-strip regex uses `https{0,1}`, NOT `https?`. A literal
+      // `?` inside a knex whereRaw string is parsed as a positional bind
+      // placeholder — alongside the real `?` for `path`, knex saw 2 placeholders
+      // for 1 binding and threw ("Expected 1 bindings, saw 2"). This function
+      // caught that and fail-closed as protected_check_error for EVERY URL not
+      // already matched by the pattern check, silently parking all refresh/edit
+      // opportunities for review. `https{0,1}` is the regex-equivalent of
+      // `https?` with no literal `?`.
       const row = await db('protected_pages')
-        .whereRaw('LOWER(?) = LOWER(regexp_replace(regexp_replace(page_url, \'^https?://[^/]+\', \'\'), \'^/+|/+$\', \'\', \'g\'))', [path])
+        .whereRaw('LOWER(?) = LOWER(regexp_replace(regexp_replace(page_url, \'^https{0,1}://[^/]+\', \'\'), \'^/+|/+$\', \'\', \'g\'))', [path])
         .first();
       if (row) {
         return { protected: true, reason: row.reason, source: 'registry', detail: row.notes || null };
