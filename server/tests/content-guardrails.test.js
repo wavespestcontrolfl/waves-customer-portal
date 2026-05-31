@@ -28,6 +28,24 @@ describe('content-guardrails', () => {
     expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK')).toBe(false);
   });
 
+  test('literal brand on a sole-hub-domain page is allowed (not treated as multi-domain)', () => {
+    // The legacy/default blog target_sites is just the hub; that must count as
+    // hub-only, not a spoke/multi-domain publish.
+    const r = guardrails.evaluate({
+      body: 'Waves Pest Control keeps your home pest-free.',
+      frontmatter: { domains: ['wavespestcontrol.com'] },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK')).toBe(false);
+  });
+
+  test('literal brand still leaks when the hub is bundled with a spoke domain', () => {
+    const r = guardrails.evaluate({
+      body: 'Waves Pest Control keeps your home pest-free.',
+      frontmatter: { domains: ['wavespestcontrol.com', 'bradentonflpestcontrol.com'] },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK' && f.severity === 'P0')).toBe(true);
+  });
+
   test('refresh: live domains passed via opts catch a leak the draft frontmatter hides', () => {
     // Refresh draft carries no domains (frozen from live page); caller passes
     // the live page's domains explicitly.

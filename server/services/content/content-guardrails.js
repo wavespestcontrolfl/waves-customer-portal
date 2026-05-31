@@ -53,8 +53,16 @@ function priceFinding(body) {
   return null;
 }
 
+// The hub canonical domain(s). Literal "Waves Pest Control" branding is fine on
+// hub-only pages — the brand-token leak only matters when content also targets a
+// SPOKE domain. A target_sites of just the hub (the legacy/default for blogs)
+// must therefore count as hub-only, not multi-domain.
+const HUB_DOMAINS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+
 function brandTokenFinding(body, domains) {
-  const list = Array.isArray(domains) ? domains : [];
+  const list = (Array.isArray(domains) ? domains : [])
+    .map((d) => String(d || '').trim().toLowerCase())
+    .filter((d) => d && !HUB_DOMAINS.has(d)); // only spoke domains make it multi-domain
   if (list.length === 0) return null; // hub-only page — literal brand is fine
   if (/\bWaves\s+Pest\s+Control\b/.test(String(body || ''))) {
     return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" instead of the {{brandName}} token — brand leaks across spoke domains.');
