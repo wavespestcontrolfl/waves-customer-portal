@@ -2404,6 +2404,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       try {
         const result = await ProjectEmail.sendProjectReportWithInvoice({
           project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+          // Only WDO attaches a report PDF (the FDACS-13645); non-WDO attaches
+          // just the invoice PDF and delivers the report as a link. Drives the
+          // template's attachments sentence so the copy matches reality.
+          reportAttached: isWdoProject,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
