@@ -107,6 +107,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(null);
     setPickedData(null);
+    setPickedLoading(false);
     latestPickedDateRef.current = null;
     const params = new URLSearchParams();
     params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');

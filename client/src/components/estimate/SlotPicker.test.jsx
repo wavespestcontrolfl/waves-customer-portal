@@ -82,4 +82,49 @@ describe('SlotPicker', () => {
       expect(screen.queryByText('Wednesday, June 10')).not.toBeInTheDocument();
     });
   });
+
+  it('clears picked-date loading when frequency changes during a date request', async () => {
+    const pickedDateFetch = deferred();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2026-06-01')], expander: [] }))
+      .mockReturnValueOnce(pickedDateFetch.promise)
+      .mockResolvedValueOnce(jsonResponse({ primary: [slot('changed', '2026-06-02')], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { rerender } = render(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="quarterly"
+      />,
+    );
+
+    const input = await screen.findByLabelText(/pick one that works for you/i);
+    fireEvent.change(input, { target: { value: '2026-06-10' } });
+    expect(await screen.findByText(/Loading times/)).toBeInTheDocument();
+
+    rerender(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="monthly"
+      />,
+    );
+
+    await screen.findByText('Tuesday, June 2');
+    expect(screen.queryByText(/Loading times/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      pickedDateFetch.resolve(jsonResponse({ primary: [slot('old-date', '2026-06-10')], expander: [] }));
+    });
+
+    expect(screen.queryByText('Wednesday, June 10')).not.toBeInTheDocument();
+  });
 });
