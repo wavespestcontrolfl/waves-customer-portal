@@ -244,6 +244,19 @@ class InternalLinkPrExecutor {
     }
     const resolvedPrNumber = prNumber || prInfo.number || null;
     if (!prInfo?.merged) {
+      // A closed-but-unmerged PR (abandoned canary, manual close) is terminal.
+      // Leaving the task at pr_open strands it forever: the review queue can't
+      // requeue or dismiss a pr_open task (those require a terminal status), and
+      // re-verifying just re-confirms "not merged". Move it to failed AND clear
+      // the abandoned PR lifecycle fields — otherwise hasPrLifecycle() in the
+      // review queue keeps blocking requeue/dismiss even once it's failed,
+      // leaving it just as stuck. The periodic verify loop then auto-clears
+      // these instead of accumulating pr_open zombies.
+      if (String(prInfo.state).toLowerCase() === 'closed') {
+        const reason = 'internal_link_pr_closed_unmerged';
+        await this._failAbandonedPrTask(task.id, reason);
+        return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: resolvedPrNumber };
+      }
       return { task_id: task.id, status: task.status, skipped: 'pr_not_merged', pr_number: resolvedPrNumber };
     }
 
@@ -467,6 +480,25 @@ class InternalLinkPrExecutor {
         pr_commit_sha: commitSha || null,
         failure_reason: null,
         reviewer_notes: `Verified live rendered internal link on ${liveUrl}.`,
+        updated_at: new Date(),
+      });
+  }
+
+  // Fail a task whose Astro PR was closed unmerged AND clear its PR lifecycle
+  // fields, so the review queue's hasPrLifecycle guard no longer blocks
+  // requeue/dismiss. (astro_pr_number is not a column — the PR number is parsed
+  // from astro_pr_url — so only astro_pr_url/pr_branch/pr_commit_sha are cleared.)
+  // The closed PR URL stays in reviewer_notes (from the pr_open note) for audit.
+  async _failAbandonedPrTask(taskId, reason) {
+    await db(TABLE)
+      .where({ id: taskId })
+      .whereIn('status', ['pr_open', 'pr_reserved'])
+      .update({
+        status: 'failed',
+        failure_reason: reason,
+        astro_pr_url: null,
+        pr_branch: null,
+        pr_commit_sha: null,
         updated_at: new Date(),
       });
   }
