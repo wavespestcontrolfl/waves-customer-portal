@@ -293,10 +293,58 @@ async function fetchImageBuffer(url) {
 
 // ── Main publish ───────────────────────────────────────────────────
 
+// Close + delete a post's still-open PR/branch before a build_failed retry so
+// the replacement PR doesn't orphan it. Best-effort: each step is independent
+// and non-fatal — a cleanup hiccup must not block the author's retry.
+async function cleanupStaleAstroPr(post) {
+  if (post.astro_pr_number) {
+    try {
+      const pr = await gh.getPr(post.astro_pr_number);
+      if (pr && pr.state === 'open' && !pr.merged) {
+        await gh.closePr(post.astro_pr_number);
+        logger.info(`[astro-publisher] closed stale PR #${post.astro_pr_number} for post ${post.id} before republish`);
+      }
+    } catch (err) {
+      logger.warn(`[astro-publisher] could not close stale PR #${post.astro_pr_number} for post ${post.id}: ${err.message}`);
+    }
+  }
+  if (post.astro_branch_name) {
+    try {
+      await gh.deleteRef(post.astro_branch_name);
+      logger.info(`[astro-publisher] deleted stale branch ${post.astro_branch_name} for post ${post.id} before republish`);
+    } catch (err) {
+      logger.warn(`[astro-publisher] could not delete stale branch ${post.astro_branch_name} for post ${post.id}: ${err.message}`);
+    }
+  }
+}
+
 async function publishAstro(postId) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.title) throw new Error('post missing title');
+
+  // Idempotency: each call cuts a fresh branch (random shortId) and overwrites
+  // astro_branch_name/astro_pr_number, so publishing while a prior PR is still
+  // open would orphan it. Two cases:
+  //   - pr_open / unpublish_pending → an active PR awaiting merge/unpublish.
+  //     Refuse: republishing now would duplicate in-flight work. Resolve it
+  //     first. (No retry UI targets these.)
+  //   - build_failed → the "fix the content and retry" path (admin Retry
+  //     button hits this). The failed PR/branch are still open, so CLOSE +
+  //     DELETE them before opening the replacement — that both unblocks the
+  //     retry and prevents an orphan. Best-effort: cleanup failure is logged
+  //     but doesn't block the republish.
+  // live/merged/draft/publish_failed have no open PR to orphan (the existing-
+  // file SHA path handles in-place updates), so they fall through.
+  if (post.astro_status === 'pr_open' || post.astro_status === 'unpublish_pending') {
+    throw new Error(
+      `cannot publish post ${postId}: an Astro PR is already in flight (status "${post.astro_status}"`
+      + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
+    );
+  }
+  if (post.astro_status === 'build_failed' && (post.astro_pr_number || post.astro_branch_name)) {
+    await cleanupStaleAstroPr(post);
+  }
 
   const slug = post.slug || slugify(post.title);
   const branch = `content/blog-${slug}-${shortId()}`;

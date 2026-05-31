@@ -16,6 +16,8 @@ jest.mock('../services/content-astro/github-client', () => ({
   getPr: jest.fn(),
   mergePr: jest.fn(),
   deleteFile: jest.fn(),
+  closePr: jest.fn(),
+  deleteRef: jest.fn(),
 }));
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
@@ -775,5 +777,130 @@ describe('Astro publisher hero image republish', () => {
       astro_status: 'pr_open',
       astro_pr_number: 123,
     }));
+  });
+});
+
+describe('Astro publisher idempotency guard', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test.each(['pr_open', 'unpublish_pending'])(
+    'refuses to open a second PR when one is already in flight (status %s)',
+    async (status) => {
+      const post = {
+        id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+        astro_status: status, astro_pr_number: 99,
+      };
+      const read = chain({ first: jest.fn().mockResolvedValue(post) });
+      db.mockImplementation(() => read);
+
+      await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/already in flight/);
+      // No fresh branch/PR cut, and no status write — so the existing PR isn't orphaned.
+      expect(gh.createBranch).not.toHaveBeenCalled();
+      expect(gh.createPr).not.toHaveBeenCalled();
+      expect(read.update).not.toHaveBeenCalled();
+    },
+  );
+
+  test('build_failed retry closes + deletes the stale PR/branch before republishing (no orphan)', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'build_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'open', merged: false });
+
+    // Fails later (minimal post isn't schema-valid, no gh publish mocks), but
+    // NOT with the in-flight error — the retry is allowed and cleanup runs first.
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+  });
+
+  test('build_failed retry does not close an already-merged/closed PR', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'build_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'closed', merged: true });
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+    expect(gh.closePr).not.toHaveBeenCalled();
+    // The branch is still deleted (a stale ref left from the failed build).
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+  });
+
+  test('allows republish from a non-in-flight status (e.g. publish_failed)', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'publish_failed', astro_pr_number: null,
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    // It fails downstream (this minimal post isn't schema-valid and no gh mocks
+    // are set up), but crucially NOT with the in-flight guard error — proving a
+    // publish_failed post is allowed to retry rather than being blocked.
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+  });
+});
+
+describe('Pages poll auto-merge per-tick cap', () => {
+  const originalEnv = {
+    CF_API_TOKEN: process.env.CF_API_TOKEN,
+    CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
+    CF_PAGES_PROJECT: process.env.CF_PAGES_PROJECT,
+    cap: process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL,
+  };
+
+  function previewDeployment(branch) {
+    return {
+      environment: 'preview',
+      url: `https://${branch.replace(/[^a-z0-9]/gi, '-')}.preview.pages.dev`,
+      latest_stage: { name: 'deploy', status: 'success' },
+      stages: [{ name: 'deploy', status: 'success' }],
+      deployment_trigger: { metadata: { branch } },
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.CF_API_TOKEN = 'test-token';
+    process.env.CF_ACCOUNT_ID = 'test-account';
+    process.env.CF_PAGES_PROJECT = 'test-project';
+    delete process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL; // default = 2
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    delete global.fetch;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (key === 'cap') continue;
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+    if (originalEnv.cap == null) delete process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL;
+    else process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL = originalEnv.cap;
+  });
+
+  test('merges only up to the cap per tick and defers the rest to the next tick', async () => {
+    const posts = ['b1', 'b2', 'b3'].map((b, i) => ({
+      id: `post-${i + 1}`, slug: `slug-${i + 1}`,
+      astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: b,
+    }));
+    // Every db() call: the pending select returns all three; per-post updates no-op.
+    db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue(posts) }));
+    mockCloudflareDeploymentList(posts.map((p) => previewDeployment(p.astro_branch_name)));
+    const mergeSpy = jest.spyOn(AstroPublisher, 'mergeAstro').mockResolvedValue({ merged: true });
+
+    const result = await PagesPoll.pollPending();
+
+    // Default cap = 2: first two merge, third defers.
+    expect(mergeSpy).toHaveBeenCalledTimes(2);
+    expect(result.autoMerges).toBe(2);
+    expect(result.deferred).toBe(1);
+    const deferred = result.results.filter((r) => r.mergeDeferred);
+    expect(deferred).toHaveLength(1);
   });
 });
