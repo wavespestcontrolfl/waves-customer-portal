@@ -21,6 +21,7 @@ import {
 } from "react";
 import { useLocation } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
+import DictationButton from "../tech/DictationButton";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
@@ -360,6 +361,12 @@ function GlobalCommandPalette(_props, ref) {
     setPrompt("");
   };
 
+  // Merge each dictation transcript chunk into the input, space-separated.
+  const appendTranscript = useCallback((text) => {
+    if (!text) return;
+    setPrompt((prev) => (prev ? `${prev.trimEnd()} ${text}` : text));
+  }, []);
+
   const close = () => setOpen(false);
 
   // Touch handlers for swipe-down-to-close on mobile
@@ -403,6 +410,8 @@ function GlobalCommandPalette(_props, ref) {
         quickActions={quickActions}
         contextLabel={contextLabel}
         clear={clear}
+        accentColor={accentColor}
+        appendTranscript={appendTranscript}
       />
     );
   }
@@ -464,7 +473,7 @@ function GlobalCommandPalette(_props, ref) {
               style={{
                 width: "100%",
                 padding: "10px 14px",
-                paddingRight: 90,
+                paddingRight: 128,
                 background: "#FFFFFF",
                 border: `1px solid ${D.border}`,
                 borderRadius: 10,
@@ -486,10 +495,18 @@ function GlobalCommandPalette(_props, ref) {
                 top: "50%",
                 transform: "translateY(-50%)",
                 display: "flex",
-                gap: 4,
+                gap: 6,
                 alignItems: "center",
               }}
             >
+              {!loading && (
+                <DictationButton
+                  onAppend={appendTranscript}
+                  title="Dictate your question"
+                  size={30}
+                  palette={{ accent: accentColor, muted: D.muted, red: D.red, card: "#fff" }}
+                />
+              )}
               {loading ? (
                 <div
                   style={{
@@ -746,6 +763,8 @@ function MobileSheet({
   quickActions,
   contextLabel,
   clear,
+  accentColor,
+  appendTranscript,
 }) {
   return (
     <>
@@ -854,25 +873,48 @@ function MobileSheet({
         {/* Input */}
         <div style={{ padding: "0 16px 12px" }}>
           {" "}
-          <input
-            ref={inputRef}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask anything…"
-            style={{
-              width: "100%",
-              padding: "14px 16px",
-              boxSizing: "border-box",
-              background: "#FAFAFA",
-              border: "1px solid #E4E4E7",
-              borderRadius: 10,
-              color: "#18181B",
-              fontSize: 16,
-              fontFamily: "Roboto, Arial, sans-serif",
-              outline: "none",
-            }}
-          />{" "}
+          <div style={{ position: "relative" }}>
+            {" "}
+            <input
+              ref={inputRef}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask anything…"
+              style={{
+                width: "100%",
+                padding: "14px 56px 14px 16px",
+                boxSizing: "border-box",
+                background: "#FAFAFA",
+                border: "1px solid #E4E4E7",
+                borderRadius: 10,
+                color: "#18181B",
+                fontSize: 16,
+                fontFamily: "Roboto, Arial, sans-serif",
+                outline: "none",
+              }}
+            />{" "}
+            {!loading && (
+              <div
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                {" "}
+                <DictationButton
+                  onAppend={appendTranscript}
+                  title="Tap to talk"
+                  size={38}
+                  palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
+                />{" "}
+              </div>
+            )}{" "}
+          </div>{" "}
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             {" "}
             <button
