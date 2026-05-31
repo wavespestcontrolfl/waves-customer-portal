@@ -144,45 +144,12 @@ function normalizeSha(value) {
   return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
 }
 
-// A pr_open post whose preview build never appears (CF webhook missed, build
-// never triggered) would otherwise poll forever with no signal. If it has sat
-// pr_open past the timeout WITHOUT a successful deployment, flip it to
-// build_failed so it surfaces (and the build_failed retry path can clean up +
-// republish). This is only ever called on the stalled poll paths (no deployment
-// found, or a deployment stuck non-success) — a post whose preview actually
-// succeeded returns at the success branch above, before reaching here, so an
-// awaiting-merge post is never timed out. (We can't gate on astro_preview_url:
-// publishAstro stamps a PREDICTED preview URL at PR-open, so it's always set.)
-// Uses updated_at as the age proxy — stamped at PR open; the stalled poll paths
-// don't touch it — erring toward NOT timing out. Default 60m, env-tunable.
-function buildPollTimedOut(post) {
-  if (post.astro_status !== 'pr_open') return false;
-  const since = timestampMs(post.updated_at);
-  if (since == null) return false;
-  const envMs = Number(process.env.AUTONOMOUS_CONTENT_BUILD_POLL_TIMEOUT_MS);
-  const timeoutMs = Number.isFinite(envMs) && envMs > 0 ? envMs : 3600000;
-  return Date.now() - since > timeoutMs;
-}
-
-async function failStalledBuild(post) {
-  await db('blog_posts').where({ id: post.id }).update({
-    astro_status: 'build_failed',
-    astro_publish_error: 'Preview build did not appear within the build-poll timeout — no Cloudflare deployment for this branch.',
-    updated_at: new Date(),
-  });
-  logger.warn(`[pages-poll] ${post.slug || post.id} timed out waiting for a preview build → build_failed`);
-  return { failed: true, timedOut: true };
-}
-
 async function pollPost(post, { allowMerge = true } = {}) {
   if (post.astro_status === 'merged') return pollLivePost(post);
   if (!post.astro_branch_name) return { skipped: true, reason: 'no branch' };
   try {
     const deploy = await latestDeploymentForBranch(post.astro_branch_name);
-    if (!deploy) {
-      if (buildPollTimedOut(post)) return failStalledBuild(post);
-      return { pending: true };
-    }
+    if (!deploy) return { pending: true };
 
     const { status, url, error } = extractStatus(deploy);
 
@@ -223,7 +190,6 @@ async function pollPost(post, { allowMerge = true } = {}) {
       return { failed: true, error };
     }
 
-    if (buildPollTimedOut(post)) return failStalledBuild(post);
     return { pending: true, status };
   } catch (err) {
     logger.warn(`[pages-poll] ${post.astro_branch_name} failed: ${err.message}`);
@@ -306,7 +272,7 @@ async function pollPending() {
   const pending = await db('blog_posts')
     .whereIn('astro_status', ['pr_open', 'build_failed', 'merged'])
     .whereNotNull('astro_branch_name')
-    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha', 'updated_at');
+    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha');
 
   // Cap auto-merges per tick so a batch of simultaneously-green PRs doesn't all
   // squash to main at once (each merge rebuilds the whole Cloudflare Pages
