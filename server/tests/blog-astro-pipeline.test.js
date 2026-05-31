@@ -781,7 +781,7 @@ describe('Astro publisher hero image republish', () => {
 describe('Astro publisher idempotency guard', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  test.each(['pr_open', 'unpublish_pending'])(
+  test.each(['pr_open', 'unpublish_pending', 'build_failed'])(
     'refuses to open a second PR when one is already in flight (status %s)',
     async (status) => {
       const post = {

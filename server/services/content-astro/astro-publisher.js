@@ -298,17 +298,24 @@ async function publishAstro(postId) {
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.title) throw new Error('post missing title');
 
-  // Idempotency guard: refuse to open a second PR while one is already in
-  // flight. Each call cuts a fresh branch (random shortId) and overwrites
+  // Idempotency guard: refuse to open a second PR while one is already open on
+  // GitHub. Each call cuts a fresh branch (random shortId) and overwrites
   // astro_branch_name/astro_pr_number, so a double-click or retry would orphan
-  // the first branch + PR. A republish from live/merged/draft/publish_failed is
-  // still allowed (the existing-file SHA path handles in-place updates); only
-  // the in-flight PR states are blocked. Resolve the open PR (merge/unpublish)
-  // before republishing. Mirrors the status preconditions on merge/unpublish.
-  if (post.astro_status === 'pr_open' || post.astro_status === 'unpublish_pending') {
+  // the first branch + PR. All three blocked states keep that PR open:
+  //   - pr_open            → PR open, awaiting build/merge
+  //   - build_failed       → preview build failed but the PR is still open
+  //                          (the "fix the build and republish" path)
+  //   - unpublish_pending  → unpublish PR open
+  // A republish from live/merged/draft/publish_failed is still allowed (no open
+  // PR to orphan; the existing-file SHA path handles in-place updates). Resolve
+  // the open PR (merge/unpublish/close) before republishing. Mirrors the status
+  // preconditions on merge/unpublish.
+  if (post.astro_status === 'pr_open'
+    || post.astro_status === 'build_failed'
+    || post.astro_status === 'unpublish_pending') {
     throw new Error(
       `cannot publish post ${postId}: an Astro PR is already in flight (status "${post.astro_status}"`
-      + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
+      + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge, unpublish, or close it before republishing`,
     );
   }
 
