@@ -303,7 +303,7 @@ export default function PublicBookingPage() {
 
   const renderDayGroups = (days) => days.map((day) => (
     <div key={day.date} style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.slate600, marginBottom: 6 }}>{day.fullDate}</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.slate600, marginBottom: 6 }}>{day.fullDate}</div>
       <div style={{ display: 'grid', gap: 8 }}>
         {day.slots.map((slot, i) => {
           const sel = isSlotSelected(day.date, slot);
@@ -320,7 +320,7 @@ export default function PublicBookingPage() {
               }}
             >
               <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 2 }}>{slot.start_label}</div>
-              <div style={{ fontSize: 13, color: sel ? 'rgba(255,255,255,.86)' : COLORS.slate600 }}>{slot.reason}</div>
+              <div style={{ fontSize: 14, color: sel ? 'rgba(255,255,255,.86)' : COLORS.slate600 }}>{slot.reason}</div>
             </button>
           );
         })}
