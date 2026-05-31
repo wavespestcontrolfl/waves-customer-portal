@@ -121,7 +121,7 @@ router.post('/', async (req, res) => {
       dateFrom: from,
       dateTo: to,
       technicianId: technicianId || undefined,
-      topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 25),
+      topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 50),
     });
 
     res.json({

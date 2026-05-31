@@ -248,7 +248,8 @@ finding and warns on P1. Reviewers must return JSON matching
   is `config.jwt.secret` (env: `JWT_SECRET`).
 - **Public-by-token routes (no auth, by design).** `/api/pay/:token`,
   `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
-  `/api/public/estimates/:token/ask`, `/api/reports/:token/*`,
+  `/api/public/estimates/:token/ask`,
+  `/api/public/estimates/:token/find-slots`, `/api/reports/:token/*`,
   `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
   `/api/sendgrid-webhook`, `/api/lead-webhook`,
   `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
@@ -269,6 +270,12 @@ finding and warns on P1. Reviewers must return JSON matching
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
   terminal/expired-estimate rejection, public-route rate limits, no raw
   customer question/answer logging, and estimate-context-only answers.
+  The estimate find-slots route is model-backed (parses a free-text "when"
+  into a date window via Claude) and carries the same gate as ask: estimate
+  token format gate, the short-lived signed `askToken`, terminal/expired
+  rejection, public-route rate limit (15/min), and no raw query logging. It
+  returns availability only (the same slot shape as available-slots) and never
+  books.
   Contract links are short-lived bearer tokens for customer e-signature and
   must burn the token when signed.
   The `/api/reports/:token/*` family uses long-lived report tokens

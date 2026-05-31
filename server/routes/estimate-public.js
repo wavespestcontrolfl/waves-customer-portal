@@ -3088,6 +3088,17 @@ function renderPage(token, estimate, estData) {
   .existing-appt-sub{font-size:14px;color:#3F4A65;margin-top:4px;line-height:1.4}
   .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
   .slot-list{display:grid;gap:10px}
+  .date-finder{margin:0 0 16px;display:grid;gap:10px;padding:16px;border:1px solid #CFE7F5;border-radius:12px;background:#fff}
+  .date-finder-eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#64748B}
+  .date-finder-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .date-finder-row input[type=text]{flex:1;min-width:200px;min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#F8FCFE;box-sizing:border-box}
+  .date-finder-row input[type=date]{min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#fff}
+  .date-finder-label{font-size:13px;color:#64748B;font-weight:600}
+  .date-finder-btn{min-height:44px;border:0;border-radius:10px;padding:0 18px;background:#1B2C5B;color:#fff;font-size:14px;font-weight:700;cursor:pointer}
+  .date-finder-btn[disabled]{opacity:.6;cursor:not-allowed}
+  .date-finder-summary{font-size:14px;line-height:1.5;color:#1B2C5B;background:#F0F7FC;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px}
+  .finder-soft{font-size:14px;line-height:1.4;color:#9A3412;background:#FFF7ED;border:1px solid #FED7AA;border-radius:10px;padding:10px 12px;margin-bottom:10px}
+  #finder-area .slot-list{margin-top:10px}
   .slot-more{margin-top:10px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;overflow:hidden}
   .slot-more summary{list-style:none;cursor:pointer;padding:12px 14px;color:#1B2C5B;font-size:14px;font-weight:700}
   .slot-more summary::-webkit-details-marker{display:none}
@@ -3281,6 +3292,19 @@ ${shellTopBar()}
           <div class="payment-setup-summary-body" id="payment-setup-summary-body">Review the invoice setup, then choose a service window.</div>
         </div>
         <button type="button" class="payment-setup-summary-change" id="change-payment-setup-btn">Change payment option</button>
+      </div>
+      <div id="date-finder" class="date-finder">
+        <div class="date-finder-eyebrow">Waves AI</div>
+        <div class="date-finder-row">
+          <input id="ai-when-input" type="text" placeholder="Search a date or time \u2014 try &quot;next Tuesday afternoon&quot;" maxlength="120" aria-label="Search for a service date or time" />
+          <button type="button" id="ai-when-btn" class="date-finder-btn">Search</button>
+        </div>
+        <div class="date-finder-row">
+          <label for="date-pick-input" class="date-finder-label">Or pick a date</label>
+          <input id="date-pick-input" type="date" aria-label="Pick a service date" />
+        </div>
+        <div id="ai-when-summary" class="date-finder-summary" style="display:none"></div>
+        <div id="finder-area"></div>
       </div>
       <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
     `}
@@ -3863,6 +3887,17 @@ ${shellQuestionsBar()}
       + '</button>';
   }
 
+  function attachSlotHandlers(container) {
+    if (!container) return;
+    container.querySelectorAll('.slot-btn').forEach((btn) => btn.addEventListener('click', () => selectSlot(btn)));
+  }
+  function renderSlotsHtml(slots) {
+    const html = ['<div class="slot-list">'];
+    slots.forEach((s) => html.push(renderSlot(s)));
+    html.push('</div>');
+    return html.join('');
+  }
+
   async function loadSlots() {
     const area = document.getElementById('slot-area');
     if (!area) return;
@@ -3899,10 +3934,95 @@ ${shellQuestionsBar()}
         html.push('</div></details>');
       }
       area.innerHTML = html.join('');
-      area.querySelectorAll('.slot-btn').forEach((btn) => btn.addEventListener('click', () => selectSlot(btn)));
+      attachSlotHandlers(area);
     } catch (e) {
       area.className = 'booking-state';
       area.innerHTML = 'Could not load times right now. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we will get you scheduled.';
+    }
+  }
+
+  // ── Waves AI date/time finder (search + specific-date pick) ──
+  function renderFinderResults(body) {
+    const area = document.getElementById("finder-area");
+    if (!area) return;
+    const primary = (body && body.primary) || [];
+    const expander = (body && body.expander) || [];
+    const all = primary.concat(expander);
+    if (!all.length) {
+      area.innerHTML = '<div class="booking-state">No open times then. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll fit you in.</div>';
+      return;
+    }
+    const nearby = (body && typeof body.nearby === 'boolean') ? body.nearby : all.some(function (s) { return s.routeOptimal; });
+    const soft = nearby ? '' : '<div class="finder-soft">No route near you that day yet — here\\'s what\\'s close.</div>';
+    area.innerHTML = soft + renderSlotsHtml(all);
+    attachSlotHandlers(area);
+  }
+
+  async function runAiWhenSearch() {
+    const input = document.getElementById("ai-when-input");
+    const btn = document.getElementById("ai-when-btn");
+    const summary = document.getElementById("ai-when-summary");
+    const query = input ? String(input.value || "").trim() : "";
+    if (!query) return;
+    if (btn) { btn.disabled = true; btn.textContent = "Searching…"; }
+    if (summary) { summary.style.display = ""; summary.textContent = "Checking the route map…"; }
+    try {
+      const ctx = buildSlotContext();
+      const r = await fetch("/api/public/estimates/" + TOKEN + "/find-slots", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Estimate-Ask-Token": ESTIMATE_ASK_TOKEN },
+        body: JSON.stringify({ query: query, serviceMode: ctx.serviceMode, selectedFrequency: ctx.selectedFrequency }),
+      });
+      const body = await r.json();
+      if (!r.ok) throw new Error((body && body.error) || "search failed");
+      if (summary) summary.textContent = body.summary || "";
+      const datePick = document.getElementById("date-pick-input");
+      if (datePick) datePick.value = "";
+      renderFinderResults(body);
+    } catch (e) {
+      if (summary) summary.textContent = "Could not search just now. Call ${COMPANY.phone} and we will help.";
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "Search"; }
+    }
+  }
+
+  async function pickFinderDate(date) {
+    if (!date) return;
+    const summary = document.getElementById("ai-when-summary");
+    const area = document.getElementById("finder-area");
+    if (area) area.innerHTML = '<div class="booking-state">Loading times…</div>';
+    if (summary) summary.style.display = "none";
+    try {
+      const ctx = buildSlotContext();
+      const params = new URLSearchParams();
+      params.set("serviceMode", ctx.serviceMode);
+      if (ctx.selectedFrequency) params.set("selectedFrequency", ctx.selectedFrequency);
+      params.set("date", date);
+      const r = await fetch("/api/public/estimates/" + TOKEN + "/available-slots?" + params.toString());
+      const body = await r.json();
+      if (!r.ok) throw new Error("slot fetch failed");
+      const aiInput = document.getElementById("ai-when-input");
+      if (aiInput) aiInput.value = "";
+      renderFinderResults(body);
+    } catch (e) {
+      if (area) area.innerHTML = '<div class="booking-state">Could not load that day. Call ${COMPANY.phone}.</div>';
+    }
+  }
+
+  function initDateFinder() {
+    const btn = document.getElementById("ai-when-btn");
+    const input = document.getElementById("ai-when-input");
+    const datePick = document.getElementById("date-pick-input");
+    if (btn) btn.addEventListener("click", runAiWhenSearch);
+    if (input) input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); runAiWhenSearch(); } });
+    if (datePick) {
+      const pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+      const toStr = function (d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); };
+      const today = new Date();
+      const max = new Date(); max.setDate(max.getDate() + 90);
+      datePick.min = toStr(today);
+      datePick.max = toStr(max);
+      datePick.addEventListener("change", function () { pickFinderDate(datePick.value); });
     }
   }
 
@@ -4196,6 +4316,9 @@ ${shellQuestionsBar()}
   // estimate is not yet accepted/expired).
   if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup()) {
     loadSlots();
+  }
+  if (document.getElementById('date-finder')) {
+    initDateFinder();
   }
 
 
@@ -8386,6 +8509,7 @@ async function handleEstimateAsk(req, res, next) {
 module.exports = router;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
+module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.deriveServiceCategory = deriveServiceCategory;

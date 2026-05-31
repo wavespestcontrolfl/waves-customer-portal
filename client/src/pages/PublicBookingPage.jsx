@@ -4,6 +4,8 @@ import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
+import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
+import CalendarDatePicker from '../components/booking/CalendarDatePicker';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -51,6 +53,12 @@ export default function PublicBookingPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [confCode, setConfCode] = useState('');
+  // Custom date/time finder — Waves AI search + 90-day "Find more dates" calendar
+  const [searchResult, setSearchResult] = useState(null);
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [browseDays, setBrowseDays] = useState(null);
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [pickedDate, setPickedDate] = useState(null);
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -65,6 +73,10 @@ export default function PublicBookingPage() {
     setAddressMayMatchCustomer(false);
     setContact({ firstName: '', lastName: '', phone: '', email: '' });
     setError('');
+    setSearchResult(null);
+    setShowCalendar(false);
+    setBrowseDays(null);
+    setPickedDate(null);
   }, []);
 
   // Step 2 → load availability whenever we enter it
@@ -222,6 +234,100 @@ export default function PublicBookingPage() {
       month: day.month,
     }))).slice(0, 4);
 
+  // ── custom date/time finder helpers ──
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const browseMin = toYmd(new Date());
+  const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
+
+  const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); };
+  const isSlotSelected = (date, slot) => selectedDate === date && selectedSlot?.start_time === slot.start_time;
+
+  const slotSearchBody = () => ({
+    address: address.formatted || address.line1,
+    service_type: service.id,
+    duration_minutes: service.duration,
+    ...(coords?.lat && coords?.lng ? { lat: coords.lat, lng: coords.lng } : {}),
+  });
+
+  const runAiSearch = async (query) => {
+    const res = await fetch(`${API_BASE}/booking/find-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, ...slotSearchBody() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Search failed');
+    setPickedDate(null);
+    setShowCalendar(false);
+    setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [] });
+    return { summary: data.summary };
+  };
+
+  const openCalendar = async () => {
+    const next = !showCalendar;
+    setShowCalendar(next);
+    if (!next || browseDays || browseLoading) return;
+    setBrowseLoading(true);
+    try {
+      const params = new URLSearchParams({
+        address: address.formatted || address.line1,
+        service_type: service.id,
+        duration_minutes: String(service.duration),
+        expand: 'open',
+        date_from: browseMin,
+        date_to: browseMax,
+      });
+      if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
+      const res = await fetch(`${API_BASE}/booking/availability?${params}`);
+      const data = await res.json();
+      setBrowseDays(data.days || []);
+    } catch {
+      setBrowseDays([]);
+    } finally {
+      setBrowseLoading(false);
+    }
+  };
+
+  const onPickCalendarDate = (date) => { setSearchResult(null); setPickedDate(date); };
+  const pickedDayObj = pickedDate && browseDays ? browseDays.find((d) => d.date === pickedDate) : null;
+
+  const SoftRouteBanner = () => (
+    <div style={{
+      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
+      padding: '10px 12px', fontSize: 14, color: '#9A3412', marginBottom: 12, lineHeight: 1.4,
+    }}>
+      No route near you that day yet — here&apos;s what&apos;s close.
+    </div>
+  );
+
+  const renderDayGroups = (days) => days.map((day) => (
+    <div key={day.date} style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.slate600, marginBottom: 6 }}>{day.fullDate}</div>
+      <div style={{ display: 'grid', gap: 8 }}>
+        {day.slots.map((slot, i) => {
+          const sel = isSlotSelected(day.date, slot);
+          return (
+            <button
+              key={`${day.date}-${slot.start_time}-${i}`}
+              onClick={() => selectSlot(day.date, slot)}
+              style={{
+                width: '100%', padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
+                background: sel ? COLORS.wavesBlue : COLORS.white,
+                color: sel ? '#fff' : COLORS.blueDeeper,
+                border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
+                textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
+              }}
+            >
+              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 2 }}>{slot.start_label}</div>
+              <div style={{ fontSize: 13, color: sel ? 'rgba(255,255,255,.86)' : COLORS.slate600 }}>{slot.reason}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  ));
+
   return (
     <WavesShell variant="customer" topBar="solid">
       <style>{`
@@ -353,6 +459,55 @@ export default function PublicBookingPage() {
                     </button>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Waves AI date/time search */}
+            <div style={{ marginTop: 20 }}>
+              <WavesAIScheduleSearch
+                theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.blueDeeper, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
+                onSearch={runAiSearch}
+              />
+            </div>
+
+            {searchResult && searchResult.days.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                {!searchResult.nearby && <SoftRouteBanner />}
+                {renderDayGroups(searchResult.days)}
+              </div>
+            )}
+            {searchResult && searchResult.days.length === 0 && (
+              <div style={{ marginTop: 12, fontSize: 14, color: COLORS.slate600 }}>
+                Nothing open for that search. Try another day, or call (941) 297-5749.
+              </div>
+            )}
+
+            {/* Find more dates — 90-day calendar */}
+            <div style={{ marginTop: 16 }}>
+              <Button variant="tertiary" onClick={openCalendar} style={{ width: '100%' }}>
+                {showCalendar ? 'Hide calendar' : 'Find more dates →'}
+              </Button>
+            </div>
+            {showCalendar && (
+              <div style={{ marginTop: 12 }}>
+                {browseLoading ? (
+                  <div style={{ textAlign: 'center', padding: 20, color: COLORS.slate600, fontSize: 14 }}>Loading dates…</div>
+                ) : (
+                  <CalendarDatePicker
+                    theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.blueDeeper, muted: COLORS.slate600, border: COLORS.slate200, surface: COLORS.white }}
+                    minDate={browseMin}
+                    maxDate={browseMax}
+                    availableDates={(browseDays || []).map((d) => d.date)}
+                    selectedDate={pickedDate}
+                    onPick={onPickCalendarDate}
+                  />
+                )}
+                {pickedDayObj && (
+                  <div style={{ marginTop: 14 }}>
+                    {!pickedDayObj.nearby && <SoftRouteBanner />}
+                    {renderDayGroups([pickedDayObj])}
+                  </div>
+                )}
               </div>
             )}
 

@@ -1826,6 +1826,7 @@ export default function EstimateViewPage() {
           {canShowSlotPicker ? (
             <SlotPicker
               token={token}
+              askToken={estimate.askToken}
               selectedSlotId={selectedSlotId}
               onSelect={setSelectedSlotId}
               refreshSignal={slotsRefreshSignal}
