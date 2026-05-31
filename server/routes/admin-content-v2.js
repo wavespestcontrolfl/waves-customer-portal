@@ -579,7 +579,8 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[content] publish-astro failed: ${err.message}`);
-    res.status(err.code === 'BLOG_FRONTMATTER_INVALID' ? 400 : 500).json({ error: err.message, details: err.details });
+    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID' || err.code === 'BLOG_GUARDRAILS_FAILED';
+    res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   }
 });
 

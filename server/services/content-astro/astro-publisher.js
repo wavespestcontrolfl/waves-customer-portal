@@ -28,6 +28,7 @@ const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
+const contentGuardrails = require('../content/content-guardrails');
 const { normalizeSpokeSites } = require('./spoke-sites');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -364,6 +365,26 @@ async function publishAstro(postId) {
     const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt });
     assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
+
+    // 2b. Content-policy guardrails (hardcoded price, brand-token leak on
+    // multi-domain blogs, FAQ on a policy-blocked service, keyword stuffing).
+    // The autonomous engine runs these before publishing; the legacy BlogWriter
+    // → publish-astro path (admin + the blog-calendar cron) previously had only
+    // schema validation, so a generated post could ship "$39/month" or a
+    // spoke-domain brand leak with nothing but the prompt stopping it. Block
+    // P0/P1 here too — body + editable meta are checked.
+    const guardrails = contentGuardrails.evaluate(
+      { body, frontmatter: data },
+      { domains: data.domains, service: post.category || null, primaryKeyword: post.keyword || data.primary_keyword || null },
+    );
+    if (!guardrails.pass) {
+      const blocking = guardrails.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+      const gErr = new Error(`content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`);
+      gErr.code = 'BLOG_GUARDRAILS_FAILED';
+      gErr.details = blocking;
+      throw gErr;
+    }
+
     const markdown = fm.stringify(data, body + '\n');
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
