@@ -413,6 +413,11 @@ describe('internal-link dry-run executor helpers', () => {
       title: expect.stringContaining('SEO links: 1 internal link'),
       body: expect.stringContaining('Diff contains only intended internal-link insertions'),
     }));
+    // PR body steers reviewers to the hub preview so spoke 404s aren't a false reject.
+    const prBody = GitHubClient.createPr.mock.calls[0][0].body;
+    expect(prBody).toContain('## Preview');
+    expect(prBody).toContain('Spoke-project previews');
+    expect(prBody).toContain('https://www.wavespestcontrol.com/pest-control-quote-bradenton-fl/');
     expect(GitHubClient.createIssueComment).toHaveBeenCalledWith(77, expect.stringContaining('@codex review'));
     expect(instance._markTasksPrOpen).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({
       branch: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
