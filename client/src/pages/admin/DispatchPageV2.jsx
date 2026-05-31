@@ -1892,7 +1892,7 @@ export default function DispatchPageV2({
           date={date}
           onEdit={(svc) => {
             if (shouldOpenMobileCompletion(svc)) {
-              setCompletingService(svc);
+              handleComplete(svc);
             } else {
               setDetailService(svc);
             }
