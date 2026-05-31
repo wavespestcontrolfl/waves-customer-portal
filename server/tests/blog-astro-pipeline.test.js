@@ -682,6 +682,106 @@ describe('Pages poll merged-to-live transition', () => {
   });
 });
 
+describe('Pages poll deploy-match window (deploymentMatchesMergedPost)', () => {
+  // No commit SHA on either side → the timestamp-window fallback applies.
+  const noShaDeploy = (createdOn) => ({
+    environment: 'production',
+    latest_stage: { name: 'deploy', status: 'success' },
+    stages: [{ name: 'deploy', status: 'success' }],
+    created_on: createdOn,
+    deployment_trigger: { metadata: { branch: 'main' } }, // no commit hash
+  });
+  const post = { astro_merged_at: '2026-05-08T13:00:00.000Z' }; // no astro_commit_sha
+
+  test('matches a production deploy shortly after the merge', () => {
+    expect(PagesPoll.deploymentMatchesMergedPost(noShaDeploy('2026-05-08T13:05:00.000Z'), post)).toBe(true);
+  });
+
+  test('does NOT match a production deploy hours after the merge (upper-bounded window)', () => {
+    // Previously this matched (lower-bound-only) and could flip a post live off
+    // an unrelated later merge's deployment.
+    expect(PagesPoll.deploymentMatchesMergedPost(noShaDeploy('2026-05-08T15:00:00.000Z'), post)).toBe(false);
+  });
+
+  test('does NOT match a production deploy well before the merge', () => {
+    expect(PagesPoll.deploymentMatchesMergedPost(noShaDeploy('2026-05-08T12:00:00.000Z'), post)).toBe(false);
+  });
+
+  test('still matches strictly by commit SHA when both sides have one (window irrelevant)', () => {
+    const deploy = {
+      environment: 'production',
+      latest_stage: { name: 'deploy', status: 'success' },
+      stages: [{ name: 'deploy', status: 'success' }],
+      created_on: '2026-05-09T20:00:00.000Z', // hours later — but SHA matches
+      deployment_trigger: { metadata: { branch: 'main', commit_hash: 'merge-sha' } },
+    };
+    expect(PagesPoll.deploymentMatchesMergedPost(deploy, { astro_merged_at: '2026-05-08T13:00:00.000Z', astro_commit_sha: 'merge-sha' })).toBe(true);
+  });
+});
+
+describe('Pages poll build-stall timeout', () => {
+  const originalEnv = {
+    CF_API_TOKEN: process.env.CF_API_TOKEN,
+    CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
+    CF_PAGES_PROJECT: process.env.CF_PAGES_PROJECT,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.CF_API_TOKEN = 'test-token';
+    process.env.CF_ACCOUNT_ID = 'test-account';
+    process.env.CF_PAGES_PROJECT = 'test-project';
+    mockCloudflareDeploymentList([]); // no deployment ever appears for the branch
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  test('flips a long-stalled pr_open post (no preview ever built) to build_failed', async () => {
+    const update = chain();
+    db.mockReturnValue(update);
+    const result = await PagesPoll.pollPost({
+      id: 'post-1', slug: 'stalled', astro_status: 'pr_open',
+      astro_branch_name: 'content/blog-stalled-x', publish_status: 'publishing',
+      astro_preview_url: null,
+      updated_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(), // 2h ago
+    });
+    expect(result).toMatchObject({ failed: true, timedOut: true });
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'build_failed' }));
+  });
+
+  test('does not time out a recently-opened pr_open post', async () => {
+    const update = chain();
+    db.mockReturnValue(update);
+    const result = await PagesPoll.pollPost({
+      id: 'post-1', slug: 'fresh', astro_status: 'pr_open',
+      astro_branch_name: 'content/blog-fresh-x', publish_status: 'publishing',
+      astro_preview_url: null,
+      updated_at: new Date().toISOString(),
+    });
+    expect(result).toMatchObject({ pending: true });
+    expect(update.update).not.toHaveBeenCalled();
+  });
+
+  test('does not time out a pr_open post that already has a preview (awaiting merge, not stalled)', async () => {
+    const update = chain();
+    db.mockReturnValue(update);
+    const result = await PagesPoll.pollPost({
+      id: 'post-1', slug: 'awaiting', astro_status: 'pr_open',
+      astro_branch_name: 'content/blog-awaiting-x', publish_status: 'pending_review',
+      astro_preview_url: 'https://preview.example/',
+      updated_at: new Date(Date.now() - 5 * 3600 * 1000).toISOString(), // old, but preview exists
+    });
+    expect(result).toMatchObject({ pending: true });
+    expect(update.update).not.toHaveBeenCalled();
+  });
+});
+
 describe('Content scheduler scheduling timezone handling', () => {
   beforeEach(() => {
     jest.clearAllMocks();

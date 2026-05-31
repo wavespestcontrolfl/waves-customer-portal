@@ -57,7 +57,23 @@ async function latestProductionDeploymentForPost(post) {
   const { project } = cfEnv();
   const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=production&per_page=25`);
   const list = Array.isArray(res?.result) ? res.result : [];
-  return list.find((deploy) => deploymentMatchesMergedPost(deploy, post)) || null;
+  const eligible = list.filter((deploy) => deploymentMatchesMergedPost(deploy, post));
+  if (eligible.length <= 1) return eligible[0] || null;
+
+  // More than one production deploy falls in the match window (a busy push
+  // window). Prefer an exact commit match; otherwise the deploy triggered
+  // CLOSEST to the merge, so a later unrelated merge's deploy isn't mistaken
+  // for ours (the old `.find` on the newest-first list could pick it).
+  const wantedSha = normalizeSha(post.astro_commit_sha);
+  if (wantedSha) {
+    const exact = eligible.find((d) => normalizeSha(deploymentCommitSha(d)) === wantedSha);
+    if (exact) return exact;
+  }
+  const mergedAt = timestampMs(post.astro_merged_at);
+  if (mergedAt == null) return eligible[0];
+  return eligible
+    .map((d) => ({ d, delta: Math.abs((deploymentTimestampMs(d) ?? mergedAt) - mergedAt) }))
+    .sort((a, b) => a.delta - b.delta)[0].d;
 }
 
 function extractStatus(deploy) {
@@ -85,7 +101,16 @@ function deploymentMatchesMergedPost(deploy, post) {
 
   const mergedAt = timestampMs(post.astro_merged_at);
   const deployedAt = deploymentTimestampMs(deploy);
-  return mergedAt != null && deployedAt != null && deployedAt >= mergedAt - 120000;
+  if (mergedAt == null || deployedAt == null) return false;
+  // Bounded window: at/after the merge (minus clock-skew tolerance) AND within
+  // a plausible build-completion window after it. The previous check had only
+  // the lower bound, so ANY later production deploy (a subsequent unrelated
+  // merge) matched and could flip this post live prematurely. Upper bound is
+  // generous (default 60m > the hub's 30–45m build lag) and env-tunable.
+  const SKEW_MS = 120000;
+  const maxAge = Number(process.env.CF_DEPLOY_MATCH_MAX_AGE_MS);
+  const MAX_AGE_MS = Number.isFinite(maxAge) && maxAge > 0 ? maxAge : 3600000;
+  return deployedAt >= mergedAt - SKEW_MS && deployedAt <= mergedAt + MAX_AGE_MS;
 }
 
 function deploymentCommitSha(deploy) {
@@ -119,12 +144,42 @@ function normalizeSha(value) {
   return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
 }
 
+// A pr_open post whose preview build never appears (CF webhook missed, build
+// never triggered) would otherwise poll forever with no signal. If it has sat
+// pr_open with NO preview URL past the timeout, flip it to build_failed so it
+// surfaces (and the build_failed retry path can clean up + republish). Only
+// fires when no preview ever built — a pr_open post that already has a preview
+// is legitimately awaiting merge/review, not stalled. Uses updated_at as the
+// age proxy (publishAstro stamps it at PR open; pending polls don't touch it),
+// erring toward NOT timing out. Default 60m (> a slow preview build), tunable.
+function buildPollTimedOut(post) {
+  if (post.astro_status !== 'pr_open' || post.astro_preview_url) return false;
+  const since = timestampMs(post.updated_at);
+  if (since == null) return false;
+  const envMs = Number(process.env.AUTONOMOUS_CONTENT_BUILD_POLL_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(envMs) && envMs > 0 ? envMs : 3600000;
+  return Date.now() - since > timeoutMs;
+}
+
+async function failStalledBuild(post) {
+  await db('blog_posts').where({ id: post.id }).update({
+    astro_status: 'build_failed',
+    astro_publish_error: 'Preview build did not appear within the build-poll timeout — no Cloudflare deployment for this branch.',
+    updated_at: new Date(),
+  });
+  logger.warn(`[pages-poll] ${post.slug || post.id} timed out waiting for a preview build → build_failed`);
+  return { failed: true, timedOut: true };
+}
+
 async function pollPost(post, { allowMerge = true } = {}) {
   if (post.astro_status === 'merged') return pollLivePost(post);
   if (!post.astro_branch_name) return { skipped: true, reason: 'no branch' };
   try {
     const deploy = await latestDeploymentForBranch(post.astro_branch_name);
-    if (!deploy) return { pending: true };
+    if (!deploy) {
+      if (buildPollTimedOut(post)) return failStalledBuild(post);
+      return { pending: true };
+    }
 
     const { status, url, error } = extractStatus(deploy);
 
@@ -165,6 +220,7 @@ async function pollPost(post, { allowMerge = true } = {}) {
       return { failed: true, error };
     }
 
+    if (buildPollTimedOut(post)) return failStalledBuild(post);
     return { pending: true, status };
   } catch (err) {
     logger.warn(`[pages-poll] ${post.astro_branch_name} failed: ${err.message}`);
@@ -247,7 +303,7 @@ async function pollPending() {
   const pending = await db('blog_posts')
     .whereIn('astro_status', ['pr_open', 'build_failed', 'merged'])
     .whereNotNull('astro_branch_name')
-    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha');
+    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha', 'updated_at');
 
   // Cap auto-merges per tick so a batch of simultaneously-green PRs doesn't all
   // squash to main at once (each merge rebuilds the whole Cloudflare Pages
