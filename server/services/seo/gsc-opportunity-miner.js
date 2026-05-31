@@ -94,6 +94,27 @@ function inferCityFromUrl(url) {
   return null;
 }
 
+// Collapse tracking/variant query strings (and fragments) so a page and its
+// GBP/UTM tracking-link variant key as the SAME canonical URL. GSC reports the
+// GBP "Website" link (e.g. /pest-control-sarasota-fl/?utm_source=gbp&utm_medium=
+// organic) as a DISTINCT page from the clean path — which splits a page's
+// metrics across "two" URLs and spawns phantom decay/refresh/ctr opportunities
+// on the tracking link. Astro spoke pages are path-based and carry no
+// meaningful query state, so dropping the query (and any fragment) is safe.
+// NOTE: the SQL groupings below mirror this via CANON_URL_SQL (split_part on
+// the '?' character); keep the two in sync.
+function canonicalizePageUrl(url) {
+  if (!url) return url;
+  return String(url).split('#')[0].split('?')[0];
+}
+
+// SQL mirror of canonicalizePageUrl for GROUP BY / SELECT on gsc_pages so
+// tracking-link variants aggregate into their canonical page at the DB.
+// NOTE: chr(63) is the '?' character — written this way ON PURPOSE. A literal
+// '?' in a knex raw fragment collides with knex's positional bind-placeholder
+// syntax and gets replaced by a query binding, silently breaking the split.
+const CANON_URL_SQL = 'split_part(page_url, chr(63), 1)';
+
 function inferCityFromQuery(query) {
   if (!query) return null;
   const q = String(query).toLowerCase();
@@ -366,9 +387,11 @@ class GscOpportunityMiner {
     // returns a wrong-segment page.
     const rows = await db('gsc_pages')
       .where('date', '>=', since)
-      .select('page_url', 'service_category', 'city_target')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .max('service_category as service_category')
+      .max('city_target as city_target')
       .sum('impressions as impressions')
-      .groupBy('page_url', 'service_category', 'city_target')
+      .groupByRaw(CANON_URL_SQL)
       .orderBy('impressions', 'desc');
     const map = new Map();
     for (const r of rows) {
@@ -484,19 +507,22 @@ class GscOpportunityMiner {
   async mineDecayRefresh(since, priorSince) {
     const recent = await db('gsc_pages')
       .where('date', '>=', since)
-      .select('page_url', 'page_type', 'service_category', 'city_target')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .max('page_type as page_type')
+      .max('service_category as service_category')
+      .max('city_target as city_target')
       .sum('clicks as clicks')
       .sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('page_url', 'page_type', 'service_category', 'city_target');
+      .groupByRaw(CANON_URL_SQL);
 
     const priorMap = new Map();
     const prior = await db('gsc_pages')
       .where('date', '>=', priorSince)
       .where('date', '<', since)
-      .select('page_url')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
       .sum('clicks as clicks')
-      .groupBy('page_url');
+      .groupByRaw(CANON_URL_SQL);
     for (const p of prior) priorMap.set(p.page_url, parseInt(p.clicks, 10));
 
     const out = [];
@@ -566,9 +592,9 @@ class GscOpportunityMiner {
         .where('date', '>=', since)
         .where('service_category', q.service_category || '')
         .where('city_target', q.city_target || '')
-        .select('page_url')
+        .select(db.raw(`${CANON_URL_SQL} as page_url`))
         .sum('impressions as impressions')
-        .groupBy('page_url')
+        .groupByRaw(CANON_URL_SQL)
         .havingRaw('sum(impressions) > ?', [10]);
       if (ownPages.length < THRESHOLDS.cannibalizationMinUrls) continue;
 
@@ -607,10 +633,13 @@ class GscOpportunityMiner {
     //   intent (transactional-local SERP wants a city-service page).
     const pages = await db('gsc_pages')
       .where('date', '>=', since)
-      .select('page_url', 'page_type', 'service_category', 'city_target')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .max('page_type as page_type')
+      .max('service_category as service_category')
+      .max('city_target as city_target')
       .sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('page_url', 'page_type', 'service_category', 'city_target')
+      .groupByRaw(CANON_URL_SQL)
       .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
 
     const out = [];
@@ -1050,6 +1079,7 @@ module.exports._internals = {
   inferServiceFromUrl,
   inferCityFromUrl,
   inferCityFromQuery,
+  canonicalizePageUrl,
   inferPageType,
   recomputeCtr,
   gscOpportunityScore,
