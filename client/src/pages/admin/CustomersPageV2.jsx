@@ -986,6 +986,13 @@ export default function CustomersPageV2() {
   const [savingEdit, setSavingEdit] = useState(false);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef(null);
+  // True once the first customer fetch has resolved. Gates the full-page
+  // "Loading customers…" screen so it only shows on initial load — never on
+  // a search/filter refetch. Without this, narrowing a search to zero
+  // results (customers.length === 0) made the next keystroke swap the whole
+  // page for the loading screen, unmounting the search input and dropping
+  // keyboard focus mid-type.
+  const hasLoadedRef = useRef(false);
 
   const openAddCustomer = (preset = null) => {
     setQuickAddPreset(preset);
@@ -1057,6 +1064,7 @@ export default function CustomersPageV2() {
     adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal })
       .then((data) => {
         if (seq !== loadSeqRef.current) return;
+        hasLoadedRef.current = true;
         setCustomers(Array.isArray(data) ? data : data.customers || []);
         setTotalCustomers(data.total || 0);
         setTotalPages(data.totalPages || 1);
@@ -1223,7 +1231,7 @@ export default function CustomersPageV2() {
     });
   }
 
-  if (view !== "pipeline" && loading && customers.length === 0) {
+  if (view !== "pipeline" && loading && !hasLoadedRef.current) {
     return (
       <div className="p-16 text-center text-13 text-ink-secondary">
         Loading customers…
