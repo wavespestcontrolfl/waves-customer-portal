@@ -78,6 +78,7 @@ const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
   "one_time_pest_treatment",
   "one_time_lawn_treatment",
   "flea",
+  "cockroach",
   "rodent_exclusion",
   "rodent_trapping",
   "mosquito_event",
