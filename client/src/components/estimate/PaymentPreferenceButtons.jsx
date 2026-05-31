@@ -23,6 +23,28 @@ const W = {
 
 const ACTION_BG = W.blueDeeper;
 
+function fmtMoney(n) {
+  if (n == null) return '—';
+  const v = Math.round(Number(n) * 100) / 100;
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+}
+
+function billingIntervalMonths(frequency = {}) {
+  const key = frequency.billingFrequencyKey || frequency.key;
+  if (key === 'quarterly') return 3;
+  if (key === 'bi_monthly' || key === 'bimonthly') return 2;
+  return 1;
+}
+
+function firstVisitAmount(frequency = {}) {
+  const monthly = Number(frequency.monthly);
+  if (Number.isFinite(monthly) && monthly > 0) {
+    return Math.round(monthly * billingIntervalMonths(frequency) * 100) / 100;
+  }
+  const perVisit = Number(frequency.perVisit || frequency.perApp || frequency.pa);
+  return Number.isFinite(perVisit) && perVisit > 0 ? Math.round(perVisit * 100) / 100 : null;
+}
+
 export default function PaymentPreferenceButtons({
   onSelect,
   disabled,
@@ -30,10 +52,14 @@ export default function PaymentPreferenceButtons({
   setupFee,
   invoiceMode = false,
   annualPrepayEligible = false,
+  selectedFrequency = null,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
   const offerPrepay = !invoiceMode && !isOneTime && (annualPrepayEligible || !!waivableSetupFee);
+  const setupAmount = Number(setupFee?.amount);
+  const hasSetupInvoice = Number.isFinite(setupAmount) && setupAmount > 0;
+  const firstVisit = firstVisitAmount(selectedFrequency || {});
 
   const btnBase = {
     padding: '16px 20px', borderRadius: 12,
@@ -43,7 +69,7 @@ export default function PaymentPreferenceButtons({
     opacity: disabled ? 0.65 : 1,
   };
   const optionNote = {
-    fontSize: 13,
+    fontSize: 14,
     color: W.textCaption,
     lineHeight: 1.45,
     marginTop: 8,
@@ -51,8 +77,12 @@ export default function PaymentPreferenceButtons({
     textAlign: 'center',
   };
   const optionWrap = { textAlign: 'center' };
+  const invoiceRows = [
+    ...(hasSetupInvoice ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
+    ...(firstVisit ? [{ label: 'First service visit', amount: firstVisit }] : []),
+  ];
 
-  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Choose pay-after-visit setup';
+  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Pay after each visit';
   const fineprint = offerPrepay
     ? 'Choose autopay to be billed after each completed service visit, or annual prepay to approve the 12-month plan up front with setup included.'
     : invoiceMode
@@ -135,7 +165,57 @@ export default function PaymentPreferenceButtons({
             onClick={() => onSelect('card_on_file')}
             style={{ ...btnBase, background: ACTION_BG, color: W.white }}
           >{cardOnFileLabel}</button>
-          <div style={optionNote}>Billed after each completed service through autopay.</div>
+          <div style={optionNote}>Approve now, then save a card for autopay after each completed service visit.</div>
+          {invoiceRows.length > 0 ? (
+            <div style={{
+              marginTop: 14,
+              border: `1px solid ${W.border}`,
+              borderRadius: 12,
+              padding: 14,
+              background: '#F8FAFC',
+              textAlign: 'left',
+            }}>
+              {invoiceRows.map((row) => (
+                <div
+                  key={row.label}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    alignItems: 'baseline',
+                    fontSize: 14,
+                    color: W.navy,
+                    lineHeight: 1.4,
+                    marginBottom: 8,
+                  }}
+                >
+                  <span>{row.label}</span>
+                  <strong style={{ whiteSpace: 'nowrap' }}>{fmtMoney(row.amount)}</strong>
+                </div>
+              ))}
+              {hasSetupInvoice ? (
+                <div style={{
+                  borderTop: `1px solid ${W.border}`,
+                  paddingTop: 10,
+                  marginTop: 2,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  alignItems: 'baseline',
+                  fontSize: 14,
+                  fontWeight: 800,
+                  color: W.blueDeeper,
+                }}>
+                  <span>Invoice total</span>
+                  <strong>{fmtMoney(setupAmount)}</strong>
+                </div>
+              ) : null}
+              <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 10 }}>
+                No payment is charged on this page. {hasSetupInvoice ? `The ${fmtMoney(setupAmount)} setup invoice is prepared after approval; ` : ''}
+                {firstVisit ? `your first service visit bills after completion at ${fmtMoney(firstVisit)}.` : 'your service visits bill after completion.'}
+              </div>
+            </div>
+          ) : null}
         </div>
         {offerPrepay && (
           <div style={optionWrap}>
