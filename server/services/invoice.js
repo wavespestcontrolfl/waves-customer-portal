@@ -454,6 +454,7 @@ async function calculateUpdateFinancials({
 
 const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
+  INVOICE_UNCOLLECTIBLE_STATUSES,
   assertInvoiceVoidable,
 } = require("./invoice-helpers");
 
@@ -1614,11 +1615,7 @@ const InvoiceService = {
       if (customerId) q.where("invoices.customer_id", customerId);
 
       if (normalizedStatus === "overdue") {
-        q.whereNotIn("invoices.status", [
-          "paid",
-          "void",
-          "processing",
-        ]).andWhere(function () {
+        q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES).andWhere(function () {
           this.where("invoices.status", "overdue").orWhere(
             "invoices.due_date",
             "<",
@@ -1626,7 +1623,7 @@ const InvoiceService = {
           );
         });
       } else if (normalizedStatus === "unpaid") {
-        q.whereNotIn("invoices.status", ["paid", "void", "processing"]);
+        q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
         q.where("invoices.status", "paid").whereNull(
           "invoices.receipt_sent_at",
@@ -1802,17 +1799,17 @@ const InvoiceService = {
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')) as outstanding",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
         ),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
           [today],
         ),
         db.raw(
           "COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected",
         ),
         db.raw(
-          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')), 0) as total_outstanding",
+          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
         ),
       )
       .whereNull("archived_at");
