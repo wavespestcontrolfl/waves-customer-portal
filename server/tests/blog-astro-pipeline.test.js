@@ -879,6 +879,38 @@ describe('Astro publisher hero image republish', () => {
     expect(gh.createBranch).not.toHaveBeenCalled();
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
   });
+
+  test('blocks a literal-brand post with empty target_sites (renders on ALL spokes, not hub-only)', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: [], // empty → publishes to ALL 15 domains (backward-compat)
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,eA==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      // Literal brand would leak across every spoke domain — must use {{brandName}}.
+      content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
+  });
 });
 
 describe('Astro publisher idempotency guard', () => {
