@@ -1151,6 +1151,9 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
+    if (parseFloat(invoice.total || 0) <= 0) {
+      return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
+    }
     const activePlan = await db('payment_plans')
       .where({ invoice_id: invoice.id, status: 'active' })
       .first('id');
