@@ -43,6 +43,12 @@ describe('fallbackParse', () => {
     expect(fallbackParse('any time tuesday', NOW).timeOfDay).toBe('any');
   });
 
+  it('does not treat "early <month>" as a morning preference', () => {
+    // "early" modifies the date, not the time — afternoon slots must survive.
+    expect(fallbackParse('early july', NOW).timeOfDay).toBe('any');
+    expect(fallbackParse('early next week', NOW).timeOfDay).toBe('any');
+  });
+
   it('returns understood=false with no date when nothing is recognized', () => {
     expect(fallbackParse('sometime soon please', NOW)).toMatchObject({
       dateFrom: null, dateTo: null, understood: false,

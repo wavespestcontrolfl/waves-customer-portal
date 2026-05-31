@@ -58,7 +58,10 @@ function normalizeTimeOfDay(value) {
 // ---------- deterministic fallback ----------
 
 function timeOfDayFromText(q) {
-  if (/\b(morning|mornings|a\.?m\.?|before noon|early)\b/.test(q)) return 'morning';
+  // Note: "early" is intentionally NOT a morning trigger — it almost always
+  // modifies a date ("early July", "early next week"), not a time of day, and
+  // matching it here would wrongly strip every afternoon slot from those searches.
+  if (/\b(morning|mornings|a\.?m\.?|before noon)\b/.test(q)) return 'morning';
   if (/\b(evening|evenings|after work|night|tonight)\b/.test(q)) return 'evening';
   if (/\b(afternoon|afternoons|p\.?m\.?|midday|lunch)\b/.test(q)) return 'afternoon';
   return 'any';

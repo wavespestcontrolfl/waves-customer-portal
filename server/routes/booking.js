@@ -396,7 +396,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     dateTo: rangeTo,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
     dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
-    topN: 200,
+    // The default best-4 window is narrow, so 200 ranked candidates is ample.
+    // A specific-date / "Find more dates" browse (expandOpenDays) can span the
+    // full 90-day horizon across several techs — capping at 200 there would
+    // drop the lowest-scored (furthest-out) dates and make the calendar mark
+    // them unavailable, so pull every feasible candidate. find-time only slices
+    // a pre-computed list, so this is cheap.
+    topN: expandOpenDays ? Number.MAX_SAFE_INTEGER : 200,
   });
 
   // Enforce max_self_books_per_day — filter out dates already at cap
