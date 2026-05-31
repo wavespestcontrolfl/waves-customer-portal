@@ -176,7 +176,9 @@ export default function MobileAppointmentDetailSheet({
 
   const noteDirty = (service?.notes || '') !== note;
   const isLawn = String(service?.serviceType || '').toLowerCase().includes('lawn');
-  const canCompleteService = service.status === 'en_route' || service.status === 'on_site';
+  const canCompleteService = ['en_route', 'on_site', 'pending', 'confirmed', 'rescheduled'].includes(
+    String(service?.status || '').toLowerCase(),
+  );
 
   const saveNote = async () => {
     if (!noteDirty) return true;
