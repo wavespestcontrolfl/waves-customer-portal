@@ -86,8 +86,10 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
-// Completion-panel quick-entry chips are service-aware: pest-line services get
-// a pest-focused list, lawn services keep their original (lawn-inclusive) list.
+// Completion-panel quick-entry chips are service-aware: pest-line services
+// (pest control, mosquito, termite, rodent) get a pest-focused list, while
+// plant-health services (lawn, tree/shrub) keep the original broad list that
+// includes lawn/ornamental entries like irrigation, fungus, and weeds.
 const CHIP_OBSERVATIONS_PEST = [
   "Pest activity noted",
   "Ant trails observed",
@@ -103,7 +105,7 @@ const CHIP_OBSERVATIONS_PEST = [
   "Property access issue",
   "Customer concern discussed",
 ];
-const CHIP_OBSERVATIONS_LAWN = [
+const CHIP_OBSERVATIONS_HORTICULTURAL = [
   "Pest activity noted",
   "Standing water found",
   "Irrigation issue",
@@ -129,7 +131,7 @@ const CHIP_RECOMMENDATIONS_PEST = [
   "Bait station replacement",
   "Customer wants estimate",
 ];
-const CHIP_RECOMMENDATIONS_LAWN = [
+const CHIP_RECOMMENDATIONS_HORTICULTURAL = [
   "Callback recommended",
   "Irrigation adjustment needed",
   "Follow-up in 2 weeks",
@@ -5255,6 +5257,10 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  // Plant-health services (lawn, tree/shrub) keep the broad observation list;
+  // pest-line services get the pest-focused list.
+  const usesPlantHealthChips =
+    serviceCategory === "lawn" || serviceCategory === "tree_shrub";
   const handleLawnAssessmentConfirmed = (assessmentId) => {
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
@@ -7689,7 +7695,10 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add observation...</option>
-                {(isLawn ? CHIP_OBSERVATIONS_LAWN : CHIP_OBSERVATIONS_PEST).map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_OBSERVATIONS_HORTICULTURAL
+                  : CHIP_OBSERVATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -7705,7 +7714,10 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add recommendation...</option>
-                {(isLawn ? CHIP_RECOMMENDATIONS_LAWN : CHIP_RECOMMENDATIONS_PEST).map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
+                  : CHIP_RECOMMENDATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -9478,7 +9490,10 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add observation...</option>
-                {(isLawn ? CHIP_OBSERVATIONS_LAWN : CHIP_OBSERVATIONS_PEST).map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_OBSERVATIONS_HORTICULTURAL
+                  : CHIP_OBSERVATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -9496,7 +9511,10 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add recommendation...</option>
-                {(isLawn ? CHIP_RECOMMENDATIONS_LAWN : CHIP_RECOMMENDATIONS_PEST).map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
+                  : CHIP_RECOMMENDATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
