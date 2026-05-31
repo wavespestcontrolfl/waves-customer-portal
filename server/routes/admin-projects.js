@@ -1738,44 +1738,144 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       }
     }
 
-    // 3. Nothing to reuse. On a dry-run, DON'T mint a real draft just to show the
-    //    amount — every cancelled preview would strand an orphan invoice + burn an
-    //    invoice number. Return a non-persisted preview of the fee/total instead;
-    //    `created: true` so the confirm dialog still reads "Create and send", and
-    //    the real (non-dry-run) send below does the actual create.
-    const fee = resolveWdoInspectionFee(parseFindings(project));
-    if (dryRun) {
-      const totals = await previewWdoInvoiceTotals(project, customer, fee);
-      return {
-        invoice: { id: null, invoice_number: null, status: 'preview', ...totals },
-        created: true,
-        preview: true,
-      };
+    // 2b. Don't re-bill an already-billed visit. The reuse checks above skip
+    //     'paid'/'void' (and a paid invoice isn't reusable), so without this an
+    //     admin who previews/resends a report whose invoice was already PAID would
+    //     fall through to step 3 and mint a fresh draft + pay link for the same
+    //     completed visit — a duplicate bill the later non-sendable-status guard
+    //     can't catch (it only sees the new 'draft'). A paid OR in-flight ('processing',
+    //     ACH) invoice linked to this project or the same scheduled-service /
+    //     service-record means the work is settled or settling, so block the send
+    //     with a 409 and surface the existing invoice. ('void' is intentionally
+    //     excluded — a cancelled invoice should be re-billable.)
+    const billedLinkClauses = [
+      linkedInvoiceId ? { col: 'id', val: linkedInvoiceId } : null,
+      project.scheduled_service_id ? { col: 'scheduled_service_id', val: project.scheduled_service_id } : null,
+      project.service_record_id ? { col: 'service_record_id', val: project.service_record_id } : null,
+    ].filter(Boolean);
+    if (billedLinkClauses.length) {
+      const alreadyBilled = await trx('invoices')
+        .where({ customer_id: project.customer_id })
+        .whereIn('status', ['paid', 'processing'])
+        .where(function billedLinkage() {
+          for (const c of billedLinkClauses) this.orWhere({ [c.col]: c.val });
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (alreadyBilled) {
+        // Record the link so the UI can point at the settled invoice.
+        await persistProjectInvoiceLink(project, alreadyBilled.id, trx);
+        const err = new Error(`This visit is already billed on invoice ${alreadyBilled.invoice_number} (${alreadyBilled.status}). Nothing was sent.`);
+        err.code = 'already_billed';
+        err.invoiceId = alreadyBilled.id;
+        err.invoiceNumber = alreadyBilled.invoice_number;
+        throw err;
+      }
     }
 
-    // 3b. Real send — create a draft, carrying the scheduled-service / service-record
-    //     linkage forward so completion + future lookups can find it, and record it
-    //     on the project (inside the lock) so the racing/resend POST reuses it.
-    const created = await InvoiceService.create({
+    // 3. Nothing to reuse — mint the project's draft invoice. How the draft is
+    //    built depends on the project type.
+    if (project.project_type === 'wdo_inspection') {
+      // WDO bills a single auto-priced "WDO Inspection" line. On a dry-run, DON'T
+      // mint a real draft just to show the amount — every cancelled preview would
+      // strand an orphan invoice + burn an invoice number. Return a non-persisted
+      // preview of the fee/total instead; `created: true` so the confirm dialog
+      // still reads "Create and send", and the real send below does the create.
+      const fee = resolveWdoInspectionFee(parseFindings(project));
+      if (dryRun) {
+        const totals = await previewWdoInvoiceTotals(project, customer, fee);
+        return {
+          invoice: { id: null, invoice_number: null, status: 'preview', ...totals },
+          created: true,
+          preview: true,
+        };
+      }
+
+      // Real send — create a draft, carrying the scheduled-service / service-record
+      // linkage forward so completion + future lookups can find it, and record it
+      // on the project (inside the lock) so the racing/resend POST reuses it.
+      const created = await InvoiceService.create({
+        customerId: project.customer_id,
+        serviceRecordId: project.service_record_id || undefined,
+        scheduledServiceId: project.scheduled_service_id || undefined,
+        title: 'WDO Inspection',
+        lineItems: [{
+          description: WDO_INVOICE_LINE_DESCRIPTION,
+          quantity: 1,
+          unit_price: fee,
+          amount: fee,
+        }],
+        notes: `Auto-generated for WDO inspection project ${project.id}.`,
+      });
+      // Re-fetch so callers get the canonical DB row shape (line_items as JSONB, etc.).
+      // InvoiceService.create auto-commits on the pooled connection (it doesn't touch
+      // the locked projects row, so no lock conflict); the row is visible here.
+      const fresh = await trx('invoices').where({ id: created.id }).first();
+      const invoice = fresh || created;
+      await persistProjectInvoiceLink(project, invoice.id, trx);
+      return { invoice, created: true };
+    }
+
+    // Non-WDO service reports bill what the visit actually was, so the draft's
+    // line items come from the linked service record's scheduled-service pricing.
+    // Unlike WDO there's no cheap synthetic fee to preview, and replaying the
+    // full discount/tax math outside create() would risk drift, so we mint the
+    // real draft on BOTH the dry-run and the send. That's safe: the draft is
+    // persisted + linked to the project, so a re-preview or the follow-up send
+    // reuses the SAME draft (reuse path 1 above) — a cancelled preview leaves at
+    // most one legitimate draft per project, never duplicates.
+    if (!project.service_record_id) {
+      const err = new Error('This service report isn’t linked to a completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
+      err.code = 'invoice_build_failed';
+      throw err;
+    }
+    const serviceRecord = await trx('service_records')
+      .where({ id: project.service_record_id, customer_id: project.customer_id })
+      .first();
+    if (!serviceRecord) {
+      const err = new Error('The visit linked to this report wasn’t found for this customer, so an invoice can’t be built automatically.');
+      err.code = 'invoice_build_failed';
+      throw err;
+    }
+    // Derive the scheduled-service linkage for pricing from the LINKED SERVICE
+    // RECORD first, falling back to the project's own scheduled_service_id (an
+    // ad-hoc project's service record may not carry one). The report is tied to
+    // project.service_record_id, so its visit — serviceRecord.scheduled_service_id
+    // — is the authoritative appointment to bill from; project.scheduled_service_id
+    // is a separate denormalized link that, if it disagrees, would price the
+    // invoice off a different appointment than the one being reported on. Without
+    // any scheduled service there's no priced line set to bill from.
+    const scheduledServiceId = serviceRecord.scheduled_service_id || project.scheduled_service_id;
+    const built = scheduledServiceId
+      ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
+          fallbackDescription: serviceRecord.service_type || getProjectType(project.project_type)?.label || 'Service visit',
+        })
+      : { lineItems: [], discountIds: [] };
+    // Sum the non-discount (positive) lines — a draft with no positive lines
+    // would bill $0, which means the visit has no pricing to invoice from. Fail
+    // with an actionable message instead of minting a $0 orphan draft.
+    const positiveTotal = (built.lineItems || []).reduce(
+      (sum, item) => (Number(item.amount) > 0 ? sum + Number(item.amount) : sum), 0);
+    if (positiveTotal <= 0) {
+      const err = new Error('The linked visit has no pricing, so an invoice can’t be built automatically. Add pricing on the appointment (or create the invoice from the visit) first — it will be reused here.');
+      err.code = 'invoice_build_failed';
+      throw err;
+    }
+    const createdNonWdo = await InvoiceService.create({
       customerId: project.customer_id,
-      serviceRecordId: project.service_record_id || undefined,
-      scheduledServiceId: project.scheduled_service_id || undefined,
-      title: 'WDO Inspection',
-      lineItems: [{
-        description: WDO_INVOICE_LINE_DESCRIPTION,
-        quantity: 1,
-        unit_price: fee,
-        amount: fee,
-      }],
-      notes: `Auto-generated for WDO inspection project ${project.id}.`,
+      serviceRecordId: project.service_record_id,
+      scheduledServiceId: scheduledServiceId || undefined,
+      lineItems: built.lineItems,
+      discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
+      // The scheduled-service lines carry stored discount amounts; trust them so
+      // the draft total matches the appointment (mirrors createFromService).
+      trustedStoredDiscountSources: ['scheduled_service'],
+      notes: `Auto-generated for ${getProjectType(project.project_type)?.label || 'service'} project ${project.id}.`,
     });
-    // Re-fetch so callers get the canonical DB row shape (line_items as JSONB, etc.).
-    // InvoiceService.create auto-commits on the pooled connection (it doesn't touch
-    // the locked projects row, so no lock conflict); the row is visible here.
-    const fresh = await trx('invoices').where({ id: created.id }).first();
-    const invoice = fresh || created;
-    await persistProjectInvoiceLink(project, invoice.id, trx);
-    return { invoice, created: true };
+    const builtFresh = await trx('invoices').where({ id: createdNonWdo.id }).first();
+    const builtInvoice = builtFresh || createdNonWdo;
+    await persistProjectInvoiceLink(project, builtInvoice.id, trx);
+    return { invoice: builtInvoice, created: true };
   });
 }
 
@@ -2158,14 +2258,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
-    // Enforce the WDO constraint the UI relies on — the auto-created invoice is
-    // a "WDO Inspection" line, so a direct API call on another project type
-    // must not bill the wrong service (mirrors the /fdacs-pdf guard).
-    if (project.project_type !== 'wdo_inspection') {
-      return res.status(400).json({ error: 'Report + invoice send is only available for WDO inspections' });
-    }
-    // Official FDACS-13645 filing — require the licensee signature first.
-    if (!loadWdoSignature(project)) {
+    const isWdoProject = project.project_type === 'wdo_inspection';
+    // WDO is an official FDACS-13645 filing — require the licensee signature
+    // before anything else. Other project types carry no signature requirement.
+    if (isWdoProject && !loadWdoSignature(project)) {
       return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
     }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
@@ -2175,8 +2271,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
 
     // The filled FDACS-13645 PDF rides on the email only (SMS can't carry it),
     // so a WDO report can't be delivered without an email — fail up front rather
-    // than text a bare link and record the official report as sent.
-    if (!ProjectEmail.resolveProjectEmailRecipient(customer).email) {
+    // than text a bare link and record the official report as sent. Non-WDO
+    // reports deliver the report as a link in the text itself, so SMS-only is
+    // fine and email isn't required.
+    if (isWdoProject && !ProjectEmail.resolveProjectEmailRecipient(customer).email) {
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
 
@@ -2295,15 +2393,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const firstName = customer.first_name || 'there';
     const channels = {};
 
-    // ONE email FIRST — it carries the FDACS PDF + invoice PDF and is the
-    // required channel. The pay-link SMS is only sent after the email succeeds,
-    // so a failed email can't leave the customer with a bare pay-link text while
-    // the report is recorded not-sent (and retries can't duplicate that text).
+    // ONE email FIRST — it carries the report attachments (the FDACS PDF for WDO)
+    // + the invoice PDF. For WDO it's the required channel: the pay-link SMS is
+    // only sent after the email succeeds, so a failed email can't leave the
+    // customer with a bare pay-link text while the report is recorded not-sent
+    // (and retries can't duplicate that text). For non-WDO the email is a bonus
+    // (the report link rides in the SMS), so its failure doesn't block the text.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
     if (emailRecipient.email) {
       try {
         const result = await ProjectEmail.sendProjectReportWithInvoice({
           project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+          // Only WDO attaches a report PDF (the FDACS-13645); non-WDO attaches
+          // just the invoice PDF and delivers the report as a link. Drives the
+          // template's attachments sentence so the copy matches reality.
+          reportAttached: isWdoProject,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -2316,15 +2420,17 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       channels.email = { ok: false, error: 'No email on file' };
     }
 
-    // ONE SMS — report link + pay link, only after the email succeeded. It goes
-    // through the canonical 'payment_link' policy (consent, kill switch, identity
-    // trust, invoiceId). That policy forbids an exact price and caps at 2
-    // segments, so the body omits the dollar amount (it's on the pay page /
-    // invoice PDF) and stays terse.
+    // ONE SMS — report link + pay link. It goes through the canonical
+    // 'payment_link' policy (consent, kill switch, identity trust, invoiceId).
+    // That policy forbids an exact price and caps at 2 segments, so the body
+    // omits the dollar amount (it's on the pay page / invoice PDF) and stays
+    // terse. For WDO it's sent only after the email succeeds, since the report
+    // itself lives in the email-only FDACS PDF and a bare pay-link text would be
+    // wrong; for non-WDO the report link is in the text, so it sends regardless.
     const normalized = normalizeUsPhone(customer.phone);
     if (!normalized) {
       channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
-    } else if (!channels.email?.ok) {
+    } else if (isWdoProject && !channels.email?.ok) {
       channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
     } else {
       try {
@@ -2358,10 +2464,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       emailRecipient.email ? 'email' : null,
     ].filter(Boolean);
     const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
-    // The FDACS PDF is email-only, so the WDO report only counts as delivered
-    // when the email succeeds; SMS is a supplementary link. Email failure means
-    // not-sent (claim released below, nothing finalized).
-    const delivered = !!channels.email?.ok;
+    // The FDACS PDF is email-only, so a WDO report only counts as delivered when
+    // the email succeeds; SMS is a supplementary link, and email failure means
+    // not-sent (claim released below, nothing finalized). A non-WDO report
+    // carries its link + pay link in either channel, so any successful channel
+    // counts as delivered (mirrors /send).
+    const delivered = isWdoProject ? !!channels.email?.ok : successfulChannelCount > 0;
     const deliveryStatus = !delivered
       ? (successfulChannelCount === 0 ? 'failed' : 'partial')
       : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
@@ -2426,6 +2534,17 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     if (err?.message === 'Invoice not found for this customer') {
       return res.status(404).json({ error: err.message });
+    }
+    // The invoice couldn't be auto-built from the visit (no linked visit / no
+    // derivable pricing) — surface the actionable reason as a 422 rather than an
+    // opaque 500.
+    if (err?.code === 'invoice_build_failed') {
+      return res.status(422).json({ error: err.message, code: err.code });
+    }
+    // The visit is already billed on a paid/in-flight invoice — block the
+    // duplicate send with a 409 and point at the existing invoice.
+    if (err?.code === 'already_billed') {
+      return res.status(409).json({ error: err.message, code: err.code, invoice_id: err.invoiceId, invoice_number: err.invoiceNumber });
     }
     next(err);
   }
