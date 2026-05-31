@@ -86,7 +86,26 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
-const CHIP_OBSERVATIONS = [
+// Completion-panel quick-entry chips are service-aware: pest-line services
+// (pest control, mosquito, termite, rodent) get a pest-focused list, while
+// plant-health services (lawn, tree/shrub) keep the original broad list that
+// includes lawn/ornamental entries like irrigation, fungus, and weeds.
+const CHIP_OBSERVATIONS_PEST = [
+  "Pest activity noted",
+  "Ant trails observed",
+  "Roach activity (live/dead)",
+  "Spider webs/egg sacs",
+  "Wasp/bee nests found",
+  "Rodent signs",
+  "Entry points identified",
+  "Moisture/conducive conditions",
+  "Conducive vegetation against structure",
+  "Standing water found",
+  "Debris in gutters",
+  "Property access issue",
+  "Customer concern discussed",
+];
+const CHIP_OBSERVATIONS_HORTICULTURAL = [
   "Pest activity noted",
   "Standing water found",
   "Irrigation issue",
@@ -105,7 +124,14 @@ const CHIP_OBSERVATIONS = [
   "Entry points identified",
   "Conducive vegetation against structure",
 ];
-const CHIP_RECOMMENDATIONS = [
+const CHIP_RECOMMENDATIONS_PEST = [
+  "Callback recommended",
+  "Follow-up in 2 weeks",
+  "Schedule interior next visit",
+  "Bait station replacement",
+  "Customer wants estimate",
+];
+const CHIP_RECOMMENDATIONS_HORTICULTURAL = [
   "Callback recommended",
   "Irrigation adjustment needed",
   "Follow-up in 2 weeks",
@@ -5231,6 +5257,10 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  // Plant-health services (lawn, tree/shrub) keep the broad observation list;
+  // pest-line services get the pest-focused list.
+  const usesPlantHealthChips =
+    serviceCategory === "lawn" || serviceCategory === "tree_shrub";
   const handleLawnAssessmentConfirmed = (assessmentId) => {
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
@@ -7665,7 +7695,10 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add observation...</option>
-                {CHIP_OBSERVATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_OBSERVATIONS_HORTICULTURAL
+                  : CHIP_OBSERVATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -7681,7 +7714,10 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add recommendation...</option>
-                {CHIP_RECOMMENDATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
+                  : CHIP_RECOMMENDATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -9454,7 +9490,10 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add observation...</option>
-                {CHIP_OBSERVATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_OBSERVATIONS_HORTICULTURAL
+                  : CHIP_OBSERVATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -9472,7 +9511,10 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add recommendation...</option>
-                {CHIP_RECOMMENDATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
+                  : CHIP_RECOMMENDATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
