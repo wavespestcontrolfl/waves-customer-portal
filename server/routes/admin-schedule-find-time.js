@@ -22,6 +22,8 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
+const MAX_FIND_TIME_DAYS = 90;
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 function httpError(status, message) {
@@ -111,6 +113,8 @@ router.post('/', async (req, res) => {
     }
     const to = dateTo || etDateString(addETDays(parseETDateTime(`${from}T12:00`), 7));
     if (to < from) throw httpError(400, 'dateTo must be on or after dateFrom');
+    const maxTo = etDateString(addETDays(parseETDateTime(`${from}T12:00`), MAX_FIND_TIME_DAYS));
+    const clampedTo = to > maxTo ? maxTo : to;
 
     const target = await resolveFindTimeTarget({ customerId, address, lat, lng });
 
@@ -119,14 +123,15 @@ router.post('/', async (req, res) => {
       lng: target.lng,
       durationMinutes: Math.max(15, parseInt(durationMinutes, 10) || 60),
       dateFrom: from,
-      dateTo: to,
+      dateTo: clampedTo,
       technicianId: technicianId || undefined,
-      topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 50),
+      topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100),
     });
 
     res.json({
       ...result,
       target,
+      range: { dateFrom: from, dateTo: clampedTo },
     });
   } catch (err) {
     logger.error('[find-time] failed:', err);

@@ -379,6 +379,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [findingTimes, setFindingTimes] = useState(false);
   const [timeSlots, setTimeSlots] = useState(null); // null = hidden, [] = searched but none, [...] = results
   const [slotError, setSlotError] = useState('');
+  const [findTimeHorizonDays, setFindTimeHorizonDays] = useState(7);
 
   // Date/Time/Tech state — default to today + next clean hour in local time
   const _now = new Date();
@@ -712,8 +713,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
 
   // Find best times — calls /api/admin/schedule/find-time
-  const handleFindTimes = async () => {
+  const handleFindTimes = async ({ horizonDays = 7 } = {}) => {
     if (!selectedCustomer || !selectedService) return;
+    setFindTimeHorizonDays(horizonDays);
     setFindingTimes(true);
     setSlotError('');
     setTimeSlots(null);
@@ -722,7 +724,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const today = new Date();
       const from = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
       const searchFrom = apptDate && apptDate > from ? apptDate : from;
-      const endD = new Date(searchFrom + 'T12:00:00'); endD.setDate(endD.getDate() + 7);
+      const endD = new Date(searchFrom + 'T12:00:00'); endD.setDate(endD.getDate() + horizonDays);
       const to = `${endD.getFullYear()}-${String(endD.getMonth() + 1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
       const r = await adminFetch('/admin/schedule/find-time', {
         method: 'POST',
@@ -734,7 +736,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           dateFrom: searchFrom,
           dateTo: to,
           technicianId: techMode === 'choose' && techId ? techId : undefined,
-          topN: 25,
+          topN: horizonDays > 7 ? 100 : 25,
         }),
       });
       setTimeSlots((r.slots || [])
@@ -1805,7 +1807,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date</div>
             {selectedCustomer && selectedService && (
               <button
-                onClick={handleFindTimes}
+                onClick={() => handleFindTimes({ horizonDays: 7 })}
                 disabled={findingTimes}
                 style={{
                   padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
@@ -1819,6 +1821,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </button>
             )}
           </div>
+          {selectedCustomer && selectedService && (
+            <button
+              onClick={() => handleFindTimes({ horizonDays: 90 })}
+              disabled={findingTimes}
+              style={{
+                width: '100%', marginBottom: 10, padding: '8px 12px',
+                background: '#FFFFFF', color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
+                fontSize: 12, fontWeight: 600, cursor: findingTimes ? 'default' : 'pointer',
+              }}
+              title="Search up to 90 days from the selected date"
+            >
+              Find more dates
+            </button>
+          )}
 
           {slotError && (
             <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
@@ -1830,11 +1846,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <div style={{ marginBottom: 12, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}
+                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : `No feasible slots in next ${findTimeHorizonDays} days`}
                 </div>
                 <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
               </div>
               {timeSlots.length > 0 && (
+                <>
+                {!timeSlots.some(slot => Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= 15) && (
+                  <div style={{ background: '#EFF6FF', border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
+                    No route near this customer that day yet — here's what's close.
+                  </div>
+                )}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
                   {timeSlots.map((slot) => (
                     <button
@@ -1862,6 +1884,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     </button>
                   ))}
                 </div>
+                </>
               )}
             </div>
           )}

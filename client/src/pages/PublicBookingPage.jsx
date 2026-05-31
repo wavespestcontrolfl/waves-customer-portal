@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
-import CalendarDatePicker from '../components/booking/CalendarDatePicker';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -53,12 +52,12 @@ export default function PublicBookingPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [confCode, setConfCode] = useState('');
-  // Custom date/time finder — Waves AI search + 90-day "Find more dates" calendar
+  // Custom date/time finder — Waves AI search + 90-day date picker
   const [searchResult, setSearchResult] = useState(null);
-  const [showCalendar, setShowCalendar] = useState(false);
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [pickedDate, setPickedDate] = useState(null);
+  const latestPickedDateRef = useRef(null);
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -74,7 +73,6 @@ export default function PublicBookingPage() {
     setContact({ firstName: '', lastName: '', phone: '', email: '' });
     setError('');
     setSearchResult(null);
-    setShowCalendar(false);
     setBrowseDays(null);
     setPickedDate(null);
   }, []);
@@ -259,15 +257,23 @@ export default function PublicBookingPage() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Search failed');
     setPickedDate(null);
-    setShowCalendar(false);
+    setSelectedDate(null);
+    setSelectedSlot(null);
     setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [] });
     return { summary: data.summary };
   };
 
-  const openCalendar = async () => {
-    const next = !showCalendar;
-    setShowCalendar(next);
-    if (!next || browseDays || browseLoading) return;
+  const onPickDate = async (date) => {
+    latestPickedDateRef.current = date;
+    setSearchResult(null);
+    setPickedDate(date);
+    setBrowseDays(null);
+    setSelectedDate(null);
+    setSelectedSlot(null);
+    if (!date) {
+      setBrowseLoading(false);
+      return;
+    }
     setBrowseLoading(true);
     try {
       const params = new URLSearchParams({
@@ -275,22 +281,24 @@ export default function PublicBookingPage() {
         service_type: service.id,
         duration_minutes: String(service.duration),
         expand: 'open',
-        date_from: browseMin,
-        date_to: browseMax,
+        date_from: date,
+        date_to: date,
       });
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json();
+      if (latestPickedDateRef.current !== date) return;
       setBrowseDays(data.days || []);
     } catch {
+      if (latestPickedDateRef.current !== date) return;
       setBrowseDays([]);
     } finally {
-      setBrowseLoading(false);
+      if (latestPickedDateRef.current === date) setBrowseLoading(false);
     }
   };
 
-  const onPickCalendarDate = (date) => { setSearchResult(null); setPickedDate(date); };
   const pickedDayObj = pickedDate && browseDays ? browseDays.find((d) => d.date === pickedDate) : null;
+  const pickedDateHasNoOpenTimes = pickedDate && browseDays && !browseLoading && !pickedDayObj;
 
   const SoftRouteBanner = () => (
     <div style={{
@@ -462,6 +470,41 @@ export default function PublicBookingPage() {
               </div>
             )}
 
+            {!loading && (
+              <div style={{ background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
+                <label style={{ ...labelStyle, color: COLORS.blueDeeper, fontWeight: 700 }}>
+                  Can't find a date? Pick one that works for you.
+                </label>
+                <input
+                  type="date"
+                  min={browseMin}
+                  max={browseMax}
+                  placeholder="mm/dd/yyyy"
+                  value={pickedDate || ''}
+                  onChange={(e) => onPickDate(e.target.value)}
+                  style={inputStyle}
+                />
+                <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 8 }}>
+                  We'll check open windows up to 90 days out.
+                </div>
+              </div>
+            )}
+
+            {browseLoading && (
+              <div style={{ textAlign: 'center', padding: 20, color: COLORS.slate600, fontSize: 14 }}>Loading times…</div>
+            )}
+            {pickedDayObj && (
+              <div style={{ marginTop: 14 }}>
+                {!pickedDayObj.nearby && <SoftRouteBanner />}
+                {renderDayGroups([pickedDayObj])}
+              </div>
+            )}
+            {pickedDateHasNoOpenTimes && (
+              <div style={{ marginTop: 14, fontSize: 14, color: COLORS.slate600, lineHeight: 1.45 }}>
+                No open times on that date. Try another day, or call (941) 297-5749 and we'll fit you in.
+              </div>
+            )}
+
             {/* Waves AI date/time search */}
             <div style={{ marginTop: 20 }}>
               <WavesAIScheduleSearch
@@ -479,35 +522,6 @@ export default function PublicBookingPage() {
             {searchResult && searchResult.days.length === 0 && (
               <div style={{ marginTop: 12, fontSize: 14, color: COLORS.slate600 }}>
                 Nothing open for that search. Try another day, or call (941) 297-5749.
-              </div>
-            )}
-
-            {/* Find more dates — 90-day calendar */}
-            <div style={{ marginTop: 16 }}>
-              <Button variant="tertiary" onClick={openCalendar} style={{ width: '100%' }}>
-                {showCalendar ? 'Hide calendar' : 'Find more dates →'}
-              </Button>
-            </div>
-            {showCalendar && (
-              <div style={{ marginTop: 12 }}>
-                {browseLoading ? (
-                  <div style={{ textAlign: 'center', padding: 20, color: COLORS.slate600, fontSize: 14 }}>Loading dates…</div>
-                ) : (
-                  <CalendarDatePicker
-                    theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.blueDeeper, muted: COLORS.slate600, border: COLORS.slate200, surface: COLORS.white }}
-                    minDate={browseMin}
-                    maxDate={browseMax}
-                    availableDates={(browseDays || []).map((d) => d.date)}
-                    selectedDate={pickedDate}
-                    onPick={onPickCalendarDate}
-                  />
-                )}
-                {pickedDayObj && (
-                  <div style={{ marginTop: 14 }}>
-                    {!pickedDayObj.nearby && <SoftRouteBanner />}
-                    {renderDayGroups([pickedDayObj])}
-                  </div>
-                )}
               </div>
             )}
 
