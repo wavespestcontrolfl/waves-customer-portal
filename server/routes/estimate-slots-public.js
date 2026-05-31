@@ -39,6 +39,7 @@ const slotReservation = require('../services/slot-reservation');
 const {
   handleEstimateAsk,
   isStructuralOneTimeOnlyEstimate,
+  verifyEstimateAskToken,
 } = require('./estimate-public');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
@@ -169,6 +170,11 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
+    }
+    // Model-backed endpoint — same gate as /ask: require the short-lived signed
+    // askToken bound to this estimate, on top of the URL token + rate limit.
+    if (!verifyEstimateAskToken(req, estimate)) {
+      return res.status(403).json({ error: 'estimate_ask_forbidden' });
     }
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'

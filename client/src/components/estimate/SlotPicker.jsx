@@ -81,6 +81,7 @@ const INITIAL_VISIBLE = 6;
 
 export default function SlotPicker({
   token,
+  askToken = null,
   selectedSlotId,
   onSelect,
   refreshSignal,
@@ -137,7 +138,10 @@ export default function SlotPicker({
   const runAiSearch = async (query) => {
     const res = await fetch(`${API_BASE}/public/estimates/${token}/find-slots`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
+      },
       body: JSON.stringify({ query, serviceMode, selectedFrequency }),
     });
     const body = await res.json().catch(() => ({}));

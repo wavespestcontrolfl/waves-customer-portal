@@ -3970,7 +3970,7 @@ ${shellQuestionsBar()}
       const ctx = buildSlotContext();
       const r = await fetch("/api/public/estimates/" + TOKEN + "/find-slots", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Estimate-Ask-Token": ESTIMATE_ASK_TOKEN },
         body: JSON.stringify({ query: query, serviceMode: ctx.serviceMode, selectedFrequency: ctx.selectedFrequency }),
       });
       const body = await r.json();
@@ -8509,6 +8509,7 @@ async function handleEstimateAsk(req, res, next) {
 module.exports = router;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
+module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.deriveServiceCategory = deriveServiceCategory;
