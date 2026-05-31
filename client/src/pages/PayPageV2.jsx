@@ -376,6 +376,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
         const elements = stripe.elements({
           clientSecret,
+          paymentMethodCreation: 'manual',
           appearance: {
             theme: 'stripe',
             variables: {
