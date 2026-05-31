@@ -53,8 +53,16 @@ function priceFinding(body) {
   return null;
 }
 
+// The hub canonical domain(s). Literal "Waves Pest Control" branding is fine on
+// hub-only pages — the brand-token leak only matters when content also targets a
+// SPOKE domain. A target_sites of just the hub (the legacy/default for blogs)
+// must therefore count as hub-only, not multi-domain.
+const HUB_DOMAINS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+
 function brandTokenFinding(body, domains) {
-  const list = Array.isArray(domains) ? domains : [];
+  const list = (Array.isArray(domains) ? domains : [])
+    .map((d) => String(d || '').trim().toLowerCase())
+    .filter((d) => d && !HUB_DOMAINS.has(d)); // only spoke domains make it multi-domain
   if (list.length === 0) return null; // hub-only page — literal brand is fine
   if (/\bWaves\s+Pest\s+Control\b/.test(String(body || ''))) {
     return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" instead of the {{brandName}} token — brand leaks across spoke domains.');
@@ -62,11 +70,32 @@ function brandTokenFinding(body, domains) {
   return null;
 }
 
+// Normalize service/topic value(s) to candidate FAQ_BLOCKED_SERVICES ids. The
+// ids are lowercase/singular/hyphenated ('rodent', 'bed-bug'), but legacy blog
+// `tag` values are display-cased plurals ("Rodents", "Bed Bugs", "Cockroaches").
+// Accepts a string OR an array of fields (e.g. [category, tag]) so a row whose
+// `category` is the broad Astro value ("pest-control") but whose real topic is
+// on `tag` ("Rodents") is still covered. Lowercase, hyphenate spaces, and try
+// de-pluralized forms so those match.
+function blockedServiceCandidates(service) {
+  const raw = Array.isArray(service) ? service : [service];
+  const out = new Set();
+  for (const s of raw) {
+    const base = String(s || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+    if (!base) continue;
+    out.add(base);
+    if (base.endsWith('es')) out.add(base.slice(0, -2)); // Cockroaches → cockroach
+    if (base.endsWith('s')) out.add(base.slice(0, -1)); // Rodents → rodent, Bed Bugs → bed-bug
+  }
+  return [...out];
+}
+
 function faqBlockedFinding(body, service) {
-  const svc = String(service || '').toLowerCase();
-  if (!FAQ_BLOCKED_SERVICES.has(svc)) return null;
+  const isBlocked = blockedServiceCandidates(service).some((c) => FAQ_BLOCKED_SERVICES.has(c));
+  if (!isBlocked) return null;
   if (/\b(faq|frequently asked|common questions)\b/i.test(String(body || ''))) {
-    return finding('P0', 'FAQ_BLOCKED_SERVICE', `Service "${svc}" is on the FAQ-blocked list — remove the FAQ section.`);
+    const label = Array.isArray(service) ? service.filter(Boolean).join('/') : service;
+    return finding('P0', 'FAQ_BLOCKED_SERVICE', `Service "${label}" is on the FAQ-blocked list — remove the FAQ section.`);
   }
   return null;
 }

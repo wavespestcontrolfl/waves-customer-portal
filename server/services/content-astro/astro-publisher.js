@@ -28,7 +28,8 @@ const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
-const { normalizeSpokeSites } = require('./spoke-sites');
+const contentGuardrails = require('../content/content-guardrails');
+const { normalizeSpokeSites, SPOKE_SITE_KEYS } = require('./spoke-sites');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const ASTRO_HERO_DIR = 'public/images/blog';
@@ -364,6 +365,45 @@ async function publishAstro(postId) {
     const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt });
     assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
+
+    // 2b. Content-policy guardrails (hardcoded price, brand-token leak on
+    // multi-domain blogs, FAQ on a policy-blocked service, keyword stuffing).
+    // The autonomous engine runs these before publishing; the legacy BlogWriter
+    // → publish-astro path (admin + the blog-calendar cron) previously had only
+    // schema validation, so a generated post could ship "$39/month" or a
+    // spoke-domain brand leak with nothing but the prompt stopping it. Block
+    // P0/P1 here too — body + editable meta are checked.
+    // target_sites semantics: a non-empty list targets those domains, but an
+    // EMPTY/null list renders on ALL spoke domains (backward-compat — see the
+    // target_sites migration + admin "publish to ALL 15 domains" warning).
+    // buildFrontmatter omits data.domains when target_sites is empty, so expand
+    // that to the full spoke list here — otherwise the brand-token guard would
+    // wrongly treat an all-domains post as hub-only and let a literal-brand leak
+    // ship to every spoke. (New posts default to hub-only targeting, so this
+    // mainly catches legacy/cleared rows — exactly the multi-domain case.)
+    const guardrailDomains = (Array.isArray(data.domains) && data.domains.length > 0)
+      ? data.domains
+      : SPOKE_SITE_KEYS;
+    const guardrails = contentGuardrails.evaluate(
+      { body, frontmatter: data },
+      {
+        domains: guardrailDomains,
+        // Legacy BlogWriter rows carry the topic on `tag` (e.g. "Rodents",
+        // "Bed Bugs"), while `category` may be the broad Astro value
+        // ("pest-control"). Pass BOTH so the FAQ-blocked-service guard sees the
+        // real topic regardless of which field holds it.
+        service: [post.category, post.tag],
+        primaryKeyword: post.keyword || data.primary_keyword || null,
+      },
+    );
+    if (!guardrails.pass) {
+      const blocking = guardrails.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+      const gErr = new Error(`content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`);
+      gErr.code = 'BLOG_GUARDRAILS_FAILED';
+      gErr.details = blocking;
+      throw gErr;
+    }
+
     const markdown = fm.stringify(data, body + '\n');
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 

@@ -28,6 +28,24 @@ describe('content-guardrails', () => {
     expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK')).toBe(false);
   });
 
+  test('literal brand on a sole-hub-domain page is allowed (not treated as multi-domain)', () => {
+    // The legacy/default blog target_sites is just the hub; that must count as
+    // hub-only, not a spoke/multi-domain publish.
+    const r = guardrails.evaluate({
+      body: 'Waves Pest Control keeps your home pest-free.',
+      frontmatter: { domains: ['wavespestcontrol.com'] },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK')).toBe(false);
+  });
+
+  test('literal brand still leaks when the hub is bundled with a spoke domain', () => {
+    const r = guardrails.evaluate({
+      body: 'Waves Pest Control keeps your home pest-free.',
+      frontmatter: { domains: ['wavespestcontrol.com', 'bradentonflpestcontrol.com'] },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK' && f.severity === 'P0')).toBe(true);
+  });
+
   test('refresh: live domains passed via opts catch a leak the draft frontmatter hides', () => {
     // Refresh draft carries no domains (frozen from live page); caller passes
     // the live page's domains explicitly.
@@ -63,6 +81,32 @@ describe('content-guardrails', () => {
     const r = guardrails.evaluate({ body: '## FAQ\nQ: When is the blackout?' }, { service: 'lawn-care' });
     expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
     expect(r.pass).toBe(true);
+  });
+
+  test.each(['Rodents', 'Bed Bugs', 'Cockroaches', 'Spiders', 'Termites', 'Lawn Pests'])(
+    'FAQ on a blocked service matches the legacy display tag "%s"',
+    (tag) => {
+      const r = guardrails.evaluate({ body: '## Frequently Asked Questions\nQ: ...' }, { service: tag });
+      expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
+    },
+  );
+
+  test('FAQ on an allowed display tag (Mosquitoes/Ants) is still fine', () => {
+    for (const tag of ['Mosquitoes', 'Ants', 'Pest Control']) {
+      const r = guardrails.evaluate({ body: '## FAQ\nQ: ...' }, { service: tag });
+      expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
+    }
+  });
+
+  test('FAQ check evaluates ALL service fields — blocked topic on tag while category is broad', () => {
+    // [category, tag] — category is the non-blocked broad value, tag is blocked.
+    const r = guardrails.evaluate({ body: '## Frequently Asked Questions\nQ: ...' }, { service: ['pest-control', 'Rodents'] });
+    expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('FAQ check with array of only-allowed services passes', () => {
+    const r = guardrails.evaluate({ body: '## FAQ\nQ: ...' }, { service: ['pest-control', 'Mosquitoes'] });
+    expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
   });
 
   test('keyword stuffing is a P2 warning (non-blocking)', () => {
