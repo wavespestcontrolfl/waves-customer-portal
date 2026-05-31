@@ -6640,8 +6640,14 @@ export function CompletionPanel({
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
-              {effectiveSendSms ? "SMS + Report sent" : "Report saved"} for{" "}
-              {service.customerName}
+              {!effectiveSendSms
+                ? "Report saved"
+                : completionResult?.completionSmsStatus === "blocked"
+                  ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                  : completionResult?.completionSmsStatus === "failed"
+                    ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                    : "SMS + Report sent"}{" "}
+              for {service.customerName}
             </div>{" "}
           </div>
         )}
