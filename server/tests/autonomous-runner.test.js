@@ -663,6 +663,7 @@ describe('runDaily batching', () => {
       .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'rewrite_title_meta' })
       .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
     runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn(); // batching tests bypass the engine lock
 
     const result = await runner.runDaily({ limit: 5 });
 
@@ -685,6 +686,7 @@ describe('runDaily batching', () => {
       failure_message: 'brief_compose:dependency unavailable',
     });
     runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn(); // batching tests bypass the engine lock
 
     const result = await runner.runDaily({ limit: 5 });
 
@@ -708,6 +710,7 @@ describe('runDaily batching', () => {
       .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'new_supporting_blog', opportunity_id: 'opp_2' })
       .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
     runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn(); // batching tests bypass the engine lock
 
     const result = await runner.runDaily({ limit: 5 });
 
@@ -725,6 +728,84 @@ describe('runDaily batching', () => {
       limit: 5,
       failures: 1,
     });
+  });
+});
+
+// ── engine publishing lock ──────────────────────────────────────────
+
+describe('engine publishing lock (_withEngineLock)', () => {
+  function fakeClient({ locked = true, acquireThrows = false } = {}) {
+    const conn = {
+      query: jest.fn(async (sql) => {
+        if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ locked }] };
+        if (/pg_advisory_unlock/.test(sql)) return { rows: [{ pg_advisory_unlock: true }] };
+        return { rows: [] };
+      }),
+    };
+    return {
+      conn,
+      acquireConnection: jest.fn(async () => {
+        if (acquireThrows) throw new Error('pool exhausted');
+        return conn;
+      }),
+      releaseConnection: jest.fn(async () => {}),
+    };
+  }
+
+  function freshRunnerWithClient(client) {
+    jest.resetModules();
+    const db = require('../models/db');
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    db.client = client; // runner captured the same db instance; mutate its client
+    return new AutonomousRunner();
+  }
+
+  test('skips (does not run fn) when another run already holds the lock', async () => {
+    const client = fakeClient({ locked: false });
+    const runner = freshRunnerWithClient(client);
+    const fn = jest.fn(async () => ({ outcome: 'completed_published' }));
+
+    const result = await runner._withEngineLock('test', fn);
+
+    expect(fn).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: 'skipped_locked', reason: 'engine_locked' });
+    expect(client.releaseConnection).toHaveBeenCalledWith(client.conn);
+    // never tried to unlock a lock it didn't hold
+    expect(client.conn.query).not.toHaveBeenCalledWith(expect.stringContaining('pg_advisory_unlock'), expect.anything());
+  });
+
+  test('runs fn, then unlocks and releases the connection, when the lock is acquired', async () => {
+    const client = fakeClient({ locked: true });
+    const runner = freshRunnerWithClient(client);
+    const fn = jest.fn(async () => ({ outcome: 'completed_published', count: 1 }));
+
+    const result = await runner._withEngineLock('test', fn);
+
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ outcome: 'completed_published', count: 1 });
+    expect(client.conn.query).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_unlock'), [expect.any(Number)]);
+    expect(client.releaseConnection).toHaveBeenCalledWith(client.conn);
+  });
+
+  test('unlocks even when fn throws, then re-throws', async () => {
+    const client = fakeClient({ locked: true });
+    const runner = freshRunnerWithClient(client);
+    const fn = jest.fn(async () => { throw new Error('boom'); });
+
+    await expect(runner._withEngineLock('test', fn)).rejects.toThrow('boom');
+    expect(client.conn.query).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_unlock'), [expect.any(Number)]);
+    expect(client.releaseConnection).toHaveBeenCalledWith(client.conn);
+  });
+
+  test('degrades (runs fn anyway) when the lock connection cannot be acquired', async () => {
+    const client = fakeClient({ acquireThrows: true });
+    const runner = freshRunnerWithClient(client);
+    const fn = jest.fn(async () => ({ outcome: 'completed_published' }));
+
+    const result = await runner._withEngineLock('test', fn);
+
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ outcome: 'completed_published' });
   });
 });
 
