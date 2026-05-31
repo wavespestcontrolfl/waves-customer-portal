@@ -697,10 +697,11 @@ describe('internal-link dry-run executor helpers', () => {
     expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
   });
 
-  test('leaves unmerged PR tasks open', async () => {
+  test('leaves still-open unmerged PR tasks open', async () => {
     const instance = new InternalLinkPrExecutor();
     instance._markTaskMerged = jest.fn(async () => {});
-    GitHubClient.getPr.mockResolvedValue({ number: 172, merged: false });
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    GitHubClient.getPr.mockResolvedValue({ number: 172, merged: false, state: 'open' });
 
     const result = await instance.verifyMergedTask({
       id: 'task-open',
@@ -709,6 +710,24 @@ describe('internal-link dry-run executor helpers', () => {
     });
 
     expect(result).toMatchObject({ status: 'pr_open', skipped: 'pr_not_merged' });
+    expect(instance._markTaskMerged).not.toHaveBeenCalled();
+    expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
+  });
+
+  test('fails a task whose PR was closed unmerged (so it leaves pr_open and is requeue/dismiss-able)', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn(async () => {});
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed' });
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-closed',
+      status: 'pr_open',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/178',
+    });
+
+    expect(result).toMatchObject({ status: 'failed', failure_reason: 'internal_link_pr_closed_unmerged', pr_number: 178 });
+    expect(instance._markTaskVerificationFailed).toHaveBeenCalledWith('task-closed', 'internal_link_pr_closed_unmerged');
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
   });
 

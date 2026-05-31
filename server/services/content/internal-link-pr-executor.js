@@ -244,6 +244,17 @@ class InternalLinkPrExecutor {
     }
     const resolvedPrNumber = prNumber || prInfo.number || null;
     if (!prInfo?.merged) {
+      // A closed-but-unmerged PR (abandoned canary, manual close) is terminal.
+      // Leaving the task at pr_open strands it forever: the review queue can't
+      // requeue or dismiss a pr_open task (those require a terminal status), and
+      // re-verifying just re-confirms "not merged". Move it to failed so it
+      // leaves pr_open limbo and becomes requeue/dismiss-able, and so the
+      // periodic verify loop auto-clears these instead of accumulating them.
+      if (String(prInfo.state).toLowerCase() === 'closed') {
+        const reason = 'internal_link_pr_closed_unmerged';
+        await this._markTaskVerificationFailed(task.id, reason);
+        return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: resolvedPrNumber };
+      }
       return { task_id: task.id, status: task.status, skipped: 'pr_not_merged', pr_number: resolvedPrNumber };
     }
 
