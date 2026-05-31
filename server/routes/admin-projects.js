@@ -1738,6 +1738,41 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       }
     }
 
+    // 2b. Don't re-bill an already-billed visit. The reuse checks above skip
+    //     'paid'/'void' (and a paid invoice isn't reusable), so without this an
+    //     admin who previews/resends a report whose invoice was already PAID would
+    //     fall through to step 3 and mint a fresh draft + pay link for the same
+    //     completed visit — a duplicate bill the later non-sendable-status guard
+    //     can't catch (it only sees the new 'draft'). A paid OR in-flight ('processing',
+    //     ACH) invoice linked to this project or the same scheduled-service /
+    //     service-record means the work is settled or settling, so block the send
+    //     with a 409 and surface the existing invoice. ('void' is intentionally
+    //     excluded — a cancelled invoice should be re-billable.)
+    const billedLinkClauses = [
+      linkedInvoiceId ? { col: 'id', val: linkedInvoiceId } : null,
+      project.scheduled_service_id ? { col: 'scheduled_service_id', val: project.scheduled_service_id } : null,
+      project.service_record_id ? { col: 'service_record_id', val: project.service_record_id } : null,
+    ].filter(Boolean);
+    if (billedLinkClauses.length) {
+      const alreadyBilled = await trx('invoices')
+        .where({ customer_id: project.customer_id })
+        .whereIn('status', ['paid', 'processing'])
+        .where(function billedLinkage() {
+          for (const c of billedLinkClauses) this.orWhere({ [c.col]: c.val });
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (alreadyBilled) {
+        // Record the link so the UI can point at the settled invoice.
+        await persistProjectInvoiceLink(project, alreadyBilled.id, trx);
+        const err = new Error(`This visit is already billed on invoice ${alreadyBilled.invoice_number} (${alreadyBilled.status}). Nothing was sent.`);
+        err.code = 'already_billed';
+        err.invoiceId = alreadyBilled.id;
+        err.invoiceNumber = alreadyBilled.invoice_number;
+        throw err;
+      }
+    }
+
     // 3. Nothing to reuse — mint the project's draft invoice. How the draft is
     //    built depends on the project type.
     if (project.project_type === 'wdo_inspection') {
@@ -2496,6 +2531,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // opaque 500.
     if (err?.code === 'invoice_build_failed') {
       return res.status(422).json({ error: err.message, code: err.code });
+    }
+    // The visit is already billed on a paid/in-flight invoice — block the
+    // duplicate send with a 409 and point at the existing invoice.
+    if (err?.code === 'already_billed') {
+      return res.status(409).json({ error: err.message, code: err.code, invoice_id: err.invoiceId, invoice_number: err.invoiceNumber });
     }
     next(err);
   }
