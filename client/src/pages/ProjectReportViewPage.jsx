@@ -71,6 +71,7 @@ const TYPE_LABELS = {
   termite_inspection: 'Termite Inspection',
   termite_treatment: 'Termite Treatment',
   pest_inspection: 'Pest Inspection',
+  cockroach: 'Cockroach Treatment',
   one_time_pest_treatment: 'One-Time Pest Treatment',
   one_time_lawn_treatment: 'One-Time Lawn Treatment',
   flea: 'Flea Service',
@@ -272,7 +273,7 @@ function getProjectKind(projectType) {
   if (projectType === 'wildlife_trapping') return 'wildlife';
   if (projectType === 'bed_bug') return 'bed_bug';
   if (projectType === 'flea') return 'flea';
-  if (projectType === 'pest_inspection' || projectType === 'one_time_pest_treatment') return 'pest';
+  if (projectType === 'pest_inspection' || projectType === 'one_time_pest_treatment' || projectType === 'cockroach') return 'pest';
   if (projectType === 'pre_treatment_termite_certificate') return 'pre_treat_cert';
   return 'general';
 }

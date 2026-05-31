@@ -18,6 +18,7 @@ const PREP_TEMPLATE_BY_PROJECT_TYPE = Object.freeze({
   flea: 'prep.flea',
   pest_inspection: 'prep.interior_pest',
   one_time_pest_treatment: 'prep.interior_pest',
+  cockroach: 'prep.cockroach',
   one_time_lawn_treatment: 'prep.lawn',
   mosquito_event: 'prep.mosquito',
   termite_inspection: 'prep.termite',
