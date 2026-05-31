@@ -355,6 +355,120 @@ describe('rewrite_title_meta live adapter', () => {
       else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
     }
   });
+
+  test('parks a rewrite_title_meta whose brief target is a protected money page', async () => {
+    // Regression guard: an in-place editor (rewrite_title_meta) resolves its
+    // target from the brief (target_url) even when the opp carries no page_url,
+    // so the protected-page guard sees the page the handler would actually edit.
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_meta_prot',
+          action_type: 'rewrite_title_meta',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_meta_prot',
+          action_type: 'rewrite_title_meta',
+          page_type: 'metadata',
+          target_url: 'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
+          target_keyword: 'pest control sarasota fl',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { type: 'metadata', title: 'X', meta_description: 'Y' },
+        }),
+      };
+      const publisher = { publishMetadataRewrite: jest.fn() };
+      const protectedPages = {
+        isProtected: jest.fn().mockResolvedValue({ protected: true, reason: 'money_page', source: 'pattern' }),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher, protectedPages });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('protected_page:money_page');
+      expect(protectedPages.isProtected).toHaveBeenCalledWith(
+        'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
+        { db: expect.any(Function) },
+      );
+      expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_prot', 'protected_page:money_page', { claimToken: claimedAt });
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+});
+
+// ── blog uniqueness default-on ──────────────────────────────────────
+describe('blog uniqueness gating', () => {
+  test('new_supporting_blog fails closed (gate_fail) when uniqueness is on by default but no blog corpus is available', async () => {
+    const prevShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const prevThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    const prevUniq = process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+    delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS; // default ON
+    try {
+      const claimedAt = new Date('2026-05-23T05:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_blog_uniq',
+          action_type: 'new_supporting_blog',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_blog_uniq',
+          action_type: 'new_supporting_blog',
+          page_type: 'blog',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { url: '/blog/uniq-test/', title: 'Uniq Test', body: '<p>body</p>' },
+        }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80 }),
+      };
+      const publisher = { publishOrUpdatePage: jest.fn() };
+      // linkPlanner has no corpus loader → required blog corpus is unavailable.
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, qualityGate, publisher, linkPlanner: {} });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('gate_fail');
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    } finally {
+      if (prevShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = prevShadow;
+      if (prevThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = prevThreshold;
+      if (prevUniq === undefined) delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
+      else process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = prevUniq;
+    }
+  });
 });
 
 // ── isShadow per-action env mapping ─────────────────────────────────
@@ -637,7 +751,10 @@ function loadRunnerWith({
   indexNow = null,
   linkPlanner = null,
   internalLinkExecutor = null,
-  protectedPages = null,
+  // Default to "not protected" so publish/gate tests aren't blocked by the
+  // protected-page guard (which now also runs for in-place editors like
+  // rewrite_title_meta). Protection-specific tests pass their own mock.
+  protectedPages = { isProtected: jest.fn().mockResolvedValue({ protected: false }) },
 }) {
   jest.resetModules();
   const dbMock = jest.fn(() => {
@@ -1315,6 +1432,19 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
+  // These tests exercise publish/queue bookkeeping, not blog dedup. Blog
+  // uniqueness now defaults ON (and requires a loaded corpus), so disable it
+  // here to isolate the bookkeeping paths; dedup has its own coverage.
+  let prevBlogUniqueness;
+  beforeEach(() => {
+    prevBlogUniqueness = process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+  });
+  afterEach(() => {
+    if (prevBlogUniqueness === undefined) delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
+    else process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = prevBlogUniqueness;
+  });
+
   test('fails closed when SEO completion gate is unavailable for supporting blogs', async () => {
     const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
     const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
