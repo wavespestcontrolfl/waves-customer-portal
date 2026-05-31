@@ -144,6 +144,7 @@ export default function SlotPicker({
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
     setPickedDate(null);
+    onSelect(null);
     setSearchData(body);
     return { summary: body.summary };
   };
@@ -152,6 +153,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
+    onSelect(null);
     if (!date) return;
     setPickedLoading(true);
     try {

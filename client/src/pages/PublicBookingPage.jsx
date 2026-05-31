@@ -257,6 +257,8 @@ export default function PublicBookingPage() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Search failed');
     setPickedDate(null);
+    setSelectedDate(null);
+    setSelectedSlot(null);
     setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [] });
     return { summary: data.summary };
   };
@@ -266,6 +268,8 @@ export default function PublicBookingPage() {
     setSearchResult(null);
     setPickedDate(date);
     setBrowseDays(null);
+    setSelectedDate(null);
+    setSelectedSlot(null);
     if (!date) {
       setBrowseLoading(false);
       return;
