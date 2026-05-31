@@ -894,24 +894,26 @@ function MobileSheet({
                 outline: "none",
               }}
             />{" "}
-            <div
-              style={{
-                position: "absolute",
-                right: 10,
-                top: "50%",
-                transform: "translateY(-50%)",
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              {" "}
-              <DictationButton
-                onAppend={appendTranscript}
-                title="Tap to talk"
-                size={38}
-                palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
-              />{" "}
-            </div>{" "}
+            {!loading && (
+              <div
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                {" "}
+                <DictationButton
+                  onAppend={appendTranscript}
+                  title="Tap to talk"
+                  size={38}
+                  palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
+                />{" "}
+              </div>
+            )}{" "}
           </div>{" "}
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             {" "}
