@@ -714,20 +714,37 @@ describe('internal-link dry-run executor helpers', () => {
     expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
   });
 
-  test('fails a task whose PR was closed unmerged (so it leaves pr_open and is requeue/dismiss-able)', async () => {
+  test('fails a closed-unmerged PR task AND clears PR lifecycle fields (so it leaves pr_open and is requeue/dismiss-able)', async () => {
     const instance = new InternalLinkPrExecutor();
     instance._markTaskMerged = jest.fn(async () => {});
-    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    // Capture the real DB update to assert PR lifecycle fields are cleared —
+    // hasPrLifecycle() in the review queue keeps blocking requeue/dismiss
+    // unless astro_pr_url/pr_branch/pr_commit_sha are nulled.
+    let updatePatch = null;
+    const builder = {
+      where: jest.fn(() => builder),
+      whereIn: jest.fn(() => builder),
+      update: jest.fn(async (patch) => { updatePatch = patch; return 1; }),
+    };
+    db.mockReturnValue(builder);
     GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed' });
 
     const result = await instance.verifyMergedTask({
       id: 'task-closed',
       status: 'pr_open',
       astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/178',
+      pr_branch: 'content/internal-link-x',
+      pr_commit_sha: 'deadbeef',
     });
 
     expect(result).toMatchObject({ status: 'failed', failure_reason: 'internal_link_pr_closed_unmerged', pr_number: 178 });
-    expect(instance._markTaskVerificationFailed).toHaveBeenCalledWith('task-closed', 'internal_link_pr_closed_unmerged');
+    expect(updatePatch).toMatchObject({
+      status: 'failed',
+      failure_reason: 'internal_link_pr_closed_unmerged',
+      astro_pr_url: null,
+      pr_branch: null,
+      pr_commit_sha: null,
+    });
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
   });
 
