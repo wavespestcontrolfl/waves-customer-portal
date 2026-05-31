@@ -287,6 +287,7 @@ export default function PublicBookingPage() {
   };
 
   const pickedDayObj = pickedDate && browseDays ? browseDays.find((d) => d.date === pickedDate) : null;
+  const pickedDateHasNoOpenTimes = pickedDate && browseDays && !browseLoading && !pickedDayObj;
 
   const SoftRouteBanner = () => (
     <div style={{
@@ -485,6 +486,11 @@ export default function PublicBookingPage() {
               <div style={{ marginTop: 14 }}>
                 {!pickedDayObj.nearby && <SoftRouteBanner />}
                 {renderDayGroups([pickedDayObj])}
+              </div>
+            )}
+            {pickedDateHasNoOpenTimes && (
+              <div style={{ marginTop: 14, fontSize: 14, color: COLORS.slate600, lineHeight: 1.45 }}>
+                No open times on that date. Try another day, or call (941) 297-5749 and we'll fit you in.
               </div>
             )}
 
