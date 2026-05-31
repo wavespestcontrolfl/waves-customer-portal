@@ -56,6 +56,7 @@ const TYPE_LABELS = {
   one_time_pest_treatment: "One-Time Pest",
   one_time_lawn_treatment: "One-Time Lawn",
   flea: "Flea",
+  cockroach: "Cockroach",
   rodent_exclusion: "Rodent",
   rodent_trapping: "Rodent Trap",
   wildlife_trapping: "Wildlife",

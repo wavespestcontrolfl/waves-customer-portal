@@ -101,6 +101,25 @@ const PROJECT_TYPES = {
     ],
   },
 
+  cockroach: {
+    label: 'Cockroach Treatment',
+    short: 'Cockroach',
+    description: 'Cockroach inspection + treatment — species ID, harborage and conducive conditions, treatment notes, and customer prep.',
+    requiresFollowup: false,
+    photoCategories: ['kitchen', 'bathroom', 'interior', 'exterior', 'entry_point', 'harborage', 'evidence', 'treatment_area', 'other'],
+    findingsFields: [
+      { key: 'species', label: 'Species', type: 'select', options: ['German', 'American', 'Oriental', 'Brown-banded', 'Smoky brown', 'Mixed', 'Unknown'] },
+      { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea', placeholder: 'Kitchen, bathrooms, under appliances, cabinets, drains, garage…' },
+      { key: 'activity_level', label: 'Activity level', type: 'select', options: ['Low', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'harborage_locations', label: 'Harborage locations', type: 'textarea', placeholder: 'Under/behind fridge, dishwasher, sink cabinet, pantry, wall voids…' },
+      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'textarea', placeholder: 'Moisture, food debris, clutter, cardboard, plumbing leaks…' },
+      { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea', placeholder: 'Gel bait, crack & crevice, IGR, dusting, vacuuming…' },
+      { key: 'products_used', label: 'Products used', type: 'textarea' },
+      { key: 'prep_for_customer', label: 'Customer prep / responsibilities', type: 'textarea', placeholder: 'Reduce moisture, store food sealed, remove cardboard, avoid cleaning treated areas…' },
+      { key: 'followup_plan', label: 'Follow-up plan', type: 'textarea' },
+    ],
+  },
+
   rodent_exclusion: {
     label: 'Rodent Exclusion',
     short: 'Rodent',
