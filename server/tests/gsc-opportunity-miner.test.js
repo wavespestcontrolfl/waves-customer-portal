@@ -18,6 +18,7 @@ const {
   inferServiceFromUrl,
   inferCityFromUrl,
   inferCityFromQuery,
+  canonicalizePageUrl,
   inferPageType,
   recomputeCtr,
   gscOpportunityScore,
@@ -96,6 +97,30 @@ describe('URL inference', () => {
   test('returns null on non-service URLs', () => {
     expect(inferServiceFromUrl('https://www.wavespestcontrol.com/about/')).toBeNull();
     expect(inferCityFromUrl('https://www.wavespestcontrol.com/about/')).toBeNull();
+  });
+});
+
+// ── canonicalizePageUrl (collapse GBP/UTM tracking-link variants) ───
+describe('canonicalizePageUrl', () => {
+  test('strips a GBP/UTM tracking query so it collapses to the canonical path', () => {
+    expect(canonicalizePageUrl(
+      'https://www.wavespestcontrol.com/pest-control-sarasota-fl/?utm_source=gbp&utm_medium=organic&utm_campaign=website-link&utm_content=sarasota-profile'
+    )).toBe('https://www.wavespestcontrol.com/pest-control-sarasota-fl/');
+  });
+
+  test('a clean URL is unchanged (and matches its tracking variant)', () => {
+    const clean = 'https://www.wavespestcontrol.com/pest-control-sarasota-fl/';
+    expect(canonicalizePageUrl(clean)).toBe(clean);
+    expect(canonicalizePageUrl(`${clean}?utm_source=gbp`)).toBe(clean);
+  });
+
+  test('strips a fragment as well', () => {
+    expect(canonicalizePageUrl('https://x/p/#section')).toBe('https://x/p/');
+  });
+
+  test('passes through null/empty without throwing', () => {
+    expect(canonicalizePageUrl(null)).toBeNull();
+    expect(canonicalizePageUrl('')).toBe('');
   });
 });
 
