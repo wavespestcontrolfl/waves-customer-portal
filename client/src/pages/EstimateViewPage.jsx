@@ -1696,7 +1696,7 @@ export default function EstimateViewPage() {
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
-                selectedFrequency={selectedFrequency}
+                selectedFrequency={combinedFrequency}
               />
             </>
           ) : null}
@@ -1850,7 +1850,7 @@ export default function EstimateViewPage() {
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
-              selectedFrequency={selectedFrequency}
+              selectedFrequency={combinedFrequency}
             />
           ) : null}
 
