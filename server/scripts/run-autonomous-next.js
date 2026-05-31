@@ -52,7 +52,11 @@ function redactCli(value) {
 (async function main() {
   try {
     console.log(`\n── Autonomous Runner: runNext (${LIVE ? 'LIVE' : 'DRY-RUN'}) ──\n`);
-    const result = await runner.runNext({ dryRun: !LIVE, minScore: MIN_SCORE });
+    // A live single run publishes, so serialize it behind the same engine lock
+    // the daily cron uses — a manual --live run must not overlap the 9am batch
+    // and race the per-day/week caps. Dry runs never publish, so they skip the lock.
+    const runOnce = () => runner.runNext({ dryRun: !LIVE, minScore: MIN_SCORE });
+    const result = LIVE ? await runner._withEngineLock('manual-runNext', runOnce) : await runOnce();
 
     console.log(`Outcome:           ${result.outcome}`);
     if (result.skip_reason) console.log(`Skip reason:       ${redactCli(result.skip_reason)}`);

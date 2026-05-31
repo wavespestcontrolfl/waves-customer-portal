@@ -38,6 +38,15 @@ const logger = require('../logger');
 const { etDateString, parseETDateTime, etWeekStart } = require('../../utils/datetime-et');
 const { THRESHOLDS } = require('./scoring-config');
 
+// Database-wide advisory-lock key for the publishing run. Held for the whole
+// daily batch (and by the manual --live single run) so two autonomous runs
+// never publish concurrently — overlapping runs would each independently honor
+// the per-day/week caps and could exceed them. Within a single locked batch the
+// runNext() calls are sequential, so the cap counts are accurate. The lock is
+// db-wide, so it also serializes across multiple app instances. 0x57415645 =
+// "WAVE" in ASCII; a fixed key shared by every publishing entry point.
+const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+
 // Lazy loaders — keeps the runner usable on any branch in the stack.
 function lazy(name, path) {
   let mod;
@@ -808,6 +817,50 @@ class AutonomousRunner {
    * cap actual live output per action type.
    */
   async runDaily({ limit = null } = {}) {
+    // Serialize the whole batch behind the engine lock so a long batch that
+    // spills past the next cron, a manual --live run, or another instance can't
+    // publish concurrently and blow past the per-day/week caps.
+    return this._withEngineLock('runDaily', () => this._runDailyInner({ limit }));
+  }
+
+  /**
+   * Acquire the database-wide publishing lock for the duration of `fn`.
+   * - lock held by another run  → skip cleanly (returns skipped_locked).
+   * - lock infrastructure error → degrade and run anyway (the per-day/week
+   *   caps still bound output); never block the daily run on a lock hiccup.
+   * Uses a dedicated pooled connection (session-scoped pg_advisory_lock) so the
+   * lock spans external I/O without holding an open transaction; pg auto-clears
+   * the lock if the connection/process dies. We always unlock + release in
+   * finally — a failed unlock implies the connection is gone (lock already
+   * cleared), so the connection can't return to the pool holding a stale lock.
+   */
+  async _withEngineLock(label, fn) {
+    let lockConn = null;
+    let acquired = false;
+    try {
+      lockConn = await db.client.acquireConnection();
+      const res = await lockConn.query('SELECT pg_try_advisory_lock($1) AS locked', [ENGINE_PUBLISH_LOCK_KEY]);
+      acquired = res?.rows?.[0]?.locked === true;
+    } catch (err) {
+      logger.warn(`[autonomous-runner] ${label}: engine lock unavailable (${err.message}); proceeding without it`);
+      if (lockConn) { try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ } }
+      return fn();
+    }
+    if (!acquired) {
+      try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+      logger.warn(`[autonomous-runner] ${label} skipped: another autonomous publishing run holds the engine lock`);
+      return { outcome: 'skipped_locked', skipped: true, reason: 'engine_locked', count: 0, runs: [] };
+    }
+    try {
+      return await fn();
+    } finally {
+      try { await lockConn.query('SELECT pg_advisory_unlock($1)', [ENGINE_PUBLISH_LOCK_KEY]); }
+      catch (err) { logger.warn(`[autonomous-runner] ${label}: advisory unlock failed (${err.message}); lock auto-clears on session end`); }
+      try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+    }
+  }
+
+  async _runDailyInner({ limit = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
     // the whole batch, leaving the rest of the day's queue untouched. Instead,
