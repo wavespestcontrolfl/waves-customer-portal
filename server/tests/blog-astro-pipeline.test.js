@@ -768,17 +768,29 @@ describe('Pages poll build-stall timeout', () => {
     expect(update.update).not.toHaveBeenCalled();
   });
 
-  test('does not time out a pr_open post that already has a preview (awaiting merge, not stalled)', async () => {
+  test('does not time out a pr_open post whose preview build succeeded (awaiting merge, not stalled)', async () => {
+    // A successful preview deployment exists for the branch, so pollPost returns
+    // at the success branch BEFORE the timeout is ever evaluated — even though
+    // the row is old and publishAstro already stamped a (predicted) preview URL.
+    const branch = 'content/blog-awaiting-x';
+    mockCloudflareDeploymentList([{
+      environment: 'preview',
+      url: 'https://abc123.wavespestcontrol-astro.pages.dev',
+      latest_stage: { name: 'deploy', status: 'success' },
+      stages: [{ name: 'deploy', status: 'success' }],
+      deployment_trigger: { metadata: { branch } },
+    }]);
     const update = chain();
     db.mockReturnValue(update);
     const result = await PagesPoll.pollPost({
       id: 'post-1', slug: 'awaiting', astro_status: 'pr_open',
-      astro_branch_name: 'content/blog-awaiting-x', publish_status: 'pending_review',
-      astro_preview_url: 'https://preview.example/',
-      updated_at: new Date(Date.now() - 5 * 3600 * 1000).toISOString(), // old, but preview exists
+      astro_branch_name: branch, publish_status: 'pending_review', // not 'publishing' → no auto-merge
+      astro_preview_url: 'https://predicted.pages.dev/',
+      updated_at: new Date(Date.now() - 5 * 3600 * 1000).toISOString(), // old, but build succeeded
     });
-    expect(result).toMatchObject({ pending: true });
-    expect(update.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true });
+    expect(result.timedOut).toBeUndefined();
+    expect(update.update).not.toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'build_failed' }));
   });
 });
 

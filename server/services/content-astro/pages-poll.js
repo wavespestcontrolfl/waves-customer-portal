@@ -146,14 +146,17 @@ function normalizeSha(value) {
 
 // A pr_open post whose preview build never appears (CF webhook missed, build
 // never triggered) would otherwise poll forever with no signal. If it has sat
-// pr_open with NO preview URL past the timeout, flip it to build_failed so it
-// surfaces (and the build_failed retry path can clean up + republish). Only
-// fires when no preview ever built — a pr_open post that already has a preview
-// is legitimately awaiting merge/review, not stalled. Uses updated_at as the
-// age proxy (publishAstro stamps it at PR open; pending polls don't touch it),
-// erring toward NOT timing out. Default 60m (> a slow preview build), tunable.
+// pr_open past the timeout WITHOUT a successful deployment, flip it to
+// build_failed so it surfaces (and the build_failed retry path can clean up +
+// republish). This is only ever called on the stalled poll paths (no deployment
+// found, or a deployment stuck non-success) — a post whose preview actually
+// succeeded returns at the success branch above, before reaching here, so an
+// awaiting-merge post is never timed out. (We can't gate on astro_preview_url:
+// publishAstro stamps a PREDICTED preview URL at PR-open, so it's always set.)
+// Uses updated_at as the age proxy — stamped at PR open; the stalled poll paths
+// don't touch it — erring toward NOT timing out. Default 60m, env-tunable.
 function buildPollTimedOut(post) {
-  if (post.astro_status !== 'pr_open' || post.astro_preview_url) return false;
+  if (post.astro_status !== 'pr_open') return false;
   const since = timestampMs(post.updated_at);
   if (since == null) return false;
   const envMs = Number(process.env.AUTONOMOUS_CONTENT_BUILD_POLL_TIMEOUT_MS);
