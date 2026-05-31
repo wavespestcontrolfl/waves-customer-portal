@@ -45,4 +45,28 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getAllByText('$99').length).toBeGreaterThan(0);
     expect(screen.getByText('$125')).toBeInTheDocument();
   });
+
+  it('uses same-day treatment total for the first service visit amount', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={{ amount: 99, waivedWithPrepay: true }}
+        selectedFrequency={{
+          key: 'quarterly',
+          monthly: 200,
+          sameDayTreatmentTotal: 125,
+          perServiceTreatments: [
+            { service: 'pest_control', displayPrice: 75 },
+            { service: 'lawn_care', displayPrice: 50 },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('First service visit')).toBeInTheDocument();
+    expect(screen.getByText('$125')).toBeInTheDocument();
+    expect(screen.queryByText('$600')).not.toBeInTheDocument();
+  });
 });

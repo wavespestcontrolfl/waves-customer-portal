@@ -36,13 +36,45 @@ function billingIntervalMonths(frequency = {}) {
   return 1;
 }
 
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function treatmentRowAmount(row = {}) {
+  return firstPositiveNumber(
+    row.displayPrice,
+    row.priceAfterDiscount,
+    row.netPerTreatment,
+    row.price,
+    row.perTreatment,
+    row.perApp,
+    row.perVisit,
+    row.pa,
+  );
+}
+
 function firstVisitAmount(frequency = {}) {
+  const sameDayTreatmentTotal = Number(frequency.sameDayTreatmentTotal);
+  if (Number.isFinite(sameDayTreatmentTotal) && sameDayTreatmentTotal > 0) {
+    return Math.round(sameDayTreatmentTotal * 100) / 100;
+  }
+  const treatments = Array.isArray(frequency.perServiceTreatments) ? frequency.perServiceTreatments : [];
+  const treatmentTotal = treatments.reduce((sum, row) => {
+    const amount = treatmentRowAmount(row);
+    return amount ? sum + amount : sum;
+  }, 0);
+  if (treatmentTotal > 0) return Math.round(treatmentTotal * 100) / 100;
+  const perVisit = firstPositiveNumber(frequency.perVisit, frequency.perApp, frequency.pa);
+  if (perVisit) return Math.round(perVisit * 100) / 100;
   const monthly = Number(frequency.monthly);
   if (Number.isFinite(monthly) && monthly > 0) {
     return Math.round(monthly * billingIntervalMonths(frequency) * 100) / 100;
   }
-  const perVisit = Number(frequency.perVisit || frequency.perApp || frequency.pa);
-  return Number.isFinite(perVisit) && perVisit > 0 ? Math.round(perVisit * 100) / 100 : null;
+  return null;
 }
 
 export default function PaymentPreferenceButtons({
