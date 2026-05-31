@@ -69,7 +69,6 @@ import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
-import ServiceRecapModal from "../../components/ServiceRecapModal";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
 import { Button, Badge, Card, CardBody, cn } from "../../components/ui";
@@ -106,14 +105,6 @@ function shouldOpenMobileCompletion(service) {
 function isProjectBackedCompletion(service) {
   const profile = service?.completionProfile;
   return !!(profile?.projectBacked || profile?.requiresProject);
-}
-
-// Pest control services complete through the lightweight ServiceRecapModal
-// instead of CompletionPanel / CreateProjectModal. Category is the
-// services-table backed signal (completionProfile.category), not the broad
-// detectServiceCategory fallback.
-function isPestControlService(service) {
-  return service?.completionProfile?.category === "pest_control";
 }
 
 function projectCompletionActionLabel(service) {
@@ -1160,7 +1151,6 @@ export default function DispatchPageV2({
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
   const [projectService, setProjectService] = useState(null);
-  const [recapService, setRecapService] = useState(null);
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
@@ -1356,10 +1346,6 @@ export default function DispatchPageV2({
   }, []);
 
   const handleComplete = useCallback((service) => {
-    if (isPestControlService(service)) {
-      setRecapService(service);
-      return;
-    }
     if (isProjectBackedCompletion(service)) {
       if (projectCompletionIsClosed(service)) return;
       if (service?.linkedProject?.id) {
@@ -2262,6 +2248,14 @@ export default function DispatchPageV2({
             }
           }}
           onSubmit={handleCompleteSubmit}
+          onViewDetails={
+            isMobile
+              ? (svc) => {
+                  setCompletingService(null);
+                  setDetailService(svc);
+                }
+              : undefined
+          }
         />
       )}
       {projectService && (
@@ -2282,23 +2276,6 @@ export default function DispatchPageV2({
           onClose={() => setProjectService(null)}
           onCreated={() => {
             setProjectService(null);
-            fetchSchedule(date);
-          }}
-        />
-      )}
-      {recapService && (
-        <ServiceRecapModal
-          theme="light"
-          service={{
-            id: recapService.id,
-            customerName: recapService.customerName,
-            serviceType: recapService.serviceType,
-          }}
-          request={adminFetch}
-          onClose={() => setRecapService(null)}
-          onCompleted={() => {
-            handleStatusChange(recapService.id, "completed");
-            setRecapService(null);
             fetchSchedule(date);
           }}
         />
