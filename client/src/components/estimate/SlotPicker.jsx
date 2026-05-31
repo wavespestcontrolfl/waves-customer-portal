@@ -12,7 +12,6 @@
  */
 import { useEffect, useState } from 'react';
 import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
-import CalendarDatePicker from '../booking/CalendarDatePicker';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -92,9 +91,8 @@ export default function SlotPicker({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showMore, setShowMore] = useState(false);
-  // Custom date/time finder — Waves AI search + 90-day "Find more dates" calendar
+  // Custom date/time finder — Waves AI search + 90-day date picker
   const [searchData, setSearchData] = useState(null);
-  const [showCalendar, setShowCalendar] = useState(false);
   const [pickedDate, setPickedDate] = useState(null);
   const [pickedData, setPickedData] = useState(null);
   const [pickedLoading, setPickedLoading] = useState(false);
@@ -105,7 +103,6 @@ export default function SlotPicker({
     setError(null);
     setShowMore(false);
     setSearchData(null);
-    setShowCalendar(false);
     setPickedDate(null);
     setPickedData(null);
     const params = new URLSearchParams();
@@ -147,15 +144,15 @@ export default function SlotPicker({
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
     setPickedDate(null);
-    setShowCalendar(false);
     setSearchData(body);
     return { summary: body.summary };
   };
 
-  const onPickCalendarDate = async (date) => {
+  const onPickDate = async (date) => {
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
+    if (!date) return;
     setPickedLoading(true);
     try {
       const p = freqParams();
@@ -205,30 +202,28 @@ export default function SlotPicker({
         onSearch={runAiSearch}
       />
       {searchData ? <div>{renderSlotList(searchData)}</div> : null}
-      <button
-        type="button"
-        onClick={() => setShowCalendar((v) => !v)}
-        style={{
-          padding: '10px 16px', background: 'transparent', color: W.blueDeeper,
-          border: `1px solid ${W.blueDeeper}`, borderRadius: 12, cursor: 'pointer',
-          fontSize: 14, fontWeight: 600, width: '100%',
-        }}
-      >
-        {showCalendar ? 'Hide calendar' : 'Find more dates'}
-      </button>
-      {showCalendar ? (
-        <div style={{ display: 'grid', gap: 12 }}>
-          <CalendarDatePicker
-            theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white }}
-            minDate={browseMin}
-            maxDate={browseMax}
-            selectedDate={pickedDate}
-            onPick={onPickCalendarDate}
-          />
-          {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption }}>Loading times…</div> : null}
-          {pickedData ? <div>{renderSlotList(pickedData)}</div> : null}
+      <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.offWhite }}>
+        <label style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
+          Can't find a date? Pick one that works for you.
+        </label>
+        <input
+          type="date"
+          min={browseMin}
+          max={browseMax}
+          placeholder="mm/dd/yyyy"
+          value={pickedDate || ''}
+          onChange={(e) => onPickDate(e.target.value)}
+          style={{
+            width: '100%', border: `1px solid ${W.border}`, borderRadius: 10,
+            padding: '12px 14px', fontSize: 15, color: W.navy, background: W.white,
+          }}
+        />
+        <div style={{ fontSize: 12, color: W.textCaption, marginTop: 8 }}>
+          We'll check open windows up to 90 days out.
         </div>
-      ) : null}
+      </div>
+      {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption }}>Loading times…</div> : null}
+      {pickedData ? <div>{renderSlotList(pickedData)}</div> : null}
     </div>
   );
 
