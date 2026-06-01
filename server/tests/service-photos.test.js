@@ -29,7 +29,7 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-function makeKnex({ existing = null, insertError = null } = {}) {
+function makeKnex({ existing = null, insertError = null, isTransaction = false } = {}) {
   let insertPayload = null;
   const columnInfo = {
     service_record_id: {},
@@ -66,7 +66,8 @@ function makeKnex({ existing = null, insertError = null } = {}) {
     };
     return chain;
   });
-  knex.transaction = async (handler) => handler(knex);
+  knex.transaction = jest.fn(async (handler) => handler(knex));
+  if (isTransaction) knex.isTransaction = true;
   knex.getInsertPayload = () => insertPayload;
   return knex;
 }
@@ -142,6 +143,25 @@ describe('service photo uploads', () => {
     expect(mockS3Send.mock.calls[1][0].constructor.name).toBe('DeleteObjectCommand');
     expect(mockS3Send.mock.calls[1][0].input).toMatchObject({
       Bucket: 'service-photo-bucket',
+    });
+  });
+
+  test('uses the caller transaction when provided', async () => {
+    const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+    const trx = makeKnex({ isTransaction: true });
+
+    const result = await uploadServicePhotoDataUrls({
+      serviceRecordId: 'record-1',
+      photos: [{ data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after.jpg' }],
+      knex: trx,
+    });
+
+    expect(result.uploaded).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(trx.transaction).not.toHaveBeenCalled();
+    expect(trx.getInsertPayload()).toMatchObject({
+      service_record_id: 'record-1',
+      photo_type: 'after',
     });
   });
 });

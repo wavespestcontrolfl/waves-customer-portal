@@ -94,6 +94,11 @@ async function deleteUploadedObject(key) {
   }
 }
 
+async function withPhotoDbTransaction(knex, handler) {
+  if (knex?.isTransaction) return handler(knex);
+  return knex.transaction(handler);
+}
+
 async function uploadServicePhotoBuffer({
   serviceRecordId,
   buffer,
@@ -181,7 +186,7 @@ async function uploadServicePhotoBuffer({
   let row;
 
   try {
-    await knex.transaction(async (trx) => {
+    await withPhotoDbTransaction(knex, async (trx) => {
       const insert = {
         service_record_id: serviceRecordId,
         photo_type: photoType,
@@ -257,7 +262,12 @@ async function uploadServicePhotoDataUrls({
       });
       rows.push(row);
     } catch (err) {
-      errors.push({ index, message: err.message || 'Photo upload failed' });
+      errors.push({
+        index,
+        message: err.message || 'Photo upload failed',
+        statusCode: err.statusCode || null,
+        code: err.code || null,
+      });
     }
   }
   return {

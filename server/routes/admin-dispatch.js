@@ -266,6 +266,7 @@ const VALID_VISIT_OUTCOMES = new Set([
   'customer_concern',
   'incomplete',
 ]);
+const TREE_SHRUB_MIN_CLOSEOUT_PHOTOS = 2;
 
 const CUSTOMER_INTERACTION_ALIASES = {
   spoke: 'tech_home_spoke_with_them',
@@ -337,6 +338,17 @@ async function loadSubmittedCatalogProducts(submittedProducts = []) {
     .whereIn('id', productIds)
     .select('*')
     .catch(() => []);
+}
+
+function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
+  const errors = Array.isArray(uploadResult?.errors) ? uploadResult.errors : [];
+  const hasServerSideFailure = errors.some((err) => !err.statusCode || Number(err.statusCode) >= 500);
+  const err = new Error(`At least ${minimum} Tree/Shrub closeout photos must upload before closeout.`);
+  err.statusCode = hasServerSideFailure ? 503 : 400;
+  err.isOperational = true;
+  err.code = 'tree_shrub_closeout_photos_upload_required';
+  err.details = errors.map((entry) => entry.message).filter(Boolean);
+  return err;
 }
 
 function formatRescheduleTemplateVars(svc) {
@@ -1480,6 +1492,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const isIncompleteVisit = visitOutcome === 'incomplete';
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
+    let completionPhotosUploadedBeforeCommit = false;
     const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
@@ -1538,6 +1551,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
+    const treeShrubCloseoutRequired = !isIncompleteVisit && ['tree_shrub', 'palm'].includes(reportServiceLine);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -1588,7 +1602,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
 
-    if (claim.action === 'proceed' && !isIncompleteVisit && ['tree_shrub', 'palm'].includes(reportServiceLine)) {
+    if (claim.action === 'proceed' && treeShrubCloseoutRequired) {
       const treeShrubProductRows = await loadSubmittedCatalogProducts(products);
       const treeShrubValidation = validateTreeShrubCloseout({
         service: svc,
@@ -2178,6 +2192,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .update({ structured_notes: serializeJsonb(record.structured_notes) });
         }
 
+        if (treeShrubCloseoutRequired) {
+          completionPhotoUploadResult = await uploadServicePhotoDataUrls({
+            serviceRecordId: record.id,
+            photos: completionPhotos,
+            photoType: 'after',
+            knex: trx,
+          });
+          if (completionPhotoUploadResult.uploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
+            throw treeShrubPhotoUploadRequiredError(
+              completionPhotoUploadResult,
+              TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
+            );
+          }
+          completionPhotosUploadedBeforeCommit = true;
+          const photoNotes = {
+            ...parseJsonObject(record.structured_notes),
+            completionPhotos: {
+              uploaded: completionPhotoUploadResult.uploaded,
+              failed: completionPhotoUploadResult.failed,
+              uploadedAt: new Date().toISOString(),
+              requiredMinimum: TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
+            },
+          };
+          record.structured_notes = photoNotes;
+          await trx('service_records')
+            .where({ id: record.id })
+            .update({ structured_notes: serializeJsonb(photoNotes) });
+        }
+
         // 3. Lifecycle timestamps the route owns. transitionJobStatus
         // owns status + updated_at; we own the service timing columns
         // on the same row.
@@ -2286,7 +2329,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
 
-    if (Array.isArray(completionPhotos) && completionPhotos.length) {
+    if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
       completionPhotoUploadResult = await uploadServicePhotoDataUrls({
         serviceRecordId: record.id,
         photos: completionPhotos,
