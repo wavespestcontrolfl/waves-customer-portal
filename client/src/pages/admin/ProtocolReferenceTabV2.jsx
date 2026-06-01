@@ -113,6 +113,23 @@ function TierDotsV2({ tiers, tier4x, tier6x }) {
   );
 }
 
+function formatProtocolCost(value) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (Number.isFinite(n)) return `$${n.toFixed(2)}`;
+  return String(value);
+}
+
+function visitSopText(visit) {
+  return [
+    visit.visit_type ? `Visit type: ${visit.visit_type}` : null,
+    visit.main_goal ? `Goal: ${visit.main_goal}` : null,
+    stripLegacyBoilerplate(visit.notes),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function CurrentVisitCardV2({ visit, trackName }) {
   if (!visit) return null;
   const primaryProducts = parseProductLines(visit.primary);
@@ -161,6 +178,20 @@ function CurrentVisitCardV2({ visit, trackName }) {
         />{" "}
       </div>{" "}
       <div className="px-4 py-3">
+        {(visit.visit_type || visit.main_goal) && (
+          <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
+            {visit.visit_type && (
+              <div className="text-11 font-medium u-label text-ink-tertiary mb-1">
+                {visit.visit_type}
+              </div>
+            )}
+            {visit.main_goal && (
+              <div className="text-12 text-ink-secondary leading-normal">
+                {visit.main_goal}
+              </div>
+            )}
+          </div>
+        )}
         {" "}
         <div className="mb-3">
           {" "}
@@ -225,7 +256,7 @@ function CurrentVisitCardV2({ visit, trackName }) {
           <div className="text-12 text-ink-tertiary">
             Legacy Mat:{" "}
             <span className="font-mono u-nums text-ink-primary font-medium">
-              {costLabel(visit.material_cost)}
+              {formatProtocolCost(visit.material_cost)}
             </span>{" "}
             <span className="text-10 text-ink-tertiary ml-1">
               reference
@@ -234,7 +265,7 @@ function CurrentVisitCardV2({ visit, trackName }) {
           <div className="text-12 text-ink-tertiary">
             Labor:{" "}
             <span className="font-mono u-nums text-ink-primary font-medium">
-              {costLabel(visit.labor_cost)}
+              {formatProtocolCost(visit.labor_cost)}
             </span>{" "}
           </div>
           {hasNumericCost && (
@@ -722,7 +753,7 @@ export default function ProtocolReferenceTabV2() {
     (isServiceProgram ? trackData?.visits?.[0] : null);
   const safetyRules = isLawnTrack
     ? TRACK_SAFETY_RULES[selectedTrack] || []
-    : [];
+    : trackData?.safety_rules || [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -1040,10 +1071,10 @@ export default function ProtocolReferenceTabV2() {
                             {!v.secondary && "\u2014"}
                           </td>{" "}
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
-                            {v.material_cost ? `$${v.material_cost}` : "\u2014"}
+                            {formatProtocolCost(v.material_cost)}
                           </td>{" "}
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
-                            {v.labor_cost ? `$${v.labor_cost}` : "\u2014"}
+                            {formatProtocolCost(v.labor_cost)}
                           </td>{" "}
                           <td className="px-2.5 py-2 align-top">
                             {" "}
@@ -1054,7 +1085,7 @@ export default function ProtocolReferenceTabV2() {
                             />{" "}
                           </td>{" "}
                           <td className="px-2.5 py-2 text-11 text-ink-tertiary whitespace-pre-wrap align-top">
-                            {stripLegacyBoilerplate(v.notes) || "\u2014"}
+                            {visitSopText(v) || "\u2014"}
                           </td>{" "}
                         </tr>
                       );

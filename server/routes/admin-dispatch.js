@@ -41,6 +41,7 @@ const {
   recordLawnProtocolCompletion,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
+const { validateTreeShrubCloseout } = require('../services/tree-shrub-closeout');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
@@ -327,6 +328,15 @@ function toETNoonServiceDate(value) {
 
 function serviceDateOnly(value) {
   return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
+}
+
+async function loadSubmittedCatalogProducts(submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p?.productId).filter(Boolean))];
+  if (!productIds.length) return [];
+  return db('products_catalog')
+    .whereIn('id', productIds)
+    .select('*')
+    .catch(() => []);
 }
 
 function formatRescheduleTemplateVars(svc) {
@@ -1425,6 +1435,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       invoiceAlreadySent = false,
       lawnAssessmentId = null,
       lawnProtocolCompletion = null,
+      treeShrubCompletion = null,
       completionPhotos = [],
       clientPestRating = null,
     } = req.body;
@@ -1485,6 +1496,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let inventoryDeductions = [];
     let waveguardEquipmentSystemId = equipmentSystemId || null;
     let waveguardCalibrationId = calibrationId || null;
+    let treeShrubCloseoutSummary = null;
+    let treeShrubCloseoutWarnings = [];
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -1574,6 +1587,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    if (claim.action === 'proceed' && !isIncompleteVisit && ['tree_shrub', 'palm'].includes(reportServiceLine)) {
+      const treeShrubProductRows = await loadSubmittedCatalogProducts(products);
+      const treeShrubValidation = validateTreeShrubCloseout({
+        service: svc,
+        serviceLine: reportServiceLine,
+        serviceDate: serviceDateOnly(svc.scheduled_date),
+        completion: treeShrubCompletion,
+        products: products || [],
+        productRows: treeShrubProductRows,
+        completionPhotos,
+        customerRecap,
+        technicianNotes,
+      });
+      if (!treeShrubValidation.ok) {
+        const validationErr = new Error('Tree/Shrub closeout lockout');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+        return res.status(400).json({
+          error: 'Tree/Shrub protocol closeout required',
+          code: 'tree_shrub_closeout_lockout',
+          details: treeShrubValidation.blocks.map((block) => block.message),
+          blocks: treeShrubValidation.blocks,
+          warnings: treeShrubValidation.warnings,
+        });
+      }
+      treeShrubCloseoutSummary = treeShrubValidation.normalized;
+      treeShrubCloseoutWarnings = treeShrubValidation.warnings || [];
+    }
 
     if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
       const plan = await buildPlanForService(svc.id, {
@@ -1779,6 +1820,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardNLimitApproval,
             waveguardManagerApproval,
             waveguardTankCleanout,
+            ...(treeShrubCloseoutSummary ? {
+              treeShrubCloseout: treeShrubCloseoutSummary,
+              treeShrubCloseoutWarnings,
+            } : {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
