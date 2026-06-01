@@ -1700,13 +1700,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
         waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
       }
-      // Tank cleanout attestation is required whenever an equipment system is
-      // actually in use — keyed off equipment use, not calibration validity —
-      // mirroring CompletionPanel's tankCleanoutRequired gate (`!!equipmentSystemId`).
-      // A tech can complete with no equipment selected (the calibration-bypass
-      // unblock), but if they used a system — even one whose calibration is
-      // expired/unverified — the tank must still be attested.
-      if (waveguardEquipmentSystemId) {
+      // Tank cleanout attestation is required only when the tech actually
+      // submitted an equipment system. We key off the raw request `equipmentSystemId`
+      // — NOT the backfilled `waveguardEquipmentSystemId`, which may be repopulated
+      // from a stale `assigned_equipment_system_id` the tech never chose — so this
+      // exactly mirrors CompletionPanel's tankCleanoutRequired gate (`!!equipmentSystemId`),
+      // which is also what drives whether the UI even renders the cleanout fields.
+      // Submitting no equipment (the calibration-bypass unblock) skips it; submitting
+      // any system — verified or not — still requires the tank attestation.
+      if (equipmentSystemId) {
         const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
         if (cleanoutBlocks.length) {
           const validationErr = new Error('WaveGuard tank cleanout lockout');
