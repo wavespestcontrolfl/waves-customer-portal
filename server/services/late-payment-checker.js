@@ -2,8 +2,8 @@
  * Late Payment Checker
  *
  * Runs daily (weekdays 10AM) via cron. Searches the portal's invoices table
- * for unpaid invoices 7+ days overdue, sends tiered reminder SMS via Twilio,
- * and logs each send to avoid duplicate reminders.
+ * for unpaid invoices 7+ days overdue, sends tiered reminder SMS + matching
+ * transactional email, and logs each send to avoid duplicate reminders.
  */
 
 const db = require('../models/db');
@@ -119,6 +119,25 @@ const LatePaymentService = {
         });
         if (sendResult.blocked || sendResult.sent === false) {
           throw new Error(`late payment SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+        }
+        try {
+          const BalanceReminder = require('./workflows/balance-reminder');
+          if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
+            await BalanceReminder.sendLatePaymentEmail({
+              customer,
+              invoice: inv,
+              balance: {
+                totalBalance: totalAmount,
+                oldestDueDate: inv.due_date || inv.created_at,
+              },
+              smsTemplateKey: templateKey,
+              invoiceTitle,
+              serviceDateClause: dateClause,
+              payUrl,
+            });
+          }
+        } catch (emailErr) {
+          logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
         }
         notified++;
         logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
