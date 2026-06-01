@@ -17,6 +17,10 @@ const SERVICE_QUESTION_RE = /\b(typical visit|outline of the service|what'?s inc
 const GENERAL_ESTIMATE_QUESTION_RE = /\b(how much|fees?|price|pricing|cost|bundle|bundled|add that|add .*later|come inside|inside|safe for pets?|new estimate|proceed with (a )?service)\b|\?/i;
 const SERVICE_SCHEDULING_PROMPT_RE = /\b(availability|available|what availability|what works|what time|what day|can y'?all do|can you do|does .* work|appointment|schedule|reschedule|adjust around your schedule|route)\b/i;
 const TIME_AVAILABILITY_RE = /\b([1-9]|1[0-2])(?::[0-5]\d)?\s?(a\.?m\.?|p\.?m\.?)?\b|\b(morning|afternoon|evening|midday|noon|early|late)\b/i;
+const WEATHER_RE = /\b(rain|raining|storm|weather|wash(ed)? out|radar|lightning|thunder)\b/i;
+const RESCHEDULE_RE = /\b(reschedule|move|push|change|adjust)\b/i;
+const TIME_TOKEN_RE = /\b([1-9]|1[0-2])(?::[0-5]\d)?\s?(a\.?m\.?|p\.?m\.?)\b|\b(morning|afternoon|evening|midday|noon)\b/ig;
+const DAY_TOKEN_RE = /\b(today|tomorrow|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig;
 
 function normalizePhoneLast10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -169,7 +173,9 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
   const scheduleWindow = SCHEDULE_WINDOW_RE.test(text);
   const activeSchedulingThread = hasActiveServiceSchedulingThread(context.recentSmsThread);
   const availabilityReply = scheduleWindow || (activeSchedulingThread && TIME_AVAILABILITY_RE.test(text));
-  if (!hasCustomer || !availabilityReply || accepted || (hasEstimate && !activeSchedulingThread)) {
+  const weatherMention = WEATHER_RE.test(text);
+  const rainReschedule = weatherMention && (RESCHEDULE_RE.test(text) || activeSchedulingThread);
+  if (!hasCustomer || !(availabilityReply || rainReschedule) || accepted || (hasEstimate && !activeSchedulingThread)) {
     return {
       intent: null,
       confidence: 0,
@@ -183,9 +189,11 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
   }
 
   const firstName = firstNameFrom(context.customer?.first_name || context.customer?.name);
+  const scenarioLabel = classifyServiceSchedulingScenario(text, { activeSchedulingThread, rainReschedule });
+  const offeredWindows = extractOfferedSchedulingWindows(text);
   return {
-    intent: 'service_scheduling_window_reply',
-    confidence: 0.86,
+    intent: rainReschedule ? 'service_reschedule_weather_question' : 'service_scheduling_window_reply',
+    confidence: rainReschedule ? 0.82 : 0.86,
     recommendedActions: [
       'draft_service_scheduling_reply',
       'check_route_availability',
@@ -203,11 +211,61 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
       'never_create_subscription',
       'never_charge_card',
     ],
-    suggestedMessage: `Hello ${firstName}! That helps. I can check the route for those windows and confirm the best available option before locking anything in.`,
+    suggestedMessage: buildServiceSchedulingDraft({ firstName, scenarioLabel, offeredWindows }),
     reasoningSummary: activeSchedulingThread
       ? 'existing customer text answers a recent service scheduling prompt; route as service scheduling, not estimate conversion.'
       : 'existing customer text references service availability or a scheduling window; route as service scheduling, not estimate conversion.',
+    metadata: {
+      scenarioLabel,
+      offeredWindows,
+    },
   };
+}
+
+function classifyServiceSchedulingScenario(text, { activeSchedulingThread = false, rainReschedule = false } = {}) {
+  if (rainReschedule) return 'rain_reschedule';
+  const dayMatches = Array.from(String(text || '').matchAll(DAY_TOKEN_RE));
+  const timeMatches = Array.from(String(text || '').matchAll(TIME_TOKEN_RE));
+  if (dayMatches.length > 1 || (dayMatches.length >= 1 && timeMatches.length > 1)) return 'scheduling_multi_window';
+  if (activeSchedulingThread && timeMatches.length && !dayMatches.length) return 'scheduling_time_only';
+  return 'scheduling_general';
+}
+
+function extractOfferedSchedulingWindows(text) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return [];
+  const pieces = normalized
+    .split(/\s*(?:,|;|\bor\b|\bthen\b|\bif you're not free then\b|\bif you are not free then\b)\s*/i)
+    .map((piece) => piece.trim().replace(/[.?!]+$/g, ''))
+    .filter((piece) => piece.length >= 3)
+    .filter((piece) => SCHEDULE_WINDOW_RE.test(piece) || TIME_AVAILABILITY_RE.test(piece));
+  return [...new Set(pieces)].slice(0, 4);
+}
+
+function buildServiceSchedulingDraft({ firstName, scenarioLabel, offeredWindows = [] } = {}) {
+  const name = firstName || 'there';
+  const windows = offeredWindows.filter(Boolean);
+  if (scenarioLabel === 'rain_reschedule') {
+    return `Hello ${name}! I see the weather concern. I can check the radar and route timing before deciding whether we need to adjust the appointment.`;
+  }
+  if (scenarioLabel === 'scheduling_time_only' && windows.length) {
+    return `Hello ${name}! ${windows[0]} helps. I can check the route timing and confirm whether that window works before locking it in.`;
+  }
+  if (scenarioLabel === 'scheduling_multi_window' && windows.length) {
+    const list = formatWindowList(windows);
+    return `Hello ${name}! Thanks, ${list} gives us good options. I can check the route and confirm the best available window before locking anything in.`;
+  }
+  if (windows.length) {
+    return `Hello ${name}! ${formatWindowList(windows)} should help. I can check the route and confirm the best available option before locking anything in.`;
+  }
+  return `Hello ${name}! That helps. I can check the route and confirm the best available option before locking anything in.`;
+}
+
+function formatWindowList(items = []) {
+  const clean = items.map((item) => String(item || '').trim()).filter(Boolean);
+  if (clean.length <= 1) return clean[0] || 'that window';
+  if (clean.length === 2) return `${clean[0]} or ${clean[1]}`;
+  return `${clean.slice(0, -1).join(', ')}, or ${clean[clean.length - 1]}`;
 }
 
 function hasActiveServiceSchedulingThread(thread = []) {
@@ -423,6 +481,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         ...buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCode }),
         routing: { workflow },
         recent_sms_thread: recentSmsThread,
+        reply_training_hint: decision.metadata || null,
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
@@ -459,6 +518,9 @@ module.exports = {
   routeEstimateOrCustomerReply,
   _test: {
     buildInputSnapshot,
+    buildServiceSchedulingDraft,
+    classifyServiceSchedulingScenario,
+    extractOfferedSchedulingWindows,
     confidenceLabel,
     hasActiveServiceSchedulingThread,
     resolveRecentSmsThread,

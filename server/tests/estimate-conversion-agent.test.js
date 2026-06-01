@@ -103,7 +103,11 @@ describe('estimate conversion agent shadow decisions', () => {
     expect(routed.decision).toMatchObject({
       intent: 'service_scheduling_window_reply',
       confidence: expect.any(Number),
-      suggestedMessage: expect.stringContaining('check the route'),
+      suggestedMessage: expect.stringContaining('Wednesday'),
+      metadata: {
+        scenarioLabel: 'scheduling_multi_window',
+        offeredWindows: expect.arrayContaining(['Wednesday']),
+      },
     });
     expect(routed.decision.recommendedActions).toEqual(expect.arrayContaining([
       'draft_service_scheduling_reply',
@@ -156,8 +160,40 @@ describe('estimate conversion agent shadow decisions', () => {
       ],
     };
 
-    expect(routeEstimateOrCustomerReply('9am works', context).workflow).toBe('service_scheduling_sms');
-    expect(routeEstimateOrCustomerReply('morning is fine', context).workflow).toBe('service_scheduling_sms');
+    const timeOnly = routeEstimateOrCustomerReply('9am works', context);
+    const partOfDay = routeEstimateOrCustomerReply('morning is fine', context);
+
+    expect(timeOnly.workflow).toBe('service_scheduling_sms');
+    expect(timeOnly.decision.metadata.scenarioLabel).toBe('scheduling_time_only');
+    expect(timeOnly.decision.suggestedMessage).toContain('9am');
+    expect(partOfDay.workflow).toBe('service_scheduling_sms');
+    expect(partOfDay.decision.metadata.scenarioLabel).toBe('scheduling_time_only');
+    expect(partOfDay.decision.suggestedMessage).toContain('morning');
+  });
+
+  test('weather reschedule texts get a weather-specific scheduling draft', () => {
+    const routed = routeEstimateOrCustomerReply('Looks like rain is headed here. Do we need to reschedule?', {
+      customer: { id: 'customer-1', first_name: 'Dale' },
+      recentSmsThread: [
+        { direction: 'outbound', body: 'We are on the route this morning.' },
+      ],
+    });
+
+    expect(routed.workflow).toBe('service_scheduling_sms');
+    expect(routed.decision).toMatchObject({
+      intent: 'service_reschedule_weather_question',
+      metadata: { scenarioLabel: 'rain_reschedule' },
+      suggestedMessage: expect.stringContaining('weather concern'),
+    });
+  });
+
+  test('bare reschedule request is not mislabeled as weather reschedule', () => {
+    const routed = routeEstimateOrCustomerReply('Can we reschedule?', {
+      customer: { id: 'customer-1', first_name: 'Dale' },
+    });
+
+    expect(routed.workflow).toBe('estimate_conversion_sms');
+    expect(routed.decision.intent).toBeNull();
   });
 
   test('service scheduling classifier requires an existing customer scheduling signal', () => {
