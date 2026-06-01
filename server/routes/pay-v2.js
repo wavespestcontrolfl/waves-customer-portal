@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
+const { shouldSkipClientPaymentErrorAlert } = require('./pay-v2-helpers');
 
 /**
  * Public pay routes — no auth required.
@@ -582,6 +583,9 @@ router.post('/:token/error', clientPaymentErrorLimiter, async (req, res) => {
   try {
     const invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (shouldSkipClientPaymentErrorAlert(invoice)) {
+      return res.json({ success: true, skipped: true, reason: 'non_collectible' });
+    }
 
     const body = req.body || {};
     const message = cleanField(body.message || body.error || 'Payment form error');
