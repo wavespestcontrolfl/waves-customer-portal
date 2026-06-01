@@ -1990,7 +1990,7 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
         'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
         'scheduled_services.source_estimate_id',
-        'customers.first_name', 'customers.last_name', 'customers.address', 'customers.city', 'customers.zip',
+        'customers.first_name', 'customers.last_name', 'customers.address_line1 as address', 'customers.city', 'customers.zip',
         'technicians.name as tech_name'
       )
       .orderBy('scheduled_services.scheduled_date')
