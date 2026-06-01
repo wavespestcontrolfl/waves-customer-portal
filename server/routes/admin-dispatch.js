@@ -36,7 +36,10 @@ const { buildServiceReportDynamicContext } = require('../services/service-report
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
-const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+const {
+  cleanupUploadedServicePhotoObjects,
+  uploadServicePhotoDataUrls,
+} = require('../services/service-photos');
 const {
   recordLawnProtocolCompletion,
   normalizeCompletionForStructuredNotes,
@@ -1493,6 +1496,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
+    let preCommitCompletionPhotoRows = [];
     const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
@@ -2199,6 +2203,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             photoType: 'after',
             knex: trx,
           });
+          preCommitCompletionPhotoRows = completionPhotoUploadResult.photos || [];
           if (completionPhotoUploadResult.uploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
             throw treeShrubPhotoUploadRequiredError(
               completionPhotoUploadResult,
@@ -2314,6 +2319,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
         durableCompletionCommitted = true;
       } catch (err) {
+        if (preCommitCompletionPhotoRows.length) {
+          await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
+          preCommitCompletionPhotoRows = [];
+        }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
           return res.status(409).json({

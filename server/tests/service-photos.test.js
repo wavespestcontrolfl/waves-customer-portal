@@ -164,4 +164,23 @@ describe('service photo uploads', () => {
       photo_type: 'after',
     });
   });
+
+  test('cleans up uploaded S3 objects by unique storage key', async () => {
+    const { cleanupUploadedServicePhotoObjects } = require('../services/service-photos');
+
+    const result = await cleanupUploadedServicePhotoObjects([
+      { s3_key: 'service-photos/record-1/a.jpg' },
+      { storage_key: 'service-photos/record-1/b.jpg' },
+      { s3_key: 'service-photos/record-1/a.jpg' },
+      {},
+    ]);
+
+    expect(result.deleted).toBe(2);
+    expect(mockS3Send).toHaveBeenCalledTimes(2);
+    expect(mockS3Send.mock.calls.map((call) => call[0].input.Key)).toEqual([
+      'service-photos/record-1/a.jpg',
+      'service-photos/record-1/b.jpg',
+    ]);
+    expect(mockS3Send.mock.calls.every((call) => call[0].constructor.name === 'DeleteObjectCommand')).toBe(true);
+  });
 });

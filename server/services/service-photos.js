@@ -94,6 +94,19 @@ async function deleteUploadedObject(key) {
   }
 }
 
+async function cleanupUploadedServicePhotoObjects(photos = []) {
+  const seen = new Set();
+  let deleted = 0;
+  for (const photo of photos || []) {
+    const key = photo?.s3_key || photo?.storage_key;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    await deleteUploadedObject(key);
+    deleted += 1;
+  }
+  return { deleted };
+}
+
 async function withPhotoDbTransaction(knex, handler) {
   if (knex?.isTransaction) return handler(knex);
   return knex.transaction(handler);
@@ -283,6 +296,7 @@ module.exports = {
   MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
   SERVICE_PHOTO_PREFIX,
   VALID_PHOTO_TYPES,
+  cleanupUploadedServicePhotoObjects,
   decodeDataUrlPhoto,
   safePhotoName,
   uploadServicePhotoBuffer,
