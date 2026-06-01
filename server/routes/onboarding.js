@@ -45,6 +45,32 @@ function billingCadenceForSession(session, estimate) {
   });
 }
 
+function formatOnboardingServiceDate(value) {
+  if (!value) return 'TBD';
+  let date;
+  if (value instanceof Date) {
+    date = new Date(Date.UTC(
+      value.getUTCFullYear(),
+      value.getUTCMonth(),
+      value.getUTCDate(),
+      12,
+    ));
+  } else {
+    date = new Date(`${String(value).slice(0, 10)}T12:00:00`);
+  }
+  if (Number.isNaN(date.getTime())) return 'TBD';
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'America/New_York',
+  });
+}
+
+function onboardingTechClause(svc) {
+  const techName = String(svc?.tech_name || '').trim();
+  return techName ? ` with ${techName}` : '';
+}
+
 async function sendOnboardingSms(customer, body, metadata = {}) {
   if (!customer?.phone || !customer?.id) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
@@ -583,7 +609,7 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
       .orderBy('scheduled_date', 'asc')
       .first();
 
-    const svcDate = svc ? new Date(svc.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }) : 'TBD';
+    const svcDate = formatOnboardingServiceDate(svc?.scheduled_date);
 
     // Welcome SMS
     try {
@@ -591,7 +617,7 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
         first_name: c.first_name || 'there',
         service_type: s.service_type,
         service_date: svcDate,
-        tech_clause: svc ? ` with ${svc.tech_name}` : '',
+        tech_clause: onboardingTechClause(svc),
       }, {
         workflow: 'onboarding_welcome',
         entity_type: 'onboarding_session',
@@ -630,5 +656,10 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
     res.json({ success: true, portalUrl: 'https://portal.wavespestcontrol.com' });
   } catch (err) { next(err); }
 });
+
+router._private = {
+  formatOnboardingServiceDate,
+  onboardingTechClause,
+};
 
 module.exports = router;
