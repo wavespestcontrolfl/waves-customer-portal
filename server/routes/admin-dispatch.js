@@ -1480,6 +1480,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardBlackoutApproval = null;
     let waveguardNLimitApproval = null;
     let waveguardManagerApproval = null;
+    let waveguardCalibrationAdvisory = null;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
     let inventoryDeductions = [];
@@ -1582,15 +1583,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
       waveguardPlan = plan;
       const calibrationBlocks = calibrationLockoutBlocks(plan);
-      if (calibrationBlocks.length) {
-        const validationErr = new Error('Equipment calibration lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Equipment calibration lockout',
-          code: 'waveguard_calibration_lockout',
-          details: calibrationBlocks.map((block) => block.message),
-          blocks: calibrationBlocks,
-        });
+      // Calibration is advisory at completion, not a hard gate (mirrors
+      // CompletionPanel's calibrationAdvisory): the tech acknowledges the warning
+      // client-side and may complete a WaveGuard lawn visit without field-verified
+      // equipment. Record the bypass for audit instead of returning a 400 lockout
+      // that would trap the tech on the screen.
+      const calibrationBypass = calibrationBlocks.length > 0;
+      if (calibrationBypass) {
+        waveguardCalibrationAdvisory = {
+          acknowledged: true,
+          acknowledgedByTechnicianId: req.technicianId,
+          acknowledgedByRole: req.techRole || null,
+          acknowledgedAt: new Date().toISOString(),
+          blocks: calibrationBlocks.map((block) => ({
+            code: block.code,
+            message: block.message,
+            source: block.source || null,
+          })),
+        };
       }
       const blackoutBlocks = [
         ...blackoutLockoutBlocks(plan),
@@ -1683,31 +1693,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         });
       }
       const selectedCalibration = plan?.equipmentCalibration?.selected;
-      if (selectedCalibration) {
+      // Only adopt the plan's calibration when it's valid (no bypass). On a
+      // calibration bypass we keep whatever the tech explicitly passed (usually
+      // none) rather than recording an auto-picked, non-verified system as used.
+      if (selectedCalibration && !calibrationBypass) {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
         waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
       }
-      const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
-      if (cleanoutBlocks.length) {
-        const validationErr = new Error('WaveGuard tank cleanout lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Tank cleanout record required',
-          code: 'waveguard_tank_cleanout_lockout',
-          details: cleanoutBlocks.map((block) => block.message),
-          blocks: cleanoutBlocks,
-        });
+      // Tank cleanout attestation is only required when field-verified equipment
+      // is actually in use — mirrors CompletionPanel's tankCleanoutRequired gate
+      // (which keys off a selected calibration). With a calibration bypass there
+      // is no tank to attest, so skip the lockout instead of trapping the tech.
+      if (!calibrationBypass) {
+        const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
+        if (cleanoutBlocks.length) {
+          const validationErr = new Error('WaveGuard tank cleanout lockout');
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+          return res.status(400).json({
+            error: 'Tank cleanout record required',
+            code: 'waveguard_tank_cleanout_lockout',
+            details: cleanoutBlocks.map((block) => block.message),
+            blocks: cleanoutBlocks,
+          });
+        }
+        waveguardTankCleanout = {
+          ...normalizedTankCleanout,
+          equipmentSystemId: waveguardEquipmentSystemId || null,
+          calibrationId: waveguardCalibrationId || null,
+          equipmentName: selectedCalibration?.system_name || selectedCalibration?.name || null,
+          warnings: tankCleanoutWarnings(normalizedTankCleanout, selectedCalibration),
+          recordedByTechnicianId: req.technicianId,
+          recordedByRole: req.techRole || null,
+          recordedAt: new Date().toISOString(),
+        };
       }
-      waveguardTankCleanout = {
-        ...normalizedTankCleanout,
-        equipmentSystemId: waveguardEquipmentSystemId || null,
-        calibrationId: waveguardCalibrationId || null,
-        equipmentName: selectedCalibration?.system_name || selectedCalibration?.name || null,
-        warnings: tankCleanoutWarnings(normalizedTankCleanout, selectedCalibration),
-        recordedByTechnicianId: req.technicianId,
-        recordedByRole: req.techRole || null,
-        recordedAt: new Date().toISOString(),
-      };
     }
 
     // Status flip + completion artifacts + audit row + lifecycle
@@ -1778,6 +1797,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardBlackoutApproval,
             waveguardNLimitApproval,
             waveguardManagerApproval,
+            waveguardCalibrationAdvisory,
             waveguardTankCleanout,
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
