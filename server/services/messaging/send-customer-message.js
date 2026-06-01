@@ -48,6 +48,7 @@ const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { persistAudit } = require('./audit');
 const { sendViaTwilio } = require('./providers/twilio-sms');
+const { isEnabled } = require('../../config/feature-gates');
 
 const RETRYABLE_BLOCK_CODES = new Set(['QUIET_HOURS_HOLD']);
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
@@ -66,6 +67,27 @@ function nextProviderRetryAt(providerOutcome, now = new Date()) {
     ? Math.max(0, providerOutcome.retryAfterMs)
     : DEFAULT_PROVIDER_RETRY_DELAY_MS;
   return new Date(now.getTime() + delayMs);
+}
+
+function isAutopayCustomerSms(input = {}) {
+  if (input.channel !== 'sms') return false;
+  if (!['customer', 'lead'].includes(input.audience)) return false;
+
+  const originalMessageType = String(input.metadata?.original_message_type || '').toLowerCase();
+  const entryPoint = String(input.entryPoint || '').toLowerCase();
+  return input.purpose === 'autopay'
+    || originalMessageType.startsWith('autopay_')
+    || entryPoint.startsWith('autopay_');
+}
+
+function checkAutopayCustomerSmsGate(input) {
+  if (!isAutopayCustomerSms(input)) return { ok: true };
+  if (isEnabled('autopayCustomerSms')) return { ok: true };
+  return {
+    ok: false,
+    code: 'AUTOPAY_CUSTOMER_SMS_DISABLED',
+    reason: 'AutoPay customer SMS is disabled',
+  };
 }
 
 /**
@@ -135,6 +157,7 @@ async function sendCustomerMessage(input) {
     { name: 'check_suppression',          fn: () => checkSuppression(sendInput, policy, contactState) },
     { name: 'check_consent_for_purpose',  fn: () => checkConsentForPurpose(sendInput, policy, contactState) },
     { name: 'check_contact_compliance',   fn: () => checkContactCompliance(sendInput, policy) },
+    { name: 'check_autopay_sms_gate',      fn: () => checkAutopayCustomerSmsGate(sendInput) },
     { name: 'check_florida_quiet_hours',  fn: () => checkFloridaQuietHours(sendInput, policy) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
@@ -295,5 +318,7 @@ module.exports = {
     normalizeRecipient,
     isRetryableBlockedResult,
     nextProviderRetryAt,
+    isAutopayCustomerSms,
+    checkAutopayCustomerSmsGate,
   },
 };

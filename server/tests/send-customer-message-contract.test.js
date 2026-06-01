@@ -33,4 +33,56 @@ describe('sendCustomerMessage contract guardrails', () => {
       reason: 'internal/admin audience requires internal_briefing purpose',
     });
   });
+
+  test('detects autopay customer SMS across purpose and message type', () => {
+    expect(_internals.isAutopayCustomerSms({
+      to: '+19415550123',
+      body: 'Payment failed',
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_failure',
+      metadata: { original_message_type: 'autopay_charge_failed' },
+    })).toBe(true);
+
+    expect(_internals.isAutopayCustomerSms({
+      to: '+19415550123',
+      body: 'Card expiring',
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'autopay',
+      metadata: { original_message_type: 'payment_expiry' },
+    })).toBe(true);
+
+    expect(_internals.isAutopayCustomerSms({
+      to: '+19415550123',
+      body: 'Internal alert',
+      channel: 'sms',
+      audience: 'internal',
+      purpose: 'internal_briefing',
+      metadata: { original_message_type: 'autopay_charge_failed' },
+    })).toBe(false);
+  });
+
+  test('blocks autopay customer SMS while the rollout gate is off', () => {
+    expect(_internals.checkAutopayCustomerSmsGate({
+      to: '+19415550123',
+      body: 'Payment failed',
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_failure',
+      metadata: { original_message_type: 'autopay_charge_failed' },
+    })).toEqual({
+      ok: false,
+      code: 'AUTOPAY_CUSTOMER_SMS_DISABLED',
+      reason: 'AutoPay customer SMS is disabled',
+    });
+
+    expect(_internals.checkAutopayCustomerSmsGate({
+      to: '+19415550123',
+      body: 'Appointment reminder',
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'appointment',
+    })).toEqual({ ok: true });
+  });
 });
