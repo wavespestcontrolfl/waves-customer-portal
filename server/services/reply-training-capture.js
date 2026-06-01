@@ -8,6 +8,7 @@ const RECENT_SERVICE_LIMIT = 5;
 const RECENT_ESTIMATE_LIMIT = 5;
 const RECENT_LEAD_LIMIT = 5;
 const INBOUND_LOOKBACK_DAYS = 21;
+const AGENT_DECISION_LINK_LOOKBACK_DAYS = 7;
 
 let hasTrainingTableCache = null;
 
@@ -138,6 +139,44 @@ async function findLatestInbound({ conversationId, outboundCreatedAt }) {
     .first();
 }
 
+async function findRecentAgentDecisionForReply({ inbound, outboundCreatedAt, customerId } = {}) {
+  const before = outboundCreatedAt || new Date();
+  const since = new Date(new Date(before).getTime() - AGENT_DECISION_LINK_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const inboundCreatedAt = inbound?.created_at ? new Date(inbound.created_at) : null;
+  const afterInbound = inboundCreatedAt && !Number.isNaN(inboundCreatedAt.getTime())
+    ? new Date(inboundCreatedAt.getTime() - 5 * 60 * 1000)
+    : since;
+
+  if (inbound?.twilio_sid) {
+    const exact = await db('agent_decisions')
+      .where({
+        source_channel: 'sms',
+        source_message_id: inbound.twilio_sid,
+      })
+      .where('created_at', '<=', before)
+      .whereIn('status', ['pending_review', 'accepted', 'corrected'])
+      .orderByRaw("CASE WHEN status = 'pending_review' THEN 0 ELSE 1 END")
+      .orderBy('created_at', 'desc')
+      .first()
+      .catch(() => null);
+    if (exact) return exact;
+  }
+
+  if (!customerId) return null;
+  return db('agent_decisions')
+    .where({
+      source_channel: 'sms',
+      customer_id: customerId,
+    })
+    .where('created_at', '<=', before)
+    .where('created_at', '>=', afterInbound > since ? afterInbound : since)
+    .whereIn('status', ['pending_review', 'accepted', 'corrected'])
+    .orderByRaw("CASE WHEN status = 'pending_review' THEN 0 ELSE 1 END")
+    .orderBy('created_at', 'desc')
+    .first()
+    .catch(() => null);
+}
+
 async function buildContextSnapshot({ conversation, inbound, outbound, customerId }) {
   const before = outbound.created_at || new Date();
   const messages = await db('messages')
@@ -220,6 +259,15 @@ async function captureReplyExampleForMessage(outboundMessage, options = {}) {
       outboundCreatedAt: outboundMessage.created_at || new Date(),
     });
     if (!inbound) return null;
+    const linkedDecision = metadata.agentDecisionId
+      ? null
+      : await findRecentAgentDecisionForReply({
+        inbound,
+        outboundCreatedAt: outboundMessage.created_at || new Date(),
+        customerId,
+      });
+    const sourceAgentDecisionId = metadata.agentDecisionId || linkedDecision?.id || null;
+    const linkedDecisionInput = parseJson(linkedDecision?.input_snapshot, {});
 
     const contextSnapshot = await buildContextSnapshot({
       conversation,
@@ -236,7 +284,7 @@ async function captureReplyExampleForMessage(outboundMessage, options = {}) {
       customer_id: customerId,
       inbound_message_id: inbound.id,
       outbound_message_id: outboundMessage.id,
-      source_agent_decision_id: metadata.agentDecisionId || null,
+      source_agent_decision_id: sourceAgentDecisionId,
       inbound_body: inbound.body || null,
       outbound_body: outboundBody,
       agent_draft: agentDraft || null,
@@ -244,11 +292,18 @@ async function captureReplyExampleForMessage(outboundMessage, options = {}) {
       scenario_label: classifyScenario({
         inboundBody: inbound.body,
         outboundBody,
-        metadata,
+        metadata: {
+          scenarioLabel: metadata.scenarioLabel || linkedDecisionInput?.reply_training_hint?.scenarioLabel,
+        },
       }),
+      capture_reason: sourceAgentDecisionId ? 'admin_sms_reply_linked_agent_decision' : 'admin_sms_reply',
       context_snapshot: JSON.stringify(contextSnapshot),
       metadata: JSON.stringify({
         ...metadata,
+        actualHumanReply: outboundBody,
+        linkedAgentDecisionId: sourceAgentDecisionId,
+        linkedAgentDecisionWorkflow: linkedDecision?.workflow || null,
+        linkedAgentDecisionIntent: linkedDecision?.detected_intent || null,
         outboundMessageType: outboundMessage.message_type || null,
         outboundAdminUserId: outboundMessage.admin_user_id || null,
       }),
@@ -406,5 +461,6 @@ module.exports = {
     shouldCaptureReply,
     parseJson,
     resetTableCacheForTests,
+    findRecentAgentDecisionForReply,
   },
 };
