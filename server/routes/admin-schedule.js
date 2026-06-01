@@ -228,6 +228,25 @@ const MONTH_RECURRENCE_INTERVALS = {
   semiannual: 6, biannual: 6, annual: 12, yearly: 12,
 };
 
+function etDateDiffDays(fromDateStr, toDateStr) {
+  const from = parseETDateTime(`${String(fromDateStr || '').split('T')[0]}T12:00`);
+  const to = parseETDateTime(`${String(toDateStr || '').split('T')[0]}T12:00`);
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) return null;
+  return Math.round((to.getTime() - from.getTime()) / 86400000);
+}
+
+function recurringCandidateTooCloseToAnchor(baseDateStr, pattern, candidateDateStr) {
+  const monthInterval = MONTH_RECURRENCE_INTERVALS[pattern];
+  if (!monthInterval) return false;
+  const diffDays = etDateDiffDays(baseDateStr, candidateDateStr);
+  if (diffDays == null) return false;
+  // Weekend shifting can turn an accidentally reused Sunday anchor into the
+  // following Monday. Month-based cadences should never create their next
+  // visit inside the same near-term week; keep the threshold conservative so
+  // end-of-month fallback cases still work.
+  return diffDays <= 0 || diffDays < (monthInterval * 21);
+}
+
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
   const safe = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
   const base = parseETDateTime(safe + 'T12:00');
@@ -1664,6 +1683,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
         attempt++;
         const nextDateStr = shiftPastWeekend(rawNext, !!skipWeekends, shiftDir);
+        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
         if (seriesDates.has(nextDateStr)) continue;
         seriesDates.add(nextDateStr);
         const childData = {
@@ -2351,6 +2371,7 @@ router.put('/:id/update-details', async (req, res, next) => {
                 const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
                 attempt++;
                 const candidate = shiftPastWeekend(rawNext, skipChild, dirChild);
+                if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, candidate)) continue;
                 if (seenDates.has(candidate)) continue;
                 seenDates.add(candidate);
                 nextDateStr = candidate;
@@ -2467,6 +2488,7 @@ router.put('/:id/update-details', async (req, res, next) => {
             const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
             attempt++;
             const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
+            if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, nextDateStr)) continue;
             if (seenChildDates.has(nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
             const childData = {
@@ -3241,6 +3263,10 @@ router.put('/:id/status', async (req, res, next) => {
               while (attempt <= 12) {
                 const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
                 const candidate = shiftPastWeekend(rawNext, skipParent, dirParent);
+                if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
+                  attempt++;
+                  continue;
+                }
                 if (!existingDates.has(candidate)) { nextStr = candidate; break; }
                 attempt++;
               }
@@ -4362,6 +4388,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
         const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);
         const data = {
@@ -4410,6 +4437,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
         const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);
         const data = {
