@@ -107,6 +107,15 @@ async function cleanupUploadedServicePhotoObjects(photos = []) {
   return { deleted };
 }
 
+function uniqueServicePhotoCount(photos = []) {
+  const seen = new Set();
+  for (const photo of photos || []) {
+    const key = photo?.id || photo?.s3_key || photo?.storage_key;
+    if (key) seen.add(String(key));
+  }
+  return seen.size;
+}
+
 async function withPhotoDbTransaction(knex, handler) {
   if (knex?.isTransaction) return handler(knex);
   return knex.transaction(handler);
@@ -283,8 +292,10 @@ async function uploadServicePhotoDataUrls({
       });
     }
   }
+  const uniqueUploaded = uniqueServicePhotoCount(rows);
   return {
     uploaded: rows.length,
+    uniqueUploaded,
     failed: errors.length,
     errors,
     photos: rows,
@@ -299,6 +310,7 @@ module.exports = {
   cleanupUploadedServicePhotoObjects,
   decodeDataUrlPhoto,
   safePhotoName,
+  uniqueServicePhotoCount,
   uploadServicePhotoBuffer,
   uploadServicePhotoDataUrls,
 };

@@ -2204,7 +2204,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             knex: trx,
           });
           preCommitCompletionPhotoRows = completionPhotoUploadResult.photos || [];
-          if (completionPhotoUploadResult.uploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
+          const uniqueCompletionPhotosUploaded = completionPhotoUploadResult.uniqueUploaded
+            ?? completionPhotoUploadResult.uploaded;
+          if (uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
             throw treeShrubPhotoUploadRequiredError(
               completionPhotoUploadResult,
               TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
@@ -2215,6 +2217,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ...parseJsonObject(record.structured_notes),
             completionPhotos: {
               uploaded: completionPhotoUploadResult.uploaded,
+              uniqueUploaded: uniqueCompletionPhotosUploaded,
               failed: completionPhotoUploadResult.failed,
               uploadedAt: new Date().toISOString(),
               requiredMinimum: TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,

@@ -121,7 +121,29 @@ describe('service photo uploads', () => {
     });
 
     expect(result.uploaded).toBe(1);
+    expect(result.uniqueUploaded).toBe(1);
     expect(result.photos[0].id).toBe('existing-photo');
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  test('counts duplicate returned photo rows as one unique uploaded photo', async () => {
+    const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+    const knex = makeKnex({
+      existing: { id: 'existing-photo', service_record_id: 'record-1' },
+    });
+
+    const result = await uploadServicePhotoDataUrls({
+      serviceRecordId: 'record-1',
+      photos: [
+        { data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after-1.jpg' },
+        { data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after-2.jpg' },
+      ],
+      knex,
+    });
+
+    expect(result.uploaded).toBe(2);
+    expect(result.uniqueUploaded).toBe(1);
+    expect(result.photos.map((photo) => photo.id)).toEqual(['existing-photo', 'existing-photo']);
     expect(mockS3Send).not.toHaveBeenCalled();
   });
 
