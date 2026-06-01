@@ -316,7 +316,10 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed', failure_message: 'agent-dispatcher unavailable' });
     }
     const t3 = Date.now();
-    const dispatchResult = await dispatcher.runWithBrief(brief, { dryRun }).catch((err) => ({
+    const dispatchResult = await dispatcher.runWithBrief(brief, {
+      dryRun,
+      sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
+    }).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
     run.agent_ms = Date.now() - t3;
@@ -1734,6 +1737,13 @@ function envInt(key, defaultValue = null) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
 }
 
+function agentSessionTimeoutMs(actionType, brief = {}) {
+  const fallback = actionType === 'new_supporting_blog' || brief?.page_type === 'supporting-blog'
+    ? 10 * 60 * 1000
+    : 5 * 60 * 1000;
+  return envInt('AUTONOMOUS_CONTENT_AGENT_SESSION_TIMEOUT_MS', fallback);
+}
+
 function dailyBatchLimit(value = null) {
   const raw = value == null
     ? envInt('AUTONOMOUS_CONTENT_DAILY_BATCH_SIZE', 5)
@@ -1920,6 +1930,7 @@ module.exports._internals = {
   isDeterministicPublishError,
   envBool,
   envInt,
+  agentSessionTimeoutMs,
   dailyBatchLimit,
   INTERNAL_LINK_RETRYABLE_STATUSES,
   firstReturnedId,

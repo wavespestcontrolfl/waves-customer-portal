@@ -21,6 +21,7 @@ const {
   isDeterministicPublishError,
   envBool,
   envInt,
+  agentSessionTimeoutMs,
   dailyBatchLimit,
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
@@ -615,6 +616,7 @@ describe('canary guard env parsing', () => {
   afterEach(() => {
     delete process.env.AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0;
     delete process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS;
+    delete process.env.AUTONOMOUS_CONTENT_AGENT_SESSION_TIMEOUT_MS;
   });
 
   test('envBool accepts common true/false forms', () => {
@@ -640,6 +642,13 @@ describe('canary guard env parsing', () => {
     expect(dailyBatchLimit()).toBe(10);
     expect(dailyBatchLimit(0)).toBe(5);
     expect(dailyBatchLimit(3)).toBe(3);
+  });
+
+  test('agentSessionTimeoutMs gives supporting blog drafts more time', () => {
+    expect(agentSessionTimeoutMs('new_supporting_blog', { page_type: 'supporting-blog' })).toBe(10 * 60 * 1000);
+    expect(agentSessionTimeoutMs('refresh_existing_page', { page_type: 'service' })).toBe(5 * 60 * 1000);
+    process.env.AUTONOMOUS_CONTENT_AGENT_SESSION_TIMEOUT_MS = '720000';
+    expect(agentSessionTimeoutMs('new_supporting_blog', { page_type: 'supporting-blog' })).toBe(720000);
   });
 });
 
