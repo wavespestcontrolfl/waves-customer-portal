@@ -304,7 +304,7 @@ router.get('/', async (req, res, next) => {
     if (workflow) q.where('ad.workflow', workflow);
 
     const hasReplyTrainingTable = await tableExists('reply_training_examples');
-    const [rows, metricsRows, replyMetricRows] = await Promise.all([
+    const [rows, metricsRows, replyMetricRows, replyVerdictRows, replyWorkflowRows, replyScenarioRows, recentRejectedRows] = await Promise.all([
       q,
       db('agent_decisions')
         .select('status')
@@ -316,6 +316,58 @@ router.get('/', async (req, res, next) => {
           .count('* as count')
           .groupBy('status')
         : [],
+      hasReplyTrainingTable
+        ? db('reply_training_examples')
+          .select('review_verdict')
+          .count('* as count')
+          .where({ status: 'reviewed' })
+          .groupBy('review_verdict')
+        : [],
+      hasReplyTrainingTable
+        ? db('reply_training_examples as rte')
+          .leftJoin('agent_decisions as ad', 'rte.source_agent_decision_id', 'ad.id')
+          .select(db.raw("COALESCE(ad.workflow, 'unlinked') as workflow"))
+          .count('* as reviewed')
+          .select(db.raw("SUM(CASE WHEN rte.review_verdict = 'accepted' THEN 1 ELSE 0 END) as accepted"))
+          .select(db.raw("SUM(CASE WHEN rte.review_verdict = 'edited' THEN 1 ELSE 0 END) as edited"))
+          .select(db.raw("SUM(CASE WHEN rte.review_verdict = 'rejected' THEN 1 ELSE 0 END) as rejected"))
+          .select(db.raw("SUM(CASE WHEN rte.review_verdict = 'no_reply_needed' THEN 1 ELSE 0 END) as no_reply_needed"))
+          .where('rte.status', 'reviewed')
+          .groupByRaw("COALESCE(ad.workflow, 'unlinked')")
+          .orderBy('reviewed', 'desc')
+          .limit(8)
+        : [],
+      hasReplyTrainingTable
+        ? db('reply_training_examples')
+          .select('scenario_label')
+          .count('* as count')
+          .where({ status: 'reviewed' })
+          .groupBy('scenario_label')
+          .orderBy('count', 'desc')
+          .limit(10)
+        : [],
+      hasReplyTrainingTable
+        ? db('reply_training_examples as rte')
+          .leftJoin('agent_decisions as ad', 'rte.source_agent_decision_id', 'ad.id')
+          .leftJoin('customers as c', 'rte.customer_id', 'c.id')
+          .select(
+            'rte.id',
+            'rte.scenario_label',
+            'rte.inbound_body',
+            'rte.agent_draft',
+            'rte.outbound_body',
+            'rte.review_note',
+            'rte.reviewed_at',
+            'ad.workflow',
+            'ad.detected_intent',
+            'c.first_name as customer_first_name',
+            'c.last_name as customer_last_name'
+          )
+          .where('rte.status', 'reviewed')
+          .where('rte.review_verdict', 'rejected')
+          .orderBy('rte.reviewed_at', 'desc')
+          .limit(5)
+        : [],
     ]);
 
     const metrics = {
@@ -324,7 +376,17 @@ router.get('/', async (req, res, next) => {
       corrected: 0,
       dismissed: 0,
       total: 0,
-      replyTraining: { captured: 0, reviewed: 0, excluded: 0, total: 0 },
+      replyTraining: {
+        captured: 0,
+        reviewed: 0,
+        excluded: 0,
+        total: 0,
+        verdicts: { accepted: 0, edited: 0, rejected: 0, noReplyNeeded: 0 },
+        rates: { accepted: 0, edited: 0, rejected: 0, noReplyNeeded: 0 },
+        byWorkflow: [],
+        byScenario: [],
+        recentRejected: [],
+      },
     };
     for (const row of metricsRows) {
       const count = Number(row.count || 0);
@@ -341,6 +403,53 @@ router.get('/', async (req, res, next) => {
       if (row.status === 'reviewed') metrics.replyTraining.reviewed = count;
       if (row.status === 'excluded') metrics.replyTraining.excluded = count;
     }
+    for (const row of replyVerdictRows) {
+      const count = Number(row.count || 0);
+      if (row.review_verdict === 'accepted') metrics.replyTraining.verdicts.accepted = count;
+      if (row.review_verdict === 'edited') metrics.replyTraining.verdicts.edited = count;
+      if (row.review_verdict === 'rejected') metrics.replyTraining.verdicts.rejected = count;
+      if (row.review_verdict === 'no_reply_needed') metrics.replyTraining.verdicts.noReplyNeeded = count;
+    }
+    const reviewedReplies = Math.max(0, metrics.replyTraining.reviewed);
+    if (reviewedReplies) {
+      metrics.replyTraining.rates.accepted = metrics.replyTraining.verdicts.accepted / reviewedReplies;
+      metrics.replyTraining.rates.edited = metrics.replyTraining.verdicts.edited / reviewedReplies;
+      metrics.replyTraining.rates.rejected = metrics.replyTraining.verdicts.rejected / reviewedReplies;
+      metrics.replyTraining.rates.noReplyNeeded = metrics.replyTraining.verdicts.noReplyNeeded / reviewedReplies;
+    }
+    metrics.replyTraining.byWorkflow = replyWorkflowRows.map((row) => {
+      const reviewed = Number(row.reviewed || 0);
+      const accepted = Number(row.accepted || 0);
+      const edited = Number(row.edited || 0);
+      const rejected = Number(row.rejected || 0);
+      const noReplyNeeded = Number(row.no_reply_needed || 0);
+      return {
+        workflow: row.workflow || 'unlinked',
+        reviewed,
+        accepted,
+        edited,
+        rejected,
+        noReplyNeeded,
+        acceptanceRate: reviewed ? accepted / reviewed : 0,
+        rejectedRate: reviewed ? rejected / reviewed : 0,
+      };
+    });
+    metrics.replyTraining.byScenario = replyScenarioRows.map((row) => ({
+      scenarioLabel: row.scenario_label || 'unlabeled',
+      count: Number(row.count || 0),
+    }));
+    metrics.replyTraining.recentRejected = recentRejectedRows.map((row) => ({
+      id: row.id,
+      workflow: row.workflow || 'unlinked',
+      detectedIntent: row.detected_intent || null,
+      scenarioLabel: row.scenario_label || null,
+      customerName: [row.customer_first_name, row.customer_last_name].filter(Boolean).join(' ').trim() || null,
+      inboundBody: row.inbound_body || null,
+      agentDraft: row.agent_draft || null,
+      finalReply: row.outbound_body || null,
+      reviewNote: row.review_note || null,
+      reviewedAt: row.reviewed_at || null,
+    }));
 
     res.json({ decisions: rows.map(mapDecision), metrics, missingTable: false });
   } catch (err) {

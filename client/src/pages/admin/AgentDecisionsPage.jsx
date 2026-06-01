@@ -64,6 +64,11 @@ function confidence(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
+function percent(value) {
+  const number = Number(value || 0);
+  return `${Math.round(number * 100)}%`;
+}
+
 function shortId(value) {
   return value ? String(value).slice(0, 8) : "-";
 }
@@ -248,6 +253,9 @@ export default function AgentDecisionsPage() {
   }, [actualReply, idealReply, replyReviewNote, replyScenarioLabel]);
 
   const metrics = data.metrics || {};
+  const replyMetrics = metrics.replyTraining || {};
+  const replyVerdicts = replyMetrics.verdicts || {};
+  const replyRates = replyMetrics.rates || {};
 
   return (
     <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
@@ -291,6 +299,79 @@ export default function AgentDecisionsPage() {
             </div>
           ))}
         </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1.2fr 1fr", gap: 12, alignItems: "start" }}>
+          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>Reply Quality</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+              {[
+                ["Accept", replyVerdicts.accepted || 0, replyRates.accepted, D.green],
+                ["Edit", replyVerdicts.edited || 0, replyRates.edited, D.blue],
+                ["Reject", replyVerdicts.rejected || 0, replyRates.rejected, D.red],
+                ["No Reply", replyVerdicts.noReplyNeeded || 0, replyRates.noReplyNeeded, D.amber],
+              ].map(([label, count, rate, color]) => (
+                <div key={label} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10 }}>
+                  <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>{label}</div>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <strong style={{ color, fontSize: 22 }}>{count}</strong>
+                    <span style={{ color: D.muted, fontSize: 12 }}>{percent(rate)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>By Workflow</div>
+            {replyMetrics.byWorkflow?.length ? (
+              <div style={{ display: "grid", gap: 8 }}>
+                {replyMetrics.byWorkflow.map((row) => (
+                  <div key={row.workflow} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto", gap: 10, alignItems: "center", fontSize: 13 }}>
+                    <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 750 }}>{row.workflow}</div>
+                    <span style={{ color: D.muted }}>{row.reviewed} reviewed</span>
+                    <span style={{ color: row.rejectedRate > 0.15 ? D.red : D.green, fontWeight: 800 }}>{percent(row.acceptanceRate)} accept</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ color: D.muted, fontSize: 13 }}>No reviewed reply examples yet.</div>
+            )}
+          </div>
+
+          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>Top Scenarios</div>
+            {replyMetrics.byScenario?.length ? (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {replyMetrics.byScenario.map((row) => (
+                  <Chip key={row.scenarioLabel}>{actionLabel(row.scenarioLabel)} · {row.count}</Chip>
+                ))}
+              </div>
+            ) : (
+              <div style={{ color: D.muted, fontSize: 13 }}>No scenario labels yet.</div>
+            )}
+          </div>
+        </div>
+
+        {replyMetrics.recentRejected?.length ? (
+          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>Recent Rejected Drafts</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {replyMetrics.recentRejected.map((row) => (
+                <div key={row.id} style={{ display: "grid", gap: 4, borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: D.muted, fontWeight: 800 }}>
+                    <Chip tone="red">Rejected</Chip>
+                    <span>{row.customerName || "Unknown customer"}</span>
+                    <span>{row.workflow}</span>
+                    {row.scenarioLabel && <span>{actionLabel(row.scenarioLabel)}</span>}
+                    <span>{timeLabel(row.reviewedAt)}</span>
+                  </div>
+                  <div style={{ fontSize: 13, lineHeight: 1.35 }}>{row.inboundBody || "-"}</div>
+                  {row.reviewNote && <div style={{ color: D.muted, fontSize: 13, lineHeight: 1.35 }}>{row.reviewNote}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           {STATUSES.map((item) => (
