@@ -94,6 +94,33 @@ async function deleteUploadedObject(key) {
   }
 }
 
+async function cleanupUploadedServicePhotoObjects(photos = []) {
+  const seen = new Set();
+  let deleted = 0;
+  for (const photo of photos || []) {
+    const key = photo?.s3_key || photo?.storage_key;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    await deleteUploadedObject(key);
+    deleted += 1;
+  }
+  return { deleted };
+}
+
+function uniqueServicePhotoCount(photos = []) {
+  const seen = new Set();
+  for (const photo of photos || []) {
+    const key = photo?.id || photo?.s3_key || photo?.storage_key;
+    if (key) seen.add(String(key));
+  }
+  return seen.size;
+}
+
+async function withPhotoDbTransaction(knex, handler) {
+  if (knex?.isTransaction) return handler(knex);
+  return knex.transaction(handler);
+}
+
 async function uploadServicePhotoBuffer({
   serviceRecordId,
   buffer,
@@ -181,7 +208,7 @@ async function uploadServicePhotoBuffer({
   let row;
 
   try {
-    await knex.transaction(async (trx) => {
+    await withPhotoDbTransaction(knex, async (trx) => {
       const insert = {
         service_record_id: serviceRecordId,
         photo_type: photoType,
@@ -257,11 +284,18 @@ async function uploadServicePhotoDataUrls({
       });
       rows.push(row);
     } catch (err) {
-      errors.push({ index, message: err.message || 'Photo upload failed' });
+      errors.push({
+        index,
+        message: err.message || 'Photo upload failed',
+        statusCode: err.statusCode || null,
+        code: err.code || null,
+      });
     }
   }
+  const uniqueUploaded = uniqueServicePhotoCount(rows);
   return {
     uploaded: rows.length,
+    uniqueUploaded,
     failed: errors.length,
     errors,
     photos: rows,
@@ -273,8 +307,10 @@ module.exports = {
   MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
   SERVICE_PHOTO_PREFIX,
   VALID_PHOTO_TYPES,
+  cleanupUploadedServicePhotoObjects,
   decodeDataUrlPhoto,
   safePhotoName,
+  uniqueServicePhotoCount,
   uploadServicePhotoBuffer,
   uploadServicePhotoDataUrls,
 };

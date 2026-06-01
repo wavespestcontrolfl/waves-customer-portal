@@ -29,7 +29,7 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-function makeKnex({ existing = null, insertError = null } = {}) {
+function makeKnex({ existing = null, insertError = null, isTransaction = false } = {}) {
   let insertPayload = null;
   const columnInfo = {
     service_record_id: {},
@@ -66,7 +66,8 @@ function makeKnex({ existing = null, insertError = null } = {}) {
     };
     return chain;
   });
-  knex.transaction = async (handler) => handler(knex);
+  knex.transaction = jest.fn(async (handler) => handler(knex));
+  if (isTransaction) knex.isTransaction = true;
   knex.getInsertPayload = () => insertPayload;
   return knex;
 }
@@ -120,7 +121,29 @@ describe('service photo uploads', () => {
     });
 
     expect(result.uploaded).toBe(1);
+    expect(result.uniqueUploaded).toBe(1);
     expect(result.photos[0].id).toBe('existing-photo');
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  test('counts duplicate returned photo rows as one unique uploaded photo', async () => {
+    const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+    const knex = makeKnex({
+      existing: { id: 'existing-photo', service_record_id: 'record-1' },
+    });
+
+    const result = await uploadServicePhotoDataUrls({
+      serviceRecordId: 'record-1',
+      photos: [
+        { data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after-1.jpg' },
+        { data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after-2.jpg' },
+      ],
+      knex,
+    });
+
+    expect(result.uploaded).toBe(2);
+    expect(result.uniqueUploaded).toBe(1);
+    expect(result.photos.map((photo) => photo.id)).toEqual(['existing-photo', 'existing-photo']);
     expect(mockS3Send).not.toHaveBeenCalled();
   });
 
@@ -143,5 +166,43 @@ describe('service photo uploads', () => {
     expect(mockS3Send.mock.calls[1][0].input).toMatchObject({
       Bucket: 'service-photo-bucket',
     });
+  });
+
+  test('uses the caller transaction when provided', async () => {
+    const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+    const trx = makeKnex({ isTransaction: true });
+
+    const result = await uploadServicePhotoDataUrls({
+      serviceRecordId: 'record-1',
+      photos: [{ data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after.jpg' }],
+      knex: trx,
+    });
+
+    expect(result.uploaded).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(trx.transaction).not.toHaveBeenCalled();
+    expect(trx.getInsertPayload()).toMatchObject({
+      service_record_id: 'record-1',
+      photo_type: 'after',
+    });
+  });
+
+  test('cleans up uploaded S3 objects by unique storage key', async () => {
+    const { cleanupUploadedServicePhotoObjects } = require('../services/service-photos');
+
+    const result = await cleanupUploadedServicePhotoObjects([
+      { s3_key: 'service-photos/record-1/a.jpg' },
+      { storage_key: 'service-photos/record-1/b.jpg' },
+      { s3_key: 'service-photos/record-1/a.jpg' },
+      {},
+    ]);
+
+    expect(result.deleted).toBe(2);
+    expect(mockS3Send).toHaveBeenCalledTimes(2);
+    expect(mockS3Send.mock.calls.map((call) => call[0].input.Key)).toEqual([
+      'service-photos/record-1/a.jpg',
+      'service-photos/record-1/b.jpg',
+    ]);
+    expect(mockS3Send.mock.calls.every((call) => call[0].constructor.name === 'DeleteObjectCommand')).toBe(true);
   });
 });

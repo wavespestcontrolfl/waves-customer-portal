@@ -5108,6 +5108,460 @@ function normalizeProductArea(product = {}, serviceType = "") {
   };
 }
 
+const TREE_SHRUB_ORDINANCE_OPTIONS = [
+  { value: "sarasota_venice", label: "Sarasota / Venice" },
+  { value: "north_port", label: "North Port" },
+  { value: "manatee_parrish", label: "Manatee / Parrish" },
+  { value: "other_unknown", label: "Other / unknown" },
+];
+
+const TREE_SHRUB_POLLINATOR_OPTIONS = [
+  { value: "", label: "Flowering / pollinator status" },
+  { value: "no_blooms_or_no_bees", label: "No blooms or bees observed" },
+  { value: "blooming_no_bees", label: "Blooming, no bees active" },
+  { value: "blooming_bees_active", label: "Blooming, bees active" },
+  { value: "no_insecticide_applied", label: "No insecticide applied" },
+];
+
+const TREE_SHRUB_LIFE_STAGE_OPTIONS = [
+  { value: "", label: "Pest life stage" },
+  { value: "none", label: "None observed" },
+  { value: "adult", label: "Adult" },
+  { value: "crawler", label: "Crawler" },
+  { value: "nymph", label: "Nymph" },
+  { value: "eggs", label: "Eggs" },
+  { value: "larvae", label: "Larvae" },
+  { value: "mites", label: "Mites" },
+  { value: "mixed", label: "Mixed stages" },
+  { value: "unknown", label: "Unknown" },
+];
+
+function treeShrubLocationText(service = {}) {
+  return [
+    service.city,
+    service.address,
+    service.serviceAddress,
+    service.propertyAddress,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function inferTreeShrubOrdinanceZoneClient(service = {}) {
+  const location = treeShrubLocationText(service);
+  if (/\bnorth\s*port\b/.test(location)) return "north_port";
+  if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
+    return "manatee_parrish";
+  }
+  if (/\b(sarasota|venice|nokomis|osprey|englewood)\b/.test(location)) return "sarasota_venice";
+  return "other_unknown";
+}
+
+function defaultTreeShrubCloseout(service = {}) {
+  return {
+    ordinanceZone: inferTreeShrubOrdinanceZoneClient(service),
+    bedSqft: "",
+    palmCount: "",
+    palmRootZoneSqft: "",
+    plantInventory: "",
+    pollinatorStatus: "",
+    targetPestOrDisease: "",
+    pestLifeStage: "",
+    iracFracLogged: false,
+    snapshotAppliedYtd: "",
+    fertilizerAppliedYtd: "",
+    customerNote: "",
+    injectionPerformed: false,
+    injectionRecord: {
+      plantSpecies: "",
+      sizeClassOrDbh: "",
+      product: "",
+      dose: "",
+      numberOfPorts: "",
+      targetIssue: "",
+      followUpDate: "",
+    },
+  };
+}
+
+function normalizeTreeShrubCloseoutDraft(value = {}, service = {}) {
+  const defaults = defaultTreeShrubCloseout(service);
+  return {
+    ...defaults,
+    ...(value || {}),
+    ordinanceZone: value?.ordinanceZone || defaults.ordinanceZone,
+    injectionRecord: {
+      ...defaults.injectionRecord,
+      ...(value?.injectionRecord || {}),
+    },
+  };
+}
+
+function treeShrubNumber(value) {
+  if (value === "" || value == null) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function treeShrubText(...values) {
+  return values.filter(Boolean).join(" ").toLowerCase();
+}
+
+function treeShrubProductFlagsClient(selectedProducts = []) {
+  const productsText = (product) =>
+    treeShrubText(
+      product.name,
+      product.category,
+      product.productCategory,
+      product.applicationMethod,
+      product.rateUnit,
+    );
+  const hasInsectProduct = selectedProducts.some((product) =>
+    /\b(insect|miticide|igr|whitefly|scale|aphid|thrip|caterpillar|mite|neonic|imidacloprid|dinotefuran|bifenthrin|pyrethroid|merit|zylam|kontos|mainspring|distance|talus|suffoil|oil|conserve|floramite|talstar|sevin|azamax|ima[\s-]*jet)\b/.test(productsText(product)),
+  );
+  const hasFungicideProduct = selectedProducts.some((product) =>
+    /\b(fungicide|fungus|disease|phytophthora|kphite|phosphite|phosphonate|copper|headway|artavia|propizol|frac)\b/.test(productsText(product)),
+  );
+  const hasSnapshot = selectedProducts.some((product) => /\bsnapshot\b/.test(productsText(product)));
+  const hasNpFertilizer = selectedProducts.some((product) => {
+    const textValue = productsText(product);
+    const analysis = textValue.match(/\b(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\b/);
+    if (analysis) return Number(analysis[1]) > 0 || Number(analysis[2]) > 0;
+    if (/\b0\s*-\s*0\s*-\s*\d+/.test(textValue)) return false;
+    return /\b(fertiliz|fertiliser|fertilizer|fert\b|palm\s*fert|alfalfa|13\s*-\s*0\s*-\s*13|8\s*-\s*2\s*-\s*12)\b/.test(textValue);
+  });
+  const hasInjectionProduct = selectedProducts.some((product) =>
+    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)),
+  );
+  const missingActuals = selectedProducts.filter((product) => {
+    const amount = treeShrubNumber(product.totalAmount);
+    return !amount || amount <= 0 || !product.amountUnit;
+  });
+  return {
+    hasInsectProduct,
+    hasFungicideProduct,
+    needsIracFracLog: hasInsectProduct || hasFungicideProduct,
+    hasSnapshot,
+    hasNpFertilizer,
+    hasInjectionProduct,
+    missingActuals,
+  };
+}
+
+function treeShrubDateInBlackout(service = {}, zone = "") {
+  if (!["sarasota_venice", "manatee_parrish", "other_unknown"].includes(zone)) return false;
+  const raw = service.scheduledDate || service.scheduled_date || service.date;
+  const dateOnly = raw ? String(raw).split("T")[0] : "";
+  const match = dateOnly.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  return (month > 6 || (month === 6 && day >= 1)) && (month < 9 || (month === 9 && day <= 30));
+}
+
+function isNoneLikeTreeShrubValue(value = "") {
+  return ["", "none", "none observed", "none_observed", "n/a", "na"].includes(
+    String(value || "").trim().toLowerCase(),
+  );
+}
+
+function treeShrubCloseoutBlocksClient({
+  closeout,
+  productFlags,
+  servicePhotos,
+  service,
+  customerRecap,
+  notes,
+  isIncompleteVisit,
+}) {
+  if (isIncompleteVisit) return [];
+  const blocks = [];
+  const push = (message, field) => blocks.push({ message, field });
+  const bedSqft = treeShrubNumber(closeout.bedSqft);
+  const palmCount = treeShrubNumber(closeout.palmCount);
+  const palmRootZoneSqft = treeShrubNumber(closeout.palmRootZoneSqft);
+  const snapshotYtd = treeShrubNumber(closeout.snapshotAppliedYtd);
+
+  if (!closeout.ordinanceZone) push("Select ordinance zone.", "ordinanceZone");
+  if (!bedSqft || bedSqft <= 0) push("Enter bed square footage.", "bedSqft");
+  if (palmCount === null || palmCount < 0 || !Number.isInteger(palmCount)) push("Enter palm count, even if it is 0.", "palmCount");
+  if (palmCount > 0 && (!palmRootZoneSqft || palmRootZoneSqft <= 0)) push("Enter palm canopy/root-zone square footage.", "palmRootZoneSqft");
+  if (!String(closeout.plantInventory || "").trim()) push("Record plant inventory.", "plantInventory");
+  if (!closeout.pollinatorStatus) push("Record flowering/pollinator status.", "pollinatorStatus");
+  if (!String(closeout.targetPestOrDisease || "").trim()) push("Record target pest, disease, or none observed.", "targetPestOrDisease");
+  if (!String(closeout.pestLifeStage || "").trim()) push("Record pest life stage or none.", "pestLifeStage");
+  if (productFlags.hasInsectProduct && isNoneLikeTreeShrubValue(closeout.targetPestOrDisease)) {
+    push("Insecticide/miticide/IGR applications require a target pest ID.", "targetPestOrDisease");
+  }
+  if (productFlags.hasInsectProduct && isNoneLikeTreeShrubValue(closeout.pestLifeStage)) {
+    push("Insecticide/miticide/IGR applications require pest life stage.", "pestLifeStage");
+  }
+  if (productFlags.hasInsectProduct && closeout.pollinatorStatus === "blooming_bees_active") {
+    push("Bee-active blooming plants block insect/contact applications.", "pollinatorStatus");
+  }
+  if (productFlags.needsIracFracLog && !closeout.iracFracLogged) {
+    push("Confirm IRAC/FRAC history was checked and logged.", "iracFracLogged");
+  }
+  if (snapshotYtd === null || snapshotYtd < 0 || !Number.isInteger(snapshotYtd)) {
+    push("Record Snapshot applications year-to-date.", "snapshotAppliedYtd");
+  } else if (snapshotYtd > 4) {
+    push("Snapshot applications YTD cannot exceed the quarterly program limit.", "snapshotAppliedYtd");
+  }
+  if (!String(closeout.fertilizerAppliedYtd || "").trim()) {
+    push("Record fertilizer applied YTD or none.", "fertilizerAppliedYtd");
+  }
+  if (!String(closeout.customerNote || customerRecap || notes || "").trim()) {
+    push("Enter customer-facing note or technician note.", "customerNote");
+  }
+  if ((servicePhotos || []).length < 2) push("Attach at least 2 Tree/Shrub closeout photos.", "completionPhotos");
+  if (productFlags.missingActuals.length) {
+    push(
+      `Enter actual product amount and unit: ${productFlags.missingActuals
+        .map((product) => product.name || "Selected product")
+        .join(", ")}.`,
+      "products",
+    );
+  }
+  if (productFlags.hasNpFertilizer && treeShrubDateInBlackout(service, closeout.ordinanceZone)) {
+    push("N/P fertilizer is blocked for this ordinance zone from June 1 through September 30.", "ordinanceZone");
+  }
+
+  if (closeout.injectionPerformed || productFlags.hasInjectionProduct) {
+    const injection = closeout.injectionRecord || {};
+    if (!String(injection.plantSpecies || "").trim()) push("Injection record requires plant species.", "injectionRecord.plantSpecies");
+    if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
+    if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
+    if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
+    if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
+    if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
+    if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");
+  }
+
+  return blocks;
+}
+
+function TreeShrubCloseoutBlock({
+  value,
+  onChange,
+  blocks,
+  productFlags,
+  inputStyle: baseInputStyle,
+  selectStyle,
+  textareaStyle,
+  colors,
+}) {
+  const input = { ...baseInputStyle, marginBottom: 8 };
+  const select = { ...(selectStyle || baseInputStyle), marginBottom: 8 };
+  const textarea = { ...(textareaStyle || baseInputStyle), marginBottom: 8, minHeight: 82 };
+  const setField = (field, nextValue) => onChange({ ...value, [field]: nextValue });
+  const setInjectionField = (field, nextValue) =>
+    onChange({
+      ...value,
+      injectionRecord: {
+        ...(value.injectionRecord || {}),
+        [field]: nextValue,
+      },
+    });
+  const injectionVisible = value.injectionPerformed || productFlags.hasInjectionProduct;
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {blocks.length > 0 && (
+        <div
+          style={{
+            background: `${colors.error}12`,
+            border: `1px solid ${colors.error}`,
+            borderRadius: 10,
+            padding: 10,
+            color: colors.error,
+            fontSize: 12,
+            lineHeight: 1.4,
+          }}
+        >
+          {blocks.slice(0, 4).map((block) => block.message).join(" ")}
+          {blocks.length > 4 ? ` ${blocks.length - 4} more required.` : ""}
+        </div>
+      )}
+      <div
+        style={{
+          background: colors.card,
+          border: `1px solid ${colors.border}`,
+          borderRadius: 10,
+          padding: 10,
+          color: colors.muted,
+          fontSize: 12,
+          lineHeight: 1.4,
+        }}
+      >
+        Closeout is locked until ordinance, plant inventory, pollinator status, pest/life stage, YTD Snapshot/fertilizer, product actuals, and photos are recorded.
+      </div>
+      <select
+        value={value.ordinanceZone || ""}
+        onChange={(e) => setField("ordinanceZone", e.target.value)}
+        style={select}
+      >
+        {TREE_SHRUB_ORDINANCE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          type="number"
+          value={value.bedSqft ?? ""}
+          onChange={(e) => setField("bedSqft", e.target.value)}
+          placeholder="Bed sq ft"
+          style={input}
+        />
+        <input
+          type="number"
+          value={value.palmCount ?? ""}
+          onChange={(e) => setField("palmCount", e.target.value)}
+          placeholder="Palm count"
+          style={input}
+        />
+      </div>
+      <input
+        type="number"
+        value={value.palmRootZoneSqft ?? ""}
+        onChange={(e) => setField("palmRootZoneSqft", e.target.value)}
+        placeholder="Palm canopy/root-zone sq ft"
+        style={input}
+      />
+      <textarea
+        value={value.plantInventory || ""}
+        onChange={(e) => setField("plantInventory", e.target.value)}
+        rows={3}
+        placeholder="Plant inventory: palms, ficus, ixora, hibiscus, croton..."
+        style={textarea}
+      />
+      <select
+        value={value.pollinatorStatus || ""}
+        onChange={(e) => setField("pollinatorStatus", e.target.value)}
+        style={select}
+      >
+        {TREE_SHRUB_POLLINATOR_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          value={value.targetPestOrDisease || ""}
+          onChange={(e) => setField("targetPestOrDisease", e.target.value)}
+          placeholder="Target pest/disease"
+          style={input}
+        />
+        <select
+          value={value.pestLifeStage || ""}
+          onChange={(e) => setField("pestLifeStage", e.target.value)}
+          style={select}
+        >
+          {TREE_SHRUB_LIFE_STAGE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+        <input
+          type="checkbox"
+          checked={!!value.iracFracLogged}
+          onChange={(e) => setField("iracFracLogged", e.target.checked)}
+        />
+        IRAC/FRAC history checked and logged
+      </label>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          type="number"
+          value={value.snapshotAppliedYtd ?? ""}
+          onChange={(e) => setField("snapshotAppliedYtd", e.target.value)}
+          placeholder="Snapshot YTD"
+          style={input}
+        />
+        <input
+          value={value.fertilizerAppliedYtd || ""}
+          onChange={(e) => setField("fertilizerAppliedYtd", e.target.value)}
+          placeholder="Fertilizer YTD"
+          style={input}
+        />
+      </div>
+      <textarea
+        value={value.customerNote || ""}
+        onChange={(e) => setField("customerNote", e.target.value)}
+        rows={2}
+        placeholder="Customer note"
+        style={textarea}
+      />
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+        <input
+          type="checkbox"
+          checked={!!value.injectionPerformed || productFlags.hasInjectionProduct}
+          onChange={(e) => setField("injectionPerformed", e.target.checked)}
+          disabled={productFlags.hasInjectionProduct}
+        />
+        Injection add-on performed
+      </label>
+      {injectionVisible && (
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <input
+              value={value.injectionRecord?.plantSpecies || ""}
+              onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
+              placeholder="Plant species"
+              style={input}
+            />
+            <input
+              value={value.injectionRecord?.sizeClassOrDbh || ""}
+              onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
+              placeholder="DBH / palm size"
+              style={input}
+            />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <input
+              value={value.injectionRecord?.product || ""}
+              onChange={(e) => setInjectionField("product", e.target.value)}
+              placeholder="Injection product"
+              style={input}
+            />
+            <input
+              value={value.injectionRecord?.dose || ""}
+              onChange={(e) => setInjectionField("dose", e.target.value)}
+              placeholder="Dose"
+              style={input}
+            />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <input
+              type="number"
+              value={value.injectionRecord?.numberOfPorts ?? ""}
+              onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
+              placeholder="Ports"
+              style={input}
+            />
+            <input
+              type="date"
+              value={value.injectionRecord?.followUpDate || ""}
+              onChange={(e) => setInjectionField("followUpDate", e.target.value)}
+              style={input}
+            />
+          </div>
+          <input
+            value={value.injectionRecord?.targetIssue || ""}
+            onChange={(e) => setInjectionField("targetIssue", e.target.value)}
+            placeholder="Injection target issue"
+            style={input}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -5141,6 +5595,9 @@ export function CompletionPanel({
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   const [servicePhotos, setServicePhotos] = useState([]);
+  const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
+    defaultTreeShrubCloseout(service),
+  );
   const [areasServiced, setAreasServiced] = useState([]);
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
@@ -5261,6 +5718,10 @@ export function CompletionPanel({
   // pest-line services get the pest-focused list.
   const usesPlantHealthChips =
     serviceCategory === "lawn" || serviceCategory === "tree_shrub";
+  const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  const treeShrubCloseoutRequired = ["tree_shrub", "palm"].includes(
+    serviceLineForCloseout,
+  );
   const handleLawnAssessmentConfirmed = (assessmentId) => {
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
@@ -5531,6 +5992,22 @@ export function CompletionPanel({
       !tankCleanoutMethod.trim());
   const tankCleanoutHelpText =
     "Record the prior tank product and confirm cleanout before completing this WaveGuard lawn visit.";
+  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
+  const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
+    ? treeShrubCloseoutBlocksClient({
+        closeout: treeShrubCloseout,
+        productFlags: treeShrubProductFlags,
+        servicePhotos,
+        service,
+        customerRecap,
+        notes,
+        isIncompleteVisit,
+      })
+    : [];
+  const treeShrubCompletionBlocked =
+    treeShrubCloseoutRequired && !isIncompleteVisit && treeShrubCloseoutBlocks.length > 0;
+  const structuredCloseoutRequired =
+    (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const completionCtaLabel = submitting
     ? "Completing..."
     : calibrationRequired && !isIncompleteVisit && !equipmentSystemId
@@ -5557,6 +6034,8 @@ export function CompletionPanel({
               ? canApproveOfficeExceptions
                 ? "Manager Approval Required"
                 : "Admin Approval Required"
+              : treeShrubCompletionBlocked
+                ? "Tree/Shrub Closeout Required"
               : isIncompleteVisit
                 ? "Mark Visit Incomplete"
                 : !effectiveSendSms
@@ -5571,10 +6050,10 @@ export function CompletionPanel({
   }, [onSiteTime]);
 
   useEffect(() => {
-    if (calibrationRequired && !isIncompleteVisit && quickComplete) {
+    if (structuredCloseoutRequired && quickComplete) {
       setQuickComplete(false);
     }
-  }, [calibrationRequired, isIncompleteVisit, quickComplete]);
+  }, [structuredCloseoutRequired, quickComplete]);
 
   // Lock body+html scroll while the panel is mounted. The panel is portaled
   // to document.body so its position:fixed overlay isn't trapped inside the
@@ -5776,6 +6255,10 @@ export function CompletionPanel({
   ]);
 
   useEffect(() => {
+    setTreeShrubCloseout(defaultTreeShrubCloseout(service));
+  }, [service.id]);
+
+  useEffect(() => {
     draftReadyRef.current = false;
     setSavedDraft(null);
     setShowDraftPrompt(false);
@@ -5815,6 +6298,7 @@ export function CompletionPanel({
       tankCleanoutCompleted ||
       tankCleanoutMethod.trim() ||
       tankCleanoutNote.trim() ||
+      JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) return;
 
@@ -5858,6 +6342,7 @@ export function CompletionPanel({
         tankCleanoutCompleted,
         tankCleanoutMethod,
         tankCleanoutNote,
+        treeShrubCloseout,
       };
       localStorage.setItem(
         completionDraftKey(service.id),
@@ -5905,6 +6390,11 @@ export function CompletionPanel({
     tankCleanoutCompleted,
     tankCleanoutMethod,
     tankCleanoutNote,
+    treeShrubCloseout,
+    service.city,
+    service.address,
+    service.serviceAddress,
+    service.propertyAddress,
   ]);
 
   function restoreDraft() {
@@ -5975,6 +6465,9 @@ export function CompletionPanel({
     setTankCleanoutCompleted(savedDraft.tankCleanoutCompleted || "");
     setTankCleanoutMethod(savedDraft.tankCleanoutMethod || "");
     setTankCleanoutNote(savedDraft.tankCleanoutNote || "");
+    setTreeShrubCloseout(
+      normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
+    );
     setShowDraftPrompt(false);
   }
 
@@ -6374,6 +6867,14 @@ export function CompletionPanel({
       );
       return;
     }
+    if (treeShrubCompletionBlocked) {
+      alert(
+        `Complete Tree/Shrub closeout before submitting: ${treeShrubCloseoutBlocks
+          .map((block) => block.message)
+          .join(" ")}`,
+      );
+      return;
+    }
     if (
       calibrationRequired &&
       !isIncompleteVisit &&
@@ -6547,6 +7048,13 @@ export function CompletionPanel({
                 skippedProducts: Object.values(skippedProtocolProducts),
               }
             : null,
+        treeShrubCompletion: treeShrubCloseoutRequired
+          ? {
+              ...treeShrubCloseout,
+              customerNote:
+                treeShrubCloseout.customerNote || customerRecap || notes || "",
+            }
+          : null,
         oneTimeRecapOnly,
         sendCompletionSms: effectiveSendSms,
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
@@ -7090,10 +7598,10 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={() => {
-                  if (calibrationRequired && !isIncompleteVisit) return;
+                  if (structuredCloseoutRequired) return;
                   setQuickComplete(!quickComplete);
                 }}
-                disabled={calibrationRequired && !isIncompleteVisit}
+                disabled={structuredCloseoutRequired}
                 style={{
                   height: 36,
                   padding: "0 16px",
@@ -7107,10 +7615,10 @@ export function CompletionPanel({
                   textTransform: "uppercase",
                   letterSpacing: "0.3px",
                   cursor:
-                    calibrationRequired && !isIncompleteVisit
+                    structuredCloseoutRequired
                       ? "not-allowed"
                       : "pointer",
-                  opacity: calibrationRequired && !isIncompleteVisit ? 0.55 : 1,
+                  opacity: structuredCloseoutRequired ? 0.55 : 1,
                   whiteSpace: "nowrap",
                 }}
               >
@@ -7161,6 +7669,30 @@ export function CompletionPanel({
                   service={service}
                   disabled={isIncompleteVisit || submitting}
                   onConfirmed={handleLawnAssessmentConfirmed}
+                />
+              </Field>
+            )}
+            {treeShrubCloseoutRequired && !quickComplete && (
+              <Field label="Tree & Shrub protocol closeout">
+                <TreeShrubCloseoutBlock
+                  value={treeShrubCloseout}
+                  onChange={(next) =>
+                    setTreeShrubCloseout(
+                      normalizeTreeShrubCloseoutDraft(next, service),
+                    )
+                  }
+                  blocks={treeShrubCloseoutBlocks}
+                  productFlags={treeShrubProductFlags}
+                  inputStyle={mInput}
+                  selectStyle={mSelect}
+                  textareaStyle={mTextarea}
+                  colors={{
+                    card: M.card,
+                    border: M.hairline,
+                    text: M.ink,
+                    muted: M.ink3,
+                    error: M.err,
+                  }}
                 />
               </Field>
             )}
@@ -8627,6 +9159,7 @@ export function CompletionPanel({
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||
                 managerApprovalCompletionBlocked ||
+                treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
               }
               style={{
@@ -8638,6 +9171,7 @@ export function CompletionPanel({
                   blackoutCompletionBlocked ||
                   nLimitCompletionBlocked ||
                   managerApprovalCompletionBlocked ||
+                  treeShrubCompletionBlocked ||
                   protocolActualsCompletionBlocked
                     ? 0.5
                     : 1,
@@ -8816,31 +9350,33 @@ export function CompletionPanel({
             {" "}
             <button
               onClick={() => {
-                if (calibrationRequired && !isIncompleteVisit) return;
+                if (structuredCloseoutRequired) return;
                 setQuickComplete(!quickComplete);
               }}
-              disabled={calibrationRequired && !isIncompleteVisit}
+              disabled={structuredCloseoutRequired}
               style={{
                 padding: "6px 14px",
                 borderRadius: 8,
                 fontSize: 12,
                 fontWeight: 700,
                 cursor:
-                  calibrationRequired && !isIncompleteVisit
+                  structuredCloseoutRequired
                     ? "not-allowed"
                     : "pointer",
                 background: quickComplete ? D.amber : "transparent",
                 color: quickComplete ? D.bg : D.amber,
                 border: `1px solid ${D.amber}`,
-                opacity: calibrationRequired && !isIncompleteVisit ? 0.55 : 1,
+                opacity: structuredCloseoutRequired ? 0.55 : 1,
                 transition: "all 0.15s",
               }}
             >
               {quickComplete ? "Quick Complete ON" : "Quick Complete"}
             </button>{" "}
             <span style={{ fontSize: 11, color: D.muted }}>
-              {calibrationRequired && !isIncompleteVisit
-                ? "WaveGuard lawn closeout requires full execution checklist"
+              {structuredCloseoutRequired
+                ? treeShrubCloseoutRequired
+                  ? "Tree/Shrub protocol closeout requires full form"
+                  : "WaveGuard lawn closeout requires full execution checklist"
                 : quickComplete
                 ? "Showing minimal fields"
                 : "Bulk end-of-day mode"}
@@ -8926,6 +9462,31 @@ export function CompletionPanel({
                 service={service}
                 disabled={isIncompleteVisit || submitting}
                 onConfirmed={handleLawnAssessmentConfirmed}
+              />
+            </div>
+          )}
+          {treeShrubCloseoutRequired && !quickComplete && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Tree & Shrub Protocol Closeout</label>
+              <TreeShrubCloseoutBlock
+                value={treeShrubCloseout}
+                onChange={(next) =>
+                  setTreeShrubCloseout(
+                    normalizeTreeShrubCloseoutDraft(next, service),
+                  )
+                }
+                blocks={treeShrubCloseoutBlocks}
+                productFlags={treeShrubProductFlags}
+                inputStyle={inputStyle}
+                selectStyle={inputStyle}
+                textareaStyle={{ ...inputStyle, minHeight: 82, resize: "vertical" }}
+                colors={{
+                  card: D.input,
+                  border: D.border,
+                  text: D.text,
+                  muted: D.muted,
+                  error: D.red,
+                }}
               />
             </div>
           )}
@@ -10374,6 +10935,7 @@ export function CompletionPanel({
               blackoutCompletionBlocked ||
               nLimitCompletionBlocked ||
               managerApprovalCompletionBlocked ||
+              treeShrubCompletionBlocked ||
               protocolActualsCompletionBlocked
             }
             style={{
@@ -10390,6 +10952,7 @@ export function CompletionPanel({
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||
                 managerApprovalCompletionBlocked ||
+                treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
                   ? 0.6
                   : 1,
@@ -10535,6 +11098,26 @@ const PRODUCT_DESCRIPTIONS = {
   "green flo 6-0-0": "calcium supplement for summer cation balance",
   "green flo phyte plus":
     "phosphite + potassium for disease suppression and root health",
+  "snapshot 2.5tg": "granular bed pre-emergent for long residual weed prevention",
+  snapshot: "granular bed pre-emergent for long residual weed prevention",
+  "8-2-12": "palm fertilizer with potassium and magnesium for palm nutrition",
+  "13-0-13": "ornamental fertilizer used only where N/P rules allow",
+  "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
+  suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
+  merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
+  zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
+  kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",
+  mainspring: "non-neonic option for whiteflies, caterpillars, leafminers, and resistance management (IRAC 28)",
+  "distance igr": "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
+  distance: "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
+  talus: "insect growth regulator for immature whitefly and scale stages (IRAC 16)",
+  "kphite 7lp": "phosphite support for root/oomycete pressure; FRAC P07",
+  kphite: "phosphite support for root/oomycete pressure; FRAC P07",
+  conserve: "spinosyn option for caterpillar/thrips-type work where labeled",
+  floramite: "miticide for confirmed mite pressure only",
+  "liquid copper": "contact protectant for labeled leaf or bacterial disease; keep separate from oil",
+  eddha: "iron chelate for high-pH chlorosis situations",
+  shortstop: "plant growth regulator add-on for healthy established hedges",
 };
 
 /* Safety rules per track */
