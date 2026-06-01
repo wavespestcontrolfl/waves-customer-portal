@@ -17,7 +17,8 @@ const SERVICE_QUESTION_RE = /\b(typical visit|outline of the service|what'?s inc
 const GENERAL_ESTIMATE_QUESTION_RE = /\b(how much|fees?|price|pricing|cost|bundle|bundled|add that|add .*later|come inside|inside|safe for pets?|new estimate|proceed with (a )?service)\b|\?/i;
 const SERVICE_SCHEDULING_PROMPT_RE = /\b(availability|available|what availability|what works|what time|what day|can y'?all do|can you do|does .* work|appointment|schedule|reschedule|adjust around your schedule|route)\b/i;
 const TIME_AVAILABILITY_RE = /\b([1-9]|1[0-2])(?::[0-5]\d)?\s?(a\.?m\.?|p\.?m\.?)?\b|\b(morning|afternoon|evening|midday|noon|early|late)\b/i;
-const RAIN_RESCHEDULE_RE = /\b(rain|raining|storm|weather|reschedule|wash(ed)? out)\b/i;
+const WEATHER_RE = /\b(rain|raining|storm|weather|wash(ed)? out|radar|lightning|thunder)\b/i;
+const RESCHEDULE_RE = /\b(reschedule|move|push|change|adjust)\b/i;
 const TIME_TOKEN_RE = /\b([1-9]|1[0-2])(?::[0-5]\d)?\s?(a\.?m\.?|p\.?m\.?)\b|\b(morning|afternoon|evening|midday|noon)\b/ig;
 const DAY_TOKEN_RE = /\b(today|tomorrow|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig;
 
@@ -172,7 +173,8 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
   const scheduleWindow = SCHEDULE_WINDOW_RE.test(text);
   const activeSchedulingThread = hasActiveServiceSchedulingThread(context.recentSmsThread);
   const availabilityReply = scheduleWindow || (activeSchedulingThread && TIME_AVAILABILITY_RE.test(text));
-  const rainReschedule = RAIN_RESCHEDULE_RE.test(text);
+  const weatherMention = WEATHER_RE.test(text);
+  const rainReschedule = weatherMention && (RESCHEDULE_RE.test(text) || activeSchedulingThread);
   if (!hasCustomer || !(availabilityReply || rainReschedule) || accepted || (hasEstimate && !activeSchedulingThread)) {
     return {
       intent: null,

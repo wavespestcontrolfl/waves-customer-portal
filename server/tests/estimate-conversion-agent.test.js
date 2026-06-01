@@ -187,6 +187,15 @@ describe('estimate conversion agent shadow decisions', () => {
     });
   });
 
+  test('bare reschedule request is not mislabeled as weather reschedule', () => {
+    const routed = routeEstimateOrCustomerReply('Can we reschedule?', {
+      customer: { id: 'customer-1', first_name: 'Dale' },
+    });
+
+    expect(routed.workflow).toBe('estimate_conversion_sms');
+    expect(routed.decision.intent).toBeNull();
+  });
+
   test('service scheduling classifier requires an existing customer scheduling signal', () => {
     expect(classifyServiceSchedulingSmsIntent('Wednesday morning works', {}).intent).toBeNull();
     expect(classifyServiceSchedulingSmsIntent('Thanks for the update', { customer: { id: 'customer-1' } }).intent).toBeNull();
