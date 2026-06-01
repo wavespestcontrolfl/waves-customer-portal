@@ -225,6 +225,44 @@ describe('review incentives', () => {
     });
   });
 
+  test('uses Eastern business dates when attributing late-night Google reviews', async () => {
+    const conn = createDbMock({
+      service_records: [
+        {
+          id: 'sunday-service',
+          customer_id: 'customer-1',
+          technician_id: 'tech-sunday',
+          service_date: '2026-05-31',
+        },
+        {
+          id: 'monday-service',
+          customer_id: 'customer-1',
+          technician_id: 'tech-monday',
+          service_date: '2026-06-01',
+        },
+      ],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: 'customer-1',
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: '2026-06-01T02:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+      }],
+    });
+
+    const result = await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
+
+    expect(result.created).toBe(true);
+    expect(conn.__state.rows.review_incentive_payouts[0]).toMatchObject({
+      technician_id: 'tech-sunday',
+      service_record_id: 'sunday-service',
+      pay_period_start: '2026-05-25',
+      pay_period_end: '2026-05-31',
+    });
+  });
+
   test('manually attributes an unmatched Google review to a customer technician visit', async () => {
     const conn = createDbMock({
       customers: [{

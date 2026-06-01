@@ -4,7 +4,7 @@ const db = require('../models/db');
 const gbp = require('../services/google-business');
 const ReviewService = require('../services/review-request');
 const ReviewIncentives = require('../services/review-incentives');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -620,7 +620,7 @@ router.get('/incentives/attribution-candidates', async (req, res, next) => {
 });
 
 // POST /api/admin/reviews/incentives/attribute — manually attribute a confirmed Google review payout
-router.post('/incentives/attribute', async (req, res, next) => {
+router.post('/incentives/attribute', requireAdmin, async (req, res, next) => {
   try {
     const result = await ReviewIncentives.manualAttributeGoogleReview({
       reviewId: req.body?.reviewId,
@@ -634,7 +634,7 @@ router.post('/incentives/attribute', async (req, res, next) => {
 });
 
 // POST /api/admin/reviews/incentives/sync — backfill/create earned bonus rows
-router.post('/incentives/sync', async (req, res, next) => {
+router.post('/incentives/sync', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(365, parseInt(req.body?.days || req.query.days, 10) || 90));
     const sync = await ReviewIncentives.syncReviewIncentives({ sinceDays: days });
@@ -644,7 +644,7 @@ router.post('/incentives/sync', async (req, res, next) => {
 });
 
 // PATCH /api/admin/reviews/incentives/policy — update flat bonus policy
-router.patch('/incentives/policy', async (req, res, next) => {
+router.patch('/incentives/policy', requireAdmin, async (req, res, next) => {
   try {
     const policy = await ReviewIncentives.savePolicy(req.body || {});
     res.json({ success: true, policy });
@@ -652,7 +652,7 @@ router.patch('/incentives/policy', async (req, res, next) => {
 });
 
 // POST /api/admin/reviews/incentives/mark-paid — close payroll loop manually
-router.post('/incentives/mark-paid', async (req, res, next) => {
+router.post('/incentives/mark-paid', requireAdmin, async (req, res, next) => {
   try {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
     if (!ids.length) return res.status(400).json({ error: 'ids required' });

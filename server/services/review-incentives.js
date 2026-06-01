@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 const POLICY_KEY = 'review_incentives.policy';
 const DEFAULT_POLICY = {
@@ -29,15 +30,34 @@ function dateOnly(date) {
   return asDate(date).toISOString().slice(0, 10);
 }
 
+function isDateOnlyString(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+}
+
+function etBusinessDateAnchor(date) {
+  if (isDateOnlyString(date)) {
+    const [year, month, day] = date.trim().split('-').map(Number);
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  }
+  return asDate(date);
+}
+
+function etBusinessDate(date) {
+  return etDateString(etBusinessDateAnchor(date));
+}
+
+function etBusinessDateOffset(date, days) {
+  return etDateString(addETDays(etBusinessDateAnchor(date), days));
+}
+
 function weekPeriodFor(date) {
-  const d = asDate(date);
-  const utc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = utc.getUTCDay() || 7;
-  const start = new Date(utc.getTime() - (day - 1) * DAY_MS);
-  const end = new Date(start.getTime() + 6 * DAY_MS);
+  const d = etBusinessDateAnchor(date);
+  const { dayOfWeek } = etParts(d);
+  const start = addETDays(d, dayOfWeek === 0 ? -6 : 1 - dayOfWeek);
+  const end = addETDays(start, 6);
   return {
-    start: dateOnly(start),
-    end: dateOnly(end),
+    start: etDateString(start),
+    end: etDateString(end),
   };
 }
 
@@ -167,8 +187,8 @@ async function resolveTechnicianForReviewRequest(request, conn = db) {
 async function resolveTechnicianForGoogleReview(review, conn = db) {
   if (!review?.customer_id) return null;
   const reviewDate = review.review_created_at || review.created_at || new Date();
-  const reviewDateOnly = dateOnly(reviewDate);
-  const cutoff = dateOnly(new Date(asDate(reviewDate).getTime() - 45 * DAY_MS));
+  const reviewDateOnly = etBusinessDate(reviewDate);
+  const cutoff = etBusinessDateOffset(reviewDate, -45);
 
   const serviceRecord = await conn('service_records')
     .where({ customer_id: review.customer_id })
@@ -408,8 +428,8 @@ function serializeServiceCandidate(row, type = 'service_record') {
 async function recentServiceCandidatesForCustomer(customerId, review, conn = db, limit = 8) {
   if (!customerId) return [];
   const reviewDate = review?.review_created_at || review?.created_at || new Date();
-  const reviewDateOnly = dateOnly(reviewDate);
-  const cutoff = dateOnly(new Date(asDate(reviewDate).getTime() - 90 * DAY_MS));
+  const reviewDateOnly = etBusinessDate(reviewDate);
+  const cutoff = etBusinessDateOffset(reviewDate, -90);
 
   const records = await conn('service_records as sr')
     .leftJoin('technicians as t', 'sr.technician_id', 't.id')
