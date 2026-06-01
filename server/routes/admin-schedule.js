@@ -35,6 +35,9 @@ const {
   resolveSeriesParentId,
   buildPrepaidSeriesContext,
 } = require('../services/prepaid-series');
+const {
+  auditRecurringScheduleAnomalies,
+} = require('../services/recurring-schedule-audit');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -4120,6 +4123,17 @@ router.get('/recommend-slots', async (req, res, next) => {
 });
 
 // GET /api/admin/schedule/recurring-alerts — end-of-plan alerts + upcoming fixed plans ending soon
+router.get('/recurring-anomalies', requireAdmin, async (req, res, next) => {
+  try {
+    const includeCompleted = req.query.includeCompleted === 'true';
+    const audit = await auditRecurringScheduleAnomalies({
+      includeCompleted,
+      limit: req.query.limit,
+    });
+    res.json({ success: true, ...audit });
+  } catch (err) { next(err); }
+});
+
 router.get('/recurring-alerts', async (req, res, next) => {
   try {
     const alerts = [];
