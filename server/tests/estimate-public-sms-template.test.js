@@ -59,6 +59,31 @@ describe('public estimate SMS templates', () => {
     expect(body).toBeNull();
   });
 
+  test('registers accepted estimate slot appointments for reminder cron without duplicate confirmation SMS', async () => {
+    const registerAppointment = jest.fn(async () => ({ id: 'reminder-1' }));
+    const { registerAcceptedEstimateAppointmentReminder } = require('../routes/estimate-public');
+
+    await registerAcceptedEstimateAppointmentReminder({
+      appointment: {
+        id: 'scheduled-service-1',
+        scheduled_date: '2026-06-01',
+        window_start: '10:00:00',
+        service_type: 'General Pest Control',
+      },
+      customerId: 'customer-1',
+      appointmentReminders: { registerAppointment },
+    });
+
+    expect(registerAppointment).toHaveBeenCalledWith(
+      'scheduled-service-1',
+      'customer-1',
+      '2026-06-01T10:00',
+      'General Pest Control',
+      'estimate_accept_slot',
+      { sendConfirmation: false },
+    );
+  });
+
   test('seeds annual prepay acceptance as a protected SMS template', () => {
     const { TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
     const template = TEMPLATES.find((row) => row.template_key === 'estimate_accepted_annual_prepay');
