@@ -8,6 +8,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const VALID_STATUSES = new Set(['pending_review', 'accepted', 'corrected', 'dismissed', 'all']);
 const VALID_VERDICTS = new Set(['accepted', 'corrected', 'dismissed']);
+const VALID_REPLY_VERDICTS = new Set(['accepted', 'edited', 'rejected', 'no_reply_needed']);
 
 function parseJson(value, fallback) {
   if (value === null || value === undefined || value === '') return fallback;
@@ -114,12 +115,15 @@ function mapReplyTraining(row) {
     outboundBody: row.outbound_body || null,
     agentDraft: row.agent_draft || null,
     agentDraftEdited: row.agent_draft_edited,
+    replyVerdict: row.review_verdict || null,
     reviewNote: row.review_note || row.edit_summary || null,
     reviewedBy: row.reviewed_by || null,
     reviewedAt: row.reviewed_at || null,
     captureReason: row.capture_reason || null,
     actualHumanReply: metadata.actualHumanReply || null,
+    noReplyNeeded: !!metadata.noReplyNeeded || row.review_verdict === 'no_reply_needed',
     idealReplyProvided: !!metadata.idealReplyProvided,
+    finalReplyProvided: !!metadata.finalReplyProvided,
     capturedAt: row.captured_at || row.created_at || null,
   };
 }
@@ -380,21 +384,31 @@ router.post('/:id/reply-training', async (req, res, next) => {
     const decision = await loadDecision(req.params.id);
     if (!decision) return res.status(404).json({ error: 'Decision not found' });
 
-    const idealReply = String(req.body?.idealReply || '').trim().slice(0, 8000);
+    const replyVerdict = String(req.body?.replyVerdict || 'edited').trim();
+    if (!VALID_REPLY_VERDICTS.has(replyVerdict)) {
+      return res.status(400).json({ error: 'replyVerdict must be accepted, edited, rejected, or no_reply_needed' });
+    }
+
+    const finalReplyInput = String(req.body?.finalReply || req.body?.idealReply || '').trim().slice(0, 8000);
     const actualReply = String(req.body?.actualReply || '').trim().slice(0, 8000);
     const reviewNote = String(req.body?.reviewNote || '').trim().slice(0, 4000);
     const scenarioLabel = String(req.body?.scenarioLabel || '').trim().slice(0, 80);
+    const finalReply = replyVerdict === 'accepted'
+      ? finalReplyInput || selectedSuggestedReply(decision)
+      : finalReplyInput;
 
-    if (!idealReply && !actualReply) {
-      return res.status(400).json({ error: 'reply training requires an idealReply or actualReply' });
+    if (replyVerdict !== 'no_reply_needed' && !finalReply) {
+      return res.status(400).json({ error: 'reply training requires a finalReply unless no_reply_needed is selected' });
     }
 
     const context = await loadDecisionContext(decision);
     const row = await upsertReplyExampleFromAgentReview({
       decision,
       context,
-      idealReply,
+      finalReply,
+      idealReply: finalReply,
       actualReply,
+      replyVerdict,
       reviewNote,
       scenarioLabel,
       reviewedBy: actorName(req),
@@ -406,6 +420,10 @@ router.post('/:id/reply-training', async (req, res, next) => {
     next(err);
   }
 });
+
+function selectedSuggestedReply(decision) {
+  return String(decision?.suggestedMessage || '').trim().slice(0, 8000);
+}
 
 router.post('/:id/review', async (req, res, next) => {
   try {

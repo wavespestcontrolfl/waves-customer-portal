@@ -217,23 +217,29 @@ export default function AgentDecisionsPage() {
     }
   }, [correctedActions, correctionNote, load]);
 
-  const saveReplyTraining = useCallback(async (decision) => {
+  const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
     if (!decision) return;
     setBusyId(`${decision.id}:reply`);
     setError("");
     setNotice("");
     try {
+      const finalReply = replyVerdict === "accepted"
+        ? (idealReply.trim() || decision.suggestedMessage || "")
+        : replyVerdict === "no_reply_needed"
+          ? ""
+          : idealReply;
       const next = await adminFetch(`/admin/agent-decisions/${decision.id}/reply-training`, {
         method: "POST",
         body: JSON.stringify({
-          idealReply,
+          replyVerdict,
+          finalReply,
           actualReply,
           reviewNote: replyReviewNote,
           scenarioLabel: replyScenarioLabel,
         }),
       });
       setDetail((current) => ({ ...(current || {}), replyTraining: next.replyTraining }));
-      setNotice("Reply training example saved.");
+      setNotice(`Reply training ${statusLabel(replyVerdict).toLowerCase()} saved.`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -480,6 +486,7 @@ export default function AgentDecisionsPage() {
                     {detail?.replyTraining && (
                       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                         <Chip tone="green">Saved</Chip>
+                        {detail.replyTraining.replyVerdict && <Chip tone={detail.replyTraining.replyVerdict === "rejected" ? "red" : detail.replyTraining.replyVerdict === "accepted" ? "green" : "blue"}>{statusLabel(detail.replyTraining.replyVerdict)}</Chip>}
                         {detail.replyTraining.scenarioLabel && <Chip>{actionLabel(detail.replyTraining.scenarioLabel)}</Chip>}
                         <span style={{ color: D.muted, fontSize: 12 }}>
                           {detail.replyTraining.reviewedBy ? `Reviewed by ${detail.replyTraining.reviewedBy}` : "Reviewed"}
@@ -499,12 +506,12 @@ export default function AgentDecisionsPage() {
                         />
                       </section>
                       <section style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>Ideal Agent Reply</div>
+                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>Final / Rewrite Reply</div>
                         <textarea
                           value={idealReply}
                           onChange={(event) => setIdealReply(event.target.value)}
                           rows={5}
-                          placeholder="What should the agent say if you do not reply?"
+                          placeholder="Accepted draft, edited version, or your replacement reply."
                           style={{ width: "100%", resize: "vertical", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, font: "inherit", boxSizing: "border-box" }}
                         />
                       </section>
@@ -523,15 +530,42 @@ export default function AgentDecisionsPage() {
                         style={{ width: "100%", border: `1px solid ${D.border}`, borderRadius: 8, padding: "0 10px", font: "inherit", minHeight: 38, boxSizing: "border-box" }}
                       />
                     </div>
-                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
                       <button
                         type="button"
-                        disabled={!!busyId || (!idealReply.trim() && !actualReply.trim())}
-                        onClick={() => saveReplyTraining(selected)}
+                        disabled={!!busyId || !(idealReply.trim() || selected.suggestedMessage)}
+                        onClick={() => saveReplyTraining(selected, "accepted")}
+                        style={actionButton(D.green)}
+                      >
+                        <CheckCircle2 size={16} />
+                        Accept Draft
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!busyId || !idealReply.trim()}
+                        onClick={() => saveReplyTraining(selected, "edited")}
                         style={actionButton(D.blue)}
                       >
+                        <Edit3 size={16} />
+                        Edit & Save
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!busyId || !idealReply.trim()}
+                        onClick={() => saveReplyTraining(selected, "rejected")}
+                        style={actionButton(D.red)}
+                      >
+                        <XCircle size={16} />
+                        Reject & Rewrite
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!busyId}
+                        onClick={() => saveReplyTraining(selected, "no_reply_needed")}
+                        style={actionButton(D.amber)}
+                      >
                         <Save size={16} />
-                        Save Reply Training
+                        No Reply Needed
                       </button>
                     </div>
                   </div>

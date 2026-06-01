@@ -33,7 +33,9 @@ function fixtureFromReplyExample(row) {
       },
     },
     expected: {
-      outboundReply: row.outbound_body || '',
+      replyVerdict: row.review_verdict || null,
+      outboundReply: row.review_verdict === 'no_reply_needed' ? null : row.outbound_body || '',
+      noReplyNeeded: row.review_verdict === 'no_reply_needed' || !!metadata.noReplyNeeded,
       tone: metadata.tone || 'friendly_professional_waves',
       agentDraft: row.agent_draft || null,
       agentDraftEdited: row.agent_draft_edited,
