@@ -93,6 +93,12 @@ function compactRecord(row, keys) {
   )));
 }
 
+function isAdminAuthoredSmsReply(row = {}) {
+  const type = String(row.type || '').toLowerCase();
+  if (['internal_alert', 'system_note'].includes(type)) return false;
+  return !!row.adminUserId || type === 'manual';
+}
+
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
 }
@@ -171,7 +177,7 @@ async function loadDecisionContext(decision) {
     (async () => {
       if (!(customerId || normalizePhoneLast10(phone))) return [];
       const q = db('sms_log')
-        .select('id', 'direction', 'from_phone', 'to_phone', 'message_body', 'message_type', 'status', 'created_at')
+        .select('id', 'direction', 'from_phone', 'to_phone', 'message_body', 'message_type', 'status', 'admin_user_id', 'created_at')
         .orderBy('created_at', 'desc')
         .limit(18);
       applyPhoneOrCustomerFilter(q, { customerId, phone });
@@ -202,6 +208,7 @@ async function loadDecisionContext(decision) {
     body: row.message_body,
     type: row.message_type,
     status: row.status,
+    adminUserId: row.admin_user_id || null,
     createdAt: row.created_at,
     isTrigger: row.id === decision.smsLogId,
   }));
@@ -212,7 +219,7 @@ async function loadDecisionContext(decision) {
       row.direction === 'outbound'
       && row.body
       && new Date(row.createdAt).getTime() > triggerTime
-      && !['internal_alert', 'system_note'].includes(String(row.type || '').toLowerCase())
+      && isAdminAuthoredSmsReply(row)
     ))
     : null;
 
