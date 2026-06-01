@@ -1399,6 +1399,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:10AM ET — Document request lifecycle
+  // Marks expired e-sign document requests and sends due reminders for
+  // requests that were already delivered through email/SMS.
+  // =========================================================================
+  cron.schedule('10 6 * * *', async () => {
+    logger.info('Running: document request lifecycle');
+    try {
+      const { processDocumentWorkflow } = require('./document-contract-delivery');
+      const result = await processDocumentWorkflow();
+      logger.info(`Document workflow done: ${result.expired || 0} expired, ${result.reminders?.sent || 0} reminder(s) sent, ${result.reminders?.failed || 0} failed`);
+    } catch (err) {
+      logger.error(`Document request lifecycle failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM ET — Credential expiry check (credentials v1 §7)
   // Scans business_credentials for anything expiring within 60 days; fires a
   // `credential_expiring_soon` notification per credential (deduped 7d).

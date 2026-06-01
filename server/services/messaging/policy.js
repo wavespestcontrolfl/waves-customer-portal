@@ -25,6 +25,7 @@
  *   'payment_failure'     |   // failed charge / retry / bank-verification action required
  *   'autopay'             |   // autopay pre-charge / card state notices
  *   'payment_link'        |   // tap-to-pay link
+ *   'document_request'    |   // e-sign document request / reminder
  *   'estimate_followup'   |   // estimate sent / viewed / nudge
  *   'review_request'      |   // post-service review ask
  *   'referral'            |   // referral enrollment/reward/invite
@@ -83,6 +84,7 @@ const MESSAGE_PURPOSES = [
   'payment_failure',
   'autopay',
   'payment_link',
+  'document_request',
   'estimate_followup',
   'review_request',
   'referral',
@@ -255,6 +257,15 @@ const PURPOSE_POLICY = {
     prefsColumn: null,
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId', 'invoiceId'],
+  },
+  document_request: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
   },
   estimate_followup: {
     allowEmoji: false,

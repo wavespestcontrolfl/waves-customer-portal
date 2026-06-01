@@ -119,6 +119,7 @@ export default function ContractSignPage() {
     signedName: '',
     agreeElectronic: false,
     agreeAuthorization: false,
+    agreeDocumentTerms: false,
   });
 
   useEffect(() => {
@@ -148,13 +149,17 @@ export default function ContractSignPage() {
     return () => { cancelled = true; };
   }, [token]);
 
-  const canSubmit = useMemo(() => (
-    form.initials.trim().length > 0 &&
-    form.signedName.trim().length > 1 &&
-    form.agreeElectronic &&
-    form.agreeAuthorization &&
-    !submitting
-  ), [form, submitting]);
+  const canSubmit = useMemo(() => {
+    const isAutopayContract = contract?.contractType === 'autopay_authorization';
+    const acceptedTerms = isAutopayContract ? form.agreeAuthorization : form.agreeDocumentTerms;
+    return (
+      form.initials.trim().length > 0 &&
+      form.signedName.trim().length > 1 &&
+      form.agreeElectronic &&
+      acceptedTerms &&
+      !submitting
+    );
+  }, [contract?.contractType, form, submitting]);
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -171,7 +176,8 @@ export default function ContractSignPage() {
           initials: form.initials.trim(),
           signedName: form.signedName.trim(),
           agreeElectronic: form.agreeElectronic,
-          agreeAuthorization: form.agreeAuthorization,
+          agreeAuthorization: contract?.contractType === 'autopay_authorization' ? form.agreeAuthorization : false,
+          agreeDocumentTerms: contract?.contractType === 'autopay_authorization' ? false : form.agreeDocumentTerms,
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -206,6 +212,10 @@ export default function ContractSignPage() {
   }
 
   const signedLabel = signed ? 'Signed' : 'Ready to sign';
+  const isAutopay = contract.contractType === 'autopay_authorization';
+  const documentTitle = contract.title || (isAutopay ? 'AutoPay Authorization' : 'Document');
+  const documentKind = isAutopay ? 'authorization' : 'document';
+  const termsLabel = isAutopay ? 'Authorization terms' : 'Document terms';
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -213,9 +223,11 @@ export default function ContractSignPage() {
         <div className="waves-flow-header">
           <div>
             <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
-            <SerifHeading style={{ marginTop: 14, marginBottom: 8 }}>AutoPay Authorization</SerifHeading>
+            <SerifHeading style={{ marginTop: 14, marginBottom: 8 }}>{documentTitle}</SerifHeading>
             <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 16, lineHeight: 1.55, maxWidth: 660 }}>
-              Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.
+              {isAutopay
+                ? 'Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.'
+                : 'Review this Waves document, then sign electronically to acknowledge and accept the terms shown below.'}
             </p>
           </div>
         </div>
@@ -237,7 +249,7 @@ export default function ContractSignPage() {
                   <Icon name="document" size={22} strokeWidth={2} />
                 </span>
                 <div>
-                  <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>Electronic Payment Authorization</div>
+                  <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>{documentTitle}</div>
                   <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Waves Pest Control</div>
                 </div>
               </div>
@@ -246,13 +258,23 @@ export default function ContractSignPage() {
 
             <div className="waves-contract-fields">
               <Field label="Recipient" value={contract.recipientName} />
-              <Field label="Payment Method" value={contract.paymentMethodLabel} />
-              <Field label="Renewal Date" value={fmtDate(contract.renewalDate)} />
-              <Field label="Cancellation Deadline" value={fmtDate(contract.cancellationDeadline)} />
+              {isAutopay ? (
+                <>
+                  <Field label="Payment Method" value={contract.paymentMethodLabel} />
+                  <Field label="Renewal Date" value={fmtDate(contract.renewalDate)} />
+                  <Field label="Cancellation Deadline" value={fmtDate(contract.cancellationDeadline)} />
+                </>
+              ) : (
+                <>
+                  <Field label="Document Type" value={contract.documentTemplateKey || contract.contractType} />
+                  <Field label="Service" value={contract.serviceName || 'Waves service'} />
+                  <Field label="Requested" value={fmtDate(contract.sharedAt || contract.createdAt)} />
+                </>
+              )}
             </div>
 
             <div style={{ marginTop: 24 }}>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 8 }}>Authorization terms</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 8 }}>{termsLabel}</div>
               <div style={{
                 border: '1px solid var(--border)',
                 borderRadius: 8,
@@ -286,9 +308,9 @@ export default function ContractSignPage() {
                 }}>
                   <Icon name="checkCircle" size={24} strokeWidth={2} />
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>Authorization signed</div>
+                <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>{isAutopay ? 'Authorization' : 'Document'} signed</div>
                 <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
-                  Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature and authorization.
+                  Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature{isAutopay ? ' and authorization' : ''}.
                 </p>
               </div>
             ) : (
@@ -307,7 +329,7 @@ export default function ContractSignPage() {
                     <Icon name="pencil" size={18} strokeWidth={2} />
                   </span>
                   <div>
-                    <div style={{ fontSize: 16, fontWeight: 850, color: 'var(--text)' }}>Sign authorization</div>
+                    <div style={{ fontSize: 16, fontWeight: 850, color: 'var(--text)' }}>Sign {documentKind}</div>
                     <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Both fields and agreements are required.</div>
                   </div>
                 </div>
@@ -336,10 +358,15 @@ export default function ContractSignPage() {
                 </label>
 
                 <AgreementRow checked={form.agreeElectronic} onChange={(checked) => update('agreeElectronic', checked)}>
-                  I agree to receive and sign this authorization electronically.
+                  I agree to receive and sign this {documentKind} electronically.
                 </AgreementRow>
-                <AgreementRow checked={form.agreeAuthorization} onChange={(checked) => update('agreeAuthorization', checked)}>
-                  I authorize Waves to keep the listed payment method on file and use it for future agreed service payments until I revoke authorization.
+                <AgreementRow
+                  checked={isAutopay ? form.agreeAuthorization : form.agreeDocumentTerms}
+                  onChange={(checked) => update(isAutopay ? 'agreeAuthorization' : 'agreeDocumentTerms', checked)}
+                >
+                  {isAutopay
+                    ? 'I authorize Waves to keep the listed payment method on file and use it for future agreed service payments until I revoke authorization.'
+                    : 'I have reviewed the document terms and agree to sign this document electronically.'}
                 </AgreementRow>
 
                 {error && (
@@ -349,7 +376,7 @@ export default function ContractSignPage() {
                 )}
 
                 <BrandButton type="submit" disabled={!canSubmit} fullWidth style={{ marginTop: 16 }}>
-                  {submitting ? 'Signing...' : 'Sign Authorization'}
+                  {submitting ? 'Signing...' : `Sign ${isAutopay ? 'Authorization' : 'Document'}`}
                 </BrandButton>
                 <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.45, textAlign: 'center' }}>
                   Need help before signing? <HelpPhoneLink tone="dark" inline />

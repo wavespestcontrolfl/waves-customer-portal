@@ -173,6 +173,8 @@ const AdminEquipmentCalibrationPage = lazyWithRetry(() => import('./pages/admin/
 const AdminLawnProtocolPage = lazyWithRetry(() => import('./pages/admin/LawnProtocolCommandCenterPage'));
 const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
+const AdminDocumentTemplatesPage = lazyWithRetry(() => import('./pages/admin/DocumentTemplatesPage'));
+const AdminDocumentRequestsPage = lazyWithRetry(() => import('./pages/admin/DocumentRequestsPage'));
 const PayPage = lazyWithRetry(() => import('./pages/PayPageV2'));
 const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
@@ -347,6 +349,8 @@ export default function App() {
             <Route path="fleet" element={<FleetRedirect />} />
             <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
             <Route path="projects" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading projects...</div>}><ProjectsPage /></Suspense>} />
+            <Route path="documents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading documents...</div>}><AdminDocumentTemplatesPage /></Suspense>} />
+            <Route path="document-requests" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading document requests...</div>}><AdminDocumentRequestsPage /></Suspense>} />
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
             <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
             <Route path="credentials" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading credentials...</div>}><CredentialsPage /></Suspense>} />

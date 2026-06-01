@@ -57,7 +57,7 @@ async function send({ to, subject, heading, body, ctaUrl, ctaLabel }) {
     });
     return { ok: true };
   } catch (err) {
-    logger.error(`[email] send failed to ${to}: ${err.message}`);
+    logger.error(`[email] send failed: ${err.message}`);
     return { ok: false, error: err.message };
   }
 }
