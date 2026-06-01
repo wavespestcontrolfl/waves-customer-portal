@@ -61,6 +61,7 @@ import React, {
 } from "react";
 import {
   Bell,
+  Bot,
   FileText,
   Headphones,
   Inbox,
@@ -572,6 +573,9 @@ function SmsTab() {
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
+  const [agentDraft, setAgentDraft] = useState(null);
+  const [agentDraftLoading, setAgentDraftLoading] = useState(false);
+  const [selectedAgentDraft, setSelectedAgentDraft] = useState(null);
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
@@ -712,6 +716,50 @@ function SmsTab() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    const phone = toNumber.trim();
+    if (!phone && !selectedCustomerId) {
+      setAgentDraft(null);
+      setAgentDraftLoading(false);
+      setSelectedAgentDraft(null);
+      return;
+    }
+
+    let cancelled = false;
+    const t = setTimeout(() => {
+      const params = new URLSearchParams();
+      if (selectedCustomerId) params.set("customerId", selectedCustomerId);
+      if (phone) params.set("phone", phone);
+      setAgentDraftLoading(true);
+      adminFetch(`/admin/communications/agent-draft?${params.toString()}`)
+        .then((d) => {
+          if (!cancelled) setAgentDraft(d?.draft || null);
+        })
+        .catch(() => {
+          if (!cancelled) setAgentDraft(null);
+        })
+        .finally(() => {
+          if (!cancelled) setAgentDraftLoading(false);
+        });
+    }, 200);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [toNumber, selectedCustomerId]);
+
+  useEffect(() => {
+    setSelectedAgentDraft(null);
+  }, [toNumber, selectedCustomerId]);
+
+  useEffect(() => {
+    setSelectedAgentDraft((current) => {
+      if (!current) return null;
+      return current.decisionId === agentDraft?.decisionId ? current : null;
+    });
+  }, [agentDraft?.decisionId]);
+
   // Prefill compose "To" from ?phone= deep-link (Estimates/Customers SMS button)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -835,6 +883,8 @@ function SmsTab() {
               attachments.length > 0
                 ? attachments.map(({ previewUrl, ...a }) => a)
                 : undefined,
+            agentDecisionId: selectedAgentDraft?.decisionId || undefined,
+            agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
           }),
         });
         setSendResult({ ok: true, text: "Message sent." });
@@ -843,6 +893,8 @@ function SmsTab() {
       setToSearch("");
       setSelectedCustomerId(null);
       setMsgBody("");
+      setAgentDraft(null);
+      setSelectedAgentDraft(null);
       // Release blob preview URLs before clearing so we don't leak them.
       for (const a of attachments) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -1404,6 +1456,52 @@ function SmsTab() {
               </div>
             );
           })()}
+        {(agentDraft || agentDraftLoading) && (
+          <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="flex items-center justify-center h-7 w-7 rounded-full bg-zinc-100 text-zinc-900">
+                <Bot size={15} strokeWidth={2} />
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
+                  Agent Review Draft
+                </div>
+                {agentDraft?.workflow && (
+                  <div className="text-12 md:text-11 text-ink-tertiary truncate">
+                    {agentDraft.workflow.replace(/_/g, " ")}
+                    {agentDraft.scenarioLabel
+                      ? ` · ${agentDraft.scenarioLabel.replace(/_/g, " ")}`
+                      : ""}
+                  </div>
+                )}
+              </div>
+              {agentDraft?.suggestedMessage && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setMsgBody(agentDraft.suggestedMessage);
+                    setSelectedAgentDraft(agentDraft);
+                  }}
+                >
+                  Use Draft
+                </Button>
+              )}
+            </div>
+            {agentDraftLoading ? (
+              <div className="text-13 text-ink-secondary">Checking pending review…</div>
+            ) : (
+              <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+                {agentDraft.suggestedMessage}
+              </div>
+            )}
+            {agentDraft?.inboundMessage && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-12 md:text-11 text-ink-tertiary line-clamp-2">
+                Trigger: {agentDraft.inboundMessage}
+              </div>
+            )}
+          </div>
+        )}
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           Message
         </label>{" "}

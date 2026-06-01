@@ -506,6 +506,9 @@ const TwilioService = {
             metadata: {
               captureSource: "twilio_send_sms",
               originalMessageType: options.messageType || "manual",
+              agentDecisionId: options.agentDecisionId || null,
+              agentDraft: options.agentDraft || null,
+              suggestedReply: options.suggestedReply || null,
             },
           });
         })
