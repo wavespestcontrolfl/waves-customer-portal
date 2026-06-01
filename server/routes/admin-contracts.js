@@ -4,6 +4,11 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { logAutopay } = require('../services/autopay-log');
 const {
+  deliverDocumentRequest,
+  documentRequestStats,
+  listDocumentRequests,
+} = require('../services/document-contract-delivery');
+const {
   CONSENT_VERSION,
   getConsentText,
   ESIGN_DISCLOSURE,
@@ -49,6 +54,32 @@ async function loadContract(id) {
   return contractQuery().where('cc.id', id).first();
 }
 
+function parseEventMetadata(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function serializeContractEvent(event) {
+  return {
+    id: event.id,
+    contractId: event.contract_id,
+    customerId: event.customer_id,
+    eventType: event.event_type,
+    actorType: event.actor_type,
+    actorId: event.actor_id,
+    ip: event.ip,
+    userAgent: event.user_agent,
+    metadata: parseEventMetadata(event.metadata),
+    createdAt: event.created_at,
+  };
+}
+
 async function insertEvent(trx, contractId, customerId, eventType, req, metadata = {}) {
   await trx('customer_contract_events').insert({
     contract_id: contractId,
@@ -78,6 +109,83 @@ router.get('/customer/:customerId', async (req, res, next) => {
 
     res.json({ contracts: rows.map(row => serializeContract(row)) });
   } catch (err) { next(err); }
+});
+
+router.get('/requests', async (req, res, next) => {
+  try {
+    const result = await listDocumentRequests({
+      status: req.query.status || 'open',
+      search: req.query.search || '',
+      limit: req.query.limit,
+      page: req.query.page,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.get('/requests/stats', async (req, res, next) => {
+  try {
+    const stats = await documentRequestStats();
+    res.json({ stats });
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/events', async (req, res, next) => {
+  try {
+    const contract = await loadContract(req.params.id);
+    if (!contract) return res.status(404).json({ error: 'Contract not found' });
+    const events = await db('customer_contract_events')
+      .where({ contract_id: contract.id })
+      .orderBy('created_at', 'asc')
+      .limit(100);
+    const serializedEvents = events.map(serializeContractEvent);
+    res.json({
+      contract: serializeContract(contract, {
+        events: serializedEvents,
+      }),
+      events: serializedEvents,
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/send-email', async (req, res, next) => {
+  try {
+    const result = await deliverDocumentRequest(req.params.id, req, {
+      channel: 'email',
+      action: 'send',
+    });
+    res.status(result.ok ? 200 : 422).json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+router.post('/:id/send-sms', async (req, res, next) => {
+  try {
+    const result = await deliverDocumentRequest(req.params.id, req, {
+      channel: 'sms',
+      action: 'send',
+    });
+    res.status(result.ok ? 200 : 422).json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+router.post('/:id/remind', async (req, res, next) => {
+  try {
+    const channel = req.body?.channel || 'email';
+    const result = await deliverDocumentRequest(req.params.id, req, {
+      channel,
+      action: 'reminder',
+    });
+    res.status(result.ok ? 200 : 422).json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
 });
 
 router.post('/customer/:customerId/autopay-authorization', async (req, res, next) => {
@@ -154,7 +262,7 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
 router.post('/:id/share-link', async (req, res, next) => {
   try {
     const token = mintContractToken();
-    const expiresAt = contractExpiresAt();
+    let expiresAt = contractExpiresAt();
     let response;
     await db.transaction(async (trx) => {
       const contract = await trx('customer_contracts')
@@ -169,10 +277,17 @@ router.post('/:id/share-link', async (req, res, next) => {
         response = { status: 400, body: { error: `Cannot create a signing link for a ${contract.status} contract.` } };
         return;
       }
+      const isDocumentRequest = contract.contract_type === 'document_template';
+      if (isDocumentRequest && contract.document_template_id) {
+        const template = await trx('document_templates')
+          .where({ id: contract.document_template_id })
+          .first('expire_after_days');
+        expiresAt = contractExpiresAt(new Date(), template?.expire_after_days || 14);
+      }
 
       const updated = await trx('customer_contracts')
         .where({ id: contract.id })
-        .whereIn('status', ['draft', 'sent', 'viewed'])
+        .whereIn('status', isDocumentRequest ? ['draft', 'sent', 'viewed', 'expired'] : ['draft', 'sent', 'viewed'])
         .update({
           status: 'sent',
           share_token_hash: hashContractToken(token),
@@ -225,7 +340,12 @@ router.post('/:id/cancel', async (req, res, next) => {
         .where({ id: contract.customer_id })
         .first('autopay_enabled', 'autopay_payment_method_id');
       const latestSigned = await trx('customer_contracts')
-        .where({ customer_id: contract.customer_id, status: 'signed' })
+        .where({
+          customer_id: contract.customer_id,
+          status: 'signed',
+          contract_type: 'autopay_authorization',
+        })
+        .whereNotNull('payment_method_id')
         .orderBy('signed_at', 'desc')
         .orderBy('created_at', 'desc')
         .first('id');

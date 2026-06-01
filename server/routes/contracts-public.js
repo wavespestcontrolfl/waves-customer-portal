@@ -101,12 +101,12 @@ router.post('/:token/sign', async (req, res, next) => {
     const initials = String(req.body?.initials || '').trim().slice(0, 20);
     const agreeElectronic = req.body?.agreeElectronic === true;
     const agreeAuthorization = req.body?.agreeAuthorization === true;
+    const agreeDocumentTerms = req.body?.agreeDocumentTerms === true;
 
     if (signedName.length < 2) return res.status(400).json({ error: 'Typed signature is required.' });
     if (signedName.length > 180) return res.status(400).json({ error: 'Typed signature must be 180 characters or fewer.' });
     if (initials.length < 1) return res.status(400).json({ error: 'Initials are required.' });
     if (!agreeElectronic) return res.status(400).json({ error: 'Electronic signature consent is required.' });
-    if (!agreeAuthorization) return res.status(400).json({ error: 'Payment authorization agreement is required.' });
 
     const now = new Date();
     const tokenHash = publicTokenHash(req.params.token);
@@ -137,7 +137,16 @@ router.post('/:token/sign', async (req, res, next) => {
       }
 
       const contract = await contractQuery(trx).where('cc.id', locked.id).first();
-      if (!contract.payment_method_id || !contract.stripe_payment_method_id) {
+      const isAutopayAuthorization = contract.contract_type === 'autopay_authorization';
+      if (isAutopayAuthorization && !agreeAuthorization) {
+        response = { status: 400, body: { error: 'Payment authorization agreement is required.' } };
+        return;
+      }
+      if (!isAutopayAuthorization && !agreeDocumentTerms) {
+        response = { status: 400, body: { error: 'Document agreement is required.' } };
+        return;
+      }
+      if (isAutopayAuthorization && (!contract.payment_method_id || !contract.stripe_payment_method_id)) {
         response = { status: 409, body: { error: 'The selected payment method is no longer available for AutoPay.' } };
         return;
       }
@@ -176,10 +185,11 @@ router.post('/:token/sign', async (req, res, next) => {
         signedName,
         initials,
         agreeElectronic,
-        agreeAuthorization,
+        agreementType: isAutopayAuthorization ? 'autopay_authorization' : 'document_terms',
+        ...(isAutopayAuthorization ? { agreeAuthorization } : { agreeDocumentTerms }),
       });
 
-      if (contract.payment_method_id) {
+      if (isAutopayAuthorization && contract.payment_method_id) {
         await trx('customers').where({ id: contract.customer_id }).update({
           autopay_enabled: true,
           autopay_payment_method_id: contract.payment_method_id,
@@ -190,7 +200,7 @@ router.post('/:token/sign', async (req, res, next) => {
         await trx('payment_methods').where({ id: contract.payment_method_id, customer_id: contract.customer_id }).update({ autopay_enabled: true, is_default: true });
       }
 
-      if (contract.stripe_payment_method_id) {
+      if (isAutopayAuthorization && contract.stripe_payment_method_id) {
         await trx('payment_method_consents').insert({
           customer_id: contract.customer_id,
           payment_method_id: contract.payment_method_id,

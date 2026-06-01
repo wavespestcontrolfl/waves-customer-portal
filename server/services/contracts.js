@@ -84,8 +84,10 @@ function hashContractToken(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex');
 }
 
-function contractExpiresAt(now = new Date()) {
-  return new Date(now.getTime() + CONTRACT_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+function contractExpiresAt(now = new Date(), ttlDays = CONTRACT_TOKEN_TTL_DAYS) {
+  const days = Number(ttlDays);
+  const safeDays = Number.isFinite(days) && days > 0 ? Math.min(CONTRACT_TOKEN_TTL_DAYS, Math.floor(days)) : CONTRACT_TOKEN_TTL_DAYS;
+  return new Date(now.getTime() + safeDays * 24 * 60 * 60 * 1000);
 }
 
 function publicContractUrl(token) {
@@ -100,6 +102,7 @@ function isoDate(value) {
 
 function serializeContract(row, options = {}) {
   if (!row) return null;
+  const includeDocumentSnapshots = options.includeDocumentSnapshots ?? options.includeAudit !== false;
   return {
     id: row.id,
     customerId: row.customer_id,
@@ -120,6 +123,13 @@ function serializeContract(row, options = {}) {
     consentTextSnapshot: row.consent_text_snapshot,
     contractTextSnapshot: row.contract_text_snapshot,
     esignDisclosureSnapshot: row.esign_disclosure_snapshot,
+    documentTemplateId: row.document_template_id || null,
+    documentTemplateVersionId: row.document_template_version_id || null,
+    documentTemplateKey: row.document_template_key || null,
+    ...(includeDocumentSnapshots ? {
+      documentVariablesSnapshot: row.document_variables_snapshot || {},
+      documentRenderSummary: row.document_render_summary || {},
+    } : {}),
     shareTokenExpiresAt: isoDate(row.share_token_expires_at),
     sharedAt: isoDate(row.shared_at),
     viewedAt: isoDate(row.viewed_at),
