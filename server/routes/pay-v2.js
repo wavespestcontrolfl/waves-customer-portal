@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
@@ -10,11 +11,94 @@ const ConsentService = require('../services/payment-method-consents');
 const logger = require('../services/logger');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
+const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 
 /**
  * Public pay routes — no auth required.
  * Customers access these via invoice token links (e.g. /pay/abc123def456).
  */
+
+const clientPaymentErrorLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many payment error reports. Please call (941) 297-5749.' },
+});
+
+function cleanField(value, max = 500) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+function paymentRouteLabel(req) {
+  if (req.route?.path) {
+    return `${req.method} ${req.baseUrl || ''}${req.route.path}`;
+  }
+  const rawPath = req.originalUrl || req.path || '';
+  const token = req.params?.token;
+  const safePath = token ? rawPath.replace(String(token), ':token') : rawPath;
+  return `${req.method} ${safePath}`;
+}
+
+function reportBillPaymentError(req, {
+  invoice,
+  phase,
+  methodCategory,
+  paymentIntentId,
+  error,
+  message,
+  code,
+  statusCode,
+  source = 'server',
+  metadata = {},
+}) {
+  if (!invoice?.id) return;
+  BillPaymentErrorAlerts.alertBillPaymentError({
+    invoice,
+    phase,
+    methodCategory,
+    paymentIntentId,
+    error,
+    message,
+    code,
+    statusCode,
+    source,
+    metadata: {
+      route: paymentRouteLabel(req),
+      method: req.method,
+      ...metadata,
+    },
+  }).catch((alertErr) => {
+    logger.warn(`[pay-v2] Bill payment error alert failed for invoice ${invoice.id}: ${alertErr.message}`);
+  });
+}
+
+function respondWithPaymentError(req, res, {
+  invoice,
+  phase,
+  methodCategory,
+  paymentIntentId,
+  error,
+  message,
+  code,
+  statusCode = 400,
+  clientMessage,
+  metadata,
+}) {
+  reportBillPaymentError(req, {
+    invoice,
+    phase,
+    methodCategory,
+    paymentIntentId,
+    error,
+    message,
+    code,
+    statusCode,
+    metadata,
+  });
+  return res.status(statusCode).json({ error: clientMessage || message || error?.message || 'Payment error' });
+}
 
 // =========================================================================
 // GET /api/pay/:token — Invoice data + processor info + Stripe key
@@ -109,9 +193,10 @@ router.get('/:token/attachments/:attachmentId', async (req, res, next) => {
 // POST /api/pay/:token/setup — Create Stripe PaymentIntent for invoice
 // =========================================================================
 router.post('/:token/setup', async (req, res, next) => {
+  let invoice = null;
   try {
     const { saveCard, cardOnly } = req.body || {};
-    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     try {
       assertInvoiceCollectible(invoice.status);
@@ -131,6 +216,14 @@ router.post('/:token/setup', async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[pay-v2] Setup error: ${err.message}`);
+    reportBillPaymentError(req, {
+      invoice,
+      phase: 'setup',
+      methodCategory: 'card',
+      error: err,
+      statusCode: err.statusCode || 500,
+      metadata: { save_card: !!req.body?.saveCard },
+    });
     if (err.statusCode === 409) {
       return res.status(409).json({ error: err.message });
     }
@@ -144,11 +237,12 @@ router.post('/:token/setup', async (req, res, next) => {
 // Surcharge is added at /quote + /finalize after PM funding is known.
 // =========================================================================
 router.post('/:token/update-amount', async (req, res, next) => {
+  let invoice = null;
   try {
     const { paymentIntentId, methodCategory, saveCard } = req.body || {};
     if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
 
-    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     try {
       assertInvoiceCollectible(invoice.status);
@@ -171,6 +265,15 @@ router.post('/:token/update-amount', async (req, res, next) => {
       + `${err.code ? ` [code=${err.code}]` : ''}`
       + `${err.param ? ` [param=${err.param}]` : ''}`,
     );
+    reportBillPaymentError(req, {
+      invoice,
+      phase: 'update_amount',
+      methodCategory: req.body?.methodCategory,
+      paymentIntentId: req.body?.paymentIntentId,
+      error: err,
+      statusCode: 400,
+      metadata: { save_card: !!req.body?.saveCard },
+    });
     res.status(400).json({ error: 'Could not update payment total. Please refresh and try again, or call (941) 297-5749.' });
   }
 });
@@ -179,11 +282,12 @@ router.post('/:token/update-amount', async (req, res, next) => {
 // POST /api/pay/:token/quote — Get surcharge quote for a specific PM
 // =========================================================================
 router.post('/:token/quote', async (req, res, next) => {
+  let invoice = null;
   try {
     const { paymentMethodId } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
 
-    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     try {
       assertInvoiceCollectible(invoice.status);
@@ -195,6 +299,14 @@ router.post('/:token/quote', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     logger.error(`[pay-v2] Quote error: ${err.message}`);
+    reportBillPaymentError(req, {
+      invoice,
+      phase: 'quote',
+      methodCategory: 'card',
+      paymentIntentId: invoice?.stripe_payment_intent_id,
+      error: err,
+      statusCode: 400,
+    });
     res.status(400).json({ error: err.message });
   }
 });
@@ -203,11 +315,12 @@ router.post('/:token/quote', async (req, res, next) => {
 // POST /api/pay/:token/finalize — Confirm payment with surcharge applied
 // =========================================================================
 router.post('/:token/finalize', async (req, res, next) => {
+  let invoice = null;
   try {
     const { quoteToken, saveCard } = req.body || {};
     if (!quoteToken) return res.status(400).json({ error: 'quoteToken required' });
 
-    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     try {
       assertInvoiceCollectible(invoice.status);
@@ -219,6 +332,15 @@ router.post('/:token/finalize', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     logger.error(`[pay-v2] Finalize error: ${err.message}`);
+    reportBillPaymentError(req, {
+      invoice,
+      phase: 'finalize',
+      methodCategory: 'card',
+      paymentIntentId: invoice?.stripe_payment_intent_id,
+      error: err,
+      statusCode: 400,
+      metadata: { save_card: !!req.body?.saveCard },
+    });
     res.status(400).json({ error: err.message });
   }
 });
@@ -228,11 +350,12 @@ router.post('/:token/finalize', async (req, res, next) => {
 // (Legacy — kept for ACH confirmation and Express Checkout which skip /finalize)
 // =========================================================================
 router.post('/:token/confirm', async (req, res, next) => {
+  let invoice = null;
   try {
     const { paymentIntentId } = req.body;
     if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
 
-    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       try {
@@ -271,6 +394,14 @@ router.post('/:token/confirm', async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[pay-v2] Confirm error: ${err.message}`);
+    reportBillPaymentError(req, {
+      invoice,
+      phase: 'confirm',
+      methodCategory: req.body?.methodCategory || invoice?.payment_method,
+      paymentIntentId: req.body?.paymentIntentId,
+      error: err,
+      statusCode: 400,
+    });
     res.status(400).json({ error: err.message });
   }
 });
@@ -293,15 +424,31 @@ router.post('/:token/confirm', async (req, res, next) => {
 // authorization variant defeats the entire snapshot audit trail.
 // =========================================================================
 router.post('/:token/consent', async (req, res, next) => {
+  let invoice = null;
   try {
-    const { stripePaymentMethodId } = req.body || {};
+    const { stripePaymentMethodId, methodCategory } = req.body || {};
     if (!stripePaymentMethodId) return res.status(400).json({ error: 'stripePaymentMethodId required' });
 
-    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
+    if (!invoice.customer_id) {
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        message: 'Invoice has no customer',
+        statusCode: 400,
+      });
+    }
     if (!invoice.stripe_payment_intent_id) {
-      return res.status(409).json({ error: 'Invoice has no PaymentIntent — cannot verify payment method' });
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        message: 'Invoice has no PaymentIntent - cannot verify payment method',
+        statusCode: 409,
+      });
     }
 
     let pi;
@@ -311,15 +458,38 @@ router.post('/:token/consent', async (req, res, next) => {
       });
     } catch (err) {
       logger.error(`[pay-v2] PI retrieve failed for consent on invoice ${invoice.id}: ${err.message}`);
-      return res.status(502).json({ error: 'Could not verify payment with Stripe' });
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        error: err,
+        statusCode: 502,
+        clientMessage: 'Could not verify payment with Stripe',
+      });
     }
     if (!pi) {
-      return res.status(503).json({ error: 'Payment processing temporarily unavailable' });
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        message: 'Payment processing temporarily unavailable',
+        statusCode: 503,
+      });
     }
 
     if (pi.payment_method !== stripePaymentMethodId) {
       logger.warn(`[pay-v2] Consent PM mismatch: client=${stripePaymentMethodId} pi.payment_method=${pi.payment_method} invoice=${invoice.id}`);
-      return res.status(409).json({ error: 'PaymentMethod does not match the invoice charge' });
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        message: 'PaymentMethod does not match the invoice charge',
+        statusCode: 409,
+        metadata: { stripe_payment_method_id: stripePaymentMethodId },
+      });
     }
 
     // PI status acceptable for consent: succeeded (cards / wallets) or
@@ -327,7 +497,14 @@ router.post('/:token/consent', async (req, res, next) => {
     // the customer hasn't actually authorized a charge against this PM
     // on this invoice yet.
     if (pi.status !== 'succeeded' && pi.status !== 'processing') {
-      return res.status(409).json({ error: `PaymentIntent not in a consent-eligible state (status=${pi.status})` });
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        message: `PaymentIntent not in a consent-eligible state (status=${pi.status})`,
+        statusCode: 409,
+      });
     }
 
     // The customer must have opted to save the payment method when the
@@ -341,7 +518,14 @@ router.post('/:token/consent', async (req, res, next) => {
       && pi?.metadata?.save_card_opt_in === 'true';
     if (!optedIn) {
       logger.warn(`[pay-v2] Consent rejected — PI ${pi.id} not configured for save-on-file (setup_future_usage=${pi.setup_future_usage}, save_card_opt_in=${pi?.metadata?.save_card_opt_in})`);
-      return res.status(409).json({ error: 'Save-on-file was not requested on this payment' });
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        message: 'Save-on-file was not requested on this payment',
+        statusCode: 409,
+      });
     }
 
     // Prefer the verified charge.payment_method_details.type — that's
@@ -354,7 +538,14 @@ router.post('/:token/consent', async (req, res, next) => {
     const verifiedMethodType = pmdType || fallbackType;
     if (!verifiedMethodType) {
       logger.warn(`[pay-v2] Could not determine method type for consent on invoice ${invoice.id}`);
-      return res.status(409).json({ error: 'Could not determine payment method type' });
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        message: 'Could not determine payment method type',
+        statusCode: 409,
+      });
     }
 
     const row = await ConsentService.recordConsent({
@@ -369,7 +560,53 @@ router.post('/:token/consent', async (req, res, next) => {
     res.json({ success: true, consentId: row.id, version: row.consent_text_version });
   } catch (err) {
     logger.error(`[pay-v2] Consent record failed: ${err.message}`);
+    reportBillPaymentError(req, {
+      invoice,
+      phase: 'consent',
+      methodCategory: req.body?.methodCategory,
+      paymentIntentId: invoice?.stripe_payment_intent_id,
+      error: err,
+      statusCode: 400,
+    });
     res.status(400).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// POST /api/pay/:token/error — Browser-side payment form error report
+//
+// Used for Stripe.js/network failures that never become a Stripe webhook
+// event and may never reach one of the server-side catch blocks above.
+// =========================================================================
+router.post('/:token/error', clientPaymentErrorLimiter, async (req, res) => {
+  try {
+    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+    const body = req.body || {};
+    const message = cleanField(body.message || body.error || 'Payment form error');
+    if (!message) return res.json({ success: true, skipped: true });
+
+    await BillPaymentErrorAlerts.alertBillPaymentError({
+      invoice,
+      phase: cleanField(body.phase || 'client', 60),
+      methodCategory: cleanField(body.methodCategory || invoice.payment_method || 'unknown', 60),
+      paymentIntentId: cleanField(body.paymentIntentId || invoice.stripe_payment_intent_id || '', 128),
+      message,
+      code: cleanField(body.code || '', 100),
+      statusCode: Number(body.statusCode || 0) || null,
+      source: 'client',
+      metadata: {
+        route: paymentRouteLabel(req),
+        stripe_type: cleanField(body.stripeType || '', 100) || null,
+        client_phase: cleanField(body.clientPhase || '', 100) || null,
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    logger.error(`[pay-v2] Client payment error report failed: ${err.message}`);
+    res.status(500).json({ error: 'Could not record payment error report' });
   }
 });
 

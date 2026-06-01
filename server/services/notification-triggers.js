@@ -154,6 +154,22 @@ const TRIGGER_REGISTRY = {
       link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/revenue',
     }),
   },
+  bill_payment_error: {
+    label: 'Bill payment checkout error',
+    category: 'payment',
+    priority: 'high',
+    group: 'Payments',
+    build: (p) => {
+      const invoiceLabel = p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : 'Invoice payment';
+      const method = p.methodLabel || 'Payment method';
+      const phase = p.phaseLabel || p.phase || 'checkout';
+      return {
+        title: method === 'Bank account' ? 'Bank payment error' : 'Bill payment error',
+        body: `${invoiceLabel} - ${p.customerName || 'customer'} - ${method} during ${phase}${p.reason ? ': ' + p.reason : ''}`,
+        link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/invoices',
+      };
+    },
+  },
   payment_refunded: {
     label: 'Refund issued',
     category: 'payment',

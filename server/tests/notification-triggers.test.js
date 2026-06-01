@@ -18,6 +18,21 @@ describe('notification trigger push tags', () => {
     expect(__private.pushTagFor('payment_failed', {})).toBe('waves-payment_failed');
   });
 
+  test('bill payment error trigger highlights ACH checkout failures', () => {
+    const built = TRIGGER_REGISTRY.bill_payment_error.build({
+      invoiceId: 'inv_123',
+      invoiceNumber: 'WPC-2026-0100',
+      customerName: 'Virginia Demo',
+      methodLabel: 'Bank account',
+      phaseLabel: 'Stripe confirmation',
+      reason: 'Bank account could not be verified',
+    });
+
+    expect(built.title).toBe('Bank payment error');
+    expect(built.body).toBe('Invoice WPC-2026-0100 - Virginia Demo - Bank account during Stripe confirmation: Bank account could not be verified');
+    expect(built.link).toBe('/admin/invoices/inv_123');
+  });
+
   test('new lead trigger can carry tracking number context', () => {
     const built = TRIGGER_REGISTRY.new_lead.build({
       title: 'New lead from palmettoexterminator.com',

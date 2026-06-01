@@ -112,6 +112,35 @@ function getStripe(publishableKey) {
   return stripePromise;
 }
 
+function paymentErrorPayload(err, extra = {}) {
+  return {
+    message: err?.message || extra.message || 'Payment error',
+    code: err?.code || err?.decline_code || err?.raw?.code || extra.code || null,
+    stripeType: err?.type || err?.raw?.type || null,
+    ...extra,
+  };
+}
+
+function serverReportedError(message) {
+  const err = new Error(message || 'Payment error');
+  err.serverReported = true;
+  return err;
+}
+
+function reportPaymentError(token, payload = {}) {
+  if (!token || !payload.message) return;
+  try {
+    fetch(`${API_BASE}/pay/${token}/error`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  } catch {
+    // Best-effort telemetry only. Never block the customer payment UI.
+  }
+}
+
 function fmtCurrency(n) {
   const v = Number(n || 0);
   return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -270,7 +299,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || 'Could not update payment total');
+        throw serverReportedError(data.error || 'Could not update payment total');
       }
       if (!options.skipFetchUpdates && elementsRef.current?.fetchUpdates) {
         const { error: fetchError } = await elementsRef.current.fetchUpdates();
@@ -286,6 +315,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       setAmountSyncError(true);
       const methodLabel = methodCategory === 'us_bank_account' ? 'bank-transfer' : 'card';
       setElementError(err.message || `Could not update the ${methodLabel} total. Select another method or try again.`);
+      if (!err.serverReported) {
+        reportPaymentError(token, paymentErrorPayload(err, {
+          phase: 'update_amount',
+          methodCategory,
+          paymentIntentId,
+        }));
+      }
     } finally {
       if (syncSeq === amountSyncSeqRef.current) {
         syncingAmountRef.current = false;
@@ -391,15 +427,25 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             });
             if (error) {
               setElementError(error.message);
+              reportPaymentError(token, paymentErrorPayload(error, {
+                phase: 'express_confirm',
+                methodCategory: 'express_checkout',
+                paymentIntentId,
+              }));
               return;
             }
             if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-              onSuccess?.(paymentIntent);
+              onSuccess?.(paymentIntent, 'express_checkout');
             } else if (paymentIntent && paymentIntent.status === 'requires_action') {
               setElementError('Additional verification required. Please follow the prompts.');
             }
           } catch (err) {
             setElementError(err.message || 'Payment failed');
+            reportPaymentError(token, paymentErrorPayload(err, {
+              phase: 'express_confirm',
+              methodCategory: 'express_checkout',
+              paymentIntentId,
+            }));
           }
         });
 
@@ -442,7 +488,16 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
         paymentElement.mount(mountRef.current);
       } catch (err) {
-        if (!cancelled) onError?.(err.message || 'Failed to initialize payment form');
+        if (!cancelled) {
+          const message = err.message || 'Failed to initialize payment form';
+          onError?.(message);
+          reportPaymentError(token, paymentErrorPayload(err, {
+            phase: 'payment_form_init',
+            methodCategory: selectedMethodRef.current,
+            paymentIntentId,
+            message,
+          }));
+        }
       }
     })();
 
@@ -482,21 +537,56 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           confirmParams: { return_url: window.location.href },
           redirect: 'if_required',
         });
-        if (error) { setElementError(error.message); setProcessing(false); return; }
-        if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) onSuccess?.(pi);
+        if (error) {
+          setElementError(error.message);
+          reportPaymentError(token, paymentErrorPayload(error, {
+            phase: 'stripe_confirm',
+            methodCategory: 'us_bank_account',
+            paymentIntentId,
+          }));
+          setProcessing(false);
+          return;
+        }
+        if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) onSuccess?.(pi, 'us_bank_account');
         else if (pi?.status === 'requires_action') { setElementError('Additional verification required.'); setProcessing(false); }
-        else onSuccess?.(pi);
-      } catch (err) { setElementError(err.message || 'Payment failed'); setProcessing(false); }
+        else onSuccess?.(pi, 'us_bank_account');
+      } catch (err) {
+        setElementError(err.message || 'Payment failed');
+        reportPaymentError(token, paymentErrorPayload(err, {
+          phase: 'stripe_confirm',
+          methodCategory: 'us_bank_account',
+          paymentIntentId,
+        }));
+        setProcessing(false);
+      }
       return;
     }
 
     // Card: Step 1 — create PaymentMethod from Elements, then get surcharge quote
     try {
       const { error: submitError } = await elementsRef.current.submit();
-      if (submitError) { setElementError(submitError.message); setProcessing(false); return; }
+      if (submitError) {
+        setElementError(submitError.message);
+        reportPaymentError(token, paymentErrorPayload(submitError, {
+          phase: 'payment_form_submit',
+          methodCategory: selectedMethodRef.current,
+          paymentIntentId,
+        }));
+        setProcessing(false);
+        return;
+      }
 
       const { error: pmError, paymentMethod } = await stripeRef.current.createPaymentMethod({ elements: elementsRef.current });
-      if (pmError) { setElementError(pmError.message); setProcessing(false); return; }
+      if (pmError) {
+        setElementError(pmError.message);
+        reportPaymentError(token, paymentErrorPayload(pmError, {
+          phase: 'payment_method_create',
+          methodCategory: selectedMethodRef.current,
+          paymentIntentId,
+        }));
+        setProcessing(false);
+        return;
+      }
 
       const quoteRes = await fetch(`${API_BASE}/pay/${token}/quote`, {
         method: 'POST',
@@ -504,7 +594,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         body: JSON.stringify({ paymentMethodId: paymentMethod.id }),
       });
       const quote = await quoteRes.json().catch(() => ({}));
-      if (!quoteRes.ok) throw new Error(quote.error || 'Could not get surcharge quote');
+      if (!quoteRes.ok) throw serverReportedError(quote.error || 'Could not get surcharge quote');
 
       // Show the surcharge confirmation UI
       setDisplayedBase(quote.base);
@@ -515,6 +605,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       setProcessing(false);
     } catch (err) {
       setElementError(err.message || 'Payment failed');
+      if (!err.serverReported) {
+        reportPaymentError(token, paymentErrorPayload(err, {
+          phase: 'quote',
+          methodCategory: selectedMethodRef.current,
+          paymentIntentId,
+        }));
+      }
       setProcessing(false);
     }
   };
@@ -531,30 +628,60 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         body: JSON.stringify({ quoteToken: quoteData.quoteToken, saveCard: !!saveCard }),
       });
       const result = await finalRes.json().catch(() => ({}));
-      if (!finalRes.ok) throw new Error(result.error || 'Payment failed');
+      if (!finalRes.ok) throw serverReportedError(result.error || 'Payment failed');
 
       if (result.requiresAction && result.clientSecret) {
         const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });
-        if (actionError) { setElementError(actionError.message); setProcessing(false); return; }
-        if (actionPI && (actionPI.status === 'succeeded' || actionPI.status === 'processing')) {
-          onSuccess?.({ id: actionPI.id, status: actionPI.status, payment_method: actionPI.payment_method });
+        if (actionError) {
+          setElementError(actionError.message);
+          reportPaymentError(token, paymentErrorPayload(actionError, {
+            phase: 'next_action',
+            methodCategory: selectedMethodRef.current,
+            paymentIntentId: result.paymentIntentId || paymentIntentId,
+          }));
+          setProcessing(false);
           return;
         }
-        setElementError('Payment could not be completed. Please try again.');
+        if (actionPI && (actionPI.status === 'succeeded' || actionPI.status === 'processing')) {
+          onSuccess?.({ id: actionPI.id, status: actionPI.status, payment_method: actionPI.payment_method }, selectedMethodRef.current);
+          return;
+        }
+        const statusMessage = 'Payment could not be completed. Please try again.';
+        setElementError(statusMessage);
+        reportPaymentError(token, {
+          phase: 'payment_status',
+          methodCategory: selectedMethodRef.current,
+          paymentIntentId: result.paymentIntentId || paymentIntentId,
+          message: `${statusMessage} Stripe status: ${actionPI?.status || 'unknown'}`,
+        });
         setProcessing(false);
         return;
       }
 
       if (result.status === 'succeeded' || result.status === 'processing') {
-        onSuccess?.({ id: result.paymentIntentId, status: result.status, payment_method: result.paymentMethodId });
+        onSuccess?.({ id: result.paymentIntentId, status: result.status, payment_method: result.paymentMethodId }, selectedMethodRef.current);
       } else {
-        setElementError('Payment was not completed. Please try again or use a different payment method.');
+        const statusMessage = 'Payment was not completed. Please try again or use a different payment method.';
+        setElementError(statusMessage);
+        reportPaymentError(token, {
+          phase: 'payment_status',
+          methodCategory: selectedMethodRef.current,
+          paymentIntentId: result.paymentIntentId || paymentIntentId,
+          message: `${statusMessage} Stripe status: ${result.status || 'unknown'}`,
+        });
         setProcessing(false);
         setAwaitingConfirm(false);
         setQuoteData(null);
       }
     } catch (err) {
       setElementError(err.message || 'Payment failed');
+      if (!err.serverReported) {
+        reportPaymentError(token, paymentErrorPayload(err, {
+          phase: 'finalize',
+          methodCategory: selectedMethodRef.current,
+          paymentIntentId,
+        }));
+      }
       setProcessing(false);
       setAwaitingConfirm(false);
       setQuoteData(null);
@@ -807,13 +934,24 @@ export default function PayPageV2() {
   useEffect(() => {
     if (!data || data.invoice.status === 'paid' || data.invoice.status === 'processing') return;
     if (!data.stripe?.available || !data.stripe?.publishableKey) {
-      setPaymentError('Payment processing is temporarily unavailable. Please call (941) 297-5749.');
+      const message = 'Payment processing is temporarily unavailable. Please call (941) 297-5749.';
+      setPaymentError(message);
       setPaymentState('error');
+      reportPaymentError(token, {
+        phase: 'setup',
+        methodCategory: 'card',
+        message,
+        code: 'stripe_unavailable',
+      });
       return;
     }
     setPaymentState('setup');
     fetch(`${API_BASE}/pay/${token}/setup`, { method: 'POST' })
-      .then((r) => { if (!r.ok) throw new Error('Failed to initialize payment'); return r.json(); })
+      .then(async (r) => {
+        const setup = await r.json().catch(() => ({}));
+        if (!r.ok) throw serverReportedError(setup.error || 'Failed to initialize payment');
+        return setup;
+      })
       .then((setup) => {
         setStripeSetup({
           clientSecret: setup.clientSecret,
@@ -827,19 +965,36 @@ export default function PayPageV2() {
       .catch((err) => {
         setPaymentState('error');
         setPaymentError(err.message);
+        if (!err.serverReported) {
+          reportPaymentError(token, paymentErrorPayload(err, {
+            phase: 'setup',
+            methodCategory: 'card',
+          }));
+        }
       });
   }, [data, token]);
 
-  const handlePaymentSuccess = async (paymentIntent) => {
+  const handlePaymentSuccess = async (paymentIntent, methodCategory = null) => {
     try {
-      await fetch(`${API_BASE}/pay/${token}/confirm`, {
+      const confirmRes = await fetch(`${API_BASE}/pay/${token}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paymentIntentId: paymentIntent.id }),
+        body: JSON.stringify({ paymentIntentId: paymentIntent.id, methodCategory }),
       });
+      const confirmBody = await confirmRes.json().catch(() => ({}));
+      if (!confirmRes.ok) {
+        throw serverReportedError(confirmBody.error || 'Local payment confirmation failed');
+      }
     } catch (err) {
       // Stripe already charged — webhook will reconcile if confirm failed
       console.error('Confirm call failed (webhook will reconcile):', err);
+      if (!err.serverReported) {
+        reportPaymentError(token, paymentErrorPayload(err, {
+          phase: 'confirm',
+          methodCategory,
+          paymentIntentId: paymentIntent.id,
+        }));
+      }
     }
 
     // Record save-payment-method consent if the customer opted in. The
@@ -862,7 +1017,7 @@ export default function PayPageV2() {
       const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method }),
+        body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method, methodCategory }),
       });
       try {
         let res = await postConsent();
@@ -877,6 +1032,11 @@ export default function PayPageV2() {
       } catch (err) {
         consentFailed = true;
         console.error('Consent record failed:', err);
+        reportPaymentError(token, paymentErrorPayload(err, {
+          phase: 'consent',
+          methodCategory,
+          paymentIntentId: paymentIntent.id,
+        }));
       }
     }
 
