@@ -22,7 +22,7 @@
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
 import { useState, useEffect, useRef } from "react";
-import { PhoneCall, Voicemail } from "lucide-react";
+import { CheckCircle2, PhoneCall, Voicemail, XCircle } from "lucide-react";
 import {
   Badge,
   Button,
@@ -110,6 +110,20 @@ function getCallRouteLabel(call) {
   return [call.from_phone, call.to_phone].filter(Boolean).join(" → ");
 }
 
+function routeActionLabel(value) {
+  return String(value || "pending review").replace(/_/g, " ");
+}
+
+function routeFeedbackLabel(feedback) {
+  if (!feedback?.verdict) return "Not reviewed";
+  return feedback.verdict === "accept" ? "Accepted" : "Marked wrong";
+}
+
+function percentLabel(value) {
+  const n = Number(value || 0);
+  return `${Math.round(n * 100)}%`;
+}
+
 function StatButton({ label, value, filter, active, onClick, alert }) {
   return (
     <button
@@ -138,6 +152,7 @@ function StatButton({ label, value, filter, active, onClick, alert }) {
 
 export default function CallLogTabV2() {
   const [calls, setCalls] = useState([]);
+  const [routeCalibration, setRouteCalibration] = useState(null);
   const [loading, setLoading] = useState(true);
   const [callTo, setCallTo] = useState("");
   const [callToSearch, setCallToSearch] = useState("");
@@ -152,6 +167,8 @@ export default function CallLogTabV2() {
   const [callLogSearch, setCallLogSearch] = useState("");
   const [processingCallSid, setProcessingCallSid] = useState(null);
   const [processResult, setProcessResult] = useState(null);
+  const [routeFeedbackSavingId, setRouteFeedbackSavingId] = useState(null);
+  const [routeFeedbackResult, setRouteFeedbackResult] = useState(null);
   // Auto-processed sids — once we kick off a transcription run for a call
   // we don't retry it during this session, even if it errors. Avoids hammering
   // Gemini in a loop on a permanently-broken row.
@@ -174,9 +191,17 @@ export default function CallLogTabV2() {
     const q = search
       ? `?search=${encodeURIComponent(search)}&limit=1000`
       : "?days=365&limit=200";
-    return adminFetch(`/ai/admin/calls${q}`)
-      .then((d) => {
+    return Promise.allSettled([
+      adminFetch(`/ai/admin/calls${q}`),
+      adminFetch("/ai/admin/calls/route-calibration?days=30"),
+    ])
+      .then(([callsResult, calibrationResult]) => {
+        if (callsResult.status !== "fulfilled") throw callsResult.reason;
+        const d = callsResult.value;
         setCalls(d.calls || []);
+        if (calibrationResult.status === "fulfilled") {
+          setRouteCalibration(calibrationResult.value);
+        }
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -361,6 +386,49 @@ export default function CallLogTabV2() {
       });
     } finally {
       setProcessingCallSid(null);
+    }
+  };
+
+  const handleRouteFeedback = async (call, verdict) => {
+    if (!call?.id || routeFeedbackSavingId) return;
+    let note = "";
+    const wrongFields = [];
+    if (verdict === "deny") {
+      const response = window.prompt(
+        "What was wrong with the call routing decision?",
+        "routing",
+      );
+      if (response === null) return;
+      note = response.trim();
+      wrongFields.push("routing");
+    }
+
+    setRouteFeedbackSavingId(call.id);
+    setRouteFeedbackResult(null);
+    try {
+      await adminFetch(`/ai/admin/calls/${call.id}/route-feedback`, {
+        method: "POST",
+        body: JSON.stringify({
+          verdict,
+          routeDecisionId: call.routeDecision?.id || null,
+          wrongFields,
+          note,
+        }),
+      });
+      setRouteFeedbackResult({
+        ok: true,
+        callId: call.id,
+        text: verdict === "accept" ? "Decision accepted." : "Decision marked wrong.",
+      });
+      await loadCalls(callLogSearch.trim());
+    } catch (err) {
+      setRouteFeedbackResult({
+        ok: false,
+        callId: call.id,
+        text: `Review failed: ${err.message || "unknown error"}`,
+      });
+    } finally {
+      setRouteFeedbackSavingId(null);
     }
   };
 
@@ -612,6 +680,57 @@ export default function CallLogTabV2() {
           </CardBody>{" "}
         </Card>
       )}
+      {routeCalibration && (
+        <Card>
+          <CardBody>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary">
+                  Route Calibration
+                </div>
+                <div className="text-12 text-ink-tertiary mt-0.5">
+                  Last {routeCalibration.windowDays || 30} days
+                  {routeCalibration.missingTable ? " · migration needed" : ""}
+                </div>
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                <div className="px-3 py-1 bg-zinc-50 border-hairline rounded-md">
+                  <span className="text-11 text-ink-tertiary mr-2">Labels</span>
+                  <span className="text-13 font-mono u-nums text-ink-primary">
+                    {routeCalibration.total || 0}
+                  </span>
+                </div>
+                <div className="px-3 py-1 bg-zinc-50 border-hairline rounded-md">
+                  <span className="text-11 text-ink-tertiary mr-2">Wrong</span>
+                  <span className="text-13 font-mono u-nums text-ink-primary">
+                    {routeCalibration.denied || 0} ({percentLabel(routeCalibration.denyRate)})
+                  </span>
+                </div>
+                <div className="px-3 py-1 bg-zinc-50 border-hairline rounded-md">
+                  <span className="text-11 text-ink-tertiary mr-2">Right</span>
+                  <span className="text-13 font-mono u-nums text-ink-primary">
+                    {routeCalibration.accepted || 0}
+                  </span>
+                </div>
+              </div>
+            </div>
+            {(routeCalibration.byAction || []).length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {(routeCalibration.byAction || []).slice(0, 6).map((row) => (
+                  <div key={row.key} className="px-3 py-2 bg-white border-hairline rounded-md">
+                    <div className="text-12 text-ink-primary capitalize">
+                      {routeActionLabel(row.key)}
+                    </div>
+                    <div className="text-11 text-ink-tertiary">
+                      {row.denied || 0} wrong / {row.total || 0} labels
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      )}
       {/* Make a Call */}
       <Card>
         {" "}
@@ -782,6 +901,13 @@ export default function CallLogTabV2() {
                   ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, "0")}`
                   : "--";
                 const isUnknown = !c.first_name && !c.customer_id;
+                const routeDecision = c.routeDecision;
+                const routeFeedback = c.routeFeedback;
+                const routeBlockedReasons = Array.isArray(
+                  routeDecision?.blockedReasons,
+                )
+                  ? routeDecision.blockedReasons
+                  : [];
 
                 return (
                   <div
@@ -950,6 +1076,58 @@ export default function CallLogTabV2() {
                             >
                               {callbackResult.text}
                             </span>
+                          )}
+                      </div>
+                    )}
+                    {routeDecision && (
+                      <div className="mt-2 ml-8 bg-zinc-50 border-hairline rounded-md p-2">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <div className="min-w-0">
+                            <div className="text-12 text-ink-primary font-medium capitalize">
+                              AI route: {routeActionLabel(routeDecision.finalAction)}
+                            </div>
+                            <div className="text-11 text-ink-tertiary">
+                              {routeFeedbackLabel(routeFeedback)}
+                              {routeBlockedReasons.length > 0
+                                ? ` · ${routeBlockedReasons.slice(0, 3).map(routeActionLabel).join(", ")}`
+                                : ""}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => handleRouteFeedback(c, "accept")}
+                              disabled={routeFeedbackSavingId === c.id}
+                              title="Save this routing decision as correct training feedback"
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+                              Right
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => handleRouteFeedback(c, "deny")}
+                              disabled={routeFeedbackSavingId === c.id}
+                              title="Save this routing decision as incorrect training feedback"
+                            >
+                              <XCircle size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+                              Wrong
+                            </Button>
+                          </div>
+                        </div>
+                        {routeFeedbackResult &&
+                          routeFeedbackResult.callId === c.id && (
+                            <div
+                              className={cn(
+                                "mt-2 text-12",
+                                routeFeedbackResult.ok
+                                  ? "text-ink-secondary"
+                                  : "text-alert-fg",
+                              )}
+                            >
+                              {routeFeedbackResult.text}
+                            </div>
                           )}
                       </div>
                     )}
