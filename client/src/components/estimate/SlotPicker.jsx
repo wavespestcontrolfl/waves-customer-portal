@@ -96,7 +96,7 @@ export default function SlotPicker({
   const [pickedDate, setPickedDate] = useState(null);
   const [pickedData, setPickedData] = useState(null);
   const [pickedLoading, setPickedLoading] = useState(false);
-  const latestPickedDateRef = useRef(null);
+  const latestPickedRequestRef = useRef(0);
   const pickedDateInputId = useId();
 
   useEffect(() => {
@@ -108,7 +108,7 @@ export default function SlotPicker({
     setPickedDate(null);
     setPickedData(null);
     setPickedLoading(false);
-    latestPickedDateRef.current = null;
+    latestPickedRequestRef.current += 1;
     const params = new URLSearchParams();
     params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     params.set('windowDays', '14');
@@ -154,7 +154,8 @@ export default function SlotPicker({
   };
 
   const onPickDate = async (date) => {
-    latestPickedDateRef.current = date;
+    const requestId = latestPickedRequestRef.current + 1;
+    latestPickedRequestRef.current = requestId;
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
@@ -169,13 +170,13 @@ export default function SlotPicker({
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
       const body = res.ok ? await res.json() : { primary: [], expander: [] };
-      if (latestPickedDateRef.current !== date) return;
+      if (latestPickedRequestRef.current !== requestId) return;
       setPickedData(body);
     } catch {
-      if (latestPickedDateRef.current !== date) return;
+      if (latestPickedRequestRef.current !== requestId) return;
       setPickedData({ primary: [], expander: [] });
     } finally {
-      if (latestPickedDateRef.current === date) {
+      if (latestPickedRequestRef.current === requestId) {
         setPickedLoading(false);
       }
     }

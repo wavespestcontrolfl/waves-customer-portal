@@ -26,7 +26,7 @@ function jsonResponse(body) {
   };
 }
 
-function slot(slotId, date) {
+function slot(slotId, date, overrides = {}) {
   return {
     slotId,
     date,
@@ -34,6 +34,7 @@ function slot(slotId, date) {
     windowEnd: '12:00',
     routeOptimal: true,
     techFirstName: 'Sam',
+    ...overrides,
   };
 }
 
@@ -126,5 +127,60 @@ describe('SlotPicker', () => {
     });
 
     expect(screen.queryByText('Wednesday, June 10')).not.toBeInTheDocument();
+  });
+
+  it('ignores stale same-date responses from an older request context', async () => {
+    const oldDateFetch = deferred();
+    const newDateFetch = deferred();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2026-06-01')], expander: [] }))
+      .mockReturnValueOnce(oldDateFetch.promise)
+      .mockResolvedValueOnce(jsonResponse({ primary: [slot('changed', '2026-06-02')], expander: [] }))
+      .mockReturnValueOnce(newDateFetch.promise);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { rerender } = render(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="quarterly"
+      />,
+    );
+
+    const input = await screen.findByLabelText(/pick one that works for you/i);
+    fireEvent.change(input, { target: { value: '2026-06-10' } });
+
+    rerender(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="monthly"
+      />,
+    );
+
+    const nextInput = await screen.findByLabelText(/pick one that works for you/i);
+    fireEvent.change(nextInput, { target: { value: '2026-06-10' } });
+
+    await act(async () => {
+      newDateFetch.resolve(jsonResponse({ primary: [slot('monthly-date', '2026-06-10', { windowStart: '11:00', windowEnd: '13:00' })], expander: [] }));
+    });
+    await screen.findByText('Wednesday, June 10');
+    expect(screen.getByText('11:00 AM')).toBeInTheDocument();
+
+    await act(async () => {
+      oldDateFetch.resolve(jsonResponse({ primary: [slot('quarterly-date', '2026-06-10', { windowStart: '9:00', windowEnd: '11:00' })], expander: [] }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('11:00 AM')).toBeInTheDocument();
+      expect(screen.queryByText('9:00 AM')).not.toBeInTheDocument();
+    });
   });
 });

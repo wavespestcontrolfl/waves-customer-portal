@@ -69,4 +69,28 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText('$125')).toBeInTheDocument();
     expect(screen.queryByText('$600')).not.toBeInTheDocument();
   });
+
+  it('uses monthly amount for monthly-billed tiers even when treatment totals are higher', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={{ amount: 99, waivedWithPrepay: true }}
+        selectedFrequency={{
+          key: 'standard_lawn',
+          billingFrequencyKey: 'monthly',
+          monthly: 72,
+          sameDayTreatmentTotal: 144,
+          perServiceTreatments: [
+            { service: 'lawn_care', displayPrice: 144 },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('First service visit')).toBeInTheDocument();
+    expect(screen.getByText('$72')).toBeInTheDocument();
+    expect(screen.queryByText('$144')).not.toBeInTheDocument();
+  });
 });

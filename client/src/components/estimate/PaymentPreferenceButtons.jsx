@@ -58,6 +58,10 @@ function treatmentRowAmount(row = {}) {
 }
 
 function firstVisitAmount(frequency = {}) {
+  const monthly = Number(frequency.monthly);
+  if (frequency.billingFrequencyKey === 'monthly' && Number.isFinite(monthly) && monthly > 0) {
+    return Math.round(monthly * 100) / 100;
+  }
   const sameDayTreatmentTotal = Number(frequency.sameDayTreatmentTotal);
   if (Number.isFinite(sameDayTreatmentTotal) && sameDayTreatmentTotal > 0) {
     return Math.round(sameDayTreatmentTotal * 100) / 100;
@@ -70,7 +74,6 @@ function firstVisitAmount(frequency = {}) {
   if (treatmentTotal > 0) return Math.round(treatmentTotal * 100) / 100;
   const perVisit = firstPositiveNumber(frequency.perVisit, frequency.perApp, frequency.pa);
   if (perVisit) return Math.round(perVisit * 100) / 100;
-  const monthly = Number(frequency.monthly);
   if (Number.isFinite(monthly) && monthly > 0) {
     return Math.round(monthly * billingIntervalMonths(frequency) * 100) / 100;
   }
