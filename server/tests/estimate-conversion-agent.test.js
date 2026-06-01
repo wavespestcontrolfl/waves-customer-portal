@@ -1,7 +1,9 @@
 const {
   classifyEstimateSmsIntent,
+  classifyServiceSchedulingSmsIntent,
   extractShortCode,
   normalizePhoneLast10,
+  routeEstimateOrCustomerReply,
 } = require('../services/estimate-conversion-agent');
 
 describe('estimate conversion agent shadow decisions', () => {
@@ -88,6 +90,66 @@ describe('estimate conversion agent shadow decisions', () => {
     );
     expect(decision.intent).toBeNull();
     expect(decision.recommendedActions).toEqual([]);
+  });
+
+  test('routes existing-customer availability replies to service scheduling', () => {
+    const customer = { id: 'customer-1', first_name: 'Dale', last_name: 'Brush' };
+    const routed = routeEstimateOrCustomerReply(
+      "Wednesday or Friday morning would work. If you're not free then, next week Monday, Wednesday morning.",
+      { customer }
+    );
+
+    expect(routed.workflow).toBe('service_scheduling_sms');
+    expect(routed.decision).toMatchObject({
+      intent: 'service_scheduling_window_reply',
+      confidence: expect.any(Number),
+      suggestedMessage: expect.stringContaining('check the route'),
+    });
+    expect(routed.decision.recommendedActions).toEqual(expect.arrayContaining([
+      'draft_service_scheduling_reply',
+      'check_route_availability',
+      'confirm_service_window_after_review',
+    ]));
+    expect(routed.decision.autoActionsAllowed).toEqual(['draft_service_scheduling_reply']);
+    expect(routed.decision.blockedActions).toEqual(expect.arrayContaining([
+      'silently_schedule_without_confirmed_slot',
+      'create_subscription',
+      'charge_card',
+    ]));
+  });
+
+  test('does not route estimate acceptance with timing into service scheduling', () => {
+    const customer = { id: 'customer-1', first_name: 'Paul' };
+    const routed = routeEstimateOrCustomerReply(
+      'Ok. I think I will give your team a try. Can we start the week of June 8th?',
+      { customer, estimate }
+    );
+
+    expect(routed.workflow).toBe('estimate_conversion_sms');
+    expect(routed.decision.intent).toBe('accepted_estimate_by_text');
+  });
+
+  test('recent scheduling prompt can route service scheduling even with an old open estimate', () => {
+    const customer = { id: 'customer-1', first_name: 'Dale' };
+    const routed = routeEstimateOrCustomerReply(
+      'Wednesday or Friday morning would work.',
+      {
+        customer,
+        estimate,
+        recentSmsThread: [
+          { direction: 'outbound', body: 'Ok, what availability do you have? We will adjust around your schedule.' },
+          { direction: 'inbound', body: 'Wednesday or Friday morning would work.' },
+        ],
+      }
+    );
+
+    expect(routed.workflow).toBe('service_scheduling_sms');
+    expect(routed.decision.reasoningSummary).toContain('recent service scheduling prompt');
+  });
+
+  test('service scheduling classifier requires an existing customer scheduling signal', () => {
+    expect(classifyServiceSchedulingSmsIntent('Wednesday morning works', {}).intent).toBeNull();
+    expect(classifyServiceSchedulingSmsIntent('Thanks for the update', { customer: { id: 'customer-1' } }).intent).toBeNull();
   });
 
   test('extracts short-code estimate links and normalizes phones', () => {
