@@ -11,6 +11,7 @@ const { etDateString, formatETDate } = require('../utils/datetime-et');
 const { formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
@@ -52,6 +53,37 @@ const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
   || config.jwt.secret
   || crypto.randomBytes(32).toString('hex');
 const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+
+function scheduledDateOnly(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().split('T')[0];
+  return String(value).split('T')[0];
+}
+
+function scheduledTimeOnly(value) {
+  const raw = String(value || '').trim();
+  return raw ? raw.slice(0, 5) : '08:00';
+}
+
+async function registerAcceptedEstimateAppointmentReminder({
+  appointment,
+  customerId,
+  serviceType,
+  appointmentReminders = AppointmentReminders,
+}) {
+  if (!appointment?.id || !customerId) return null;
+  const date = scheduledDateOnly(appointment.scheduled_date);
+  if (!date) return null;
+
+  return appointmentReminders.registerAppointment(
+    appointment.id,
+    customerId,
+    `${date}T${scheduledTimeOnly(appointment.window_start)}`,
+    serviceType || appointment.service_type || 'Pest Control',
+    'estimate_accept_slot',
+    { sendConfirmation: false },
+  );
+}
 
 // View-count hygiene. We surface view_count + last_viewed_at on the admin
 // estimates dashboard, so the count needs to mean "the customer opened it"
@@ -4958,13 +4990,14 @@ router.put('/:token/accept', async (req, res, next) => {
       }
 
       let reservationCommitted = false;
+      const acceptedAppointmentsToRegister = [];
       // Commit the slot reservation (if one) now that we have customerId.
       // Runs inside the same trx so either everything lands or nothing
       // does — a mid-flight failure here won't leave a committed customer
       // paired with an un-committed reservation (or vice versa).
       if (reservationRow && customerId) {
         try {
-          await slotReservation.commitReservation({
+          const committedAppointment = await slotReservation.commitReservation({
             scheduledServiceId: reservationRow.id,
             customerId,
             paymentMethodPreference,
@@ -4975,6 +5008,9 @@ router.put('/:token/accept', async (req, res, next) => {
             trx,
           });
           reservationCommitted = true;
+          if (committedAppointment?.id) {
+            acceptedAppointmentsToRegister.push(committedAppointment);
+          }
         } catch (commitErr) {
           if (commitErr.code === 'RESERVATION_EXPIRED') {
             const err = new Error('reservation expired — re-pick a slot');
@@ -5024,6 +5060,10 @@ router.put('/:token/accept', async (req, res, next) => {
           throw err;
         }
         reservationCommitted = true;
+        acceptedAppointmentsToRegister.push({
+          ...existingAppointmentRow,
+          ...updates,
+        });
       }
 
       let onboardingToken = null;
@@ -5051,10 +5091,26 @@ router.put('/:token/accept', async (req, res, next) => {
         onboardingToken = obToken;
       }
 
-      return { customerId, onboardingToken, reservationCommitted };
+      return { customerId, onboardingToken, reservationCommitted, acceptedAppointmentsToRegister };
     });
 
-    const { customerId, onboardingToken, reservationCommitted } = txResult;
+    const {
+      customerId,
+      onboardingToken,
+      reservationCommitted,
+      acceptedAppointmentsToRegister = [],
+    } = txResult;
+    for (const appointment of acceptedAppointmentsToRegister) {
+      try {
+        await registerAcceptedEstimateAppointmentReminder({
+          appointment,
+          customerId,
+          serviceType: appointment.service_type,
+        });
+      } catch (e) {
+        logger.error(`[estimate-accept] Appointment reminder registration failed for ${appointment.id}: ${e.message}`);
+      }
+    }
     if (customerId) {
       try {
         await markLinkedLeadEstimateAccepted({
@@ -8554,6 +8610,7 @@ module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNo
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
 module.exports.renderEditableSmsTemplate = renderEditableSmsTemplate;
+module.exports.registerAcceptedEstimateAppointmentReminder = registerAcceptedEstimateAppointmentReminder;
 module.exports.isRodentServiceName = isRodentServiceName;
 module.exports.isTreeShrubServiceName = isTreeShrubServiceName;
 module.exports.isMosquitoServiceName = isMosquitoServiceName;
