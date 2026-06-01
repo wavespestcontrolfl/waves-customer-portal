@@ -93,6 +93,7 @@ const TRIGGER_REGISTRY = {
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
       ];
+      if (p.service) bodyParts.push(`Wants ${p.service}`);
       if (p.phone) bodyParts.push(`Phone: ${maskPhone(p.phone)}`);
       if (p.message) bodyParts.push('Message included on lead record');
       return {
