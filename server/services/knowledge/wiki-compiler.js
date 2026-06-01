@@ -40,6 +40,72 @@ function parseArray(value) {
   return [];
 }
 
+function parseCompilerArticles(value) {
+  const articles = Array.isArray(value)
+    ? value
+    : (value && typeof value === 'object' && Array.isArray(value.articles) ? value.articles : null);
+
+  if (!articles) {
+    throw new Error('Compiler output JSON must be an array of articles');
+  }
+
+  articles.forEach((article, index) => {
+    if (!article || typeof article !== 'object' || Array.isArray(article)) {
+      throw new Error(`Compiler output article at index ${index} must be an object`);
+    }
+  });
+
+  return articles;
+}
+
+function normalizeSourceDocument(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return cleanText(value) || null;
+  if (typeof value === 'object') return value;
+  return cleanText(value) || null;
+}
+
+function parseSourceDocuments(value) {
+  if (Array.isArray(value)) return value.map(normalizeSourceDocument).filter(Boolean);
+  if (typeof value === 'string') {
+    const trimmed = cleanText(value);
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed.map(normalizeSourceDocument).filter(Boolean);
+      const normalized = normalizeSourceDocument(parsed);
+      return normalized ? [normalized] : [];
+    } catch {}
+    return trimmed.split(',').map(cleanText).filter(Boolean);
+  }
+
+  const normalized = normalizeSourceDocument(value);
+  return normalized ? [normalized] : [];
+}
+
+function sourceDocumentKey(value) {
+  if (typeof value === 'string') return `s:${value}`;
+  try {
+    return `j:${JSON.stringify(value)}`;
+  } catch {
+    return `o:${String(value)}`;
+  }
+}
+
+function appendSourceDocument(existing, next) {
+  const merged = [...parseSourceDocuments(existing)];
+  const normalizedNext = normalizeSourceDocument(next);
+  if (normalizedNext) merged.push(normalizedNext);
+
+  const seen = new Set();
+  return merged.filter(item => {
+    const key = sourceDocumentKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function wordCount(value) {
   return cleanText(value).split(/\s+/).filter(Boolean).length;
 }
@@ -136,7 +202,7 @@ ${content.substring(0, 50000)}`
       logger.error('Failed to parse compiler output');
       throw new Error('Compiler output was not valid JSON');
     }
-    articles = (Array.isArray(articles) ? articles : [articles])
+    articles = parseCompilerArticles(articles)
       .map((article, index) => normalizeArticle(article, {
         sourceLabel: source.filename,
         defaultCategory: source.file_type,
@@ -155,7 +221,7 @@ ${content.substring(0, 50000)}`
           category: article.category,
           tags: JSON.stringify(article.tags),
           backlinks: JSON.stringify(article.backlinks),
-          source_documents: JSON.stringify([...new Set([...parseArray(existing.source_documents), source.file_path])]),
+          source_documents: JSON.stringify(appendSourceDocument(existing.source_documents, source.file_path)),
           word_count: wordCount(article.content),
           last_compiled: new Date(),
           version: Number(existing.version || 0) + 1,
@@ -339,7 +405,7 @@ ${content.substring(0, 50000)}`
       await db('knowledge_sources').where('id', source.id).update({ processed: true, processed_at: new Date(), articles_generated: JSON.stringify([]) });
       throw new Error('Compiler output was not valid JSON');
     }
-    articles = (Array.isArray(articles) ? articles : [articles])
+    articles = parseCompilerArticles(articles)
       .map((article, index) => normalizeArticle(article, {
         sourceLabel: filename,
         defaultCategory,
@@ -352,7 +418,6 @@ ${content.substring(0, 50000)}`
       const existing = await db('knowledge_base').where('path', article.path).first();
 
       if (existing) {
-        const existingSources = parseArray(existing.source_documents);
         await db('knowledge_base').where('id', existing.id).update({
           title: article.title,
           content: article.content,
@@ -360,7 +425,7 @@ ${content.substring(0, 50000)}`
           category: article.category,
           tags: JSON.stringify(article.tags),
           backlinks: JSON.stringify(article.backlinks),
-          source_documents: JSON.stringify([...new Set([...existingSources, sourceTag])]),
+          source_documents: JSON.stringify(appendSourceDocument(existing.source_documents, sourceTag)),
           word_count: wordCount(article.content),
           last_compiled: new Date(),
           version: Number(existing.version || 0) + 1,
