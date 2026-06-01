@@ -1,4 +1,9 @@
-const { classifyEstimateSmsIntent } = require('./estimate-conversion-agent');
+const {
+  SERVICE_SCHEDULING_WORKFLOW,
+  WORKFLOW: ESTIMATE_CONVERSION_WORKFLOW,
+  classifyEstimateSmsIntent,
+  classifyServiceSchedulingSmsIntent,
+} = require('./estimate-conversion-agent');
 
 const SCHEMA_VERSION = 'agent-decision-fixtures.v1';
 
@@ -73,6 +78,7 @@ function fixtureFromDecision(row, options = {}) {
     customer: inputSnapshot.customer || null,
     estimate: inputSnapshot.estimate || null,
     lead: inputSnapshot.lead || null,
+    recentSmsThread: inputSnapshot.recent_sms_thread || inputSnapshot.recentSmsThread || null,
   });
   const humanVerdict = row.human_verdict || row.status || 'pending_review';
   const correctedActions = arrayFrom(row.corrected_actions);
@@ -131,8 +137,19 @@ function includesAll(actual = [], expected = []) {
   return (expected || []).every((item) => actualSet.has(String(item)));
 }
 
+function evaluateDecisionForWorkflow(testCase = {}) {
+  const workflow = testCase.workflow || ESTIMATE_CONVERSION_WORKFLOW;
+  const body = testCase?.input?.body || '';
+  const context = testCase?.input?.context || {};
+
+  if (workflow === SERVICE_SCHEDULING_WORKFLOW) {
+    return classifyServiceSchedulingSmsIntent(body, context);
+  }
+  return classifyEstimateSmsIntent(body, context);
+}
+
 function evaluateFixture(testCase) {
-  const actual = classifyEstimateSmsIntent(testCase?.input?.body || '', testCase?.input?.context || {});
+  const actual = evaluateDecisionForWorkflow(testCase);
   const expected = testCase.expected || {};
   const failures = [];
 
@@ -189,6 +206,7 @@ module.exports = {
   fixtureFromDecision,
   _test: {
     arrayFrom,
+    evaluateDecisionForWorkflow,
     parseJson,
     redactText,
     redactValue,

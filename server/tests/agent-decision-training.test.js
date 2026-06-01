@@ -24,6 +24,29 @@ function decision(overrides = {}) {
   };
 }
 
+function serviceSchedulingDecision(overrides = {}) {
+  return decision({
+    workflow: 'service_scheduling_sms',
+    detected_intent: 'service_scheduling_window_reply',
+    input_snapshot: {
+      sms: { body: '9am works' },
+      customer: { id: 'customer-1', name: 'Dale Brush' },
+      recent_sms_thread: [
+        { direction: 'outbound', body: 'What time works for you?' },
+        { direction: 'inbound', body: '9am works' },
+      ],
+    },
+    recommended_actions: [
+      'draft_service_scheduling_reply',
+      'check_route_availability',
+      'confirm_service_window_after_review',
+    ],
+    blocked_actions: ['silently_schedule_without_confirmed_slot', 'create_subscription', 'charge_card'],
+    safety_flags: ['existing_customer_service_thread', 'scheduling_requires_explicit_slot', 'never_create_subscription', 'never_charge_card'],
+    ...overrides,
+  });
+}
+
 describe('agent decision training fixtures', () => {
   test('exports accepted decisions as expected classifier fixtures', () => {
     const fixture = fixtureFromDecision(decision());
@@ -134,6 +157,20 @@ describe('agent decision training fixtures', () => {
       caseCount: 1,
       passed: 1,
       failed: 0,
+    });
+  });
+
+  test('evaluates service scheduling fixtures with the service scheduling classifier', () => {
+    const fixture = fixtureFromDecision(serviceSchedulingDecision());
+    const result = evaluateFixture(fixture);
+
+    expect(fixture.workflow).toBe('service_scheduling_sms');
+    expect(result).toMatchObject({
+      ok: true,
+      actual: {
+        intent: 'service_scheduling_window_reply',
+        recommendedActions: expect.arrayContaining(['draft_service_scheduling_reply']),
+      },
     });
   });
 });

@@ -2,8 +2,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 const WORKFLOW = 'estimate_conversion_sms';
+const SERVICE_SCHEDULING_WORKFLOW = 'service_scheduling_sms';
 const AGENT_NAME = 'waves-estimate-conversion-shadow';
-const DECISION_VERSION = '2026-05-29.1';
+const SERVICE_SCHEDULING_AGENT_NAME = 'waves-service-scheduling-shadow';
+const DECISION_VERSION = '2026-06-01.1';
 
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'];
 const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up'];
@@ -13,6 +15,8 @@ const SCHEDULE_WINDOW_RE = /\b(week of|next week|couple weeks?|any time|start (o
 const HOME_QUESTION_RE = /\b(do i need to be home|need to be home|have to be home|do we need to be there|access to the exterior)\b/i;
 const SERVICE_QUESTION_RE = /\b(typical visit|outline of the service|what'?s included|does it include|sweep|sweeping|webs?|lanai|cage|front door|entry points?|shrubs?)\b/i;
 const GENERAL_ESTIMATE_QUESTION_RE = /\b(how much|fees?|price|pricing|cost|bundle|bundled|add that|add .*later|come inside|inside|safe for pets?|new estimate|proceed with (a )?service)\b|\?/i;
+const SERVICE_SCHEDULING_PROMPT_RE = /\b(availability|available|what availability|what works|what time|what day|can y'?all do|can you do|does .* work|appointment|schedule|reschedule|adjust around your schedule|route)\b/i;
+const TIME_AVAILABILITY_RE = /\b([1-9]|1[0-2])(?::[0-5]\d)?\s?(a\.?m\.?|p\.?m\.?)?\b|\b(morning|afternoon|evening|midday|noon|early|late)\b/i;
 
 function normalizePhoneLast10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -144,6 +148,93 @@ function classifyEstimateSmsIntent(body, context = {}) {
   };
 }
 
+function classifyServiceSchedulingSmsIntent(body, context = {}) {
+  const text = String(body || '').trim();
+  if (!text) {
+    return {
+      intent: null,
+      confidence: 0,
+      recommendedActions: [],
+      autoActionsAllowed: [],
+      blockedActions: [],
+      safetyFlags: [],
+      suggestedMessage: null,
+      reasoningSummary: 'Empty SMS body; no service scheduling decision.',
+    };
+  }
+
+  const hasCustomer = !!context.customer;
+  const hasEstimate = !!context.estimate;
+  const accepted = ACCEPTANCE_RE.test(text);
+  const scheduleWindow = SCHEDULE_WINDOW_RE.test(text);
+  const activeSchedulingThread = hasActiveServiceSchedulingThread(context.recentSmsThread);
+  const availabilityReply = scheduleWindow || (activeSchedulingThread && TIME_AVAILABILITY_RE.test(text));
+  if (!hasCustomer || !availabilityReply || accepted || (hasEstimate && !activeSchedulingThread)) {
+    return {
+      intent: null,
+      confidence: 0,
+      recommendedActions: [],
+      autoActionsAllowed: [],
+      blockedActions: [],
+      safetyFlags: [],
+      suggestedMessage: null,
+      reasoningSummary: 'No active customer service-scheduling signal detected.',
+    };
+  }
+
+  const firstName = firstNameFrom(context.customer?.first_name || context.customer?.name);
+  return {
+    intent: 'service_scheduling_window_reply',
+    confidence: 0.86,
+    recommendedActions: [
+      'draft_service_scheduling_reply',
+      'check_route_availability',
+      'confirm_service_window_after_review',
+    ],
+    autoActionsAllowed: ['draft_service_scheduling_reply'],
+    blockedActions: [
+      'silently_schedule_without_confirmed_slot',
+      'create_subscription',
+      'charge_card',
+    ],
+    safetyFlags: [
+      'existing_customer_service_thread',
+      'scheduling_requires_explicit_slot',
+      'never_create_subscription',
+      'never_charge_card',
+    ],
+    suggestedMessage: `Hello ${firstName}! That helps. I can check the route for those windows and confirm the best available option before locking anything in.`,
+    reasoningSummary: activeSchedulingThread
+      ? 'existing customer text answers a recent service scheduling prompt; route as service scheduling, not estimate conversion.'
+      : 'existing customer text references service availability or a scheduling window; route as service scheduling, not estimate conversion.',
+  };
+}
+
+function hasActiveServiceSchedulingThread(thread = []) {
+  const rows = Array.isArray(thread) ? thread : [];
+  return rows.some((row) => (
+    row?.direction === 'outbound'
+    && SERVICE_SCHEDULING_PROMPT_RE.test(String(row.body || row.message_body || ''))
+  ));
+}
+
+function routeEstimateOrCustomerReply(body, context = {}) {
+  const serviceScheduling = classifyServiceSchedulingSmsIntent(body, context);
+  if (serviceScheduling.intent) {
+    return {
+      workflow: SERVICE_SCHEDULING_WORKFLOW,
+      agentName: SERVICE_SCHEDULING_AGENT_NAME,
+      decision: serviceScheduling,
+    };
+  }
+
+  return {
+    workflow: WORKFLOW,
+    agentName: AGENT_NAME,
+    decision: classifyEstimateSmsIntent(body, context),
+  };
+}
+
 function buildReasoningSummary({ accepted, scheduleWindow, homeQuestion, serviceQuestion, generalEstimateQuestion, hasEstimate }) {
   const parts = [];
   if (accepted) parts.push('customer text contains a verbal acceptance signal');
@@ -217,6 +308,42 @@ async function resolveLeadContext({ customer, phone, estimate }) {
   return null;
 }
 
+async function resolveRecentSmsThread({ customer, phone, smsLogId }) {
+  const last10 = normalizePhoneLast10(phone);
+  if (!customer?.id && !last10) return [];
+
+  let currentCreatedAt = null;
+  if (smsLogId) {
+    const current = await db('sms_log').where({ id: smsLogId }).select('created_at').first();
+    currentCreatedAt = current?.created_at || null;
+  }
+
+  const q = db('sms_log')
+    .select('id', 'direction', 'message_body', 'message_type', 'admin_user_id', 'created_at')
+    .orderBy('created_at', 'desc')
+    .limit(8);
+
+  q.where(function filterIdentity() {
+    if (customer?.id) this.where('customer_id', customer.id);
+    if (last10) {
+      this.orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10]);
+    }
+  });
+  if (currentCreatedAt) q.where('created_at', '<=', currentCreatedAt);
+
+  const rows = await q;
+  return rows.reverse().map((row) => ({
+    id: row.id,
+    direction: row.direction,
+    body: row.message_body,
+    type: row.message_type,
+    adminUserId: row.admin_user_id || null,
+    createdAt: row.created_at,
+    isTrigger: smsLogId ? row.id === smsLogId : false,
+  }));
+}
+
 function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCode }) {
   return {
     sms: {
@@ -261,21 +388,23 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
   try {
     const { estimate, shortCode } = await resolveEstimateContext({ customer, phone: from, body });
     const lead = await resolveLeadContext({ customer, phone: from, estimate });
-    const decision = classifyEstimateSmsIntent(body, { customer, estimate, lead });
+    const recentSmsThread = await resolveRecentSmsThread({ customer, phone: from, smsLogId });
+    const routed = routeEstimateOrCustomerReply(body, { customer, estimate, lead, recentSmsThread });
+    const { workflow, agentName, decision } = routed;
 
     if (!decision.intent) return null;
 
     const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
     const entityId = estimate?.id || lead?.id || customer?.id || null;
     const idempotencyKey = sourceMessageId
-      ? `${WORKFLOW}:twilio:${sourceMessageId}`
+      ? `${workflow}:twilio:${sourceMessageId}`
       : smsLogId
-        ? `${WORKFLOW}:sms_log:${smsLogId}`
+        ? `${workflow}:sms_log:${smsLogId}`
         : null;
 
     const payload = {
-      workflow: WORKFLOW,
-      agent_name: AGENT_NAME,
+      workflow,
+      agent_name: agentName,
       decision_version: DECISION_VERSION,
       mode: 'shadow',
       status: 'pending_review',
@@ -290,7 +419,11 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       detected_intent: decision.intent,
       confidence: decision.confidence,
       confidence_label: confidenceLabel(decision.confidence),
-      input_snapshot: JSON.stringify(buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCode })),
+      input_snapshot: JSON.stringify({
+        ...buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCode }),
+        routing: { workflow },
+        recent_sms_thread: recentSmsThread,
+      }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
       blocked_actions: JSON.stringify(decision.blockedActions),
@@ -314,14 +447,20 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
 
 module.exports = {
   WORKFLOW,
+  SERVICE_SCHEDULING_WORKFLOW,
   AGENT_NAME,
+  SERVICE_SCHEDULING_AGENT_NAME,
   DECISION_VERSION,
   classifyEstimateSmsIntent,
+  classifyServiceSchedulingSmsIntent,
   extractShortCode,
   normalizePhoneLast10,
   processInboundSms,
+  routeEstimateOrCustomerReply,
   _test: {
     buildInputSnapshot,
     confidenceLabel,
+    hasActiveServiceSchedulingThread,
+    resolveRecentSmsThread,
   },
 };
