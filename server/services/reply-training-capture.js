@@ -280,9 +280,121 @@ async function captureReplyExampleForTwilioSid(twilioSid, options = {}) {
   return captureReplyExampleForMessage(outbound, options);
 }
 
+async function upsertReplyExampleFromAgentReview({
+  decision,
+  context = {},
+  idealReply,
+  actualReply,
+  reviewNote,
+  scenarioLabel,
+  reviewedBy,
+} = {}) {
+  try {
+    if (!(await tableExists(TRAINING_TABLE))) return null;
+    if (!decision?.id) return null;
+
+    const outboundBody = normalizeText(idealReply || actualReply || '');
+    if (!outboundBody) return null;
+
+    const inboundBody = normalizeText(decision.inboundMessage || decision.inputSnapshot?.sms?.body || '');
+    const agentDraft = normalizeText(decision.suggestedMessage || '');
+    const resolvedScenario = classifyScenario({
+      inboundBody,
+      outboundBody,
+      metadata: { scenarioLabel },
+    });
+    const contextSnapshot = {
+      conversation: context.conversation || null,
+      customer: context.customer || null,
+      lead: context.lead || null,
+      estimate: context.estimate || null,
+      pairedInbound: {
+        id: decision.smsLogId || decision.sourceMessageId || null,
+        channel: 'sms',
+        direction: 'inbound',
+        body: inboundBody,
+        createdAt: decision.createdAt || null,
+      },
+      outboundReply: actualReply ? {
+        channel: 'sms',
+        direction: 'outbound',
+        authorType: 'admin',
+        body: normalizeText(actualReply),
+      } : null,
+      smsThread: context.smsThread || [],
+      recentCalls: context.calls || [],
+      recentServices: context.services || [],
+      recentEstimates: context.estimate ? [context.estimate] : [],
+      recentLeads: context.lead ? [context.lead] : [],
+      sourceAgentDecision: {
+        id: decision.id,
+        workflow: decision.workflow,
+        detectedIntent: decision.detectedIntent,
+        confidence: decision.confidence,
+        recommendedActions: decision.recommendedActions || [],
+        blockedActions: decision.blockedActions || [],
+      },
+    };
+
+    const payload = {
+      channel: 'sms',
+      conversation_id: decision.conversationId || null,
+      customer_id: decision.customerId || null,
+      lead_id: decision.leadId || null,
+      estimate_id: decision.estimateId || null,
+      source_agent_decision_id: decision.id,
+      inbound_body: inboundBody || null,
+      outbound_body: outboundBody,
+      agent_draft: agentDraft || null,
+      agent_draft_edited: agentDraft ? agentDraft !== outboundBody : null,
+      edit_summary: reviewNote || null,
+      scenario_label: resolvedScenario,
+      capture_reason: actualReply ? 'agent_review_actual_or_ideal_reply' : 'agent_review_ideal_reply',
+      status: 'reviewed',
+      review_verdict: 'approved_training_example',
+      review_note: reviewNote || null,
+      reviewed_by: reviewedBy || null,
+      reviewed_at: new Date(),
+      context_snapshot: JSON.stringify(contextSnapshot),
+      metadata: JSON.stringify({
+        source: 'agent_review',
+        actualHumanReply: normalizeText(actualReply || '') || null,
+        idealReplyProvided: !!normalizeText(idealReply || ''),
+      }),
+      captured_at: new Date(),
+      updated_at: new Date(),
+    };
+
+    const existing = await db(TRAINING_TABLE)
+      .where({ source_agent_decision_id: decision.id })
+      .whereIn('capture_reason', ['agent_review_actual_or_ideal_reply', 'agent_review_ideal_reply'])
+      .first();
+
+    if (existing) {
+      const [row] = await db(TRAINING_TABLE)
+        .where({ id: existing.id })
+        .update(payload)
+        .returning('*');
+      return row || null;
+    }
+
+    const [row] = await db(TRAINING_TABLE)
+      .insert({
+        ...payload,
+        created_at: new Date(),
+      })
+      .returning('*');
+    return row || null;
+  } catch (err) {
+    logger.warn(`[reply-training] agent review save failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   captureReplyExampleForMessage,
   captureReplyExampleForTwilioSid,
+  upsertReplyExampleFromAgentReview,
   _internals: {
     classifyScenario,
     shouldCaptureReply,
