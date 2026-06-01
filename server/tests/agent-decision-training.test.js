@@ -47,6 +47,21 @@ function serviceSchedulingDecision(overrides = {}) {
   });
 }
 
+function customerSmsTriageDecision(overrides = {}) {
+  return decision({
+    workflow: 'customer_sms_triage',
+    detected_intent: 'customer_nudge_needs_reply',
+    input_snapshot: {
+      sms: { body: 'Hey Adam?' },
+      customer: { id: 'customer-1', first_name: 'Jess', name: 'Jess Latika' },
+    },
+    recommended_actions: ['review_thread_context', 'draft_customer_reply'],
+    blocked_actions: ['send_without_human_review', 'create_subscription', 'charge_card'],
+    safety_flags: ['human_review_required', 'never_create_subscription', 'never_charge_card'],
+    ...overrides,
+  });
+}
+
 describe('agent decision training fixtures', () => {
   test('exports accepted decisions as expected classifier fixtures', () => {
     const fixture = fixtureFromDecision(decision());
@@ -170,6 +185,20 @@ describe('agent decision training fixtures', () => {
       actual: {
         intent: 'service_scheduling_window_reply',
         recommendedActions: expect.arrayContaining(['draft_service_scheduling_reply']),
+      },
+    });
+  });
+
+  test('evaluates customer SMS triage fixtures with the triage classifier', () => {
+    const fixture = fixtureFromDecision(customerSmsTriageDecision());
+    const result = evaluateFixture(fixture);
+
+    expect(fixture.workflow).toBe('customer_sms_triage');
+    expect(result).toMatchObject({
+      ok: true,
+      actual: {
+        intent: 'customer_nudge_needs_reply',
+        recommendedActions: expect.arrayContaining(['draft_customer_reply']),
       },
     });
   });

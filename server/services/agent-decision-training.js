@@ -1,6 +1,8 @@
 const {
+  CUSTOMER_SMS_TRIAGE_WORKFLOW,
   SERVICE_SCHEDULING_WORKFLOW,
   WORKFLOW: ESTIMATE_CONVERSION_WORKFLOW,
+  classifyCustomerSmsTriageIntent,
   classifyEstimateSmsIntent,
   classifyServiceSchedulingSmsIntent,
 } = require('./estimate-conversion-agent');
@@ -144,6 +146,9 @@ function evaluateDecisionForWorkflow(testCase = {}) {
 
   if (workflow === SERVICE_SCHEDULING_WORKFLOW) {
     return classifyServiceSchedulingSmsIntent(body, context);
+  }
+  if (workflow === CUSTOMER_SMS_TRIAGE_WORKFLOW) {
+    return classifyCustomerSmsTriageIntent(body, context);
   }
   return classifyEstimateSmsIntent(body, context);
 }
