@@ -262,6 +262,54 @@ describe('review incentives', () => {
     });
   });
 
+  test('dashboard visibility counts only post-program Google reviews', async () => {
+    const conn = createDbMock({
+      google_reviews: [
+        {
+          id: 'old-google',
+          customer_id: null,
+          reviewer_name: 'Old Customer',
+          star_rating: 5,
+          review_created_at: '2026-05-29T16:00:00.000Z',
+          location_id: 'sarasota',
+          google_review_id: 'accounts/1/locations/2/reviews/old',
+        },
+        {
+          id: 'new-google',
+          customer_id: null,
+          reviewer_name: 'New Customer',
+          star_rating: 5,
+          review_created_at: '2026-06-01T16:00:00.000Z',
+          location_id: 'sarasota',
+          google_review_id: 'accounts/1/locations/2/reviews/new',
+        },
+        {
+          id: 'stats-row',
+          customer_id: null,
+          reviewer_name: '_stats',
+          star_rating: 5,
+          review_created_at: '2026-06-01T18:00:00.000Z',
+          location_id: 'sarasota',
+          google_review_id: 'stats',
+        },
+      ],
+    });
+
+    const dashboard = await ReviewIncentives.getDashboard({
+      conn,
+      policy: { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' },
+      periodStart: '2026-05-01T00:00:00.000Z',
+      periodEnd: '2026-06-02T00:00:00.000Z',
+    });
+
+    expect(dashboard.period).toMatchObject({
+      effectiveStart: '2026-06-01T00:00:00.000Z',
+      programStartsAt: '2026-06-01T00:00:00.000Z',
+    });
+    expect(dashboard.summary.confirmedGoogleReviews).toBe(1);
+    expect(dashboard.summary.unattributedGoogleReviews).toBe(1);
+  });
+
   test('attributes a matched Google review to the most recent technician service', async () => {
     const conn = createDbMock({
       service_records: [{

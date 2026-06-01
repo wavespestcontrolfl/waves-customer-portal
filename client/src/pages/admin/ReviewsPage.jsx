@@ -789,6 +789,57 @@ function fmtShortDate(value) {
   }
 }
 
+function fmtDateTime(value) {
+  if (!value) return "";
+  try {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: "America/New_York",
+      timeZoneName: "short",
+    });
+  } catch {
+    return "";
+  }
+}
+
+function PolicyInfoCard({ Icon, label, value, sub, color = D.teal }) {
+  return (
+    <div
+      style={{
+        background: D.card,
+        border: `1px solid ${D.border}`,
+        borderRadius: 8,
+        padding: 14,
+        display: "grid",
+        gridTemplateColumns: "20px minmax(0, 1fr)",
+        gap: 10,
+        alignItems: "start",
+      }}
+    >
+      <Icon size={18} color={color} style={{ marginTop: 1 }} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: D.muted, marginBottom: 4 }}>
+          {label}
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 800, color: D.heading, lineHeight: 1.25 }}>
+          {value}
+        </div>
+        {sub && (
+          <div style={{ fontSize: 12, color: D.muted, marginTop: 5, lineHeight: 1.4 }}>
+            {sub}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ReviewIncentivesPanel() {
   const [days, setDays] = useState("30");
   const [data, setData] = useState(null);
@@ -948,6 +999,14 @@ function ReviewIncentivesPanel() {
   const needsAttributionCount = queueLoading
     ? "..."
     : queue.length || ((summary.unattributedGoogleReviews || 0) + (summary.unattributedReviewRequests || 0));
+  const confirmedGoogleReviews = Number(summary.confirmedGoogleReviews || 0);
+  const programStartsAt = policy.programStartsAt || data?.period?.programStartsAt || null;
+  const programStartLabel = fmtDateTime(programStartsAt) || "Not configured";
+  const policyEnabled = policy.enabled !== false;
+  const noEligiblePostLaunchReviews = policyEnabled
+    && confirmedGoogleReviews === 0
+    && payouts.length === 0
+    && queue.length === 0;
 
   return (
     <div style={{ fontFamily: "Roboto, Arial, sans-serif" }}>
@@ -1044,11 +1103,73 @@ function ReviewIncentivesPanel() {
         </div>
       ) : (
         <>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))",
+              gap: 10,
+              marginBottom: 14,
+            }}
+          >
+            <PolicyInfoCard
+              Icon={Award}
+              label="Program active since"
+              value={programStartLabel}
+              sub="Reviews before this cutoff stay excluded from payouts and attribution repair."
+            />
+            <PolicyInfoCard
+              Icon={CheckCircle2}
+              label="Payout trigger"
+              value="Confirmed public Google reviews after activation"
+              sub="A bonus row is created only after the review is synced from Google and matched to a technician."
+              color={D.green}
+            />
+            <PolicyInfoCard
+              Icon={Search}
+              label="Attribution context"
+              value="Rate page and review requests are not payout triggers"
+              sub="They only help connect a confirmed Google review to the right customer and technician."
+              color={D.amber}
+            />
+          </div>
+
+          {noEligiblePostLaunchReviews && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "22px minmax(0, 1fr)",
+                gap: 10,
+                alignItems: "start",
+                background: "#F0FDF4",
+                border: `1px solid ${D.green}`,
+                borderRadius: 8,
+                padding: 14,
+                marginBottom: 14,
+              }}
+            >
+              <CheckCircle2 size={18} color={D.green} style={{ marginTop: 1 }} />
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
+                  No eligible post-launch Google reviews yet.
+                </div>
+                <div style={{ fontSize: 12, color: D.text, marginTop: 4, lineHeight: 1.45 }}>
+                  Old reviews are intentionally ignored. The first public Google review after activation will either create an earned payout or appear in the attribution queue.
+                </div>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
+            <StatCard
+              label="Post-Launch Reviews"
+              value={confirmedGoogleReviews}
+              sub="public Google reviews since activation"
+              color={D.heading}
+            />
             <StatCard
               label="Earned"
               value={money(summary.earnedCents)}
-              sub={`${summary.payoutCount || 0} confirmed reviews`}
+              sub={`${summary.payoutCount || 0} technician bonuses`}
               color={D.teal}
             />
             <StatCard
@@ -1066,7 +1187,7 @@ function ReviewIncentivesPanel() {
             <StatCard
               label="Needs Attribution"
               value={needsAttributionCount}
-              sub="missing customer or technician match"
+              sub="post-launch reviews missing a customer or technician match"
               color={D.red}
             />
           </div>
@@ -1127,7 +1248,9 @@ function ReviewIncentivesPanel() {
               </div>
             ) : queue.length === 0 ? (
               <div style={{ color: D.muted, fontSize: 13, padding: "16px 0" }}>
-                No unmatched Google reviews in this period.
+                {confirmedGoogleReviews === 0
+                  ? "No eligible post-launch Google reviews in this period."
+                  : "No unmatched post-launch Google reviews in this period."}
               </div>
             ) : (
               <div style={{ display: "grid", gap: 10 }}>

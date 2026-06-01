@@ -750,6 +750,8 @@ async function getDashboard(options = {}) {
     : new Date(Date.now() - days * DAY_MS);
   const periodEnd = options.periodEnd ? asDate(options.periodEnd) : new Date();
   const policy = options.policy || await getPolicy(conn);
+  const startsAt = programStart(policy);
+  const effectivePeriodStart = startsAt && startsAt > periodStart ? startsAt : periodStart;
 
   const rows = await conn('review_incentive_payouts as p')
     .leftJoin('technicians as t', 'p.technician_id', 't.id')
@@ -757,7 +759,7 @@ async function getDashboard(options = {}) {
     .leftJoin('review_requests as rr', 'p.review_request_id', 'rr.id')
     .leftJoin('google_reviews as gr', 'p.google_review_id', 'gr.id')
     .where('p.source', 'google_review')
-    .where('p.earned_at', '>=', periodStart)
+    .where('p.earned_at', '>=', effectivePeriodStart)
     .where('p.earned_at', '<=', periodEnd)
     .orderBy('p.earned_at', 'desc')
     .select(
@@ -801,17 +803,29 @@ async function getDashboard(options = {}) {
     }))
     .sort((a, b) => b.earnedCents - a.earnedCents || b.reviewCount - a.reviewCount);
 
+  let confirmedGoogleReviews = 0;
   let unattributedGoogleReviews = 0;
   try {
-    const googleRow = await conn('google_reviews')
+    const minRating = Math.max(1, toInt(policy.minRating, 1));
+    const confirmedRow = await conn('google_reviews')
       .where('reviewer_name', '!=', '_stats')
-      .where('review_created_at', '>=', periodStart)
-      .where('review_created_at', '<=', periodEnd)
+      .where('review_created_at', '>=', effectivePeriodStart.toISOString())
+      .where('review_created_at', '<=', periodEnd.toISOString())
+      .where('star_rating', '>=', minRating)
+      .count('* as count')
+      .first();
+    const unattributedRow = await conn('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .where('review_created_at', '>=', effectivePeriodStart.toISOString())
+      .where('review_created_at', '<=', periodEnd.toISOString())
+      .where('star_rating', '>=', minRating)
       .whereNull('customer_id')
       .count('* as count')
       .first();
-    unattributedGoogleReviews = toInt(googleRow?.count, 0);
+    confirmedGoogleReviews = toInt(confirmedRow?.count, 0);
+    unattributedGoogleReviews = toInt(unattributedRow?.count, 0);
   } catch {
+    confirmedGoogleReviews = 0;
     unattributedGoogleReviews = 0;
   }
 
@@ -823,10 +837,13 @@ async function getDashboard(options = {}) {
     policy,
     period: {
       start: periodStart.toISOString(),
+      effectiveStart: effectivePeriodStart.toISOString(),
       end: periodEnd.toISOString(),
       days,
+      programStartsAt: policy.programStartsAt || null,
     },
     summary: {
+      confirmedGoogleReviews,
       payoutCount: payouts.length,
       attributedReviews: payouts.length,
       earnedCents,
