@@ -588,7 +588,7 @@ router.post('/send-request', async (req, res, next) => {
 });
 
 // GET /api/admin/reviews/incentives — technician review bonus dashboard
-router.get('/incentives', async (req, res, next) => {
+router.get('/incentives', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 30));
     const dashboard = await ReviewIncentives.getDashboard({ days });
@@ -597,7 +597,7 @@ router.get('/incentives', async (req, res, next) => {
 });
 
 // GET /api/admin/reviews/incentives/attribution-queue — Google reviews that need payout attribution repair
-router.get('/incentives/attribution-queue', async (req, res, next) => {
+router.get('/incentives/attribution-queue', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 30));
     const limit = Math.max(1, Math.min(250, parseInt(req.query.limit, 10) || 100));
@@ -607,7 +607,7 @@ router.get('/incentives/attribution-queue', async (req, res, next) => {
 });
 
 // GET /api/admin/reviews/incentives/attribution-candidates — customer/service matches for one Google review
-router.get('/incentives/attribution-candidates', async (req, res, next) => {
+router.get('/incentives/attribution-candidates', requireAdmin, async (req, res, next) => {
   try {
     const limit = Math.max(1, Math.min(25, parseInt(req.query.limit, 10) || 10));
     const result = await ReviewIncentives.searchAttributionCandidates({
@@ -662,7 +662,7 @@ router.post('/incentives/mark-paid', requireAdmin, async (req, res, next) => {
 });
 
 // GET /api/admin/reviews/incentives/export — payroll-friendly CSV
-router.get('/incentives/export', async (req, res, next) => {
+router.get('/incentives/export', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 30));
     const dashboard = await ReviewIncentives.getDashboard({ days });
