@@ -190,7 +190,7 @@ export default function AgentDecisionsPage() {
     setActualReply(training?.actualHumanReply || humanReply || "");
     setIdealReply(training?.outboundBody || selected?.suggestedMessage || humanReply || "");
     setReplyReviewNote(training?.reviewNote || "");
-    setReplyScenarioLabel(training?.scenarioLabel || "");
+    setReplyScenarioLabel(training?.scenarioLabel || selected?.inputSnapshot?.reply_training_hint?.scenarioLabel || "");
   }, [detail?.replyTraining?.id, detail?.context?.actualHumanReply?.id, selected?.id, selected?.suggestedMessage]);
 
   const review = useCallback(async (decision, verdict) => {
