@@ -318,6 +318,29 @@ async function processWebhookEvent(ev, messageId, email, handler) {
  *   subscriberAt   — timestamp to use for the subscriber-side write
  */
 function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
+  const event = String(ev?.event || '').toLowerCase();
+  const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
+  if (event === 'dropped' && (reason === 'group unsubscribe' || reason === 'unsubscribed address')) {
+    if (delivery.unsubscribed_at) return null;
+    return {
+      delivery: { status: 'unsubscribed', unsubscribed_at: now, updated_at: now },
+      sendIncrement: 'unsubscribed_count',
+      reconcileSendStatus: true,
+      subscriberAction: delivery.subscriber_id ? 'unsubscribe_if_active' : null,
+      subscriberAt: now,
+    };
+  }
+  if (event === 'dropped' && reason === 'spam reporting address') {
+    if (delivery.complained_at) return null;
+    return {
+      delivery: { status: 'complained', complained_at: now, updated_at: now },
+      sendIncrement: 'complained_count',
+      reconcileSendStatus: true,
+      subscriberAction: delivery.subscriber_id ? 'force_unsubscribe' : null,
+      subscriberAt: now,
+    };
+  }
+
   switch (ev.event) {
     case 'delivered':
       if (delivery.delivered_at) return null;
@@ -455,6 +478,7 @@ function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
 
 function suppressionForEmailEvent(ev, groupKey = null) {
   const event = String(ev?.event || '').toLowerCase();
+  const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
   if (event === 'spamreport') {
     return { suppression_type: 'spam_complaint', group_key: null };
   }
@@ -465,8 +489,22 @@ function suppressionForEmailEvent(ev, groupKey = null) {
     return { suppression_type: 'unsubscribe', group_key: groupKey || null };
   }
   if (event === 'bounce') {
-    const type = String(ev?.type || '').toLowerCase();
+    const type = String(ev?.type || '').trim().toLowerCase();
     if (!type || type === 'bounce' || type === 'hard') {
+      return { suppression_type: 'bounce', group_key: null };
+    }
+  }
+  if (event === 'dropped') {
+    if (reason === 'group unsubscribe') {
+      return groupKey ? { suppression_type: 'unsubscribe', group_key: groupKey } : null;
+    }
+    if (reason === 'unsubscribed address') {
+      return { suppression_type: 'unsubscribe', group_key: null };
+    }
+    if (reason === 'spam reporting address') {
+      return { suppression_type: 'spam_complaint', group_key: null };
+    }
+    if (reason === 'bounced address' || reason === 'invalid') {
       return { suppression_type: 'bounce', group_key: null };
     }
   }
@@ -474,7 +512,9 @@ function suppressionForEmailEvent(ev, groupKey = null) {
 }
 
 function automationSuppressionGroupKeyForEvent(ev) {
-  if (String(ev?.event || '').toLowerCase() !== 'group_unsubscribe') return null;
+  const event = String(ev?.event || '').toLowerCase();
+  const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
+  if (event !== 'group_unsubscribe' && !(event === 'dropped' && reason === 'group unsubscribe')) return null;
   const gid = String(ev?.asm_group_id || '');
   if (gid && gid === String(process.env.SENDGRID_ASM_GROUP_NEWSLETTER || '')) return 'marketing_newsletter';
   if (gid && gid === String(process.env.SENDGRID_ASM_GROUP_SERVICE || '')) return 'service_operational';
@@ -599,18 +639,34 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
     }
   }
 
-  // Record the GLOBAL suppression ledger entry for hard bounces and spam
-  // complaints so every send stream honors them — including future newsletter
-  // blasts via buildSubscriberQuery's anti-join. Mirrors the automation +
-  // transactional paths, which already call this; the newsletter handler was
-  // the only stream that updated subscriber state but never wrote the ledger,
-  // so a hard-bounced/complained address kept getting re-mailed. Runs even
-  // when there's no matching subscriber row (the address still bounced).
-  // suppressionForEmailEvent only emits a row for TRUE hard bounces and
-  // spam complaints, so soft bounces / blocks / opt-outs are unaffected.
-  if (ev.event === 'bounce' || ev.event === 'spamreport') {
-    await recordEmailSuppressionForEvent(ev, null, null, updates.subscriberAt || new Date(), client);
+  // Record the suppression ledger entry for provider events that should block
+  // future app sends. Runs even when there's no matching subscriber row; the
+  // address/provider signal is still valid. SendGrid's newsletter ASM group is
+  // local `marketing_newsletter`, while bounces/spam complaints stay GLOBAL.
+  const newsletterGroupKey = newsletterSuppressionGroupKeyForEvent(ev);
+  if (shouldRecordNewsletterSuppression(ev, newsletterGroupKey)) {
+    await recordEmailSuppressionForEvent(
+      ev,
+      { recipient_email_snapshot: delivery.email || null },
+      newsletterGroupKey,
+      updates.subscriberAt || new Date(),
+      client,
+    );
   }
+}
+
+function newsletterSuppressionGroupKeyForEvent(ev) {
+  const event = String(ev?.event || '').toLowerCase();
+  const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
+  if (event === 'group_unsubscribe' || (event === 'dropped' && reason === 'group unsubscribe')) {
+    return automationSuppressionGroupKeyForEvent({ event: 'group_unsubscribe', asm_group_id: ev?.asm_group_id })
+      || 'marketing_newsletter';
+  }
+  return null;
+}
+
+function shouldRecordNewsletterSuppression(ev, groupKey = null) {
+  return !!suppressionForEmailEvent(ev, groupKey);
 }
 
 /**
@@ -773,3 +829,6 @@ module.exports.canUseDeliveryIdFallback = canUseDeliveryIdFallback;
 module.exports.canUseProviderMessageMatch = canUseProviderMessageMatch;
 module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId;
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
+module.exports.handleNewsletterEvent = handleNewsletterEvent;
+module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;
+module.exports.shouldRecordNewsletterSuppression = shouldRecordNewsletterSuppression;

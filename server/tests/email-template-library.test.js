@@ -331,6 +331,61 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('deduplicates membership.started categories before provider send', async () => {
+    const queuedMessage = {
+      id: 'msg-membership-started',
+      status: 'queued',
+      subject_snapshot: 'Your membership is active',
+    };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-membership-started' };
+
+    setDbQueues({
+      email_templates: [chain({
+        first: serviceTemplate({
+          id: 'tmpl-membership-started',
+          template_key: 'membership.started',
+          send_stream: 'transactional_required',
+          suppression_group_key: 'transactional_required',
+          active_version_id: 'ver-membership-started',
+          allowed_variables: ['first_name'],
+          required_variables: ['first_name'],
+        }),
+      })],
+      email_template_versions: [chain({
+        first: version({
+          id: 'ver-membership-started',
+          subject: 'Your membership is active',
+          preview_text: '',
+          blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, your membership is active.' }],
+        }),
+      })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        chain({ returning: [queuedMessage] }),
+        chain({ returning: [sentMessage] }),
+      ],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-membership-started' });
+
+    await EmailTemplates.sendTemplate({
+      templateKey: 'membership.started',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam' },
+      categories: ['membership', 'membership_started', 'membership_started'],
+      suppressionGroupKey: 'transactional_required',
+    });
+
+    const categories = sendgrid.sendOne.mock.calls[0][0].categories;
+    expect(categories).toEqual([
+      'email_template',
+      'template_membership_started',
+      'stream_transactional_required',
+      'membership',
+      'membership_started',
+    ]);
+    expect(new Set(categories).size).toBe(categories.length);
+  });
+
   test('keeps manual suppressions scoped to their selected preference group', async () => {
     const marketingSuppression = {
       id: 'suppression-1',
