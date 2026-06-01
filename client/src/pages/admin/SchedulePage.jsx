@@ -5717,7 +5717,17 @@ export function CompletionPanel({
             : [],
         );
         const selectedCalibration = data?.plan?.equipmentCalibration?.selected;
-        if (!equipmentSystemId && selectedCalibration?.equipment_system_id) {
+        // Only auto-adopt the plan's selected calibration when it's field
+        // verified — i.e. one of the rows that actually appears in the dropdown.
+        // The plan can surface a stale, unverified calibration as `selected`
+        // (it's filtered out of the dropdown); auto-filling that would make the
+        // visit look like the tech chose equipment they can't see, defeating the
+        // calibration advisory bypass and recording an unverified system as used.
+        if (
+          !equipmentSystemId &&
+          selectedCalibration?.equipment_system_id &&
+          selectedCalibration.calibration_status === "field_verified"
+        ) {
           setEquipmentSystemId(selectedCalibration.equipment_system_id);
           setCalibrationId(selectedCalibration.id || "");
         }
