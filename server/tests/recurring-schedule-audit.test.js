@@ -12,6 +12,7 @@ describe('recurring schedule anomaly audit', () => {
 
     expect(normalizedSql).toContain('from scheduled_services s');
     expect(normalizedSql).toContain('where s.is_recurring = true');
+    expect(normalizedSql).toContain('?::text, ?::integer');
     expect(normalizedSql).toContain('s.status not in (?, ?, ?)');
     expect(bindings).toContain('monthly_nth_weekday');
     expect(bindings).toEqual(expect.arrayContaining(['cancelled', 'rescheduled', 'completed']));
