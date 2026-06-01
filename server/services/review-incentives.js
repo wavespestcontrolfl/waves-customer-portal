@@ -10,6 +10,7 @@ const DEFAULT_POLICY = {
   eligibleSources: ['google_review'],
   minRating: 1,
   requireCustomerMatchForGoogle: true,
+  programStartsAt: null,
 };
 
 const PAYOUT_ELIGIBLE_SOURCES = ['google_review'];
@@ -24,6 +25,17 @@ function toInt(value, fallback = 0) {
 function asDate(value, fallback = new Date()) {
   const d = value ? new Date(value) : new Date(fallback);
   return Number.isNaN(d.getTime()) ? new Date(fallback) : d;
+}
+
+function validDate(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function normalizedIsoDate(value) {
+  const d = validDate(value);
+  return d ? d.toISOString() : null;
 }
 
 function dateOnly(date) {
@@ -74,10 +86,25 @@ function parsePolicy(value) {
       amountCents: Math.max(0, toInt(parsed.amountCents, DEFAULT_POLICY.amountCents)),
       minRating: Math.max(1, Math.min(5, toInt(parsed.minRating, DEFAULT_POLICY.minRating))),
       eligibleSources: PAYOUT_ELIGIBLE_SOURCES,
+      programStartsAt: normalizedIsoDate(parsed.programStartsAt) || null,
     };
   } catch {
     return { ...DEFAULT_POLICY };
   }
+}
+
+function reviewEarnedAt(review) {
+  return validDate(review?.review_created_at || review?.created_at) || new Date();
+}
+
+function programStart(policy) {
+  return validDate(policy?.programStartsAt);
+}
+
+function reviewWithinProgramWindow(review, policy) {
+  const startsAt = programStart(policy);
+  if (!startsAt) return true;
+  return reviewEarnedAt(review).getTime() >= startsAt.getTime();
 }
 
 function operationalError(message, statusCode = 400, code = 'review_incentive_error') {
@@ -129,6 +156,7 @@ function qualifiesGoogleReview(review, policy) {
   if (!policy.enabled) return false;
   if (!policy.eligibleSources.includes('google_review')) return false;
   if (!review || review.reviewer_name === '_stats') return false;
+  if (!reviewWithinProgramWindow(review, policy)) return false;
   if (policy.requireCustomerMatchForGoogle && !review.customer_id) return false;
   const rating = toInt(review.star_rating, 0);
   return rating >= Math.max(1, toInt(policy.minRating, 1));
@@ -301,6 +329,9 @@ async function createPayoutForGoogleReview(reviewId, options = {}) {
   const review = typeof reviewId === 'object'
     ? reviewId
     : await conn('google_reviews').where({ id: reviewId }).first();
+  if (review && !reviewWithinProgramWindow(review, policy)) {
+    return { created: false, skipped: true, reason: 'before_program_start' };
+  }
   if (!qualifiesGoogleReview(review, policy)) {
     return { created: false, skipped: true, reason: 'not_eligible' };
   }
@@ -334,6 +365,8 @@ async function syncReviewIncentives(options = {}) {
   const policy = options.policy || await getPolicy(conn);
   const sinceDays = Math.max(1, Math.min(365, toInt(options.sinceDays, 90)));
   const since = new Date(Date.now() - sinceDays * DAY_MS);
+  const startsAt = programStart(policy);
+  const effectiveSince = startsAt && startsAt > since ? startsAt : since;
   const summary = {
     scannedGoogleReviews: 0,
     created: 0,
@@ -346,7 +379,7 @@ async function syncReviewIncentives(options = {}) {
 
   const googleReviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
-    .where('review_created_at', '>=', since)
+    .where('review_created_at', '>=', effectiveSince.toISOString())
     .limit(500);
 
   for (const review of googleReviews) {
@@ -494,12 +527,14 @@ async function getAttributionQueue(options = {}) {
   const days = Math.max(1, Math.min(365, toInt(options.days, 30)));
   const limit = Math.max(1, Math.min(250, toInt(options.limit, 100)));
   const since = new Date(Date.now() - days * DAY_MS);
+  const startsAt = programStart(policy);
+  const effectiveSince = startsAt && startsAt > since ? startsAt : since;
 
   if (!policy.enabled) return { items: [], policyEnabled: false };
 
   const reviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
-    .where('review_created_at', '>=', since)
+    .where('review_created_at', '>=', effectiveSince.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
 
@@ -533,7 +568,8 @@ async function getAttributionQueue(options = {}) {
     policyEnabled: true,
     period: {
       days,
-      since: since.toISOString(),
+      since: effectiveSince.toISOString(),
+      programStartsAt: policy.programStartsAt || null,
     },
   };
 }
@@ -614,6 +650,9 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   const review = await conn('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') {
     throw operationalError('Google review not found', 404, 'review_not_found');
+  }
+  if (!reviewWithinProgramWindow(review, policy)) {
+    throw operationalError('Google review predates the review incentive program start', 422, 'review_before_program_start');
   }
   if (toInt(review.star_rating, 0) < Math.max(1, toInt(policy.minRating, 1))) {
     throw operationalError('Google review does not meet the minimum rating policy', 422, 'review_below_min_rating');
