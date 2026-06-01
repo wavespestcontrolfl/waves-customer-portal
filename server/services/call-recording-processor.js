@@ -33,6 +33,7 @@ const { normalizeCallExtraction } = require('../utils/intake-normalize');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
 
 const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 'true';
@@ -1529,6 +1530,12 @@ const CallRecordingProcessor = {
 
     // Skip voicemail/spam
     if (extracted.is_voicemail || extracted.is_spam) {
+      await writeLegacyShadowRouteDecision({
+        call,
+        extracted,
+        customerId: call.customer_id || null,
+        finalStatus: extracted.is_spam ? 'spam' : 'voicemail',
+      });
       const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
@@ -2399,6 +2406,18 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped newsletter subscribe for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
       }
     }
+
+    await writeLegacyShadowRouteDecision({
+      call,
+      extracted,
+      customerId,
+      leadId,
+      finalStatus,
+      appointmentResult,
+      serviceResolution,
+      hasSpecificTime,
+      createdCustomerFromCall,
+    });
 
     const finalized = await db('call_log')
       .where({ id: call.id })
