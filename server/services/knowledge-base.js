@@ -39,7 +39,15 @@ function knowledgePath(category, slug) {
 }
 
 function normalizeTags(tags) {
-  return Array.isArray(tags) ? tags.map(cleanText).filter(Boolean) : [];
+  if (Array.isArray(tags)) return tags.map(cleanText).filter(Boolean);
+  if (typeof tags === 'string') {
+    try {
+      const parsed = JSON.parse(tags);
+      if (Array.isArray(parsed)) return normalizeTags(parsed);
+    } catch {}
+    return tags.split(',').map(cleanText).filter(Boolean);
+  }
+  return [];
 }
 
 async function uniqueSlug(base) {
@@ -446,7 +454,8 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
         .first();
       if (existing) {
         const tagJson = JSON.stringify(safeTags);
-        if (existing.content !== safeContent || existing.title !== safeTitle || existing.path !== safePath || existing.category !== safeCategory || existing.tags !== tagJson) {
+        const existingTagJson = JSON.stringify(normalizeTags(existing.tags));
+        if (existing.content !== safeContent || existing.title !== safeTitle || existing.path !== safePath || existing.category !== safeCategory || existingTagJson !== tagJson) {
           await db('knowledge_base').where({ id: existing.id }).update({
             slug: safeSlug,
             path: safePath,
