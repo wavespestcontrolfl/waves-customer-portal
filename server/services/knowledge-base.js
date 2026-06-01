@@ -8,8 +8,38 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
 // ══════════════════════════════════════════════════════════════
-function slugify(text) {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
+function cleanText(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function slugify(text, fallback = 'knowledge-entry') {
+  const slug = cleanText(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 190);
+  return slug || fallback;
+}
+
+function humanizeSlug(slug) {
+  return cleanText(slug)
+    .replace(/^(product|protocol|cogs)-/, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, char => char.toUpperCase())
+    || 'Knowledge Base Entry';
+}
+
+function normalizeCategory(category) {
+  return slugify(category || 'general', 'general').substring(0, 80);
+}
+
+function knowledgePath(category, slug) {
+  return `kb/${normalizeCategory(category)}/${slugify(slug)}.md`;
+}
+
+function normalizeTags(tags) {
+  return Array.isArray(tags) ? tags.map(cleanText).filter(Boolean) : [];
 }
 
 async function uniqueSlug(base) {
@@ -28,14 +58,16 @@ async function uniqueSlug(base) {
 // ══════════════════════════════════════════════════════════════
 const KnowledgeBaseService = {
   async create({ title, content, category, tags, source, confidence, metadata, status }) {
-    const slug = await uniqueSlug(title);
+    const safeTitle = cleanText(title) || 'Knowledge Base Entry';
+    const safeCategory = normalizeCategory(category);
+    const slug = await uniqueSlug(safeTitle);
     const [entry] = await db('knowledge_base').insert({
-      path: `kb/${category || 'general'}/${slug}.md`,
+      path: knowledgePath(safeCategory, slug),
       slug,
-      title,
-      content: content || '',
-      category: category || 'general',
-      tags: JSON.stringify(tags || []),
+      title: safeTitle,
+      content: cleanText(content),
+      category: safeCategory,
+      tags: JSON.stringify(normalizeTags(tags)),
       source: source || 'manual',
       confidence: confidence || 'medium',
       metadata: JSON.stringify(metadata || {}),
@@ -402,11 +434,26 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
 
     // Helper: upsert by slug
     async function upsert(slug, title, content, category, tags = []) {
-      const existing = await db('knowledge_base').where({ slug }).first();
+      const safeSlug = slugify(slug || title);
+      const safeTitle = cleanText(title) || humanizeSlug(safeSlug);
+      const safeCategory = normalizeCategory(category);
+      const safeContent = cleanText(content);
+      const safeTags = normalizeTags(tags);
+      const safePath = knowledgePath(safeCategory, safeSlug);
+      const existing = await db('knowledge_base')
+        .where({ slug: safeSlug })
+        .orWhere({ path: safePath })
+        .first();
       if (existing) {
-        if (existing.content !== content) {
+        const tagJson = JSON.stringify(safeTags);
+        if (existing.content !== safeContent || existing.title !== safeTitle || existing.path !== safePath || existing.category !== safeCategory || existing.tags !== tagJson) {
           await db('knowledge_base').where({ id: existing.id }).update({
-            content, title, tags: JSON.stringify(tags),
+            slug: safeSlug,
+            path: safePath,
+            content: safeContent,
+            title: safeTitle,
+            category: safeCategory,
+            tags: tagJson,
             last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
           });
           updated++;
@@ -414,8 +461,12 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       } else {
         try {
           await db('knowledge_base').insert({
-            path: `kb/${category || 'general'}/${slug}.md`,
-            slug, title, content, category, tags: JSON.stringify(tags),
+            path: safePath,
+            slug: safeSlug,
+            title: safeTitle,
+            content: safeContent,
+            category: safeCategory,
+            tags: JSON.stringify(safeTags),
             source: 'auto-sync', confidence: 'high', status: 'active',
             last_verified_at: new Date(), verified_by: 'auto-sync',
           });
