@@ -22,6 +22,34 @@ function addReason(list, reason) {
   if (value && !list.includes(value)) list.push(value);
 }
 
+function routeDecisionModeRank(row = {}) {
+  if (row.mode === 'enforce') return 0;
+  if (row.mode === 'shadow') return 1;
+  return 2;
+}
+
+function routeDecisionVersionRank(row = {}) {
+  const version = String(row.decision_version || '');
+  if (version.startsWith('v2-')) return 0;
+  if (version === DECISION_VERSION) return 1;
+  return 2;
+}
+
+function routeDecisionCreatedAtMs(row = {}) {
+  const value = row.created_at ? new Date(row.created_at).getTime() : 0;
+  return Number.isFinite(value) ? value : 0;
+}
+
+function compareRouteDecisionsForFeedback(a, b) {
+  return routeDecisionModeRank(a) - routeDecisionModeRank(b) ||
+    routeDecisionVersionRank(a) - routeDecisionVersionRank(b) ||
+    routeDecisionCreatedAtMs(b) - routeDecisionCreatedAtMs(a);
+}
+
+function preferredRouteDecisionForFeedback(rows = []) {
+  return [...rows].filter(Boolean).sort(compareRouteDecisionsForFeedback)[0] || null;
+}
+
 function fieldWritePlanFromExtraction(extracted = {}) {
   const fields = [
     'first_name',
@@ -194,6 +222,8 @@ module.exports = {
   DECISION_MODE,
   DECISION_VERSION,
   buildLegacyShadowRouteDecision,
+  compareRouteDecisionsForFeedback,
+  preferredRouteDecisionForFeedback,
   writeLegacyShadowRouteDecision,
   _test: {
     fieldWritePlanFromExtraction,

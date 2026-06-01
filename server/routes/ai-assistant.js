@@ -5,6 +5,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
 
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
@@ -287,10 +288,13 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
 
     if (callIds.length && await tableExists('route_decisions')) {
       const decisionRows = await db('route_decisions')
-        .whereIn('call_log_id', callIds)
-        .orderBy('created_at', 'desc');
+        .whereIn('call_log_id', callIds);
       for (const row of decisionRows) {
-        if (!routeDecisionByCall.has(row.call_log_id)) routeDecisionByCall.set(row.call_log_id, row);
+        const selected = preferredRouteDecisionForFeedback([
+          routeDecisionByCall.get(row.call_log_id),
+          row,
+        ]);
+        if (selected) routeDecisionByCall.set(row.call_log_id, selected);
       }
     }
 
@@ -483,10 +487,9 @@ router.post('/admin/calls/:id/route-feedback', adminAuthenticate, requireTechOrA
         .first();
       if (!routeDecision) return res.status(400).json({ error: 'routeDecisionId does not belong to this call' });
     } else if (await tableExists('route_decisions')) {
-      routeDecision = await db('route_decisions')
-        .where({ call_log_id: call.id })
-        .orderBy('created_at', 'desc')
-        .first();
+      const decisionRows = await db('route_decisions')
+        .where({ call_log_id: call.id });
+      routeDecision = preferredRouteDecisionForFeedback(decisionRows);
     }
 
     const finalAction = String(routeDecision?.final_action_taken || '').toLowerCase();

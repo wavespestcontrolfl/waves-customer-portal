@@ -2,6 +2,7 @@ const {
   DECISION_MODE,
   DECISION_VERSION,
   buildLegacyShadowRouteDecision,
+  preferredRouteDecisionForFeedback,
 } = require('../services/call-route-decisions');
 
 describe('call route decisions', () => {
@@ -76,5 +77,44 @@ describe('call route decisions', () => {
       'unsupported_service',
       'no_customer_match',
     ]));
+  });
+
+  test('prefers the v2 enforce decision over a newer legacy shadow decision', () => {
+    const enforceDecision = {
+      id: 'enforce-decision',
+      call_log_id: call.id,
+      decision_version: 'v2-1.0.0',
+      mode: 'enforce',
+      created_at: '2026-06-01T10:00:00.000Z',
+    };
+    const laterShadowDecision = {
+      id: 'shadow-decision',
+      call_log_id: call.id,
+      decision_version: DECISION_VERSION,
+      mode: DECISION_MODE,
+      created_at: '2026-06-01T10:05:00.000Z',
+    };
+
+    expect(preferredRouteDecisionForFeedback([
+      laterShadowDecision,
+      enforceDecision,
+    ])).toBe(enforceDecision);
+  });
+
+  test('falls back to the newest legacy shadow decision when no enforce decision exists', () => {
+    const oldShadow = {
+      id: 'old-shadow',
+      decision_version: DECISION_VERSION,
+      mode: DECISION_MODE,
+      created_at: '2026-06-01T10:00:00.000Z',
+    };
+    const newShadow = {
+      id: 'new-shadow',
+      decision_version: DECISION_VERSION,
+      mode: DECISION_MODE,
+      created_at: '2026-06-01T10:05:00.000Z',
+    };
+
+    expect(preferredRouteDecisionForFeedback([oldShadow, newShadow])).toBe(newShadow);
   });
 });
