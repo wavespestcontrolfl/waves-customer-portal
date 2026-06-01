@@ -283,8 +283,10 @@ async function captureReplyExampleForTwilioSid(twilioSid, options = {}) {
 async function upsertReplyExampleFromAgentReview({
   decision,
   context = {},
+  finalReply,
   idealReply,
   actualReply,
+  replyVerdict = 'edited',
   reviewNote,
   scenarioLabel,
   reviewedBy,
@@ -293,14 +295,16 @@ async function upsertReplyExampleFromAgentReview({
     if (!(await tableExists(TRAINING_TABLE))) return null;
     if (!decision?.id) return null;
 
-    const outboundBody = normalizeText(idealReply || actualReply || '');
-    if (!outboundBody) return null;
+    const normalizedVerdict = String(replyVerdict || 'edited').trim() || 'edited';
+    const noReplyNeeded = normalizedVerdict === 'no_reply_needed';
+    const outboundBody = noReplyNeeded ? null : normalizeText(finalReply || idealReply || actualReply || '');
+    if (!noReplyNeeded && !outboundBody) return null;
 
     const inboundBody = normalizeText(decision.inboundMessage || decision.inputSnapshot?.sms?.body || '');
     const agentDraft = normalizeText(decision.suggestedMessage || '');
     const resolvedScenario = classifyScenario({
       inboundBody,
-      outboundBody,
+      outboundBody: outboundBody || '',
       metadata: { scenarioLabel },
     });
     const contextSnapshot = {
@@ -346,12 +350,12 @@ async function upsertReplyExampleFromAgentReview({
       inbound_body: inboundBody || null,
       outbound_body: outboundBody,
       agent_draft: agentDraft || null,
-      agent_draft_edited: agentDraft ? agentDraft !== outboundBody : null,
+      agent_draft_edited: noReplyNeeded ? null : agentDraft ? agentDraft !== outboundBody : null,
       edit_summary: reviewNote || null,
       scenario_label: resolvedScenario,
-      capture_reason: actualReply ? 'agent_review_actual_or_ideal_reply' : 'agent_review_ideal_reply',
+      capture_reason: 'agent_review_reply_verdict',
       status: 'reviewed',
-      review_verdict: 'approved_training_example',
+      review_verdict: normalizedVerdict,
       review_note: reviewNote || null,
       reviewed_by: reviewedBy || null,
       reviewed_at: new Date(),
@@ -359,7 +363,9 @@ async function upsertReplyExampleFromAgentReview({
       metadata: JSON.stringify({
         source: 'agent_review',
         actualHumanReply: normalizeText(actualReply || '') || null,
-        idealReplyProvided: !!normalizeText(idealReply || ''),
+        finalReplyProvided: !!normalizeText(outboundBody || ''),
+        idealReplyProvided: !!normalizeText(idealReply || finalReply || ''),
+        noReplyNeeded,
       }),
       captured_at: new Date(),
       updated_at: new Date(),
@@ -367,7 +373,7 @@ async function upsertReplyExampleFromAgentReview({
 
     const existing = await db(TRAINING_TABLE)
       .where({ source_agent_decision_id: decision.id })
-      .whereIn('capture_reason', ['agent_review_actual_or_ideal_reply', 'agent_review_ideal_reply'])
+      .whereIn('capture_reason', ['agent_review_reply_verdict', 'agent_review_actual_or_ideal_reply', 'agent_review_ideal_reply'])
       .first();
 
     if (existing) {

@@ -108,6 +108,27 @@ describe('reply training capture', () => {
     });
   });
 
+  test('exports no-reply-needed reviewed examples without a final reply', () => {
+    const fixture = fixtureFromReplyExample({
+      id: '12345678-aaaa-bbbb-cccc-123456789000',
+      channel: 'sms',
+      scenario_label: 'general_customer_reply',
+      inbound_body: 'Thank you!',
+      outbound_body: null,
+      agent_draft: 'You are welcome!',
+      review_verdict: 'no_reply_needed',
+      context_snapshot: {},
+      metadata: { noReplyNeeded: true },
+    });
+
+    expect(fixture.expected).toMatchObject({
+      replyVerdict: 'no_reply_needed',
+      outboundReply: null,
+      noReplyNeeded: true,
+      agentDraft: 'You are welcome!',
+    });
+  });
+
   test('keeps raw reply fixture exports outside the repo unless explicitly allowed', () => {
     const repoRoot = path.resolve(__dirname, '..', '..');
     const repoLocalOutput = path.join(repoRoot, 'server', 'fixtures', 'reply-training', 'local.json');
