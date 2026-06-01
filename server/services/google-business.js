@@ -513,6 +513,12 @@ class GoogleBusinessService {
     }
 
     await this._resolveGbpResourceNames();
+    try {
+      const ReviewIncentives = require('./review-incentives');
+      await ReviewIncentives.syncReviewIncentives({ sinceDays: 90 });
+    } catch (err) {
+      logger.warn(`[gbp] Review incentive sync skipped: ${err?.code || err?.name || 'Error'}`);
+    }
 
     return { synced: totalSynced, new: totalNew, errors, sources };
   }

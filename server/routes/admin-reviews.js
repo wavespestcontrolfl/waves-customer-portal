@@ -3,7 +3,8 @@ const router = express.Router();
 const db = require('../models/db');
 const gbp = require('../services/google-business');
 const ReviewService = require('../services/review-request');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const ReviewIncentives = require('../services/review-incentives');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -583,6 +584,91 @@ router.post('/send-request', async (req, res, next) => {
     });
 
     res.json({ success: true, token: reviewReq.token });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/reviews/incentives — technician review bonus dashboard
+router.get('/incentives', requireAdmin, async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 30));
+    const dashboard = await ReviewIncentives.getDashboard({ days });
+    res.json(dashboard);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/reviews/incentives/attribution-queue — Google reviews that need payout attribution repair
+router.get('/incentives/attribution-queue', requireAdmin, async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 30));
+    const limit = Math.max(1, Math.min(250, parseInt(req.query.limit, 10) || 100));
+    const queue = await ReviewIncentives.getAttributionQueue({ days, limit });
+    res.json(queue);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/reviews/incentives/attribution-candidates — customer/service matches for one Google review
+router.get('/incentives/attribution-candidates', requireAdmin, async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(25, parseInt(req.query.limit, 10) || 10));
+    const result = await ReviewIncentives.searchAttributionCandidates({
+      reviewId: req.query.reviewId,
+      q: req.query.q,
+      limit,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/incentives/attribute — manually attribute a confirmed Google review payout
+router.post('/incentives/attribute', requireAdmin, async (req, res, next) => {
+  try {
+    const result = await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: req.body?.reviewId,
+      customerId: req.body?.customerId,
+      technicianId: req.body?.technicianId,
+      serviceRecordId: req.body?.serviceRecordId,
+      adminId: req.technicianId,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/incentives/sync — backfill/create earned bonus rows
+router.post('/incentives/sync', requireAdmin, async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(365, parseInt(req.body?.days || req.query.days, 10) || 90));
+    const sync = await ReviewIncentives.syncReviewIncentives({ sinceDays: days });
+    const dashboard = await ReviewIncentives.getDashboard({ days: Math.min(days, 90) });
+    res.json({ success: true, sync, ...dashboard });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/reviews/incentives/policy — update flat bonus policy
+router.patch('/incentives/policy', requireAdmin, async (req, res, next) => {
+  try {
+    const policy = await ReviewIncentives.savePolicy(req.body || {});
+    res.json({ success: true, policy });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/incentives/mark-paid — close payroll loop manually
+router.post('/incentives/mark-paid', requireAdmin, async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!ids.length) return res.status(400).json({ error: 'ids required' });
+    const result = await ReviewIncentives.markPaid(ids, { paidBy: req.technicianId });
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/reviews/incentives/export — payroll-friendly CSV
+router.get('/incentives/export', requireAdmin, async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 30));
+    const dashboard = await ReviewIncentives.getDashboard({ days });
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename=waves-review-incentives.csv');
+    res.send(ReviewIncentives.toCsv(dashboard.payouts));
   } catch (err) { next(err); }
 });
 
