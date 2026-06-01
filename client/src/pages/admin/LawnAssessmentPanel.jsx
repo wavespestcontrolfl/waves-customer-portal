@@ -133,6 +133,7 @@ const TURF_PROFILE_OPTIONS = {
   ],
   sun_exposure: ["full_sun", "partial_shade", "heavy_shade"],
   irrigation_type: ["in_ground", "manual", "none", "mixed"],
+  irrigation_status: ["good", "dry", "wet", "unknown"],
 };
 
 const EMPTY_TURF_PROFILE = {
@@ -142,6 +143,8 @@ const EMPTY_TURF_PROFILE = {
   sun_exposure: "",
   lawn_sqft: "",
   irrigation_type: "",
+  irrigation_status: "",
+  irrigation_inches_per_week: "",
   municipality: "",
   county: "",
   soil_test_date: "",
@@ -356,6 +359,11 @@ export default function LawnAssessmentPanel() {
   // train its weighting, so this state is the input that makes the
   // calibration pipeline actually meaningful.
   const [techScores, setTechScores] = useState(null);
+  const [protocolChecks, setProtocolChecks] = useState({
+    irrigation_status: "",
+    irrigation_inches_per_week: "",
+    protocol_field_notes: "",
+  });
   const [confirming, setConfirming] = useState(false);
   const [assessmentConfirmed, setAssessmentConfirmed] = useState(false);
   const [snapshotReview, setSnapshotReview] = useState(null);
@@ -448,6 +456,11 @@ export default function LawnAssessmentPanel() {
       // tiles match what will be persisted if the tech makes no changes.
       const initialScores = r.adjustedScores || r.displayScores;
       setTechScores(initialScores ? { ...initialScores } : null);
+      setProtocolChecks({
+        irrigation_status: "",
+        irrigation_inches_per_week: "",
+        protocol_field_notes: "",
+      });
       setStep("review");
     } catch (e) {
       alert("Analysis failed: " + e.message);
@@ -463,11 +476,15 @@ export default function LawnAssessmentPanel() {
       // Send the tech-confirmed scores. Falls back to the server-adjusted
       // scores when the tech didn't change anything.
       const adjustedScores = techScores || result.adjustedScores || result.displayScores;
+      const protocol_field_checks = Object.fromEntries(
+        Object.entries(protocolChecks).filter(([, value]) => value !== "" && value !== null),
+      );
       const response = await adminFetch("/admin/lawn-assessment/confirm", {
         method: "POST",
         body: JSON.stringify({
           assessmentId: result.assessment.id,
           adjustedScores,
+          protocol_field_checks,
         }),
       });
       setResult((prev) => ({
@@ -488,6 +505,11 @@ export default function LawnAssessmentPanel() {
     setPhotos([]);
     setResult(null);
     setTechScores(null);
+    setProtocolChecks({
+      irrigation_status: "",
+      irrigation_inches_per_week: "",
+      protocol_field_notes: "",
+    });
     setSnapshotReview(null);
     setAssessmentConfirmed(false);
     setSelectedCustomer(null);
@@ -1187,6 +1209,92 @@ export default function LawnAssessmentPanel() {
                 );
               })}
             </div>
+            <div
+              style={{
+                marginTop: 12,
+                padding: 12,
+                background: D.input,
+                borderRadius: 8,
+                border: `1px solid ${D.border}`,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: D.heading,
+                  marginBottom: 8,
+                }}
+              >
+                Irrigation check
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                  gap: 10,
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                    Status
+                  </div>
+                  <select
+                    value={protocolChecks.irrigation_status || ""}
+                    onChange={(e) =>
+                      setProtocolChecks((prev) => ({
+                        ...prev,
+                        irrigation_status: e.target.value,
+                      }))
+                    }
+                    style={{ ...inputStyle, marginBottom: 0 }}
+                  >
+                    <option value="">Not checked</option>
+                    <option value="good">Adequate</option>
+                    <option value="dry">Too dry</option>
+                    <option value="wet">Too wet</option>
+                    <option value="unknown">Unknown</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                    Inches per week
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    max="5"
+                    step="0.25"
+                    value={protocolChecks.irrigation_inches_per_week ?? ""}
+                    onChange={(e) =>
+                      setProtocolChecks((prev) => ({
+                        ...prev,
+                        irrigation_inches_per_week: e.target.value,
+                      }))
+                    }
+                    placeholder="1.00"
+                    style={{ ...inputStyle, marginBottom: 0 }}
+                  />
+                </div>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                  Irrigation notes
+                </div>
+                <textarea
+                  value={protocolChecks.protocol_field_notes || ""}
+                  onChange={(e) =>
+                    setProtocolChecks((prev) => ({
+                      ...prev,
+                      protocol_field_notes: e.target.value,
+                    }))
+                  }
+                  placeholder="Dry spots, overwatering, runoff, broken heads, or customer controller notes"
+                  rows={2}
+                  style={{ ...inputStyle, marginBottom: 0, resize: "vertical" }}
+                />
+              </div>
+            </div>
             {/* Observations */}
             {result.observations && (
               <div
@@ -1445,6 +1553,11 @@ export default function LawnAssessmentPanel() {
                   "Irrigation",
                   TURF_PROFILE_OPTIONS.irrigation_type,
                 ],
+                [
+                  "irrigation_status",
+                  "Irrigation status",
+                  TURF_PROFILE_OPTIONS.irrigation_status,
+                ],
               ].map(([key, label, opts]) => (
                 <div key={key} style={{ marginBottom: 12 }}>
                   {" "}
@@ -1473,6 +1586,7 @@ export default function LawnAssessmentPanel() {
                 ["track_key", "Track key (e.g. st_augustine)", "text"],
                 ["cultivar", "Cultivar (e.g. Floratam, Palmetto)", "text"],
                 ["lawn_sqft", "Lawn area (sqft)", "number"],
+                ["irrigation_inches_per_week", "Irrigation inches / week", "number"],
                 ["municipality", "Municipality (e.g. North Port)", "text"],
                 ["county", "County (e.g. Sarasota)", "text"],
                 ["soil_test_date", "Last soil test date", "date"],
@@ -1496,6 +1610,8 @@ export default function LawnAssessmentPanel() {
                       type === "number" &&
                       (key === "soil_ph" || key === "annual_n_budget_target")
                         ? "0.1"
+                        : key === "irrigation_inches_per_week"
+                          ? "0.25"
                         : undefined
                     }
                     value={turfProfile[key] ?? ""}

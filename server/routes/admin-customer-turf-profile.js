@@ -44,7 +44,7 @@ const IRRIGATION_TYPES = ['in_ground', 'manual', 'none', 'mixed'];
 const PROFILE_COLUMNS = [
   'grass_type', 'track_key', 'cultivar', 'sun_exposure',
   'lawn_sqft', 'irrigation_type', 'municipality', 'county',
-  'ordinance_zone', 'irrigation_status', 'soil_k_ppm',
+  'ordinance_zone', 'irrigation_status', 'irrigation_inches_per_week', 'soil_k_ppm',
   'thatch_measurement_in', 'nematode_assay_flag', 'large_patch_history',
   'last_thatch_checked_at', 'last_chinch_checked_at',
   'soil_test_date', 'soil_ph',
@@ -77,6 +77,12 @@ function validateProfile(payload) {
   }
   if (payload.irrigation_status != null && !['good', 'dry', 'wet', 'unknown'].includes(payload.irrigation_status)) {
     errors.push('irrigation_status must be one of: good, dry, wet, unknown');
+  }
+  if (payload.irrigation_inches_per_week != null) {
+    const n = Number(payload.irrigation_inches_per_week);
+    if (!Number.isFinite(n) || n < 0 || n > 5) {
+      errors.push('irrigation_inches_per_week must be between 0 and 5 inches');
+    }
   }
   if (payload.lawn_sqft != null) {
     // The schema column is integer; the validator must enforce that

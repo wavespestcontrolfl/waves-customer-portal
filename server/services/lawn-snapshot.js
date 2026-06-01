@@ -120,6 +120,11 @@ function sentenceList(items) {
   return `${clean.slice(0, -1).join(', ')}, and ${clean[clean.length - 1]}`;
 }
 
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function normalizeLabel(value) {
   return String(value || '')
     .trim()
@@ -201,15 +206,20 @@ function deriveFindings(inputs = {}) {
 }
 
 function buildPropertyContext({ customer = {}, turfProfile = {}, assessment = {} } = {}) {
+  const fawn = parseJsonObject(assessment.fawn_snapshot, {});
   return {
     grass_type: turfProfile.grass_type || customer.lawn_type || null,
     cultivar: turfProfile.cultivar || null,
     sun_exposure: turfProfile.sun_exposure || null,
     lawn_sqft: turfProfile.lawn_sqft || null,
+    irrigation_type: turfProfile.irrigation_type || null,
+    irrigation_status: turfProfile.irrigation_status || assessment.irrigation_status || null,
+    irrigation_inches_per_week: turfProfile.irrigation_inches_per_week || assessment.irrigation_inches_per_week || null,
+    rainfall_inches_today: numberOrNull(fawn.rainfall_in ?? fawn.rain_24h_in ?? assessment.fawn_rainfall_7d),
     waveguard_tier: customer.waveguard_tier || null,
     city: customer.city || null,
     zip: customer.zip || customer.postal_code || null,
-    fawn_station: parseJsonObject(assessment.fawn_snapshot, {}).station || null,
+    fawn_station: fawn.station || null,
   };
 }
 
@@ -236,9 +246,13 @@ function buildWeatherContext(assessment = {}) {
   const fawn = parseJsonObject(assessment.fawn_snapshot, null);
   if (!fawn) return {};
   const label = fawn.label || fawn.condition_label || fawn.summary || 'Recent weather context';
+  const rainfallInchesToday = numberOrNull(fawn.rainfall_in ?? fawn.rain_24h_in ?? assessment.fawn_rainfall_7d);
   return {
     label,
-    customer_copy: 'Recent weather can influence turf stress, weed pressure, and visible recovery time.',
+    rainfall_inches_today: rainfallInchesToday,
+    customer_copy: rainfallInchesToday != null
+      ? `Recent rainfall near the property was about ${rainfallInchesToday}" and can influence turf stress, weed pressure, and visible recovery time.`
+      : 'Recent weather can influence turf stress, weed pressure, and visible recovery time.',
     source: 'fawn_snapshot',
   };
 }

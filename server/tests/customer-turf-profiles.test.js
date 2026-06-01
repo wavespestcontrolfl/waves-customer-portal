@@ -28,7 +28,7 @@ describeOrSkip('customer_turf_profiles', () => {
     const required = [
       'id', 'customer_id',
       'grass_type', 'track_key', 'cultivar', 'sun_exposure',
-      'lawn_sqft', 'irrigation_type',
+      'lawn_sqft', 'irrigation_type', 'irrigation_status', 'irrigation_inches_per_week',
       'municipality', 'county',
       'soil_test_date', 'soil_ph',
       'known_chinch_history', 'known_disease_history', 'known_drought_stress',

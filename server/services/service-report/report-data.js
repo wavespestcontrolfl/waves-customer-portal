@@ -203,6 +203,58 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function firstNumber(...values) {
+  for (const value of values) {
+    const n = numberOrNull(value);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function roundInches(value) {
+  const n = numberOrNull(value);
+  return n == null ? null : Math.round(n * 100) / 100;
+}
+
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {} } = {}) {
+  const irrigationInchesPerWeek = firstNumber(
+    turfProfile?.irrigation_inches_per_week,
+    assessment.irrigation_inches_per_week,
+    propertyPrefs?.irrigation_inches_per_week,
+  );
+  const irrigationInchesPerDay = irrigationInchesPerWeek == null ? null : irrigationInchesPerWeek / 7;
+  const rainfallInchesToday = firstNumber(
+    fawnSnapshot.rainfall_in,
+    fawnSnapshot.rain_24h_in,
+    fawnSnapshot.precipitation_in,
+    assessment.fawn_rainfall_7d,
+  );
+  const rainfallInches7d = firstNumber(
+    fawnSnapshot.rainfall_7d,
+    fawnSnapshot.rain_7d,
+    fawnSnapshot.rainfall_last_7d,
+    fawnSnapshot.precipitation_7d,
+  );
+  const dailyInputs = [irrigationInchesPerDay, rainfallInchesToday].filter((value) => value != null);
+  const weeklyInputs = [irrigationInchesPerWeek, rainfallInches7d].filter((value) => value != null);
+
+  if (!dailyInputs.length && !weeklyInputs.length) return null;
+
+  return {
+    irrigationInchesPerWeek: roundInches(irrigationInchesPerWeek),
+    irrigationInchesPerDay: roundInches(irrigationInchesPerDay),
+    rainfallInchesToday: roundInches(rainfallInchesToday),
+    rainfallInches7d: roundInches(rainfallInches7d),
+    effectiveInchesToday: dailyInputs.length ? roundInches(dailyInputs.reduce((sum, value) => sum + value, 0)) : null,
+    effectiveInches7d: rainfallInches7d == null ? null : roundInches(weeklyInputs.reduce((sum, value) => sum + value, 0)),
+    targetInchesPerWeek: 1,
+    targetInchesPerDay: roundInches(1 / 7),
+    rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
+      ? 'fawn_daily_observation'
+      : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
+  };
+}
+
 function serviceDisplayName(service) {
   const raw = String(service?.service_type || '').trim();
   return raw || 'Waves service';
@@ -1568,6 +1620,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     .where({ customer_id: service.customer_id, active: true })
     .first()
     .catch(() => null);
+  const propertyPrefs = await knex('property_preferences')
+    .where({ customer_id: service.customer_id })
+    .first()
+    .catch(() => null);
   const trend = historyRows.map((row) => ({
     date: row.service_date,
     overallScore: calculateLawnOverallScore(row),
@@ -1589,6 +1645,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     }, knex)
     : [];
   const defaultCustomerSummary = lawnAssessmentSummary(currentScore, initialScore, trend.length);
+  const fawnSnapshot = parseJsonObject(assessment.fawn_snapshot);
+  const waterContext = buildLawnWaterContext({
+    assessment,
+    turfProfile,
+    propertyPrefs,
+    fawnSnapshot,
+  });
 
   return {
     assessmentId: assessment.id,
@@ -1603,7 +1666,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     recommendations: parseJsonObject(assessment.recommendations),
     observations: assessment.observations || '',
     aiSummary: assessment.ai_summary || null,
-    fawnSnapshot: parseJsonObject(assessment.fawn_snapshot),
+    fawnSnapshot,
+    waterContext,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {
@@ -1612,11 +1676,18 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       sunExposure: turfProfile.sun_exposure || null,
       lawnSqft: turfProfile.lawn_sqft || null,
       irrigationType: turfProfile.irrigation_type || null,
+      irrigationStatus: turfProfile.irrigation_status || assessment.irrigation_status || null,
+      irrigationInchesPerWeek: turfProfile.irrigation_inches_per_week
+        ?? assessment.irrigation_inches_per_week
+        ?? propertyPrefs?.irrigation_inches_per_week
+        ?? null,
       soilPh: turfProfile.soil_ph || null,
       knownChinchHistory: !!turfProfile.known_chinch_history,
       knownDiseaseHistory: !!turfProfile.known_disease_history,
       knownDroughtStress: !!turfProfile.known_drought_stress,
-    } : null,
+    } : (propertyPrefs ? {
+      irrigationInchesPerWeek: propertyPrefs.irrigation_inches_per_week ?? null,
+    } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
   };
