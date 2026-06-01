@@ -11,6 +11,7 @@
  *   GET  /                    — list active equipment systems
  *   GET  /:id                 — one system + its current active calibration
  *   GET  /calibrations        — active calibrations across all systems
+ *   POST /calibrations/:id/verify — verify an estimated calibration with field measurements
  *   POST /:id/calibrations    — record a new calibration; deactivates prior active
  *                                 in the same trx so the unique-active partial
  *                                 index can't catch a race
@@ -51,6 +52,29 @@ const CALIBRATION_COLUMNS = [
   'test_area_sqft', 'captured_gallons',
   'pressure_psi', 'engine_rpm_setting',
   'swath_width_ft', 'pass_time_seconds',
+  'calibration_status', 'estimated_sq_ft_per_4gal_tank', 'flow_output_reference_gpm',
+  'likely_sq_ft_per_4gal_tank_min', 'likely_sq_ft_per_4gal_tank_max',
+  'carrier_gal_per_1000_range_min', 'carrier_gal_per_1000_range_max',
+  'conservative_carrier_gal_per_1000', 'conservative_sq_ft_per_4gal_tank',
+  'estimated_sq_ft_per_full_tank', 'estimated_acres_per_full_tank',
+  'tank_size_gallons', 'gun_output_reference_gpm', 'pump_output_reference_gpm',
+  'pass_time_reference',
+  'low_volume_carrier_gal_per_1000', 'low_volume_sq_ft_per_full_tank',
+  'heavy_carrier_gal_per_1000', 'heavy_sq_ft_per_full_tank',
+  'very_heavy_carrier_gal_per_1000', 'very_heavy_sq_ft_per_full_tank',
+  'recommended_test_area_sqft', 'expected_refill_gallons',
+  'acceptable_first_pass_refill_min_gallons', 'acceptable_first_pass_refill_max_gallons',
+  'final_formula',
+  'pump_pressure_reference_psi', 'pump_amp_reference', 'pump_weight_reference_lb',
+  'electric_pump_setting', 'target_bucket_30_sec_oz',
+  'low_volume_bucket_30_sec_oz', 'heavy_bucket_30_sec_oz',
+  'very_heavy_bucket_30_sec_oz', 'pump_max_bucket_30_sec_oz',
+  'incorrect_pump_max_carrier_gal_per_1000',
+  'incorrect_pump_max_sq_ft_per_full_tank',
+  'incorrect_pump_max_acres_per_full_tank',
+  'example_result',
+  'verified_at', 'verified_test_area_sqft', 'verified_captured_gallons',
+  'verification_notes', 'previous_calibration_status',
   'calibrated_at', 'expires_at', 'active',
   'notes',
 ];
@@ -146,13 +170,19 @@ const BOOLEAN_COLUMNS = ['active'];
 // names the field and limit so the caller can fix the input.
 const STRING_MAX_LENGTHS = {
   engine_rpm_setting: 30,
+  calibration_status: 40,
+  pass_time_reference: 160,
+  final_formula: 180,
+  electric_pump_setting: 160,
+  example_result: 180,
+  previous_calibration_status: 40,
 };
 
 // Date fields the route accepts from clients. We must validate the
 // parsed Date is finite before letting it reach Postgres — `new Date()`
 // will happily return Invalid Date for garbage input, then bubble as
 // a "invalid input syntax for type timestamp" 500.
-const DATE_COLUMNS = ['calibrated_at', 'expires_at'];
+const DATE_COLUMNS = ['calibrated_at', 'expires_at', 'verified_at'];
 
 // Stricter Number() that only accepts actual numbers and numeric
 // strings. Without these guards, JS's coercion table lets booleans,
@@ -246,10 +276,29 @@ function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
   // numeric set (others are decimal). The schema would silently round
   // a fractional input or 500 on the integer cast, so enforce
   // Number.isInteger upfront.
-  const INTEGER_NUMERIC_COLUMNS = new Set(['test_area_sqft']);
+  const INTEGER_NUMERIC_COLUMNS = new Set(['test_area_sqft', 'verified_test_area_sqft']);
   for (const k of [
     'test_area_sqft', 'captured_gallons',
     'pressure_psi', 'swath_width_ft', 'pass_time_seconds',
+    'estimated_sq_ft_per_4gal_tank', 'flow_output_reference_gpm',
+    'likely_sq_ft_per_4gal_tank_min', 'likely_sq_ft_per_4gal_tank_max',
+    'carrier_gal_per_1000_range_min', 'carrier_gal_per_1000_range_max',
+    'conservative_carrier_gal_per_1000', 'conservative_sq_ft_per_4gal_tank',
+    'estimated_sq_ft_per_full_tank', 'estimated_acres_per_full_tank',
+    'tank_size_gallons', 'gun_output_reference_gpm', 'pump_output_reference_gpm',
+    'low_volume_carrier_gal_per_1000', 'low_volume_sq_ft_per_full_tank',
+    'heavy_carrier_gal_per_1000', 'heavy_sq_ft_per_full_tank',
+    'very_heavy_carrier_gal_per_1000', 'very_heavy_sq_ft_per_full_tank',
+    'recommended_test_area_sqft', 'expected_refill_gallons',
+    'acceptable_first_pass_refill_min_gallons', 'acceptable_first_pass_refill_max_gallons',
+    'pump_pressure_reference_psi', 'pump_amp_reference', 'pump_weight_reference_lb',
+    'target_bucket_30_sec_oz', 'low_volume_bucket_30_sec_oz',
+    'heavy_bucket_30_sec_oz', 'very_heavy_bucket_30_sec_oz',
+    'pump_max_bucket_30_sec_oz',
+    'incorrect_pump_max_carrier_gal_per_1000',
+    'incorrect_pump_max_sq_ft_per_full_tank',
+    'incorrect_pump_max_acres_per_full_tank',
+    'verified_test_area_sqft', 'verified_captured_gallons',
   ]) {
     if (payload[k] != null) {
       const n = parseFiniteNumber(payload[k]);
@@ -259,6 +308,14 @@ function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
         errors.push(`${k} must be a non-negative integer`);
       }
     }
+  }
+
+  if (
+    payload.acceptable_first_pass_refill_min_gallons != null
+    && payload.acceptable_first_pass_refill_max_gallons != null
+    && Number(payload.acceptable_first_pass_refill_min_gallons) > Number(payload.acceptable_first_pass_refill_max_gallons)
+  ) {
+    errors.push('acceptable_first_pass_refill_min_gallons cannot exceed acceptable_first_pass_refill_max_gallons');
   }
 
   // ── date fields ────────────────────────────────────────────────────
@@ -364,6 +421,90 @@ router.get('/calibrations', async (req, res, next) => {
       )
       .orderBy('ec.expires_at', 'asc');
     res.json({ calibrations: rows });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// POST /calibrations/:id/verify — convert estimate to field-verified
+// =========================================================================
+router.post('/calibrations/:id/verify', async (req, res, next) => {
+  try {
+    const existing = await db('equipment_calibrations').where({ id: req.params.id }).first();
+    if (!existing) return res.status(404).json({ error: 'Calibration not found' });
+    if (!existing.active) {
+      return res.status(400).json({
+        error: 'Only the active calibration can be field-verified',
+      });
+    }
+
+    const body = req.body || {};
+    const measuredTestAreaSqft = body.verified_test_area_sqft ?? body.test_area_sqft ?? body.measured_test_area_sqft;
+    const measuredCapturedGallons = body.verified_captured_gallons ?? body.captured_gallons ?? body.measured_captured_gallons;
+    const testArea = parseFiniteNumber(measuredTestAreaSqft);
+    const captured = parseFiniteNumber(measuredCapturedGallons);
+    const errors = [];
+
+    if (!Number.isInteger(testArea) || testArea <= 0) {
+      errors.push('verified_test_area_sqft must be a positive integer');
+    }
+    if (Number.isNaN(captured) || captured <= 0) {
+      errors.push('verified_captured_gallons must be a positive number');
+    }
+
+    const verifiedAtInput = body.verified_at ?? body.calibrated_at;
+    const verifiedAt = verifiedAtInput ? new Date(verifiedAtInput) : new Date();
+    if (Number.isNaN(verifiedAt.getTime())) {
+      errors.push('verified_at must be a valid ISO date string');
+    }
+
+    const verificationNotes = body.verification_notes ?? body.notes ?? null;
+    if (typeof verificationNotes === 'string' && verificationNotes.length > 5000) {
+      errors.push('verification_notes must be 5000 characters or fewer');
+    }
+
+    if (errors.length) {
+      return res.status(400).json({ error: 'Invalid calibration verification', details: errors });
+    }
+
+    const carrier = Math.round((captured / (testArea / 1000)) * 1000) / 1000;
+    if (carrier < CARRIER_MIN || carrier > CARRIER_MAX) {
+      return res.status(400).json({
+        error: 'Invalid calibration verification',
+        details: [`computed carrier_gal_per_1000 must be between ${CARRIER_MIN} and ${CARRIER_MAX}`],
+      });
+    }
+
+    const expiresAt = body.expires_at
+      ? new Date(body.expires_at)
+      : new Date(verifiedAt.getTime() + DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+    if (Number.isNaN(expiresAt.getTime())) {
+      return res.status(400).json({
+        error: 'Invalid calibration verification',
+        details: ['expires_at must be a valid ISO date string'],
+      });
+    }
+
+    const [saved] = await db('equipment_calibrations')
+      .where({ id: existing.id })
+      .update({
+        previous_calibration_status: existing.calibration_status ?? null,
+        calibration_status: 'field_verified',
+        carrier_gal_per_1000: carrier,
+        test_area_sqft: testArea,
+        captured_gallons: captured,
+        verified_test_area_sqft: testArea,
+        verified_captured_gallons: captured,
+        verified_at: verifiedAt,
+        verified_by_technician_id: req.technicianId ?? null,
+        verification_notes: verificationNotes,
+        calibrated_at: verifiedAt,
+        expires_at: expiresAt,
+        updated_at: new Date(),
+      })
+      .returning('*');
+
+    logger.info?.(`[equipment] calibration verified id=${existing.id} carrier=${carrier} by tech=${req.technicianId}`);
+    res.json({ calibration: saved });
   } catch (err) { next(err); }
 });
 
@@ -580,6 +721,45 @@ router.post('/:id/calibrations', async (req, res, next) => {
           engine_rpm_setting: payload.engine_rpm_setting ?? null,
           swath_width_ft: payload.swath_width_ft ?? null,
           pass_time_seconds: payload.pass_time_seconds ?? null,
+          calibration_status: payload.calibration_status ?? null,
+          estimated_sq_ft_per_4gal_tank: payload.estimated_sq_ft_per_4gal_tank ?? null,
+          flow_output_reference_gpm: payload.flow_output_reference_gpm ?? null,
+          likely_sq_ft_per_4gal_tank_min: payload.likely_sq_ft_per_4gal_tank_min ?? null,
+          likely_sq_ft_per_4gal_tank_max: payload.likely_sq_ft_per_4gal_tank_max ?? null,
+          carrier_gal_per_1000_range_min: payload.carrier_gal_per_1000_range_min ?? null,
+          carrier_gal_per_1000_range_max: payload.carrier_gal_per_1000_range_max ?? null,
+          conservative_carrier_gal_per_1000: payload.conservative_carrier_gal_per_1000 ?? null,
+          conservative_sq_ft_per_4gal_tank: payload.conservative_sq_ft_per_4gal_tank ?? null,
+          estimated_sq_ft_per_full_tank: payload.estimated_sq_ft_per_full_tank ?? null,
+          estimated_acres_per_full_tank: payload.estimated_acres_per_full_tank ?? null,
+          tank_size_gallons: payload.tank_size_gallons ?? null,
+          gun_output_reference_gpm: payload.gun_output_reference_gpm ?? null,
+          pump_output_reference_gpm: payload.pump_output_reference_gpm ?? null,
+          pass_time_reference: payload.pass_time_reference ?? null,
+          low_volume_carrier_gal_per_1000: payload.low_volume_carrier_gal_per_1000 ?? null,
+          low_volume_sq_ft_per_full_tank: payload.low_volume_sq_ft_per_full_tank ?? null,
+          heavy_carrier_gal_per_1000: payload.heavy_carrier_gal_per_1000 ?? null,
+          heavy_sq_ft_per_full_tank: payload.heavy_sq_ft_per_full_tank ?? null,
+          very_heavy_carrier_gal_per_1000: payload.very_heavy_carrier_gal_per_1000 ?? null,
+          very_heavy_sq_ft_per_full_tank: payload.very_heavy_sq_ft_per_full_tank ?? null,
+          recommended_test_area_sqft: payload.recommended_test_area_sqft ?? null,
+          expected_refill_gallons: payload.expected_refill_gallons ?? null,
+          acceptable_first_pass_refill_min_gallons: payload.acceptable_first_pass_refill_min_gallons ?? null,
+          acceptable_first_pass_refill_max_gallons: payload.acceptable_first_pass_refill_max_gallons ?? null,
+          final_formula: payload.final_formula ?? null,
+          pump_pressure_reference_psi: payload.pump_pressure_reference_psi ?? null,
+          pump_amp_reference: payload.pump_amp_reference ?? null,
+          pump_weight_reference_lb: payload.pump_weight_reference_lb ?? null,
+          electric_pump_setting: payload.electric_pump_setting ?? null,
+          target_bucket_30_sec_oz: payload.target_bucket_30_sec_oz ?? null,
+          low_volume_bucket_30_sec_oz: payload.low_volume_bucket_30_sec_oz ?? null,
+          heavy_bucket_30_sec_oz: payload.heavy_bucket_30_sec_oz ?? null,
+          very_heavy_bucket_30_sec_oz: payload.very_heavy_bucket_30_sec_oz ?? null,
+          pump_max_bucket_30_sec_oz: payload.pump_max_bucket_30_sec_oz ?? null,
+          incorrect_pump_max_carrier_gal_per_1000: payload.incorrect_pump_max_carrier_gal_per_1000 ?? null,
+          incorrect_pump_max_sq_ft_per_full_tank: payload.incorrect_pump_max_sq_ft_per_full_tank ?? null,
+          incorrect_pump_max_acres_per_full_tank: payload.incorrect_pump_max_acres_per_full_tank ?? null,
+          example_result: payload.example_result ?? null,
           calibrated_at: calibratedAt,
           expires_at: expiresAt,
           active: true,

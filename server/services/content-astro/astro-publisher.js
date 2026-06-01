@@ -28,7 +28,8 @@ const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
-const { normalizeSpokeSites } = require('./spoke-sites');
+const contentGuardrails = require('../content/content-guardrails');
+const { normalizeSpokeSites, SPOKE_SITE_KEYS } = require('./spoke-sites');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const ASTRO_HERO_DIR = 'public/images/blog';
@@ -293,10 +294,58 @@ async function fetchImageBuffer(url) {
 
 // ── Main publish ───────────────────────────────────────────────────
 
+// Close + delete a post's still-open PR/branch before a build_failed retry so
+// the replacement PR doesn't orphan it. Best-effort: each step is independent
+// and non-fatal — a cleanup hiccup must not block the author's retry.
+async function cleanupStaleAstroPr(post) {
+  if (post.astro_pr_number) {
+    try {
+      const pr = await gh.getPr(post.astro_pr_number);
+      if (pr && pr.state === 'open' && !pr.merged) {
+        await gh.closePr(post.astro_pr_number);
+        logger.info(`[astro-publisher] closed stale PR #${post.astro_pr_number} for post ${post.id} before republish`);
+      }
+    } catch (err) {
+      logger.warn(`[astro-publisher] could not close stale PR #${post.astro_pr_number} for post ${post.id}: ${err.message}`);
+    }
+  }
+  if (post.astro_branch_name) {
+    try {
+      await gh.deleteRef(post.astro_branch_name);
+      logger.info(`[astro-publisher] deleted stale branch ${post.astro_branch_name} for post ${post.id} before republish`);
+    } catch (err) {
+      logger.warn(`[astro-publisher] could not delete stale branch ${post.astro_branch_name} for post ${post.id}: ${err.message}`);
+    }
+  }
+}
+
 async function publishAstro(postId) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.title) throw new Error('post missing title');
+
+  // Idempotency: each call cuts a fresh branch (random shortId) and overwrites
+  // astro_branch_name/astro_pr_number, so publishing while a prior PR is still
+  // open would orphan it. Two cases:
+  //   - pr_open / unpublish_pending → an active PR awaiting merge/unpublish.
+  //     Refuse: republishing now would duplicate in-flight work. Resolve it
+  //     first. (No retry UI targets these.)
+  //   - build_failed → the "fix the content and retry" path (admin Retry
+  //     button hits this). The failed PR/branch are still open, so CLOSE +
+  //     DELETE them before opening the replacement — that both unblocks the
+  //     retry and prevents an orphan. Best-effort: cleanup failure is logged
+  //     but doesn't block the republish.
+  // live/merged/draft/publish_failed have no open PR to orphan (the existing-
+  // file SHA path handles in-place updates), so they fall through.
+  if (post.astro_status === 'pr_open' || post.astro_status === 'unpublish_pending') {
+    throw new Error(
+      `cannot publish post ${postId}: an Astro PR is already in flight (status "${post.astro_status}"`
+      + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
+    );
+  }
+  if (post.astro_status === 'build_failed' && (post.astro_pr_number || post.astro_branch_name)) {
+    await cleanupStaleAstroPr(post);
+  }
 
   const slug = post.slug || slugify(post.title);
   const branch = `content/blog-${slug}-${shortId()}`;
@@ -316,6 +365,45 @@ async function publishAstro(postId) {
     const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt });
     assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
+
+    // 2b. Content-policy guardrails (hardcoded price, brand-token leak on
+    // multi-domain blogs, FAQ on a policy-blocked service, keyword stuffing).
+    // The autonomous engine runs these before publishing; the legacy BlogWriter
+    // → publish-astro path (admin + the blog-calendar cron) previously had only
+    // schema validation, so a generated post could ship "$39/month" or a
+    // spoke-domain brand leak with nothing but the prompt stopping it. Block
+    // P0/P1 here too — body + editable meta are checked.
+    // target_sites semantics: a non-empty list targets those domains, but an
+    // EMPTY/null list renders on ALL spoke domains (backward-compat — see the
+    // target_sites migration + admin "publish to ALL 15 domains" warning).
+    // buildFrontmatter omits data.domains when target_sites is empty, so expand
+    // that to the full spoke list here — otherwise the brand-token guard would
+    // wrongly treat an all-domains post as hub-only and let a literal-brand leak
+    // ship to every spoke. (New posts default to hub-only targeting, so this
+    // mainly catches legacy/cleared rows — exactly the multi-domain case.)
+    const guardrailDomains = (Array.isArray(data.domains) && data.domains.length > 0)
+      ? data.domains
+      : SPOKE_SITE_KEYS;
+    const guardrails = contentGuardrails.evaluate(
+      { body, frontmatter: data },
+      {
+        domains: guardrailDomains,
+        // Legacy BlogWriter rows carry the topic on `tag` (e.g. "Rodents",
+        // "Bed Bugs"), while `category` may be the broad Astro value
+        // ("pest-control"). Pass BOTH so the FAQ-blocked-service guard sees the
+        // real topic regardless of which field holds it.
+        service: [post.category, post.tag],
+        primaryKeyword: post.keyword || data.primary_keyword || null,
+      },
+    );
+    if (!guardrails.pass) {
+      const blocking = guardrails.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+      const gErr = new Error(`content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`);
+      gErr.code = 'BLOG_GUARDRAILS_FAILED';
+      gErr.details = blocking;
+      throw gErr;
+    }
+
     const markdown = fm.stringify(data, body + '\n');
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
@@ -388,6 +476,25 @@ async function publishAstro(postId) {
   }
 }
 
+// Resolve an existing content file to its real path, tolerating the .md→.mdx
+// migration. New autonomous blog posts are written as .mdx so they can render
+// MDX infographic components (SeasonalPressureChart, HomeZoneMap, …); legacy
+// and hand-authored posts may still be .md. Given a path or base (with or
+// without extension), try .mdx first, then .md. Returns { path, file } (file =
+// github-client getFile result: { sha, path, content, raw }) or null.
+async function resolveExistingAstroFile(pathOrBase) {
+  if (!pathOrBase) return null;
+  const base = String(pathOrBase).replace(/\.mdx?$/, '');
+  // Only blog posts migrate to .mdx (so they can use MDX components); service
+  // and location pages stay .md, so don't waste a lookup or change their path.
+  const exts = isBlogTarget(`${base}.md`) ? ['.mdx', '.md'] : ['.md'];
+  for (const ext of exts) {
+    const file = await gh.getFile(`${base}${ext}`);
+    if (file) return { path: `${base}${ext}`, file };
+  }
+  return null;
+}
+
 async function publishOrUpdatePage(draft, brief = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
@@ -403,17 +510,31 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const body = String(draft.body || '').trim();
   frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
   const markdown = fm.stringify(frontmatter, `${body}\n`);
-  const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
+  // New autonomous posts are written as .mdx so they can embed MDX infographic
+  // components. If a post already exists as .mdx, update it in place. If a
+  // LEGACY .md post exists at this slug, MIGRATE it to .mdx (the body may carry
+  // MDX-only components that would render broken in a .md file): write the
+  // .mdx and delete the stale .md in the same branch — never leave both.
+  const existingFile = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+  const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
+  const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 
   await gh.createBranch(branch);
-  const existing = await gh.getFile(filePath);
   const fileCommit = await gh.putFile({
     path: filePath,
     content: markdown,
     message: `feat(blog): publish ${slug}`,
     branch,
-    sha: existing ? existing.sha : undefined,
+    sha: existingFile && !isLegacyMd ? existingFile.file.sha : undefined,
   });
+  if (isLegacyMd) {
+    await gh.deleteFile({
+      path: existingFile.path,
+      message: `chore(blog): migrate ${slug} to .mdx`,
+      branch,
+      sha: existingFile.file.sha,
+    });
+  }
 
   const pr = await gh.createPr({
     head: branch,
@@ -444,19 +565,34 @@ async function publishMetadataRewrite(draft, brief = {}) {
   }
 
   const targetUrl = brief.target_url || brief.page_url || draft.page_url;
-  const filePath = draft.file_path || urlToAstroPath(targetUrl);
-  if (!filePath) throw new Error(`could not resolve metadata rewrite target: ${targetUrl || 'missing target_url'}`);
+  const target = draft.file_path || urlToAstroPath(targetUrl);
+  if (!target) throw new Error(`could not resolve metadata rewrite target: ${targetUrl || 'missing target_url'}`);
 
-  const existing = await gh.getFile(filePath);
-  if (!existing) throw new Error(`Astro file not found for metadata rewrite: ${filePath}`);
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) throw new Error(`Astro file not found for metadata rewrite: ${target}`);
+  const filePath = resolved.path;
+  const existing = resolved.file;
 
   const parsed = fm.parse(existing.content);
   const currentFrontmatter = parsed.data || {};
+  const newTitle = String(draft.title || '').trim();
+  const newMeta = String(draft.meta_description || '').trim();
   const nextFrontmatter = {
     ...currentFrontmatter,
-    title: String(draft.title || '').trim(),
-    meta_description: String(draft.meta_description || '').trim(),
+    title: newTitle,
+    meta_description: newMeta,
   };
+
+  // Bump the freshness field the live page already uses (services: `modified`;
+  // blog v2: `updated`) so sitemap lastmod updates and Google recrawls the
+  // rewritten title/meta — these are high-SEO-value edits. Only when something
+  // actually changed; mirrors publishRefresh and avoids fake-freshness churn.
+  if (newTitle !== String(currentFrontmatter.title || '').trim()
+    || newMeta !== String(currentFrontmatter.meta_description || '').trim()) {
+    const today = dateOnly(new Date());
+    if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
+    else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
+  }
 
   // Blog targets must stay schema-valid after a metadata rewrite (e.g.
   // meta_description 115-160). Non-blog pages use a different contract.
@@ -531,11 +667,13 @@ async function publishRefresh(draft, brief = {}) {
   }
 
   const targetUrl = brief.target_url || brief.page_url || draft.page_url;
-  const filePath = draft.file_path || urlToAstroPath(targetUrl);
-  if (!filePath) throw new Error(`could not resolve refresh target: ${targetUrl || 'missing target_url'}`);
+  const target = draft.file_path || urlToAstroPath(targetUrl);
+  if (!target) throw new Error(`could not resolve refresh target: ${targetUrl || 'missing target_url'}`);
 
-  const existing = await gh.getFile(filePath);
-  if (!existing) throw new Error(`Astro file not found for refresh: ${filePath}`);
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) throw new Error(`Astro file not found for refresh: ${target}`);
+  const filePath = resolved.path;
+  const existing = resolved.file;
 
   const parsed = fm.parse(existing.content);
   const currentFrontmatter = parsed.data || {};
@@ -649,11 +787,11 @@ function canPublishMetadataRewrite(draft, brief = {}) {
  * latter.
  */
 async function getLiveFrontmatter(targetUrlOrPath) {
-  const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
-  if (!filePath) return null;
-  const existing = await gh.getFile(filePath);
-  if (!existing) return null;
-  return fm.parse(existing.content).data || {};
+  const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (!target) return null;
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) return null;
+  return fm.parse(resolved.file.content).data || {};
 }
 
 /**
@@ -664,11 +802,11 @@ async function getLiveFrontmatter(targetUrlOrPath) {
  * publish a refresh without a prior version to compare against).
  */
 async function loadExistingPageBody(targetUrlOrPath) {
-  const filePath = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
-  if (!filePath) return null;
-  const existing = await gh.getFile(filePath);
-  if (!existing) return null;
-  const body = fm.parse(existing.content).content || '';
+  const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (!target) return null;
+  const resolved = await resolveExistingAstroFile(target);
+  if (!resolved) return null;
+  const body = fm.parse(resolved.file.content).content || '';
   const word_count = body.split(/\s+/).filter(Boolean).length;
   return { body, word_count };
 }
@@ -766,9 +904,10 @@ async function unpublishAstro(postId) {
   try {
     await gh.createBranch(branch);
 
-    const mdPath = `${ASTRO_BLOG_DIR}/${slug}.md`;
-    const mdFile = await gh.getFile(mdPath);
-    if (!mdFile) throw new Error(`markdown not found on main: ${mdPath}`);
+    const resolved = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+    if (!resolved) throw new Error(`markdown not found on main: ${ASTRO_BLOG_DIR}/${slug}.{mdx,md}`);
+    const mdPath = resolved.path;
+    const mdFile = resolved.file;
 
     await gh.deleteFile({
       path: mdPath,

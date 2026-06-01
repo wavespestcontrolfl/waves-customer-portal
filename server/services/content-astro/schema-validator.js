@@ -1,6 +1,24 @@
+const Ajv2020 = require('ajv/dist/2020');
+const addFormats = require('ajv-formats');
 const schemaBundle = require('../../../packages/blog-schema/schema.json');
 
 const BLOG_FRONTMATTER_EXTENSIONS = new Set(['domains']);
+
+// Validate against the binding schema with a real draft-2020 validator (ajv),
+// not a hand-rolled subset. The previous implementation only understood a
+// handful of keywords (enum/type/required/min·max/pattern/format:uri), so if
+// the vendored schema ever gained anyOf/oneOf/allOf/const/if or a non-uri
+// format, those constraints were silently ignored here and only failed later at
+// the Astro build — after the PR had already merged. ajv enforces the whole
+// schema, keeping "valid here" == "valid at the Astro build".
+//
+// strict:false keeps the validator resilient to future schema-authoring quirks
+// (it won't throw at compile time on an unknown custom keyword) while still
+// enforcing every standard keyword. allErrors:true accumulates all problems,
+// matching the prior behavior of returning a full error list.
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+addFormats(ajv);
+const validateFrontmatter = ajv.compile(schemaBundle.frontmatter);
 
 function validateBlogFrontmatter(frontmatter) {
   const data = { ...(frontmatter || {}) };
@@ -10,9 +28,10 @@ function validateBlogFrontmatter(frontmatter) {
   // so validate the schema projection while still allowing the emitted field.
   for (const key of BLOG_FRONTMATTER_EXTENSIONS) delete data[key];
 
-  const errors = [];
-  validateValue(data, schemaBundle.frontmatter, '', errors);
-  return { ok: errors.length === 0, errors };
+  const ok = validateFrontmatter(data);
+  if (ok) return { ok: true, errors: [] };
+  const errors = (validateFrontmatter.errors || []).map(formatError);
+  return { ok: false, errors };
 }
 
 function assertValidBlogFrontmatter(frontmatter) {
@@ -26,110 +45,56 @@ function assertValidBlogFrontmatter(frontmatter) {
   return frontmatter;
 }
 
-function validateValue(value, schema, path, errors) {
-  if (!schema) return;
-
-  if (schema.enum && !schema.enum.includes(value)) {
-    errors.push(`${label(path)} must be one of: ${schema.enum.join(', ')}`);
-    return;
-  }
-
-  if (schema.type) {
-    const ok = matchesType(value, schema.type);
-    if (!ok) {
-      errors.push(`${label(path)} must be ${schema.type}`);
-      return;
-    }
-  }
-
-  if (schema.type === 'object') {
-    validateObject(value, schema, path, errors);
-    return;
-  }
-
-  if (schema.type === 'array') {
-    validateArray(value, schema, path, errors);
-    return;
-  }
-
-  if (schema.type === 'string') {
-    validateString(value, schema, path, errors);
-    return;
-  }
-
-  if (schema.type === 'integer' || schema.type === 'number') {
-    validateNumber(value, schema, path, errors);
-  }
-}
-
-function validateObject(value, schema, path, errors) {
-  const required = schema.required || [];
-  for (const key of required) {
-    if (value[key] === undefined) errors.push(`${label(joinPath(path, key))} is required`);
-  }
-
-  const properties = schema.properties || {};
-  if (schema.additionalProperties === false) {
-    for (const key of Object.keys(value)) {
-      if (!properties[key]) errors.push(`${label(joinPath(path, key))} is not allowed`);
-    }
-  }
-
-  for (const [key, childSchema] of Object.entries(properties)) {
-    if (value[key] !== undefined) validateValue(value[key], childSchema, joinPath(path, key), errors);
+// Map an ajv error to the same human-readable shape the previous hand-rolled
+// validator produced — callers and tests key on these messages (e.g.
+// "category must be one of: ...", "<field> is required").
+function formatError(e) {
+  const params = e.params || {};
+  switch (e.keyword) {
+    case 'required':
+      return `${label(joinPath(e.instancePath, params.missingProperty))} is required`;
+    case 'additionalProperties':
+      return `${label(joinPath(e.instancePath, params.additionalProperty))} is not allowed`;
+    case 'enum':
+      return `${label(e.instancePath)} must be one of: ${(params.allowedValues || []).join(', ')}`;
+    case 'type':
+      return `${label(e.instancePath)} must be ${params.type}`;
+    case 'minLength':
+      return `${label(e.instancePath)} must be at least ${params.limit} character${params.limit === 1 ? '' : 's'}`;
+    case 'maxLength':
+      return `${label(e.instancePath)} must be at most ${params.limit} character${params.limit === 1 ? '' : 's'}`;
+    case 'minItems':
+      return `${label(e.instancePath)} must contain at least ${params.limit} item${params.limit === 1 ? '' : 's'}`;
+    case 'maxItems':
+      return `${label(e.instancePath)} must contain at most ${params.limit} items`;
+    case 'minimum':
+      return `${label(e.instancePath)} must be at least ${params.limit}`;
+    case 'maximum':
+      return `${label(e.instancePath)} must be at most ${params.limit}`;
+    case 'pattern':
+      return `${label(e.instancePath)} has invalid format`;
+    case 'format':
+      return params.format === 'uri'
+        ? `${label(e.instancePath)} must be a valid URL`
+        : `${label(e.instancePath)} must be a valid ${params.format}`;
+    default:
+      return `${label(e.instancePath)} ${e.message}`.trim();
   }
 }
 
-function validateArray(value, schema, path, errors) {
-  if (schema.minItems != null && value.length < schema.minItems) {
-    errors.push(`${label(path)} must contain at least ${schema.minItems} item${schema.minItems === 1 ? '' : 's'}`);
-  }
-  if (schema.maxItems != null && value.length > schema.maxItems) {
-    errors.push(`${label(path)} must contain at most ${schema.maxItems} items`);
-  }
-  if (schema.items) {
-    value.forEach((item, i) => validateValue(item, schema.items, `${path}[${i}]`, errors));
-  }
+// Append a child segment to an ajv instancePath (a JSON pointer like
+// "/author"). Used for `required`/`additionalProperties`, where the offending
+// key lives in params rather than the instancePath.
+function joinPath(instancePath, key) {
+  return key ? `${instancePath}/${key}` : instancePath;
 }
 
-function validateString(value, schema, path, errors) {
-  if (schema.minLength != null && value.length < schema.minLength) {
-    errors.push(`${label(path)} must be at least ${schema.minLength} characters`);
-  }
-  if (schema.maxLength != null && value.length > schema.maxLength) {
-    errors.push(`${label(path)} must be at most ${schema.maxLength} characters`);
-  }
-  if (schema.pattern) {
-    const re = new RegExp(schema.pattern);
-    if (!re.test(value)) errors.push(`${label(path)} has invalid format`);
-  }
-  if (schema.format === 'uri') {
-    try { new URL(value); } catch { errors.push(`${label(path)} must be a valid URL`); }
-  }
-}
-
-function validateNumber(value, schema, path, errors) {
-  if (schema.minimum != null && value < schema.minimum) {
-    errors.push(`${label(path)} must be at least ${schema.minimum}`);
-  }
-  if (schema.maximum != null && value > schema.maximum) {
-    errors.push(`${label(path)} must be at most ${schema.maximum}`);
-  }
-}
-
-function matchesType(value, type) {
-  if (type === 'array') return Array.isArray(value);
-  if (type === 'object') return value !== null && typeof value === 'object' && !Array.isArray(value);
-  if (type === 'integer') return Number.isInteger(value);
-  return typeof value === type;
-}
-
-function joinPath(base, key) {
-  return base ? `${base}.${key}` : key;
-}
-
+// Render an ajv JSON-pointer path as the dotted field path the prior messages
+// used ("/author/bio_url" → "author.bio_url"). Idempotent on already-dotted
+// input. Empty path (top-level value) → "frontmatter".
 function label(path) {
-  return path || 'frontmatter';
+  const dotted = String(path || '').replace(/^\//, '').replace(/\//g, '.');
+  return dotted || 'frontmatter';
 }
 
 module.exports = { assertValidBlogFrontmatter, validateBlogFrontmatter };

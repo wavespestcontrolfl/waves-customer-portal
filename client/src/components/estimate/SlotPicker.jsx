@@ -10,7 +10,8 @@
  * quantification shown to customer in v1; detourMinutes carried on the
  * payload for future A/B testing.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
+import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -79,6 +80,7 @@ const INITIAL_VISIBLE = 6;
 
 export default function SlotPicker({
   token,
+  askToken = null,
   selectedSlotId,
   onSelect,
   refreshSignal,
@@ -89,12 +91,24 @@ export default function SlotPicker({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showMore, setShowMore] = useState(false);
+  // Custom date/time finder — Waves AI search + 90-day date picker
+  const [searchData, setSearchData] = useState(null);
+  const [pickedDate, setPickedDate] = useState(null);
+  const [pickedData, setPickedData] = useState(null);
+  const [pickedLoading, setPickedLoading] = useState(false);
+  const latestPickedRequestRef = useRef(0);
+  const pickedDateInputId = useId();
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setShowMore(false);
+    setSearchData(null);
+    setPickedDate(null);
+    setPickedData(null);
+    setPickedLoading(false);
+    latestPickedRequestRef.current += 1;
     const params = new URLSearchParams();
     params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     params.set('windowDays', '14');
@@ -108,6 +122,127 @@ export default function SlotPicker({
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
   }, [token, refreshSignal, serviceMode, selectedFrequency]);
+
+  // ── custom date/time finder ──
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const browseMin = toYmd(new Date());
+  const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
+
+  const freqParams = () => {
+    const p = new URLSearchParams();
+    p.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
+    if (serviceMode !== 'one_time' && selectedFrequency) p.set('selectedFrequency', selectedFrequency);
+    return p;
+  };
+
+  const runAiSearch = async (query) => {
+    const res = await fetch(`${API_BASE}/public/estimates/${token}/find-slots`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
+      },
+      body: JSON.stringify({ query, serviceMode, selectedFrequency }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || 'search failed');
+    setPickedDate(null);
+    onSelect(null);
+    setSearchData(body);
+    return { summary: body.summary };
+  };
+
+  const onPickDate = async (date) => {
+    const requestId = latestPickedRequestRef.current + 1;
+    latestPickedRequestRef.current = requestId;
+    setSearchData(null);
+    setPickedDate(date);
+    setPickedData(null);
+    onSelect(null);
+    if (!date) {
+      setPickedLoading(false);
+      return;
+    }
+    setPickedLoading(true);
+    try {
+      const p = freqParams();
+      p.set('date', date);
+      const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
+      const body = res.ok ? await res.json() : { primary: [], expander: [] };
+      if (latestPickedRequestRef.current !== requestId) return;
+      setPickedData(body);
+    } catch {
+      if (latestPickedRequestRef.current !== requestId) return;
+      setPickedData({ primary: [], expander: [] });
+    } finally {
+      if (latestPickedRequestRef.current === requestId) {
+        setPickedLoading(false);
+      }
+    }
+  };
+
+  const SoftRouteBanner = () => (
+    <div style={{
+      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
+      padding: '10px 12px', fontSize: 14, color: '#9A3412', marginBottom: 10, lineHeight: 1.4,
+    }}>
+      No route near you that day yet — here&apos;s what&apos;s close.
+    </div>
+  );
+
+  const renderSlotList = (payload) => {
+    const list = [...(payload?.primary || []), ...(payload?.expander || [])];
+    if (list.length === 0) {
+      return (
+        <div style={{ fontSize: 14, color: W.textBody }}>
+          No open times then. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a> and we&apos;ll fit you in.
+        </div>
+      );
+    }
+    const nearby = payload?.nearby ?? list.some((s) => s.routeOptimal);
+    return (
+      <>
+        {!nearby ? <SoftRouteBanner /> : null}
+        {list.map((slot) => (
+          <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
+        ))}
+      </>
+    );
+  };
+
+  const finder = (
+    <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16, display: 'grid', gap: 14 }}>
+      <WavesAIScheduleSearch
+        theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white, inputBg: W.offWhite }}
+        onSearch={runAiSearch}
+      />
+      {searchData ? <div>{renderSlotList(searchData)}</div> : null}
+      <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.offWhite }}>
+        <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
+          Can't find a date? Pick one that works for you.
+        </label>
+        <input
+          id={pickedDateInputId}
+          type="date"
+          min={browseMin}
+          max={browseMax}
+          placeholder="mm/dd/yyyy"
+          value={pickedDate || ''}
+          onChange={(e) => onPickDate(e.target.value)}
+          style={{
+            width: '100%', border: `1px solid ${W.border}`, borderRadius: 10,
+            padding: '12px 14px', fontSize: 15, color: W.navy, background: W.white,
+          }}
+        />
+        <div style={{ fontSize: 12, color: W.textCaption, marginTop: 8 }}>
+          We'll check open windows up to 90 days out.
+        </div>
+      </div>
+      {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption }}>Loading times…</div> : null}
+      {pickedData ? <div>{renderSlotList(pickedData)}</div> : null}
+    </div>
+  );
 
   if (loading) {
     return (
@@ -136,11 +271,14 @@ export default function SlotPicker({
 
   if (allSlots.length === 0) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
-        <div style={{ fontSize: 14, color: W.textBody }}>
-          No open slots in the next 14 days. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call us</a> and we'll fit you in.
+      <>
+        <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, color: W.textBody }}>
+            No open slots in the next 14 days — try searching a specific date below, or <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>call us</a> and we&apos;ll fit you in.
+          </div>
         </div>
-      </div>
+        {finder}
+      </>
     );
   }
 
@@ -148,6 +286,7 @@ export default function SlotPicker({
   const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
 
   return (
+    <>
     <div style={{ background: W.white, borderRadius: 14, padding: 32, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
       <div style={{
         fontSize: 30,
@@ -189,5 +328,7 @@ export default function SlotPicker({
         </>
       ) : null}
     </div>
+    {finder}
+    </>
   );
 }

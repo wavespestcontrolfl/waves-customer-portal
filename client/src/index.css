@@ -130,62 +130,11 @@ button, input, select, textarea, optgroup {
   margin: 28px auto 56px;
 }
 
-.waves-pay-page {
-  width: min(100% - 32px, 920px);
-}
-
-.waves-pay-hero {
-  position: relative;
-  overflow: hidden;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(250px, 340px);
-  gap: 24px;
-  align-items: stretch;
-  margin-bottom: 20px;
-  padding: 24px;
-  border-radius: var(--radius-xl);
-  background:
-    linear-gradient(135deg, rgba(0, 156, 222, 0.18), rgba(255, 215, 0, 0.12) 48%, rgba(255, 255, 255, 0)),
-    var(--brand);
-  box-shadow: var(--shadow-card);
-}
-
-.waves-pay-hero::after {
-  content: "";
-  position: absolute;
-  inset: auto -80px -120px auto;
-  width: 260px;
-  height: 260px;
-  border-radius: 50%;
-  border: 52px solid rgba(255, 255, 255, 0.08);
-  pointer-events: none;
-}
-
-.waves-pay-hero-copy,
-.waves-pay-hero-total {
-  position: relative;
-  z-index: 1;
-}
-
-.waves-pay-hero-total {
-  align-self: stretch;
-  padding: 18px;
-  border-radius: var(--radius-xl);
-  background: #FFFFFF;
-  border: 1px solid rgba(255, 255, 255, 0.32);
-  text-align: right;
-}
-
 .waves-billing-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
   gap: 20px;
   align-items: start;
-}
-
-.waves-pay-single {
-  width: min(100%, 860px);
-  margin: 0 auto;
 }
 
 .waves-pay-payment-panel {
@@ -286,20 +235,6 @@ button, input, select, textarea, optgroup {
 @media (max-width: 820px) {
   :root {
     --h1-serif: 26px;
-  }
-
-  .waves-pay-hero {
-    grid-template-columns: 1fr;
-    gap: 16px;
-    padding: 18px;
-  }
-
-  .waves-pay-hero-total {
-    text-align: left;
-  }
-
-  .waves-pay-hero-total > div:last-child {
-    justify-content: flex-start !important;
   }
 
   .waves-billing-grid {

@@ -79,6 +79,7 @@ function normalizeAssessmentRow(row) {
     adjusted_scores: parseJsonObject(row.adjusted_scores),
     divergence_flags: parseJsonArray(row.divergence_flags),
     stress_flags: parseJsonObject(row.stress_flags, null),
+    protocol_field_checks: parseJsonObject(row.protocol_field_checks, null),
   };
 }
 
@@ -87,6 +88,96 @@ function scoreValue(value, fallback = 0) {
   if (Number.isFinite(n)) return Math.max(0, Math.min(100, Math.round(n)));
   const f = Number(fallback);
   return Number.isFinite(f) ? Math.max(0, Math.min(100, Math.round(f))) : 0;
+}
+
+function finiteNumberOrNull(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeProtocolFieldChecks(input = {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  const errors = [];
+  const irrigationStatus = source.irrigation_status || source.irrigationStatus || null;
+  if (irrigationStatus != null && !['good', 'dry', 'wet', 'unknown'].includes(irrigationStatus)) {
+    errors.push('irrigation_status must be one of: good, dry, wet, unknown');
+  }
+
+  const thatchMeasurementIn = finiteNumberOrNull(source.thatch_measurement_in ?? source.thatchMeasurementIn);
+  if (thatchMeasurementIn != null && (thatchMeasurementIn < 0 || thatchMeasurementIn > 12)) {
+    errors.push('thatch_measurement_in must be between 0 and 12 inches');
+  }
+
+  const chinchCountPerSqft = finiteNumberOrNull(source.chinch_count_per_sqft ?? source.chinchCountPerSqft);
+  if (chinchCountPerSqft != null && (chinchCountPerSqft < 0 || chinchCountPerSqft > 500)) {
+    errors.push('chinch_count_per_sqft must be between 0 and 500');
+  }
+
+  const soilKPpm = finiteNumberOrNull(source.soil_k_ppm ?? source.soilKPpm);
+  if (soilKPpm != null && (soilKPpm < 0 || soilKPpm > 5000)) {
+    errors.push('soil_k_ppm must be between 0 and 5000');
+  }
+
+  const notes = source.protocol_field_notes ?? source.notes ?? null;
+  if (notes != null && String(notes).length > 3000) {
+    errors.push('protocol_field_notes must be 3000 characters or fewer');
+  }
+
+  const normalized = {
+    irrigation_status: irrigationStatus,
+    thatch_measurement_in: thatchMeasurementIn,
+    chinch_count_per_sqft: chinchCountPerSqft,
+    chinch_float_test_done: source.chinch_float_test_done === true || source.chinchFloatTestDone === true,
+    nematode_assay_flag: source.nematode_assay_flag === true || source.nematodeAssayFlag === true,
+    soil_k_ppm: soilKPpm,
+    large_patch_history_observed: source.large_patch_history_observed === true || source.largePatchHistoryObserved === true,
+    protocol_field_notes: notes == null ? null : String(notes),
+  };
+
+  return { errors, normalized };
+}
+
+async function persistProtocolFieldChecks({ assessment, checks, trx = db }) {
+  if (!assessment?.id || !checks) return null;
+  const assessmentCols = await trx('lawn_assessments').columnInfo().catch(() => ({}));
+  const update = { updated_at: new Date() };
+  for (const [key, value] of Object.entries(checks)) {
+    if (assessmentCols[key] && value !== undefined) update[key] = value;
+  }
+  if (assessmentCols.protocol_field_checks) update.protocol_field_checks = JSON.stringify(checks);
+  if (Object.keys(update).length > 1) {
+    await trx('lawn_assessments').where({ id: assessment.id }).update(update);
+  }
+
+  const turfCols = await trx('customer_turf_profiles').columnInfo().catch(() => ({}));
+  if (!Object.keys(turfCols).length) return update;
+  const profileUpdate = { updated_at: new Date() };
+  if (checks.irrigation_status && turfCols.irrigation_status) profileUpdate.irrigation_status = checks.irrigation_status;
+  if (checks.thatch_measurement_in != null && turfCols.thatch_measurement_in) {
+    profileUpdate.thatch_measurement_in = checks.thatch_measurement_in;
+  }
+  if (checks.thatch_measurement_in != null && turfCols.last_thatch_checked_at) {
+    profileUpdate.last_thatch_checked_at = assessment.service_date || new Date();
+  }
+  if (checks.chinch_float_test_done && turfCols.last_chinch_checked_at) {
+    profileUpdate.last_chinch_checked_at = assessment.service_date || new Date();
+  }
+  if (checks.soil_k_ppm != null && turfCols.soil_k_ppm) profileUpdate.soil_k_ppm = checks.soil_k_ppm;
+  if (checks.nematode_assay_flag && turfCols.nematode_assay_flag) profileUpdate.nematode_assay_flag = true;
+  if (checks.nematode_assay_flag && turfCols.last_nematode_flagged_at) {
+    profileUpdate.last_nematode_flagged_at = assessment.service_date || new Date();
+  }
+  if (checks.large_patch_history_observed && turfCols.large_patch_history) profileUpdate.large_patch_history = true;
+  if (turfCols.last_protocol_assessment_id) profileUpdate.last_protocol_assessment_id = assessment.id;
+
+  if (Object.keys(profileUpdate).length > 1) {
+    await trx('customer_turf_profiles')
+      .insert({ customer_id: assessment.customer_id, ...profileUpdate })
+      .onConflict('customer_id')
+      .merge(profileUpdate);
+  }
+  return update;
 }
 
 function customerVisibleForQualityCheck(qualityCheck = {}) {
@@ -853,7 +944,12 @@ function normalizeStressFlags(input) {
 
 router.post('/confirm', async (req, res, next) => {
   try {
-    const { assessmentId, adjustedScores, stress_flags: stressFlagsInput } = req.body;
+    const {
+      assessmentId,
+      adjustedScores,
+      stress_flags: stressFlagsInput,
+      protocol_field_checks: protocolFieldChecksInput,
+    } = req.body;
 
     if (!assessmentId) return res.status(400).json({ error: 'assessmentId is required' });
 
@@ -862,6 +958,15 @@ router.post('/confirm', async (req, res, next) => {
     const { errors: stressErrors, normalized: normalizedStressFlags } = normalizeStressFlags(stressFlagsInput);
     if (stressErrors.length) {
       return res.status(400).json({ error: 'Invalid stress_flags', details: stressErrors });
+    }
+    const protocolFieldChecksProvided = Object.prototype.hasOwnProperty.call(req.body, 'protocol_field_checks');
+    let protocolFieldChecks = null;
+    if (protocolFieldChecksProvided) {
+      const { errors: protocolCheckErrors, normalized } = normalizeProtocolFieldChecks(protocolFieldChecksInput);
+      if (protocolCheckErrors.length) {
+        return res.status(400).json({ error: 'Invalid protocol_field_checks', details: protocolCheckErrors });
+      }
+      protocolFieldChecks = normalized;
     }
 
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
@@ -904,6 +1009,10 @@ router.post('/confirm', async (req, res, next) => {
       .where({ id: assessmentId })
       .update(updateData)
       .returning('*');
+    if (protocolFieldChecksProvided) {
+      await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
+      Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+    }
 
     // Agronomic Wiki: link only when a durable service_record exists.
     // Assessments captured inside Complete Service are back-linked after

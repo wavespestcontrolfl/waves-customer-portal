@@ -46,6 +46,12 @@ function loadClientEstimator() {
 
 const client = loadClientEstimator();
 
+function roundedFloorFromRaw(rawAnnual, visits) {
+  const pa = Math.ceil(rawAnnual / visits);
+  const ann = pa * visits;
+  return { pa, ann, mo: Math.round(ann / 12 * 100) / 100 };
+}
+
 // Server's selected-tier price for a given turf/track/freq (+ optional property).
 function serverTier(sf, track, visits, { property = {} } = {}) {
   const result = priceLawnCare(
@@ -55,6 +61,19 @@ function serverTier(sf, track, visits, { property = {} } = {}) {
   const tier = result.tiers.find((t) => t.freq === visits);
   if (!tier) throw new Error(`no server tier for visits=${visits}`);
   return { pa: tier.perApp, ann: tier.annual, mo: tier.monthly };
+}
+
+// Server's raw cost-floor calculation for a tier. The client calcLawnFloorPrice()
+// intentionally returns the floor-only value, while selected customer pricing may
+// use the market table when market is above the 45% floor.
+function serverFloor(sf, track, visits, { property = {} } = {}) {
+  const result = priceLawnCare(
+    { turfSf: sf, ...property },
+    { track, lawnFreq: visits, useLawnCostFloor: true },
+  );
+  const tier = result.tiers.find((t) => t.freq === visits);
+  if (!tier) throw new Error(`no server tier for visits=${visits}`);
+  return roundedFloorFromRaw(tier.costFloorAnnual, visits);
 }
 
 const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
@@ -67,14 +86,14 @@ describe('client/server lawn parity — base grid (clamp removal)', () => {
 
   it.each(cases)('%s', (_label, track, sf, v) => {
     const c = client.calcLawnFloorPrice(sf, track, v);
-    const s = serverTier(sf, track, v);
+    const s = serverFloor(sf, track, v);
     expect({ pa: c.pa, ann: c.ann, mo: c.mo }).toEqual(s);
   });
 
   it('the removed clamp actually mattered: 2500 sqft no longer floors material at 0.6×', () => {
     // 2500/4500 = 0.556 — under the old 0.6 clamp, so client used to over-price here.
     const c = client.calcLawnFloorPrice(2500, 'st_augustine', 9);
-    const s = serverTier(2500, 'st_augustine', 9);
+    const s = serverFloor(2500, 'st_augustine', 9);
     expect(c.pa).toBe(s.pa);
   });
 });
@@ -89,7 +108,7 @@ describe('client/server lawn parity — complexity minutes', () => {
   it.each(combos.map((c) => [JSON.stringify(c), c]))('%s', (_l, combo) => {
     const minutes = lawnComplexityMinutes(combo);
     const c = client.calcLawnFloorPrice(4250, 'st_augustine', 9, { complexityMinutes: minutes });
-    const s = serverTier(4250, 'st_augustine', 9, {
+    const s = serverFloor(4250, 'st_augustine', 9, {
       property: {
         landscapeComplexity: combo.landscapeComplexity,
         shrubDensity: combo.shrubDensity,
@@ -114,7 +133,7 @@ describe('client/server lawn parity — callback reserve (maintenance / pressure
   it.each(combos.map((c) => [JSON.stringify(c), c]))('%s', (_l, combo) => {
     const reserve = reserveFor(combo.maintenanceCondition, combo.overallPestPressure);
     const c = client.calcLawnFloorPrice(4250, 'st_augustine', 9, { callbackReservePerVisit: reserve });
-    const s = serverTier(4250, 'st_augustine', 9, { property: combo });
+    const s = serverFloor(4250, 'st_augustine', 9, { property: combo });
     expect({ pa: c.pa, ann: c.ann, mo: c.mo }).toEqual(s);
   });
 });

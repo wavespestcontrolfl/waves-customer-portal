@@ -12,6 +12,13 @@ function extractDomain(url) {
   try { return new URL(url).hostname.replace('www.', ''); } catch { return null; }
 }
 
+function normalizeDomain(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return null;
+  const parsed = extractDomain(raw) || extractDomain(`https://${raw}`);
+  return parsed || raw.replace(/^www\./, '').replace(/\/+$/, '') || null;
+}
+
 async function executeBacklinkTool(toolName, input) {
   switch (toolName) {
 
@@ -182,6 +189,73 @@ async function executeBacklinkTool(toolName, input) {
           source: p.source,
           queue_status: p.queue_status,
           created: p.created_at,
+        })),
+      };
+    }
+
+    // ── Link prospect board (outbound pipeline) ─────────────────
+
+    case 'create_link_prospects': {
+      const prospects = input.prospects || [];
+      let added = 0, skipped = 0;
+      const duplicates = [];
+
+      for (const p of prospects) {
+        const domain = normalizeDomain(p.target_domain) || normalizeDomain(p.target_url);
+        if (!domain || !p.target_page) { skipped++; continue; }
+
+        const exists = await db('seo_link_prospects')
+          .where({ target_domain: domain, target_page: p.target_page })
+          .first();
+        if (exists) { duplicates.push(domain); skipped++; continue; }
+
+        await db('seo_link_prospects').insert({
+          target_domain: domain,
+          target_url: p.target_url || null,
+          target_page: p.target_page,
+          anchor_planned: p.anchor_planned || null,
+          link_type: p.link_type || null,
+          priority: p.priority || null,
+          domain_rating: p.domain_rating || null,
+          notes: p.notes || null,
+          source: 'strategy_agent',
+          owner: 'strategy_agent',
+        });
+        added++;
+      }
+
+      logger.info(`[backlink-strategy] Created ${added} link prospects, skipped ${skipped}`);
+      return { added, skipped, duplicates };
+    }
+
+    case 'list_prospects': {
+      const limit = input.limit || 50;
+      let query = db('seo_link_prospects')
+        .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
+        .orderBy('updated_at', 'desc')
+        .limit(limit);
+      if (input.status) query = query.where({ status: input.status });
+      if (input.link_type) query = query.where({ link_type: input.link_type });
+
+      const rows = await query;
+      const counts = await db('seo_link_prospects').select('status').count('* as count').groupBy('status');
+      const statusMap = {};
+      counts.forEach(c => { statusMap[c.status] = parseInt(c.count); });
+
+      return {
+        counts: statusMap,
+        prospects: rows.map(p => ({
+          id: p.id,
+          target_domain: p.target_domain,
+          target_page: p.target_page,
+          link_type: p.link_type,
+          status: p.status,
+          priority: p.priority,
+          anchor: p.anchor_text || p.anchor_planned,
+          is_dofollow: p.is_dofollow,
+          indexing_status: p.indexing_status,
+          domain_rating: p.domain_rating,
+          live_url: p.live_url,
         })),
       };
     }

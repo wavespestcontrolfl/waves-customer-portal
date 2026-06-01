@@ -412,15 +412,18 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
           updated++;
         } else { skipped++; }
       } else {
-        await db('knowledge_base').insert({
-          slug, title, content, category, tags: JSON.stringify(tags),
-          source: 'auto-sync', confidence: 'high', status: 'active',
-          last_verified_at: new Date(), verified_by: 'auto-sync',
-        }).catch(e => {
+        try {
+          await db('knowledge_base').insert({
+            path: `kb/${category || 'general'}/${slug}.md`,
+            slug, title, content, category, tags: JSON.stringify(tags),
+            source: 'auto-sync', confidence: 'high', status: 'active',
+            last_verified_at: new Date(), verified_by: 'auto-sync',
+          });
+          created++;
+        } catch (e) {
           if (!e.message?.includes('duplicate')) logger.error(`[kb-sync] Insert failed: ${e.message}`);
           skipped++;
-        });
-        created++;
+        }
       }
     }
 

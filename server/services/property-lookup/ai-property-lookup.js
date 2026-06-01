@@ -655,7 +655,10 @@ async function lookupPropertyFromOpenAI(address) {
     return null;
   }
 
-  const timeoutMs = positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+  // OpenAI web_search property lookups routinely need >30s; the shared
+  // DEFAULT_TIMEOUT_MS (30s) was aborting nearly every call. Use a 60s default
+  // for this path specifically (still overridable via AI_PROPERTY_TIMEOUT_MS).
+  const timeoutMs = positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, 60000);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();

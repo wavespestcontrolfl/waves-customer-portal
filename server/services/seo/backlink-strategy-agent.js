@@ -16,8 +16,48 @@ const { executeBacklinkTool } = require('./backlink-strategy-tools');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BACKLINK_STRATEGY_AGENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ID;
+const BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID
+  || process.env.MANAGED_AGENT_ENVIRONMENT_ID
+  || process.env.ANTHROPIC_ENVIRONMENT_ID;
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
+const REQUIRED_TOOL_NAMES = ['list_prospects', 'create_link_prospects'];
+
+function buildSessionCreateBody(agentId, environmentId) {
+  return { agent: agentId, environment_id: environmentId };
+}
+
+function buildUserMessageEvent(text) {
+  return { type: 'user.message', content: [{ type: 'text', text }] };
+}
+
+function buildToolResultEvent(toolUseId, toolResult, { custom = true } = {}) {
+  if (custom) {
+    return {
+      type: 'user.custom_tool_result',
+      custom_tool_use_id: toolUseId,
+      content: [{ type: 'text', text: JSON.stringify(toolResult) }],
+      ...(toolResult?.error ? { is_error: true } : {}),
+    };
+  }
+  return {
+    type: 'tool_result',
+    tool_use_id: toolUseId,
+    content: [{ type: 'text', text: JSON.stringify(toolResult) }],
+  };
+}
+
+function toolUseIdFromEvent(data = {}) {
+  return data.id || data.custom_tool_use_id || data.tool_use_id;
+}
+
+function stopReasonFromEvent(data = {}) {
+  return typeof data.stop_reason === 'string' ? { type: data.stop_reason } : data.stop_reason;
+}
+
+function sendSessionEvents(sessionId, events) {
+  return apiCall('POST', `/sessions/${sessionId}/events`, { events });
+}
 
 async function apiCall(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -38,7 +78,7 @@ async function apiCall(method, path, body) {
 }
 
 async function* streamSessionEvents(sessionId) {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/events?stream=true`, {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/events/stream`, {
     headers: {
       'x-api-key': ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
@@ -77,6 +117,18 @@ async function* streamSessionEvents(sessionId) {
 }
 
 const BacklinkStrategyAgent = {
+  async assertAgentConfigSynced() {
+    const agent = await apiCall('GET', `/agents/${BACKLINK_STRATEGY_AGENT_ID}`);
+    const configuredTools = new Set((agent.tools || []).map((tool) => tool && tool.name).filter(Boolean));
+    const missingTools = REQUIRED_TOOL_NAMES.filter((name) => !configuredTools.has(name));
+    if (missingTools.length) {
+      throw new Error(
+        `BACKLINK_STRATEGY_AGENT_ID=${BACKLINK_STRATEGY_AGENT_ID} is missing required M2 tools: ${missingTools.join(', ')}. `
+        + 'Run `npm run backlink:sync-strategy-agent` with ANTHROPIC_API_KEY before running the strategist.'
+      );
+    }
+    return { ok: true, agentId: agent.id, requiredTools: REQUIRED_TOOL_NAMES };
+  },
 
   /**
    * Run the weekly backlink strategy cycle.
@@ -91,8 +143,8 @@ const BacklinkStrategyAgent = {
    * @returns {object} { sessionId, report, targetsAdded, gapsFound, durationSeconds }
    */
   async run(opts = {}) {
-    if (!ANTHROPIC_API_KEY || !BACKLINK_STRATEGY_AGENT_ID) {
-      throw new Error('Missing ANTHROPIC_API_KEY or BACKLINK_STRATEGY_AGENT_ID');
+    if (!ANTHROPIC_API_KEY || !BACKLINK_STRATEGY_AGENT_ID || !BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID) {
+      throw new Error('Missing ANTHROPIC_API_KEY, BACKLINK_STRATEGY_AGENT_ID, or BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID/MANAGED_AGENT_ENVIRONMENT_ID');
     }
 
     const startTime = Date.now();
@@ -117,33 +169,79 @@ const BacklinkStrategyAgent = {
     prompt += '\n\nAt the end, save your strategy report using the save_strategy_report tool.';
 
     notify('starting', 'Creating backlink strategy session...');
+    await this.assertAgentConfigSynced();
 
-    const session = await apiCall('POST', '/sessions', {
-      agent_id: BACKLINK_STRATEGY_AGENT_ID,
-    });
+    const session = await apiCall('POST', '/sessions', buildSessionCreateBody(
+      BACKLINK_STRATEGY_AGENT_ID,
+      BACKLINK_STRATEGY_AGENT_ENVIRONMENT_ID
+    ));
 
     const sessionId = session.id;
     logger.info(`[backlink-strategy] Session created: ${sessionId}`);
 
-    await apiCall('POST', `/sessions/${sessionId}/events`, {
-      type: 'user',
-      content: [{ type: 'text', text: prompt }],
-    });
+    await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
 
     let finalReport = '';
     let toolsExecuted = [];
     let targetsAdded = 0;
     let gapsFound = 0;
-    let maxIterations = 60; // strategy agent may need lots of tool calls
+    let maxToolCalls = 60; // strategy agent may need lots of tool calls
+    const pendingCustomToolUses = new Map();
+    const resolvedToolUseIds = new Set();
 
     notify('auditing', 'Agent is auditing the backlink profile...');
 
-    for await (const { event, data } of streamSessionEvents(sessionId)) {
-      if (--maxIterations <= 0) {
-        logger.warn(`[backlink-strategy] Hit max iterations for session ${sessionId}`);
-        break;
+    const executeToolUse = async (toolName, toolInput, toolUseId) => {
+      if (!toolUseId || resolvedToolUseIds.has(toolUseId)) return null;
+      if (--maxToolCalls <= 0) {
+        logger.warn(`[backlink-strategy] Hit max tool calls for session ${sessionId}`);
+        return null;
       }
 
+      const stageMap = {
+        get_backlink_dashboard: 'auditing',
+        scan_backlinks: 'auditing',
+        get_signup_agent_stats: 'auditing',
+        get_citation_dashboard: 'auditing',
+        scan_competitor_gaps: 'analyzing competitors',
+        get_competitor_gap_opportunities: 'analyzing competitors',
+        add_targets_to_queue: 'adding targets',
+        get_queue_status: 'reviewing queue',
+        get_completed_profiles: 'reviewing profiles',
+        list_prospects: 'reviewing prospects',
+        create_link_prospects: 'adding prospects',
+        check_search_volume: 'checking keywords',
+        check_llm_mentions: 'checking LLM visibility',
+        save_strategy_report: 'saving report',
+      };
+      notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
+
+      logger.info(`[backlink-strategy] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
+
+      let toolResult;
+      try {
+        toolResult = await executeBacklinkTool(toolName, toolInput);
+
+        if (toolName === 'add_targets_to_queue' && toolResult.added) {
+          targetsAdded += toolResult.added;
+        }
+        if (toolName === 'create_link_prospects' && toolResult.added) {
+          targetsAdded += toolResult.added;
+        }
+        if (toolName === 'scan_competitor_gaps' && toolResult.gaps) {
+          gapsFound += toolResult.gaps;
+        }
+      } catch (err) {
+        toolResult = { error: `Tool failed: ${err.message}` };
+        logger.error(`[backlink-strategy] Tool ${toolName} error: ${err.message}`);
+      }
+
+      resolvedToolUseIds.add(toolUseId);
+      toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
+      return toolResult;
+    };
+
+    for await (const { event, data } of streamSessionEvents(sessionId)) {
       if (event === 'assistant' || event === 'text') {
         if (data.text) finalReport += data.text;
         if (data.content) {
@@ -153,58 +251,59 @@ const BacklinkStrategyAgent = {
         }
       }
 
-      if (event === 'tool_use' || data?.type === 'tool_use') {
+      const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
+      const isLegacyToolUse = event === 'tool_use' || data?.type === 'tool_use';
+      if (isCustomToolUse) {
         const toolName = data.name;
         const toolInput = data.input || {};
-        const toolUseId = data.id;
-
-        const stageMap = {
-          get_backlink_dashboard: 'auditing',
-          scan_backlinks: 'auditing',
-          get_signup_agent_stats: 'auditing',
-          get_citation_dashboard: 'auditing',
-          scan_competitor_gaps: 'analyzing competitors',
-          get_competitor_gap_opportunities: 'analyzing competitors',
-          add_targets_to_queue: 'adding targets',
-          get_queue_status: 'reviewing queue',
-          get_completed_profiles: 'reviewing profiles',
-          check_search_volume: 'checking keywords',
-          check_llm_mentions: 'checking LLM visibility',
-          save_strategy_report: 'saving report',
-        };
-        notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
-
-        logger.info(`[backlink-strategy] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
-
-        let toolResult;
-        try {
-          toolResult = await executeBacklinkTool(toolName, toolInput);
-
-          if (toolName === 'add_targets_to_queue' && toolResult.added) {
-            targetsAdded += toolResult.added;
-          }
-          if (toolName === 'scan_competitor_gaps' && toolResult.gaps) {
-            gapsFound += toolResult.gaps;
-          }
-        } catch (err) {
-          toolResult = { error: `Tool failed: ${err.message}` };
-          logger.error(`[backlink-strategy] Tool ${toolName} error: ${err.message}`);
+        const toolUseId = toolUseIdFromEvent(data);
+        if (!toolUseId) {
+          logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
+          continue;
+        }
+        pendingCustomToolUses.set(toolUseId, { toolName, toolInput });
+      } else if (isLegacyToolUse) {
+        const toolName = data.name;
+        const toolInput = data.input || {};
+        const toolUseId = toolUseIdFromEvent(data);
+        if (!toolUseId) {
+          logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
+          continue;
         }
 
-        toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
+        const toolResult = await executeToolUse(toolName, toolInput, toolUseId);
+        if (!toolResult) break;
 
-        await apiCall('POST', `/sessions/${sessionId}/events`, {
-          type: 'tool_result',
-          tool_use_id: toolUseId,
-          content: [{ type: 'text', text: JSON.stringify(toolResult) }],
-        });
+        await sendSessionEvents(sessionId, [
+          buildToolResultEvent(toolUseId, toolResult, { custom: false }),
+        ]);
       }
 
-      if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') {
+      const stopReason = stopReasonFromEvent(data);
+      if (event === 'session.status_idle' && stopReason?.type === 'requires_action') {
+        const toolResultEvents = [];
+        for (const toolUseId of stopReason.event_ids || []) {
+          const pending = pendingCustomToolUses.get(toolUseId);
+          if (!pending) {
+            logger.error(`[backlink-strategy] Missing pending custom tool use for required event ${toolUseId}`);
+            continue;
+          }
+          const toolResult = await executeToolUse(pending.toolName, pending.toolInput, toolUseId);
+          if (!toolResult) break;
+          pendingCustomToolUses.delete(toolUseId);
+          toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, { custom: true }));
+        }
+        if (toolResultEvents.length) {
+          await sendSessionEvents(sessionId, toolResultEvents);
+        }
+        continue;
+      }
+
+      if (event === 'done' || event === 'session_complete' || stopReason?.type === 'end_turn') {
         break;
       }
 
-      if (event === 'error') {
+      if (event === 'error' || event === 'session.error') {
         logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
         break;
       }
@@ -228,3 +327,10 @@ const BacklinkStrategyAgent = {
 };
 
 module.exports = BacklinkStrategyAgent;
+module.exports._test = {
+  buildSessionCreateBody,
+  buildUserMessageEvent,
+  buildToolResultEvent,
+  toolUseIdFromEvent,
+  stopReasonFromEvent,
+};

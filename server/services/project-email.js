@@ -18,6 +18,7 @@ const PREP_TEMPLATE_BY_PROJECT_TYPE = Object.freeze({
   flea: 'prep.flea',
   pest_inspection: 'prep.interior_pest',
   one_time_pest_treatment: 'prep.interior_pest',
+  cockroach: 'prep.cockroach',
   one_time_lawn_treatment: 'prep.lawn',
   mosquito_event: 'prep.mosquito',
   termite_inspection: 'prep.termite',
@@ -280,14 +281,24 @@ async function sendProjectReportWithInvoice({
   payUrl,
   invoice,
   attachments = [],
+  reportAttached = false,
   idempotencyKey,
 } = {}) {
+  // The template's attachments sentence is a variable, not hardcoded copy: only
+  // WDO sends carry a report PDF attachment (the FDACS-13645), so a non-WDO send
+  // attaches just the invoice PDF and the report is delivered as a link. Pick the
+  // sentence that matches what's actually attached so we never tell a customer a
+  // report PDF is attached when it isn't.
+  const attachmentsNote = reportAttached
+    ? 'The official report PDF and your invoice PDF are attached to this email.'
+    : 'Your invoice PDF is attached, and you can view your full report online using the link below.';
   const payload = {
     ...buildProjectPayload({ project, customer, reportUrl }),
     invoice_url: payUrl || '',
     pay_url: payUrl || '',
     invoice_number: clean(invoice?.invoice_number),
     amount_due: invoice?.total != null ? `$${Number(invoice.total).toFixed(2)}` : '',
+    attachments_note: attachmentsNote,
   };
   return sendProjectTemplate({
     project,

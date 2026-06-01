@@ -2116,8 +2116,17 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(html).toContain('id="payment-setup-card"');
-    expect(html).toContain('Choose pay-after-visit setup');
-    expect(html).toContain('Choose annual prepay setup');
+    expect(html).toContain('Pay at the visit');
+    expect(html).toContain('Annual prepay');
+    expect(html).toContain('If card setup is required, we send you to the secure setup screen after confirmation.');
+    expect(html).toContain('No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.');
+    expect(html).toContain('id="payment-setup-summary"');
+    expect(html).toContain('id="change-payment-setup-btn"');
+    expect(html).toContain('function updatePaymentSetupSummary(pref)');
+    expect(html).toContain("bookingTitle.textContent = 'Review your invoice setup'");
+    expect(html).toContain("history.pushState(null, '', '#invoice-setup')");
+    expect(html).toContain("if (setupCard) setupCard.style.display = 'none';");
+    expect(html).toContain("changePaymentSetupBtn.addEventListener('click', returnToPaymentSetupChoices)");
     expect(html).toContain('<section class="card booking-card" id="booking-card" style="display:none">');
     expect(html).toContain('const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = true;');
     expect(html).toContain('function bookingRequiresPaymentSetup()');

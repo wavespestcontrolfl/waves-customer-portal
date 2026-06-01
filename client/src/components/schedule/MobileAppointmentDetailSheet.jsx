@@ -100,15 +100,6 @@ function mapDeepLink(address) {
   return isIos ? `maps://?q=${encoded}` : `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
-const ACTIVE_COMPLETION_STATUSES = new Set(['en_route', 'on_site']);
-const PRE_SERVICE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
-
-function canOpenCompletion(service) {
-  const status = String(service?.status || '').toLowerCase();
-  if (ACTIVE_COMPLETION_STATUSES.has(status)) return true;
-  return PRE_SERVICE_STATUSES.has(status);
-}
-
 export default function MobileAppointmentDetailSheet({
   service,
   onClose,
@@ -185,7 +176,9 @@ export default function MobileAppointmentDetailSheet({
 
   const noteDirty = (service?.notes || '') !== note;
   const isLawn = String(service?.serviceType || '').toLowerCase().includes('lawn');
-  const canCompleteService = canOpenCompletion(service);
+  const canCompleteService = ['en_route', 'on_site', 'pending', 'confirmed', 'rescheduled'].includes(
+    String(service?.status || '').toLowerCase(),
+  );
 
   const saveNote = async () => {
     if (!noteDirty) return true;

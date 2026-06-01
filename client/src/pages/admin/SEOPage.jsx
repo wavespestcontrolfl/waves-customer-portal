@@ -890,6 +890,8 @@ function BacklinksTab() {
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [subTab, setSubTab] = useState("overview");
+  const [llmDash, setLlmDash] = useState(null);
+  const [llmScanning, setLlmScanning] = useState(false);
   const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
@@ -900,6 +902,31 @@ function BacklinksTab() {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  // Lazy-load the answer-engine share-of-voice dashboard the first time the
+  // LLM Mentions sub-tab is opened.
+  useEffect(() => {
+    if (subTab !== "llm" || llmDash) return;
+    adminFetch("/admin/seo/llm-mentions")
+      .then(setLlmDash)
+      .catch(() => {});
+  }, [subTab, llmDash]);
+
+  const handleLlmScan = async () => {
+    if (!canRunSeoActions) return;
+    setLlmScanning(true);
+    try {
+      await adminPost("/admin/seo/llm-mentions/scan", {});
+      const [dash, backlinks] = await Promise.all([
+        adminFetch("/admin/seo/llm-mentions").catch(() => null),
+        adminFetch("/admin/seo/backlinks").catch(() => null),
+      ]);
+      if (dash) setLlmDash(dash);
+      if (backlinks) setData(backlinks);
+    } finally {
+      setLlmScanning(false);
+    }
+  };
 
   const handleScan = async () => {
     if (!canRunSeoActions) return;
@@ -969,6 +996,7 @@ function BacklinksTab() {
             { key: "citations", label: "Citations" },
             { key: "gaps", label: "Competitor Gaps" },
             { key: "llm", label: "LLM Mentions" },
+            { key: "prospects", label: "Link Building" },
             { key: "agent", label: "Agent" },
           ].map((t) => (
             <button
@@ -1372,87 +1400,488 @@ function BacklinksTab() {
         </Card>
       )}
 
-      {/* LLM Mentions sub-tab */}
+      {/* LLM Mentions sub-tab — answer-engine visibility (AEO) */}
       {subTab === "llm" && (
-        <Card>
-          {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 12,
-            }}
-          >
-            {" "}
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
-              LLM Mentions ({data.llmStats?.wavesMentioned || 0}/
-              {data.llmStats?.total || 0} mentioning Waves)
-            </div>{" "}
-            {canRunSeoActions && (
-              <button
-                onClick={() => adminPost("/admin/seo/backlinks/llm-mentions", {})}
-                style={{
-                  padding: "4px 10px",
-                  borderRadius: 4,
-                  border: `1px solid ${D.teal}`,
-                  background: "transparent",
-                  color: D.teal,
-                  fontSize: 11,
-                  cursor: "pointer",
-                }}
-              >
-                Check Now
-              </button>
-            )}{" "}
-          </div>
-          {(data.llmMentions || []).length === 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Header + scan */}
+          <Card>
             <div
               style={{
-                fontSize: 13,
-                color: D.muted,
-                padding: 20,
-                textAlign: "center",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
               }}
             >
-              {canRunSeoActions
-                ? 'Click "Check Now" to scan LLM responses for Waves mentions'
-                : "No LLM mentions found."}
-            </div>
-          ) : (
-            (data.llmMentions || []).map((m, i) => (
-              <div
-                key={i}
-                style={{
-                  padding: "8px 12px",
-                  background: D.bg,
-                  borderRadius: 6,
-                  marginBottom: 4,
-                  borderLeft: `3px solid ${m.waves_mentioned ? D.green : D.muted}`,
-                }}
-              >
-                {" "}
-                <div style={{ fontSize: 12, color: D.heading }}>
-                  "{m.query}"
-                </div>{" "}
+              <div>
                 <div
+                  style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                >
+                  Answer-Engine Visibility (AEO)
+                </div>
+                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                  {llmDash
+                    ? `${llmDash.summary?.overallShareOfVoice ?? 0}% share of voice · ${llmDash.summary?.queriesTracked ?? 0} queries · ${(llmDash.summary?.platforms || []).length} engines`
+                    : "Loading…"}
+                </div>
+              </div>
+              {canRunSeoActions && (
+                <button
+                  onClick={handleLlmScan}
+                  disabled={llmScanning}
                   style={{
+                    padding: "4px 10px",
+                    borderRadius: 4,
+                    border: `1px solid ${D.teal}`,
+                    background: "transparent",
+                    color: D.teal,
                     fontSize: 11,
-                    color: m.waves_mentioned ? D.green : D.muted,
+                    cursor: llmScanning ? "default" : "pointer",
+                    opacity: llmScanning ? 0.6 : 1,
                   }}
                 >
-                  {m.waves_mentioned
-                    ? "Yes Waves mentioned"
-                    : "— Not mentioned"}{" "}
-                  · {m.llm_platform} · {m.check_date}
-                </div>{" "}
+                  {llmScanning ? "Scanning…" : "Run Scan"}
+                </button>
+              )}
+            </div>
+          </Card>
+
+          {/* Share of voice by engine */}
+          {llmDash?.byPlatform?.length > 0 && (
+            <Card>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Share of Voice by Engine
               </div>
-            ))
+              {llmDash.byPlatform.map((p) => (
+                <div
+                  key={p.platform}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 6,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 130,
+                      fontSize: 11,
+                      color: D.text,
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    {p.platform.replace(/_/g, " ")}
+                  </div>
+                  <div
+                    style={{
+                      flex: 1,
+                      height: 14,
+                      background: D.bg,
+                      borderRadius: 3,
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        borderRadius: 3,
+                        background:
+                          p.shareOfVoice >= 50
+                            ? D.green
+                            : p.shareOfVoice > 0
+                              ? D.amber
+                              : D.muted,
+                        width: `${p.shareOfVoice}%`,
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      width: 70,
+                      fontSize: 11,
+                      color: D.muted,
+                      textAlign: "right",
+                      fontFamily: MONO,
+                    }}
+                  >
+                    {p.shareOfVoice}% ({p.mentioned}/{p.total})
+                  </div>
+                </div>
+              ))}
+            </Card>
           )}
-        </Card>
+
+          {/* Share-of-voice trend */}
+          {llmDash?.trend?.length > 1 && (
+            <Card>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Share-of-Voice Trend ({llmDash.trend.length}d)
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "flex-end",
+                  gap: 2,
+                  height: 48,
+                }}
+              >
+                {llmDash.trend.map((t) => (
+                  <div
+                    key={t.date}
+                    title={`${t.date}: ${t.shareOfVoice}% (${t.mentioned}/${t.total})`}
+                    style={{
+                      flex: 1,
+                      minWidth: 3,
+                      height: `${Math.max(2, t.shareOfVoice)}%`,
+                      background: D.green,
+                      borderRadius: 2,
+                    }}
+                  />
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Cited Waves pages + competitors */}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Cited Waves Pages
+              </div>
+              {(llmDash?.citedPages || []).length === 0 ? (
+                <div style={{ fontSize: 12, color: D.muted }}>
+                  No owned-domain citations yet.
+                </div>
+              ) : (
+                llmDash.citedPages.map((c, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      fontSize: 11,
+                      padding: "3px 0",
+                      color: D.text,
+                    }}
+                  >
+                    <span
+                      style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {c.url}
+                    </span>
+                    <span style={{ color: D.green, fontFamily: MONO }}>
+                      {c.count}
+                    </span>
+                  </div>
+                ))
+              )}
+            </Card>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 10,
+                }}
+              >
+                Competitors Cited
+              </div>
+              {(llmDash?.competitors || []).length === 0 ? (
+                <div style={{ fontSize: 12, color: D.muted }}>
+                  None detected.
+                </div>
+              ) : (
+                llmDash.competitors.map((c, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      fontSize: 11,
+                      padding: "3px 0",
+                      color: D.text,
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    <span>{c.name}</span>
+                    <span style={{ color: D.amber, fontFamily: MONO }}>
+                      {c.count}
+                    </span>
+                  </div>
+                ))
+              )}
+            </Card>
+          </div>
+
+          {/* Latest by query × engine */}
+          <Card>
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: D.heading,
+                marginBottom: 10,
+              }}
+            >
+              Latest by Query × Engine
+            </div>
+            {(llmDash?.grid || data.llmMentions || []).length === 0 ? (
+              <div
+                style={{
+                  fontSize: 13,
+                  color: D.muted,
+                  padding: 20,
+                  textAlign: "center",
+                }}
+              >
+                {canRunSeoActions
+                  ? 'Click "Run Scan" to probe answer engines for Waves mentions'
+                  : "No LLM mentions found."}
+              </div>
+            ) : (
+              (llmDash?.grid || data.llmMentions || []).map((m, i) => (
+                <div
+                  key={i}
+                  style={{
+                    padding: "8px 12px",
+                    background: D.bg,
+                    borderRadius: 6,
+                    marginBottom: 4,
+                    borderLeft: `3px solid ${m.waves_mentioned ? D.green : D.muted}`,
+                  }}
+                >
+                  <div style={{ fontSize: 12, color: D.heading }}>
+                    "{m.query}"
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: m.waves_mentioned ? D.green : D.muted,
+                    }}
+                  >
+                    {m.waves_mentioned
+                      ? `✓ Mentioned${m.rank_position ? ` (rank ${m.rank_position})` : ""}`
+                      : "— Not mentioned"}{" "}
+                    · {m.llm_platform} · {m.check_date}
+                  </div>
+                </div>
+              ))
+            )}
+          </Card>
+        </div>
       )}
 
+      {subTab === "prospects" && <LinkBuildingBoard canRun={canRunSeoActions} />}
       {subTab === "agent" && <BacklinkAgentPanel />}
+    </div>
+  );
+}
+
+// =========================================================================
+// LINK BUILDING BOARD — outbound prospect pipeline (Backlink Manager M1)
+// =========================================================================
+const PROSPECT_VIEWS = [
+  { key: "all", label: "All", statuses: null },
+  { key: "outreach", label: "Needs outreach", statuses: ["prospect", "contacted", "negotiating"] },
+  { key: "placed", label: "In progress", statuses: ["placed"] },
+  { key: "notindexed", label: "Live · not indexed", statuses: ["live"] },
+  { key: "indexed", label: "Indexed", statuses: ["indexed"] },
+  { key: "lost", label: "Lost", statuses: ["lost"] },
+];
+
+const PROSPECT_STATUS_COLOR = {
+  prospect: D.muted,
+  contacted: D.amber,
+  negotiating: D.amber,
+  placed: D.teal,
+  live: D.green,
+  indexed: D.green,
+  lost: D.red,
+  rejected: D.red,
+};
+
+function LinkBuildingBoard({ canRun }) {
+  const [items, setItems] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [view, setView] = useState("all");
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
+
+  const load = () => {
+    const cur = PROSPECT_VIEWS.find((v) => v.key === view);
+    const qs = cur?.statuses?.length === 1 ? `?status=${cur.statuses[0]}` : "";
+    const request = cur?.statuses?.length > 1
+      ? Promise.all(cur.statuses.map((status) => adminFetch(`/admin/backlink-agent/prospects?status=${status}`)))
+        .then((results) => {
+          const seen = new Set();
+          return results.flatMap((d) => d.items || []).filter((row) => {
+            if (!row?.id || seen.has(row.id)) return false;
+            seen.add(row.id);
+            return true;
+          });
+        })
+      : adminFetch(`/admin/backlink-agent/prospects${qs}`).then((d) => d.items || []);
+    request
+      .then((rows) => setItems(rows))
+      .catch(() => setItems([]));
+    adminFetch("/admin/backlink-agent/prospects/stats").then(setStats).catch(() => {});
+  };
+
+  useEffect(load, [view]);
+
+  const runVerify = async () => {
+    if (!canRun) return;
+    setBusy(true);
+    try { await adminPost("/admin/backlink-agent/prospects/verify", {}); } finally { setBusy(false); }
+  };
+
+  const recheck = async (id) => {
+    setBusy(true);
+    try { await adminPost(`/admin/backlink-agent/prospects/${id}/recheck`, {}); load(); } finally { setBusy(false); }
+  };
+
+  const addProspect = async () => {
+    if (!form.target_page || (!form.target_url && !form.live_url)) return;
+    setBusy(true);
+    try {
+      await adminPost("/admin/backlink-agent/prospects", form);
+      setForm({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
+      setAdding(false);
+      load();
+    } finally { setBusy(false); }
+  };
+
+  if (items === null) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading link prospects...</div>;
+
+  const inputStyle = { padding: "6px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 13, background: D.white, color: D.text };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* KPIs */}
+      {stats && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {[
+            ["Prospects", stats.total],
+            ["Placed", stats.byStatus?.placed || 0],
+            ["Live", stats.byStatus?.live || 0],
+            ["Indexed", stats.byStatus?.indexed || 0],
+            ["Lost", stats.byStatus?.lost || 0],
+            ["Indexing rate", `${stats.indexingRate || 0}%`],
+          ].map(([label, val]) => (
+            <div key={label} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 14px", minWidth: 96 }}>
+              <div style={{ fontSize: 18, fontWeight: 600, color: D.heading }}>{val}</div>
+              <div style={{ fontSize: 11, color: D.muted }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* View filters + actions */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {PROSPECT_VIEWS.map((v) => (
+            <button key={v.key} onClick={() => setView(v.key)}
+              style={{ padding: "5px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12,
+                background: view === v.key ? D.teal : D.bg, color: view === v.key ? D.white : D.muted, whiteSpace: "nowrap" }}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+        {canRun && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setAdding((a) => !a)} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${D.teal}`, background: D.teal, color: D.white, fontSize: 12, cursor: "pointer" }}>
+              + Add prospect
+            </button>
+            <button onClick={runVerify} disabled={busy} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${D.teal}`, background: "transparent", color: D.teal, fontSize: 12, cursor: "pointer", opacity: busy ? 0.5 : 1 }}>
+              {busy ? "Verifying..." : "Verify now"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Add form */}
+      {adding && canRun && (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Prospect site/page URL (planned)" value={form.target_url} onChange={(e) => setForm({ ...form, target_url: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Live URL — if link is already placed" value={form.live_url} onChange={(e) => setForm({ ...form, live_url: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Our target page (money page URL)" value={form.target_page} onChange={(e) => setForm({ ...form, target_page: e.target.value })} />
+          <input style={{ ...inputStyle, flex: "1 1 160px" }} placeholder="Planned anchor" value={form.anchor_planned} onChange={(e) => setForm({ ...form, anchor_planned: e.target.value })} />
+          <select style={inputStyle} value={form.link_type} onChange={(e) => setForm({ ...form, link_type: e.target.value })}>
+            {["editorial", "resource", "guest_post", "haro", "directory", "citation", "social"].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select style={inputStyle} value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
+            {["high", "medium", "low"].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+          <button onClick={addProspect} disabled={busy} style={{ padding: "6px 14px", borderRadius: 6, border: "none", background: D.green, color: D.white, fontSize: 12, cursor: "pointer" }}>Save</button>
+        </div>
+      )}
+
+      {/* Table */}
+      {items.length === 0 ? (
+        <Card style={{ padding: 30, textAlign: "center" }}><div style={{ color: D.muted }}>No prospects in this view.</div></Card>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: D.muted, borderBottom: `1px solid ${D.border}` }}>
+                {["Target", "Our page", "Anchor", "Type", "Follow", "Indexed", "Status", "DR", ""].map((h) => (
+                  <th key={h} style={{ padding: "8px 10px", fontWeight: 500, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((p) => (
+                <tr key={p.id} style={{ borderBottom: `1px solid ${D.border}`, color: D.text }}>
+                  <td style={{ padding: "8px 10px", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {p.live_url ? <a href={p.live_url} target="_blank" rel="noreferrer" style={{ color: D.teal }}>{p.target_domain}</a> : p.target_domain}
+                  </td>
+                  <td style={{ padding: "8px 10px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", color: D.muted }}>{(p.target_page || "").replace(/^https?:\/\/[^/]+/, "")}</td>
+                  <td style={{ padding: "8px 10px" }}>{p.anchor_text || <span style={{ color: D.muted }}>{p.anchor_planned || "—"}</span>}</td>
+                  <td style={{ padding: "8px 10px", color: D.muted }}>{p.link_type || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{p.is_dofollow == null ? "—" : p.is_dofollow ? <span style={{ color: D.green }}>dofollow</span> : <span style={{ color: D.amber }}>nofollow</span>}</td>
+                  <td style={{ padding: "8px 10px" }}>
+                    <span style={{ color: p.indexing_status === "indexed" ? D.green : p.indexing_status === "not_checked" ? D.muted : D.amber }}>
+                      {p.indexing_status === "not_checked" ? "—" : p.indexing_status}
+                    </span>
+                  </td>
+                  <td style={{ padding: "8px 10px" }}><span style={{ color: PROSPECT_STATUS_COLOR[p.status] || D.muted, fontWeight: 500 }}>{p.status}</span></td>
+                  <td style={{ padding: "8px 10px", color: D.muted }}>{p.domain_rating ?? "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>
+                    {p.live_url && <button onClick={() => recheck(p.id)} disabled={busy} style={{ padding: "3px 8px", borderRadius: 5, border: `1px solid ${D.border}`, background: "transparent", color: D.teal, fontSize: 11, cursor: "pointer" }}>Recheck</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

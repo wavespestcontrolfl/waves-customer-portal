@@ -1295,7 +1295,10 @@ function recurringServiceReceivesTierDiscount(svc = {}) {
     svc.excludeFromPctDiscount === true
   ) return false;
   if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
-  return true;
+  if (PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true || svc.excludeFromPctDiscount === true) return false;
+  if (PRICING_WAVEGUARD.qualifyingServices.includes(key)) return true;
+  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false) return false;
+  return false;
 }
 
 function recurringServiceReceivesManualDiscount(svc = {}) {
@@ -2614,6 +2617,7 @@ function renderPage(token, estimate, estData) {
         </div>
         <p class="billing-small">${showMembershipFee && firstServiceVisitTotal > 0 ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; your first service visit bills after completion at <span data-first-visit-copy-total>${fmtMoney(firstServiceVisitTotal)}</span>.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
+        <p class="billing-small">Next: pick a time, then confirm. If card setup is required, we send you to the secure setup screen after confirmation.</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
@@ -2629,7 +2633,8 @@ function renderPage(token, estimate, estData) {
         </div>
         <p class="billing-small">No payment is charged on this page. Your annual prepay invoice totals <span data-prepay-copy-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</span> and is prepared after approval.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
-        <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Choose annual prepay setup</button>
+        <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
+        <p class="billing-small">Next: pick a time, then confirm. No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.</p>
       </div>` : ''}
     </div>
   </section>` : '';
@@ -3051,6 +3056,14 @@ function renderPage(token, estimate, estData) {
   .billing-total-row span{font-size:13px;color:#6B7280;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
   .billing-total-row strong{font-family:'Source Serif 4',Georgia,serif;font-size:28px;font-weight:600;color:#1B2C5B;white-space:nowrap}
   .billing-small{font-size:12px!important;color:#6B7280!important;line-height:1.5!important}
+  .payment-setup-summary{border:1px solid #D8E7F0;border-radius:12px;background:#F8FCFE;padding:14px 16px;margin:0 0 18px;display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .payment-setup-summary-main{min-width:0}
+  .payment-setup-summary-kicker{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#6B7280;margin-bottom:5px}
+  .payment-setup-summary-title{font-size:16px;font-weight:800;color:#1B2C5B;line-height:1.25;margin-bottom:4px}
+  .payment-setup-summary-body{font-size:13px;color:#3F4A65;line-height:1.5}
+  .payment-setup-summary-change{border:1px solid #CFE7F5;background:#fff;color:#1B2C5B;border-radius:8px;padding:8px 10px;font:800 12px/1 Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+  .payment-setup-summary-change:hover{border-color:${ESTIMATE_BUTTON_BLUE}}
+  @media(max-width:560px){.payment-setup-summary{display:block}.payment-setup-summary-change{margin-top:12px;width:100%}}
   .prefs-card h2{margin-bottom:4px}
   .prefs-list{margin-top:14px;display:flex;flex-direction:column;gap:10px}
   .pref-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;transition:all .15s;box-shadow:0 3px 10px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.05)}
@@ -3075,6 +3088,17 @@ function renderPage(token, estimate, estData) {
   .existing-appt-sub{font-size:14px;color:#3F4A65;margin-top:4px;line-height:1.4}
   .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
   .slot-list{display:grid;gap:10px}
+  .date-finder{margin:0 0 16px;display:grid;gap:10px;padding:16px;border:1px solid #CFE7F5;border-radius:12px;background:#fff}
+  .date-finder-eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#64748B}
+  .date-finder-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .date-finder-row input[type=text]{flex:1;min-width:200px;min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#F8FCFE;box-sizing:border-box}
+  .date-finder-row input[type=date]{min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#fff}
+  .date-finder-label{font-size:13px;color:#64748B;font-weight:600}
+  .date-finder-btn{min-height:44px;border:0;border-radius:10px;padding:0 18px;background:#1B2C5B;color:#fff;font-size:14px;font-weight:700;cursor:pointer}
+  .date-finder-btn[disabled]{opacity:.6;cursor:not-allowed}
+  .date-finder-summary{font-size:14px;line-height:1.5;color:#1B2C5B;background:#F0F7FC;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px}
+  .finder-soft{font-size:14px;line-height:1.4;color:#9A3412;background:#FFF7ED;border:1px solid #FED7AA;border-radius:10px;padding:10px 12px;margin-bottom:10px}
+  #finder-area .slot-list{margin-top:10px}
   .slot-more{margin-top:10px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;overflow:hidden}
   .slot-more summary{list-style:none;cursor:pointer;padding:12px 14px;color:#1B2C5B;font-size:14px;font-weight:700}
   .slot-more summary::-webkit-details-marker{display:none}
@@ -3261,6 +3285,27 @@ ${shellTopBar()}
       </div>
     ` : `
       <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
+      <div id="payment-setup-summary" class="payment-setup-summary" style="display:none">
+        <div class="payment-setup-summary-main">
+          <div class="payment-setup-summary-kicker">Selected payment setup</div>
+          <div class="payment-setup-summary-title" id="payment-setup-summary-title">Payment setup selected</div>
+          <div class="payment-setup-summary-body" id="payment-setup-summary-body">Review the invoice setup, then choose a service window.</div>
+        </div>
+        <button type="button" class="payment-setup-summary-change" id="change-payment-setup-btn">Change payment option</button>
+      </div>
+      <div id="date-finder" class="date-finder">
+        <div class="date-finder-eyebrow">Waves AI</div>
+        <div class="date-finder-row">
+          <input id="ai-when-input" type="text" placeholder="Search a date or time \u2014 try &quot;next Tuesday afternoon&quot;" maxlength="120" aria-label="Search for a service date or time" />
+          <button type="button" id="ai-when-btn" class="date-finder-btn">Search</button>
+        </div>
+        <div class="date-finder-row">
+          <label for="date-pick-input" class="date-finder-label">Or pick a date</label>
+          <input id="date-pick-input" type="date" aria-label="Pick a service date" />
+        </div>
+        <div id="ai-when-summary" class="date-finder-summary" style="display:none"></div>
+        <div id="finder-area"></div>
+      </div>
       <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
     `}
     <div id="pay-pref-area" style="${existingAppointment ? '' : 'display:none'}">
@@ -3283,7 +3328,7 @@ ${shellTopBar()}
       ${existingAppointment ? '<div class="review-payment-summary" id="existing-review-pay-summary" aria-live="polite"></div>' : ''}
       <div class="pay-pref-grid">
         <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${existingAppointment ? '' : escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">${existingAppointment ? '' : 'You will be taken to a secure Stripe page to add your card.'}</span></button>
-        ${existingAppointment ? '' : '<button type="button" class="pay-pref-btn" data-change-booking-pick><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>'}
+        ${existingAppointment ? '' : '<button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>'}
       </div>
     </div>
   </section>
@@ -3356,6 +3401,8 @@ ${shellQuestionsBar()}
   const PRICE_PERIOD_WORD = ${JSON.stringify(recurringPricePeriodWord)};
   const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
   const RECURRING_PAY_PREF_HEADING = ${JSON.stringify(pageCopy.payPrefHeading)};
+  const BOOKING_TITLE = ${JSON.stringify(pageCopy.bookingTitle)};
+  const BOOKING_SUBHEAD = ${JSON.stringify(pageCopy.bookingSubhead)};
   const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
   const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
@@ -3602,6 +3649,60 @@ ${shellQuestionsBar()}
     return text || fmt(ANNUAL_PREPAY_INVOICE_TOTAL);
   }
 
+  function firstVisitTotalText() {
+    const el = document.querySelector('[data-first-visit-total]');
+    const text = el && String(el.textContent || '').trim();
+    return text || 'after completion';
+  }
+
+  function updatePaymentSetupSummary(pref) {
+    const summary = document.getElementById('payment-setup-summary');
+    if (!summary) return;
+    const bookingTitle = document.getElementById('booking-title');
+    const bookingSubhead = document.querySelector('#booking-card > .card-sub');
+    const title = document.getElementById('payment-setup-summary-title');
+    const body = document.getElementById('payment-setup-summary-body');
+    if (bookingTitle) bookingTitle.textContent = 'Review your invoice setup';
+    if (pref === 'prepay_annual') {
+      if (bookingSubhead) bookingSubhead.textContent = 'Annual prepay is selected. Review the invoice setup, then choose a service window.';
+      if (title) title.textContent = 'Annual prepay invoice';
+      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is prepared after approval; choose a service window to continue.';
+    } else {
+      if (bookingSubhead) bookingSubhead.textContent = 'Pay at the visit is selected. Review the setup, then choose a service window.';
+      if (title) title.textContent = 'Pay at the visit';
+      if (body) body.textContent = 'No payment is charged here. Your first service visit bills after completion at ' + firstVisitTotalText() + '; choose a service window to continue.';
+    }
+    summary.style.display = '';
+    if (location.hash !== '#invoice-setup') {
+      history.pushState(null, '', '#invoice-setup');
+    }
+  }
+
+  function resetPaymentSetupSummary() {
+    const summary = document.getElementById('payment-setup-summary');
+    if (summary) summary.style.display = 'none';
+    const bookingTitle = document.getElementById('booking-title');
+    const bookingSubhead = document.querySelector('#booking-card > .card-sub');
+    if (bookingTitle) bookingTitle.textContent = BOOKING_TITLE;
+    if (bookingSubhead) bookingSubhead.textContent = BOOKING_SUBHEAD;
+  }
+
+  function returnToPaymentSetupChoices() {
+    bookingState.pendingPref = null;
+    bookingState.pickedPref = null;
+    syncPaymentSetupCards();
+    resetPaymentSetupSummary();
+    const setupCard = document.getElementById('payment-setup-card');
+    if (setupCard) {
+      setupCard.style.display = '';
+      try { setupCard.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      catch (e) { setupCard.scrollIntoView(true); }
+    }
+    if (!EXISTING_APPOINTMENT_ID && bookingRequiresPaymentSetup()) {
+      hideBookingCardUntilSetup();
+    }
+  }
+
   function ensureBookingCardVisible() {
     const target = document.getElementById('booking-card');
     if (!target) return null;
@@ -3647,6 +3748,9 @@ ${shellQuestionsBar()}
     bookingState.pendingPref = pref;
     bookingState.pickedPref = null;
     syncPaymentSetupCards();
+    updatePaymentSetupSummary(pref);
+    const setupCard = document.getElementById('payment-setup-card');
+    if (setupCard) setupCard.style.display = 'none';
     if (EXISTING_APPOINTMENT_ID) {
       pickExistingAppointmentPref(pref);
       return;
@@ -3655,7 +3759,7 @@ ${shellQuestionsBar()}
     if (bookingState.selectedSlotId) {
       pickPaymentPref(pref);
     } else {
-      toast(pref === 'prepay_annual' ? 'Annual prepay selected. Pick a time to continue.' : 'Pay-after-visit selected. Pick a time to continue.');
+      toast(pref === 'prepay_annual' ? 'Annual prepay selected. Pick a time to continue.' : 'Pay at the visit selected. Pick a time to continue.');
     }
   }
 
@@ -3694,6 +3798,9 @@ ${shellQuestionsBar()}
       syncPaymentSetupCards();
       setBookingChoiceControlsDisabled(false);
       if (bookingRequiresPaymentSetup()) {
+        const setupCard = document.getElementById('payment-setup-card');
+        if (setupCard) setupCard.style.display = '';
+        resetPaymentSetupSummary();
         hideBookingCardUntilSetup();
       } else {
         ensureBookingCardVisible();
@@ -3780,6 +3887,17 @@ ${shellQuestionsBar()}
       + '</button>';
   }
 
+  function attachSlotHandlers(container) {
+    if (!container) return;
+    container.querySelectorAll('.slot-btn').forEach((btn) => btn.addEventListener('click', () => selectSlot(btn)));
+  }
+  function renderSlotsHtml(slots) {
+    const html = ['<div class="slot-list">'];
+    slots.forEach((s) => html.push(renderSlot(s)));
+    html.push('</div>');
+    return html.join('');
+  }
+
   async function loadSlots() {
     const area = document.getElementById('slot-area');
     if (!area) return;
@@ -3816,10 +3934,95 @@ ${shellQuestionsBar()}
         html.push('</div></details>');
       }
       area.innerHTML = html.join('');
-      area.querySelectorAll('.slot-btn').forEach((btn) => btn.addEventListener('click', () => selectSlot(btn)));
+      attachSlotHandlers(area);
     } catch (e) {
       area.className = 'booking-state';
       area.innerHTML = 'Could not load times right now. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we will get you scheduled.';
+    }
+  }
+
+  // ── Waves AI date/time finder (search + specific-date pick) ──
+  function renderFinderResults(body) {
+    const area = document.getElementById("finder-area");
+    if (!area) return;
+    const primary = (body && body.primary) || [];
+    const expander = (body && body.expander) || [];
+    const all = primary.concat(expander);
+    if (!all.length) {
+      area.innerHTML = '<div class="booking-state">No open times then. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll fit you in.</div>';
+      return;
+    }
+    const nearby = (body && typeof body.nearby === 'boolean') ? body.nearby : all.some(function (s) { return s.routeOptimal; });
+    const soft = nearby ? '' : '<div class="finder-soft">No route near you that day yet — here\\'s what\\'s close.</div>';
+    area.innerHTML = soft + renderSlotsHtml(all);
+    attachSlotHandlers(area);
+  }
+
+  async function runAiWhenSearch() {
+    const input = document.getElementById("ai-when-input");
+    const btn = document.getElementById("ai-when-btn");
+    const summary = document.getElementById("ai-when-summary");
+    const query = input ? String(input.value || "").trim() : "";
+    if (!query) return;
+    if (btn) { btn.disabled = true; btn.textContent = "Searching…"; }
+    if (summary) { summary.style.display = ""; summary.textContent = "Checking the route map…"; }
+    try {
+      const ctx = buildSlotContext();
+      const r = await fetch("/api/public/estimates/" + TOKEN + "/find-slots", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Estimate-Ask-Token": ESTIMATE_ASK_TOKEN },
+        body: JSON.stringify({ query: query, serviceMode: ctx.serviceMode, selectedFrequency: ctx.selectedFrequency }),
+      });
+      const body = await r.json();
+      if (!r.ok) throw new Error((body && body.error) || "search failed");
+      if (summary) summary.textContent = body.summary || "";
+      const datePick = document.getElementById("date-pick-input");
+      if (datePick) datePick.value = "";
+      renderFinderResults(body);
+    } catch (e) {
+      if (summary) summary.textContent = "Could not search just now. Call ${COMPANY.phone} and we will help.";
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "Search"; }
+    }
+  }
+
+  async function pickFinderDate(date) {
+    if (!date) return;
+    const summary = document.getElementById("ai-when-summary");
+    const area = document.getElementById("finder-area");
+    if (area) area.innerHTML = '<div class="booking-state">Loading times…</div>';
+    if (summary) summary.style.display = "none";
+    try {
+      const ctx = buildSlotContext();
+      const params = new URLSearchParams();
+      params.set("serviceMode", ctx.serviceMode);
+      if (ctx.selectedFrequency) params.set("selectedFrequency", ctx.selectedFrequency);
+      params.set("date", date);
+      const r = await fetch("/api/public/estimates/" + TOKEN + "/available-slots?" + params.toString());
+      const body = await r.json();
+      if (!r.ok) throw new Error("slot fetch failed");
+      const aiInput = document.getElementById("ai-when-input");
+      if (aiInput) aiInput.value = "";
+      renderFinderResults(body);
+    } catch (e) {
+      if (area) area.innerHTML = '<div class="booking-state">Could not load that day. Call ${COMPANY.phone}.</div>';
+    }
+  }
+
+  function initDateFinder() {
+    const btn = document.getElementById("ai-when-btn");
+    const input = document.getElementById("ai-when-input");
+    const datePick = document.getElementById("date-pick-input");
+    if (btn) btn.addEventListener("click", runAiWhenSearch);
+    if (input) input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); runAiWhenSearch(); } });
+    if (datePick) {
+      const pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+      const toStr = function (d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); };
+      const today = new Date();
+      const max = new Date(); max.setDate(max.getDate() + 90);
+      datePick.min = toStr(today);
+      datePick.max = toStr(max);
+      datePick.addEventListener("change", function () { pickFinderDate(datePick.value); });
     }
   }
 
@@ -3902,6 +4105,7 @@ ${shellQuestionsBar()}
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
       syncPaymentSetupCards();
       // Swap UI: hide slot list + pay pref, show review
+      resetPaymentSetupSummary();
       document.getElementById('slot-area').style.display = 'none';
       document.getElementById('pay-pref-area').style.display = 'none';
       const reviewArea = document.getElementById('review-area');
@@ -4020,6 +4224,9 @@ ${shellQuestionsBar()}
     }
     if (EXISTING_APPOINTMENT_ID) return;
     if (bookingRequiresPaymentSetup()) {
+      const setupCard = document.getElementById('payment-setup-card');
+      if (setupCard) setupCard.style.display = '';
+      resetPaymentSetupSummary();
       hideBookingCardUntilSetup();
     } else {
       // Reload slots to reflect any changes since the first fetch
@@ -4096,14 +4303,22 @@ ${shellQuestionsBar()}
   if (confirmBookBtn) {
     confirmBookBtn.addEventListener('click', confirmBooking);
   }
-  document.querySelectorAll('[data-change-booking-pick]').forEach((b) => {
-    b.addEventListener('click', cancelReservation);
-  });
+  const changeBookingPickBtn = document.getElementById('change-booking-pick-btn');
+  if (changeBookingPickBtn) {
+    changeBookingPickBtn.addEventListener('click', cancelReservation);
+  }
+  const changePaymentSetupBtn = document.getElementById('change-payment-setup-btn');
+  if (changePaymentSetupBtn) {
+    changePaymentSetupBtn.addEventListener('click', returnToPaymentSetupChoices);
+  }
 
   // Kick off the slot fetch if the booking card is on the page (i.e.,
   // estimate is not yet accepted/expired).
   if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup()) {
     loadSlots();
+  }
+  if (document.getElementById('date-finder')) {
+    initDateFinder();
   }
 
 
@@ -8294,6 +8509,7 @@ async function handleEstimateAsk(req, res, next) {
 module.exports = router;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
+module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.deriveServiceCategory = deriveServiceCategory;

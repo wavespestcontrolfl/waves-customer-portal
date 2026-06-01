@@ -515,6 +515,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [sendModalInvoice, setSendModalInvoice] = useState(null);
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
+  const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
 
   const load = useCallback(
@@ -1034,6 +1035,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               {cardOnFile.last_four} on file
                             </span>
                           )}
+                          {inv.active_payment_plan && (
+                            <span style={sBadge("#E0F2FE", "#075985")}>
+                              Plan $
+                              {Number(
+                                inv.active_payment_plan.payment_amount || 0,
+                              ).toFixed(2)}{" "}
+                              {inv.active_payment_plan.payment_frequency}
+                            </span>
+                          )}
                         </div>{" "}
                         <InvoiceTimeline invoice={inv} />{" "}
                         {/* Mounted only for the expanded row so attachment fetches stay lazy. */}
@@ -1101,6 +1111,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               title="Record cash, check, or Zelle payment and close the invoice"
                             >
                               Add payment
+                            </button>
+                          )}
+                          {canCollect && !inv.active_payment_plan && (
+                            <button
+                              onClick={() => setPaymentPlanModalInvoice(inv)}
+                              style={sBtn(D.card, D.text, isMobile)}
+                              title="Create a payment plan and send the confirmation email"
+                            >
+                              Payment plan
                             </button>
                           )}
                           {inv.status !== "void" && inv.token && (
@@ -1318,6 +1337,21 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
           onRecorded={(msg) => {
             setPaymentModalInvoice(null);
             showToast(msg);
+            load();
+            onRefresh();
+          }}
+          onError={(msg) => showToast(msg)}
+        />
+      )}
+
+      {paymentPlanModalInvoice && (
+        <PaymentPlanModal
+          invoice={paymentPlanModalInvoice}
+          isMobile={isMobile}
+          onClose={() => setPaymentPlanModalInvoice(null)}
+          onCreated={() => {
+            setPaymentPlanModalInvoice(null);
+            showToast("Payment plan created");
             load();
             onRefresh();
           }}
@@ -2831,6 +2865,304 @@ function RecordPaymentModal({
           </button>{" "}
         </div>{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+function todayDateInput() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function addDaysDateInput(dateString, days) {
+  const date = new Date(`${dateString}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function PaymentPlanModal({
+  invoice,
+  isMobile,
+  onClose,
+  onCreated,
+  onError,
+}) {
+  const total = Number(invoice.total || 0);
+  const startDate = todayDateInput();
+  const [paymentAmount, setPaymentAmount] = useState(
+    Number.isFinite(total) && total > 0 ? (Math.ceil((total / 3) * 100) / 100).toFixed(2) : "",
+  );
+  const [paymentFrequency, setPaymentFrequency] = useState("monthly");
+  const [planStartDate, setPlanStartDate] = useState(startDate);
+  const [nextPaymentDate, setNextPaymentDate] = useState(addDaysDateInput(startDate, 30));
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const amount = Number(paymentAmount);
+  const validAmount = Number.isFinite(amount) && amount > 0 && amount <= total;
+  const createDisabled = saving || !validAmount || !nextPaymentDate || !planStartDate;
+
+  const createPlan = async () => {
+    if (createDisabled) return;
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/invoices/${invoice.id}/payment-plan`, {
+        method: "POST",
+        body: JSON.stringify({
+          totalBalance: total,
+          paymentAmount: amount,
+          paymentFrequency,
+          planStartDate,
+          nextPaymentDate,
+          notes: notes.trim() || undefined,
+        }),
+      });
+      onCreated();
+    } catch (err) {
+      onError(`Payment plan failed: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const frequencyChoice = (key, label) => (
+    <button
+      key={key}
+      type="button"
+      onClick={() => setPaymentFrequency(key)}
+      style={{
+        flex: 1,
+        padding: "12px 10px",
+        background: paymentFrequency === key ? D.heading : D.card,
+        color: paymentFrequency === key ? D.white : D.text,
+        border: `1px solid ${paymentFrequency === key ? D.heading : D.border}`,
+        borderRadius: 8,
+        fontSize: 13,
+        fontWeight: 600,
+        cursor: "pointer",
+        textTransform: "uppercase",
+        letterSpacing: "0.04em",
+        minHeight: 44,
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        zIndex: 400,
+        display: "flex",
+        alignItems: isMobile ? "flex-end" : "center",
+        justifyContent: "center",
+        padding: isMobile ? 0 : 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card,
+          borderRadius: isMobile ? "16px 16px 0 0" : 14,
+          width: "100%",
+          maxWidth: 500,
+          padding: isMobile ? "24px 20px 28px" : 28,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+          maxHeight: "92vh",
+          overflowY: "auto",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 20,
+            fontWeight: 700,
+            color: D.heading,
+            marginBottom: 4,
+          }}
+        >
+          Create payment plan
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
+          Invoice #{invoice.invoice_number} · ${total.toFixed(2)} ·{" "}
+          {invoice.first_name} {invoice.last_name}
+        </div>
+
+        <label
+          style={{
+            display: "block",
+            fontSize: 12,
+            fontWeight: 600,
+            color: D.text,
+            marginBottom: 6,
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+          }}
+        >
+          Payment amount
+        </label>
+        <input
+          type="number"
+          min="0.01"
+          step="0.01"
+          value={paymentAmount}
+          onChange={(e) => setPaymentAmount(e.target.value)}
+          style={sInput(isMobile)}
+        />
+        {!validAmount && (
+          <div style={{ color: D.red, fontSize: 12, marginTop: 6 }}>
+            Enter an amount greater than $0 and no more than ${total.toFixed(2)}.
+          </div>
+        )}
+
+        <label
+          style={{
+            display: "block",
+            fontSize: 12,
+            fontWeight: 600,
+            color: D.text,
+            margin: "16px 0 8px",
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+          }}
+        >
+          Frequency
+        </label>
+        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+          {frequencyChoice("weekly", "Weekly")}
+          {frequencyChoice("biweekly", "Biweekly")}
+          {frequencyChoice("monthly", "Monthly")}
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+            gap: 12,
+          }}
+        >
+          <div>
+            <label
+              style={{
+                display: "block",
+                fontSize: 12,
+                fontWeight: 600,
+                color: D.text,
+                marginBottom: 6,
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              Start date
+            </label>
+            <input
+              type="date"
+              value={planStartDate}
+              onChange={(e) => setPlanStartDate(e.target.value)}
+              style={sInput(isMobile)}
+            />
+          </div>
+          <div>
+            <label
+              style={{
+                display: "block",
+                fontSize: 12,
+                fontWeight: 600,
+                color: D.text,
+                marginBottom: 6,
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              Next payment
+            </label>
+            <input
+              type="date"
+              value={nextPaymentDate}
+              onChange={(e) => setNextPaymentDate(e.target.value)}
+              style={sInput(isMobile)}
+            />
+          </div>
+        </div>
+
+        <label
+          style={{
+            display: "block",
+            fontSize: 12,
+            fontWeight: 600,
+            color: D.text,
+            margin: "16px 0 6px",
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+          }}
+        >
+          Note (optional)
+        </label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value.slice(0, 500))}
+          placeholder="e.g. Customer requested three monthly payments"
+          rows={3}
+          style={{
+            ...sInput(isMobile),
+            resize: "vertical",
+            minHeight: 72,
+            fontFamily: "inherit",
+          }}
+        />
+
+        <div
+          style={{
+            marginTop: 14,
+            padding: "10px 12px",
+            background: "#F4F4F5",
+            border: `1px solid ${D.border}`,
+            borderRadius: 8,
+            fontSize: 12,
+            color: D.muted,
+            lineHeight: 1.45,
+          }}
+        >
+          Creates the plan, adds an invoice timeline entry, and sends the
+          customer the payment plan confirmation email.
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            justifyContent: "flex-end",
+            marginTop: 20,
+          }}
+        >
+          <button
+            onClick={onClose}
+            disabled={saving}
+            style={sBtn("transparent", D.text, isMobile)}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={createPlan}
+            disabled={createDisabled}
+            style={{
+              ...sBtn(D.heading, D.white, isMobile),
+              opacity: createDisabled ? 0.5 : 1,
+            }}
+          >
+            {saving ? "Creating…" : "Create plan"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

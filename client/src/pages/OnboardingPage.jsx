@@ -11,6 +11,13 @@ import {
 } from '../components/brand';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { etDateString } from '../lib/timezone';
+import {
+  buildSetupIntentReturnUrl,
+  clearReturnedSetupIntent,
+  getReturnedSetupIntent,
+  redirectToSetupIntentAction,
+  setupIntentIncompleteMessage,
+} from '../lib/stripeSetupActions';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -178,30 +185,33 @@ function DetailRow({ label, value }) {
   );
 }
 
-function PlanSummary({ customer, quote, service, payAtVisit, card }) {
+function PlanSummary({ customer, quote, service, payAtVisit, card, paymentStep = false, style }) {
   const billing = billingDisplay(quote);
   return (
-    <BrandCard padding={24} style={{ position: 'sticky', top: 20 }}>
+    <BrandCard
+      padding={paymentStep ? 28 : 24}
+      style={{
+        position: paymentStep ? 'static' : 'sticky',
+        top: 20,
+        ...(paymentStep ? {
+          background: '#F2EEE0',
+          border: '1px solid #D9D3C4',
+          borderRadius: 12,
+          boxShadow: '0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)',
+        } : {}),
+        ...style,
+      }}
+    >
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-        <span style={{
-          width: 38,
-          height: 38,
-          borderRadius: 8,
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: 'var(--brand-soft)',
-          color: 'var(--brand)',
-        }}>
-          <Icon name="shield" size={19} strokeWidth={2} />
-        </span>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 850, color: 'var(--text)' }}>Setup Summary</div>
+          <div style={{ fontSize: paymentStep ? 22 : 15, fontWeight: paymentStep ? 600 : 850, color: '#1B2C5B', fontFamily: paymentStep ? 'Inter, system-ui, sans-serif' : undefined, lineHeight: 1.2 }}>
+            {paymentStep ? 'Review Auto Pay setup' : 'Setup Summary'}
+          </div>
           <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>{customer?.firstName} {customer?.lastName}</div>
         </div>
       </div>
 
-      <div style={{ fontSize: 24, lineHeight: 1.05, fontWeight: 850, color: 'var(--text)', marginBottom: 4 }}>
+      <div style={{ fontSize: paymentStep ? 34 : 24, lineHeight: 1.05, fontWeight: 850, color: '#1B2C5B', marginBottom: 4 }}>
         {money(billing.amount)}<span style={{ fontSize: 14, color: 'var(--text-muted)', fontWeight: 650 }}> {billing.suffix}</span>
       </div>
       <div style={{ fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45, marginBottom: 14 }}>
@@ -210,7 +220,7 @@ function PlanSummary({ customer, quote, service, payAtVisit, card }) {
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
         {quote?.tier && <StatusPill tone="brand">WaveGuard {quote.tier}</StatusPill>}
-        {payAtVisit ? <StatusPill tone="attention">Pay at visit</StatusPill> : <StatusPill tone={card ? 'success' : 'neutral'}>{card ? 'Card saved' : 'Card needed'}</StatusPill>}
+        {payAtVisit ? <StatusPill tone="attention">Pay at visit</StatusPill> : <StatusPill tone={card ? 'success' : 'neutral'}>{card ? 'Auto Pay active' : 'Auto Pay after completed visits'}</StatusPill>}
       </div>
 
       <DetailRow label="First visit" value={service ? fmtVisitDate(service.date, false) : 'To be scheduled'} />
@@ -476,6 +486,7 @@ export default function OnboardingPage() {
   const paymentElementRef = useRef(null);
   const cardMountRef = useRef(null);
   const stripeInitRef = useRef(false);
+  const processedSetupReturnRef = useRef(false);
 
   useEffect(() => {
     apiFetch(`/onboarding/${token}`)
@@ -502,6 +513,37 @@ export default function OnboardingPage() {
         setLoading(false);
       })
       .catch(e => { setError(e.message); setLoading(false); });
+  }, [token]);
+
+  useEffect(() => {
+    if (processedSetupReturnRef.current) return;
+    const returned = getReturnedSetupIntent('onboarding_autopay');
+    if (!returned) return;
+
+    processedSetupReturnRef.current = true;
+    setSubmitting(true);
+    setStripeError('');
+    apiFetch(`/onboarding/${token}/save-card`, {
+      method: 'POST',
+      body: JSON.stringify({ setupIntentId: returned.setupIntentId }),
+    })
+      .then((result) => {
+        clearReturnedSetupIntent();
+        setData(prev => (prev ? {
+          ...prev,
+          status: { ...prev.status, paymentCollected: true },
+          card: {
+            brand: result.card?.card_brand || result.card?.brand || 'CARD',
+            lastFour: result.card?.last_four || result.card?.lastFour || '****',
+            autopay: result.card?.autopay_enabled === true || result.card?.autopay === true,
+          },
+        } : prev));
+        setTimeout(() => setScreen(2), 300);
+      })
+      .catch((e) => {
+        setStripeError(e.message || 'Failed to finish bank account setup');
+      })
+      .finally(() => setSubmitting(false));
   }, [token]);
 
   const payAtVisit = data?.scheduledService?.paymentMethodPreference === 'pay_at_visit';
@@ -633,6 +675,7 @@ export default function OnboardingPage() {
     try {
       const { error: setupError, setupIntent } = await stripeRef.current.confirmSetup({
         elements: elementsRef.current,
+        confirmParams: { return_url: buildSetupIntentReturnUrl('onboarding_autopay') },
         redirect: 'if_required',
       });
       if (setupError) {
@@ -640,10 +683,19 @@ export default function OnboardingPage() {
         setSubmitting(false);
         return;
       }
+      if (redirectToSetupIntentAction(setupIntent)) return;
+      if (!setupIntent || setupIntent.status !== 'succeeded') {
+        setStripeError(setupIntentIncompleteMessage('enabling Auto Pay'));
+        setSubmitting(false);
+        return;
+      }
       if (setupIntent && setupIntent.payment_method) {
         const result = await apiFetch(`/onboarding/${token}/save-card`, {
           method: 'POST',
-          body: JSON.stringify({ paymentMethodId: setupIntent.payment_method }),
+          body: JSON.stringify({
+            paymentMethodId: setupIntent.payment_method,
+            setupIntentId: setupIntent.id,
+          }),
         });
         setData(prev => ({
           ...prev,
@@ -781,21 +833,24 @@ export default function OnboardingPage() {
   const headerTitle = screen === 0
     ? `Welcome, ${c.firstName}`
     : screen === 1
-      ? 'Save your payment method'
+      ? 'Set up Auto Pay'
       : screen === 2
         ? 'Set up your first visit'
         : `You are all set, ${c.firstName}`;
   const headerCopy = screen === 0
     ? `Your ${serviceName(q.serviceType)} plan is ready. Finish the details below so your first service starts cleanly.`
     : screen === 1
-      ? 'Your card is stored securely with Stripe and can be used for approved future service payments.'
+      ? 'Save a payment method to turn on Auto Pay for future service visits and invoices as agreed.'
       : screen === 2
         ? 'Confirm the appointment and leave the access notes your technician needs before arriving.'
         : 'Your plan, first visit, and property notes are saved.';
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-onboarding-page">
+      <div
+        className="waves-onboarding-page"
+        style={screen === 1 ? { width: 'min(100% - 48px, 1040px)', margin: '0 auto 56px', paddingTop: 34 } : undefined}
+      >
         {saved && (
           <div style={{
             position: 'fixed',
@@ -808,18 +863,33 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        <div className="waves-flow-header">
-          <div>
+        <div
+          className="waves-flow-header"
+          style={screen === 1 ? { display: 'block', marginBottom: 28 } : undefined}
+        >
+          <div style={screen === 1 ? { order: 2 } : undefined}>
             <StatusPill tone={screen === 3 ? 'success' : 'brand'}>{screen === 3 ? 'Setup complete' : 'New customer setup'}</StatusPill>
-            <SerifHeading style={{ marginTop: 14, marginBottom: 8 }}>{headerTitle}</SerifHeading>
-            <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 16, lineHeight: 1.55, maxWidth: 660 }}>
+            <SerifHeading
+              style={screen === 1
+                ? { marginTop: 14, marginBottom: 12, fontSize: 'clamp(40px,6vw,64px)', lineHeight: 1.04, maxWidth: 860, fontWeight: 500 }
+                : { marginTop: 14, marginBottom: 8 }}
+            >
+              {headerTitle}
+            </SerifHeading>
+            <p style={screen === 1
+              ? { margin: 0, color: '#3F4A65', fontSize: 17, lineHeight: 1.55, maxWidth: 760 }
+              : { margin: 0, color: 'var(--text-muted)', fontSize: 16, lineHeight: 1.55, maxWidth: 660 }}
+            >
               {headerCopy}
             </p>
           </div>
-          <StepProgress current={screen} payAtVisit={payAtVisit} />
+          {screen === 1 ? null : <StepProgress current={screen} payAtVisit={payAtVisit} />}
         </div>
 
-        <div className={screen === 3 ? 'waves-onboarding-single' : 'waves-onboarding-grid'}>
+        <div
+          className={screen === 3 ? 'waves-onboarding-single' : 'waves-onboarding-grid'}
+          style={screen === 1 ? { display: 'grid', gridTemplateColumns: '1fr', gap: 16, maxWidth: 760 } : undefined}
+        >
           <div>
             {screen === 0 && (
               <BrandCard padding={30}>
@@ -851,7 +921,7 @@ export default function OnboardingPage() {
                   <div style={{ padding: '14px 0', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>
                     <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>Payment</div>
                     <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--text)', marginTop: 9 }}>
-                      {payAtVisit ? 'At the visit' : q.depositAmount > 0 ? `${money(q.depositAmount)} visit-day hold` : 'Card on file'}
+                      {payAtVisit ? 'At the visit' : q.depositAmount > 0 ? `${money(q.depositAmount)} visit-day hold` : 'Auto Pay setup'}
                     </div>
                   </div>
                 </div>
@@ -876,7 +946,7 @@ export default function OnboardingPage() {
                   fullWidth
                   rightIcon={<Icon name="arrowRight" size={16} />}
                 >
-                  {payAtVisit ? 'Finish Setup' : 'Continue to Payment'}
+                  {payAtVisit ? 'Finish Setup' : 'Continue to Auto Pay'}
                 </BrandButton>
                 <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 12, textAlign: 'center' }}>
                   Most customers finish this in about two minutes.
@@ -885,17 +955,50 @@ export default function OnboardingPage() {
             )}
 
             {screen === 1 && (
-              <BrandCard padding={30}>
-                <SectionHeader
-                  icon="lock"
-                  title="Secure payment setup"
-                  sub="Nothing is charged today unless your accepted plan says otherwise. We use Stripe for card and bank-account storage."
-                />
+              <BrandCard
+                padding={28}
+                style={{
+                  background: '#F3EEE1',
+                  border: '1px solid #D8D1C3',
+                  borderRadius: 10,
+                  boxShadow: '0 8px 24px rgba(15,23,42,.08)',
+                }}
+              >
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontFamily: FONTS.heading, fontSize: 22, fontWeight: 600, color: '#1B2C5B', lineHeight: 1.2, letterSpacing: 0 }}>
+                    Secure payment setup
+                  </div>
+                  <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8, lineHeight: 1.55 }}>
+                    Nothing is charged today unless your accepted plan says otherwise. Choose card or Bank account (ACH); we use Stripe for secure storage.
+                  </div>
+                </div>
                 <div style={{ marginTop: 16 }}>
+                  <div style={{
+                    padding: 14,
+                    borderRadius: 8,
+                    background: '#F8FCFE',
+                    border: '1px solid #CFE7F5',
+                    fontSize: 14,
+                    lineHeight: 1.5,
+                    color: '#1B2C5B',
+                    marginBottom: 16,
+                  }}>
+                    <span>
+                      A credit card surcharge of up to 3.99% may apply. The exact surcharge and total will be shown before payment.
+                      Debit cards, prepaid cards, and bank transfers have no added card surcharge.
+                    </span>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: '#6B7280', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em', lineHeight: 1.35, marginBottom: 8 }}>
+                    Payment method
+                  </div>
+                  <div style={{ fontSize: 14, color: '#6B7280', marginBottom: 10, lineHeight: 1.5 }}>
+                    Choose card, wallet, or Bank account (ACH).
+                  </div>
                   <div ref={cardMountRef} style={{
                     minHeight: 132,
                     padding: 14,
-                    border: '1px solid var(--border)',
+                    border: '1px solid #D4CBB8',
                     borderRadius: 8,
                     background: '#fff',
                     marginBottom: 14,
@@ -917,12 +1020,26 @@ export default function OnboardingPage() {
                     marginBottom: 16,
                   }}>
                     <div>
-                      <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>Card on file</div>
-                      <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>
-                        {billing.visitChargeLabel}: {money(billing.amount)} {billing.suffix}.
+                      <div style={{ fontSize: 14, fontWeight: 800, color: '#1B2C5B' }}>Auto Pay after completed visits</div>
+                      <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.45 }}>
+                        {billing.visitChargeLabel}: {money(billing.amount)} {billing.suffix}. Auto Pay becomes active when this method is saved.
                       </div>
                     </div>
-                    <StatusPill tone="brand">Visit-day charge</StatusPill>
+                    <span style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      minHeight: 28,
+                      padding: '5px 9px',
+                      borderRadius: 999,
+                      background: '#F8FCFE',
+                      border: '1px solid #CFE7F5',
+                      color: '#1B2C5B',
+                      fontSize: 12,
+                      fontWeight: 800,
+                      textTransform: 'uppercase',
+                      letterSpacing: '.06em',
+                      whiteSpace: 'nowrap',
+                    }}>Visit-day charge</span>
                   </div>
 
                   <SaveCardConsent locked onChange={() => {}} />
@@ -937,13 +1054,21 @@ export default function OnboardingPage() {
                     onClick={handlePayment}
                     disabled={submitting || !stripeReady || stripeFatalError}
                     fullWidth
-                    style={{ marginTop: 18 }}
-                    leftIcon={<Icon name="lock" size={16} />}
+                    style={{
+                      marginTop: 18,
+                      minHeight: 42,
+                      borderRadius: 8,
+                      background: '#1B2C5B',
+                      border: '1px solid #1B2C5B',
+                      fontSize: 14,
+                      fontWeight: 800,
+                      lineHeight: 1.2,
+                    }}
                   >
-                    {submitting ? 'Saving...' : stripeFatalError ? 'Payment Form Unavailable' : !stripeReady ? 'Loading payment form...' : 'Save Payment Method'}
+                    {submitting ? 'Saving...' : stripeFatalError ? 'Payment Form Unavailable' : !stripeReady ? 'Loading payment form...' : 'Save Payment Method & Turn On Auto Pay'}
                   </BrandButton>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 12, textAlign: 'center' }}>
-                    Secured by Stripe. Waves never stores full card details.
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 7, fontSize: 12, color: '#6B7280', marginTop: 12, lineHeight: 1.5 }}>
+                    <span>256-bit encrypted · Processed by Stripe</span>
                   </div>
                 </div>
               </BrandCard>
@@ -1165,7 +1290,15 @@ export default function OnboardingPage() {
           </div>
 
           {screen !== 3 && (
-            <PlanSummary customer={c} quote={q} service={svc} payAtVisit={payAtVisit} card={data.card} />
+            <PlanSummary
+              customer={c}
+              quote={q}
+              service={svc}
+              payAtVisit={payAtVisit}
+              card={data.card}
+              paymentStep={screen === 1}
+              style={screen === 1 ? { order: 1 } : undefined}
+            />
           )}
 
           {screen === 3 && (

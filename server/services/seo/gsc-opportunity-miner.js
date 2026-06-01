@@ -17,6 +17,8 @@
  *   local_gap           {city, service} has impressions but no own page
  *   seasonal_rising     query impressions up 50%+ vs prior 14d window
  *   no_content_yet      query has impressions but no own page anywhere
+ *   aeo_gap             city×service absent from LLM answers across N+ days
+ *                       AND has GSC demand (gated behind GATE_AEO_GAP_MINING)
  *
  * Defensive about Step-0 data quality findings:
  *   - city_target == 'local_intent' is normalized to null (overload from
@@ -30,6 +32,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { isEnabled } = require('../../config/feature-gates');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES } =
   require('../content/scoring-config');
 
@@ -91,6 +94,27 @@ function inferCityFromUrl(url) {
   return null;
 }
 
+// Collapse tracking/variant query strings (and fragments) so a page and its
+// GBP/UTM tracking-link variant key as the SAME canonical URL. GSC reports the
+// GBP "Website" link (e.g. /pest-control-sarasota-fl/?utm_source=gbp&utm_medium=
+// organic) as a DISTINCT page from the clean path — which splits a page's
+// metrics across "two" URLs and spawns phantom decay/refresh/ctr opportunities
+// on the tracking link. Astro spoke pages are path-based and carry no
+// meaningful query state, so dropping the query (and any fragment) is safe.
+// NOTE: the SQL groupings below mirror this via CANON_URL_SQL (split_part on
+// the '?' character); keep the two in sync.
+function canonicalizePageUrl(url) {
+  if (!url) return url;
+  return String(url).split('#')[0].split('?')[0];
+}
+
+// SQL mirror of canonicalizePageUrl for GROUP BY / SELECT on gsc_pages so
+// tracking-link variants aggregate into their canonical page at the DB.
+// NOTE: chr(63) is the '?' character — written this way ON PURPOSE. A literal
+// '?' in a knex raw fragment collides with knex's positional bind-placeholder
+// syntax and gets replaced by a query binding, silently breaking the split.
+const CANON_URL_SQL = 'split_part(page_url, chr(63), 1)';
+
 function inferCityFromQuery(query) {
   if (!query) return null;
   const q = String(query).toLowerCase();
@@ -134,6 +158,7 @@ function gscOpportunityScore(bucket, position, impressionsBoost) {
   if (bucket === 'local_gap') return Math.round(W * 0.8 * impressionsBoost);
   if (bucket === 'seasonal_rising') return Math.round(W * 0.7 * impressionsBoost);
   if (bucket === 'no_content_yet') return Math.round(W * 0.65 * impressionsBoost);
+  if (bucket === 'aeo_gap') return Math.round(W * 0.8 * impressionsBoost);
   return 0;
 }
 
@@ -182,6 +207,11 @@ function actionForOpportunity({ bucket, query, page_url, city, service }) {
   if (bucket === 'seasonal_rising') {
     return page_url ? 'refresh_existing_page' : 'new_supporting_blog';
   }
+  if (bucket === 'aeo_gap') {
+    if (page_url) return 'refresh_existing_page';
+    if (city && service) return 'create_or_refresh_city_service_page';
+    return 'new_supporting_blog';
+  }
   return 'do_not_publish';
 }
 
@@ -216,6 +246,9 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
       : 0,
     refreshLift: opportunity.bucket === 'decay_refresh' || opportunity.bucket === 'ctr_rewrite'
       ? WEIGHTS.refreshLift
+      : 0,
+    aeoGap: opportunity.bucket === 'aeo_gap'
+      ? Math.round(WEIGHTS.aeoGap * (extraSignals.gapStrength ?? 1))
       : 0,
   };
   // Penalties surface in later steps (cannibalizationRisk needs SERP, etc.).
@@ -264,6 +297,7 @@ class GscOpportunityMiner {
       ['local_gap', () => this.mineLocalGap(since, ownPagesByServiceCity)],
       ['seasonal_rising', () => this.mineSeasonalRising(periodDays)],
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
+      ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
     ];
 
     for (const [name, fn] of runs) {
@@ -353,9 +387,11 @@ class GscOpportunityMiner {
     // returns a wrong-segment page.
     const rows = await db('gsc_pages')
       .where('date', '>=', since)
-      .select('page_url', 'service_category', 'city_target')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .max('service_category as service_category')
+      .max('city_target as city_target')
       .sum('impressions as impressions')
-      .groupBy('page_url', 'service_category', 'city_target')
+      .groupByRaw(CANON_URL_SQL)
       .orderBy('impressions', 'desc');
     const map = new Map();
     for (const r of rows) {
@@ -471,19 +507,22 @@ class GscOpportunityMiner {
   async mineDecayRefresh(since, priorSince) {
     const recent = await db('gsc_pages')
       .where('date', '>=', since)
-      .select('page_url', 'page_type', 'service_category', 'city_target')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .max('page_type as page_type')
+      .max('service_category as service_category')
+      .max('city_target as city_target')
       .sum('clicks as clicks')
       .sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('page_url', 'page_type', 'service_category', 'city_target');
+      .groupByRaw(CANON_URL_SQL);
 
     const priorMap = new Map();
     const prior = await db('gsc_pages')
       .where('date', '>=', priorSince)
       .where('date', '<', since)
-      .select('page_url')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
       .sum('clicks as clicks')
-      .groupBy('page_url');
+      .groupByRaw(CANON_URL_SQL);
     for (const p of prior) priorMap.set(p.page_url, parseInt(p.clicks, 10));
 
     const out = [];
@@ -553,9 +592,9 @@ class GscOpportunityMiner {
         .where('date', '>=', since)
         .where('service_category', q.service_category || '')
         .where('city_target', q.city_target || '')
-        .select('page_url')
+        .select(db.raw(`${CANON_URL_SQL} as page_url`))
         .sum('impressions as impressions')
-        .groupBy('page_url')
+        .groupByRaw(CANON_URL_SQL)
         .havingRaw('sum(impressions) > ?', [10]);
       if (ownPages.length < THRESHOLDS.cannibalizationMinUrls) continue;
 
@@ -594,10 +633,13 @@ class GscOpportunityMiner {
     //   intent (transactional-local SERP wants a city-service page).
     const pages = await db('gsc_pages')
       .where('date', '>=', since)
-      .select('page_url', 'page_type', 'service_category', 'city_target')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .max('page_type as page_type')
+      .max('service_category as service_category')
+      .max('city_target as city_target')
       .sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('page_url', 'page_type', 'service_category', 'city_target')
+      .groupByRaw(CANON_URL_SQL)
       .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
 
     const out = [];
@@ -692,6 +734,131 @@ class GscOpportunityMiner {
       out.push(opp);
     }
     return out;
+  }
+
+  /**
+   * aeo_gap — city×service that is persistently ABSENT from answer-engine
+   * (LLM) responses and ALSO has Google search demand. Sources the new
+   * seo_llm_mentions tracker. Dormant behind GATE_AEO_GAP_MINING so it can't
+   * feed the autonomous publisher until enabled after the tracker matures.
+   *
+   * A gap qualifies only when:
+   *   - the city×service was observed on ≥ AEO_GAP_MIN_DAYS distinct days and
+   *     Waves was NEVER mentioned (persistent, not a one-off probe miss), and
+   *   - that city×service has ≥ minImpressionsToScore GSC impressions
+   *     (demand-gated — we don't chase queries nobody searches).
+   * Competitor citations strengthen the gap (they're winning the answer).
+   */
+  async mineAeoGaps(since, ownPagesByServiceCity = new Map()) {
+    if (!isEnabled('aeoGapMining')) return []; // dormant until explicitly enabled
+    const minDays = Math.max(1, parseInt(process.env.AEO_GAP_MIN_DAYS || '3', 10));
+
+    // Recent answer-engine observations joined to their managed query (city/service).
+    let rows;
+    try {
+      rows = await db('seo_llm_mentions as m')
+        .leftJoin('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
+        .where('m.check_date', '>=', since)
+        // Honor the admin toggle: ignore history from managed queries that have
+        // been deactivated (don't enqueue work the disable was meant to stop).
+        // Unmanaged/legacy rows (no query_id) have no toggle, so keep them.
+        .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
+        .select(
+          'm.query', 'm.waves_mentioned', 'm.check_date', 'm.competitors_mentioned',
+          'q.city as q_city', 'q.service as q_service'
+        );
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] aeo_gap: mentions read failed: ${err.message}`);
+      return [];
+    }
+
+    const asArray = (v) => Array.isArray(v) ? v
+      : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; } })() : []);
+
+    // Map a probe's managed service label onto the miner's service vocabulary.
+    const SERVICE_ALIAS = { 'pest control': 'pest', 'lawn care': 'lawn', termite: 'termite', mosquito: 'mosquito', rodent: 'rodent' };
+    const resolveService = (qService, query) =>
+      (qService && (SERVICE_ALIAS[qService.toLowerCase()] || qService.toLowerCase())) || inferServiceFromQuery(query);
+
+    // Group by city×service.
+    const groups = new Map();
+    for (const r of rows) {
+      const city = normalizeCity(r.q_city) || inferCityFromQuery(r.query);
+      const service = resolveService(r.q_service, r.query);
+      if (!city || !service) continue;
+      const key = ownPageKey(service, city);
+      let g = groups.get(key);
+      if (!g) { g = { city, service, days: new Set(), wavesHits: 0, competitors: new Set() }; groups.set(key, g); }
+      g.days.add(String(r.check_date).slice(0, 10));
+      if (r.waves_mentioned) g.wavesHits++;
+      for (const c of asArray(r.competitors_mentioned)) if (c && c.name) g.competitors.add(c.name);
+    }
+
+    // GSC demand per city×service (same aggregation shape as local_gap).
+    const demand = await this._gscDemandByServiceCity(since)
+      .catch((err) => { logger.warn(`[gsc-opp-miner] aeo_gap: demand map failed: ${err.message}`); return new Map(); });
+
+    const out = [];
+    for (const g of groups.values()) {
+      // Persistent absence: enough distinct observation days, never mentioned.
+      if (g.days.size < minDays || g.wavesHits > 0) continue;
+      const impressions = demand.get(ownPageKey(g.service, g.city)) || 0;
+      if (impressions < THRESHOLDS.minImpressionsToScore) continue; // demand gate
+      const page_url = ownPagesByServiceCity.get(ownPageKey(g.service, g.city)) || null;
+
+      // Gap strength: more competitors winning → stronger (0.5 floor, 1.0 cap).
+      const gapStrength = 0.5 + 0.5 * Math.min(1, g.competitors.size / 3);
+
+      const opp = {
+        bucket: 'aeo_gap',
+        query: null,
+        page_url,
+        service: g.service,
+        city: g.city,
+        signal_metadata: {
+          impressions,
+          absence_days: g.days.size,
+          competitors_cited: Array.from(g.competitors),
+          gap_strength: Number(gapStrength.toFixed(2)),
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: 20, // assumed deep — absent from answers
+        impressions,
+        gapStrength,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  /**
+   * Summed non-branded GSC impressions per normalized city×service, keyed by
+   * ownPageKey(service, city). Mirrors the local_gap aggregation so aeo_gap
+   * shares the same demand definition.
+   */
+  async _gscDemandByServiceCity(since) {
+    const rows = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .whereNotNull('city_target')
+      .whereNot('city_target', 'local_intent')
+      .whereNotNull('service_category')
+      .select('city_target', 'service_category')
+      .sum('impressions as impressions')
+      .groupBy('city_target', 'service_category');
+    const map = new Map();
+    for (const r of rows) {
+      const city = normalizeCity(r.city_target);
+      const service = r.service_category;
+      if (!city || !service) continue;
+      map.set(ownPageKey(service, city), parseInt(r.impressions, 10) || 0);
+    }
+    return map;
   }
 
   async mineSeasonalRising(periodDays) {
@@ -912,6 +1079,7 @@ module.exports._internals = {
   inferServiceFromUrl,
   inferCityFromUrl,
   inferCityFromQuery,
+  canonicalizePageUrl,
   inferPageType,
   recomputeCtr,
   gscOpportunityScore,

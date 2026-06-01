@@ -1696,6 +1696,7 @@ export default function EstimateViewPage() {
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
+                selectedFrequency={combinedFrequency}
               />
             </>
           ) : null}
@@ -1826,6 +1827,7 @@ export default function EstimateViewPage() {
           {canShowSlotPicker ? (
             <SlotPicker
               token={token}
+              askToken={estimate.askToken}
               selectedSlotId={selectedSlotId}
               onSelect={setSelectedSlotId}
               refreshSignal={slotsRefreshSignal}
@@ -1848,6 +1850,7 @@ export default function EstimateViewPage() {
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
+              selectedFrequency={combinedFrequency}
             />
           ) : null}
 

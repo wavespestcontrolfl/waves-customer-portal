@@ -279,6 +279,16 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`AI Overview tracking failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:00AM — LLM mention probe (ChatGPT/Gemini/Claude/AI Overview)
+  cron.schedule('0 3 * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: LLM mention probe');
+    try {
+      const prober = require('./seo/llm-mention-prober');
+      await prober.runDaily();
+    } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY SUNDAY 3:30AM — Backlink scan
   cron.schedule('30 3 * * 0', async () => {
     if (!isEnabled('seoIntelligence')) return;
@@ -287,6 +297,25 @@ function initScheduledJobs() {
       const BacklinkMonitor = require('./seo/backlink-monitor');
       await BacklinkMonitor.scan();
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 4:30AM — Link prospect verifier (live/follow reconcile + crawl fallback)
+  cron.schedule('30 4 * * *', async () => {
+    logger.info('Running: Link prospect verifier');
+    try {
+      const Verifier = require('./seo/link-prospect-verifier');
+      await Verifier.run();
+    } catch (err) { logger.error(`Link prospect verifier failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 5:00AM — Link prospect indexer (linking-page index via DataForSEO + target-page via GSC)
+  cron.schedule('0 5 * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: Link prospect indexer');
+    try {
+      const Indexer = require('./seo/link-prospect-indexer');
+      await Indexer.run();
+    } catch (err) { logger.error(`Link prospect indexer failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // WEEKLY MONDAY 1:30AM — Full site technical audit
@@ -320,6 +349,23 @@ function initScheduledJobs() {
       const Cannibalization = require('./seo/cannibalization');
       await Cannibalization.detect();
     } catch (err) { logger.error(`Content decay/cannibalization failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 7:15AM ET — Refresh customer-insight clusters before the opportunity
+  // miner + runner so customer-question pages draw on current first-party data.
+  // Reader against call_log / messages / google_reviews (consent + suppression
+  // gated, PII-redacted); writes ONLY customer_insight_clusters aggregates —
+  // never raw transcripts. Without this the clusters table goes stale (it was
+  // empty in prod until the first manual run). Same gate as the engine.
+  cron.schedule('15 7 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    logger.info('Running: Customer Insights Miner');
+    try {
+      const insightsMiner = require('./content/customer-insights-miner');
+      const result = await insightsMiner.mineAll({ days: 120, persist: true });
+      const persistedCount = Array.isArray(result?.persisted) ? result.persisted.length : (result?.persisted ?? '?');
+      logger.info(`Customer insights mine: ${result?.cluster_count ?? '?'} clusters (${result?.qualifying_count ?? '?'} qualifying), ${persistedCount} persisted`);
+    } catch (err) { logger.error(`Customer insights miner failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // DAILY 7:30AM ET — Mine fresh GSC opportunities before the 9AM runner.
@@ -359,6 +405,7 @@ function initScheduledJobs() {
       const ImpactTracker = require('./seo/impact-tracker');
       await ImpactTracker.sweepNewlyLive({});
       await ImpactTracker.checkPending({});
+      await ImpactTracker.checkAeoVisibility({});
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
@@ -966,6 +1013,39 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Dashboard alerts cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WaveGuard lawn readiness — route-morning protocol preflight snapshot.
+  // Stores the readiness ledger and opens an admin alert when appointments
+  // are blocked by assignment, calibration, inventory, or property gates.
+  // =========================================================================
+  cron.schedule('30 5 * * *', async () => {
+    try {
+      const { runReadinessSnapshot } = require('./lawn-protocol-readiness-cron');
+      const result = await runReadinessSnapshot({ days: 14, limit: 100, source: 'scheduled_daily' });
+      if (!result.skipped) {
+        logger.info(`[lawn-protocol-readiness] ready=${result.ready || 0} warning=${result.warning || 0} blocked=${result.blocked || 0} appointments=${result.appointmentCount || 0}`);
+      }
+    } catch (err) {
+      logger.error(`Lawn protocol readiness snapshot failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WaveGuard inventory forecast — proactive product shortage warning before
+  // readiness starts blocking dispatch.
+  // =========================================================================
+  cron.schedule('45 5 * * *', async () => {
+    try {
+      const { runWaveGuardInventoryForecastCheck } = require('./waveguard-inventory-forecast');
+      const result = await runWaveGuardInventoryForecastCheck({ days: 14, limit: 150, source: 'scheduled_daily' });
+      if (!result.skipped) {
+        logger.info(`[waveguard-inventory-forecast] ok=${result.ok || 0} warning=${result.warning || 0} short=${result.short || 0} unit_mismatch=${result.unit_mismatch || 0} not_tracked=${result.not_tracked || 0} products=${result.productCount || 0}`);
+      }
+    } catch (err) {
+      logger.error(`WaveGuard inventory forecast check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

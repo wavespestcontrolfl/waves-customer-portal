@@ -454,6 +454,7 @@ async function calculateUpdateFinancials({
 
 const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
+  INVOICE_UNCOLLECTIBLE_STATUSES,
   assertInvoiceVoidable,
 } = require("./invoice-helpers");
 
@@ -1558,7 +1559,13 @@ const InvoiceService = {
         "zip",
       )
       .first();
-    return { ...invoice, customer };
+    const activePaymentPlan = await db("payment_plans")
+      .where({ invoice_id: id })
+      .where("status", "active")
+      .orderBy("created_at", "desc")
+      .first()
+      .catch(() => null);
+    return { ...invoice, customer, active_payment_plan: activePaymentPlan };
   },
 
   async list({
@@ -1608,11 +1615,7 @@ const InvoiceService = {
       if (customerId) q.where("invoices.customer_id", customerId);
 
       if (normalizedStatus === "overdue") {
-        q.whereNotIn("invoices.status", [
-          "paid",
-          "void",
-          "processing",
-        ]).andWhere(function () {
+        q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES).andWhere(function () {
           this.where("invoices.status", "overdue").orWhere(
             "invoices.due_date",
             "<",
@@ -1620,7 +1623,7 @@ const InvoiceService = {
           );
         });
       } else if (normalizedStatus === "unpaid") {
-        q.whereNotIn("invoices.status", ["paid", "void", "processing"]);
+        q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
         q.where("invoices.status", "paid").whereNull(
           "invoices.receipt_sent_at",
@@ -1671,6 +1674,20 @@ const InvoiceService = {
           WHERE customer_id = invoices.customer_id AND is_default = true
           LIMIT 1
         ) AS card_on_file`),
+      db.raw(`(
+          SELECT json_build_object(
+            'id', pp.id,
+            'payment_amount', pp.payment_amount,
+            'payment_frequency', pp.payment_frequency,
+            'next_payment_date', pp.next_payment_date,
+            'total_balance', pp.total_balance,
+            'status', pp.status
+          )
+          FROM payment_plans pp
+          WHERE pp.invoice_id = invoices.id AND pp.status = 'active'
+          ORDER BY pp.created_at DESC
+          LIMIT 1
+        ) AS active_payment_plan`),
     );
 
     if (sort === "oldest") {
@@ -1782,17 +1799,17 @@ const InvoiceService = {
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')) as outstanding",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
         ),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
           [today],
         ),
         db.raw(
           "COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected",
         ),
         db.raw(
-          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')), 0) as total_outstanding",
+          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
         ),
       )
       .whereNull("archived_at");

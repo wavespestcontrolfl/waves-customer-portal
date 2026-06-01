@@ -67,6 +67,7 @@ export default function MobileManualCardSheet({
 
         const elements = stripe.elements({
           clientSecret: setup.clientSecret,
+          paymentMethodCreation: 'manual',
           appearance: {
             theme: 'stripe',
             variables: {

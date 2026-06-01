@@ -44,6 +44,9 @@ const IRRIGATION_TYPES = ['in_ground', 'manual', 'none', 'mixed'];
 const PROFILE_COLUMNS = [
   'grass_type', 'track_key', 'cultivar', 'sun_exposure',
   'lawn_sqft', 'irrigation_type', 'municipality', 'county',
+  'ordinance_zone', 'irrigation_status', 'soil_k_ppm',
+  'thatch_measurement_in', 'nematode_assay_flag', 'large_patch_history',
+  'last_thatch_checked_at', 'last_chinch_checked_at',
   'soil_test_date', 'soil_ph',
   'known_chinch_history', 'known_disease_history', 'known_drought_stress',
   'annual_n_budget_target', 'active',
@@ -69,6 +72,12 @@ function validateProfile(payload) {
   if (payload.irrigation_type != null && !IRRIGATION_TYPES.includes(payload.irrigation_type)) {
     errors.push(`irrigation_type must be one of: ${IRRIGATION_TYPES.join(', ')}`);
   }
+  if (payload.ordinance_zone != null && !['sarasota', 'north_port', 'manatee', 'other', 'unknown'].includes(payload.ordinance_zone)) {
+    errors.push('ordinance_zone must be one of: sarasota, north_port, manatee, other, unknown');
+  }
+  if (payload.irrigation_status != null && !['good', 'dry', 'wet', 'unknown'].includes(payload.irrigation_status)) {
+    errors.push('irrigation_status must be one of: good, dry, wet, unknown');
+  }
   if (payload.lawn_sqft != null) {
     // The schema column is integer; the validator must enforce that
     // upfront. Without Number.isInteger, fractional inputs like
@@ -84,6 +93,18 @@ function validateProfile(payload) {
     const n = Number(payload.soil_ph);
     if (!Number.isFinite(n) || n < 0 || n > 14) {
       errors.push('soil_ph must be between 0 and 14');
+    }
+  }
+  if (payload.soil_k_ppm != null) {
+    const n = Number(payload.soil_k_ppm);
+    if (!Number.isFinite(n) || n < 0 || n > 5000) {
+      errors.push('soil_k_ppm must be between 0 and 5000');
+    }
+  }
+  if (payload.thatch_measurement_in != null) {
+    const n = Number(payload.thatch_measurement_in);
+    if (!Number.isFinite(n) || n < 0 || n > 12) {
+      errors.push('thatch_measurement_in must be between 0 and 12 inches');
     }
   }
   if (payload.annual_n_budget_target != null) {

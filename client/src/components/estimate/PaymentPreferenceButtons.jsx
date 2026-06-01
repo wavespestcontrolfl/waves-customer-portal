@@ -23,6 +23,63 @@ const W = {
 
 const ACTION_BG = W.blueDeeper;
 
+function fmtMoney(n) {
+  if (n == null) return '—';
+  const v = Math.round(Number(n) * 100) / 100;
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+}
+
+function billingIntervalMonths(frequency = {}) {
+  const key = frequency.billingFrequencyKey || frequency.key;
+  if (key === 'quarterly') return 3;
+  if (key === 'bi_monthly' || key === 'bimonthly') return 2;
+  return 1;
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function treatmentRowAmount(row = {}) {
+  return firstPositiveNumber(
+    row.displayPrice,
+    row.priceAfterDiscount,
+    row.netPerTreatment,
+    row.price,
+    row.perTreatment,
+    row.perApp,
+    row.perVisit,
+    row.pa,
+  );
+}
+
+function firstVisitAmount(frequency = {}) {
+  const monthly = Number(frequency.monthly);
+  if (frequency.billingFrequencyKey === 'monthly' && Number.isFinite(monthly) && monthly > 0) {
+    return Math.round(monthly * 100) / 100;
+  }
+  const sameDayTreatmentTotal = Number(frequency.sameDayTreatmentTotal);
+  if (Number.isFinite(sameDayTreatmentTotal) && sameDayTreatmentTotal > 0) {
+    return Math.round(sameDayTreatmentTotal * 100) / 100;
+  }
+  const treatments = Array.isArray(frequency.perServiceTreatments) ? frequency.perServiceTreatments : [];
+  const treatmentTotal = treatments.reduce((sum, row) => {
+    const amount = treatmentRowAmount(row);
+    return amount ? sum + amount : sum;
+  }, 0);
+  if (treatmentTotal > 0) return Math.round(treatmentTotal * 100) / 100;
+  const perVisit = firstPositiveNumber(frequency.perVisit, frequency.perApp, frequency.pa);
+  if (perVisit) return Math.round(perVisit * 100) / 100;
+  if (Number.isFinite(monthly) && monthly > 0) {
+    return Math.round(monthly * billingIntervalMonths(frequency) * 100) / 100;
+  }
+  return null;
+}
+
 export default function PaymentPreferenceButtons({
   onSelect,
   disabled,
@@ -30,10 +87,14 @@ export default function PaymentPreferenceButtons({
   setupFee,
   invoiceMode = false,
   annualPrepayEligible = false,
+  selectedFrequency = null,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
   const offerPrepay = !invoiceMode && !isOneTime && (annualPrepayEligible || !!waivableSetupFee);
+  const setupAmount = Number(setupFee?.amount);
+  const hasSetupInvoice = Number.isFinite(setupAmount) && setupAmount > 0;
+  const firstVisit = firstVisitAmount(selectedFrequency || {});
 
   const btnBase = {
     padding: '16px 20px', borderRadius: 12,
@@ -43,7 +104,7 @@ export default function PaymentPreferenceButtons({
     opacity: disabled ? 0.65 : 1,
   };
   const optionNote = {
-    fontSize: 13,
+    fontSize: 14,
     color: W.textCaption,
     lineHeight: 1.45,
     marginTop: 8,
@@ -51,15 +112,21 @@ export default function PaymentPreferenceButtons({
     textAlign: 'center',
   };
   const optionWrap = { textAlign: 'center' };
+  const invoiceRows = [
+    ...(hasSetupInvoice ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
+    ...(firstVisit ? [{ label: 'First service visit', amount: firstVisit }] : []),
+  ];
 
-  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Choose pay-after-visit setup';
+  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Pay after each visit';
   const fineprint = offerPrepay
     ? 'Choose autopay to be billed after each completed service visit, or annual prepay to approve the 12-month plan up front with setup included.'
     : invoiceMode
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
-        : 'Choose autopay setup to be billed after each completed service visit.';
+        : 'Choose pay-after-visit setup to be billed after each completed service visit through autopay.';
+  const cardNextStep = 'Next: confirm your booking. If card setup is required, we send you to the secure setup screen after confirmation.';
+  const prepayNextStep = 'Next: confirm annual prepay. No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.';
 
   if (invoiceMode) {
     return (
@@ -133,7 +200,57 @@ export default function PaymentPreferenceButtons({
             onClick={() => onSelect('card_on_file')}
             style={{ ...btnBase, background: ACTION_BG, color: W.white }}
           >{cardOnFileLabel}</button>
-          <div style={optionNote}>Billed after each completed service through autopay.</div>
+          <div style={optionNote}>Approve now, then save a card for autopay after each completed service visit.</div>
+          {invoiceRows.length > 0 ? (
+            <div style={{
+              marginTop: 14,
+              border: `1px solid ${W.border}`,
+              borderRadius: 12,
+              padding: 14,
+              background: '#F8FAFC',
+              textAlign: 'left',
+            }}>
+              {invoiceRows.map((row) => (
+                <div
+                  key={row.label}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    alignItems: 'baseline',
+                    fontSize: 14,
+                    color: W.navy,
+                    lineHeight: 1.4,
+                    marginBottom: 8,
+                  }}
+                >
+                  <span>{row.label}</span>
+                  <strong style={{ whiteSpace: 'nowrap' }}>{fmtMoney(row.amount)}</strong>
+                </div>
+              ))}
+              {hasSetupInvoice ? (
+                <div style={{
+                  borderTop: `1px solid ${W.border}`,
+                  paddingTop: 10,
+                  marginTop: 2,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  alignItems: 'baseline',
+                  fontSize: 14,
+                  fontWeight: 800,
+                  color: W.blueDeeper,
+                }}>
+                  <span>Invoice total</span>
+                  <strong>{fmtMoney(setupAmount)}</strong>
+                </div>
+              ) : null}
+              <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 10 }}>
+                No payment is charged on this page. {hasSetupInvoice ? `The ${fmtMoney(setupAmount)} setup invoice is prepared after approval; ` : ''}
+                {firstVisit ? `your first service visit bills after completion at ${fmtMoney(firstVisit)}.` : 'your service visits bill after completion.'}
+              </div>
+            </div>
+          ) : null}
         </div>
         {offerPrepay && (
           <div style={optionWrap}>

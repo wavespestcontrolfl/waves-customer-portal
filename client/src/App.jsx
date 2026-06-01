@@ -170,6 +170,7 @@ const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealth
 const AdminLawnAssessmentPage = lazyWithRetry(() => import('./pages/admin/LawnAssessmentPanel'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminEquipmentCalibrationPage = lazyWithRetry(() => import('./pages/admin/EquipmentCalibrationPanel'));
+const AdminLawnProtocolPage = lazyWithRetry(() => import('./pages/admin/LawnProtocolCommandCenterPage'));
 const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
 const PayPage = lazyWithRetry(() => import('./pages/PayPageV2'));
@@ -197,6 +198,8 @@ const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
 import BookingPage from './pages/BookingPage';
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
+const LawnCareIncludedPage = lazyWithRetry(() => import('./pages/LawnCareIncludedPage'));
+const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
 const NewsletterLandingPage = lazyWithRetry(() => import('./pages/NewsletterLandingPage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
 const ButtonExamples = lazyWithRetry(() => import('./pages/ButtonExamples'));
@@ -283,6 +286,8 @@ export default function App() {
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
           <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
           <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
+          <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
+          <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ServiceOutlinePage /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
@@ -328,6 +333,7 @@ export default function App() {
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
             <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
             <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
+            <Route path="lawn-protocol" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn protocol...</div>}><AdminLawnProtocolPage /></Suspense>} />
             <Route path="equipment-calibration" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment calibration...</div>}><AdminEquipmentCalibrationPage /></Suspense>} />
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
             <Route path="kb" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgeBasePage /></Suspense>} />

@@ -947,6 +947,36 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 // their card_brand/card_last_four; manual payments leave those NULL so
 // timeline rendering can distinguish.
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+const VALID_PAYMENT_PLAN_FREQUENCIES = ['weekly', 'biweekly', 'monthly'];
+
+function parsePositiveMoney(value, field) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    const err = new Error(`${field} must be a positive amount`);
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
+  return Math.round(amount * 100) / 100;
+}
+
+function parseDateOnly(value, field) {
+  if (!value) {
+    const err = new Error(`${field} is required`);
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    const err = new Error(`${field} must be a valid YYYY-MM-DD date`);
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
+  return String(value).slice(0, 10);
+}
+
 router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -1103,6 +1133,116 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// POST /:id/payment-plan — create a customer payment plan for this invoice
+// and fire the lifecycle confirmation email. The notification helper already
+// dedupes on payment_plan_id, so repeated sends won't spam the customer.
+router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const body = req.body || {};
+    const invoice = await db('invoices').where({ id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (err) {
+      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+    }
+    if (parseFloat(invoice.total || 0) <= 0) {
+      return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
+    }
+    const activePlan = await db('payment_plans')
+      .where({ invoice_id: invoice.id, status: 'active' })
+      .first('id');
+    if (activePlan) {
+      return res.status(409).json({ error: 'Invoice already has an active payment plan' });
+    }
+
+    const paymentFrequency = cleanOptionalText(body.paymentFrequency || body.payment_frequency, 40);
+    if (!VALID_PAYMENT_PLAN_FREQUENCIES.includes(paymentFrequency)) {
+      return res.status(400).json({
+        error: `paymentFrequency must be one of: ${VALID_PAYMENT_PLAN_FREQUENCIES.join(', ')}`,
+      });
+    }
+
+    const totalBalance = parsePositiveMoney(body.totalBalance ?? body.total_balance ?? invoice.balance_due ?? invoice.total, 'totalBalance');
+    const paymentAmount = parsePositiveMoney(body.paymentAmount ?? body.payment_amount, 'paymentAmount');
+    if (paymentAmount > totalBalance) {
+      return res.status(400).json({ error: 'paymentAmount cannot exceed totalBalance' });
+    }
+
+    const planStartDate = parseDateOnly(body.planStartDate || body.plan_start_date || etDateString(), 'planStartDate');
+    const nextPaymentDate = parseDateOnly(body.nextPaymentDate || body.next_payment_date, 'nextPaymentDate');
+    const paymentMethodId = body.paymentMethodId || body.payment_method_id || null;
+    const notes = cleanOptionalText(body.notes || body.note, 500);
+    const createdBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+
+    let paymentPlan;
+    try {
+      [paymentPlan] = await db('payment_plans')
+        .insert({
+          customer_id: invoice.customer_id,
+          invoice_id: invoice.id,
+          payment_method_id: paymentMethodId,
+          total_balance: totalBalance,
+          payment_amount: paymentAmount,
+          payment_frequency: paymentFrequency,
+          plan_start_date: planStartDate,
+          next_payment_date: nextPaymentDate,
+          status: 'active',
+          notes,
+          created_by: createdBy,
+          created_by_user_id: req.technicianId || null,
+        })
+        .returning('*');
+    } catch (err) {
+      if (err?.code === '23505' && String(err.constraint || '').includes('payment_plans_one_active_per_invoice')) {
+        return res.status(409).json({ error: 'Invoice already has an active payment plan' });
+      }
+      throw err;
+    }
+
+    const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+    const emailResult = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
+      customerId: invoice.customer_id,
+      paymentPlanId: paymentPlan.id,
+      paymentMethodId,
+      plan: paymentPlan,
+      idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${invoice.customer_id}`,
+    }).catch((err) => ({ ok: false, error: err.message }));
+
+    try {
+      const FollowUps = require('../services/invoice-followups');
+      await FollowUps.pauseSequence(invoice.id, {
+        reason: 'payment_plan_created',
+        adminId: req.user?.id || req.technicianId || null,
+      });
+    } catch (err) {
+      logger.warn(`[admin-invoices:payment-plan] follow-up pause failed: ${err.message}`);
+    }
+
+    await db('activity_log').insert({
+      customer_id: invoice.customer_id,
+      action: 'payment_plan_created',
+      description: `Payment plan created for invoice ${invoice.invoice_number || invoice.id}: `
+        + `$${paymentAmount.toFixed(2)} ${paymentFrequency} toward $${totalBalance.toFixed(2)} — ${createdBy}`,
+      metadata: {
+        invoice_id: invoice.id,
+        payment_plan_id: paymentPlan.id,
+        email_result: emailResult,
+      },
+    }).catch((err) => logger.warn(`[admin-invoices:payment-plan] activity_log insert failed: ${err.message}`));
+
+    res.status(201).json({
+      ok: true,
+      paymentPlan,
+      email: emailResult,
+    });
+  } catch (err) {
+    logger.error(`[admin-invoices] payment-plan failed: ${err.message}`);
     next(err);
   }
 });

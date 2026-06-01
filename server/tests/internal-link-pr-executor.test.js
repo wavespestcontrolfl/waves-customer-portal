@@ -331,10 +331,11 @@ describe('internal-link dry-run executor helpers', () => {
   });
 
   test('loads source and target pages from GitHub for dryRunTask', async () => {
-    GitHubClient.getFile.mockImplementation(async (file) => ({
-      sha: `${file}-sha`,
-      content: file.includes('termite-swarmers') ? sourceBody : targetBody,
-    }));
+    GitHubClient.getFile.mockImplementation(async (file) =>
+      file.endsWith('.mdx')
+        ? null
+        : { sha: `${file}-sha`, content: file.includes('termite-swarmers') ? sourceBody : targetBody }
+    );
 
     const result = await executor.dryRunTask({
       id: 'task-github',
@@ -412,6 +413,11 @@ describe('internal-link dry-run executor helpers', () => {
       title: expect.stringContaining('SEO links: 1 internal link'),
       body: expect.stringContaining('Diff contains only intended internal-link insertions'),
     }));
+    // PR body steers reviewers to the hub preview so spoke 404s aren't a false reject.
+    const prBody = GitHubClient.createPr.mock.calls[0][0].body;
+    expect(prBody).toContain('## Preview');
+    expect(prBody).toContain('Spoke-project previews');
+    expect(prBody).toContain('https://www.wavespestcontrol.com/pest-control-quote-bradenton-fl/');
     expect(GitHubClient.createIssueComment).toHaveBeenCalledWith(77, expect.stringContaining('@codex review'));
     expect(instance._markTasksPrOpen).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({
       branch: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
@@ -696,10 +702,11 @@ describe('internal-link dry-run executor helpers', () => {
     expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
   });
 
-  test('leaves unmerged PR tasks open', async () => {
+  test('leaves still-open unmerged PR tasks open', async () => {
     const instance = new InternalLinkPrExecutor();
     instance._markTaskMerged = jest.fn(async () => {});
-    GitHubClient.getPr.mockResolvedValue({ number: 172, merged: false });
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    GitHubClient.getPr.mockResolvedValue({ number: 172, merged: false, state: 'open' });
 
     const result = await instance.verifyMergedTask({
       id: 'task-open',
@@ -708,6 +715,41 @@ describe('internal-link dry-run executor helpers', () => {
     });
 
     expect(result).toMatchObject({ status: 'pr_open', skipped: 'pr_not_merged' });
+    expect(instance._markTaskMerged).not.toHaveBeenCalled();
+    expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
+  });
+
+  test('fails a closed-unmerged PR task AND clears PR lifecycle fields (so it leaves pr_open and is requeue/dismiss-able)', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn(async () => {});
+    // Capture the real DB update to assert PR lifecycle fields are cleared —
+    // hasPrLifecycle() in the review queue keeps blocking requeue/dismiss
+    // unless astro_pr_url/pr_branch/pr_commit_sha are nulled.
+    let updatePatch = null;
+    const builder = {
+      where: jest.fn(() => builder),
+      whereIn: jest.fn(() => builder),
+      update: jest.fn(async (patch) => { updatePatch = patch; return 1; }),
+    };
+    db.mockReturnValue(builder);
+    GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed' });
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-closed',
+      status: 'pr_open',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/178',
+      pr_branch: 'content/internal-link-x',
+      pr_commit_sha: 'deadbeef',
+    });
+
+    expect(result).toMatchObject({ status: 'failed', failure_reason: 'internal_link_pr_closed_unmerged', pr_number: 178 });
+    expect(updatePatch).toMatchObject({
+      status: 'failed',
+      failure_reason: 'internal_link_pr_closed_unmerged',
+      astro_pr_url: null,
+      pr_branch: null,
+      pr_commit_sha: null,
+    });
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
   });
 

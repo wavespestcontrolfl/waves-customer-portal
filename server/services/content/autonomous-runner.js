@@ -38,6 +38,15 @@ const logger = require('../logger');
 const { etDateString, parseETDateTime, etWeekStart } = require('../../utils/datetime-et');
 const { THRESHOLDS } = require('./scoring-config');
 
+// Database-wide advisory-lock key for the publishing run. Held for the whole
+// daily batch (and by the manual --live single run) so two autonomous runs
+// never publish concurrently — overlapping runs would each independently honor
+// the per-day/week caps and could exceed them. Within a single locked batch the
+// runNext() calls are sequential, so the cap counts are accurate. The lock is
+// db-wide, so it also serializes across multiple app instances. 0x57415645 =
+// "WAVE" in ASCII; a fixed key shared by every publishing entry point.
+const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+
 // Lazy loaders — keeps the runner usable on any branch in the stack.
 function lazy(name, path) {
   let mod;
@@ -118,7 +127,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [] } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -136,7 +145,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore });
+      opp = await queue.claimNext({ minScore, excludeIds });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -467,7 +476,10 @@ class AutonomousRunner {
     const needsUniquenessGate = brief.page_type === 'city-service' || brief.page_type === 'customer-question';
     const needsBlogUniqueness = !needsUniquenessGate
       && (brief.page_type === 'supporting-blog' || run.action_type === 'new_supporting_blog')
-      && envBool('AUTONOMOUS_CONTENT_BLOG_UNIQUENESS', false);
+      // Default ON: blog dedup is the primary anti-scaled-content gate for the
+      // highest-volume content type. Set AUTONOMOUS_CONTENT_BLOG_UNIQUENESS=false
+      // to explicitly disable (fail open) rather than relying on an unset env.
+      && envBool('AUTONOMOUS_CONTENT_BLOG_UNIQUENESS', true);
     let uniquenessResult = { ok: true, skipped: 'not_applicable' };
     if (!uniquenessGate && (needsUniquenessGate || needsBlogUniqueness)) {
       uniquenessResult = { ok: false, error: 'uniqueness_gate_unavailable' };
@@ -632,8 +644,12 @@ class AutonomousRunner {
       run.quality_gate_result = qualityResult;
     }
 
-    const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed !== false
-      && prePublishVisibilityResult.passed !== false;
+    // Require an explicit pass from every gate. `=== true` (not `!== false`)
+    // so a gate that returns a malformed/missing `passed` shape fails CLOSED
+    // rather than slipping through as a silent pass. Both results above are
+    // always initialized with an explicit boolean `passed`.
+    const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed === true
+      && prePublishVisibilityResult.passed === true;
 
     // 6. Trust-build check. AUTO_PUBLISH_<ACTION_TYPE>=true skips the human
     // trust-build ramp once every quality gate has passed; the canary
@@ -801,14 +817,87 @@ class AutonomousRunner {
    * cap actual live output per action type.
    */
   async runDaily({ limit = null } = {}) {
+    // Serialize the whole batch behind the engine lock so a long batch that
+    // spills past the next cron, a manual --live run, or another instance can't
+    // publish concurrently and blow past the per-day/week caps.
+    return this._withEngineLock('runDaily', () => this._runDailyInner({ limit }));
+  }
+
+  /**
+   * Acquire the database-wide publishing lock for the duration of `fn`.
+   * - lock held by another run  → skip cleanly (returns skipped_locked).
+   * - lock infrastructure error → degrade and run anyway (the per-day/week
+   *   caps still bound output); never block the daily run on a lock hiccup.
+   * Uses a dedicated pooled connection (session-scoped pg_advisory_lock) so the
+   * lock spans external I/O without holding an open transaction; pg auto-clears
+   * the lock if the connection/process dies. We always unlock + release in
+   * finally — a failed unlock implies the connection is gone (lock already
+   * cleared), so the connection can't return to the pool holding a stale lock.
+   */
+  async _withEngineLock(label, fn) {
+    let lockConn = null;
+    let acquired = false;
+    try {
+      lockConn = await db.client.acquireConnection();
+      const res = await lockConn.query('SELECT pg_try_advisory_lock($1) AS locked', [ENGINE_PUBLISH_LOCK_KEY]);
+      acquired = res?.rows?.[0]?.locked === true;
+    } catch (err) {
+      logger.warn(`[autonomous-runner] ${label}: engine lock unavailable (${err.message}); proceeding without it`);
+      if (lockConn) { try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ } }
+      return fn();
+    }
+    if (!acquired) {
+      try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+      logger.warn(`[autonomous-runner] ${label} skipped: another autonomous publishing run holds the engine lock`);
+      return { outcome: 'skipped_locked', skipped: true, reason: 'engine_locked', count: 0, runs: [] };
+    }
+    try {
+      return await fn();
+    } finally {
+      try { await lockConn.query('SELECT pg_advisory_unlock($1)', [ENGINE_PUBLISH_LOCK_KEY]); }
+      catch (err) { logger.warn(`[autonomous-runner] ${label}: advisory unlock failed (${err.message}); lock auto-clears on session end`); }
+      try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+    }
+  }
+
+  async _runDailyInner({ limit = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
+    // A single transient failure (e.g. a flaky agent dispatch) used to abort
+    // the whole batch, leaving the rest of the day's queue untouched. Instead,
+    // continue past an isolated failure and only bail when failures stack up —
+    // a genuinely broken engine still stops fast, but one hiccup doesn't waste
+    // the day. Bounded by batchLimit and the downstream per-day/week publish
+    // caps, so continuing can't over-publish.
+    const maxConsecutiveFailures = envInt('AUTONOMOUS_CONTENT_MAX_CONSECUTIVE_FAILURES', 2);
     const runs = [];
+    let consecutiveFailures = 0;
+    let failuresSeen = 0;
+    // A failed runNext() releases its claim back to 'pending', so the queue
+    // would re-serve the same top opportunity on the next iteration. Exclude
+    // already-failed opportunities for the rest of THIS batch so a single
+    // poison row can't starve the lower-scored queue (it's still eligible on
+    // the next cron, where its claim was released to pending).
+    const failedOppIds = [];
     for (let i = 0; i < batchLimit; i += 1) {
-      const run = await this.runNext();
+      const run = await this.runNext({ excludeIds: [...failedOppIds] });
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
-      if (String(run.outcome || '').startsWith('failed')) break;
+      if (String(run.outcome || '').startsWith('failed')) {
+        consecutiveFailures += 1;
+        failuresSeen += 1;
+        if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
+        if (consecutiveFailures >= maxConsecutiveFailures) {
+          logger.warn(`[autonomous-runner] runDaily halting batch after ${consecutiveFailures} consecutive failed runs (last: ${run.failure_message || run.outcome})`);
+          break;
+        }
+        logger.warn(`[autonomous-runner] runDaily continuing to the next opportunity past a failure (${run.failure_message || run.outcome}); ${consecutiveFailures}/${maxConsecutiveFailures} consecutive, ${failedOppIds.length} excluded`);
+        continue;
+      }
+      consecutiveFailures = 0;
+    }
+    if (failuresSeen > 0) {
+      logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
     }
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
@@ -817,6 +906,7 @@ class AutonomousRunner {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
       limit: batchLimit,
+      failures: failuresSeen,
       runs,
     };
   }
@@ -961,15 +1051,54 @@ class AutonomousRunner {
     const protectedPages = getProtectedPages();
     if (!protectedPages?.isProtected) return null;
     const target = protectedPageCandidateUrl(opp, brief);
+    // No resolvable target: nothing to check here. An in-place editor (rewrite/
+    // refresh) that reaches publish without a target still fails closed at the
+    // publish step (the handler throws a deterministic "could not resolve
+    // target" error and the run is parked for review).
     if (!target) return null;
     let prot;
     try {
       prot = await protectedPages.isProtected(target, { db });
     } catch (err) {
-      logger.warn(`[autonomous-runner] protected-page check threw: ${err.message}`);
-      prot = { protected: true, reason: 'protected_check_error', detail: err.message };
+      // The guard normally catches its own registry failures and RETURNS an
+      // error verdict (see below); this catch is the belt-and-suspenders path
+      // for an unexpected throw. Fail closed with the same error shape.
+      prot = { protected: true, reason: 'protected_check_error', source: 'error', detail: err.message };
+    }
+    // Normalize the ERROR case from BOTH paths into one place: a thrown check
+    // (caught above) AND the guard's own returned failure
+    // (protected-pages.js fails closed with reason:'protected_check_error',
+    // source:'error'). Either is an engine ERROR, not a by-design money-page
+    // skip — tag is_error so it's distinguishable in autonomous_runs, log it,
+    // and optionally alert the operator. Still fails closed regardless.
+    const isError = !!prot && (prot.reason === 'protected_check_error' || prot.source === 'error');
+    if (isError && !prot.is_error) {
+      prot = { ...prot, is_error: true };
+      logger.error(`[autonomous-runner] protected-page check errored for ${target}: ${prot.detail || 'unknown'}`);
+      await this._alertEngineError('protected_check_error', `Protected-page check errored for ${target}: ${prot.detail || 'unknown'}`).catch(() => {});
     }
     return { ...prot, checked_url: target };
+  }
+
+  /**
+   * Surface a hard engine error (a thrown guard, not a by-design skip) to the
+   * operator. Opt-in via AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT=true; routed as
+   * an internal_alert so it respects the OWNER_SMS_DISABLED kill switch. Best
+   * effort — never let an alert failure affect the run.
+   */
+  async _alertEngineError(code, message) {
+    if (!envBool('AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT', false)) return;
+    try {
+      const twilio = require('../twilio');
+      const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+      await twilio.sendSMS(ownerPhone, `Waves content engine error [${code}]: ${message}`, {
+        messageType: 'internal_alert',
+        link: '/admin/seo',
+      });
+      logger.info(`[autonomous-runner] engine-error alert sent: ${code}`);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] engine-error alert failed: ${err.message}`);
+    }
   }
 
   async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
@@ -1639,8 +1768,25 @@ function protectedPageCandidateUrl(opp = {}, brief = null) {
 }
 
 function protectedBriefTargetUrl(opp = {}, brief = null) {
-  if (!brief || !protectedCityServiceGuardApplies(opp, brief)) return null;
+  // Resolve the URL the action will actually edit so the protected-page check
+  // sees the same target the handler does. City-service actions derive it; the
+  // in-place editors (rewrite/refresh) carry it on the brief (target_url||
+  // page_url) even when opp.page_url is empty — without this a refresh/rewrite
+  // on a non-city-service money page is checked against `null` (i.e. skipped).
+  if (!brief) return null;
+  if (!protectedCityServiceGuardApplies(opp, brief) && !actionEditsExistingPage(opp, brief)) return null;
   return brief.target_url || brief.page_url || null;
+}
+
+// Actions that edit an already-published page IN PLACE (vs. creating a new one).
+// For these, an unresolvable target must fail CLOSED — we can't confirm it isn't
+// a protected money page. NOTE: add_internal_links is intentionally excluded —
+// its target_url is the link DESTINATION (which may legitimately be a money
+// page), not the page being edited; its source files get their own protection
+// via the internal-link executor's indexability/canonical checks.
+const EDITING_ACTION_TYPES = new Set(['rewrite_title_meta', 'refresh_existing_page']);
+function actionEditsExistingPage(opp = {}, brief = null) {
+  return EDITING_ACTION_TYPES.has(brief?.action_type || opp.action_type);
 }
 
 function protectedPagePatch(prot = {}) {

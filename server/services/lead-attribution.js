@@ -189,7 +189,7 @@ async function logSourceTouch(sourceId, customerId, type) {
       customer_id: customerId,
       interaction_type: type || 'source_touch',
       channel: 'lead_source',
-      notes: `Touchpoint from lead source ${sourceId}`,
+      body: `Touchpoint from lead source ${sourceId}`,
       metadata: JSON.stringify({ leadSourceId: sourceId, type }),
       created_at: new Date(),
     });

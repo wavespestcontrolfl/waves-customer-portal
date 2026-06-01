@@ -47,6 +47,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
 import { etDateString, addETDays } from '../../lib/timezone';
+import {
+  buildSetupIntentReturnUrl,
+  clearReturnedSetupIntent,
+  getReturnedSetupIntent,
+  redirectToSetupIntentAction,
+  setupIntentIncompleteMessage,
+} from '../../lib/stripeSetupActions';
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 
@@ -160,6 +167,7 @@ export default function AutopayCard({ onStateChange }) {
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
   const mountRef = useRef(null);
+  const processedReturnRef = useRef(false);
 
   const load = () =>
     api.getAutopay()
@@ -180,6 +188,33 @@ export default function AutopayCard({ onStateChange }) {
   useEffect(() => {
     if (modal !== 'card' && addingCard) resetAddCard();
   }, [modal]);
+
+  useEffect(() => {
+    if (processedReturnRef.current) return;
+    const returned = getReturnedSetupIntent('autopay_add_card');
+    if (!returned) return;
+
+    processedReturnRef.current = true;
+    setSaving(true);
+    setErr('');
+    api.saveStripeCard(null, returned.setupIntentId)
+      .then(async (saved) => {
+        const newId = saved?.card?.id;
+        if (newId) {
+          await api.updateAutopay({
+            autopay_payment_method_id: newId,
+            autopay_enabled: true,
+          });
+        }
+        clearReturnedSetupIntent();
+        await load();
+        setModal(null);
+      })
+      .catch((e) => {
+        setErr(e.message || 'Failed to finish bank account setup');
+      })
+      .finally(() => setSaving(false));
+  }, []);
 
   const retryLoad = () => {
     setLoading(true);
@@ -284,7 +319,7 @@ export default function AutopayCard({ onStateChange }) {
     setAddingCard(true);
     setStripeReady(false);
     try {
-      const setupData = await api.createSetupIntent('card');
+      const setupData = await api.createSetupIntent('card_or_bank');
       const stripe = await loadStripeJs(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
@@ -312,11 +347,18 @@ export default function AutopayCard({ onStateChange }) {
     try {
       const { error, setupIntent } = await stripeRef.current.confirmSetup({
         elements: elementsRef.current,
+        confirmParams: { return_url: buildSetupIntentReturnUrl('autopay_add_card') },
         redirect: 'if_required',
       });
       if (error) { setErr(error.message); setSaving(false); return; }
+      if (redirectToSetupIntentAction(setupIntent)) return;
+      if (!setupIntent || setupIntent.status !== 'succeeded') {
+        setErr(setupIntentIncompleteMessage('enabling Auto Pay'));
+        setSaving(false);
+        return;
+      }
       if (setupIntent && setupIntent.payment_method) {
-        const saved = await api.saveStripeCard(setupIntent.payment_method);
+        const saved = await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
         const newId = saved?.card?.id;
         resetAddCard();
         await load();

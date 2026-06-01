@@ -120,11 +120,12 @@ async function runForUrl(url, options = {}) {
  * P0 (noindex, robots block, canonical-elsewhere, content not rendered) was
  * previously only logged + flagged 'visibility_review' with nobody notified.
  * With unattended auto-publish live, text the operator so it can be fixed or
- * reverted fast. Opt-in (AUTONOMOUS_CONTENT_VISIBILITY_ALERT=true), scoped to
+ * reverted fast. Default ON for a safety gate on an unattended publisher — set
+ * AUTONOMOUS_CONTENT_VISIBILITY_ALERT=false to explicitly silence it. Scoped to
  * engine-published posts, routed as internal_alert (honors OWNER_SMS_DISABLED).
  */
 async function maybeAlertVisibilityFailure(url, snapshot, aiResult, post) {
-  if (process.env.AUTONOMOUS_CONTENT_VISIBILITY_ALERT !== 'true') return;
+  if (process.env.AUTONOMOUS_CONTENT_VISIBILITY_ALERT === 'false') return;
   if (!post) return; // only engine-published content, not ad-hoc URL audits
   const p0Codes = (aiResult.findings || [])
     .filter((f) => f.severity === 'P0')

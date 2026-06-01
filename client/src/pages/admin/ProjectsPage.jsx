@@ -56,6 +56,7 @@ const TYPE_LABELS = {
   one_time_pest_treatment: "One-Time Pest",
   one_time_lawn_treatment: "One-Time Lawn",
   flea: "Flea",
+  cockroach: "Cockroach",
   rodent_exclusion: "Rodent",
   rodent_trapping: "Rodent Trap",
   wildlife_trapping: "Wildlife",
@@ -77,6 +78,7 @@ const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
   "one_time_pest_treatment",
   "one_time_lawn_treatment",
   "flea",
+  "cockroach",
   "rodent_exclusion",
   "rodent_trapping",
   "mosquito_event",
@@ -1616,10 +1618,15 @@ function ProjectDetail({
       // A brand-new WDO has no invoice number yet (the draft is created on send),
       // so only name the number when the preview resolved an existing invoice.
       const invoiceLabel = inv.invoice_number ? ` ${inv.invoice_number}` : "";
+      const isWdoReport = project.project_type === WDO_TYPE;
+      const reportNoun = isWdoReport ? "WDO report" : "report";
+      const emailContents = isWdoReport
+        ? "FDACS-13645 report PDF + invoice PDF"
+        : "report + invoice PDF";
       if (
         !confirm(
-          `${verb} invoice${invoiceLabel} for ${amount} together with the WDO report?\n\n` +
-            `The customer gets one email (FDACS-13645 report PDF + invoice PDF) and one text (report + pay links).`,
+          `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
+            `The customer gets one email (${emailContents}) and one text (report + pay links).`,
         )
       ) {
         setSaving(false);
@@ -2715,14 +2722,20 @@ function ProjectDetail({
             </button>
           )}
         {canAdminActions &&
-          project.project_type === WDO_TYPE &&
+          (project.project_type === WDO_TYPE || project.service_record_id) &&
           project.status !== "closed" && (
             <button
               type="button"
               onClick={handleSendWithInvoice}
               disabled={saving || wdoNeedsSignature}
               style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
-              title={wdoNeedsSignature ? "Capture the licensee signature first" : "Send the filled FDACS-13645 report and an invoice together via email + text"}
+              title={
+                wdoNeedsSignature
+                  ? "Capture the licensee signature first"
+                  : project.project_type === WDO_TYPE
+                    ? "Send the filled FDACS-13645 report and an invoice together via email + text"
+                    : "Send the report and an invoice together via email + text"
+              }
             >
               Send report + invoice
             </button>

@@ -339,8 +339,9 @@ function hasAnySelectedFlag(input = {}, flags = []) {
 const LAWN_TABLE_MAX_SQFT = 20000;
 const LAWN_FREQS = [4, 6, 9, 12];
 const LAWN_PRICING_V2 = {
-  targetCollectedMarginFloor: 0.55,
-  pricingMode: 'FIFTY_FIVE_MARGIN_FLOOR',
+  targetCollectedMarginFloor: 0.45,
+  pricingMode: 'FORTY_FIVE_MARGIN_FLOOR',
+  pricingVersion: 'LAWN_PRICING_V2_DENSE_45_FLOOR',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -353,10 +354,10 @@ const LAWN_PRICING_V2 = {
 // Material budgets now live in @waves/lawn-cost-floor (lawnMaterialBudget),
 // shared with the server so the table can't drift between preview and bill.
 const LAWN_PRICES = {
-  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,39,52,76,100],[3000,39,52,76,100],[3500,41,55,80,106],[4000,43,57,84,111],[5000,47,63,92,123],[6000,51,68,100,135],[7000,54,73,109,146],[8000,58,78,117,158],[10000,65,88,133,182],[12000,73,98,150,205],[15000,84,113,175,240],[20000,102,138,216,298]] },
-  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,42,57,84,113],[4000,42,57,84,113],[5000,45,62,92,125],[6000,48,67,100,137],[7000,52,71,108,149],[8000,55,76,117,161],[10000,62,86,133,186],[12000,68,96,149,210],[15000,78,110,174,246],[20000,95,135,215,307]] },
-  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,42,57,85,107],[4000,42,57,85,107],[5000,46,62,94,118],[6000,50,67,102,128],[7000,53,72,111,139],[8000,57,77,119,149],[10000,64,87,136,170],[12000,71,97,153,192],[15000,81,112,179,223],[20000,99,137,221,276]] },
-  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,37,51,70,89],[3000,37,51,70,89],[3500,38,53,73,93],[4000,40,55,76,97],[5000,43,59,83,105],[6000,46,64,89,113],[7000,49,68,95,121],[8000,52,73,102,129],[10000,58,82,114,144],[12000,63,90,127,160],[15000,72,104,146,184],[20000,87,126,178,224]] },
+  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
+  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
+  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
+  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] },
 };
 
 function toPositiveNumber(value) {
@@ -1061,6 +1062,7 @@ function calcLawnFloorPrice(sf, grassType, visits, opts = {}) {
       annualCallbackReserve: Math.round(floor.annualCallbackReserve * 100) / 100,
       annualAdmin: LAWN_PRICING_V2.adminAnnualDefault,
       total: Math.round(floor.annualCost * 100) / 100,
+      pricingVersion: LAWN_PRICING_V2.pricingVersion,
     },
   };
 }
@@ -1598,9 +1600,11 @@ export function calculateEstimate(inputs) {
       const freqIdx = LAWN_FREQS.indexOf(f.v);
       const marketPrice = lawnLookup(lp, lsf, freqIdx);
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
-      const mo = floorPrice.mo;
-      const ann = floorPrice.ann;
-      const pa = floorPrice.pa;
+      const marketAnnual = marketPrice.monthly * 12;
+      const floorApplied = floorPrice.costFloorAnnual > marketAnnual;
+      const ann = floorApplied ? floorPrice.ann : marketAnnual;
+      const mo = Math.round(ann / 12 * 100) / 100;
+      const pa = Math.round(ann / f.v * 100) / 100;
       const rec = f.v === selectedFreq, dim = !rec;
       R.lawn.push({
         pa,
@@ -1610,11 +1614,12 @@ export function calculateEstimate(inputs) {
         name: f.name,
         recommended: rec,
         dimmed: dim,
-        pricingBasis: LAWN_PRICING_V2.pricingMode,
-        pricingSource: 'COST_FLOOR',
+        pricingBasis: floorApplied ? LAWN_PRICING_V2.pricingMode : marketPrice.pricingBasis,
+        pricingSource: floorApplied ? 'COST_FLOOR' : marketPrice.pricingSource,
         marketMonthly: marketPrice.monthly,
-        marketAnnual: marketPrice.monthly * 12,
+        marketAnnual,
         costFloorAnnual: floorPrice.costFloorAnnual,
+        costFloorApplied: floorApplied,
         costs: floorPrice.costs,
       });
     });

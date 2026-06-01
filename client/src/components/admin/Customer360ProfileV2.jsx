@@ -2361,16 +2361,25 @@ export default function Customer360ProfileV2({
                 {" "}
                 <ChevronLeft size={18} strokeWidth={1.75} />{" "}
               </button>{" "}
-              <div className="flex items-center gap-2">
-                {c.phone && (
+              <div className="flex items-center gap-1.5">
+                {c.phone ? (
                   <a
                     href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
                     className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
                     Text
                   </a>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    title="No phone number on file — add one with Edit"
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-200 bg-white text-zinc-400 cursor-not-allowed"
+                  >
+                    Text
+                  </button>
                 )}
-                {c.phone && (
+                {c.phone ? (
                   <CallBridgeLink
                     phone={c.phone}
                     customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
@@ -2378,6 +2387,43 @@ export default function Customer360ProfileV2({
                   >
                     Call
                   </CallBridgeLink>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    title="No phone number on file — add one with Edit"
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-200 bg-white text-zinc-400 cursor-not-allowed"
+                  >
+                    Call
+                  </button>
+                )}
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditForm({
+                        firstName: c.firstName || "",
+                        lastName: c.lastName || "",
+                        email: c.email || "",
+                        phone: c.phone || "",
+                        profileLabel: c.profileLabel || "",
+                        addressLine1: c.address?.line1 || "",
+                        city: c.address?.city || "",
+                        state: c.address?.state || "",
+                        zip: c.address?.zip || "",
+                        monthlyRate: c.monthlyRate ?? "",
+                        tier: c.tier || "",
+                        pipelineStage: c.pipelineStage || "new_lead",
+                      });
+                      setEditErr("");
+                      setEditOpen(true);
+                    }}
+                    aria-label="Edit customer"
+                    title="Edit customer"
+                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+                  >
+                    <PenLine size={17} strokeWidth={1.75} />
+                  </button>
                 )}
                 <div ref={menuRef} className="relative">
                   {" "}
@@ -2395,32 +2441,6 @@ export default function Customer360ProfileV2({
                       role="menu"
                       className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
                     >
-                      {isAdmin && (
-                        <button
-                          role="menuitem"
-                          onClick={() => {
-                            setEditForm({
-                              firstName: c.firstName || "",
-                              lastName: c.lastName || "",
-                              email: c.email || "",
-                              phone: c.phone || "",
-                              addressLine1: c.address?.line1 || "",
-                              city: c.address?.city || "",
-                              state: c.address?.state || "",
-                              zip: c.address?.zip || "",
-                              monthlyRate: c.monthlyRate ?? "",
-                              tier: c.tier || "",
-                              pipelineStage: c.pipelineStage || "new_lead",
-                            });
-                            setEditErr("");
-                            setEditOpen(true);
-                            setMenuOpen(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                        >
-                          Edit customer
-                        </button>
-                      )}
                       <button
                         role="menuitem"
                         onClick={() => {

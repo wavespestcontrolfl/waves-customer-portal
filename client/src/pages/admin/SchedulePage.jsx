@@ -86,7 +86,26 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
-const CHIP_OBSERVATIONS = [
+// Completion-panel quick-entry chips are service-aware: pest-line services
+// (pest control, mosquito, termite, rodent) get a pest-focused list, while
+// plant-health services (lawn, tree/shrub) keep the original broad list that
+// includes lawn/ornamental entries like irrigation, fungus, and weeds.
+const CHIP_OBSERVATIONS_PEST = [
+  "Pest activity noted",
+  "Ant trails observed",
+  "Roach activity (live/dead)",
+  "Spider webs/egg sacs",
+  "Wasp/bee nests found",
+  "Rodent signs",
+  "Entry points identified",
+  "Moisture/conducive conditions",
+  "Conducive vegetation against structure",
+  "Standing water found",
+  "Debris in gutters",
+  "Property access issue",
+  "Customer concern discussed",
+];
+const CHIP_OBSERVATIONS_HORTICULTURAL = [
   "Pest activity noted",
   "Standing water found",
   "Irrigation issue",
@@ -105,7 +124,14 @@ const CHIP_OBSERVATIONS = [
   "Entry points identified",
   "Conducive vegetation against structure",
 ];
-const CHIP_RECOMMENDATIONS = [
+const CHIP_RECOMMENDATIONS_PEST = [
+  "Callback recommended",
+  "Follow-up in 2 weeks",
+  "Schedule interior next visit",
+  "Bait station replacement",
+  "Customer wants estimate",
+];
+const CHIP_RECOMMENDATIONS_HORTICULTURAL = [
   "Callback recommended",
   "Irrigation adjustment needed",
   "Follow-up in 2 weeks",
@@ -4217,6 +4243,17 @@ const EMPTY_LAWN_STRESS_FLAGS = Object.fromEntries(
   LAWN_STRESS_FLAGS.map((flag) => [flag.key, false]),
 );
 
+const EMPTY_PROTOCOL_FIELD_CHECKS = {
+  irrigationStatus: "unknown",
+  thatchMeasurementIn: "",
+  chinchFloatTestDone: false,
+  chinchCountPerSqft: "",
+  nematodeAssayFlag: false,
+  soilKPpm: "",
+  largePatchHistoryObserved: false,
+  notes: "",
+};
+
 function lawnScoreColor(value) {
   const n = Number(value) || 0;
   if (n >= 75) return D.green;
@@ -4284,11 +4321,40 @@ function parseStressFlags(value) {
   return { ...EMPTY_LAWN_STRESS_FLAGS, ...(parsed || {}) };
 }
 
+function parseProtocolFieldChecks(value) {
+  const parsed =
+    typeof value === "string"
+      ? (() => {
+          try {
+            return JSON.parse(value);
+          } catch {
+            return {};
+          }
+        })()
+      : value || {};
+  return {
+    ...EMPTY_PROTOCOL_FIELD_CHECKS,
+    irrigationStatus: parsed.irrigationStatus || parsed.irrigation_status || "unknown",
+    thatchMeasurementIn: parsed.thatchMeasurementIn ?? parsed.thatch_measurement_in ?? "",
+    chinchFloatTestDone: !!(parsed.chinchFloatTestDone ?? parsed.chinch_float_test_done),
+    chinchCountPerSqft: parsed.chinchCountPerSqft ?? parsed.chinch_count_per_sqft ?? "",
+    nematodeAssayFlag: !!(parsed.nematodeAssayFlag ?? parsed.nematode_assay_flag),
+    soilKPpm: parsed.soilKPpm ?? parsed.soil_k_ppm ?? "",
+    largePatchHistoryObserved: !!(
+      parsed.largePatchHistoryObserved ?? parsed.large_patch_history_observed
+    ),
+    notes: parsed.notes ?? parsed.protocol_field_notes ?? "",
+  };
+}
+
 function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
   const [photos, setPhotos] = useState([]);
   const [result, setResult] = useState(null);
   const [techScores, setTechScores] = useState(null);
   const [stressFlags, setStressFlags] = useState(EMPTY_LAWN_STRESS_FLAGS);
+  const [protocolFieldChecks, setProtocolFieldChecks] = useState(
+    EMPTY_PROTOCOL_FIELD_CHECKS,
+  );
   const [confirmedId, setConfirmedId] = useState(null);
   const [snapshotReview, setSnapshotReview] = useState(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
@@ -4304,6 +4370,7 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
     setResult(null);
     setTechScores(null);
     setStressFlags(EMPTY_LAWN_STRESS_FLAGS);
+    setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
     setConfirmedId(null);
     setSnapshotReview(null);
     setError("");
@@ -4325,6 +4392,9 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
         });
         setTechScores(scores);
         setStressFlags(parseStressFlags(assessment.stress_flags));
+        setProtocolFieldChecks(
+          parseProtocolFieldChecks(assessment.protocol_field_checks || assessment),
+        );
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
           onConfirmed?.(assessment.id);
@@ -4456,6 +4526,17 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
           assessmentId: result.assessment.id,
           adjustedScores: techScores || result.adjustedScores || result.displayScores,
           stress_flags: stressFlags,
+          protocol_field_checks: {
+            irrigationStatus: protocolFieldChecks.irrigationStatus,
+            thatchMeasurementIn: protocolFieldChecks.thatchMeasurementIn,
+            chinchFloatTestDone: protocolFieldChecks.chinchFloatTestDone,
+            chinchCountPerSqft: protocolFieldChecks.chinchCountPerSqft,
+            nematodeAssayFlag: protocolFieldChecks.nematodeAssayFlag,
+            soilKPpm: protocolFieldChecks.soilKPpm,
+            largePatchHistoryObserved:
+              protocolFieldChecks.largePatchHistoryObserved,
+            notes: protocolFieldChecks.notes,
+          },
         }),
       });
       const assessmentId = response?.assessment?.id || result.assessment.id;
@@ -4639,6 +4720,118 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
               </div>
             </div>
           )}
+          {!confirmed && (
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+                Protocol field checks
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8 }}>
+                <select
+                  value={protocolFieldChecks.irrigationStatus}
+                  onChange={(e) =>
+                    setProtocolFieldChecks((prev) => ({
+                      ...prev,
+                      irrigationStatus: e.target.value,
+                    }))
+                  }
+                  style={inputStyle}
+                >
+                  <option value="unknown">Irrigation unknown</option>
+                  <option value="good">Irrigation good</option>
+                  <option value="dry">Dry</option>
+                  <option value="wet">Wet</option>
+                </select>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Thatch inches"
+                  value={protocolFieldChecks.thatchMeasurementIn}
+                  onChange={(e) =>
+                    setProtocolFieldChecks((prev) => ({
+                      ...prev,
+                      thatchMeasurementIn: e.target.value,
+                    }))
+                  }
+                  style={inputStyle}
+                />
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  placeholder="Chinch / sqft"
+                  value={protocolFieldChecks.chinchCountPerSqft}
+                  onChange={(e) =>
+                    setProtocolFieldChecks((prev) => ({
+                      ...prev,
+                      chinchCountPerSqft: e.target.value,
+                    }))
+                  }
+                  style={inputStyle}
+                />
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="Soil K ppm"
+                  value={protocolFieldChecks.soilKPpm}
+                  onChange={(e) =>
+                    setProtocolFieldChecks((prev) => ({
+                      ...prev,
+                      soilKPpm: e.target.value,
+                    }))
+                  }
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {[
+                  ["chinchFloatTestDone", "Chinch float test done"],
+                  ["nematodeAssayFlag", "Nematode assay flag"],
+                  ["largePatchHistoryObserved", "Large patch history"],
+                ].map(([key, label]) => {
+                  const selected = !!protocolFieldChecks[key];
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() =>
+                        setProtocolFieldChecks((prev) => ({
+                          ...prev,
+                          [key]: !prev[key],
+                        }))
+                      }
+                      style={{
+                        padding: "7px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${selected ? D.green : D.border}`,
+                        background: selected ? `${D.green}14` : D.white,
+                        color: selected ? D.green : D.text,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {selected ? "Selected " : ""}
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              <textarea
+                rows={2}
+                placeholder="Protocol notes"
+                value={protocolFieldChecks.notes}
+                onChange={(e) =>
+                  setProtocolFieldChecks((prev) => ({
+                    ...prev,
+                    notes: e.target.value,
+                  }))
+                }
+                style={{ ...inputStyle, marginTop: 8, resize: "vertical" }}
+              />
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             {confirmed ? (
               <div
@@ -4682,6 +4875,7 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
                 setPhotos([]);
                 setResult(null);
                 setTechScores(null);
+                setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
                 setConfirmedId(null);
                 setSnapshotReview(null);
                 setError("");
@@ -4996,6 +5190,16 @@ export function CompletionPanel({
     useState("");
   const [treatmentPlanBlocks, setTreatmentPlanBlocks] = useState([]);
   const [treatmentPlanAnnualN, setTreatmentPlanAnnualN] = useState(null);
+  const [treatmentPlanStructuredProtocol, setTreatmentPlanStructuredProtocol] =
+    useState(null);
+  const [treatmentPlanAppointmentAssignment, setTreatmentPlanAppointmentAssignment] =
+    useState(null);
+  const [treatmentPlanInventoryBlocks, setTreatmentPlanInventoryBlocks] =
+    useState([]);
+  const [treatmentPlanInventoryWarnings, setTreatmentPlanInventoryWarnings] =
+    useState([]);
+  const [treatmentPlanSubstitutions, setTreatmentPlanSubstitutions] =
+    useState([]);
   const [treatmentPlanError, setTreatmentPlanError] = useState("");
   const [protocolActions, setProtocolActions] = useState([]);
   const [protocolActionMeta, setProtocolActionMeta] = useState(null);
@@ -5011,6 +5215,11 @@ export function CompletionPanel({
   );
   const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
     useState([]);
+  const [protocolTaskStatus, setProtocolTaskStatus] = useState({});
+  const [protocolTreatedSqft, setProtocolTreatedSqft] = useState("");
+  const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
+    useState("");
+  const [skippedProtocolProducts, setSkippedProtocolProducts] = useState({});
   const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState("");
   const [officeApprovalNote, setOfficeApprovalNote] = useState("");
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState("");
@@ -5048,6 +5257,10 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  // Plant-health services (lawn, tree/shrub) keep the broad observation list;
+  // pest-line services get the pest-focused list.
+  const usesPlantHealthChips =
+    serviceCategory === "lawn" || serviceCategory === "tree_shrub";
   const handleLawnAssessmentConfirmed = (assessmentId) => {
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
@@ -5201,6 +5414,48 @@ export function CompletionPanel({
   const selectedProductIds = new Set(
     selectedProducts.map((product) => String(product.productId)),
   );
+  const substitutionByOriginalProductId = new Map(
+    treatmentPlanSubstitutions
+      .filter((sub) => sub.originalProductId)
+      .map((sub) => [String(sub.originalProductId), sub]),
+  );
+  const requiredProtocolTasks =
+    treatmentPlanStructuredProtocol?.window?.requiredTasks || [];
+  const missingProtocolTasks = requiredProtocolTasks.filter(
+    (task) => !protocolTaskStatus[task],
+  );
+  const protocolProductKey = (product) =>
+    product?.id || product?.productId || product?.productName;
+  const defaultProtocolProducts =
+    treatmentPlanStructuredProtocol?.products?.filter(
+      (product) => product.defaultInPlan,
+    ) || [];
+  const undispositionedDefaultProtocolProducts = defaultProtocolProducts.filter(
+    (product) => {
+      const key = protocolProductKey(product);
+      const substitution = product.productId
+        ? substitutionByOriginalProductId.get(String(product.productId))
+        : null;
+      const selected = product.productId
+        ? selectedProductIds.has(String(product.productId))
+          || (substitution?.substituteProductId && selectedProductIds.has(String(substitution.substituteProductId)))
+        : false;
+      return !selected && !skippedProtocolProducts[key];
+    },
+  );
+  const selectedProductsMissingActualAmount = selectedProducts.filter(
+    (product) =>
+      !product.totalAmount ||
+      Number(product.totalAmount) <= 0 ||
+      !product.amountUnit,
+  );
+  const protocolActualsCompletionBlocked =
+    calibrationRequired &&
+    !isIncompleteVisit &&
+    (missingProtocolTasks.length > 0 ||
+      undispositionedDefaultProtocolProducts.length > 0 ||
+      selectedProductsMissingActualAmount.length > 0 ||
+      treatmentPlanInventoryBlocks.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -5282,6 +5537,14 @@ export function CompletionPanel({
       ? "Select Equipment Calibration"
       : tankCleanoutCompletionBlocked
         ? "Tank Cleanout Required"
+        : protocolActualsCompletionBlocked
+          ? missingProtocolTasks.length
+            ? "Protocol Checklist Required"
+            : selectedProductsMissingActualAmount.length
+              ? "Product Actuals Required"
+              : treatmentPlanInventoryBlocks.length
+                ? "Inventory Blocked"
+                : "Product Disposition Required"
         : blackoutCompletionBlocked
           ? canApproveOfficeExceptions
             ? "Office Approval Required"
@@ -5306,6 +5569,12 @@ export function CompletionPanel({
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
     return () => clearInterval(iv);
   }, [onSiteTime]);
+
+  useEffect(() => {
+    if (calibrationRequired && !isIncompleteVisit && quickComplete) {
+      setQuickComplete(false);
+    }
+  }, [calibrationRequired, isIncompleteVisit, quickComplete]);
 
   // Lock body+html scroll while the panel is mounted. The panel is portaled
   // to document.body so its position:fixed overlay isn't trapped inside the
@@ -5400,10 +5669,13 @@ export function CompletionPanel({
       .then((data) => {
         if (cancelled) return;
         const rows = Array.isArray(data.calibrations) ? data.calibrations : [];
-        setEquipmentCalibrations(rows);
-        if (!equipmentSystemId && rows.length === 1) {
-          setEquipmentSystemId(rows[0].equipment_system_id || "");
-          setCalibrationId(rows[0].id || "");
+        const usableRows = rows.filter(
+          (row) => row.calibration_status === "field_verified",
+        );
+        setEquipmentCalibrations(usableRows);
+        if (!equipmentSystemId && usableRows.length === 1) {
+          setEquipmentSystemId(usableRows[0].equipment_system_id || "");
+          setCalibrationId(usableRows[0].id || "");
         }
       })
       .catch((err) => {
@@ -5434,9 +5706,46 @@ export function CompletionPanel({
           [];
         setTreatmentPlanBlocks(Array.isArray(blocks) ? blocks : []);
         setTreatmentPlanAnnualN(data?.plan?.propertyGate?.annualN || null);
+        setTreatmentPlanStructuredProtocol(data?.plan?.protocol?.structured || null);
+        setTreatmentPlanAppointmentAssignment(data?.plan?.appointmentAssignment || null);
+        setTreatmentPlanInventoryBlocks(
+          Array.isArray(data?.plan?.inventory?.blocks)
+            ? data.plan.inventory.blocks
+            : [],
+        );
+        setTreatmentPlanInventoryWarnings(
+          Array.isArray(data?.plan?.inventory?.warnings)
+            ? data.plan.inventory.warnings
+            : [],
+        );
+        const selectedCalibration = data?.plan?.equipmentCalibration?.selected;
+        if (!equipmentSystemId && selectedCalibration?.equipment_system_id) {
+          setEquipmentSystemId(selectedCalibration.equipment_system_id);
+          setCalibrationId(selectedCalibration.id || "");
+        }
+        const requiredTasks =
+          data?.plan?.closeout?.requiredProtocolTasks ||
+          data?.plan?.protocol?.structured?.window?.requiredTasks ||
+          [];
+        setProtocolTaskStatus((prev) => {
+          const next = { ...prev };
+          requiredTasks.forEach((task) => {
+            if (!(task in next)) next[task] = false;
+          });
+          return next;
+        });
+        if (!protocolTreatedSqft && data?.plan?.mixCalculator?.lawnSqft) {
+          setProtocolTreatedSqft(String(data.plan.mixCalculator.lawnSqft));
+        }
+        if (!protocolCarrierGalPer1000 && data?.plan?.mixCalculator?.carrierGalPer1000) {
+          setProtocolCarrierGalPer1000(String(data.plan.mixCalculator.carrierGalPer1000));
+        }
         const baseItems = data?.plan?.protocol?.base || [];
         const conditionalItems = data?.plan?.protocol?.conditional || [];
         const mixItems = data?.plan?.mixCalculator?.items || [];
+        setTreatmentPlanSubstitutions(
+          mixItems.map((item) => item?.substitution).filter(Boolean),
+        );
         const productIdsFor = (items) =>
           items
             .map((item) => item?.product?.id || item?.productId)
@@ -5904,7 +6213,7 @@ export function CompletionPanel({
       {
         productId: product.id,
         name: product.name,
-        rate: "",
+        rate: product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "",
         rateUnit: defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
         maxLabelRatePer1000:
@@ -5920,6 +6229,16 @@ export function CompletionPanel({
       },
     ]);
     setProductSearch("");
+  }
+  function addSubstitutionProduct(substitution) {
+    if (!substitution?.substituteProductId) return;
+    addProduct({
+      id: substitution.substituteProductId,
+      name: substitution.substituteProductName || "Approved substitute",
+      defaultRatePer1000: substitution.ratePer1000 || "",
+      rateUnit: substitution.rateUnit || "oz",
+      defaultUnit: substitution.rateUnit || "oz",
+    });
   }
   function removeProduct(productId) {
     setSelectedProducts((prev) =>
@@ -5960,6 +6279,28 @@ export function CompletionPanel({
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
+  }
+  function toggleProtocolTask(task) {
+    setProtocolTaskStatus((prev) => ({ ...prev, [task]: !prev[task] }));
+  }
+  function updateSkippedProtocolProduct(product, skipped, reason = "") {
+    const key = product.id || product.productId || product.productName;
+    if (!key) return;
+    setSkippedProtocolProducts((prev) => {
+      const next = { ...prev };
+      if (!skipped) {
+        delete next[key];
+        return next;
+      }
+      next[key] = {
+        protocolProductId: product.id || null,
+        productId: product.productId || null,
+        productName: product.productName || product.protocolProductName || "Protocol product",
+        role: product.role || null,
+        reason: reason || next[key]?.reason || "Not applied",
+      };
+      return next;
+    });
   }
   function handleEquipmentSelect(value) {
     setEquipmentSystemId(value);
@@ -6030,6 +6371,56 @@ export function CompletionPanel({
         canApproveOfficeExceptions
           ? "Manager approval is required before completing this WaveGuard protocol exception."
           : "An admin must approve this WaveGuard protocol exception before completion.",
+      );
+      return;
+    }
+    if (
+      calibrationRequired &&
+      !isIncompleteVisit &&
+      missingProtocolTasks.length
+    ) {
+      alert(
+        `Complete the required protocol checklist before closeout: ${missingProtocolTasks
+          .map((task) => task.replace(/_/g, " "))
+          .join(", ")}.`,
+      );
+      return;
+    }
+    if (
+      calibrationRequired &&
+      !isIncompleteVisit &&
+      undispositionedDefaultProtocolProducts.length
+    ) {
+      alert(
+        `Mark each default protocol product as applied or skipped before closeout: ${undispositionedDefaultProtocolProducts
+          .map((product) => product.productName)
+          .filter(Boolean)
+          .join(", ")}.`,
+      );
+      return;
+    }
+    if (
+      calibrationRequired &&
+      !isIncompleteVisit &&
+      selectedProductsMissingActualAmount.length
+    ) {
+      alert(
+        `Enter actual product amount and unit before closeout: ${selectedProductsMissingActualAmount
+          .map((product) => product.name || "Selected product")
+          .join(", ")}.`,
+      );
+      return;
+    }
+    if (
+      calibrationRequired &&
+      !isIncompleteVisit &&
+      treatmentPlanInventoryBlocks.length
+    ) {
+      alert(
+        `Resolve inventory blocks before closeout: ${treatmentPlanInventoryBlocks
+          .map((block) => block.message)
+          .filter(Boolean)
+          .join(" ")}`,
       );
       return;
     }
@@ -6139,6 +6530,23 @@ export function CompletionPanel({
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
         })),
+        lawnProtocolCompletion:
+          calibrationRequired && treatmentPlanStructuredProtocol
+            ? {
+                checklist: requiredProtocolTasks.map((task) => ({
+                  key: task,
+                  label: task.replace(/_/g, " "),
+                  completed: !!protocolTaskStatus[task],
+                })),
+                treatedSqft: protocolTreatedSqft
+                  ? Number(protocolTreatedSqft)
+                  : null,
+                carrierGalPer1000: protocolCarrierGalPer1000
+                  ? Number(protocolCarrierGalPer1000)
+                  : null,
+                skippedProducts: Object.values(skippedProtocolProducts),
+              }
+            : null,
         oneTimeRecapOnly,
         sendCompletionSms: effectiveSendSms,
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
@@ -6220,16 +6628,23 @@ export function CompletionPanel({
   const selectedCalibrationExpired =
     !!selectedCalibration?.expires_at &&
     new Date(selectedCalibration.expires_at).getTime() < Date.now();
+  const selectedCalibrationUnverified =
+    !!selectedCalibration &&
+    selectedCalibration.calibration_status !== "field_verified";
   const calibrationCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
-    (!equipmentSystemId || selectedCalibrationExpired);
+    (!equipmentSystemId ||
+      selectedCalibrationExpired ||
+      selectedCalibrationUnverified);
   const calibrationHelpText =
     equipmentCalibrationError ||
-    (selectedCalibrationExpired
+    (selectedCalibrationUnverified
+      ? "Selected calibration is not field verified. Verify calibration before completing this visit."
+      : selectedCalibrationExpired
       ? "Selected calibration is expired. Record a new calibration before completing this visit."
       : calibrationRequired
-        ? "WaveGuard lawn visits require current calibrated spray equipment before completion."
+        ? "WaveGuard lawn visits require current field-verified calibrated spray equipment before completion."
         : "");
   function isProtocolActionSelected(action) {
     const noteText = action?.note || action?.label || action?.raw || "";
@@ -6674,7 +7089,11 @@ export function CompletionPanel({
               {" "}
               <button
                 type="button"
-                onClick={() => setQuickComplete(!quickComplete)}
+                onClick={() => {
+                  if (calibrationRequired && !isIncompleteVisit) return;
+                  setQuickComplete(!quickComplete);
+                }}
+                disabled={calibrationRequired && !isIncompleteVisit}
                 style={{
                   height: 36,
                   padding: "0 16px",
@@ -6687,7 +7106,11 @@ export function CompletionPanel({
                   fontWeight: 600,
                   textTransform: "uppercase",
                   letterSpacing: "0.3px",
-                  cursor: "pointer",
+                  cursor:
+                    calibrationRequired && !isIncompleteVisit
+                      ? "not-allowed"
+                      : "pointer",
+                  opacity: calibrationRequired && !isIncompleteVisit ? 0.55 : 1,
                   whiteSpace: "nowrap",
                 }}
               >
@@ -6739,6 +7162,193 @@ export function CompletionPanel({
                   disabled={isIncompleteVisit || submitting}
                   onConfirmed={handleLawnAssessmentConfirmed}
                 />
+              </Field>
+            )}
+            {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
+              <Field label="10/10 protocol closeout">
+                <div
+                  style={{
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    padding: 12,
+                    marginBottom: 10,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontFamily: font,
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: M.ink,
+                      marginBottom: 4,
+                    }}
+                  >
+                    {treatmentPlanStructuredProtocol.window.title}
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: font,
+                      fontSize: 12,
+                      color: M.ink3,
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    {treatmentPlanStructuredProtocol.window.goal}
+                  </div>
+                  <div
+                    style={{
+                      marginTop: 10,
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: 8,
+                      fontFamily: font,
+                      fontSize: 11,
+                      color: M.ink3,
+                    }}
+                  >
+                    <div>
+                      <strong style={{ color: M.ink }}>Assignment:</strong>{" "}
+                      {treatmentPlanAppointmentAssignment?.assignedAt
+                        ? "linked"
+                        : "plan preview"}
+                    </div>
+                    <div>
+                      <strong style={{ color: M.ink }}>Inventory:</strong>{" "}
+                      {treatmentPlanInventoryBlocks.length
+                        ? `${treatmentPlanInventoryBlocks.length} block`
+                        : treatmentPlanInventoryWarnings.length
+                          ? `${treatmentPlanInventoryWarnings.length} warning`
+                          : "clear"}
+                    </div>
+                  </div>
+                </div>
+                {treatmentPlanInventoryBlocks.length > 0 && (
+                  <div
+                    style={{
+                      background: M.err + "10",
+                      border: `1px solid ${M.err}`,
+                      borderRadius: 10,
+                      color: M.err,
+                      fontFamily: font,
+                      fontSize: 12,
+                      lineHeight: 1.35,
+                      padding: 10,
+                      marginBottom: 10,
+                    }}
+                  >
+                    {treatmentPlanInventoryBlocks
+                      .map((block) => block.message)
+                      .filter(Boolean)
+                      .join(" ")}
+                  </div>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                  <input
+                    type="number"
+                    value={protocolTreatedSqft}
+                    onChange={(e) => setProtocolTreatedSqft(e.target.value)}
+                    placeholder="Treated sq ft"
+                    style={mInput}
+                  />
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={protocolCarrierGalPer1000}
+                    onChange={(e) => setProtocolCarrierGalPer1000(e.target.value)}
+                    placeholder="Carrier gal/1K"
+                    style={mInput}
+                  />
+                </div>
+                {(treatmentPlanStructuredProtocol.window.requiredTasks || []).length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                    {treatmentPlanStructuredProtocol.window.requiredTasks.map((task) => {
+                      const checked = !!protocolTaskStatus[task];
+                      return (
+                        <button
+                          key={task}
+                          type="button"
+                          onClick={() => toggleProtocolTask(task)}
+                          disabled={isIncompleteVisit || submitting}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            fontSize: 13,
+                            fontWeight: 600,
+                            textAlign: "left",
+                            cursor: "pointer",
+                            background: checked ? M.success + "18" : M.card,
+                            color: checked ? M.success : M.ink,
+                            border: `1px solid ${checked ? M.success : M.hairline}`,
+                          }}
+                        >
+                          {checked ? "\u2713 " : ""}
+                          {task.replace(/_/g, " ")}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {(treatmentPlanStructuredProtocol.products || []).length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ ...subLabelStyle, marginBottom: 2 }}>
+                      Default product disposition
+                    </div>
+                    {undispositionedDefaultProtocolProducts.length > 0 && (
+                      <div style={{ fontFamily: font, fontSize: 12, color: M.err, lineHeight: 1.35 }}>
+                        Mark default products as applied through the product list or skipped below before closeout.
+                      </div>
+                    )}
+                    {treatmentPlanStructuredProtocol.products
+                      .filter((product) => product.defaultInPlan)
+                      .slice(0, 6)
+                      .map((product) => {
+                        const key = product.id || product.productId || product.productName;
+                        const skipped = !!skippedProtocolProducts[key];
+                        const substitution = product.productId
+                          ? substitutionByOriginalProductId.get(String(product.productId))
+                          : null;
+                        return (
+                          <div
+                            key={key}
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "auto 1fr",
+                              gap: 8,
+                              alignItems: "center",
+                            }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => updateSkippedProtocolProduct(product, !skipped)}
+                              style={{
+                                height: 34,
+                                padding: "0 10px",
+                                borderRadius: 8,
+                                border: `1px solid ${skipped ? M.err : M.hairline}`,
+                                background: skipped ? M.err + "12" : M.card,
+                                color: skipped ? M.err : M.ink3,
+                                fontSize: 12,
+                                fontWeight: 700,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {skipped ? "Skipped" : "Applied"}
+                            </button>
+                            <input
+                              value={skippedProtocolProducts[key]?.reason || ""}
+                              onChange={(e) => updateSkippedProtocolProduct(product, true, e.target.value)}
+                              placeholder={substitution
+                                ? `${product.productName} replaced by ${substitution.substituteProductName}`
+                                : `${product.productName} skip reason`}
+                              disabled={!skipped}
+                              style={{ ...mInput, marginBottom: 0, opacity: skipped ? 1 : 0.55 }}
+                            />
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
               </Field>
             )}
             {calibrationRequired && (
@@ -7085,7 +7695,10 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add observation...</option>
-                {CHIP_OBSERVATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_OBSERVATIONS_HORTICULTURAL
+                  : CHIP_OBSERVATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -7101,7 +7714,10 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add recommendation...</option>
-                {CHIP_RECOMMENDATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
+                  : CHIP_RECOMMENDATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -8010,7 +8626,8 @@ export function CompletionPanel({
                 tankCleanoutCompletionBlocked ||
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||
-                managerApprovalCompletionBlocked
+                managerApprovalCompletionBlocked ||
+                protocolActualsCompletionBlocked
               }
               style={{
                 ...primaryPill,
@@ -8020,7 +8637,8 @@ export function CompletionPanel({
                   tankCleanoutCompletionBlocked ||
                   blackoutCompletionBlocked ||
                   nLimitCompletionBlocked ||
-                  managerApprovalCompletionBlocked
+                  managerApprovalCompletionBlocked ||
+                  protocolActualsCompletionBlocked
                     ? 0.5
                     : 1,
               }}
@@ -8088,8 +8706,14 @@ export function CompletionPanel({
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
-              {effectiveSendSms ? "SMS + Report sent" : "Report saved"} for{" "}
-              {service.customerName}
+              {!effectiveSendSms
+                ? "Report saved"
+                : completionResult?.completionSmsStatus === "blocked"
+                  ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                  : completionResult?.completionSmsStatus === "failed"
+                    ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                    : "SMS + Report sent"}{" "}
+              for {service.customerName}
             </div>{" "}
           </div>
         )}
@@ -8191,23 +8815,33 @@ export function CompletionPanel({
           >
             {" "}
             <button
-              onClick={() => setQuickComplete(!quickComplete)}
+              onClick={() => {
+                if (calibrationRequired && !isIncompleteVisit) return;
+                setQuickComplete(!quickComplete);
+              }}
+              disabled={calibrationRequired && !isIncompleteVisit}
               style={{
                 padding: "6px 14px",
                 borderRadius: 8,
                 fontSize: 12,
                 fontWeight: 700,
-                cursor: "pointer",
+                cursor:
+                  calibrationRequired && !isIncompleteVisit
+                    ? "not-allowed"
+                    : "pointer",
                 background: quickComplete ? D.amber : "transparent",
                 color: quickComplete ? D.bg : D.amber,
                 border: `1px solid ${D.amber}`,
+                opacity: calibrationRequired && !isIncompleteVisit ? 0.55 : 1,
                 transition: "all 0.15s",
               }}
             >
               {quickComplete ? "Quick Complete ON" : "Quick Complete"}
             </button>{" "}
             <span style={{ fontSize: 11, color: D.muted }}>
-              {quickComplete
+              {calibrationRequired && !isIncompleteVisit
+                ? "WaveGuard lawn closeout requires full execution checklist"
+                : quickComplete
                 ? "Showing minimal fields"
                 : "Bulk end-of-day mode"}
             </span>{" "}
@@ -8293,6 +8927,180 @@ export function CompletionPanel({
                 disabled={isIncompleteVisit || submitting}
                 onConfirmed={handleLawnAssessmentConfirmed}
               />
+            </div>
+          )}
+          {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>WaveGuard Execution Checklist</label>
+              <div
+                style={{
+                  background: D.input,
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 10,
+                  padding: 14,
+                  marginBottom: 10,
+                }}
+              >
+                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
+                  {treatmentPlanStructuredProtocol.window.title}
+                </div>
+                <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, marginTop: 4 }}>
+                  {treatmentPlanStructuredProtocol.window.goal}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10, fontSize: 12, color: D.muted }}>
+                  <div>
+                    <strong style={{ color: D.text }}>Assignment:</strong>{" "}
+                    {treatmentPlanAppointmentAssignment?.assignedAt ? "linked" : "plan preview"}
+                  </div>
+                  <div>
+                    <strong style={{ color: D.text }}>Inventory:</strong>{" "}
+                    {treatmentPlanInventoryBlocks.length
+                      ? `${treatmentPlanInventoryBlocks.length} block`
+                      : treatmentPlanInventoryWarnings.length
+                        ? `${treatmentPlanInventoryWarnings.length} warning`
+                        : "clear"}
+                  </div>
+                </div>
+              </div>
+              {treatmentPlanInventoryBlocks.length > 0 && (
+                <div style={{ background: D.red + "12", border: `1px solid ${D.red}`, borderRadius: 10, padding: 10, color: D.red, fontSize: 12, lineHeight: 1.4, marginBottom: 10 }}>
+                  {treatmentPlanInventoryBlocks.map((block) => block.message).filter(Boolean).join(" ")}
+                </div>
+              )}
+              {treatmentPlanSubstitutions.length > 0 && (
+                <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
+                  {treatmentPlanSubstitutions.map((sub) => {
+                    const selected = selectedProducts.some((product) => String(product.productId) === String(sub.substituteProductId));
+                    return (
+                      <div
+                        key={sub.id || `${sub.originalProductId}-${sub.substituteProductId}`}
+                        style={{
+                          background: D.green + "12",
+                          border: `1px solid ${D.green}`,
+                          borderRadius: 10,
+                          padding: 10,
+                          color: D.text,
+                          fontSize: 12,
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        <div style={{ fontWeight: 800, color: D.heading }}>
+                          Approved substitute: {sub.substituteProductName}
+                        </div>
+                        <div style={{ color: D.muted, marginTop: 2 }}>
+                          Replaces {sub.originalProductName || "planned product"}
+                          {sub.reason ? ` · ${sub.reason}` : ""}
+                          {sub.approvedByName ? ` · approved by ${sub.approvedByName}` : ""}
+                        </div>
+                        <button
+                          type="button"
+                          disabled={selected || isIncompleteVisit || submitting}
+                          onClick={() => addSubstitutionProduct(sub)}
+                          style={{
+                            marginTop: 8,
+                            height: 32,
+                            padding: "0 10px",
+                            borderRadius: 8,
+                            border: `1px solid ${selected ? D.green : D.border}`,
+                            background: selected ? D.green + "18" : D.card,
+                            color: selected ? D.green : D.text,
+                            fontSize: 12,
+                            fontWeight: 800,
+                            cursor: selected ? "default" : "pointer",
+                            opacity: isIncompleteVisit || submitting ? 0.6 : 1,
+                          }}
+                        >
+                          {selected ? "Added to products" : "Add substitute to products"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                <input
+                  type="number"
+                  value={protocolTreatedSqft}
+                  onChange={(e) => setProtocolTreatedSqft(e.target.value)}
+                  placeholder="Treated sq ft"
+                  style={inputStyle}
+                />
+                <input
+                  type="number"
+                  step="0.1"
+                  value={protocolCarrierGalPer1000}
+                  onChange={(e) => setProtocolCarrierGalPer1000(e.target.value)}
+                  placeholder="Carrier gal/1K"
+                  style={inputStyle}
+                />
+              </div>
+              {requiredProtocolTasks.length > 0 && (
+                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                  {requiredProtocolTasks.map((task) => {
+                    const checked = !!protocolTaskStatus[task];
+                    return (
+                      <button
+                        key={task}
+                        type="button"
+                        onClick={() => toggleProtocolTask(task)}
+                        disabled={isIncompleteVisit || submitting}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          fontSize: 13,
+                          fontWeight: 700,
+                          textAlign: "left",
+                          cursor: "pointer",
+                          background: checked ? D.green + "18" : D.input,
+                          color: checked ? D.green : D.text,
+                          border: `1px solid ${checked ? D.green : D.border}`,
+                        }}
+                      >
+                        {checked ? "\u2713 " : ""}
+                        {task.replace(/_/g, " ")}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {defaultProtocolProducts.length > 0 && (
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, color: undispositionedDefaultProtocolProducts.length ? D.red : D.muted, lineHeight: 1.4 }}>
+                    Mark each default protocol product as applied in product actuals or skipped below.
+                  </div>
+                  {defaultProtocolProducts.slice(0, 6).map((product) => {
+                    const key = protocolProductKey(product);
+                    const skipped = !!skippedProtocolProducts[key];
+                    return (
+                      <div key={key} style={{ display: "grid", gridTemplateColumns: "96px 1fr", gap: 8, alignItems: "center" }}>
+                        <button
+                          type="button"
+                          onClick={() => updateSkippedProtocolProduct(product, !skipped)}
+                          style={{
+                            height: 36,
+                            borderRadius: 8,
+                            border: `1px solid ${skipped ? D.red : D.border}`,
+                            background: skipped ? D.red + "12" : D.input,
+                            color: skipped ? D.red : D.text,
+                            fontSize: 12,
+                            fontWeight: 800,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {skipped ? "Skipped" : "Applied"}
+                        </button>
+                        <input
+                          value={skippedProtocolProducts[key]?.reason || ""}
+                          onChange={(e) => updateSkippedProtocolProduct(product, true, e.target.value)}
+                          placeholder={`${product.productName} skip reason`}
+                          disabled={!skipped}
+                          style={{ ...inputStyle, margin: 0, opacity: skipped ? 1 : 0.55 }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
           {calibrationRequired && (
@@ -8682,7 +9490,10 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add observation...</option>
-                {CHIP_OBSERVATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_OBSERVATIONS_HORTICULTURAL
+                  : CHIP_OBSERVATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -8700,7 +9511,10 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add recommendation...</option>
-                {CHIP_RECOMMENDATIONS.map((chip) => (
+                {(usesPlantHealthChips
+                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
+                  : CHIP_RECOMMENDATIONS_PEST
+                ).map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -9559,7 +10373,8 @@ export function CompletionPanel({
               tankCleanoutCompletionBlocked ||
               blackoutCompletionBlocked ||
               nLimitCompletionBlocked ||
-              managerApprovalCompletionBlocked
+              managerApprovalCompletionBlocked ||
+              protocolActualsCompletionBlocked
             }
             style={{
               ...btnBase,
@@ -9574,7 +10389,8 @@ export function CompletionPanel({
                 tankCleanoutCompletionBlocked ||
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||
-                managerApprovalCompletionBlocked
+                managerApprovalCompletionBlocked ||
+                protocolActualsCompletionBlocked
                   ? 0.6
                   : 1,
               flexDirection: "column",

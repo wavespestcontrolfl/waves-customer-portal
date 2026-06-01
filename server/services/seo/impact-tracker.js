@@ -44,7 +44,18 @@ const LIFT_POSITION_REGRESSED = -3;
 const LIFT_CLICKS_REGRESSED_PCT = -25;
 const REGRESSION_PAUSE_THRESHOLD = 3;
 
+// AEO visibility feedback loop (aeo_gap rows only).
+const AEO_REPROBE_DAYS = 21;        // wait this many days post-deploy before judging
+const AEO_MIN_OBSERVATIONS = 5;     // distinct post-deploy probe-days needed for a verdict
+
 // ── pure verdict core ───────────────────────────────────────────────
+
+// Pure: did Waves start getting cited after the page went live?
+function aeoVerdict({ observedDays, wavesHitDays, minObservations = AEO_MIN_OBSERVATIONS }) {
+  if (observedDays < minObservations) return { verdict: 'insufficient_data', nowCited: null };
+  const nowCited = wavesHitDays > 0;
+  return { verdict: nowCited ? 'now_cited' : 'still_absent', nowCited };
+}
 
 function median(nums) {
   const xs = nums.filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
@@ -184,13 +195,20 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
 
   const measurementStart = etDateString(addETDays(deployedAt, DEPLOY_LAG_DAYS));
 
-  const bucket = runId ? await bucketForRun(database, runId) : null;
+  const ctx = runId ? await aeoContextForRun(database, runId) : { bucket: null, city: null, service: null };
+  const bucket = ctx.bucket;
+  // For aeo_gap rows, capture which managed mention queries to watch after the
+  // deploy so the daily feedback check can tell if Waves started getting cited.
+  const aeoQueryIds = bucket === 'aeo_gap'
+    ? await aeoQueryIdsForCityService(database, ctx.city, ctx.service).catch(() => [])
+    : null;
 
   const [row] = await database('content_optimization_impact')
     .insert({
       run_id: runId || null,
       page_url: pageUrl,
       bucket,
+      aeo_query_ids: aeoQueryIds ? JSON.stringify(aeoQueryIds) : null,
       deployed_at: deployedAt,
       measurement_start: measurementStart,
       baseline_start_date: startDate,
@@ -209,14 +227,28 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
   return row;
 }
 
-async function bucketForRun(database, runId) {
+async function aeoContextForRun(database, runId) {
   try {
     const row = await database('autonomous_runs as r')
       .leftJoin('opportunity_queue as q', 'r.opportunity_id', 'q.id')
       .where('r.id', runId)
-      .first('q.bucket as bucket');
-    return row?.bucket || null;
-  } catch { return null; }
+      .first('q.bucket as bucket', 'q.city as city', 'q.service as service');
+    return { bucket: row?.bucket || null, city: row?.city || null, service: row?.service || null };
+  } catch { return { bucket: null, city: null, service: null }; }
+}
+
+// Managed mention-query ids for an opportunity's city×service. The miner stores
+// the normalized service ('pest'); the managed query stores the human label
+// ('pest control'), so match by prefix (pest→'pest control', lawn→'lawn care',
+// termite/mosquito/rodent are identical). City is already normalized on both.
+async function aeoQueryIdsForCityService(database, city, service) {
+  if (!city || !service) return [];
+  const rows = await database('seo_llm_mention_queries')
+    .where('active', true)
+    .whereRaw('lower(city) = ?', [String(city).toLowerCase()])
+    .whereRaw('lower(service) like ?', [`${String(service).toLowerCase()}%`])
+    .select('id');
+  return rows.map((r) => r.id);
 }
 
 // Find live runs with no impact row yet and snapshot their baseline.
@@ -430,16 +462,72 @@ async function pausedBuckets({ db: database = db } = {}) {
   }
 }
 
+/**
+ * AEO visibility feedback loop. For aeo_gap rows that deployed ≥ AEO_REPROBE_DAYS
+ * ago and haven't been checked, look at the answer-engine observations the daily
+ * prober has recorded for the watched queries SINCE the deploy, and record
+ * whether Waves started getting cited. Reuses existing seo_llm_mentions data —
+ * fires no new probes.
+ */
+async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) {
+  let checked = 0;
+  let pending = [];
+  try {
+    pending = await database('content_optimization_impact')
+      .where('bucket', 'aeo_gap')
+      .whereNull('aeo_checked_at')
+      .where('deployed_at', '<=', addETDays(now, -AEO_REPROBE_DAYS))
+      .select('id', 'aeo_query_ids', 'deployed_at');
+  } catch (err) {
+    logger.warn(`[impact-tracker] checkAeoVisibility query failed: ${err.message}`);
+    return { checked: 0 };
+  }
+
+  for (const row of pending) {
+    try {
+      let ids = [];
+      try { ids = Array.isArray(row.aeo_query_ids) ? row.aeo_query_ids : JSON.parse(row.aeo_query_ids || '[]'); } catch { ids = []; }
+
+      let observedDays = 0;
+      let wavesHitDays = 0;
+      if (ids.length) {
+        const obs = await database('seo_llm_mentions')
+          .whereIn('query_id', ids)
+          .where('check_date', '>=', etDateString(row.deployed_at))
+          .select('check_date', 'waves_mentioned');
+        const days = new Map(); // date → any waves hit that day
+        for (const o of obs) {
+          const d = String(o.check_date).slice(0, 10);
+          days.set(d, (days.get(d) || false) || !!o.waves_mentioned);
+        }
+        observedDays = days.size;
+        wavesHitDays = Array.from(days.values()).filter(Boolean).length;
+      }
+
+      const { verdict, nowCited } = aeoVerdict({ observedDays, wavesHitDays });
+      await database('content_optimization_impact')
+        .where('id', row.id)
+        .update({ aeo_checked_at: now, aeo_now_cited: nowCited, aeo_verdict: verdict, updated_at: now });
+      checked++;
+    } catch (err) {
+      logger.warn(`[impact-tracker] checkAeoVisibility row ${row.id} failed: ${err.message}`);
+    }
+  }
+  if (checked) logger.info(`[impact-tracker] AEO visibility: checked ${checked} aeo_gap row(s)`);
+  return { checked };
+}
+
 module.exports = {
   computeVerdict,
   snapshotBaseline,
+  checkAeoVisibility,
   sweepNewlyLive,
   checkPending,
   pausedBuckets,
   // exposed for tests / reuse
   aggregatePageMetrics,
   selectControlPages,
-  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl },
+  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,

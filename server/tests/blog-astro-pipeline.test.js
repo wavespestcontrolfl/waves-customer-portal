@@ -16,6 +16,8 @@ jest.mock('../services/content-astro/github-client', () => ({
   getPr: jest.fn(),
   mergePr: jest.fn(),
   deleteFile: jest.fn(),
+  closePr: jest.fn(),
+  deleteRef: jest.fn(),
 }));
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
@@ -152,6 +154,36 @@ describe('blog Astro frontmatter validation', () => {
     expect(result.ok).toBe(false);
     expect(result.errors.join('\n')).toMatch(/category must be one of/);
     expect(result.errors.join('\n')).toMatch(/post_type must be one of/);
+  });
+
+  // The validator is ajv-backed (draft-2020); these lock the human-readable
+  // error contract callers/UX depend on through the ajv→message mapping.
+  test('reports a missing required field', () => {
+    const fm = validFrontmatter();
+    delete fm.title;
+    const result = validateBlogFrontmatter(fm);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/title is required/);
+  });
+
+  test('rejects an unknown top-level field (additionalProperties:false)', () => {
+    const result = validateBlogFrontmatter(validFrontmatter({ bogus_field: 'x' }));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/bogus_field is not allowed/);
+  });
+
+  test('reports a meta_description over the max length', () => {
+    const result = validateBlogFrontmatter(validFrontmatter({ meta_description: 'x'.repeat(200) }));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/meta_description must be at most \d+ characters/);
+  });
+
+  test('reports a nested field error with a dotted path (author.bio_url)', () => {
+    const result = validateBlogFrontmatter(validFrontmatter({
+      author: { name: 'Adam Benetti', role: 'Owner', fdacs_license: 'JB1234', years_swfl: 10, bio_url: 12345 },
+    }));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toMatch(/author\.bio_url must be string/);
   });
 
   test('maps pest-family legacy tags to the required pest-control category', async () => {
@@ -314,7 +346,7 @@ describe('blog Astro frontmatter validation', () => {
 
     expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-ant-trails-bradenton-/));
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/ant-trails-bradenton.md',
+      path: 'src/content/blog/ant-trails-bradenton.mdx',
       content: expect.stringContaining('Waves Pest Control guidance'),
       message: 'feat(blog): publish ant-trails-bradenton',
       sha: undefined,
@@ -455,7 +487,7 @@ describe('Astro publisher autonomous draft adapter', () => {
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
     });
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/autonomous-ant-control-bradenton.md',
+      path: 'src/content/blog/autonomous-ant-control-bradenton.mdx',
       branch: expect.stringMatching(/^content\/autonomous-autonomous-ant-control-bradenton-/),
       sha: undefined,
     }));
@@ -463,6 +495,44 @@ describe('Astro publisher autonomous draft adapter', () => {
       title: 'Blog: Autonomous Ant Control in Bradenton',
     }));
     expect(gh.createIssueComment).toHaveBeenCalledWith(42, expect.stringContaining('@codex review'));
+  });
+
+  test('migrates a legacy .md post to .mdx instead of writing components into Markdown', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    // .mdx does not exist yet; the legacy .md does.
+    gh.getFile.mockImplementation(async (path) =>
+      path.endsWith('.mdx')
+        ? null
+        : { sha: 'legacy-md-sha', path, content: '---\ntitle: Old\n---\nold body' }
+    );
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.deleteFile.mockResolvedValue({});
+    gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77' });
+    gh.createIssueComment.mockResolvedValue({});
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({
+          slug: '/legacy-ant-post/',
+          canonical: 'https://www.wavespestcontrol.com/legacy-ant-post/',
+        }),
+        body: 'Updated guidance.\n\n<SeasonalPressureChart />',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    // Writes the .mdx (no sha — it is a new file), not the legacy .md.
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/legacy-ant-post.mdx',
+      sha: undefined,
+    }));
+    // Deletes the superseded .md so we never leave both.
+    expect(gh.deleteFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/legacy-ant-post.md',
+      sha: 'legacy-md-sha',
+    }));
   });
 
   test('declines unsupported autonomous action types', () => {
@@ -612,6 +682,43 @@ describe('Pages poll merged-to-live transition', () => {
   });
 });
 
+describe('Pages poll deploy-match window (deploymentMatchesMergedPost)', () => {
+  // No commit SHA on either side → the timestamp-window fallback applies.
+  const noShaDeploy = (createdOn) => ({
+    environment: 'production',
+    latest_stage: { name: 'deploy', status: 'success' },
+    stages: [{ name: 'deploy', status: 'success' }],
+    created_on: createdOn,
+    deployment_trigger: { metadata: { branch: 'main' } }, // no commit hash
+  });
+  const post = { astro_merged_at: '2026-05-08T13:00:00.000Z' }; // no astro_commit_sha
+
+  test('matches a production deploy shortly after the merge', () => {
+    expect(PagesPoll.deploymentMatchesMergedPost(noShaDeploy('2026-05-08T13:05:00.000Z'), post)).toBe(true);
+  });
+
+  test('does NOT match a production deploy hours after the merge (upper-bounded window)', () => {
+    // Previously this matched (lower-bound-only) and could flip a post live off
+    // an unrelated later merge's deployment.
+    expect(PagesPoll.deploymentMatchesMergedPost(noShaDeploy('2026-05-08T15:00:00.000Z'), post)).toBe(false);
+  });
+
+  test('does NOT match a production deploy well before the merge', () => {
+    expect(PagesPoll.deploymentMatchesMergedPost(noShaDeploy('2026-05-08T12:00:00.000Z'), post)).toBe(false);
+  });
+
+  test('still matches strictly by commit SHA when both sides have one (window irrelevant)', () => {
+    const deploy = {
+      environment: 'production',
+      latest_stage: { name: 'deploy', status: 'success' },
+      stages: [{ name: 'deploy', status: 'success' }],
+      created_on: '2026-05-09T20:00:00.000Z', // hours later — but SHA matches
+      deployment_trigger: { metadata: { branch: 'main', commit_hash: 'merge-sha' } },
+    };
+    expect(PagesPoll.deploymentMatchesMergedPost(deploy, { astro_merged_at: '2026-05-08T13:00:00.000Z', astro_commit_sha: 'merge-sha' })).toBe(true);
+  });
+});
+
 describe('Content scheduler scheduling timezone handling', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -737,5 +844,263 @@ describe('Astro publisher hero image republish', () => {
       astro_status: 'pr_open',
       astro_pr_number: 123,
     }));
+  });
+
+  test('blocks a legacy post that ships a hardcoded price (P0 guardrail) before opening a PR', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,eA==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      // Hardcoded monthly price with no calculator/quote framing — a P0 the
+      // legacy publish path previously shipped (only schema validation ran).
+      content: '## Pricing\n\nOur pest control plan is just $39/month for year-round protection. Sign up today and never see an ant again.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+    // Marked publish_failed (consistent with schema-invalid handling) so the
+    // author can fix the body and retry.
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
+  });
+
+  test('hub-only post with literal "Waves Pest Control" branding publishes (not treated as multi-domain)', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'], // sole hub domain — hub-only
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,eA==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments and exterior sealing.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    // Literal brand on a hub-only post is allowed — it must NOT be blocked.
+    expect(gh.createPr).toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open' }));
+  });
+
+  test('blocks a legacy rodent post (topic on `tag`) that ships an FAQ section', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Keeping Rats Out of Bradenton Homes',
+      slug: 'rats-out-of-bradenton-homes',
+      meta_description: 'Bradenton homeowners can use this guide to spot early rodent activity, seal entry points, and know when professional rodent control is worth calling.',
+      keyword: 'rodent control Bradenton',
+      category: 'pest-control', // broad Astro category…
+      tag: 'Rodents', // …real topic lives on `tag`
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,eA==',
+      hero_image_alt: 'Rodent exclusion around a Bradenton home',
+      content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
+  });
+
+  test('blocks a literal-brand post with empty target_sites (renders on ALL spokes, not hub-only)', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: [], // empty → publishes to ALL 15 domains (backward-compat)
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,eA==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      // Literal brand would leak across every spoke domain — must use {{brandName}}.
+      content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
+  });
+});
+
+describe('Astro publisher idempotency guard', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test.each(['pr_open', 'unpublish_pending'])(
+    'refuses to open a second PR when one is already in flight (status %s)',
+    async (status) => {
+      const post = {
+        id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+        astro_status: status, astro_pr_number: 99,
+      };
+      const read = chain({ first: jest.fn().mockResolvedValue(post) });
+      db.mockImplementation(() => read);
+
+      await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/already in flight/);
+      // No fresh branch/PR cut, and no status write — so the existing PR isn't orphaned.
+      expect(gh.createBranch).not.toHaveBeenCalled();
+      expect(gh.createPr).not.toHaveBeenCalled();
+      expect(read.update).not.toHaveBeenCalled();
+    },
+  );
+
+  test('build_failed retry closes + deletes the stale PR/branch before republishing (no orphan)', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'build_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'open', merged: false });
+
+    // Fails later (minimal post isn't schema-valid, no gh publish mocks), but
+    // NOT with the in-flight error — the retry is allowed and cleanup runs first.
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+  });
+
+  test('build_failed retry does not close an already-merged/closed PR', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'build_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'closed', merged: true });
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+    expect(gh.closePr).not.toHaveBeenCalled();
+    // The branch is still deleted (a stale ref left from the failed build).
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+  });
+
+  test('allows republish from a non-in-flight status (e.g. publish_failed)', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'publish_failed', astro_pr_number: null,
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    // It fails downstream (this minimal post isn't schema-valid and no gh mocks
+    // are set up), but crucially NOT with the in-flight guard error — proving a
+    // publish_failed post is allowed to retry rather than being blocked.
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toThrow(/already in flight/);
+  });
+});
+
+describe('Pages poll auto-merge per-tick cap', () => {
+  const originalEnv = {
+    CF_API_TOKEN: process.env.CF_API_TOKEN,
+    CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
+    CF_PAGES_PROJECT: process.env.CF_PAGES_PROJECT,
+    cap: process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL,
+  };
+
+  function previewDeployment(branch) {
+    return {
+      environment: 'preview',
+      url: `https://${branch.replace(/[^a-z0-9]/gi, '-')}.preview.pages.dev`,
+      latest_stage: { name: 'deploy', status: 'success' },
+      stages: [{ name: 'deploy', status: 'success' }],
+      deployment_trigger: { metadata: { branch } },
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.CF_API_TOKEN = 'test-token';
+    process.env.CF_ACCOUNT_ID = 'test-account';
+    process.env.CF_PAGES_PROJECT = 'test-project';
+    delete process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL; // default = 2
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    delete global.fetch;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (key === 'cap') continue;
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+    if (originalEnv.cap == null) delete process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL;
+    else process.env.AUTONOMOUS_CONTENT_MAX_AUTO_MERGES_PER_POLL = originalEnv.cap;
+  });
+
+  test('merges only up to the cap per tick and defers the rest to the next tick', async () => {
+    const posts = ['b1', 'b2', 'b3'].map((b, i) => ({
+      id: `post-${i + 1}`, slug: `slug-${i + 1}`,
+      astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: b,
+    }));
+    // Every db() call: the pending select returns all three; per-post updates no-op.
+    db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue(posts) }));
+    mockCloudflareDeploymentList(posts.map((p) => previewDeployment(p.astro_branch_name)));
+    const mergeSpy = jest.spyOn(AstroPublisher, 'mergeAstro').mockResolvedValue({ merged: true });
+
+    const result = await PagesPoll.pollPending();
+
+    // Default cap = 2: first two merge, third defers.
+    expect(mergeSpy).toHaveBeenCalledTimes(2);
+    expect(result.autoMerges).toBe(2);
+    expect(result.deferred).toBe(1);
+    const deferred = result.results.filter((r) => r.mergeDeferred);
+    expect(deferred).toHaveLength(1);
   });
 });

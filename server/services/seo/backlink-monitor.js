@@ -315,51 +315,15 @@ class BacklinkMonitor {
   }
 
   /**
-   * Check LLM mentions of Waves Pest Control.
+   * Check LLM mentions of Waves across all answer engines.
+   * Delegates to the multi-platform prober (ChatGPT/Gemini/Claude/AI Overview);
+   * kept here so the existing /backlinks/llm-mentions button stays wired.
    */
   async checkLLMMentions() {
-    const queries = [
-      'best pest control bradenton florida',
-      'pest control sarasota fl reviews',
-      'lawn care service lakewood ranch',
-      'termite inspection bradenton',
-      'mosquito control southwest florida',
-    ];
-
-    // Use DataForSEO LLM Mentions API if available
-    for (const query of queries) {
-      try {
-        const data = await dataforseo.request('/serp/google/ai_overview/live/advanced', [{
-          keyword: query,
-          location_name: 'Bradenton,Florida,United States',
-          language_name: 'English',
-        }]);
-
-        const items = data?.tasks?.[0]?.result?.[0]?.items || [];
-        const aio = items.find(i => i.type === 'ai_overview');
-
-        if (aio) {
-          const text = JSON.stringify(aio).toLowerCase();
-          const wavesMentioned = text.includes('waves pest') || text.includes('wavespestcontrol');
-          const competitors = [];
-          ['turner pest', 'hoskins', 'orkin', 'terminix', 'truly nolen', 'hometeam'].forEach(c => {
-            if (text.includes(c)) competitors.push({ name: c });
-          });
-
-          await db('seo_llm_mentions').insert({
-            llm_platform: 'google_ai_overview',
-            query,
-            mention_context: wavesMentioned ? text.substring(0, 500) : null,
-            waves_mentioned: wavesMentioned,
-            competitors_mentioned: JSON.stringify(competitors),
-            sentiment: wavesMentioned ? 'positive' : 'neutral',
-            check_date: etDateString(),
-          });
-        }
-      } catch { /* non-critical */ }
-    }
-
+    const prober = require('./llm-mention-prober');
+    const result = await prober.runDaily();
     logger.info('LLM mentions check complete');
+    return result;
   }
 
   /**

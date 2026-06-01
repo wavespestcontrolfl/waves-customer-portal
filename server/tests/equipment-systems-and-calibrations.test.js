@@ -45,6 +45,9 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
       'test_area_sqft', 'captured_gallons',
       'pressure_psi', 'engine_rpm_setting',
       'swath_width_ft', 'pass_time_seconds',
+      'verified_at', 'verified_by_technician_id',
+      'verified_test_area_sqft', 'verified_captured_gallons',
+      'verification_notes', 'previous_calibration_status',
       'calibrated_at', 'expires_at', 'active',
       'notes', 'created_at', 'updated_at',
     ];
@@ -56,15 +59,13 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
   });
 
   // ── Seed data ─────────────────────────────────────────────────────────
-  test('5 spray rigs are seeded and active', async () => {
+  test('3 spray systems are seeded and active', async () => {
     const systems = await knex('equipment_systems').where({ active: true }).orderBy('name');
     const names = systems.map((s) => s.name);
     expect(names).toEqual(
       expect.arrayContaining([
         '110-Gallon Spray Tank #1',
-        '110-Gallon Spray Tank #2',
-        'FlowZone Typhoon 2.5 #1',
-        'FlowZone Typhoon 2.5 #2',
+        'Udor KAPPA-18/12V-HP + 110-gal tank #2 - Lawn Gun',
         'FlowZone Typhoon Backpack',
       ])
     );
@@ -74,9 +75,9 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
     expect(parseFloat(tank1.tank_capacity_gal)).toBe(110);
     expect(tank1.system_type).toBe('tank');
 
-    const fz1 = systems.find((s) => s.name === 'FlowZone Typhoon 2.5 #1');
-    expect(parseFloat(fz1.tank_capacity_gal)).toBe(4);
-    expect(fz1.system_type).toBe('backpack');
+    const flowzone = systems.find((s) => s.name === 'FlowZone Typhoon Backpack');
+    expect(parseFloat(flowzone.tank_capacity_gal)).toBe(4);
+    expect(flowzone.system_type).toBe('backpack');
   });
 
   // ── FK + cascade ──────────────────────────────────────────────────────
@@ -146,7 +147,7 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
   // load-bearing, not a no-op.
   test('partial unique index would reject reactivating a stale row', async () => {
     const tank2 = await knex('equipment_systems')
-      .where({ name: '110-Gallon Spray Tank #2' })
+      .where({ name: 'Udor KAPPA-18/12V-HP + 110-gal tank #2 - Lawn Gun' })
       .first();
 
     const created = [];
@@ -174,8 +175,8 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
 
   // ── Multiple historical calibrations per system ───────────────────────
   test('can store calibration history (multiple rows, one active)', async () => {
-    const fz1 = await knex('equipment_systems')
-      .where({ name: 'FlowZone Typhoon 2.5 #1' })
+    const flowzone = await knex('equipment_systems')
+      .where({ name: 'FlowZone Typhoon Backpack' })
       .first();
 
     const created = [];
@@ -183,7 +184,7 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
       // Insert 3 historical (inactive) and 1 current (active).
       for (let i = 0; i < 3; i++) {
         const [r] = await knex('equipment_calibrations').insert({
-          equipment_system_id: fz1.id,
+          equipment_system_id: flowzone.id,
           carrier_gal_per_1000: 0.9 + i * 0.05,
           active: false,
           calibrated_at: new Date(Date.now() - (i + 1) * 30 * 24 * 60 * 60 * 1000),
@@ -191,14 +192,14 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
         created.push(r.id);
       }
       const [active] = await knex('equipment_calibrations').insert({
-        equipment_system_id: fz1.id,
+        equipment_system_id: flowzone.id,
         carrier_gal_per_1000: 1.0,
         active: true,
       }).returning(['id']);
       created.push(active.id);
 
       const all = await knex('equipment_calibrations')
-        .where({ equipment_system_id: fz1.id })
+        .where({ equipment_system_id: flowzone.id })
         .orderBy('calibrated_at', 'desc');
       expect(all.length).toBe(4);
 

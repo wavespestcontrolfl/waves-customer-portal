@@ -23,7 +23,7 @@ const {
   formatTechnicianForCustomer,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
-const { parseETDateTime } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 let PhotoService = null;
 try {
@@ -117,6 +117,85 @@ function methodFromProduct(product, serviceLine) {
   if (serviceLine === 'palm' || serviceLine === 'tree_shrub') return 'foliar_spray';
   if (serviceLine === 'rodent' || serviceLine === 'termite') return 'station_check';
   return 'perimeter_spray';
+}
+
+function inferCatalogProductType(product = {}) {
+  if (product.product_type) return product.product_type;
+  const category = String(product.category || product.product_category || '').toLowerCase();
+  if (/(herbicide|insecticide|fungicide|pgr|growth)/.test(category)) return 'pesticide';
+  if (category.includes('fertilizer')) return 'fertilizer';
+  if (category.includes('wetting')) return 'wetting_agent';
+  if (category.includes('bio')) return 'biostimulant';
+  return 'other';
+}
+
+function validCatalogEpaReg(value) {
+  const text = String(value || '').trim();
+  return !!text && !/^(n\/a|not epa|not epa-registered fertilizer|none)$/i.test(text);
+}
+
+function approvedReportProductFacts(catalog = {}) {
+  if (!catalog || !catalog.approved_for_service_report) return null;
+  const productType = inferCatalogProductType(catalog);
+  if (productType === 'pesticide' && !validCatalogEpaReg(catalog.epa_reg_number)) return null;
+  return {
+    productType,
+    name: catalog.name || null,
+    category: catalog.category || null,
+    activeIngredient: catalog.active_ingredient || null,
+    epaRegNumber: productType === 'pesticide' ? catalog.epa_reg_number : null,
+    publicSummary: catalog.public_summary || catalog.portal_summary || null,
+    serviceReportSummary: catalog.service_report_summary || catalog.public_summary || catalog.portal_summary || null,
+    precautionSummary: catalog.customer_precaution_summary || catalog.customer_safety_summary || catalog.pet_kid_guidance_text || null,
+    reentrySummary: catalog.reentry_summary || catalog.reentry_text || null,
+    labelVerifiedAt: catalog.label_verified_at || null,
+    labelVersion: catalog.label_version || null,
+  };
+}
+
+async function attachApprovedReportProductFacts(knex, products = []) {
+  const productIds = [...new Set((products || []).map((product) => product.product_id).filter(Boolean))];
+  if (!productIds.length) return products;
+  let catalogRows = [];
+  try {
+    catalogRows = await knex('products_catalog')
+      .whereIn('id', productIds)
+      .select(
+        'id',
+        'name',
+        'category',
+        'product_type',
+        'active_ingredient',
+        'epa_reg_number',
+        'public_summary',
+        'portal_summary',
+        'service_report_summary',
+        'customer_safety_summary',
+        'customer_precaution_summary',
+        'pet_kid_guidance_text',
+        'reentry_text',
+        'reentry_summary',
+        'label_verified_at',
+        'label_version',
+        'approved_for_service_report',
+      );
+  } catch {
+    return products;
+  }
+  const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
+  return products.map((product) => {
+    const catalog = catalogById.get(String(product.product_id || ''));
+    const facts = approvedReportProductFacts(catalog);
+    if (!facts) return product;
+    return {
+      ...product,
+      product_name: product.product_name || facts.name,
+      product_category: product.product_category || facts.category,
+      active_ingredient: product.active_ingredient || facts.activeIngredient,
+      epa_reg_number: product.epa_reg_number || facts.epaRegNumber,
+      approved_report_product_facts: facts,
+    };
+  });
 }
 
 function numberOrNull(value) {
@@ -1088,6 +1167,187 @@ function hasLawnAssessmentCustomerSignal(lawnAssessment) {
   return Object.values(recommendations).some((value) => String(value || '').trim());
 }
 
+function lawnProgramFallbackContext() {
+  return {
+    linked: false,
+    title: 'Your Waves Lawn Care Program Overview',
+    contextCopy: 'This lawn service report documents what was actually inspected and completed during today\'s visit.',
+    distinctionCopy: 'The program overview explains what may be used through the season. This service report documents what was actually done today.',
+  };
+}
+
+function outlineCandidateEstimateIds(service = {}, scheduledService = {}, structured = {}, serviceData = {}) {
+  return uniqueStrings([
+    service.estimate_id,
+    service.estimateId,
+    service.source_estimate_id,
+    service.sourceEstimateId,
+    scheduledService?.source_estimate_id,
+    scheduledService?.sourceEstimateId,
+    scheduledService?.estimate_id,
+    scheduledService?.estimateId,
+    structured.estimateId,
+    structured.estimate_id,
+    structured.sourceEstimateId,
+    structured.source_estimate_id,
+    serviceData.estimateId,
+    serviceData.estimate_id,
+    serviceData.sourceEstimateId,
+    serviceData.source_estimate_id,
+  ]);
+}
+
+function outlineTurfLabel(row = {}) {
+  const summary = parseJsonObject(row.summary_json);
+  const content = parseJsonObject(row.content_json);
+  return summary.turfLabel
+    || summary.turfTypeLabel
+    || content?.property?.turfTypeLabel
+    || content?.property?.turfType
+    || row.turf_type
+    || null;
+}
+
+function outlineProductCardCount(row = {}) {
+  const summary = parseJsonObject(row.summary_json);
+  const content = parseJsonObject(row.content_json);
+  if (Number.isFinite(Number(summary.productCardCount))) return Number(summary.productCardCount);
+  if (Array.isArray(content.productCards)) return content.productCards.length;
+  if (Array.isArray(content.product_cards)) return content.product_cards.length;
+  return 0;
+}
+
+function outlineIsoDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return etDateString(date);
+}
+
+function outlineReportReferenceAt(service = {}, scheduledService = {}, structured = {}, serviceData = {}) {
+  return firstValidTimestamp(
+    service.completed_at,
+    service.actual_end_time,
+    service.check_out_time,
+    service.ended_at,
+    structured.serviceCompletedAt,
+    structured.service_completed_at,
+    serviceData.serviceCompletedAt,
+    serviceData.service_completed_at,
+    scheduledService?.completed_at,
+    scheduledService?.actual_end_time,
+    scheduledService?.check_out_time,
+    service.started_at,
+    service.actual_start_time,
+    service.check_in_time,
+    structured.serviceStartedAt,
+    structured.service_started_at,
+    serviceData.serviceStartedAt,
+    serviceData.service_started_at,
+    scheduledService?.started_at,
+    scheduledService?.actual_start_time,
+    scheduledService?.check_in_time,
+    service.service_date ? `${service.service_date}T23:59:59` : null,
+    scheduledService?.service_date ? `${scheduledService.service_date}T23:59:59` : null,
+  );
+}
+
+function selectOutlinePacketColumns(query) {
+  return query.select(
+    'id',
+    'title',
+    'status',
+    'turf_type',
+    'estimate_id',
+    'sent_at',
+    'approved_at',
+    'created_at',
+    'first_viewed_at',
+    'last_viewed_at',
+    'view_count',
+    'content_library_version',
+    'protocol_version',
+    'product_registry_version',
+    'template_version',
+    'summary_json',
+    'content_json',
+  );
+}
+
+function orderOutlinePacketsByReferenceDate(query) {
+  return query.orderByRaw('COALESCE(sent_at, approved_at, created_at) DESC');
+}
+
+async function loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService = null) {
+  if (serviceLine !== 'lawn') return null;
+  const fallback = lawnProgramFallbackContext();
+  const structured = parseJsonObject(service.structured_notes);
+  const serviceData = parseJsonObject(service.service_data);
+  const customerId = service.customer_id || service.customerId || scheduledService?.customer_id || null;
+  const estimateIds = outlineCandidateEstimateIds(service, scheduledService, structured, serviceData);
+  const reportReferenceAt = outlineReportReferenceAt(service, scheduledService, structured, serviceData);
+  if (!customerId && !estimateIds.length) return fallback;
+
+  let row = null;
+  try {
+    const baseQuery = () => knex('service_outline_packets')
+      .where({ service_line: 'lawn_care' })
+      .whereNull('revoked_at')
+      .whereIn('status', ['approved', 'sent', 'viewed']);
+
+    const probe = baseQuery();
+    if (!probe || typeof probe.whereNull !== 'function' || typeof probe.whereIn !== 'function') return fallback;
+
+    if (estimateIds.length) {
+      let estimateQuery = baseQuery().whereIn('estimate_id', estimateIds);
+      if (reportReferenceAt && typeof estimateQuery.whereRaw === 'function') {
+        estimateQuery = estimateQuery.whereRaw('COALESCE(sent_at, approved_at, created_at) <= ?', [reportReferenceAt]);
+      }
+      row = await orderOutlinePacketsByReferenceDate(selectOutlinePacketColumns(estimateQuery))
+        .first();
+    }
+
+    if (!row && customerId) {
+      let fallbackQuery = baseQuery().where({ customer_id: customerId });
+      if (reportReferenceAt && typeof fallbackQuery.whereRaw === 'function') {
+        fallbackQuery = fallbackQuery.whereRaw('COALESCE(sent_at, approved_at, created_at) <= ?', [reportReferenceAt]);
+      }
+      row = await orderOutlinePacketsByReferenceDate(selectOutlinePacketColumns(fallbackQuery)).first();
+    }
+  } catch {
+    return fallback;
+  }
+
+  if (!row) return fallback;
+  const referenceAt = row.sent_at || row.approved_at || row.created_at || null;
+  const contextVerb = row.sent_at ? 'sent' : (row.approved_at ? 'approved' : 'created');
+  const referenceDate = outlineIsoDate(referenceAt);
+  const datePhrase = referenceDate ? ` ${contextVerb} on ${referenceDate}` : '';
+
+  return {
+    linked: true,
+    packetId: row.id,
+    estimateId: row.estimate_id || null,
+    title: row.title || fallback.title,
+    status: row.status || null,
+    sentAt: row.sent_at || null,
+    approvedAt: row.approved_at || null,
+    createdAt: row.created_at || null,
+    referenceAt,
+    contextVerb,
+    viewedAt: row.last_viewed_at || row.first_viewed_at || null,
+    viewCount: Number(row.view_count || 0),
+    turfType: outlineTurfLabel(row),
+    productCardCount: outlineProductCardCount(row),
+    contentLibraryVersion: row.content_library_version || null,
+    protocolVersion: row.protocol_version || null,
+    productRegistryVersion: row.product_registry_version || null,
+    templateVersion: row.template_version || null,
+    contextCopy: `This visit follows the Waves Lawn Care Program Overview${datePhrase}.`,
+    distinctionCopy: fallback.distinctionCopy,
+  };
+}
+
 function formatApprovedLawnSnapshot(row) {
   if (!row) return null;
   const findings = parseJsonArray(row.findings)
@@ -1382,7 +1642,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
-  const [products, geometryRow, dbZones, dbFindings, photos, scheduledService] = await Promise.all([
+  const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
@@ -1390,6 +1650,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
   ]);
+  const products = await attachApprovedReportProductFacts(knex, rawProducts);
 
   const areaLabels = locationAreaLabels([
     ...parseJsonArray(service.areas_serviced),
@@ -1425,6 +1686,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  const lawnProgramOverview = await loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService);
   const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
 
   if (!findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
@@ -1488,6 +1750,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         epa_reg: product.epa_reg_number || product.epa_reg || '',
         active_ingredient: product.active_ingredient || '',
         category: product.product_category || '',
+        product_type: product.approved_report_product_facts?.productType || null,
+        public_summary: product.approved_report_product_facts?.publicSummary || null,
+        service_report_summary: product.approved_report_product_facts?.serviceReportSummary || null,
+        precaution_summary: product.approved_report_product_facts?.precautionSummary || null,
+        reentry_summary: product.approved_report_product_facts?.reentrySummary || null,
+        label_verified_at: product.approved_report_product_facts?.labelVerifiedAt || null,
+        label_version: product.approved_report_product_facts?.labelVersion || null,
+        facts_approved: !!product.approved_report_product_facts,
       },
       method,
       methodLabel: METHOD_LABELS[method] || method.replace(/_/g, ' '),
@@ -1747,6 +2017,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     protocol,
     advisory,
     lawnAssessment,
+    lawnProgramOverview,
     photos: photoPayload,
     photoChain,
     pdfUrl: `/api/reports/${token}`,
@@ -1771,6 +2042,10 @@ module.exports = {
   taggedNoteLines,
   minutesFromElapsed,
   methodFromProduct,
+  inferCatalogProductType,
+  approvedReportProductFacts,
+  attachApprovedReportProductFacts,
+  loadLawnProgramOverviewContext,
   normalizeAdvisoryForTreatmentScope,
   buildCompletionAdvisory,
   serviceDisplayName,

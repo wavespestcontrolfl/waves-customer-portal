@@ -264,7 +264,10 @@ router.post('/autonomous/run-now', aiContentLimiter, async (req, res, next) => {
       mined = { persisted: result.persisted, counts: result.counts, errors: result.errors };
     }
 
-    const run = await runner.runNext({ minScore });
+    // run-now publishes when SHADOW_MODE_* is live, so serialize it behind the
+    // same engine lock the daily cron + CLI live run use — an admin triggering
+    // this while a batch is in flight must not race the per-day/week caps.
+    const run = await runner._withEngineLock('admin-run-now', () => runner.runNext({ minScore }));
     logger.info(`[content] manual run-now by ${req.technicianId || 'admin'}: outcome=${run.outcome} action=${run.action_type || '-'} opp=${run.opportunity_id || '-'} pr=${run.astro_pr_url || '-'}`);
     res.json({ success: true, mined, run });
   } catch (err) { next(err); }
@@ -576,7 +579,8 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[content] publish-astro failed: ${err.message}`);
-    res.status(err.code === 'BLOG_FRONTMATTER_INVALID' ? 400 : 500).json({ error: err.message, details: err.details });
+    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID' || err.code === 'BLOG_GUARDRAILS_FAILED';
+    res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   }
 });
 

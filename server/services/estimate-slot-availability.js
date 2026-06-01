@@ -836,6 +836,18 @@ function timeToMinutes(hhmm) {
   return h * 60 + m;
 }
 
+// Filter a customer-facing slot pool by time-of-day preference ('morning' |
+// 'afternoon' | 'evening' | 'any'). morning = before noon; afternoon/evening
+// fall inside the 12pm–5pm working window.
+function filterTimeOfDay(slots, timeOfDay) {
+  if (!timeOfDay || timeOfDay === 'any') return slots;
+  return (Array.isArray(slots) ? slots : []).filter((s) => {
+    const min = timeToMinutes(s.windowStart);
+    if (min == null) return true;
+    return timeOfDay === 'morning' ? min < 12 * 60 : min >= 12 * 60;
+  });
+}
+
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
@@ -897,13 +909,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     serviceProfile.selectedFrequency || 'default',
     serviceProfile.durationMinutes,
     opts.minimumLeadMinutes,
+    opts.dateFrom || 'auto',
+    opts.dateTo || 'auto',
+    opts.timeOfDay || 'any',
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {
     return { ...cached.result, metadata: { ...cached.result.metadata, cacheHit: true } };
   }
 
-  const { dateFrom, dateTo } = etDateRange(opts.windowDays);
+  // A caller-supplied explicit window (specific date or AI-parsed range)
+  // overrides the rolling windowDays lookahead.
+  const { dateFrom, dateTo } = (opts.dateFrom && opts.dateTo)
+    ? { dateFrom: opts.dateFrom, dateTo: opts.dateTo }
+    : etDateRange(opts.windowDays);
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   const coords = await resolveEstimateCoords(estimate);
 
@@ -922,11 +941,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
     const spread = spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes);
     const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
-    const selected = selectCustomerFacingSlots(filtered, TARGET_TOTAL);
+    const selected = selectCustomerFacingSlots(filterTimeOfDay(filtered, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const fallback = {
       primary,
       expander,
+      nearby: [...primary, ...expander].some((s) => s.routeOptimal),
       metadata: {
         estimateAddress: estimate.address || null,
         estimateCoords: null,
@@ -982,12 +1002,13 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // slots; that can land them on an existing booking, so re-filter once
   // more before choosing the final customer-facing list.
   const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
-  const selected = selectCustomerFacingSlots(filtered, TARGET_TOTAL);
+  const selected = selectCustomerFacingSlots(filterTimeOfDay(filtered, opts.timeOfDay), TARGET_TOTAL);
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
   const result = {
     primary,
     expander,
+    nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
       estimateAddress: estimate.address || null,
       estimateCoords: { lat: coords.lat, lng: coords.lng },
@@ -1007,6 +1028,48 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
   return result;
+}
+
+// ---------- Waves AI date/time search ----------
+
+// Natural-language slot search for the estimate page. Parses the customer's
+// free-text "when" into a date window + time-of-day, then returns the matching
+// open slots (same primary/expander shape SlotPicker already renders) plus a
+// short recap line and a `nearby` flag for the soft route-density message.
+async function findEstimateSlots(estimateId, userOpts = {}) {
+  const { parseWhen, summarizeWindow } = require('./scheduling/parse-when');
+  const query = String(userOpts.query || '').trim();
+
+  const when = await parseWhen(query, {
+    now: new Date(),
+    minDaysOut: 0,
+    maxDaysOut: 90,
+    defaultWindowDays: DEFAULT_OPTS.windowDays,
+  });
+
+  const result = await getAvailableSlots(estimateId, {
+    serviceMode: userOpts.serviceMode,
+    selectedFrequency: userOpts.selectedFrequency,
+    dateFrom: when.dateFrom,
+    dateTo: when.dateTo,
+    timeOfDay: when.timeOfDay,
+    // Widen the result set for a search — the window may span several days.
+    maxResults: 8,
+    expanderMaxResults: 4,
+  });
+
+  const primary = result.primary || [];
+  const expander = result.expander || [];
+  const nearby = result.nearby ?? [...primary, ...expander].some((s) => s.routeOptimal);
+  return {
+    summary: summarizeWindow(when, { count: primary.length + expander.length, nearby }),
+    understood: when.understood,
+    window: { date_from: when.dateFrom, date_to: when.dateTo },
+    time_of_day: when.timeOfDay,
+    nearby,
+    primary,
+    expander,
+  };
 }
 
 // ---------- admin debug variant ----------
@@ -1099,6 +1162,7 @@ function invalidateEstimate(estimateId) {
 
 module.exports = {
   getAvailableSlots,
+  findEstimateSlots,
   getSlotDebug,
   invalidateEstimate,
   resolveEstimateSlotProfile,
