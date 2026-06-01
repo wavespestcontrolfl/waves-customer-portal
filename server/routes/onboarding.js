@@ -644,9 +644,12 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
       const billingLine = billing.amount > 0
         ? `$${fmtMoney(billing.amount)}${billing.displaySuffix}`
         : `$${fmtMoney(s.monthly_rate)}/mo`;
+      const planClause = s.waveguard_tier
+        ? `${s.waveguard_tier} WaveGuard`
+        : (s.service_type || 'Service');
       await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
         `✅ New customer onboarded: ${c.first_name} ${c.last_name} at ${c.address_line1}, ${c.city}.\n` +
-        `${s.waveguard_tier || ''} WaveGuard, ${billingLine}. Card ✅.\n` +
+        `${planClause}, ${billingLine}. Card ✅.\n` +
         `First service: ${svcDate}. Gate: ${hasGate ? 'yes' : 'no'}. Pets: ${hasPets ? `yes (${prefs.pet_count})` : 'no'}.\n` +
         `Referral: ${c.referral_source || 'N/A'}.`,
         { messageType: 'internal_alert', link: '/admin/customers' },

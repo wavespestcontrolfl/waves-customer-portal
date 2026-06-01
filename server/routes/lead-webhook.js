@@ -275,6 +275,7 @@ router.post('/', async (req, res) => {
         name: `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted,
         source: leadSource.detail || leadSource.source,
         zip: customer.zip,
+        service: serviceInterest || null,
         leadId: customer.id,
       });
     } catch (e) { logger.error(`[notifications] new_lead trigger failed: ${e.message}`); }
