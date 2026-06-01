@@ -844,6 +844,20 @@ router.post('/confirm', async (req, res, next) => {
 
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        serviceRow.id,
+        custId,
+        `${slot_date}T${slot_start || '08:00'}`,
+        resolvedServiceType,
+        'booking_new',
+        { sendConfirmation: false },
+      );
+    } catch (err) {
+      logger.error(`[booking:confirm] Appointment reminder registration failed for ${serviceRow.id}: ${err.message}`);
+    }
+
     // SMS notifications (best-effort)
     try {
       const dateLabel = new Date(slot_date + 'T12:00:00').toLocaleDateString('en-US', {

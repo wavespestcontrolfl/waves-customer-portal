@@ -201,6 +201,20 @@ class AvailabilityEngine {
 
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
+    try {
+      const AppointmentReminders = require('./appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        scheduled.id,
+        customerId,
+        `${date}T${startTime || '08:00'}`,
+        serviceType,
+        'booking_new',
+        { sendConfirmation: false },
+      );
+    } catch (err) {
+      logger.error(`[availability] Appointment reminder registration failed for ${scheduled.id}: ${err.message}`);
+    }
+
     // Send SMS notifications
     try {
       const TwilioService = require('./twilio');
