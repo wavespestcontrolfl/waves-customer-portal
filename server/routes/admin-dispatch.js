@@ -1700,6 +1700,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
         waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
       }
+      // On a bypass where the tech submitted no equipment, drop the IDs that were
+      // backfilled from a stale assigned_equipment_system_id/assigned_calibration_id
+      // earlier in the handler. Otherwise the completion snapshot would persist the
+      // expired/unverified assigned system as the one applied, contradicting the
+      // bypass's intent of completing without a field-verified calibration. If the
+      // tech explicitly submitted a system, it's genuinely what they used — keep it.
+      if (calibrationBypass && !equipmentSystemId) {
+        waveguardEquipmentSystemId = null;
+        waveguardCalibrationId = null;
+      }
       // Tank cleanout attestation is required only when the tech actually
       // submitted an equipment system. We key off the raw request `equipmentSystemId`
       // — NOT the backfilled `waveguardEquipmentSystemId`, which may be repopulated
