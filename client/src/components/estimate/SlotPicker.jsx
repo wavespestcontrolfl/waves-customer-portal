@@ -10,7 +10,7 @@
  * quantification shown to customer in v1; detourMinutes carried on the
  * payload for future A/B testing.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
 
 const W = {
@@ -96,6 +96,8 @@ export default function SlotPicker({
   const [pickedDate, setPickedDate] = useState(null);
   const [pickedData, setPickedData] = useState(null);
   const [pickedLoading, setPickedLoading] = useState(false);
+  const latestPickedRequestRef = useRef(0);
+  const pickedDateInputId = useId();
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +107,8 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(null);
     setPickedData(null);
+    setPickedLoading(false);
+    latestPickedRequestRef.current += 1;
     const params = new URLSearchParams();
     params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     params.set('windowDays', '14');
@@ -150,21 +154,31 @@ export default function SlotPicker({
   };
 
   const onPickDate = async (date) => {
+    const requestId = latestPickedRequestRef.current + 1;
+    latestPickedRequestRef.current = requestId;
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
     onSelect(null);
-    if (!date) return;
+    if (!date) {
+      setPickedLoading(false);
+      return;
+    }
     setPickedLoading(true);
     try {
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
-      setPickedData(res.ok ? await res.json() : { primary: [], expander: [] });
+      const body = res.ok ? await res.json() : { primary: [], expander: [] };
+      if (latestPickedRequestRef.current !== requestId) return;
+      setPickedData(body);
     } catch {
+      if (latestPickedRequestRef.current !== requestId) return;
       setPickedData({ primary: [], expander: [] });
     } finally {
-      setPickedLoading(false);
+      if (latestPickedRequestRef.current === requestId) {
+        setPickedLoading(false);
+      }
     }
   };
 
@@ -205,10 +219,11 @@ export default function SlotPicker({
       />
       {searchData ? <div>{renderSlotList(searchData)}</div> : null}
       <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.offWhite }}>
-        <label style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
+        <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
           Can't find a date? Pick one that works for you.
         </label>
         <input
+          id={pickedDateInputId}
           type="date"
           min={browseMin}
           max={browseMax}
