@@ -1,4 +1,6 @@
 const {
+  CUSTOMER_SMS_TRIAGE_WORKFLOW,
+  classifyCustomerSmsTriageIntent,
   classifyEstimateSmsIntent,
   classifyServiceSchedulingSmsIntent,
   extractShortCode,
@@ -192,13 +194,58 @@ describe('estimate conversion agent shadow decisions', () => {
       customer: { id: 'customer-1', first_name: 'Dale' },
     });
 
-    expect(routed.workflow).toBe('estimate_conversion_sms');
-    expect(routed.decision.intent).toBeNull();
+    expect(routed.workflow).toBe(CUSTOMER_SMS_TRIAGE_WORKFLOW);
+    expect(routed.decision.intent).toBe('customer_nudge_needs_reply');
+    expect(routed.decision.metadata.scenarioLabel).toBe('customer_nudge');
+    expect(routed.decision.suggestedMessage).not.toContain('weather concern');
   });
 
   test('service scheduling classifier requires an existing customer scheduling signal', () => {
     expect(classifyServiceSchedulingSmsIntent('Wednesday morning works', {}).intent).toBeNull();
     expect(classifyServiceSchedulingSmsIntent('Thanks for the update', { customer: { id: 'customer-1' } }).intent).toBeNull();
+  });
+
+  test('triage queues customer nudges that do not match specialized workflows', () => {
+    const routed = routeEstimateOrCustomerReply('Hey Adam?', {
+      customer: { id: 'customer-1', first_name: 'Jess' },
+    });
+
+    expect(routed.workflow).toBe(CUSTOMER_SMS_TRIAGE_WORKFLOW);
+    expect(routed.decision).toMatchObject({
+      intent: 'customer_nudge_needs_reply',
+      suggestedMessage: expect.stringContaining('Hello Jess'),
+      metadata: { scenarioLabel: 'customer_nudge' },
+    });
+    expect(routed.decision.recommendedActions).toEqual(expect.arrayContaining([
+      'review_thread_context',
+      'draft_customer_reply',
+    ]));
+    expect(routed.decision.blockedActions).toContain('send_without_human_review');
+  });
+
+  test('triage captures courtesy replies as no reply needed', () => {
+    const decision = classifyCustomerSmsTriageIntent('Thank you!', {
+      customer: { id: 'customer-1', first_name: 'Dale' },
+    });
+
+    expect(decision).toMatchObject({
+      intent: 'no_reply_needed',
+      suggestedMessage: null,
+      metadata: { scenarioLabel: 'no_reply_needed', noReplyNeeded: true },
+    });
+    expect(decision.recommendedActions).toEqual(['mark_no_reply_needed']);
+  });
+
+  test('triage requires lookup for unknown senders', () => {
+    const routed = routeEstimateOrCustomerReply('Ugh, we are going to see what we can accomplish', {});
+
+    expect(routed.workflow).toBe(CUSTOMER_SMS_TRIAGE_WORKFLOW);
+    expect(routed.decision).toMatchObject({
+      intent: 'needs_customer_lookup',
+      suggestedMessage: null,
+      metadata: { scenarioLabel: 'unknown_sender' },
+    });
+    expect(routed.decision.safetyFlags).toContain('needs_customer_lookup');
   });
 
   test('extracts short-code estimate links and normalizes phones', () => {

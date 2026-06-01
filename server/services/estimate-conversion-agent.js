@@ -3,8 +3,10 @@ const logger = require('./logger');
 
 const WORKFLOW = 'estimate_conversion_sms';
 const SERVICE_SCHEDULING_WORKFLOW = 'service_scheduling_sms';
+const CUSTOMER_SMS_TRIAGE_WORKFLOW = 'customer_sms_triage';
 const AGENT_NAME = 'waves-estimate-conversion-shadow';
 const SERVICE_SCHEDULING_AGENT_NAME = 'waves-service-scheduling-shadow';
+const CUSTOMER_SMS_TRIAGE_AGENT_NAME = 'waves-customer-sms-triage-shadow';
 const DECISION_VERSION = '2026-06-01.1';
 
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'];
@@ -21,6 +23,11 @@ const WEATHER_RE = /\b(rain|raining|storm|weather|wash(ed)? out|radar|lightning|
 const RESCHEDULE_RE = /\b(reschedule|move|push|change|adjust)\b/i;
 const TIME_TOKEN_RE = /\b([1-9]|1[0-2])(?::[0-5]\d)?\s?(a\.?m\.?|p\.?m\.?)\b|\b(morning|afternoon|evening|midday|noon)\b/ig;
 const DAY_TOKEN_RE = /\b(today|tomorrow|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig;
+const COURTESY_ONLY_RE = /^(thanks?|thank you|ty|ok(?:ay)?|sounds good|great|perfect|got it|yes|no|yep|nope|cool)[\s!.]*$/i;
+const CUSTOMER_NUDGE_RE = /\b(hey|hello|hi|checking in|follow(?:ing)? up|any thoughts|when you would|when can|where are we|update)\b/i;
+const BILLING_RE = /\b(invoice|payment|paid|pay|card|zelle|venmo|receipt|charge|autopay|auto-pay|refund)\b/i;
+const COMPLAINT_RE = /\b(problem|issue|not working|still seeing|came back|upset|frustrated|disappointed|missed|no show|never showed|late|cancel)\b/i;
+const PHOTO_RE = /\b(photo|picture|image|pic|photos|pictures|attached|screenshot)\b/i;
 
 function normalizePhoneLast10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -222,6 +229,113 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
   };
 }
 
+function classifyCustomerSmsTriageIntent(body, context = {}) {
+  const text = String(body || '').trim();
+  if (!text) {
+    return {
+      intent: null,
+      confidence: 0,
+      recommendedActions: [],
+      autoActionsAllowed: [],
+      blockedActions: [],
+      safetyFlags: [],
+      suggestedMessage: null,
+      reasoningSummary: 'Empty SMS body; no customer SMS triage decision.',
+    };
+  }
+
+  const hasKnownContext = !!context.customer || !!context.estimate || !!context.lead;
+  const firstName = firstNameFrom(
+    context.customer?.first_name
+      || context.estimate?.customer_name
+      || context.lead?.first_name
+  );
+  const blockedActions = ['send_without_human_review', 'create_subscription', 'charge_card'];
+  const safetyFlags = ['human_review_required', 'never_create_subscription', 'never_charge_card'];
+
+  if (!hasKnownContext) {
+    return {
+      intent: 'needs_customer_lookup',
+      confidence: 0.52,
+      recommendedActions: ['identify_sender_before_replying'],
+      autoActionsAllowed: [],
+      blockedActions,
+      safetyFlags: [...safetyFlags, 'needs_customer_lookup'],
+      suggestedMessage: null,
+      reasoningSummary: 'inbound SMS did not match a specialized workflow and no customer, lead, or estimate context was found.',
+      metadata: { scenarioLabel: 'unknown_sender' },
+    };
+  }
+
+  if (COURTESY_ONLY_RE.test(text)) {
+    return {
+      intent: 'no_reply_needed',
+      confidence: 0.84,
+      recommendedActions: ['mark_no_reply_needed'],
+      autoActionsAllowed: [],
+      blockedActions,
+      safetyFlags: [...safetyFlags, 'no_reply_needed'],
+      suggestedMessage: null,
+      reasoningSummary: 'inbound SMS appears to be a short courtesy acknowledgement; likely no reply needed.',
+      metadata: { scenarioLabel: 'no_reply_needed', noReplyNeeded: true },
+    };
+  }
+
+  const recommendedActions = [];
+  const autoActionsAllowed = [];
+  let intent = 'general_customer_sms_needs_review';
+  let confidence = 0.62;
+  let suggestedMessage = null;
+  let scenarioLabel = 'general_customer_reply';
+  const extraSafetyFlags = [];
+
+  if (BILLING_RE.test(text)) {
+    intent = 'billing_question_needs_review';
+    confidence = 0.72;
+    recommendedActions.push('review_billing_context', 'draft_billing_reply_after_review');
+    autoActionsAllowed.push('draft_billing_reply_after_review');
+    extraSafetyFlags.push('billing_invoice_only');
+    scenarioLabel = 'billing_question';
+    suggestedMessage = `Hello ${firstName}! I can take a look at the billing details and follow up with the right answer.`;
+  } else if (COMPLAINT_RE.test(text)) {
+    intent = 'customer_issue_needs_review';
+    confidence = 0.74;
+    recommendedActions.push('review_customer_issue', 'draft_customer_issue_reply');
+    autoActionsAllowed.push('draft_customer_issue_reply');
+    extraSafetyFlags.push('customer_issue');
+    scenarioLabel = 'customer_issue';
+    suggestedMessage = `Hello ${firstName}! I am sorry about that. Let me look into it and I will follow up with the best next step.`;
+  } else if (PHOTO_RE.test(text)) {
+    intent = 'photo_or_attachment_needs_review';
+    confidence = 0.68;
+    recommendedActions.push('review_photo_or_attachment', 'draft_photo_acknowledgement');
+    autoActionsAllowed.push('draft_photo_acknowledgement');
+    scenarioLabel = 'photo_received';
+    suggestedMessage = `Hello ${firstName}! Thanks for sending that over. I will take a look and follow up with the best next step.`;
+  } else if (CUSTOMER_NUDGE_RE.test(text) || /\?$/.test(text)) {
+    intent = 'customer_nudge_needs_reply';
+    confidence = 0.7;
+    recommendedActions.push('review_thread_context', 'draft_customer_reply');
+    autoActionsAllowed.push('draft_customer_reply');
+    scenarioLabel = 'customer_nudge';
+    suggestedMessage = `Hello ${firstName}! I see your message. Let me check on this and I will follow up with you shortly.`;
+  } else {
+    recommendedActions.push('review_thread_context', 'decide_if_reply_needed');
+  }
+
+  return {
+    intent,
+    confidence,
+    recommendedActions: [...new Set(recommendedActions)],
+    autoActionsAllowed: [...new Set(autoActionsAllowed)],
+    blockedActions,
+    safetyFlags: [...new Set([...safetyFlags, ...extraSafetyFlags])],
+    suggestedMessage,
+    reasoningSummary: 'inbound SMS did not match estimate conversion or service scheduling; queued for general customer SMS triage.',
+    metadata: { scenarioLabel },
+  };
+}
+
 function classifyServiceSchedulingScenario(text, { activeSchedulingThread = false, rainReschedule = false } = {}) {
   if (rainReschedule) return 'rain_reschedule';
   const dayMatches = Array.from(String(text || '').matchAll(DAY_TOKEN_RE));
@@ -286,10 +400,19 @@ function routeEstimateOrCustomerReply(body, context = {}) {
     };
   }
 
+  const estimateConversion = classifyEstimateSmsIntent(body, context);
+  if (estimateConversion.intent) {
+    return {
+      workflow: WORKFLOW,
+      agentName: AGENT_NAME,
+      decision: estimateConversion,
+    };
+  }
+
   return {
-    workflow: WORKFLOW,
-    agentName: AGENT_NAME,
-    decision: classifyEstimateSmsIntent(body, context),
+    workflow: CUSTOMER_SMS_TRIAGE_WORKFLOW,
+    agentName: CUSTOMER_SMS_TRIAGE_AGENT_NAME,
+    decision: classifyCustomerSmsTriageIntent(body, context),
   };
 }
 
@@ -505,11 +628,14 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
 }
 
 module.exports = {
+  CUSTOMER_SMS_TRIAGE_AGENT_NAME,
+  CUSTOMER_SMS_TRIAGE_WORKFLOW,
   WORKFLOW,
   SERVICE_SCHEDULING_WORKFLOW,
   AGENT_NAME,
   SERVICE_SCHEDULING_AGENT_NAME,
   DECISION_VERSION,
+  classifyCustomerSmsTriageIntent,
   classifyEstimateSmsIntent,
   classifyServiceSchedulingSmsIntent,
   extractShortCode,
@@ -519,6 +645,7 @@ module.exports = {
   _test: {
     buildInputSnapshot,
     buildServiceSchedulingDraft,
+    classifyCustomerSmsTriageIntent,
     classifyServiceSchedulingScenario,
     extractOfferedSchedulingWindows,
     confidenceLabel,
