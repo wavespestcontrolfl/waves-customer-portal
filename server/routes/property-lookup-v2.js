@@ -223,9 +223,7 @@ async function performPropertyLookup(address) {
           console.log(`[CLAUDE DEBUG] Success! Confidence: ${claudeAnalysis?.confidenceScore || 'N/A'}%`);
           return claudeAnalysis;
         } catch (err) {
-          const timeoutLike = /timed out|timeout|abort/i.test(`${err.name || ''} ${err.message || ''}`);
-          const log = timeoutLike ? console.warn : console.error;
-          log.call(console, `[CLAUDE DEBUG] FAILED: ${err.message}`);
+          console.error(`[CLAUDE DEBUG] FAILED: ${err.message}`);
           throw err;
         }
       })(),
@@ -252,9 +250,7 @@ async function performPropertyLookup(address) {
           console.log(`[OPENAI DEBUG] Success! Confidence: ${openaiAnalysis?.confidenceScore || 'N/A'}%`);
           return openaiAnalysis;
         } catch (openaiErr) {
-          const timeoutLike = /timed out|timeout|abort/i.test(`${openaiErr.name || ''} ${openaiErr.message || ''}`);
-          const log = timeoutLike ? console.warn : console.error;
-          log.call(console, `[OPENAI DEBUG] FAILED: ${openaiErr.message}`);
+          console.error(`[OPENAI DEBUG] FAILED: ${openaiErr.message}`);
           throw openaiErr;
         }
       })(),
@@ -284,9 +280,7 @@ async function performPropertyLookup(address) {
           console.log(`[GEMINI DEBUG] Success! Confidence: ${geminiAnalysis?.confidenceScore || 'N/A'}%`);
           return geminiAnalysis;
         } catch (gemErr) {
-          const timeoutLike = /timed out|timeout|abort/i.test(`${gemErr.name || ''} ${gemErr.message || ''}`);
-          const log = timeoutLike ? console.warn : console.error;
-          log.call(console, `[GEMINI DEBUG] FAILED: ${gemErr.message}`);
+          console.error(`[GEMINI DEBUG] FAILED: ${gemErr.message}`);
           throw gemErr;
         }
       })(),

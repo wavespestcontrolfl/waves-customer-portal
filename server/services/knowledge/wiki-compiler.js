@@ -7,72 +7,6 @@ const MODELS = require('../../config/models');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-function cleanText(value) {
-  if (value === null || value === undefined) return '';
-  return String(value).trim();
-}
-
-function safeSlug(value, fallback = 'article') {
-  const slug = cleanText(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .substring(0, 120);
-  return slug || fallback;
-}
-
-function humanize(value) {
-  return cleanText(value)
-    .replace(/\.[^.]+$/, '')
-    .replace(/[-_]+/g, ' ')
-    .replace(/\b\w/g, char => char.toUpperCase());
-}
-
-function parseArray(value) {
-  if (Array.isArray(value)) return value.map(cleanText).filter(Boolean);
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) return parsed.map(cleanText).filter(Boolean);
-    } catch {}
-    return value.split(',').map(cleanText).filter(Boolean);
-  }
-  return [];
-}
-
-function wordCount(value) {
-  return cleanText(value).split(/\s+/).filter(Boolean).length;
-}
-
-function normalizeArticle(article, fallback, index) {
-  const rawPath = cleanText(article?.path);
-  const category = safeSlug(article?.category || fallback.defaultCategory || 'general', 'general');
-  const baseName = rawPath ? path.basename(rawPath, path.extname(rawPath)) : '';
-  const title = cleanText(article?.title)
-    || humanize(baseName)
-    || humanize(fallback.sourceLabel)
-    || 'Compiled Knowledge Article';
-  const slug = safeSlug(baseName || title, `article-${index + 1}`);
-  const articlePath = rawPath || `wiki/${category}/${slug}.md`;
-  const content = cleanText(article?.content)
-    || cleanText(article?.summary)
-    || `# ${title}\n\nNo compiled content was provided.`;
-  const summary = cleanText(article?.summary)
-    || cleanText(content.replace(/^#\s+/, '').split(/\n\s*\n/)[0]).substring(0, 300)
-    || title;
-
-  return {
-    ...(article || {}),
-    path: articlePath,
-    title,
-    category,
-    content,
-    summary,
-    tags: parseArray(article?.tags),
-    backlinks: parseArray(article?.backlinks),
-  };
-}
-
 class WikiCompiler {
 
   async compileSource(sourceId) {
@@ -136,11 +70,6 @@ ${content.substring(0, 50000)}`
       logger.error('Failed to parse compiler output');
       throw new Error('Compiler output was not valid JSON');
     }
-    articles = (Array.isArray(articles) ? articles : [articles])
-      .map((article, index) => normalizeArticle(article, {
-        sourceLabel: source.filename,
-        defaultCategory: source.file_type,
-      }, index));
 
     let created = 0, updated = 0;
 
@@ -153,12 +82,12 @@ ${content.substring(0, 50000)}`
           content: article.content,
           summary: article.summary,
           category: article.category,
-          tags: JSON.stringify(article.tags),
-          backlinks: JSON.stringify(article.backlinks),
-          source_documents: JSON.stringify([...new Set([...parseArray(existing.source_documents), source.file_path])]),
-          word_count: wordCount(article.content),
+          tags: JSON.stringify(article.tags || []),
+          backlinks: JSON.stringify(article.backlinks || []),
+          source_documents: JSON.stringify([...new Set([...(typeof existing.source_documents === 'string' ? JSON.parse(existing.source_documents) : existing.source_documents || []), source.file_path])]),
+          word_count: article.content.split(/\s+/).filter(Boolean).length,
           last_compiled: new Date(),
-          version: Number(existing.version || 0) + 1,
+          version: existing.version + 1,
           updated_at: new Date(),
         });
         updated++;
@@ -169,10 +98,10 @@ ${content.substring(0, 50000)}`
           category: article.category,
           content: article.content,
           summary: article.summary,
-          tags: JSON.stringify(article.tags),
-          backlinks: JSON.stringify(article.backlinks),
+          tags: JSON.stringify(article.tags || []),
+          backlinks: JSON.stringify(article.backlinks || []),
           source_documents: JSON.stringify([source.file_path]),
-          word_count: wordCount(article.content),
+          word_count: article.content.split(/\s+/).filter(Boolean).length,
           last_compiled: new Date(),
           version: 1,
           active: true,
@@ -339,11 +268,6 @@ ${content.substring(0, 50000)}`
       await db('knowledge_sources').where('id', source.id).update({ processed: true, processed_at: new Date(), articles_generated: JSON.stringify([]) });
       throw new Error('Compiler output was not valid JSON');
     }
-    articles = (Array.isArray(articles) ? articles : [articles])
-      .map((article, index) => normalizeArticle(article, {
-        sourceLabel: filename,
-        defaultCategory,
-      }, index));
 
     let created = 0, updated = 0;
     const sourceTag = originUrl || `inline:${filename}`;
@@ -352,18 +276,20 @@ ${content.substring(0, 50000)}`
       const existing = await db('knowledge_base').where('path', article.path).first();
 
       if (existing) {
-        const existingSources = parseArray(existing.source_documents);
+        const existingSources = typeof existing.source_documents === 'string'
+          ? JSON.parse(existing.source_documents)
+          : existing.source_documents || [];
         await db('knowledge_base').where('id', existing.id).update({
           title: article.title,
           content: article.content,
           summary: article.summary,
           category: article.category,
-          tags: JSON.stringify(article.tags),
-          backlinks: JSON.stringify(article.backlinks),
+          tags: JSON.stringify(article.tags || []),
+          backlinks: JSON.stringify(article.backlinks || []),
           source_documents: JSON.stringify([...new Set([...existingSources, sourceTag])]),
-          word_count: wordCount(article.content),
+          word_count: article.content.split(/\s+/).filter(Boolean).length,
           last_compiled: new Date(),
-          version: Number(existing.version || 0) + 1,
+          version: existing.version + 1,
           updated_at: new Date(),
         });
         updated++;
@@ -374,10 +300,10 @@ ${content.substring(0, 50000)}`
           category: article.category,
           content: article.content,
           summary: article.summary,
-          tags: JSON.stringify(article.tags),
-          backlinks: JSON.stringify(article.backlinks),
+          tags: JSON.stringify(article.tags || []),
+          backlinks: JSON.stringify(article.backlinks || []),
           source_documents: JSON.stringify([sourceTag]),
-          word_count: wordCount(article.content),
+          word_count: article.content.split(/\s+/).filter(Boolean).length,
           last_compiled: new Date(),
           version: 1,
           active: true,
