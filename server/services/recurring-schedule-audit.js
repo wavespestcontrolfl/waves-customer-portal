@@ -30,7 +30,7 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
     : ['cancelled', 'rescheduled', 'completed'];
   const statusPlaceholders = terminalStatuses.map(() => '?').join(', ');
   const intervalsValues = Object.entries(MONTH_RECURRENCE_INTERVALS)
-    .map(() => '(?, ?)')
+    .map(() => '(?::text, ?::integer)')
     .join(', ');
   const intervalBindings = Object.entries(MONTH_RECURRENCE_INTERVALS)
     .flatMap(([pattern, months]) => [pattern, months]);
