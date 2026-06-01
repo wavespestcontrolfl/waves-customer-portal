@@ -29,6 +29,10 @@ const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
+function assessmentAnalytics() {
+  return require('./assessment-analytics');
+}
+
 // ══════════════════════════════════════════════════════════════
 // 1. FAWN WEATHER CONTEXT
 // ══════════════════════════════════════════════════════════════
@@ -444,117 +448,19 @@ If no contradictions, return: { "contradictions": [] }`
 
   // ── 9. Neighborhood benchmarks ──────────────────────────────
   async computeNeighborhoodBenchmarks() {
-    const stats = { computed: 0 };
     try {
-      // Get all customers with assessments
-      const customers = await db('customers as c')
-        .join('lawn_assessments as la', 'c.id', 'la.customer_id')
-        .where('la.confirmed_by_tech', true)
-        .select('c.id', 'c.city', 'c.zip', 'c.address_line1', 'c.grass_type',
-          db.raw('MAX(la.overall_score) as latest_score'),
-          db.raw('MIN(la.overall_score) as first_score'),
-          db.raw('COUNT(la.id) as assessment_count'),
-          db.raw('AVG(la.overall_score) as avg_score'))
-        .groupBy('c.id', 'c.city', 'c.zip', 'c.address_line1', 'c.grass_type');
-
-      // Group by segments
-      const segments = {};
-      for (const c of customers) {
-        const keys = [];
-        if (c.city) keys.push({ type: 'city', value: c.city });
-        if (c.zip) keys.push({ type: 'zip', value: c.zip });
-        if (c.grass_type) keys.push({ type: 'grass_type', value: c.grass_type });
-        // Try to extract subdivision from address
-        const subdivMatch = (c.address_line1 || '').match(/^[\d\s]+([\w\s]+?)(?:\s+(?:Dr|St|Ave|Blvd|Ct|Ln|Way|Pl|Rd|Cir|Ter))/i);
-        if (subdivMatch) keys.push({ type: 'subdivision', value: subdivMatch[1].trim() });
-
-        for (const k of keys) {
-          const segKey = `${k.type}||${k.value}`;
-          if (!segments[segKey]) segments[segKey] = { type: k.type, value: k.value, scores: [], improvements: [] };
-          segments[segKey].scores.push(parseFloat(c.avg_score) || 0);
-          if (c.latest_score && c.first_score) {
-            segments[segKey].improvements.push(c.latest_score - c.first_score);
-          }
-        }
-      }
-
-      for (const [, seg] of Object.entries(segments)) {
-        if (seg.scores.length < 3) continue; // minimum threshold
-        const sorted = [...seg.scores].sort((a, b) => a - b);
-        const p25 = sorted[Math.floor(sorted.length * 0.25)];
-        const p50 = sorted[Math.floor(sorted.length * 0.5)];
-        const p75 = sorted[Math.floor(sorted.length * 0.75)];
-        const avgImprovement = seg.improvements.length
-          ? Math.round(seg.improvements.reduce((a, b) => a + b, 0) / seg.improvements.length * 10) / 10 : null;
-
-        await db('neighborhood_benchmarks')
-          .insert({
-            segment_type: seg.type,
-            segment_value: seg.value,
-            customer_count: seg.scores.length,
-            assessment_count: seg.scores.length, // simplified
-            avg_overall_score: Math.round(seg.scores.reduce((a, b) => a + b, 0) / seg.scores.length * 10) / 10,
-            avg_improvement: avgImprovement,
-            percentile_25: Math.round(p25 * 10) / 10,
-            percentile_50: Math.round(p50 * 10) / 10,
-            percentile_75: Math.round(p75 * 10) / 10,
-            last_computed: new Date(),
-          })
-          .onConflict(['segment_type', 'segment_value'])
-          .merge();
-        stats.computed++;
-      }
+      const result = await assessmentAnalytics().computeNeighborhoodBenchmarks();
+      return { computed: result?.segments || 0, ...result };
     } catch (err) {
       logger.error(`[lawn-intel] computeNeighborhoodBenchmarks failed: ${err.message}`);
+      return { computed: 0, error: err.message };
     }
-    return stats;
   },
 
   // ── Get customer's percentile in their neighborhood ─────────
   async getCustomerPercentile(customerId) {
     try {
-      const customer = await db('customers').where({ id: customerId }).first();
-      if (!customer) return null;
-
-      const latest = await db('lawn_assessments')
-        .where({ customer_id: customerId, confirmed_by_tech: true })
-        .orderBy('service_date', 'desc')
-        .first();
-      if (!latest) return null;
-
-      const score = latest.overall_score || Math.round(
-        (latest.turf_density + latest.weed_suppression + latest.fungus_control +
-          (latest.color_health || 0) + (latest.thatch_level || 0)) / 5
-      );
-
-      // Find relevant benchmarks
-      const benchmarks = [];
-      if (customer.city) {
-        const b = await db('neighborhood_benchmarks').where({ segment_type: 'city', segment_value: customer.city }).first();
-        if (b && b.customer_count >= 3) benchmarks.push({ ...b, segment_label: customer.city });
-      }
-      if (customer.grass_type) {
-        const b = await db('neighborhood_benchmarks').where({ segment_type: 'grass_type', segment_value: customer.grass_type }).first();
-        if (b && b.customer_count >= 3) benchmarks.push({ ...b, segment_label: `${customer.grass_type} lawns` });
-      }
-
-      return benchmarks.map(b => {
-        let percentile;
-        if (score >= b.percentile_75) percentile = 'top 25%';
-        else if (score >= b.percentile_50) percentile = 'top 50%';
-        else if (score >= b.percentile_25) percentile = 'top 75%';
-        else percentile = 'building momentum';
-
-        return {
-          segment: b.segment_label,
-          segmentType: b.segment_type,
-          yourScore: score,
-          avgScore: parseFloat(b.avg_overall_score),
-          percentile,
-          customerCount: b.customer_count,
-          avgImprovement: parseFloat(b.avg_improvement),
-        };
-      });
+      return await assessmentAnalytics().getCustomerBenchmark(customerId);
     } catch (err) {
       logger.error(`[lawn-intel] getCustomerPercentile failed: ${err.message}`);
       return null;
@@ -632,70 +538,10 @@ If no contradictions, return: { "contradictions": [] }`
   async trackAssessmentCompletion(date) {
     const trackingDate = date || etDateString();
     try {
-      // Get all techs
-      const techs = await db('technicians').where('active', true).select('id', 'name', 'email');
-
-      for (const tech of techs) {
-        // Lawn services assigned/completed that day. scheduled_services
-        // standardised on technician_id; assigned_tech_id is a column
-        // on the retired dispatch AI shadow tables, not here. The prior `or assigned_tech_id`
-        // branch silently 500s the whole query.
-        const lawnServices = await db('scheduled_services')
-          .where('scheduled_date', trackingDate)
-          .where('technician_id', tech.id)
-          .where('service_type', 'ilike', '%lawn%')
-          .count('id as count').first();
-
-        const totalLawn = parseInt(lawnServices?.count || 0);
-        if (totalLawn === 0) continue;
-
-        // Assessments created by this tech on that day
-        const started = await db('lawn_assessments')
-          .where({ technician_id: tech.id, service_date: trackingDate })
-          .count('id as count').first();
-
-        const confirmed = await db('lawn_assessments')
-          .where({ technician_id: tech.id, service_date: trackingDate, confirmed_by_tech: true })
-          .count('id as count').first();
-
-        const assessmentStarted = parseInt(started?.count || 0);
-        const assessmentConfirmed = parseInt(confirmed?.count || 0);
-
-        // Quality metrics
-        const qualityData = await db('lawn_assessments')
-          .where({ technician_id: tech.id, service_date: trackingDate });
-
-        let avgPhotoCount = 0, avgQuality = 0, divergenceCount = 0, overrideCount = 0;
-        if (qualityData.length) {
-          for (const a of qualityData) {
-            try { const photos = JSON.parse(a.photos || '[]'); avgPhotoCount += photos.length; } catch {}
-            try { const flags = JSON.parse(a.divergence_flags || '[]'); divergenceCount += flags.length; } catch {}
-            const comp = typeof a.composite_scores === 'string' ? JSON.parse(a.composite_scores || '{}') : a.composite_scores || {};
-            const adj = typeof a.adjusted_scores === 'string' ? JSON.parse(a.adjusted_scores || '{}') : a.adjusted_scores || {};
-            if (JSON.stringify(comp) !== JSON.stringify(adj)) overrideCount++;
-          }
-          avgPhotoCount = Math.round(avgPhotoCount / qualityData.length * 10) / 10;
-        }
-
-        await db('assessment_completion_tracking')
-          .insert({
-            tracking_date: trackingDate,
-            technician_id: tech.id,
-            technician_name: tech.name || tech.email,
-            lawn_services_total: totalLawn,
-            assessments_started: assessmentStarted,
-            assessments_confirmed: assessmentConfirmed,
-            completion_rate: totalLawn > 0 ? Math.round(assessmentStarted / totalLawn * 100) / 100 : 0,
-            confirmation_rate: assessmentStarted > 0 ? Math.round(assessmentConfirmed / assessmentStarted * 100) / 100 : 0,
-            avg_photo_count: avgPhotoCount,
-            divergence_flags_count: divergenceCount,
-            tech_overrides_count: overrideCount,
-          })
-          .onConflict(['tracking_date', 'technician_id'])
-          .merge();
-      }
+      return await assessmentAnalytics().computeCompletionRates(trackingDate, trackingDate);
     } catch (err) {
       logger.error(`[lawn-intel] trackAssessmentCompletion failed: ${err.message}`);
+      return { error: err.message };
     }
   },
 
@@ -765,92 +611,20 @@ If no contradictions, return: { "contradictions": [] }`
 
   // ── 14. ROI metrics ─────────────────────────────────────────
   async computeROIMetrics() {
-    const stats = { computed: 0 };
     try {
-      // Assessed vs non-assessed customers
-      const allCustomers = await db('customers').where('active', true).select('id', 'monthly_rate', 'created_at', 'waveguard_tier');
-
-      const assessed = new Set();
-      const assessments = await db('lawn_assessments')
-        .where({ confirmed_by_tech: true })
-        .select('customer_id')
-        .groupBy('customer_id');
-      assessments.forEach(a => assessed.add(a.customer_id));
-
-      const groups = { assessed: [], not_assessed: [] };
-      for (const c of allCustomers) {
-        if (assessed.has(c.id)) groups.assessed.push(c);
-        else groups.not_assessed.push(c);
-      }
-
-      for (const [segment, customers] of Object.entries(groups)) {
-        if (!customers.length) continue;
-        const rates = customers.map(c => parseFloat(c.monthly_rate || 0)).filter(v => v > 0);
-        const tenures = customers.map(c => {
-          const created = c.created_at ? new Date(c.created_at) : new Date();
-          return Math.floor((Date.now() - created.getTime()) / (86400000 * 30));
-        });
-
-        await db('lawn_roi_metrics')
-          .insert({
-            segment: 'assessed_vs_not',
-            segment_value: segment,
-            customer_count: customers.length,
-            avg_monthly_revenue: rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) / rates.length * 100) / 100 : 0,
-            avg_ltv: rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) / rates.length * 12 * 100) / 100 : 0,
-            avg_tenure_months: tenures.length ? Math.round(tenures.reduce((a, b) => a + b, 0) / tenures.length) : 0,
-            last_computed: new Date(),
-          })
-          .onConflict(['segment', 'segment_value'])
-          .merge();
-        stats.computed++;
-      }
-
-      // By improvement tier
-      const customerScores = await db('lawn_assessments')
-        .where({ confirmed_by_tech: true })
-        .select('customer_id')
-        .max('overall_score as max_score')
-        .min('overall_score as min_score')
-        .groupBy('customer_id');
-
-      const tiers = { 'high_improvement': [], 'moderate_improvement': [], 'low_improvement': [] };
-      for (const cs of customerScores) {
-        const delta = (cs.max_score || 0) - (cs.min_score || 0);
-        if (delta >= 20) tiers.high_improvement.push(cs.customer_id);
-        else if (delta >= 10) tiers.moderate_improvement.push(cs.customer_id);
-        else tiers.low_improvement.push(cs.customer_id);
-      }
-
-      for (const [tier, ids] of Object.entries(tiers)) {
-        if (!ids.length) continue;
-        const customers = await db('customers').whereIn('id', ids).select('monthly_rate', 'created_at');
-        const rates = customers.map(c => parseFloat(c.monthly_rate || 0)).filter(v => v > 0);
-
-        await db('lawn_roi_metrics')
-          .insert({
-            segment: 'improvement_tier',
-            segment_value: tier,
-            customer_count: ids.length,
-            avg_monthly_revenue: rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) / rates.length * 100) / 100 : 0,
-            avg_ltv: rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) / rates.length * 12 * 100) / 100 : 0,
-            last_computed: new Date(),
-          })
-          .onConflict(['segment', 'segment_value'])
-          .merge();
-        stats.computed++;
-      }
+      return await assessmentAnalytics().computeROI();
     } catch (err) {
       logger.error(`[lawn-intel] computeROIMetrics failed: ${err.message}`);
+      return { error: err.message };
     }
-    return stats;
   },
 
   // ── 15. Auto-generate service report ────────────────────────
   async generateServiceReport(assessmentId) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
-      if (!assessment || assessment.report_generated) return null;
+      const assessmentCols = await db('lawn_assessments').columnInfo().catch(() => ({}));
+      if (!assessment || (assessmentCols.report_auto_generated && assessment.report_auto_generated)) return null;
 
       const customer = await db('customers').where({ id: assessment.customer_id }).first();
       if (!customer) return null;
@@ -886,19 +660,24 @@ If no contradictions, return: { "contradictions": [] }`
         generated_at: new Date(),
       };
 
-      // Insert into service_reports if table exists
-      try {
-        const [report] = await db('service_reports').insert(reportData).returning('*');
-        await db('lawn_assessments').where({ id: assessmentId }).update({
-          report_generated: true,
-          report_id: report.id,
-        });
-        return report;
-      } catch {
-        // service_reports table may not exist — just mark as generated
-        await db('lawn_assessments').where({ id: assessmentId }).update({ report_generated: true });
-        return reportData;
+      let report = null;
+      if (await db.schema.hasTable('service_reports').catch(() => false)) {
+        const reportCols = await db('service_reports').columnInfo().catch(() => ({}));
+        const insertData = Object.fromEntries(
+          Object.entries(reportData).filter(([key]) => reportCols[key])
+        );
+        if (Object.keys(insertData).length > 0) {
+          [report] = await db('service_reports').insert(insertData).returning('*');
+        }
       }
+
+      const update = {};
+      if (assessmentCols.report_auto_generated) update.report_auto_generated = true;
+      if (report?.id && assessmentCols.report_id) update.report_id = report.id;
+      if (assessmentCols.updated_at) update.updated_at = new Date();
+      if (Object.keys(update).length > 0) await db('lawn_assessments').where({ id: assessmentId }).update(update);
+
+      return report || { ...reportData, skippedInsert: true };
     } catch (err) {
       logger.error(`[lawn-intel] generateServiceReport failed: ${err.message}`);
       return null;

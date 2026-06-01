@@ -12,6 +12,7 @@ const { executeBITool } = require('./bi-agent-tools');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BI_AGENT_ID = process.env.BI_AGENT_ID;
+const BI_AGENT_ENVIRONMENT_ID = process.env.BI_AGENT_ENVIRONMENT_ID || process.env.ANTHROPIC_ENVIRONMENT_ID;
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
 
@@ -58,6 +59,7 @@ async function* streamSessionEvents(sessionId) {
 const BIAgent = {
   async run(opts = {}) {
     if (!ANTHROPIC_API_KEY || !BI_AGENT_ID) throw new Error('Missing ANTHROPIC_API_KEY or BI_AGENT_ID');
+    if (!BI_AGENT_ENVIRONMENT_ID) throw new Error('Missing BI_AGENT_ENVIRONMENT_ID (or ANTHROPIC_ENVIRONMENT_ID)');
 
     const startTime = Date.now();
     const notify = opts.onProgress || (() => {});
@@ -67,7 +69,10 @@ const BIAgent = {
 
     notify('starting', 'Creating BI session...');
 
-    const session = await apiCall('POST', '/sessions', { agent: BI_AGENT_ID });
+    const session = await apiCall('POST', '/sessions', {
+      agent: BI_AGENT_ID,
+      environment_id: BI_AGENT_ENVIRONMENT_ID,
+    });
     const sessionId = session.id;
     logger.info(`[bi-agent] Session ${sessionId}`);
 
