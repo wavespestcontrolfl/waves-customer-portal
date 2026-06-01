@@ -1718,13 +1718,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;
       }
-      // Tank cleanout attestation is required only when we're actually recording a
-      // field-verified system as used. We key off the raw request `equipmentSystemId`
-      // — NOT the backfilled `waveguardEquipmentSystemId`, which may be repopulated
-      // from a stale assignment the tech never chose — and skip it when the
-      // calibration was cleared to "none", so this mirrors CompletionPanel's gate
-      // without ever requiring attestation for equipment we don't record.
-      if (equipmentSystemId && !waveguardCalibrationCleared) {
+      // Tank cleanout attestation is required whenever we will actually persist an
+      // equipment system as used — i.e. waveguardEquipmentSystemId survived to here
+      // and the calibration was not cleared to "none". Keying off the ID we persist
+      // (rather than the raw request field) closes the gap where a backfilled, valid
+      // field-verified assignment is recorded as used by an older client / direct API
+      // with no cleanout. The earlier empty-dropdown / stale-assignment trap does not
+      // recur: those calibrations are non-field-verified, so the clear above already
+      // nulled the ID and this block is skipped.
+      if (waveguardEquipmentSystemId && !waveguardCalibrationCleared) {
         const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
         if (cleanoutBlocks.length) {
           const validationErr = new Error('WaveGuard tank cleanout lockout');
