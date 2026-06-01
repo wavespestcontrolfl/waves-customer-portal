@@ -48,6 +48,8 @@ const {
   canUseProviderMessageMatch,
   bindNewsletterDeliveryMessageId,
   reconcileNewsletterSendStatus,
+  handleNewsletterEvent,
+  newsletterSuppressionGroupKeyForEvent,
 } = sendgridWebhook;
 
 describe('newsletter buildSubscriberQuery', () => {
@@ -343,6 +345,48 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ bounced_at: now }), now);
       expect(u).toBeNull();
     });
+    test('dropped group unsubscribe marks the subscriber unsubscribed, not bounced', () => {
+      const u = computeNewsletterEventUpdates(
+        { event: 'dropped', reason: 'Group Unsubscribe' },
+        fresh(),
+        now,
+      );
+      expect(u).toEqual({
+        delivery: { status: 'unsubscribed', unsubscribed_at: now, updated_at: now },
+        sendIncrement: 'unsubscribed_count',
+        reconcileSendStatus: true,
+        subscriberAction: 'unsubscribe_if_active',
+        subscriberAt: now,
+      });
+    });
+    test('dropped provider global unsubscribe marks the subscriber unsubscribed, not bounced', () => {
+      const u = computeNewsletterEventUpdates(
+        { event: 'dropped', reason: 'Unsubscribed Address' },
+        fresh(),
+        now,
+      );
+      expect(u).toEqual({
+        delivery: { status: 'unsubscribed', unsubscribed_at: now, updated_at: now },
+        sendIncrement: 'unsubscribed_count',
+        reconcileSendStatus: true,
+        subscriberAction: 'unsubscribe_if_active',
+        subscriberAt: now,
+      });
+    });
+    test('dropped provider spam report marks the subscriber complained', () => {
+      const u = computeNewsletterEventUpdates(
+        { event: 'dropped', reason: 'Spam Reporting Address' },
+        fresh(),
+        now,
+      );
+      expect(u).toEqual({
+        delivery: { status: 'complained', complained_at: now, updated_at: now },
+        sendIncrement: 'complained_count',
+        reconcileSendStatus: true,
+        subscriberAction: 'force_unsubscribe',
+        subscriberAt: now,
+      });
+    });
   });
 
   describe('open / click', () => {
@@ -458,13 +502,55 @@ describe('email template suppression event mapping', () => {
     });
   });
 
-  test('hard bounce suppresses but blocked and dropped do not', () => {
+  test('hard bounce suppresses but blocked and transient dropped do not', () => {
     expect(suppressionForEmailEvent({ event: 'bounce', type: 'bounce' })).toEqual({
       suppression_type: 'bounce',
       group_key: null,
     });
     expect(suppressionForEmailEvent({ event: 'blocked' })).toBeNull();
-    expect(suppressionForEmailEvent({ event: 'dropped' })).toBeNull();
+    expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Spam Content' })).toBeNull();
+  });
+
+  test('provider dropped events from SendGrid suppressions mirror into local suppressions', () => {
+    expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Group Unsubscribe' })).toBeNull();
+    expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Group Unsubscribe' }, 'service_operational')).toEqual({
+      suppression_type: 'unsubscribe',
+      group_key: 'service_operational',
+    });
+    expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Bounced Address' }, 'transactional_required')).toEqual({
+      suppression_type: 'bounce',
+      group_key: null,
+    });
+    expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Invalid' }, 'service_operational')).toEqual({
+      suppression_type: 'bounce',
+      group_key: null,
+    });
+    expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Unsubscribed Address' }, 'service_operational')).toEqual({
+      suppression_type: 'unsubscribe',
+      group_key: null,
+    });
+    expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Spam Reporting Address' }, 'marketing_newsletter')).toEqual({
+      suppression_type: 'spam_complaint',
+      group_key: null,
+    });
+  });
+
+  test('newsletter group unsubscribe events use the newsletter suppression group', () => {
+    expect(newsletterSuppressionGroupKeyForEvent({ event: 'group_unsubscribe' })).toBe('marketing_newsletter');
+    expect(newsletterSuppressionGroupKeyForEvent({ event: 'dropped', reason: 'Group Unsubscribe' })).toBe('marketing_newsletter');
+
+    const originalNewsletter = process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+    try {
+      process.env.SENDGRID_ASM_GROUP_NEWSLETTER = '101';
+      expect(newsletterSuppressionGroupKeyForEvent({
+        event: 'dropped',
+        reason: 'Group Unsubscribe',
+        asm_group_id: '101',
+      })).toBe('marketing_newsletter');
+    } finally {
+      if (originalNewsletter === undefined) delete process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+      else process.env.SENDGRID_ASM_GROUP_NEWSLETTER = originalNewsletter;
+    }
   });
 
   test('automation group unsubscribes map SendGrid ASM ids to local preference groups', () => {
@@ -482,6 +568,21 @@ describe('email template suppression event mapping', () => {
         event: 'group_unsubscribe',
         asm_group_id: '202',
       })).toBe('service_operational');
+      expect(automationSuppressionGroupKeyForEvent({
+        event: 'dropped',
+        reason: 'Group Unsubscribe',
+        asm_group_id: '202',
+      })).toBe('service_operational');
+      expect(automationSuppressionGroupKeyForEvent({
+        event: 'dropped',
+        reason: 'Group Unsubscribe',
+        asm_group_id: '101',
+      })).toBe('marketing_newsletter');
+      expect(automationSuppressionGroupKeyForEvent({
+        event: 'dropped',
+        reason: 'Group Unsubscribe',
+        asm_group_id: '999',
+      })).toBeNull();
       expect(automationSuppressionGroupKeyForEvent({
         event: 'group_unsubscribe',
         asm_group_id: '999',
@@ -625,6 +726,158 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
 
     expect(deliveryQuery.where).toHaveBeenCalledWith({ send_id: 'send-1' });
     expect(deliveryQuery.whereIn).toHaveBeenCalledWith('status', ['queued', 'failed', 'sending']);
+  });
+});
+
+describe('sendgrid newsletter suppression ledger writes', () => {
+  function queryDouble(firstResult = undefined) {
+    const q = {};
+    [
+      'where',
+      'whereRaw',
+      'whereNull',
+      'whereIn',
+      'whereNot',
+    ].forEach((method) => {
+      q[method] = jest.fn(() => q);
+    });
+    q.count = jest.fn(() => q);
+    q.first = jest.fn(async () => (firstResult === undefined ? null : firstResult));
+    q.update = jest.fn(async () => 1);
+    q.increment = jest.fn(async () => 1);
+    q.insert = jest.fn(async () => 1);
+    return q;
+  }
+
+  function fakeClient() {
+    const calls = {};
+    const client = jest.fn((table) => {
+      const q = queryDouble(table === 'newsletter_send_deliveries' ? { c: 0 } : undefined);
+      calls[table] = calls[table] || [];
+      calls[table].push(q);
+      return q;
+    });
+    client.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    return { client, calls };
+  }
+
+  test('newsletter dropped Bounced Address writes a global bounce suppression', async () => {
+    const { client, calls } = fakeClient();
+
+    await handleNewsletterEvent({
+      event: 'dropped',
+      reason: 'Bounced Address',
+      email: 'Bad.Customer@Example.com',
+    }, {
+      id: 'delivery-1',
+      send_id: 'send-1',
+      subscriber_id: 12,
+      email: 'bad.customer@example.com',
+    }, client);
+
+    const suppressionInsert = calls.email_suppressions
+      .find((query) => query.insert.mock.calls.length)
+      .insert.mock.calls[0][0];
+    expect(suppressionInsert).toEqual(expect.objectContaining({
+      email: 'bad.customer@example.com',
+      group_key: null,
+      suppression_type: 'bounce',
+      status: 'active',
+      source: 'sendgrid_event_webhook',
+    }));
+  });
+
+  test('newsletter dropped Group Unsubscribe writes a newsletter-scoped unsubscribe suppression', async () => {
+    const { client, calls } = fakeClient();
+
+    await handleNewsletterEvent({
+      event: 'dropped',
+      reason: 'Group Unsubscribe',
+      email: 'sub@example.com',
+    }, {
+      id: 'delivery-2',
+      send_id: 'send-2',
+      subscriber_id: 13,
+      email: 'sub@example.com',
+    }, client);
+
+    const suppressionInsert = calls.email_suppressions
+      .find((query) => query.insert.mock.calls.length)
+      .insert.mock.calls[0][0];
+    const subscriberUpdate = calls.newsletter_subscribers[0].update.mock.calls[0][0];
+    expect(suppressionInsert).toEqual(expect.objectContaining({
+      email: 'sub@example.com',
+      group_key: 'marketing_newsletter',
+      suppression_type: 'unsubscribe',
+      status: 'active',
+      source: 'sendgrid_event_webhook',
+    }));
+    expect(subscriberUpdate).toEqual(expect.objectContaining({
+      status: 'unsubscribed',
+      unsubscribed_at: expect.any(Date),
+    }));
+  });
+
+  test('newsletter dropped Unsubscribed Address writes a global unsubscribe suppression', async () => {
+    const { client, calls } = fakeClient();
+
+    await handleNewsletterEvent({
+      event: 'dropped',
+      reason: 'Unsubscribed Address',
+      email: 'global.unsub@example.com',
+    }, {
+      id: 'delivery-3',
+      send_id: 'send-3',
+      subscriber_id: 14,
+      email: 'global.unsub@example.com',
+    }, client);
+
+    const suppressionInsert = calls.email_suppressions
+      .find((query) => query.insert.mock.calls.length)
+      .insert.mock.calls[0][0];
+    const subscriberUpdate = calls.newsletter_subscribers[0].update.mock.calls[0][0];
+    expect(suppressionInsert).toEqual(expect.objectContaining({
+      email: 'global.unsub@example.com',
+      group_key: null,
+      suppression_type: 'unsubscribe',
+      status: 'active',
+      source: 'sendgrid_event_webhook',
+    }));
+    expect(subscriberUpdate).toEqual(expect.objectContaining({
+      status: 'unsubscribed',
+      unsubscribed_at: expect.any(Date),
+    }));
+  });
+
+  test('newsletter dropped Spam Reporting Address writes a global spam suppression', async () => {
+    const { client, calls } = fakeClient();
+
+    await handleNewsletterEvent({
+      event: 'dropped',
+      reason: 'Spam Reporting Address',
+      email: 'complaint@example.com',
+    }, {
+      id: 'delivery-4',
+      send_id: 'send-4',
+      subscriber_id: 15,
+      email: 'complaint@example.com',
+    }, client);
+
+    const suppressionInsert = calls.email_suppressions
+      .find((query) => query.insert.mock.calls.length)
+      .insert.mock.calls[0][0];
+    const subscriberUpdate = calls.newsletter_subscribers[0].update.mock.calls[0][0];
+    expect(suppressionInsert).toEqual(expect.objectContaining({
+      email: 'complaint@example.com',
+      group_key: null,
+      suppression_type: 'spam_complaint',
+      status: 'active',
+      source: 'sendgrid_event_webhook',
+    }));
+    expect(subscriberUpdate).toEqual(expect.objectContaining({
+      status: 'unsubscribed',
+      unsubscribed_at: expect.any(Date),
+    }));
   });
 });
 
