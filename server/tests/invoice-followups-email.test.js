@@ -109,7 +109,12 @@ function invoice(overrides = {}) {
 
 describe('invoice follow-up email sidecar', () => {
   beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   test('sends the 3-day email sidecar with the invoice follow-up SMS', async () => {

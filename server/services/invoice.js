@@ -36,6 +36,16 @@ async function nextInvoiceNumber() {
   return `${prefix}${String(num).padStart(4, "0")}`;
 }
 
+async function stopInvoiceFollowupSequence(invoiceId, reason) {
+  try {
+    await require("./invoice-followups").stopSequence(invoiceId, { reason });
+  } catch (err) {
+    logger.error(
+      `[invoice-followups] stopSequence failed for invoice ${invoiceId}: ${err.message}`,
+    );
+  }
+}
+
 function normalizeInvoiceLineItems(lineItems = []) {
   return lineItems.map((item) => {
     const quantity = Number(item.quantity) || 1;
@@ -1774,11 +1784,15 @@ const InvoiceService = {
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
     assertInvoiceVoidable(current.status);
-    if (current.status === "void") return current;
+    if (current.status === "void") {
+      await stopInvoiceFollowupSequence(id, "invoice_voided");
+      return current;
+    }
     const [invoice] = await db("invoices")
       .where({ id })
       .update({ status: "void", updated_at: new Date() })
       .returning("*");
+    await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {
       await require("./annual-prepay-renewals").syncTermForInvoicePayment(
         invoice,
