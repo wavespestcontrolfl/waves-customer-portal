@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { upsertReplyExampleFromAgentReview } = require('../services/reply-training-capture');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -55,6 +56,7 @@ function mapDecision(row) {
     estimateWaveguardTier: row.estimate_waveguard_tier || null,
     sourceChannel: row.source_channel,
     smsLogId: row.sms_log_id,
+    conversationId: row.conversation_id,
     sourceMessageId: row.source_message_id,
     detectedIntent: row.detected_intent,
     confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
@@ -91,8 +93,35 @@ function compactRecord(row, keys) {
   )));
 }
 
+function isAdminAuthoredSmsReply(row = {}) {
+  const type = String(row.type || '').toLowerCase();
+  if (['internal_alert', 'system_note'].includes(type)) return false;
+  return !!row.adminUserId || type === 'manual';
+}
+
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
+}
+
+function mapReplyTraining(row) {
+  if (!row) return null;
+  const metadata = parseJson(row.metadata, {});
+  return {
+    id: row.id,
+    status: row.status,
+    scenarioLabel: row.scenario_label || null,
+    inboundBody: row.inbound_body || null,
+    outboundBody: row.outbound_body || null,
+    agentDraft: row.agent_draft || null,
+    agentDraftEdited: row.agent_draft_edited,
+    reviewNote: row.review_note || row.edit_summary || null,
+    reviewedBy: row.reviewed_by || null,
+    reviewedAt: row.reviewed_at || null,
+    captureReason: row.capture_reason || null,
+    actualHumanReply: metadata.actualHumanReply || null,
+    idealReplyProvided: !!metadata.idealReplyProvided,
+    capturedAt: row.captured_at || row.created_at || null,
+  };
 }
 
 function applyPhoneOrCustomerFilter(q, { customerId, phone }) {
@@ -148,7 +177,7 @@ async function loadDecisionContext(decision) {
     (async () => {
       if (!(customerId || normalizePhoneLast10(phone))) return [];
       const q = db('sms_log')
-        .select('id', 'direction', 'from_phone', 'to_phone', 'message_body', 'message_type', 'status', 'created_at')
+        .select('id', 'direction', 'from_phone', 'to_phone', 'message_body', 'message_type', 'status', 'admin_user_id', 'created_at')
         .orderBy('created_at', 'desc')
         .limit(18);
       applyPhoneOrCustomerFilter(q, { customerId, phone });
@@ -171,6 +200,29 @@ async function loadDecisionContext(decision) {
       .limit(6) : [],
   ]);
 
+  const smsThread = smsRows.map((row) => ({
+    id: row.id,
+    direction: row.direction,
+    fromPhone: row.from_phone,
+    toPhone: row.to_phone,
+    body: row.message_body,
+    type: row.message_type,
+    status: row.status,
+    adminUserId: row.admin_user_id || null,
+    createdAt: row.created_at,
+    isTrigger: row.id === decision.smsLogId,
+  }));
+  const trigger = smsThread.find((row) => row.isTrigger);
+  const triggerTime = trigger?.createdAt ? new Date(trigger.createdAt).getTime() : null;
+  const actualHumanReply = triggerTime
+    ? smsThread.find((row) => (
+      row.direction === 'outbound'
+      && row.body
+      && new Date(row.createdAt).getTime() > triggerTime
+      && isAdminAuthoredSmsReply(row)
+    ))
+    : null;
+
   return {
     customer: compactRecord(customer, [
       'id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
@@ -186,17 +238,8 @@ async function loadDecisionContext(decision) {
       'onetime_total', 'bill_by_invoice', 'sent_at', 'viewed_at', 'last_viewed_at',
       'accepted_at', 'scheduled_at', 'created_at', 'updated_at',
     ]),
-    smsThread: smsRows.map((row) => ({
-      id: row.id,
-      direction: row.direction,
-      fromPhone: row.from_phone,
-      toPhone: row.to_phone,
-      body: row.message_body,
-      type: row.message_type,
-      status: row.status,
-      createdAt: row.created_at,
-      isTrigger: row.id === decision.smsLogId,
-    })),
+    smsThread,
+    actualHumanReply,
     calls: callRows.map((row) => ({
       id: row.id,
       direction: row.direction,
@@ -256,15 +299,29 @@ router.get('/', async (req, res, next) => {
     if (status !== 'all') q.where('ad.status', status);
     if (workflow) q.where('ad.workflow', workflow);
 
-    const [rows, metricsRows] = await Promise.all([
+    const hasReplyTrainingTable = await tableExists('reply_training_examples');
+    const [rows, metricsRows, replyMetricRows] = await Promise.all([
       q,
       db('agent_decisions')
         .select('status')
         .count('* as count')
         .groupBy('status'),
+      hasReplyTrainingTable
+        ? db('reply_training_examples')
+          .select('status')
+          .count('* as count')
+          .groupBy('status')
+        : [],
     ]);
 
-    const metrics = { pending: 0, accepted: 0, corrected: 0, dismissed: 0, total: 0 };
+    const metrics = {
+      pending: 0,
+      accepted: 0,
+      corrected: 0,
+      dismissed: 0,
+      total: 0,
+      replyTraining: { captured: 0, reviewed: 0, excluded: 0, total: 0 },
+    };
     for (const row of metricsRows) {
       const count = Number(row.count || 0);
       metrics.total += count;
@@ -272,6 +329,13 @@ router.get('/', async (req, res, next) => {
       if (row.status === 'accepted') metrics.accepted = count;
       if (row.status === 'corrected') metrics.corrected = count;
       if (row.status === 'dismissed') metrics.dismissed = count;
+    }
+    for (const row of replyMetricRows) {
+      const count = Number(row.count || 0);
+      metrics.replyTraining.total += count;
+      if (row.status === 'captured') metrics.replyTraining.captured = count;
+      if (row.status === 'reviewed') metrics.replyTraining.reviewed = count;
+      if (row.status === 'excluded') metrics.replyTraining.excluded = count;
     }
 
     res.json({ decisions: rows.map(mapDecision), metrics, missingTable: false });
@@ -289,8 +353,55 @@ router.get('/:id/context', async (req, res, next) => {
     const decision = await loadDecision(req.params.id);
     if (!decision) return res.status(404).json({ error: 'Decision not found' });
 
+    const [context, replyTrainingRow] = await Promise.all([
+      loadDecisionContext(decision),
+      (await tableExists('reply_training_examples'))
+        ? db('reply_training_examples')
+          .where({ source_agent_decision_id: decision.id })
+          .orderBy('updated_at', 'desc')
+          .first()
+        : null,
+    ]);
+    res.json({ decision, context, replyTraining: mapReplyTraining(replyTrainingRow) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/reply-training', async (req, res, next) => {
+  try {
+    if (!(await tableExists('agent_decisions'))) {
+      return res.status(409).json({ error: 'agent_decisions table has not been migrated yet' });
+    }
+    if (!(await tableExists('reply_training_examples'))) {
+      return res.status(409).json({ error: 'reply_training_examples table has not been migrated yet' });
+    }
+
+    const decision = await loadDecision(req.params.id);
+    if (!decision) return res.status(404).json({ error: 'Decision not found' });
+
+    const idealReply = String(req.body?.idealReply || '').trim().slice(0, 8000);
+    const actualReply = String(req.body?.actualReply || '').trim().slice(0, 8000);
+    const reviewNote = String(req.body?.reviewNote || '').trim().slice(0, 4000);
+    const scenarioLabel = String(req.body?.scenarioLabel || '').trim().slice(0, 80);
+
+    if (!idealReply && !actualReply) {
+      return res.status(400).json({ error: 'reply training requires an idealReply or actualReply' });
+    }
+
     const context = await loadDecisionContext(decision);
-    res.json({ decision, context });
+    const row = await upsertReplyExampleFromAgentReview({
+      decision,
+      context,
+      idealReply,
+      actualReply,
+      reviewNote,
+      scenarioLabel,
+      reviewedBy: actorName(req),
+    });
+
+    if (!row) return res.status(500).json({ error: 'Reply training example could not be saved' });
+    res.json({ replyTraining: mapReplyTraining(row) });
   } catch (err) {
     next(err);
   }

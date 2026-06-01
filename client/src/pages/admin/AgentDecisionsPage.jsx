@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, CheckCircle2, ClipboardList, Edit3, MessageSquare, PhoneCall, RefreshCw, ShieldAlert, UserRound, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, ClipboardList, Edit3, MessageSquare, PhoneCall, RefreshCw, Save, ShieldAlert, UserRound, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -124,6 +124,10 @@ export default function AgentDecisionsPage() {
   const [error, setError] = useState("");
   const [correctionNote, setCorrectionNote] = useState("");
   const [correctedActions, setCorrectedActions] = useState("");
+  const [idealReply, setIdealReply] = useState("");
+  const [actualReply, setActualReply] = useState("");
+  const [replyReviewNote, setReplyReviewNote] = useState("");
+  const [replyScenarioLabel, setReplyScenarioLabel] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -175,6 +179,15 @@ export default function AgentDecisionsPage() {
     return () => { cancelled = true; };
   }, [selected?.id]);
 
+  useEffect(() => {
+    const training = detail?.replyTraining;
+    const humanReply = detail?.context?.actualHumanReply?.body || "";
+    setActualReply(training?.actualHumanReply || humanReply || "");
+    setIdealReply(training?.outboundBody || selected?.suggestedMessage || humanReply || "");
+    setReplyReviewNote(training?.reviewNote || "");
+    setReplyScenarioLabel(training?.scenarioLabel || "");
+  }, [detail?.replyTraining?.id, detail?.context?.actualHumanReply?.id, selected?.id, selected?.suggestedMessage]);
+
   const review = useCallback(async (decision, verdict) => {
     if (!decision) return;
     setBusyId(decision.id);
@@ -203,6 +216,30 @@ export default function AgentDecisionsPage() {
       setBusyId("");
     }
   }, [correctedActions, correctionNote, load]);
+
+  const saveReplyTraining = useCallback(async (decision) => {
+    if (!decision) return;
+    setBusyId(`${decision.id}:reply`);
+    setError("");
+    setNotice("");
+    try {
+      const next = await adminFetch(`/admin/agent-decisions/${decision.id}/reply-training`, {
+        method: "POST",
+        body: JSON.stringify({
+          idealReply,
+          actualReply,
+          reviewNote: replyReviewNote,
+          scenarioLabel: replyScenarioLabel,
+        }),
+      });
+      setDetail((current) => ({ ...(current || {}), replyTraining: next.replyTraining }));
+      setNotice("Reply training example saved.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }, [actualReply, idealReply, replyReviewNote, replyScenarioLabel]);
 
   const metrics = data.metrics || {};
 
@@ -234,12 +271,13 @@ export default function AgentDecisionsPage() {
           </div>
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 10 }}>
           {[
             ["Pending", metrics.pending || 0],
             ["Accepted", metrics.accepted || 0],
             ["Corrected", metrics.corrected || 0],
             ["Dismissed", metrics.dismissed || 0],
+            ["Reply Examples", metrics.replyTraining?.reviewed || 0],
           ].map(([label, value]) => (
             <div key={label} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14 }}>
               <div style={{ fontSize: 12, color: D.muted, fontWeight: 750 }}>{label}</div>
@@ -436,6 +474,68 @@ export default function AgentDecisionsPage() {
                   <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Suggested Reply</div>
                   <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.suggestedMessage || "-"}</div>
                 </section>
+
+                <Panel icon={MessageSquare} title="Reply Training">
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {detail?.replyTraining && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <Chip tone="green">Saved</Chip>
+                        {detail.replyTraining.scenarioLabel && <Chip>{actionLabel(detail.replyTraining.scenarioLabel)}</Chip>}
+                        <span style={{ color: D.muted, fontSize: 12 }}>
+                          {detail.replyTraining.reviewedBy ? `Reviewed by ${detail.replyTraining.reviewedBy}` : "Reviewed"}
+                          {detail.replyTraining.reviewedAt ? ` · ${timeLabel(detail.replyTraining.reviewedAt)}` : ""}
+                        </span>
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <section style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>Actual Human Reply</div>
+                        <textarea
+                          value={actualReply}
+                          onChange={(event) => setActualReply(event.target.value)}
+                          rows={5}
+                          placeholder="If you replied, paste or adjust the actual reply here."
+                          style={{ width: "100%", resize: "vertical", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, font: "inherit", boxSizing: "border-box" }}
+                        />
+                      </section>
+                      <section style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>Ideal Agent Reply</div>
+                        <textarea
+                          value={idealReply}
+                          onChange={(event) => setIdealReply(event.target.value)}
+                          rows={5}
+                          placeholder="What should the agent say if you do not reply?"
+                          style={{ width: "100%", resize: "vertical", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, font: "inherit", boxSizing: "border-box" }}
+                        />
+                      </section>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "minmax(180px, 260px) 1fr", gap: 10 }}>
+                      <input
+                        value={replyScenarioLabel}
+                        onChange={(event) => setReplyScenarioLabel(event.target.value)}
+                        placeholder="scenario, e.g. scheduling"
+                        style={{ width: "100%", border: `1px solid ${D.border}`, borderRadius: 8, padding: "0 10px", font: "inherit", minHeight: 38, boxSizing: "border-box" }}
+                      />
+                      <input
+                        value={replyReviewNote}
+                        onChange={(event) => setReplyReviewNote(event.target.value)}
+                        placeholder="What should the agent learn from this reply?"
+                        style={{ width: "100%", border: `1px solid ${D.border}`, borderRadius: 8, padding: "0 10px", font: "inherit", minHeight: 38, boxSizing: "border-box" }}
+                      />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                      <button
+                        type="button"
+                        disabled={!!busyId || (!idealReply.trim() && !actualReply.trim())}
+                        onClick={() => saveReplyTraining(selected)}
+                        style={actionButton(D.blue)}
+                      >
+                        <Save size={16} />
+                        Save Reply Training
+                      </button>
+                    </div>
+                  </div>
+                </Panel>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                   <section style={{ display: "grid", gap: 8 }}>
