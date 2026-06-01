@@ -193,6 +193,75 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(1);
   });
 
+  test('does not create payouts for reviews before the program start', async () => {
+    const conn = createDbMock({
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: '2026-05-27',
+      }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: 'customer-1',
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+      }],
+    });
+
+    const result = await ReviewIncentives.createPayoutForGoogleReview('google-1', {
+      conn,
+      policy: { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' },
+    });
+
+    expect(result).toMatchObject({
+      created: false,
+      skipped: true,
+      reason: 'before_program_start',
+    });
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
+  test('excludes historical reviews from the attribution queue after program start', async () => {
+    const conn = createDbMock({
+      google_reviews: [
+        {
+          id: 'old-google',
+          customer_id: null,
+          reviewer_name: 'Old Customer',
+          star_rating: 5,
+          review_created_at: '2026-05-29T16:00:00.000Z',
+          location_id: 'sarasota',
+          google_review_id: 'accounts/1/locations/2/reviews/old',
+        },
+        {
+          id: 'new-google',
+          customer_id: null,
+          reviewer_name: 'New Customer',
+          star_rating: 5,
+          review_created_at: '2026-06-01T16:00:00.000Z',
+          location_id: 'sarasota',
+          google_review_id: 'accounts/1/locations/2/reviews/new',
+        },
+      ],
+    });
+
+    const queue = await ReviewIncentives.getAttributionQueue({
+      conn,
+      policy: { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' },
+      days: 365,
+    });
+
+    expect(queue.count).toBe(1);
+    expect(queue.items[0]).toMatchObject({
+      id: 'new-google',
+      reason: 'missing_customer',
+    });
+  });
+
   test('attributes a matched Google review to the most recent technician service', async () => {
     const conn = createDbMock({
       service_records: [{
@@ -319,5 +388,44 @@ describe('review incentives', () => {
       customer_id: 'customer-1',
       action: 'review_incentive_attributed',
     });
+  });
+
+  test('manual attribution rejects reviews before the program start', async () => {
+    const conn = createDbMock({
+      customers: [{
+        id: 'customer-1',
+        first_name: 'Customer',
+        last_name: 'One',
+        active: true,
+      }],
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: '2026-05-27',
+      }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+      }],
+    });
+
+    await expect(ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-1',
+      customerId: 'customer-1',
+      serviceRecordId: 'service-1',
+      adminId: 'admin-1',
+    }, {
+      conn,
+      policy: { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' },
+    })).rejects.toMatchObject({ code: 'review_before_program_start' });
+
+    expect(conn.__state.rows.google_reviews[0].customer_id).toBeNull();
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 });
