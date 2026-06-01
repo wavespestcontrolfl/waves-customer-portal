@@ -45,6 +45,25 @@ function parsePositiveInt(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function normalizePhoneLast10(value) {
+  const digits = phoneDigits(value);
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+function parseJson(value, fallback = {}) {
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeReplyForComparison(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
 async function findSingleCustomerForPhone(phone) {
   const digits = phoneDigits(normalizePhone(phone) || phone);
   if (!digits) return null;
@@ -65,7 +84,17 @@ async function findSingleCustomerForPhone(phone) {
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   try {
-    const { to, body, customerId, messageType, fromNumber, mediaUrls, mediaAttachments } = req.body;
+    const {
+      to,
+      body,
+      customerId,
+      messageType,
+      fromNumber,
+      mediaUrls,
+      mediaAttachments,
+      agentDecisionId,
+      agentDraft,
+    } = req.body;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
     const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
@@ -97,6 +126,40 @@ router.post('/sms', async (req, res, next) => {
       trustedCustomerId = customer.id;
     }
 
+    let verifiedAgentDecision = null;
+    if (agentDecisionId && agentDraft) {
+      try {
+        const sentPhoneLast10 = normalizePhoneLast10(to);
+        const decision = await db('agent_decisions as ad')
+          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+          .leftJoin('customers as c', 'ad.customer_id', 'c.id')
+          .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' })
+          .select(
+            'ad.id',
+            'ad.customer_id',
+            'ad.suggested_message',
+            's.from_phone as sms_from_phone',
+            's.to_phone as sms_to_phone',
+            'c.phone as customer_phone'
+          )
+          .first();
+        const decisionPhoneMatches = sentPhoneLast10 && [
+          decision?.sms_from_phone,
+          decision?.sms_to_phone,
+          decision?.customer_phone,
+        ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
+        const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
+        if (decision?.id && customerMatches && decisionPhoneMatches) {
+          verifiedAgentDecision = decision;
+        }
+      } catch (verifyErr) {
+        logger.warn(`[agent-review] failed to verify inbox draft decision ownership: ${verifyErr.message}`);
+      }
+    }
+    const verifiedAgentDraft = normalizeReplyForComparison(verifiedAgentDecision?.suggested_message)
+      ? verifiedAgentDecision.suggested_message
+      : null;
+
     const result = await sendCustomerMessage({
       to,
       body: cleanBody,
@@ -109,6 +172,9 @@ router.post('/sms', async (req, res, next) => {
       metadata: {
         original_message_type: messageType || 'manual',
         adminUserId: req.technicianId,
+        agentDecisionId: verifiedAgentDecision?.id || undefined,
+        agentDraft: verifiedAgentDraft || undefined,
+        suggestedReply: verifiedAgentDraft || undefined,
         fromNumber: fromNumber || undefined,
         mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
         allowMediaUrls: cleanMediaUrls.length > 0,
@@ -120,6 +186,26 @@ router.post('/sms', async (req, res, next) => {
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });
+    }
+
+    if (verifiedAgentDecision && verifiedAgentDraft) {
+      const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
+      try {
+        await db('agent_decisions')
+          .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
+          .update({
+            status: draftMatched ? 'accepted' : 'corrected',
+            human_verdict: draftMatched ? 'accepted' : 'corrected',
+            correction_note: draftMatched
+              ? 'Agent Review draft sent from SMS inbox.'
+              : 'Agent Review draft edited and sent from SMS inbox.',
+            reviewed_by: req.technicianId || 'Admin',
+            reviewed_at: new Date(),
+            updated_at: new Date(),
+          });
+      } catch (reviewErr) {
+        logger.warn(`[agent-review] failed to mark inbox draft decision reviewed: ${reviewErr.message}`);
+      }
     }
 
     res.json(result);
@@ -342,6 +428,67 @@ router.get('/log', async (req, res, next) => {
       limit: effectiveLimit,
       hasMore,
       nextPage: hasMore ? requestedPage + 1 : null,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/communications/agent-draft — latest pending Agent Review draft for composer
+router.get('/agent-draft', async (req, res, next) => {
+  try {
+    const customerId = typeof req.query.customerId === 'string' ? req.query.customerId.trim() : '';
+    const phoneLast10 = normalizePhoneLast10(req.query.phone);
+    if (!customerId && !phoneLast10) {
+      return res.status(400).json({ error: 'customerId or phone required' });
+    }
+
+    let q = db('agent_decisions as ad')
+      .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+      .leftJoin('customers as c', 'ad.customer_id', 'c.id')
+      .where('ad.source_channel', 'sms')
+      .where('ad.status', 'pending_review')
+      .whereNotNull('ad.suggested_message')
+      .whereRaw("NULLIF(TRIM(ad.suggested_message), '') IS NOT NULL")
+      .select(
+        'ad.id',
+        'ad.workflow',
+        'ad.detected_intent',
+        'ad.confidence',
+        'ad.confidence_label',
+        'ad.suggested_message',
+        'ad.reasoning_summary',
+        'ad.input_snapshot',
+        'ad.created_at'
+      )
+      .orderBy('ad.created_at', 'desc')
+      .limit(1);
+
+    if (phoneLast10) {
+      q = q.andWhere(function byActivePhoneThread() {
+        this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10])
+          .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10]);
+      });
+      if (customerId) q = q.andWhere('ad.customer_id', customerId);
+    } else {
+      q = q.andWhere('ad.customer_id', customerId);
+    }
+
+    const row = await q.first();
+    if (!row) return res.json({ draft: null });
+
+    const input = parseJson(row.input_snapshot, {});
+    res.json({
+      draft: {
+        decisionId: row.id,
+        workflow: row.workflow,
+        detectedIntent: row.detected_intent,
+        confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
+        confidenceLabel: row.confidence_label || null,
+        suggestedMessage: row.suggested_message,
+        reasoningSummary: row.reasoning_summary || null,
+        scenarioLabel: input?.reply_training_hint?.scenarioLabel || null,
+        inboundMessage: input?.sms?.body || null,
+        createdAt: row.created_at,
+      },
     });
   } catch (err) { next(err); }
 });

@@ -113,6 +113,9 @@ async function sendViaTwilio(input) {
       mediaUrls: providerMediaUrls(input),
       media: input.metadata && input.metadata.media,
       customerLocationId: input.metadata && input.metadata.customerLocationId,
+      agentDecisionId: input.metadata && input.metadata.agentDecisionId,
+      agentDraft: input.metadata && input.metadata.agentDraft,
+      suggestedReply: input.metadata && input.metadata.suggestedReply,
       // Preserve admin attribution. services/twilio.js writes
       // sms_log.admin_user_id from this option; without forwarding,
       // operator-driven sends (Comms inbox, IB) lose the audit trail
