@@ -114,6 +114,7 @@ async function recordLawnProtocolCompletion(trx, {
   completionInput = {},
   equipmentSystemId = null,
   calibrationId = null,
+  calibrationCleared = false,
   serviceDate = new Date(),
 } = {}) {
   const structured = plan?.protocol?.structured;
@@ -169,8 +170,11 @@ async function recordLawnProtocolCompletion(trx, {
       protocol_version: structured.version,
       window_key: window.key,
       window_title: window.title,
-      equipment_system_id: equipmentSystemId || plan?.mixCalculator?.equipmentSystemId || null,
-      calibration_id: calibrationId || plan?.equipmentCalibration?.selected?.id || null,
+      // calibrationCleared means the tech completed without field-verified
+      // equipment (calibration advisory bypass) — record "none" rather than
+      // falling back to the stale assigned system carried on the plan.
+      equipment_system_id: equipmentSystemId || (calibrationCleared ? null : plan?.mixCalculator?.equipmentSystemId) || null,
+      calibration_id: calibrationId || (calibrationCleared ? null : plan?.equipmentCalibration?.selected?.id) || null,
       treated_sqft: treatedSqft,
       carrier_gal_per_1000: carrier,
       total_carrier_gal: totalCarrier,

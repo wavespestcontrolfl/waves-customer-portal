@@ -1481,6 +1481,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardNLimitApproval = null;
     let waveguardManagerApproval = null;
     let waveguardCalibrationAdvisory = null;
+    let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
     let inventoryDeductions = [];
@@ -1709,6 +1710,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       if (calibrationBypass && !equipmentSystemId) {
         waveguardEquipmentSystemId = null;
         waveguardCalibrationId = null;
+        waveguardCalibrationCleared = true;
       }
       // Tank cleanout attestation is required only when the tech actually
       // submitted an equipment system. We key off the raw request `equipmentSystemId`
@@ -2144,6 +2146,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             },
             equipmentSystemId: waveguardEquipmentSystemId,
             calibrationId: waveguardCalibrationId,
+            // When the tech bypassed calibration without submitting equipment, the
+            // IDs were intentionally cleared to null — don't let the protocol
+            // completion re-derive the stale assigned system from the plan.
+            calibrationCleared: waveguardCalibrationCleared,
             serviceDate: completionEndedAt,
           });
           if (protocolCompletion) {
