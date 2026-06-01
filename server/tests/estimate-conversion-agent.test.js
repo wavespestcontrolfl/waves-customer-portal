@@ -147,6 +147,19 @@ describe('estimate conversion agent shadow decisions', () => {
     expect(routed.decision.reasoningSummary).toContain('recent service scheduling prompt');
   });
 
+  test('active scheduling thread accepts time-only availability replies', () => {
+    const customer = { id: 'customer-1', first_name: 'Dale' };
+    const context = {
+      customer,
+      recentSmsThread: [
+        { direction: 'outbound', body: 'What time works for you?' },
+      ],
+    };
+
+    expect(routeEstimateOrCustomerReply('9am works', context).workflow).toBe('service_scheduling_sms');
+    expect(routeEstimateOrCustomerReply('morning is fine', context).workflow).toBe('service_scheduling_sms');
+  });
+
   test('service scheduling classifier requires an existing customer scheduling signal', () => {
     expect(classifyServiceSchedulingSmsIntent('Wednesday morning works', {}).intent).toBeNull();
     expect(classifyServiceSchedulingSmsIntent('Thanks for the update', { customer: { id: 'customer-1' } }).intent).toBeNull();

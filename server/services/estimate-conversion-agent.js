@@ -16,6 +16,7 @@ const HOME_QUESTION_RE = /\b(do i need to be home|need to be home|have to be hom
 const SERVICE_QUESTION_RE = /\b(typical visit|outline of the service|what'?s included|does it include|sweep|sweeping|webs?|lanai|cage|front door|entry points?|shrubs?)\b/i;
 const GENERAL_ESTIMATE_QUESTION_RE = /\b(how much|fees?|price|pricing|cost|bundle|bundled|add that|add .*later|come inside|inside|safe for pets?|new estimate|proceed with (a )?service)\b|\?/i;
 const SERVICE_SCHEDULING_PROMPT_RE = /\b(availability|available|what availability|what works|what time|what day|can y'?all do|can you do|does .* work|appointment|schedule|reschedule|adjust around your schedule|route)\b/i;
+const TIME_AVAILABILITY_RE = /\b([1-9]|1[0-2])(?::[0-5]\d)?\s?(a\.?m\.?|p\.?m\.?)?\b|\b(morning|afternoon|evening|midday|noon|early|late)\b/i;
 
 function normalizePhoneLast10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -167,7 +168,8 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
   const accepted = ACCEPTANCE_RE.test(text);
   const scheduleWindow = SCHEDULE_WINDOW_RE.test(text);
   const activeSchedulingThread = hasActiveServiceSchedulingThread(context.recentSmsThread);
-  if (!hasCustomer || !scheduleWindow || accepted || (hasEstimate && !activeSchedulingThread)) {
+  const availabilityReply = scheduleWindow || (activeSchedulingThread && TIME_AVAILABILITY_RE.test(text));
+  if (!hasCustomer || !availabilityReply || accepted || (hasEstimate && !activeSchedulingThread)) {
     return {
       intent: null,
       confidence: 0,
