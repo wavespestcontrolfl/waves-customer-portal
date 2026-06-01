@@ -1701,26 +1701,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
         waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
       }
-      // On a bypass where the tech submitted no equipment, drop the IDs that were
-      // backfilled from a stale assigned_equipment_system_id/assigned_calibration_id
-      // earlier in the handler. Otherwise the completion snapshot would persist the
-      // expired/unverified assigned system as the one applied, contradicting the
-      // bypass's intent of completing without a field-verified calibration. If the
-      // tech explicitly submitted a system, it's genuinely what they used — keep it.
-      if (calibrationBypass && !equipmentSystemId) {
+      // On a calibration bypass, record "none" rather than persisting equipment
+      // the tech could not have chosen. We clear the IDs when EITHER:
+      //   - no equipment was submitted (so any value present is only a stale
+      //     assigned_equipment_system_id/assigned_calibration_id backfill), OR
+      //   - the selected calibration is not field verified — those rows are
+      //     filtered out of the dropdown (SchedulePage.jsx:5670), so a non-empty
+      //     ID for one can only come from a stale draft / direct API, never a real
+      //     tech selection.
+      // A field-verified-but-expired calibration DOES appear in the dropdown and
+      // can be deliberately selected, so we keep it (the advisory still warns).
+      const selectedIsFieldVerified =
+        selectedCalibration?.calibration_status === 'field_verified';
+      if (calibrationBypass && (!equipmentSystemId || !selectedIsFieldVerified)) {
         waveguardEquipmentSystemId = null;
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;
       }
-      // Tank cleanout attestation is required only when the tech actually
-      // submitted an equipment system. We key off the raw request `equipmentSystemId`
+      // Tank cleanout attestation is required only when we're actually recording a
+      // field-verified system as used. We key off the raw request `equipmentSystemId`
       // — NOT the backfilled `waveguardEquipmentSystemId`, which may be repopulated
-      // from a stale `assigned_equipment_system_id` the tech never chose — so this
-      // exactly mirrors CompletionPanel's tankCleanoutRequired gate (`!!equipmentSystemId`),
-      // which is also what drives whether the UI even renders the cleanout fields.
-      // Submitting no equipment (the calibration-bypass unblock) skips it; submitting
-      // any system — verified or not — still requires the tank attestation.
-      if (equipmentSystemId) {
+      // from a stale assignment the tech never chose — and skip it when the
+      // calibration was cleared to "none", so this mirrors CompletionPanel's gate
+      // without ever requiring attestation for equipment we don't record.
+      if (equipmentSystemId && !waveguardCalibrationCleared) {
         const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
         if (cleanoutBlocks.length) {
           const validationErr = new Error('WaveGuard tank cleanout lockout');
