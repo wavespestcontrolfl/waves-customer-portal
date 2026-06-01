@@ -920,6 +920,42 @@ function lawnMetricRows(assessment = {}) {
   ];
 }
 
+function formatIrrigationInches(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return `${String(Number(n.toFixed(2))).replace(/\.00$/, '')}" / week`;
+}
+
+function formatWaterInches(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return '';
+  return `${String(Number(n.toFixed(2))).replace(/\.00$/, '')}"`;
+}
+
+function lawnWaterLine(water = {}) {
+  const dailyTotal = formatWaterInches(water.effectiveInchesToday);
+  const dailyIrrigation = formatWaterInches(water.irrigationInchesPerDay);
+  const dailyRain = formatWaterInches(water.rainfallInchesToday);
+  const weeklyTotal = formatWaterInches(water.effectiveInches7d);
+  const weeklyRain = formatWaterInches(water.rainfallInches7d);
+  const target = formatWaterInches(water.targetInchesPerWeek);
+
+  if (weeklyTotal && weeklyRain) {
+    return `Estimated weekly water: ${weeklyTotal} including ${weeklyRain} recorded rainfall. Target is about ${target || '1"'} per week before site adjustments.`;
+  }
+  if (dailyTotal && dailyIrrigation && dailyRain) {
+    return `Estimated water today: ${dailyTotal} from about ${dailyIrrigation} scheduled irrigation plus ${dailyRain} recorded rainfall. Target is about ${target || '1"'} per week before site adjustments.`;
+  }
+  if (dailyRain) {
+    return `Rainfall accounted for today: ${dailyRain} recorded near the property. Target is about ${target || '1"'} per week before site adjustments.`;
+  }
+  if (dailyIrrigation) {
+    return `Estimated irrigation: ${dailyIrrigation} per day from the weekly setting. Rainfall was not recorded for this visit.`;
+  }
+  return '';
+}
+
 function lawnAssessmentBody(assessment = {}) {
   const snapshotSummary = String(assessment.snapshot?.summary || '').trim();
   if (snapshotSummary) return snapshotSummary;
@@ -930,6 +966,10 @@ function lawnAssessmentBody(assessment = {}) {
   const observations = String(assessment.observations || assessment.scores?.observations || '').trim();
   if (observations) return observations;
   const profile = assessment.turfProfile;
+  const irrigationInches = formatIrrigationInches(profile?.irrigationInchesPerWeek);
+  if (irrigationInches && profile?.irrigationStatus && profile.irrigationStatus !== 'unknown') {
+    return `Irrigation was documented as ${formatEnumLabel(profile.irrigationStatus).toLowerCase()} at about ${irrigationInches}. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
+  }
   if (profile?.grassType) {
     return `Assessment captured for ${formatEnumLabel(profile.grassType).toLowerCase()} turf. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
   }
@@ -1224,6 +1264,8 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   const score = assessment.scores.overallScore;
   const Root = embedded ? 'div' : 'section';
   const profile = assessment.turfProfile;
+  const irrigationInches = formatIrrigationInches(profile?.irrigationInchesPerWeek);
+  const waterLine = lawnWaterLine(assessment.waterContext);
   const metricRows = lawnMetricRows(assessment);
   const visiblePhotos = (assessment.photos || []).filter((photo) => photo.url).slice(0, 3);
 
@@ -1247,12 +1289,17 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
                 profile.grassType ? formatEnumLabel(profile.grassType) : null,
                 profile.lawnSqft ? `${Number(profile.lawnSqft).toLocaleString()} sq ft turf` : null,
                 profile.irrigationType ? `${formatEnumLabel(profile.irrigationType)} irrigation` : null,
+                profile.irrigationStatus ? `${formatEnumLabel(profile.irrigationStatus)} irrigation status` : null,
+                irrigationInches ? `${irrigationInches} irrigation` : null,
               ].filter(Boolean).join(' · ')}
             </div>
           )}
         </div>
         <LawnTrendChart trend={assessment.trend || []} summary={assessment.customerSummary} />
       </div>
+      {waterLine && (
+        <div className="lawn-water-line">{waterLine}</div>
+      )}
       <div className="lawn-score-grid">
         {metricRows.map(([label, value]) => (
           <div className="lawn-score-cell" key={label}>
@@ -6597,12 +6644,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           line-height: 1.2;
         }
         .lawn-profile-line,
+        .lawn-water-line,
         .lawn-before-after-line {
           margin-top: 10px;
           color: var(--muted);
           font-size: 13px;
           line-height: 1.45;
           font-weight: 650;
+        }
+        .lawn-water-line {
+          padding: 10px 12px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: var(--wash);
+          max-width: 680px;
+          color: var(--text);
+          font-weight: 600;
         }
         .lawn-trend-chart {
           width: 100%;

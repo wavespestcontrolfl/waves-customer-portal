@@ -104,6 +104,11 @@ function normalizeProtocolFieldChecks(input = {}) {
     errors.push('irrigation_status must be one of: good, dry, wet, unknown');
   }
 
+  const irrigationInchesPerWeek = finiteNumberOrNull(source.irrigation_inches_per_week ?? source.irrigationInchesPerWeek);
+  if (irrigationInchesPerWeek != null && (irrigationInchesPerWeek < 0 || irrigationInchesPerWeek > 5)) {
+    errors.push('irrigation_inches_per_week must be between 0 and 5 inches');
+  }
+
   const thatchMeasurementIn = finiteNumberOrNull(source.thatch_measurement_in ?? source.thatchMeasurementIn);
   if (thatchMeasurementIn != null && (thatchMeasurementIn < 0 || thatchMeasurementIn > 12)) {
     errors.push('thatch_measurement_in must be between 0 and 12 inches');
@@ -126,6 +131,7 @@ function normalizeProtocolFieldChecks(input = {}) {
 
   const normalized = {
     irrigation_status: irrigationStatus,
+    irrigation_inches_per_week: irrigationInchesPerWeek,
     thatch_measurement_in: thatchMeasurementIn,
     chinch_count_per_sqft: chinchCountPerSqft,
     chinch_float_test_done: source.chinch_float_test_done === true || source.chinchFloatTestDone === true,
@@ -154,6 +160,9 @@ async function persistProtocolFieldChecks({ assessment, checks, trx = db }) {
   if (!Object.keys(turfCols).length) return update;
   const profileUpdate = { updated_at: new Date() };
   if (checks.irrigation_status && turfCols.irrigation_status) profileUpdate.irrigation_status = checks.irrigation_status;
+  if (checks.irrigation_inches_per_week != null && turfCols.irrigation_inches_per_week) {
+    profileUpdate.irrigation_inches_per_week = checks.irrigation_inches_per_week;
+  }
   if (checks.thatch_measurement_in != null && turfCols.thatch_measurement_in) {
     profileUpdate.thatch_measurement_in = checks.thatch_measurement_in;
   }

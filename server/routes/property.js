@@ -41,6 +41,7 @@ const prefsSchema = Joi.object({
   irrigationSystem: Joi.boolean(),
   irrigationControllerLocation: shortText,
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
+  irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
   irrigationScheduleNotes: longText,
   wateringDays: Joi.array().items(Joi.string().max(20)).max(7),
   irrigationSystemType: shortText,
@@ -66,7 +67,7 @@ const ALLOWED_FIELDS = [
   'preferred_day', 'preferred_time', 'contact_preference',
   'blackout_start', 'blackout_end',
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
-  'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
+  'irrigation_inches_per_week', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
   'rain_sensor', 'irrigation_issues',
   'hoa_name', 'hoa_restrictions', 'hoa_company', 'hoa_phone', 'hoa_email',
   'hoa_lawn_height', 'hoa_signage_rules', 'hoa_timing_restrictions',
@@ -81,6 +82,7 @@ const CUSTOMER_EMAIL_FIELDS = {
   blackout_start: 'Blackout start date',
   blackout_end: 'Blackout end date',
   irrigation_system: 'Irrigation system',
+  irrigation_inches_per_week: 'Irrigation inches per week',
   watering_days: 'Watering days',
   irrigation_system_type: 'Irrigation system type',
   rain_sensor: 'Rain sensor',
@@ -131,6 +133,11 @@ function transformKeys(obj, fn) {
   return result;
 }
 
+function customerHasLawnCare(customer = {}) {
+  const tier = String(customer.waveguard_tier || customer.tier || '').trim();
+  return ['Silver', 'Gold', 'Platinum'].includes(tier) || !!String(customer.lawn_type || '').trim();
+}
+
 // =========================================================================
 // GET /api/property/preferences
 // =========================================================================
@@ -150,6 +157,7 @@ router.get('/preferences', async (req, res, next) => {
           preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
           blackoutStart: null, blackoutEnd: null,
           irrigationSystem: false, irrigationControllerLocation: '', irrigationZones: null,
+          irrigationInchesPerWeek: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: '',
           rainSensor: false, irrigationIssues: '',
           hoaName: '', hoaRestrictions: '', hoaCompany: '', hoaPhone: '', hoaEmail: '',
@@ -201,6 +209,9 @@ router.put('/preferences', async (req, res, next) => {
       if (field in snakeBody) {
         updates[field] = snakeBody[field];
       }
+    }
+    if ('irrigation_inches_per_week' in updates && !customerHasLawnCare(req.customer)) {
+      delete updates.irrigation_inches_per_week;
     }
 
     // Stringify JSON fields for DB storage

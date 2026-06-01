@@ -4276,6 +4276,36 @@ function PropertyTab({ customer }) {
     </div>
   );
 
+  const irrigationInchesInput = () => (
+    <div>
+      <label style={labelStyle}>Weekly Inches</label>
+      <div style={{ position: 'relative' }}>
+        <input
+          type="number"
+          min="0"
+          max="5"
+          step="0.25"
+          value={prefs.irrigationInchesPerWeek ?? ''}
+          onChange={e => updateField('irrigationInchesPerWeek', e.target.value === '' ? null : Number(e.target.value))}
+          placeholder="1.00"
+          aria-label="Weekly irrigation inches"
+          style={{ ...inputStyle, paddingRight: 48 }}
+          onFocus={focusBorder}
+          onBlur={blurBorder}
+        />
+        <span style={{
+          position: 'absolute',
+          right: 12,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          color: muted,
+          fontSize: 14,
+          fontWeight: 800,
+        }}>in</span>
+      </div>
+    </div>
+  );
+
   const dateValue = (value) => {
     if (!value) return '';
     if (typeof value === 'string') return value.slice(0, 10);
@@ -4308,6 +4338,8 @@ function PropertyTab({ customer }) {
   };
   const fullAddress = formatPropertyAddress(customer);
   const cleanTurf = (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '').trim() || 'Not set';
+  const tierHasLawnCare = ['Silver', 'Gold', 'Platinum'].includes(String(customer.tier || ''));
+  const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim();
   const homeSqFt = Number(customer.property?.propertySqFt || 0);
   const bedSqFt = Number(customer.property?.bedSqFt || 0);
   const treatedSqFt = homeSqFt ? Math.max(0, homeSqFt - bedSqFt) : 0;
@@ -4322,7 +4354,13 @@ function PropertyTab({ customer }) {
   const petPlan = prefs.petsSecuredPlan ?? prefs.petSecuredPlan ?? '';
   const petSummary = petCount > 0 ? `${petCount} pet${petCount === 1 ? '' : 's'} on file` : 'No pets listed';
   const scheduleSummary = `${displayChoice(prefs.preferredDay)}, ${displayChoice(prefs.preferredTime).toLowerCase()}`;
-  const irrigationSummary = prefs.irrigationSystem ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}` : 'No irrigation system listed';
+  const irrigationInches = Number(prefs.irrigationInchesPerWeek);
+  const irrigationInchesSummary = Number.isFinite(irrigationInches) && irrigationInches > 0
+    ? ` · ${irrigationInches.toFixed(2).replace(/\.00$/, '')}" / week`
+    : '';
+  const irrigationSummary = prefs.irrigationSystem
+    ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}${irrigationInchesSummary}`
+    : 'No irrigation system listed';
   const hoaSummary = prefs.hoaName || prefs.hoaCompany || 'No HOA details listed';
   const mapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const staticMapUrl = mapsKey && customer.address?.line1
@@ -4646,7 +4684,7 @@ function PropertyTab({ customer }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, gap: 12 }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Irrigation system</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Watering timing can affect lawn and pest applications.</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Watering volume and timing help us read lawn stress correctly.</div>
           </div>
           <ToggleSwitch checked={!!prefs.irrigationSystem} onChange={() => updateField('irrigationSystem', !prefs.irrigationSystem)} label="Irrigation system" />
         </div>
@@ -4658,7 +4696,13 @@ function PropertyTab({ customer }) {
                 <label style={labelStyle}>Number of Zones</label>
                 <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={20} label="Irrigation zones" />
               </div>
+              {hasLawnCare && irrigationInchesInput()}
             </div>
+            {hasLawnCare && (
+              <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+                Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
+              </div>
+            )}
             <div style={{ marginTop: 14 }}>
               <label style={labelStyle}>Watering Days</label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
