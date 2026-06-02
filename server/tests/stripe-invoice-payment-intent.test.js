@@ -185,6 +185,13 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
           id,
           ...params,
         })),
+        retrieve: jest.fn().mockResolvedValue({ id: 'pi_invoice', status: 'requires_payment_method' }),
+        create: jest.fn().mockImplementation(async (params) => ({
+          id: 'pi_replacement',
+          client_secret: 'cs_replacement',
+          ...params,
+        })),
+        cancel: jest.fn().mockResolvedValue({ id: 'pi_invoice', status: 'canceled' }),
       },
     };
 
@@ -192,9 +199,25 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       where: jest.fn(() => rootInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
     };
+    // Transaction-scoped invoice query: supports the forUpdate read and the
+    // guarded repoint update used by replaceInvoicePaymentIntentForTender.
+    const trxInvoiceQuery = {
+      where: jest.fn(() => trxInvoiceQuery),
+      forUpdate: jest.fn(() => trxInvoiceQuery),
+      whereNotIn: jest.fn(() => trxInvoiceQuery),
+      first: jest.fn().mockResolvedValue(invoiceRow),
+      update: jest.fn().mockResolvedValue(1),
+    };
     dbMock = jest.fn(table => {
       if (table === 'invoices') return rootInvoiceQuery;
       throw new Error(`Unexpected db table: ${table}`);
+    });
+    dbMock.transaction = jest.fn(async (cb) => {
+      const trx = jest.fn(table => {
+        if (table === 'invoices') return trxInvoiceQuery;
+        throw new Error(`Unexpected trx table: ${table}`);
+      });
+      return cb(trx);
     });
 
     jest.doMock('stripe', () => jest.fn(() => stripeClient));
@@ -249,5 +272,47 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
     ).rejects.toThrow(/does not belong/);
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('tender switch blocked by an attached PM recreates the PaymentIntent for the new tender', async () => {
+    stripeClient.paymentIntents.update.mockRejectedValueOnce(new Error(
+      'The allowed types provided (card) are incompatible with the attached PaymentMethod on the PaymentIntent. Please replace the PaymentMethod first or include us_bank_account in the allowed types.',
+    ));
+    const StripeService = require('../services/stripe');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
+
+    // Fresh PI minted for the selected tender, lock preserved.
+    expect(stripeClient.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amount: 7500,
+        payment_method_types: ['card'],
+        metadata: expect.objectContaining({ selected_method_category: 'card', card_surcharge: '0' }),
+      }),
+      expect.objectContaining({ idempotencyKey: expect.stringContaining('invoice_pi_replace_') }),
+    );
+    // Stale PI canceled now that the invoice points at the replacement.
+    expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_invoice');
+    expect(result).toEqual(expect.objectContaining({
+      replaced: true,
+      paymentIntentId: 'pi_replacement',
+      clientSecret: 'cs_replacement',
+      total: 75,
+      surcharge: 0,
+    }));
+  });
+
+  test('tender switch will not cancel a PaymentIntent that is already processing', async () => {
+    stripeClient.paymentIntents.update.mockRejectedValueOnce(new Error(
+      'The allowed types provided (card) are incompatible with the attached PaymentMethod on the PaymentIntent.',
+    ));
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({ id: 'pi_invoice', status: 'processing' });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
+    ).rejects.toThrow(/already in progress/);
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
   });
 });
