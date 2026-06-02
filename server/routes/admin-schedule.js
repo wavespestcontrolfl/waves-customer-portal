@@ -2675,6 +2675,8 @@ router.put('/:id/update-details', async (req, res, next) => {
                     estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
                   };
                   if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+                  if (addonCols.technician_id && addon.technician_id) addonData.technician_id = addon.technician_id;
+                  if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
                   if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
                   if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
                   if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
@@ -3448,6 +3450,8 @@ router.put('/:id/status', async (req, res, next) => {
                         estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
                       };
                       if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+                      if (addonCols.technician_id && addon.technician_id) addonData.technician_id = addon.technician_id;
+                      if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
                       if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
                       if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
                       if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
@@ -4490,6 +4494,8 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
             estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
           };
           if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+          if (addonCols.technician_id && addon.technician_id) addonData.technician_id = addon.technician_id;
+          if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
           if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
           if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
           if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
