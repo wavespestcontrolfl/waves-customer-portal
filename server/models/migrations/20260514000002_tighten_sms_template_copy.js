@@ -1016,22 +1016,6 @@ const TEMPLATES = [
     sort_order: 27,
   },
   {
-    template_key: 'pest_prep_cockroach',
-    name: 'Cockroach Prep Instructions',
-    category: 'service',
-    body: 'Hello {first_name}! Your cockroach treatment is {service_date}. To prep: clear under sinks and behind appliances, remove items from cabinet bases, clean food debris, and plan to leave home 2-4 hours after treatment.\n\nQuestions or requests? Reply here.',
-    variables: ['first_name', 'service_date'],
-    sort_order: 28,
-  },
-  {
-    template_key: 'pest_prep_bed_bug',
-    name: 'Bed Bug Prep Instructions',
-    category: 'service',
-    body: 'Hello {first_name}! Bed bug prep for {service_date}: strip bedding and dry on high heat, pull beds 6 inches from walls, bag clothing for wash/dry, vacuum mattress/baseboards, and do not move items to other rooms.\n\nQuestions or requests? Reply here.',
-    variables: ['first_name', 'service_date'],
-    sort_order: 29,
-  },
-  {
     template_key: 'service_request_confirmation',
     name: 'Service Request Confirmation',
     category: 'service',
