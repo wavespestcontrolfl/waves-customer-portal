@@ -818,7 +818,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         _origDiscountAmount: a.discountAmount != null ? a.discountAmount : null,
         _origDiscountId: a.discountId || null,
         _origDiscountName: a.discountName || null,
-        technicianId: a.technicianId || "",
         estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
         recurringPattern: a.recurringPattern || null,
         recurringIntervalDays: a.recurringIntervalDays ?? null,
@@ -949,7 +948,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         _origDiscountAmount: null,
         _origDiscountId: null,
         _origDiscountName: null,
-        technicianId: "",
         estimatedDuration: "",
         recurringPattern: null,
         recurringIntervalDays: null,
@@ -1005,12 +1003,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       const addonsPayload = sendAddons
         ? cleanLines.map((l) => {
             const common = {
-              // Original add-on row id (null for new lines) so the server can
-              // detect per-line staffing changes for its admin-only guard.
-              id: l.id || null,
               serviceId: l.serviceId || null,
               serviceName: l.serviceType,
-              technicianId: l.technicianId || null,
               estimatedDuration:
                 l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
                   ? parseInt(l.estimatedDuration, 10)
@@ -1237,6 +1231,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     onField,
     onRemove,
     label,
+    showStaff = false,
   }) => {
     const picking = pickerKey === pickerId;
     return (
@@ -1418,41 +1413,42 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               </div>
             )}
           </div>
-          <div>
-            <label style={labelStyle}>Staff</label>
-            <select
-              value={technicianId}
-              onChange={(e) => onField("technicianId", e.target.value)}
-              className="font-bold"
-              style={inputStyle}
-            >
-              <option value="">Unassigned</option>
-              {(technicians || []).map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-            {!onRemove &&
-              serviceHasSeries &&
-              technicianId !== (service.technicianId || "") && (
-                <div style={{ marginTop: 10 }}>
-                  <label style={labelStyle}>Apply staff change to</label>
-                  <select
-                    value={assignmentScope}
-                    onChange={(e) => setAssignmentScope(e.target.value)}
-                    className="font-bold"
-                    style={inputStyle}
-                  >
-                    <option value="this_only">This appointment only</option>
-                    <option value="following">
-                      This and following appointments
-                    </option>
-                    <option value="series">All appointments in series</option>
-                  </select>
-                </div>
-              )}
-          </div>
+          {showStaff && (
+            <div>
+              <label style={labelStyle}>Staff</label>
+              <select
+                value={technicianId}
+                onChange={(e) => onField("technicianId", e.target.value)}
+                className="font-bold"
+                style={inputStyle}
+              >
+                <option value="">Unassigned</option>
+                {(technicians || []).map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+              {serviceHasSeries &&
+                technicianId !== (service.technicianId || "") && (
+                  <div style={{ marginTop: 10 }}>
+                    <label style={labelStyle}>Apply staff change to</label>
+                    <select
+                      value={assignmentScope}
+                      onChange={(e) => setAssignmentScope(e.target.value)}
+                      className="font-bold"
+                      style={inputStyle}
+                    >
+                      <option value="this_only">This appointment only</option>
+                      <option value="following">
+                        This and following appointments
+                      </option>
+                      <option value="series">All appointments in series</option>
+                    </select>
+                  </div>
+                )}
+            </div>
+          )}
           <div>
             <label style={labelStyle}>Duration</label>
             <input
@@ -1935,6 +1931,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 price: form.price,
                 onField: update,
                 onRemove: null,
+                showStaff: true,
                 label: serviceLines.length > 0 ? "Primary service" : null,
               })}
               {serviceLines.map((line) =>
@@ -1942,7 +1939,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   {renderServiceLine({
                     pickerId: line._key,
                     serviceType: line.serviceType,
-                    technicianId: line.technicianId,
                     estimatedDuration: line.estimatedDuration,
                     price: line.price,
                     onField: (k, v) => updateLine(line._key, k, v),

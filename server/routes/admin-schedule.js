@@ -759,7 +759,6 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
       estimated_price: addon.price != null ? addon.price : null,
     };
     if (addonCols.base_price && addon.base != null) addonData.base_price = addon.base;
-    if (addonCols.technician_id && addon.technicianId) addonData.technician_id = addon.technicianId;
     if (addonCols.estimated_duration_minutes && addon.estimatedDuration != null && addon.estimatedDuration !== '' && !isNaN(parseInt(addon.estimatedDuration, 10))) {
       addonData.estimated_duration_minutes = parseInt(addon.estimatedDuration, 10);
     }
@@ -885,7 +884,6 @@ function mapAddonRow(row) {
     id: row.id,
     serviceId: row.service_id || null,
     serviceName: row.service_name,
-    technicianId: row.technician_id || null,
     estimatedDuration: row.estimated_duration_minutes ?? null,
     basePrice: row.base_price != null ? Number(row.base_price) : null,
     estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
@@ -2169,38 +2167,6 @@ router.put('/:id/update-details', async (req, res, next) => {
     // lines for this appointment (replace strategy) and recompute the stored
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
-    // Per-line add-on staffing is an admin-only change, mirroring the primary
-    // technician-assignment guard below. Compare each submitted line's tech
-    // against the stored row it came from (by id) so a non-admin can still edit
-    // price/notes/duration, but cannot assign, reassign, swap (A<->B), or drop
-    // a teched line. New lines (no id) may not introduce a technician.
-    if (Array.isArray(addons) && req.techRole !== 'admin') {
-      const existingAddonRows = await db('scheduled_service_addons')
-        .where({ scheduled_service_id: req.params.id })
-        .select('id', 'technician_id')
-        .catch(() => []);
-      const storedTechById = new Map(
-        existingAddonRows.map((r) => [String(r.id), r.technician_id ? String(r.technician_id) : null]),
-      );
-      const submittedIds = new Set(
-        addons.map((a) => (a && a.id) ? String(a.id) : null).filter(Boolean),
-      );
-      let staffChanged = addons.some((a) => {
-        const submittedTech = (a && a.technicianId) ? String(a.technicianId) : null;
-        const id = (a && a.id) ? String(a.id) : null;
-        const storedTech = id ? (storedTechById.get(id) ?? null) : null; // new line → no stored tech
-        return submittedTech !== storedTech;
-      });
-      // A removed line that previously carried staff is also a staffing change.
-      if (!staffChanged) {
-        for (const [id, tech] of storedTechById) {
-          if (tech && !submittedIds.has(id)) { staffChanged = true; break; }
-        }
-      }
-      if (staffChanged) {
-        return res.status(403).json({ error: 'Admin access required to change add-on staff' });
-      }
-    }
     if (serviceType !== undefined) updates.service_type = serviceType;
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
@@ -2297,7 +2263,6 @@ router.put('/:id/update-details', async (req, res, next) => {
           serviceName: serviceName.slice(0, 200),
           base: gross,
           price: net,
-          technicianId: a.technicianId || null,
           estimatedDuration: (a.estimatedDuration != null && a.estimatedDuration !== '' && !isNaN(parseInt(a.estimatedDuration, 10))) ? parseInt(a.estimatedDuration, 10) : null,
           recurringPattern: a.recurringPattern || null,
           recurringIntervalDays: a.recurringIntervalDays ?? null,
@@ -2713,7 +2678,6 @@ router.put('/:id/update-details', async (req, res, next) => {
                     estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
                   };
                   if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-                  if (addonCols.technician_id && addon.technician_id) addonData.technician_id = addon.technician_id;
                   if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
                   if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
                   if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
@@ -3488,7 +3452,6 @@ router.put('/:id/status', async (req, res, next) => {
                         estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
                       };
                       if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-                      if (addonCols.technician_id && addon.technician_id) addonData.technician_id = addon.technician_id;
                       if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
                       if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
                       if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
@@ -4532,7 +4495,6 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
             estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
           };
           if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-          if (addonCols.technician_id && addon.technician_id) addonData.technician_id = addon.technician_id;
           if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
           if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
           if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
