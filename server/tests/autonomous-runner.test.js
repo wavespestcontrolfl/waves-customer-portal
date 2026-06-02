@@ -644,11 +644,12 @@ describe('canary guard env parsing', () => {
     expect(dailyBatchLimit(3)).toBe(3);
   });
 
-  test('agentSessionTimeoutMs gives supporting blog drafts more time', () => {
+  test('agentSessionTimeoutMs gives long-running content agents more time', () => {
     expect(agentSessionTimeoutMs('new_supporting_blog', { page_type: 'supporting-blog' })).toBe(10 * 60 * 1000);
-    expect(agentSessionTimeoutMs('refresh_existing_page', { page_type: 'service' })).toBe(5 * 60 * 1000);
+    expect(agentSessionTimeoutMs('refresh_existing_page', { page_type: 'refresh' })).toBe(10 * 60 * 1000);
+    expect(agentSessionTimeoutMs('rewrite_title_meta', { page_type: 'service' })).toBe(5 * 60 * 1000);
     process.env.AUTONOMOUS_CONTENT_AGENT_SESSION_TIMEOUT_MS = '720000';
-    expect(agentSessionTimeoutMs('new_supporting_blog', { page_type: 'supporting-blog' })).toBe(720000);
+    expect(agentSessionTimeoutMs('refresh_existing_page', { page_type: 'refresh' })).toBe(720000);
   });
 });
 
