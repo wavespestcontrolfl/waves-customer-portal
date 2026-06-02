@@ -495,6 +495,50 @@ async function resolveExistingAstroFile(pathOrBase) {
   return null;
 }
 
+async function resolveExistingAstroFileForTarget(targetUrlOrPath) {
+  const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
+  if (target) {
+    const resolved = await resolveExistingAstroFile(target);
+    if (resolved) return resolved;
+  }
+
+  const registryPath = await registryAstroPathForTarget(targetUrlOrPath);
+  if (registryPath && registryPath !== target) {
+    const resolved = await resolveExistingAstroFile(registryPath);
+    if (resolved) return resolved;
+  }
+
+  return null;
+}
+
+async function registryAstroPathForTarget(targetUrlOrPath) {
+  if (!targetUrlOrPath || /^src\/content\//.test(String(targetUrlOrPath))) return null;
+  const normalized = normalizedPublicPath(targetUrlOrPath);
+  if (!normalized) return null;
+
+  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+  const absolute = `${hub}${normalized}`;
+  try {
+    const query = db('content_registry');
+    if (!query || typeof query.select !== 'function') return null;
+    const row = await query
+      .select('astro_source_path')
+      .whereNotNull('astro_source_path')
+      .andWhere(function registryUrlMatch() {
+        this.where('canonical_url_normalized', normalized)
+          .orWhere('canonical_target_url', absolute)
+          .orWhere('live_url', absolute);
+      })
+      .orderByRaw("CASE WHEN astro_status = 'present' THEN 0 ELSE 1 END")
+      .first();
+    const sourcePath = row?.astro_source_path;
+    return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
+  } catch (err) {
+    logger.warn(`[astro-publisher] content registry path lookup failed for ${normalized}: ${err.message}`);
+    return null;
+  }
+}
+
 async function publishOrUpdatePage(draft, brief = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
@@ -568,7 +612,9 @@ async function publishMetadataRewrite(draft, brief = {}) {
   const target = draft.file_path || urlToAstroPath(targetUrl);
   if (!target) throw new Error(`could not resolve metadata rewrite target: ${targetUrl || 'missing target_url'}`);
 
-  const resolved = await resolveExistingAstroFile(target);
+  const resolved = draft.file_path
+    ? await resolveExistingAstroFile(target)
+    : await resolveExistingAstroFileForTarget(targetUrl);
   if (!resolved) throw new Error(`Astro file not found for metadata rewrite: ${target}`);
   const filePath = resolved.path;
   const existing = resolved.file;
@@ -670,7 +716,9 @@ async function publishRefresh(draft, brief = {}) {
   const target = draft.file_path || urlToAstroPath(targetUrl);
   if (!target) throw new Error(`could not resolve refresh target: ${targetUrl || 'missing target_url'}`);
 
-  const resolved = await resolveExistingAstroFile(target);
+  const resolved = draft.file_path
+    ? await resolveExistingAstroFile(target)
+    : await resolveExistingAstroFileForTarget(targetUrl);
   if (!resolved) throw new Error(`Astro file not found for refresh: ${target}`);
   const filePath = resolved.path;
   const existing = resolved.file;
@@ -787,9 +835,7 @@ function canPublishMetadataRewrite(draft, brief = {}) {
  * latter.
  */
 async function getLiveFrontmatter(targetUrlOrPath) {
-  const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
-  if (!target) return null;
-  const resolved = await resolveExistingAstroFile(target);
+  const resolved = await resolveExistingAstroFileForTarget(targetUrlOrPath);
   if (!resolved) return null;
   return fm.parse(resolved.file.content).data || {};
 }
@@ -802,9 +848,7 @@ async function getLiveFrontmatter(targetUrlOrPath) {
  * publish a refresh without a prior version to compare against).
  */
 async function loadExistingPageBody(targetUrlOrPath) {
-  const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
-  if (!target) return null;
-  const resolved = await resolveExistingAstroFile(target);
+  const resolved = await resolveExistingAstroFileForTarget(targetUrlOrPath);
   if (!resolved) return null;
   const body = fm.parse(resolved.file.content).content || '';
   const word_count = body.split(/\s+/).filter(Boolean).length;
@@ -1238,6 +1282,22 @@ function isSafeSlugPath(value) {
   const s = String(value || '');
   if (!s || s.includes('..') || s.includes('%') || s.includes('\\')) return false;
   return s.split('/').every((segment) => SLUG_SEGMENT.test(segment));
+}
+
+function normalizedPublicPath(urlOrPath) {
+  const cleaned = String(urlOrPath || '')
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .split(/[?#]/)[0]
+    .replace(/^\/+|\/+$/g, '');
+  if (!cleaned || !isSafeSlugPath(cleaned)) return null;
+  return `/${cleaned}/`;
+}
+
+function isSafeAstroContentPath(value) {
+  const path = String(value || '').replace(/^\/+/, '');
+  const match = path.match(/^src\/content\/(?:blog|services|locations)\/(.+)\.mdx?$/);
+  if (!match) return false;
+  return isSafeSlugPath(match[1]);
 }
 
 function urlToAstroPath(url) {

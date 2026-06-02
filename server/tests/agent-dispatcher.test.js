@@ -6,12 +6,15 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/content-astro/github-client', () => ({ getFile: jest.fn() }));
 
 const dispatcher = require('../services/content/agents/agent-dispatcher');
 const { pickAgent, buildInputPayload, ACTION_TO_AGENT } = dispatcher._internals;
 const tools = require('../services/content/agents/brief-driven-tools');
 const { executeBriefTool, getDraft, clearDraft } = tools;
 const { urlToAstroPath, parseJsonbColumns } = tools._internals;
+const db = require('../models/db');
+const gh = require('../services/content-astro/github-client');
 
 const { WRITER_AGENT_CONFIG } = require('../services/content/agents/writer-agent-config');
 const { REFRESH_AGENT_CONFIG } = require('../services/content/agents/refresh-agent-config');
@@ -40,6 +43,23 @@ function brief(overrides = {}) {
     router_notes: '',
     ...overrides,
   };
+}
+
+function registryQuery(row) {
+  const query = {};
+  query.select = jest.fn(() => query);
+  query.whereNotNull = jest.fn(() => query);
+  query.andWhere = jest.fn((callback) => {
+    const whereScope = {
+      where: jest.fn(() => whereScope),
+      orWhere: jest.fn(() => whereScope),
+    };
+    callback.call(whereScope);
+    return query;
+  });
+  query.orderByRaw = jest.fn(() => query);
+  query.first = jest.fn(async () => row);
+  return query;
 }
 
 // ── ACTION_TO_AGENT map coverage ────────────────────────────────────
@@ -228,6 +248,38 @@ describe('urlToAstroPath', () => {
     '/trailinghyphen-/',
   ])('rejects unsafe path %s', (url) => {
     expect(urlToAstroPath(url)).toBeNull();
+  });
+});
+
+describe('get_existing_page registry fallback', () => {
+  beforeEach(() => {
+    db.mockReset();
+    gh.getFile.mockReset();
+  });
+
+  test('loads canonical blog URLs outside /blog from content_registry source path', async () => {
+    db.mockReturnValue(registryQuery({ astro_source_path: 'src/content/blog/fertilizer-blackout-sarasota-county.md' }));
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/fertilizer-blackout-sarasota-county.md') {
+        return {
+          sha: 'registry-sha',
+          content: '---\ntitle: Fertilizer Blackout Sarasota County\n---\nExisting body copy.',
+        };
+      }
+      return null;
+    });
+
+    const r = await executeBriefTool('get_existing_page', {
+      page_url: '/lawn-care/fertilizer-blackout-sarasota-county/',
+    }, { sessionId: 'sess-existing-page' });
+
+    expect(r.error).toBeUndefined();
+    expect(r.file_path).toBe('src/content/blog/fertilizer-blackout-sarasota-county.md');
+    expect(r.frontmatter.title).toBe('Fertilizer Blackout Sarasota County');
+    expect(r.body).toContain('Existing body copy.');
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/locations/lawn-care/fertilizer-blackout-sarasota-county.md');
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/fertilizer-blackout-sarasota-county.mdx');
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/fertilizer-blackout-sarasota-county.md');
   });
 });
 
