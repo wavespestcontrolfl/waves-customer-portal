@@ -48,9 +48,27 @@ function priceFinding(body) {
     // Allowed when the surrounding copy points at the calculator / quote / a
     // "varies" framing rather than asserting a hard price.
     if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
+    // Regulatory fines are not Waves service pricing. Allow ordinance/citation
+    // contexts while still blocking customer-facing service price claims.
+    if (isRegulatoryPenaltyAmount(match[0].trim(), window)) continue;
     return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${match[0].trim()}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
   }
   return null;
+}
+
+function isRegulatoryPenaltyAmount(amount, context) {
+  const escapedAmount = escapeRegExp(String(amount || '').trim()).replace(/\s+/g, '\\s+');
+  if (!escapedAmount) return false;
+  if (/\b(cancellation|customer|service|plan|treatment|visit|appointment|per month|monthly|recurring|subscription|fee)\b/i.test(context)) return false;
+  if (!/\b(county|city|municipal|ordinance|regulat(?:ion|ory)|statute|law|civil|citation|violation|infraction|misdemeanor|enforcement)\b/i.test(context)) return false;
+  const fineAmountPrefix = '\\b(?:fine|fines|penalt(?:y|ies)|civil infractions?|citations?)\\b(?:\\s+(?:of|up|to|not|exceed|exceeds|exceeding|as|high|maximum|max|can|may|could|carry|carries|be|is|are)){0,10}\\s+';
+  const afterAmountPenalty = '\\s*(?:per\\s+(?:violation|infraction)|(?:fine|fines|penalt(?:y|ies)|civil infraction|citation|misdemeanor)\\b)';
+  return new RegExp(`${fineAmountPrefix}${escapedAmount}`, 'i').test(context)
+    || new RegExp(`${escapedAmount}${afterAmountPenalty}`, 'i').test(context);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // The hub canonical domain(s). Literal "Waves Pest Control" branding is fine on

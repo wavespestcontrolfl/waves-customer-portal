@@ -12,6 +12,49 @@ describe('content-guardrails', () => {
     expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
   });
 
+  test('regulatory fine amounts are not treated as service prices', () => {
+    const r = guardrails.evaluate({
+      body: '### Penalties and Fines\n\nCivil infractions can carry fines up to $500 per violation under the county ordinance.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('service prices near ordinance language still block', () => {
+    const r = guardrails.evaluate({
+      body: 'Ordinance violations can be confusing. Our lawn treatment plan is $99 per month for most homes.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('service prices near fine wording still block', () => {
+    const r = guardrails.evaluate({
+      body: 'Fines can be stressful. Our lawn treatment plan is $99 per month for most homes.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('service prices before later fine wording still block', () => {
+    const r = guardrails.evaluate({
+      body: 'Our lawn treatment plan is $99 per month and helps avoid county fines.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('generic customer penalties still block as prices', () => {
+    const r = guardrails.evaluate({
+      body: 'Our cancellation penalty is $50 if the visit is cancelled after arrival.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('customer penalties still block near county wording', () => {
+    const r = guardrails.evaluate({
+      body: 'County rules are complicated. Our cancellation penalty is $50 if the visit is cancelled after arrival.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+
   test('literal brand on a multi-domain page is a P0 leak', () => {
     const r = guardrails.evaluate({
       body: 'Waves Pest Control keeps your home pest-free.',
