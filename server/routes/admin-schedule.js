@@ -2170,26 +2170,34 @@ router.put('/:id/update-details', async (req, res, next) => {
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
     // Per-line add-on staffing is an admin-only change, mirroring the primary
-    // technician-assignment guard below. Compare the submitted add-on
-    // technician set against what's stored and block non-admins only when it
-    // actually changes (so a tech can still edit price/notes on an appointment
-    // whose add-ons already carry staff).
+    // technician-assignment guard below. Compare each submitted line's tech
+    // against the stored row it came from (by id) so a non-admin can still edit
+    // price/notes/duration, but cannot assign, reassign, swap (A<->B), or drop
+    // a teched line. New lines (no id) may not introduce a technician.
     if (Array.isArray(addons) && req.techRole !== 'admin') {
-      const submittedTechs = addons
-        .map((a) => (a && a.technicianId) ? String(a.technicianId) : null)
-        .filter(Boolean)
-        .sort();
       const existingAddonRows = await db('scheduled_service_addons')
         .where({ scheduled_service_id: req.params.id })
-        .select('technician_id')
+        .select('id', 'technician_id')
         .catch(() => []);
-      const existingTechs = existingAddonRows
-        .map((r) => (r.technician_id ? String(r.technician_id) : null))
-        .filter(Boolean)
-        .sort();
-      const techsChanged = submittedTechs.length !== existingTechs.length
-        || submittedTechs.some((t, i) => t !== existingTechs[i]);
-      if (techsChanged) {
+      const storedTechById = new Map(
+        existingAddonRows.map((r) => [String(r.id), r.technician_id ? String(r.technician_id) : null]),
+      );
+      const submittedIds = new Set(
+        addons.map((a) => (a && a.id) ? String(a.id) : null).filter(Boolean),
+      );
+      let staffChanged = addons.some((a) => {
+        const submittedTech = (a && a.technicianId) ? String(a.technicianId) : null;
+        const id = (a && a.id) ? String(a.id) : null;
+        const storedTech = id ? (storedTechById.get(id) ?? null) : null; // new line → no stored tech
+        return submittedTech !== storedTech;
+      });
+      // A removed line that previously carried staff is also a staffing change.
+      if (!staffChanged) {
+        for (const [id, tech] of storedTechById) {
+          if (tech && !submittedIds.has(id)) { staffChanged = true; break; }
+        }
+      }
+      if (staffChanged) {
         return res.status(403).json({ error: 'Admin access required to change add-on staff' });
       }
     }

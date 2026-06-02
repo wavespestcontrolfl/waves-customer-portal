@@ -1005,6 +1005,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       const addonsPayload = sendAddons
         ? cleanLines.map((l) => {
             const common = {
+              // Original add-on row id (null for new lines) so the server can
+              // detect per-line staffing changes for its admin-only guard.
+              id: l.id || null,
               serviceId: l.serviceId || null,
               serviceName: l.serviceType,
               technicianId: l.technicianId || null,
