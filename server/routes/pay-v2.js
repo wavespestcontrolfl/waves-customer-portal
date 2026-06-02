@@ -12,7 +12,7 @@ const logger = require('../services/logger');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
-const { shouldSkipClientPaymentErrorAlert, isInputValidationNoise } = require('./pay-v2-helpers');
+const { shouldSkipClientPaymentErrorAlert } = require('./pay-v2-helpers');
 
 /**
  * Public pay routes — no auth required.
@@ -594,12 +594,6 @@ router.post('/:token/error', clientPaymentErrorLimiter, async (req, res) => {
 
     const stripeType = cleanField(body.stripeType || '', 100);
     const code = cleanField(body.code || '', 100);
-
-    // Skip in-progress form validation (incomplete card number, missing CVC,
-    // etc.) — the customer corrects these inline; they aren't office-actionable.
-    if (isInputValidationNoise({ stripeType, code })) {
-      return res.json({ success: true, skipped: true, reason: 'input_validation' });
-    }
 
     await BillPaymentErrorAlerts.alertBillPaymentError({
       invoice,
