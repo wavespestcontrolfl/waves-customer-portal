@@ -139,11 +139,11 @@ describe('shouldSurcharge', () => {
 });
 
 describe('buildSurchargeAmountDetails', () => {
-  test('uses Stripe preview boolean enforce_validation for positive surcharges', () => {
+  test('uses Stripe preview enum enforce_validation for positive surcharges', () => {
     expect(buildSurchargeAmountDetails(300)).toEqual({
       surcharge: {
         amount: 300,
-        enforce_validation: true,
+        enforce_validation: 'enabled',
       },
     });
   });
