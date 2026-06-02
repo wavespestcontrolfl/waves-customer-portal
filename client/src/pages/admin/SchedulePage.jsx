@@ -790,33 +790,40 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Seeded from the appointment's existing add-on rows so reopening the editor
   // round-trips them rather than dropping them.
   const [serviceLines, setServiceLines] = useState(() =>
-    (Array.isArray(service.serviceAddons) ? service.serviceAddons : []).map((a, i) => ({
-      _key: `addon-${a.id || i}`,
-      id: a.id || null,
-      serviceId: a.serviceId || null,
-      serviceType: a.serviceName || "",
+    (Array.isArray(service.serviceAddons) ? service.serviceAddons : []).map((a, i) => {
       // Seed the editable line Price from the net charge (estimated_price) so it
-      // matches what's invoiced; this editor treats the line as a flat net
-      // amount with no separate line discount.
-      price:
+      // matches what's invoiced.
+      const seededPrice =
         a.estimatedPrice != null
           ? String(a.estimatedPrice)
           : a.basePrice != null
             ? String(a.basePrice)
-            : "",
-      technicianId: a.technicianId || "",
-      estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
-      discountType: a.discountType || null,
-      discountAmount: a.discountAmount != null ? a.discountAmount : null,
-      discountId: a.discountId || null,
-      discountName: a.discountName || null,
-      recurringPattern: a.recurringPattern || null,
-      recurringIntervalDays: a.recurringIntervalDays ?? null,
-      recurringNth: a.recurringNth ?? null,
-      recurringWeekday: a.recurringWeekday ?? null,
-      skipWeekends: a.skipWeekends,
-      weekendShift: a.weekendShift,
-    })),
+            : "";
+      return {
+        _key: `addon-${a.id || i}`,
+        id: a.id || null,
+        serviceId: a.serviceId || null,
+        serviceType: a.serviceName || "",
+        price: seededPrice,
+        // Original economics captured so an unchanged line round-trips its
+        // gross/discount breakdown verbatim instead of collapsing to a flat
+        // net amount (which would drop the line-discount audit).
+        _seededPrice: seededPrice,
+        _origBasePrice: a.basePrice != null ? a.basePrice : null,
+        _origDiscountType: a.discountType || null,
+        _origDiscountAmount: a.discountAmount != null ? a.discountAmount : null,
+        _origDiscountId: a.discountId || null,
+        _origDiscountName: a.discountName || null,
+        technicianId: a.technicianId || "",
+        estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
+        recurringPattern: a.recurringPattern || null,
+        recurringIntervalDays: a.recurringIntervalDays ?? null,
+        recurringNth: a.recurringNth ?? null,
+        recurringWeekday: a.recurringWeekday ?? null,
+        skipWeekends: a.skipWeekends,
+        weekendShift: a.weekendShift,
+      };
+    }),
   );
   const hadAddonsInitially = Array.isArray(service.serviceAddons) && service.serviceAddons.length > 0;
   const [isRecurring, setIsRecurring] = useState(serviceIsRecurringTemplate);
@@ -932,12 +939,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         serviceId: null,
         serviceType: "",
         price: "",
+        _seededPrice: null,
+        _origBasePrice: null,
+        _origDiscountType: null,
+        _origDiscountAmount: null,
+        _origDiscountId: null,
+        _origDiscountName: null,
         technicianId: "",
         estimatedDuration: "",
-        discountType: null,
-        discountAmount: null,
-        discountId: null,
-        discountName: null,
         recurringPattern: null,
         recurringIntervalDays: null,
         recurringNth: null,
@@ -990,30 +999,52 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         .filter((l) => l.serviceType);
       const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
       const addonsPayload = sendAddons
-        ? cleanLines.map((l) => ({
-            serviceId: l.serviceId || null,
-            serviceName: l.serviceType,
-            // The editor has no per-line discount UI, so the Price field is the
-            // final (net) charge for the line. We deliberately do NOT resend a
-            // stored line discount — re-applying it would double-discount rows
-            // whose seeded price was already net (e.g. legacy rows lacking
-            // base_price).
-            price:
-              l.price !== "" && !isNaN(parseFloat(l.price))
-                ? parseFloat(l.price)
-                : null,
-            technicianId: l.technicianId || null,
-            estimatedDuration:
-              l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
-                ? parseInt(l.estimatedDuration, 10)
-                : null,
-            recurringPattern: l.recurringPattern || null,
-            recurringIntervalDays: l.recurringIntervalDays ?? null,
-            recurringNth: l.recurringNth ?? null,
-            recurringWeekday: l.recurringWeekday ?? null,
-            skipWeekends: l.skipWeekends,
-            weekendShift: l.weekendShift,
-          }))
+        ? cleanLines.map((l) => {
+            const common = {
+              serviceId: l.serviceId || null,
+              serviceName: l.serviceType,
+              technicianId: l.technicianId || null,
+              estimatedDuration:
+                l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
+                  ? parseInt(l.estimatedDuration, 10)
+                  : null,
+              recurringPattern: l.recurringPattern || null,
+              recurringIntervalDays: l.recurringIntervalDays ?? null,
+              recurringNth: l.recurringNth ?? null,
+              recurringWeekday: l.recurringWeekday ?? null,
+              skipWeekends: l.skipWeekends,
+              weekendShift: l.weekendShift,
+            };
+            const priceUnchanged =
+              !!l.id && String(l.price) === String(l._seededPrice ?? "");
+            // Unchanged existing line that has a real gross + line discount:
+            // round-trip its original breakdown so the server reconstructs the
+            // same line ($100 − $10), preserving the discount audit. We require
+            // _origBasePrice so the server re-derives net from the true gross —
+            // a legacy row with a discount but no base_price would otherwise be
+            // double-discounted, so it falls through to the flat-net path below.
+            if (priceUnchanged && l._origDiscountType && l._origBasePrice != null) {
+              return {
+                ...common,
+                basePrice: l._origBasePrice,
+                discountType: l._origDiscountType,
+                discountAmount: l._origDiscountAmount != null ? l._origDiscountAmount : null,
+                discountId: l._origDiscountId || null,
+                discountName: l._origDiscountName || null,
+              };
+            }
+            // New or price-edited line: the editor has no per-line discount UI,
+            // so treat the Price as the final (net) charge with no discount.
+            // (Re-applying a stored discount here would double-discount rows
+            // whose seeded price was already net.)
+            return {
+              ...common,
+              price:
+                l.price !== "" && !isNaN(parseFloat(l.price))
+                  ? parseFloat(l.price)
+                  : null,
+            };
+          })
         : undefined;
       await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
