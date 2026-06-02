@@ -254,7 +254,7 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange, customerName, customerEmail }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -301,6 +301,20 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       if (!res.ok) {
         throw serverReportedError(data.error || 'Could not update payment total');
       }
+      // The server minted a fresh PaymentIntent for this tender (the old one
+      // had an incompatible PaymentMethod attached and couldn't be re-locked).
+      // The old clientSecret is now dead, so hand the new one up to the parent
+      // and let it re-mount Elements — fetchUpdates against the old secret
+      // would fail.
+      if (data.replaced && data.clientSecret) {
+        onPaymentIntentReplaced?.({
+          clientSecret: data.clientSecret,
+          paymentIntentId: data.paymentIntentId,
+          baseAmount: data.base,
+          methodCategory,
+        });
+        return;
+      }
       if (!options.skipFetchUpdates && elementsRef.current?.fetchUpdates) {
         const { error: fetchError } = await elementsRef.current.fetchUpdates();
         if (fetchError) {
@@ -328,7 +342,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         setSyncingAmount(false);
       }
     }
-  }, [paymentIntentId, token, saveCard]);
+  }, [paymentIntentId, token, saveCard, onPaymentIntentReplaced]);
 
   // Re-sync the PI whenever the save-card checkbox toggles — Stripe's
   // mandate wording switches between one-time and recurring on the
@@ -984,6 +998,21 @@ export default function PayPageV2() {
       });
   }, [data, token]);
 
+  // The server replaced the PaymentIntent for a tender switch (the old PI had
+  // an incompatible PaymentMethod attached). Swap in the fresh clientSecret —
+  // PaymentForm is keyed by paymentIntentId, so it fully re-mounts Stripe
+  // Elements against the new intent.
+  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount }) => {
+    if (!clientSecret || !paymentIntentId) return;
+    setPaymentError(null);
+    setStripeSetup((prev) => (prev ? {
+      ...prev,
+      clientSecret,
+      paymentIntentId,
+      baseAmount: baseAmount ?? prev.baseAmount,
+    } : prev));
+  }, []);
+
   const handlePaymentSuccess = async (paymentIntent, methodCategory = null) => {
     try {
       const confirmRes = await fetch(`${API_BASE}/pay/${token}/confirm`, {
@@ -1356,6 +1385,7 @@ export default function PayPageV2() {
             )}
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
+                key={stripeSetup.paymentIntentId}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
                 amount={stripeSetup.baseAmount}
@@ -1368,6 +1398,7 @@ export default function PayPageV2() {
                 onSaveCardChange={setSaveCard}
                 customerName={[customer.firstName, customer.lastName].filter(Boolean).join(' ')}
                 customerEmail={customer.email}
+                onPaymentIntentReplaced={handlePaymentIntentReplaced}
               />
             ) : paymentState === 'error' ? null : (
               <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>

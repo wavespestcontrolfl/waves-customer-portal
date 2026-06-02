@@ -45,6 +45,26 @@ const {
 } = require('./stripe-invoice-state');
 const { assertInvoiceCollectible } = require('./invoice-helpers');
 
+// Stripe rejects a payment_method_types narrow when an incompatible
+// PaymentMethod is already attached to the PaymentIntent — e.g. a customer
+// who began an ACH entry (attaching a us_bank_account PM) then switches to
+// Card. Detect that specific rejection so the caller can recover by minting a
+// fresh PI for the selected tender rather than failing the switch.
+function isIncompatibleAttachedMethodError(err) {
+  const message = String(err?.message || err?.raw?.message || '').toLowerCase();
+  return message.includes('incompatible with the attached paymentmethod')
+    || message.includes('replace the paymentmethod first');
+}
+
+// PI statuses from which it's safe to cancel + replace the intent. A
+// processing/succeeded PI has money in flight and must never be canceled.
+const REPLACEABLE_PI_STATUSES = new Set([
+  'requires_payment_method',
+  'requires_confirmation',
+  'requires_action',
+  'requires_capture',
+]);
+
 const StripeService = {
   // =========================================================================
   // AVAILABILITY
@@ -1195,9 +1215,135 @@ const StripeService = {
         surchargeRateBps: CONFIGURED_COST_BPS,
       };
     } catch (err) {
+      // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
+      // incompatible PaymentMethod attached to the PI, so narrowing
+      // payment_method_types to the newly selected tender is rejected. Recover
+      // by minting a fresh PI for the selected tender — a new PI has no
+      // attached PM, so the lock applies cleanly and the surcharge-bypass
+      // defense is preserved.
+      if (isIncompatibleAttachedMethodError(err)) {
+        logger.warn(
+          `[stripe] PI ${paymentIntentId} tender switch blocked by attached PM; `
+          + `recreating for method=${selectedMethodCategory}`,
+        );
+        return this.replaceInvoicePaymentIntentForTender(invoiceId, paymentIntentId, {
+          paymentMethodTypes,
+          metadata: updateParams.metadata,
+          customer: updateParams.customer || null,
+          setupFutureUsage: updateParams.setup_future_usage,
+          base,
+          baseCents,
+          methodCategory: selectedMethodCategory,
+        });
+      }
       logger.error(`[stripe] PI update failed for ${paymentIntentId}: ${err.message}`);
       throw new Error(`Failed to update payment amount: ${err.message}`);
     }
+  },
+
+  /**
+   * Cancel a stale invoice PaymentIntent and mint a fresh one locked to the
+   * selected tender. Used when a tender switch can't be applied in place
+   * because an incompatible PaymentMethod is still attached to the old PI.
+   *
+   * Returns the same shape as updateInvoicePaymentIntentMethod plus the new
+   * `clientSecret` and `replaced: true` so the pay page can re-mount Stripe
+   * Elements against the fresh PI.
+   */
+  async replaceInvoicePaymentIntentForTender(invoiceId, oldPaymentIntentId, ctx) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    const { paymentMethodTypes, metadata, customer, setupFutureUsage, base, baseCents, methodCategory } = ctx;
+
+    // Inspect the stale PI before touching it. Fail CLOSED: only replace when
+    // we positively know the old PI is in a cancelable (or already-canceled)
+    // state. If its status can't be read, or it's processing/succeeded (money
+    // in flight), do NOT detach it — repointing the invoice off an in-flight
+    // ACH PI would let the customer pay the replacement while the original
+    // bank debit is still pending.
+    let oldIntent = null;
+    try {
+      oldIntent = await stripe.paymentIntents.retrieve(oldPaymentIntentId);
+    } catch (retrieveErr) {
+      logger.warn(`[stripe] Could not retrieve stale PI ${oldPaymentIntentId} during tender switch: ${retrieveErr.message}`);
+    }
+    if (!oldIntent) {
+      // Status unknown — surface as a hard error (visible to ops) and never
+      // replace blind.
+      throw new Error(`Could not verify the existing payment status for PI ${oldPaymentIntentId}`);
+    }
+    if (oldIntent.status !== 'canceled' && !REPLACEABLE_PI_STATUSES.has(oldIntent.status)) {
+      const err = new Error('Payment is already in progress. Please refresh the invoice and try again.');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    const invoice = await db('invoices').where({ id: invoiceId }).first();
+    if (!invoice) throw new Error('Invoice not found');
+
+    const piParams = {
+      amount: baseCents,
+      currency: 'usd',
+      description: `Invoice ${invoice.invoice_number} — ${invoice.title || 'Waves Pest Control'}`,
+      metadata,
+      payment_method_types: paymentMethodTypes,
+    };
+    if (customer) {
+      piParams.customer = customer;
+      if (setupFutureUsage) piParams.setup_future_usage = setupFutureUsage;
+    }
+
+    let newIntent;
+    await db.transaction(async (trx) => {
+      const lockedInvoice = await trx('invoices')
+        .where({ id: invoiceId })
+        .forUpdate()
+        .first();
+      if (!lockedInvoice) throw new Error('Invoice not found');
+      assertInvoiceCollectible(lockedInvoice.status);
+      // Guard against a racing setup/replace having already repointed the PI.
+      if (String(lockedInvoice.stripe_payment_intent_id || '') !== String(oldPaymentIntentId)) {
+        const err = new Error('Payment session changed. Please refresh the invoice and try again.');
+        err.statusCode = 409;
+        throw err;
+      }
+
+      const saveFlag = metadata?.save_card_opt_in === 'true' ? 'save' : 'nosave';
+      newIntent = await stripe.paymentIntents.create(piParams, {
+        idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}`,
+      });
+
+      const invoiceUpdated = await trx('invoices')
+        .where({ id: invoiceId })
+        .whereNotIn('status', ['paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
+        .update({ processor: 'stripe', stripe_payment_intent_id: newIntent.id });
+      if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
+    });
+
+    // Cancel the orphaned old PI now that the invoice points at the new one.
+    if (oldIntent && REPLACEABLE_PI_STATUSES.has(oldIntent.status)) {
+      try {
+        await stripe.paymentIntents.cancel(oldPaymentIntentId);
+      } catch (cancelErr) {
+        logger.warn(`[stripe] Could not cancel replaced PI ${oldPaymentIntentId}: ${cancelErr.message}`);
+      }
+    }
+
+    logger.info(
+      `[stripe] Replaced PI ${oldPaymentIntentId} → ${newIntent.id} for invoice ${invoice.invoice_number} `
+      + `(method=${methodCategory}, base=$${base})`,
+    );
+    return {
+      paymentIntentId: newIntent.id,
+      clientSecret: newIntent.client_secret,
+      replaced: true,
+      base,
+      surcharge: 0,
+      total: base,
+      cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
+      surchargeRateBps: CONFIGURED_COST_BPS,
+    };
   },
 
   /**
