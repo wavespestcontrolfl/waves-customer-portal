@@ -44,8 +44,6 @@ const TEMPLATE_KEYS = [
   'service_report_v1',
   'service_report_v1_with_invoice',
   'project_report_ready',
-  'pest_prep_cockroach',
-  'pest_prep_bed_bug',
   'service_request_confirmation',
   'lawn_health_report_ready',
 ];
