@@ -168,6 +168,42 @@ describe('invoice follow-up email sidecar', () => {
     }));
   });
 
+  test('cron excludes every non-sendable invoice status', async () => {
+    const pendingQuery = chain({ result: [] });
+    setDbQueues({
+      'invoice_followup_sequences as s': [pendingQuery],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(pendingQuery.whereNotIn).toHaveBeenCalledWith('i.status', [
+      'paid',
+      'void',
+      'processing',
+      'refunded',
+      'canceled',
+      'cancelled',
+    ]);
+  });
+
+  test('does not schedule a sequence for terminal or draft invoices', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice({ status: 'refunded' }) })],
+    });
+
+    await expect(InvoiceFollowUps.scheduleForInvoice('inv-1')).resolves.toBeNull();
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not resume terminal invoices into the active queue', async () => {
+    setDbQueues({
+      invoice_followup_sequences: [chain({ first: followupRow() })],
+      invoices: [chain({ first: invoice({ status: 'paid' }) })],
+    });
+
+    await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
+  });
+
   test('advances the sequence when email sends but the customer has no phone', async () => {
     const emailInteraction = chain();
     const finalInteraction = chain();
