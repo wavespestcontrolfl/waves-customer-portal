@@ -29,6 +29,9 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d30_final: 'invoice.followup_30_day',
 };
 
+const TERMINAL_INVOICE_STATUSES = ['paid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
+const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
+
 function clean(value) {
   return String(value || '').trim();
 }
@@ -43,6 +46,18 @@ function isEmailLike(value) {
 
 function firstToken(value) {
   return clean(value).split(/\s+/)[0] || '';
+}
+
+function normalizedStatus(invoice) {
+  return String(invoice?.status || '').trim().toLowerCase();
+}
+
+function isTerminalInvoice(invoice) {
+  return TERMINAL_INVOICE_STATUSES.includes(normalizedStatus(invoice));
+}
+
+function isSchedulableInvoice(invoice) {
+  return !NON_SCHEDULABLE_INVOICE_STATUSES.includes(normalizedStatus(invoice));
 }
 
 /**
@@ -105,7 +120,7 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
   const latestInvoice = await db('invoices').where({ id: row.invoice_id }).first().catch(() => null);
-  if (!latestInvoice || ['paid', 'void', 'processing'].includes(String(latestInvoice.status || '').toLowerCase())) {
+  if (!latestInvoice || isTerminalInvoice(latestInvoice)) {
     return { ok: false, skipped: true, reason: 'invoice_not_eligible' };
   }
 
@@ -232,7 +247,7 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
 async function scheduleForInvoice(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return null;
-  if (['paid', 'void', 'draft', 'processing'].includes(invoice.status)) return null;
+  if (!isSchedulableInvoice(invoice)) return null;
 
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
   const onAutopay = await customerOnAutopay(customer);
@@ -278,7 +293,7 @@ async function runPending() {
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'active')
     .where('s.next_touch_at', '<=', now)
-    .whereNotIn('i.status', ['paid', 'void', 'processing'])
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.status as invoice_status',
@@ -474,7 +489,7 @@ async function releaseFromAutopayHold(invoiceId) {
   if (!seq || seq.status !== 'autopay_hold') return;
 
   const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice || ['paid', 'void'].includes(invoice.status)) return;
+  if (!invoice || isTerminalInvoice(invoice)) return;
 
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
     status: 'active',
@@ -522,6 +537,7 @@ async function resumeSequence(invoiceId) {
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq) return;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
+  if (!invoice || isTerminalInvoice(invoice)) return;
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
     status: 'active',
     paused_reason: null,
@@ -549,7 +565,7 @@ async function sendNextTouchNow(invoiceId) {
   if (!seq || seq.status === 'stopped' || seq.status === 'completed') return;
 
   const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice) return;
+  if (!invoice || isTerminalInvoice(invoice)) return;
 
   // Temporarily set next_touch_at in the past + status active, then fire
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
