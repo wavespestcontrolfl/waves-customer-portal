@@ -5,7 +5,7 @@
  * unknown-funding, and ACH pay the quoted amount with no surcharge.
  *
  * Uses Stripe's surcharge API (`amount_details.surcharge`) with
- * `enforce_validation: true`. Surcharge PI calls require
+ * `enforce_validation: 'enabled'`. Surcharge PI calls require
  * `apiVersion: '2026-03-25.preview'` passed per-request.
  *
  * If you change CONFIGURED_COST_BPS you MUST also bump the consent
@@ -96,7 +96,7 @@ function buildSurchargeAmountDetails(surchargeCents) {
   return {
     surcharge: {
       amount: surchargeCents,
-      enforce_validation: true,
+      enforce_validation: 'enabled',
     },
   };
 }
