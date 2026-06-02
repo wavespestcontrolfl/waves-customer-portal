@@ -2283,30 +2283,45 @@ router.put('/:id/update-details', async (req, res, next) => {
       const addonNetTotal = normalizedAddons.reduce((s, l) => s + (l.price || 0), 0);
       const hasAnyPrice = primaryGross != null || normalizedAddons.some((l) => l.price != null);
       if (hasAnyPrice) {
-        // The editor only sends discountType/discountAmount when a discount is
-        // actively selected, so an omitted discount means "leave it alone".
-        // Preserve any existing appointment-level discount rather than clearing
-        // it (which would silently raise the visit price and drop the audit).
+        // This editor neither displays nor edits the appointment-level discount
+        // or the primary line discount, and it runs on every save once an
+        // appointment has add-ons. Preserve both so an unrelated edit can't
+        // silently drop a discount and overcharge at invoicing.
+        const existing = await db('scheduled_services')
+          .where({ id: req.params.id })
+          .first('discount_type', 'discount_amount', 'line_discount_dollars')
+          .catch(() => null);
+
+        // Appointment-level discount: the editor only sends discountType/
+        // discountAmount when one is actively selected; an omitted value means
+        // "leave it alone".
         const discountProvided = discountType !== undefined;
         let effDiscountType = discountType || null;
         let effDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
         if (!discountProvided) {
-          const existing = await db('scheduled_services')
-            .where({ id: req.params.id })
-            .first('discount_type', 'discount_amount')
-            .catch(() => null);
           effDiscountType = existing?.discount_type || null;
           effDiscountAmount = (existing?.discount_amount != null && existing.discount_amount !== '')
             ? Number(existing.discount_amount)
             : null;
         }
-        const subtotal = Math.round(((primaryGross || 0) + addonNetTotal) * 100) / 100;
+
+        // Primary line discount is not exposed here — back it out of the gross
+        // primary price so the subtotal matches what was originally stored
+        // (mirrors calculateStoredVisitFinancials).
+        const primaryLineDiscountDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
+          ? Math.max(0, Number(existing.line_discount_dollars))
+          : 0;
+        const primaryNet = primaryGross != null
+          ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
+          : 0;
+
+        const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
         const finalPrice = applyDiscount(subtotal, effDiscountType, effDiscountAmount);
         const discountDollars = Math.max(0, Math.round((subtotal - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
-        // Only rewrite the stored discount columns when the request explicitly
-        // carried a discount value; otherwise leave them as-is.
+        // Only rewrite the appointment-level discount columns when the request
+        // explicitly carried a discount value; otherwise leave them as-is.
         if (discountProvided) {
           if (cols.discount_id) updates.discount_id = null;
           if (cols.discount_name) updates.discount_name = null;
@@ -2314,12 +2329,8 @@ router.put('/:id/update-details', async (req, res, next) => {
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
         if (cols.discount_dollars) updates.discount_dollars = discountDollars > 0 ? discountDollars : null;
-        // The primary line carries no separate line-discount in this editor.
-        if (cols.line_discount_id) updates.line_discount_id = null;
-        if (cols.line_discount_name) updates.line_discount_name = null;
-        if (cols.line_discount_type) updates.line_discount_type = null;
-        if (cols.line_discount_amount) updates.line_discount_amount = null;
-        if (cols.line_discount_dollars) updates.line_discount_dollars = null;
+        // Leave the primary line_discount_* columns untouched — invoicing reads
+        // them and this editor can't resend them.
       }
     } else if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
       try {
