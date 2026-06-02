@@ -744,7 +744,38 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [saving, setSaving] = useState(false);
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
   const [expandedCategory, setExpandedCategory] = useState(null);
-  const [editingServiceType, setEditingServiceType] = useState(false);
+  // Which service line's picker is open: null | 'primary' | line._key
+  const [pickerKey, setPickerKey] = useState(null);
+  // Additional service lines (add-ons) shown beneath the primary service.
+  // Seeded from the appointment's existing add-on rows so reopening the editor
+  // round-trips them rather than dropping them.
+  const [serviceLines, setServiceLines] = useState(() =>
+    (Array.isArray(service.serviceAddons) ? service.serviceAddons : []).map((a, i) => ({
+      _key: `addon-${a.id || i}`,
+      id: a.id || null,
+      serviceId: a.serviceId || null,
+      serviceType: a.serviceName || "",
+      price:
+        a.basePrice != null
+          ? String(a.basePrice)
+          : a.estimatedPrice != null
+            ? String(a.estimatedPrice)
+            : "",
+      technicianId: a.technicianId || "",
+      estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
+      discountType: a.discountType || null,
+      discountAmount: a.discountAmount != null ? a.discountAmount : null,
+      discountId: a.discountId || null,
+      discountName: a.discountName || null,
+      recurringPattern: a.recurringPattern || null,
+      recurringIntervalDays: a.recurringIntervalDays ?? null,
+      recurringNth: a.recurringNth ?? null,
+      recurringWeekday: a.recurringWeekday ?? null,
+      skipWeekends: a.skipWeekends,
+      weekendShift: a.weekendShift,
+    })),
+  );
+  const hadAddonsInitially = Array.isArray(service.serviceAddons) && service.serviceAddons.length > 0;
   const [isRecurring, setIsRecurring] = useState(serviceIsRecurringTemplate);
   const [recurringFreq, setRecurringFreq] = useState(
     service.recurringPattern || service.recurring_pattern || "quarterly",
@@ -845,6 +876,35 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const updateLine = (key, k, v) =>
+    setServiceLines((lines) =>
+      lines.map((l) => (l._key === key ? { ...l, [k]: v } : l)),
+    );
+  const addServiceLine = () =>
+    setServiceLines((lines) => [
+      ...lines,
+      {
+        _key: `addon-new-${Date.now()}-${lines.length}`,
+        id: null,
+        serviceId: null,
+        serviceType: "",
+        price: "",
+        technicianId: "",
+        estimatedDuration: "",
+        discountType: null,
+        discountAmount: null,
+        discountId: null,
+        discountName: null,
+        recurringPattern: null,
+        recurringIntervalDays: null,
+        recurringNth: null,
+        recurringWeekday: null,
+        skipWeekends: undefined,
+        weekendShift: undefined,
+      },
+    ]);
+  const removeServiceLine = (key) =>
+    setServiceLines((lines) => lines.filter((l) => l._key !== key));
   const recurringControlsActive = isRecurring || serviceIsRecurringTemplate;
 
   const recurringPreview = () => {
@@ -880,10 +940,50 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const handleSave = async ({ takePayment = false } = {}) => {
     setSaving(true);
     try {
+      // Only manage add-on lines when there are any to send (or any existed
+      // originally, so removals persist). Otherwise keep the legacy payload.
+      const cleanLines = serviceLines
+        .map((l) => ({ ...l, serviceType: (l.serviceType || "").trim() }))
+        .filter((l) => l.serviceType);
+      const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
+      const addonsPayload = sendAddons
+        ? cleanLines.map((l) => ({
+            serviceId: l.serviceId || null,
+            serviceName: l.serviceType,
+            price:
+              l.price !== "" && !isNaN(parseFloat(l.price))
+                ? parseFloat(l.price)
+                : null,
+            technicianId: l.technicianId || null,
+            estimatedDuration:
+              l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
+                ? parseInt(l.estimatedDuration, 10)
+                : null,
+            discountType: l.discountType || null,
+            discountAmount: l.discountAmount != null ? l.discountAmount : null,
+            discountId: l.discountId || null,
+            discountName: l.discountName || null,
+            recurringPattern: l.recurringPattern || null,
+            recurringIntervalDays: l.recurringIntervalDays ?? null,
+            recurringNth: l.recurringNth ?? null,
+            recurringWeekday: l.recurringWeekday ?? null,
+            skipWeekends: l.skipWeekends,
+            weekendShift: l.weekendShift,
+          }))
+        : undefined;
       await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          ...(sendAddons
+            ? {
+                addons: addonsPayload,
+                primaryLinePrice:
+                  form.price !== "" && !isNaN(parseFloat(form.price))
+                    ? parseFloat(form.price)
+                    : undefined,
+              }
+            : {}),
           isRecurring: recurringControlsActive,
           spawnRecurringChildren: isRecurring && !serviceIsRecurringTemplate,
           recurringPattern: recurringControlsActive ? recurringFreq : undefined,
@@ -938,10 +1038,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     "Customer";
   const customerPhone = service.customerPhone || customer.phone || "";
   const customerEmail = customer.email || "";
-  const servicePrice =
+  const primaryPrice =
     form.price !== "" && !isNaN(parseFloat(form.price))
       ? parseFloat(form.price)
       : 0;
+  const addonLinesTotal = serviceLines.reduce(
+    (sum, l) =>
+      sum + (l.price !== "" && !isNaN(parseFloat(l.price)) ? parseFloat(l.price) : 0),
+    0,
+  );
+  const servicePrice = primaryPrice + addonLinesTotal;
   const manualDiscount =
     discountType && discountAmount !== ""
       ? discountType === "percentage"
@@ -1018,6 +1124,262 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }
     setSkipWeekends(true);
     setWeekendShift(value === "back" ? "back" : "forward");
+  };
+
+  // Renders one service line (the primary service or an additional add-on).
+  // `pickerId` keys this line's service picker; `onField(key, value)` writes
+  // back to the owning state; `onRemove` (when provided) deletes the line.
+  const renderServiceLine = ({
+    pickerId,
+    serviceType,
+    technicianId,
+    estimatedDuration,
+    price,
+    onField,
+    onRemove,
+    label,
+  }) => {
+    const picking = pickerKey === pickerId;
+    return (
+      <div
+        style={{
+          border: `1px solid ${D.border}`,
+          borderRadius: 6,
+          overflow: "hidden",
+          marginBottom: 12,
+        }}
+      >
+        {(label || onRemove) && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "8px 14px",
+              background: "#F3F4F6",
+              borderBottom: `1px solid ${D.border}`,
+            }}
+          >
+            <span style={{ fontSize: 12, fontWeight: 800, color: D.muted }}>
+              {label || "Additional service"}
+            </span>
+            {onRemove && (
+              <button
+                type="button"
+                onClick={onRemove}
+                className="font-bold"
+                style={{
+                  padding: "4px 10px",
+                  borderRadius: 4,
+                  background: "#fff",
+                  color: "#B42318",
+                  border: "1px solid #FCA5A5",
+                  fontSize: 12,
+                  cursor: "pointer",
+                }}
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        )}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+            gap: 12,
+            alignItems: "start",
+            padding: 14,
+            background: "#F9FAFB",
+          }}
+        >
+          <div>
+            <label style={labelStyle}>Service</label>
+            {!picking ? (
+              <div
+                style={{ display: "flex", alignItems: "center", gap: 10 }}
+              >
+                <div style={{ flex: 1, fontSize: 14, color: "#111827" }}>
+                  {serviceType || "Select service"}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPickerKey(pickerId);
+                    setExpandedCategory(null);
+                  }}
+                  className="font-bold"
+                  style={{
+                    padding: "8px 10px",
+                    borderRadius: 4,
+                    background: "#fff",
+                    color: "#111827",
+                    border: `1px solid ${D.inputBorder}`,
+                    fontSize: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  Change
+                </button>
+              </div>
+            ) : (
+              <div
+                style={{
+                  maxHeight: 260,
+                  overflowY: "auto",
+                  border: `1px solid ${D.inputBorder}`,
+                  borderRadius: 4,
+                  padding: 6,
+                  background: "#fff",
+                }}
+              >
+                {serviceGroups.map((group) => {
+                  const isOpen = expandedCategory === group.category;
+                  return (
+                    <div key={group.category} style={{ marginBottom: 4 }}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedCategory(isOpen ? null : group.category)
+                        }
+                        className="font-bold"
+                        style={{
+                          width: "100%",
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          borderRadius: 4,
+                          background: isOpen ? "#EEF6FF" : "#fff",
+                          border: `1px solid ${D.border}`,
+                          color: "#111827",
+                          fontSize: 13,
+                          cursor: "pointer",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <span>
+                          {EDIT_CATEGORY_LABELS[group.category] ||
+                            group.category}{" "}
+                          <span style={{ color: D.muted }}>
+                            ({group.items.length})
+                          </span>
+                        </span>
+                        <span style={{ color: D.muted, fontSize: 11 }}>
+                          {isOpen ? "v" : ">"}
+                        </span>
+                      </button>
+                      {isOpen && (
+                        <div
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 3,
+                            padding: 6,
+                          }}
+                        >
+                          {group.items.map((svc, si) => (
+                            <button
+                              key={si}
+                              type="button"
+                              onClick={() => {
+                                onField("serviceType", svc.name);
+                                if (svc.duration || svc.default_duration_minutes) {
+                                  onField(
+                                    "estimatedDuration",
+                                    svc.duration || svc.default_duration_minutes,
+                                  );
+                                }
+                                if (svc.id !== undefined) {
+                                  onField("serviceId", svc.id || null);
+                                }
+                                setPickerKey(null);
+                                setExpandedCategory(null);
+                              }}
+                              className="font-bold"
+                              style={{
+                                padding: "8px 10px",
+                                background: "#fff",
+                                border: `1px solid ${D.border}`,
+                                borderRadius: 4,
+                                color: "#111827",
+                                fontSize: 13,
+                                cursor: "pointer",
+                                textAlign: "left",
+                              }}
+                            >
+                              {svc.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <div>
+            <label style={labelStyle}>Staff</label>
+            <select
+              value={technicianId}
+              onChange={(e) => onField("technicianId", e.target.value)}
+              className="font-bold"
+              style={inputStyle}
+            >
+              <option value="">Unassigned</option>
+              {(technicians || []).map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+            {!onRemove &&
+              serviceHasSeries &&
+              technicianId !== (service.technicianId || "") && (
+                <div style={{ marginTop: 10 }}>
+                  <label style={labelStyle}>Apply staff change to</label>
+                  <select
+                    value={assignmentScope}
+                    onChange={(e) => setAssignmentScope(e.target.value)}
+                    className="font-bold"
+                    style={inputStyle}
+                  >
+                    <option value="this_only">This appointment only</option>
+                    <option value="following">
+                      This and following appointments
+                    </option>
+                    <option value="series">All appointments in series</option>
+                  </select>
+                </div>
+              )}
+          </div>
+          <div>
+            <label style={labelStyle}>Duration</label>
+            <input
+              type="number"
+              value={estimatedDuration}
+              onChange={(e) => onField("estimatedDuration", e.target.value)}
+              className="font-bold"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>Price</label>
+            <input
+              type="number"
+              min={0}
+              step={0.01}
+              value={price}
+              onChange={(e) => onField("price", e.target.value)}
+              placeholder="0.00"
+              className="font-bold"
+              style={inputStyle}
+            />
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return createPortal(
@@ -1466,238 +1828,50 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <section style={{ ...sectionStyle, order: 1 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Services and items</h2>{" "}
-              <div
+              {renderServiceLine({
+                pickerId: "primary",
+                serviceType: form.serviceType,
+                technicianId: form.technicianId,
+                estimatedDuration: form.estimatedDuration,
+                price: form.price,
+                onField: update,
+                onRemove: null,
+                label: serviceLines.length > 0 ? "Primary service" : null,
+              })}
+              {serviceLines.map((line) =>
+                <div key={line._key}>
+                  {renderServiceLine({
+                    pickerId: line._key,
+                    serviceType: line.serviceType,
+                    technicianId: line.technicianId,
+                    estimatedDuration: line.estimatedDuration,
+                    price: line.price,
+                    onField: (k, v) => updateLine(line._key, k, v),
+                    onRemove: () => removeServiceLine(line._key),
+                  })}
+                </div>,
+              )}
+              <button
+                type="button"
+                onClick={addServiceLine}
+                className="font-bold"
                 style={{
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 6,
-                  overflow: "hidden",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "9px 12px",
+                  borderRadius: 4,
+                  border: `1px dashed ${D.inputBorder}`,
+                  background: "#fff",
+                  color: "#111827",
+                  fontSize: 13,
+                  fontWeight: 800,
+                  cursor: "pointer",
                   marginBottom: 12,
                 }}
               >
-                {" "}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-                    gap: 12,
-                    alignItems: "center",
-                    padding: 14,
-                    background: "#F9FAFB",
-                  }}
-                >
-                  {" "}
-                  <div>
-                    {" "}
-                    <label style={labelStyle}>Service</label>
-                    {!editingServiceType ? (
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 10,
-                        }}
-                      >
-                        {" "}
-                        <div
-                          style={{ flex: 1, fontSize: 14, color: "#111827" }}
-                        >
-                          {form.serviceType || "Select service"}
-                        </div>{" "}
-                        <button
-                          type="button"
-                          onClick={() => setEditingServiceType(true)}
-                          className="font-bold"
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 4,
-                            background: "#fff",
-                            color: "#111827",
-                            border: `1px solid ${D.inputBorder}`,
-                            fontSize: 12,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Change
-                        </button>{" "}
-                      </div>
-                    ) : (
-                      <div
-                        style={{
-                          maxHeight: 260,
-                          overflowY: "auto",
-                          border: `1px solid ${D.inputBorder}`,
-                          borderRadius: 4,
-                          padding: 6,
-                          background: "#fff",
-                        }}
-                      >
-                        {serviceGroups.map((group) => {
-                          const isOpen = expandedCategory === group.category;
-                          return (
-                            <div
-                              key={group.category}
-                              style={{ marginBottom: 4 }}
-                            >
-                              {" "}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setExpandedCategory(
-                                    isOpen ? null : group.category,
-                                  )
-                                }
-                                className="font-bold"
-                                style={{
-                                  width: "100%",
-                                  textAlign: "left",
-                                  padding: "8px 10px",
-                                  borderRadius: 4,
-                                  background: isOpen ? "#EEF6FF" : "#fff",
-                                  border: `1px solid ${D.border}`,
-                                  color: "#111827",
-                                  fontSize: 13,
-                                  cursor: "pointer",
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                }}
-                              >
-                                {" "}
-                                <span>
-                                  {EDIT_CATEGORY_LABELS[group.category] ||
-                                    group.category}{" "}
-                                  <span style={{ color: D.muted }}>
-                                    ({group.items.length})
-                                  </span>
-                                </span>{" "}
-                                <span style={{ color: D.muted, fontSize: 11 }}>
-                                  {isOpen ? "v" : ">"}
-                                </span>{" "}
-                              </button>
-                              {isOpen && (
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: 3,
-                                    padding: 6,
-                                  }}
-                                >
-                                  {group.items.map((svc, si) => (
-                                    <button
-                                      key={si}
-                                      type="button"
-                                      onClick={() => {
-                                        update("serviceType", svc.name);
-                                        if (
-                                          svc.duration ||
-                                          svc.default_duration_minutes
-                                        ) {
-                                          update(
-                                            "estimatedDuration",
-                                            svc.duration ||
-                                              svc.default_duration_minutes,
-                                          );
-                                        }
-                                        setEditingServiceType(false);
-                                        setExpandedCategory(null);
-                                      }}
-                                      className="font-bold"
-                                      style={{
-                                        padding: "8px 10px",
-                                        background: "#fff",
-                                        border: `1px solid ${D.border}`,
-                                        borderRadius: 4,
-                                        color: "#111827",
-                                        fontSize: 13,
-                                        cursor: "pointer",
-                                        textAlign: "left",
-                                      }}
-                                    >
-                                      {svc.name}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={labelStyle}>Staff</label>{" "}
-                    <select
-                      value={form.technicianId}
-                      onChange={(e) => update("technicianId", e.target.value)}
-                      className="font-bold"
-                      style={inputStyle}
-                    >
-                      {" "}
-                      <option value="">Unassigned</option>
-                      {(technicians || []).map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name}
-                        </option>
-                      ))}
-                    </select>{" "}
-                    {serviceHasSeries &&
-                      form.technicianId !== (service.technicianId || "") && (
-                        <div style={{ marginTop: 10 }}>
-                          <label style={labelStyle}>
-                            Apply staff change to
-                          </label>
-                          <select
-                            value={assignmentScope}
-                            onChange={(e) =>
-                              setAssignmentScope(e.target.value)
-                            }
-                            className="font-bold"
-                            style={inputStyle}
-                          >
-                            <option value="this_only">
-                              This appointment only
-                            </option>
-                            <option value="following">
-                              This and following appointments
-                            </option>
-                            <option value="series">
-                              All appointments in series
-                            </option>
-                          </select>
-                        </div>
-                      )}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={labelStyle}>Duration</label>{" "}
-                    <input
-                      type="number"
-                      value={form.estimatedDuration}
-                      onChange={(e) =>
-                        update("estimatedDuration", e.target.value)
-                      }
-                      className="font-bold"
-                      style={inputStyle}
-                    />{" "}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={labelStyle}>Price</label>{" "}
-                    <input
-                      type="number"
-                      min={0}
-                      step={0.01}
-                      value={form.price}
-                      onChange={(e) => update("price", e.target.value)}
-                      placeholder="0.00"
-                      className="font-bold"
-                      style={inputStyle}
-                    />{" "}
-                  </div>{" "}
-                </div>{" "}
-              </div>{" "}
+                + Add service
+              </button>{" "}
               {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
                 <div
                   style={{
