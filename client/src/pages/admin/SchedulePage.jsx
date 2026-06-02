@@ -734,12 +734,36 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     technicianId: service.technicianId || "",
     routeOrder: service.routeOrder || "",
     notes: service.notes || "",
-    price:
-      service.estimatedPrice != null
-        ? String(service.estimatedPrice)
-        : service.estimated_price != null
-          ? String(service.estimated_price)
-          : "",
+    // The editable primary "Price" must be the primary line price, NOT the
+    // whole-visit total. When the appointment has add-on lines, estimatedPrice
+    // is the combined total, so prefer the API's primary_line_price; fall back
+    // to backing the add-on grosses out of the total only if it isn't exposed.
+    price: (() => {
+      const addons = Array.isArray(service.serviceAddons)
+        ? service.serviceAddons
+        : [];
+      if (service.primaryLinePrice != null) return String(service.primaryLinePrice);
+      const total =
+        service.estimatedPrice != null
+          ? service.estimatedPrice
+          : service.estimated_price != null
+            ? service.estimated_price
+            : null;
+      if (total == null) return "";
+      if (addons.length > 0) {
+        const addonGross = addons.reduce((sum, a) => {
+          const v =
+            a.basePrice != null
+              ? a.basePrice
+              : a.estimatedPrice != null
+                ? a.estimatedPrice
+                : 0;
+          return sum + (Number(v) || 0);
+        }, 0);
+        return String(Math.max(0, Math.round((Number(total) - addonGross) * 100) / 100));
+      }
+      return String(total);
+    })(),
   });
   const [saving, setSaving] = useState(false);
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
