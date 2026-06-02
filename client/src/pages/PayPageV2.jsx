@@ -254,7 +254,7 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange, customerName, customerEmail }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -456,6 +456,15 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // Wallets moved into the Express Checkout Element above, so we
         // hide them here to avoid duplicate wallet buttons. ACH stays in
         // the accordion below.
+        // Pre-fill billing details from the invoice's customer record.
+        // us_bank_account (ACH) confirmation requires a full name and email;
+        // without them Stripe rejects the confirm with "Please provide your
+        // full name". Seeding defaultValues means the ACH fields aren't blank
+        // by default, while card payments simply ignore the unused name field.
+        const billingDetails = {};
+        if (customerName) billingDetails.name = customerName;
+        if (customerEmail) billingDetails.email = customerEmail;
+
         const paymentElement = elements.create('payment', {
           layout: {
             type: 'accordion',
@@ -465,6 +474,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           },
           paymentMethodOrder: ['card', 'us_bank_account'],
           wallets: { applePay: 'never', googlePay: 'never' },
+          ...(Object.keys(billingDetails).length ? { defaultValues: { billingDetails } } : {}),
         });
 
         paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
@@ -1356,6 +1366,8 @@ export default function PayPageV2() {
                 onError={(msg) => setPaymentError(msg)}
                 saveCard={saveCard}
                 onSaveCardChange={setSaveCard}
+                customerName={[customer.firstName, customer.lastName].filter(Boolean).join(' ')}
+                customerEmail={customer.email}
               />
             ) : paymentState === 'error' ? null : (
               <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>

@@ -12,7 +12,7 @@ const logger = require('../services/logger');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
-const { shouldSkipClientPaymentErrorAlert } = require('./pay-v2-helpers');
+const { shouldSkipClientPaymentErrorAlert, isInputValidationNoise } = require('./pay-v2-helpers');
 
 /**
  * Public pay routes — no auth required.
@@ -156,6 +156,7 @@ router.get('/:token', async (req, res, next) => {
       customer: {
         firstName: customer.first_name,
         lastName: customer.last_name,
+        email: customer.email,
         tier: customer.waveguard_tier,
         address: customer.address_line1,
         city: customer.city,
@@ -591,18 +592,27 @@ router.post('/:token/error', clientPaymentErrorLimiter, async (req, res) => {
     const message = cleanField(body.message || body.error || 'Payment form error');
     if (!message) return res.json({ success: true, skipped: true });
 
+    const stripeType = cleanField(body.stripeType || '', 100);
+    const code = cleanField(body.code || '', 100);
+
+    // Skip in-progress form validation (incomplete card number, missing CVC,
+    // etc.) — the customer corrects these inline; they aren't office-actionable.
+    if (isInputValidationNoise({ stripeType, code })) {
+      return res.json({ success: true, skipped: true, reason: 'input_validation' });
+    }
+
     await BillPaymentErrorAlerts.alertBillPaymentError({
       invoice,
       phase: cleanField(body.phase || 'client', 60),
       methodCategory: cleanField(body.methodCategory || invoice.payment_method || 'unknown', 60),
       paymentIntentId: cleanField(body.paymentIntentId || invoice.stripe_payment_intent_id || '', 128),
       message,
-      code: cleanField(body.code || '', 100),
+      code,
       statusCode: Number(body.statusCode || 0) || null,
       source: 'client',
       metadata: {
         route: paymentRouteLabel(req),
-        stripe_type: cleanField(body.stripeType || '', 100) || null,
+        stripe_type: stripeType || null,
         client_phase: cleanField(body.clientPhase || '', 100) || null,
       },
     });
