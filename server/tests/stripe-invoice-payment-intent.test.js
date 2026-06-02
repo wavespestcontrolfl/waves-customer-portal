@@ -315,4 +315,19 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
   });
+
+  test('tender switch fails closed when the stale PI status cannot be read', async () => {
+    stripeClient.paymentIntents.update.mockRejectedValueOnce(new Error(
+      'The allowed types provided (card) are incompatible with the attached PaymentMethod on the PaymentIntent.',
+    ));
+    stripeClient.paymentIntents.retrieve.mockRejectedValueOnce(new Error('Stripe API unavailable'));
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
+    ).rejects.toThrow(/could not verify the existing payment status/i);
+    // Never repoint the invoice or cancel the old PI when status is unknown.
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+  });
 });

@@ -1256,14 +1256,24 @@ const StripeService = {
 
     const { paymentMethodTypes, metadata, customer, setupFutureUsage, base, baseCents, methodCategory } = ctx;
 
-    // Inspect the stale PI. Never cancel/replace one with money in flight.
+    // Inspect the stale PI before touching it. Fail CLOSED: only replace when
+    // we positively know the old PI is in a cancelable (or already-canceled)
+    // state. If its status can't be read, or it's processing/succeeded (money
+    // in flight), do NOT detach it — repointing the invoice off an in-flight
+    // ACH PI would let the customer pay the replacement while the original
+    // bank debit is still pending.
     let oldIntent = null;
     try {
       oldIntent = await stripe.paymentIntents.retrieve(oldPaymentIntentId);
-    } catch (err) {
-      logger.warn(`[stripe] Could not retrieve stale PI ${oldPaymentIntentId} during tender switch: ${err.message}`);
+    } catch (retrieveErr) {
+      logger.warn(`[stripe] Could not retrieve stale PI ${oldPaymentIntentId} during tender switch: ${retrieveErr.message}`);
     }
-    if (oldIntent && oldIntent.status !== 'canceled' && !REPLACEABLE_PI_STATUSES.has(oldIntent.status)) {
+    if (!oldIntent) {
+      // Status unknown — surface as a hard error (visible to ops) and never
+      // replace blind.
+      throw new Error(`Could not verify the existing payment status for PI ${oldPaymentIntentId}`);
+    }
+    if (oldIntent.status !== 'canceled' && !REPLACEABLE_PI_STATUSES.has(oldIntent.status)) {
       const err = new Error('Payment is already in progress. Please refresh the invoice and try again.');
       err.statusCode = 409;
       throw err;
