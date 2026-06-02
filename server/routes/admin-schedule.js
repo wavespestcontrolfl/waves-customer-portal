@@ -2008,6 +2008,11 @@ router.get('/list', async (req, res, next) => {
       .limit(limit)
       .offset(offset);
 
+    // Add-on lines so the Edit appointment modal opened from the list view
+    // knows the full visit composition (primary + add-ons) and edits totals
+    // correctly rather than rebasing the visit price down to the primary line.
+    const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+
     const mapped = services.map(s => ({
       id: s.id,
       customerId: s.customer_id,
@@ -2020,6 +2025,7 @@ router.get('/list', async (req, res, next) => {
       estimatedDuration: s.estimated_duration_minutes || 30,
       estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
       primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+      serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
       prepaidAt: s.prepaid_at || null,
@@ -2163,6 +2169,30 @@ router.put('/:id/update-details', async (req, res, next) => {
     // lines for this appointment (replace strategy) and recompute the stored
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
+    // Per-line add-on staffing is an admin-only change, mirroring the primary
+    // technician-assignment guard below. Compare the submitted add-on
+    // technician set against what's stored and block non-admins only when it
+    // actually changes (so a tech can still edit price/notes on an appointment
+    // whose add-ons already carry staff).
+    if (Array.isArray(addons) && req.techRole !== 'admin') {
+      const submittedTechs = addons
+        .map((a) => (a && a.technicianId) ? String(a.technicianId) : null)
+        .filter(Boolean)
+        .sort();
+      const existingAddonRows = await db('scheduled_service_addons')
+        .where({ scheduled_service_id: req.params.id })
+        .select('technician_id')
+        .catch(() => []);
+      const existingTechs = existingAddonRows
+        .map((r) => (r.technician_id ? String(r.technician_id) : null))
+        .filter(Boolean)
+        .sort();
+      const techsChanged = submittedTechs.length !== existingTechs.length
+        || submittedTechs.some((t, i) => t !== existingTechs[i]);
+      if (techsChanged) {
+        return res.status(403).json({ error: 'Admin access required to change add-on staff' });
+      }
+    }
     if (serviceType !== undefined) updates.service_type = serviceType;
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;

@@ -755,10 +755,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // is the combined total, so prefer the API's primary_line_price; fall back
     // to backing the add-on grosses out of the total only if it isn't exposed.
     price: (() => {
-      const addons = Array.isArray(service.serviceAddons)
-        ? service.serviceAddons
-        : [];
-      if (service.primaryLinePrice != null) return String(service.primaryLinePrice);
+      // Only trust primaryLinePrice when the add-on lines are also known — a
+      // list payload that omits serviceAddons can't distinguish primary from
+      // total, so we must fall back to the full visit total (the legacy save
+      // path preserves it correctly) instead of rebasing the visit down to the
+      // primary line.
+      const addonsKnown = Array.isArray(service.serviceAddons);
+      const addons = addonsKnown ? service.serviceAddons : [];
+      if (addonsKnown && service.primaryLinePrice != null) return String(service.primaryLinePrice);
       const total =
         service.estimatedPrice != null
           ? service.estimatedPrice
@@ -766,7 +770,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             ? service.estimated_price
             : null;
       if (total == null) return "";
-      if (addons.length > 0) {
+      if (addonsKnown && addons.length > 0) {
         const addonGross = addons.reduce((sum, a) => {
           const v =
             a.basePrice != null
