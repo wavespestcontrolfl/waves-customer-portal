@@ -62,19 +62,32 @@ beforeEach(() => {
   db.mockReset();
 });
 
-function registryQuery(row) {
+function registryQuery(row, seen = []) {
   const query = {};
   query.select = jest.fn(() => query);
   query.whereNotNull = jest.fn(() => query);
+  query.whereNot = jest.fn(() => query);
+  query.whereRaw = jest.fn((sql, bindings) => {
+    seen.push(['whereRaw', sql, bindings]);
+    return query;
+  });
   query.andWhere = jest.fn((callback) => {
     const whereScope = {
-      where: jest.fn(() => whereScope),
-      orWhere: jest.fn(() => whereScope),
+      where: jest.fn((column, value) => {
+        seen.push([column, value]);
+        return whereScope;
+      }),
+      orWhere: jest.fn((column, value) => {
+        seen.push([column, value]);
+        return whereScope;
+      }),
     };
     callback.call(whereScope);
     return query;
   });
   query.orderByRaw = jest.fn(() => query);
+  query.orderBy = jest.fn(() => query);
+  query.limit = jest.fn(() => query);
   query.first = jest.fn(async () => row);
   return query;
 }
@@ -166,7 +179,8 @@ describe('getLiveFrontmatter', () => {
   });
 
   test('falls back to content_registry source path for canonical blog URLs outside /blog', async () => {
-    db.mockReturnValue(registryQuery({ astro_source_path: 'src/content/blog/fertilizer-blackout-sarasota-county.md' }));
+    const seen = [];
+    db.mockReturnValue(registryQuery({ astro_source_path: 'src/content/blog/fertilizer-blackout-sarasota-county.md' }, seen));
     gh.getFile.mockImplementation(async (path) => {
       if (path === 'src/content/blog/fertilizer-blackout-sarasota-county.md') {
         return {
@@ -182,6 +196,19 @@ describe('getLiveFrontmatter', () => {
     expect(gh.getFile).toHaveBeenCalledWith('src/content/locations/lawn-care/fertilizer-blackout-sarasota-county.md');
     expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/fertilizer-blackout-sarasota-county.mdx');
     expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/fertilizer-blackout-sarasota-county.md');
+    expect(seen).toContainEqual(['live_url', '/lawn-care/fertilizer-blackout-sarasota-county/']);
+    expect(seen).not.toContainEqual(['canonical_url_normalized', '/lawn-care/fertilizer-blackout-sarasota-county/']);
+  });
+
+  test('preserves external host in content_registry lookup keys', async () => {
+    const seen = [];
+    db.mockReturnValue(registryQuery(null, seen));
+    gh.getFile.mockResolvedValue(null);
+    const r = await pub.getLiveFrontmatter('https://sarasotaflpestcontrol.com/lawn-care/fertilizer-blackout-sarasota-county/');
+    expect(r).toBeNull();
+    expect(seen).toContainEqual(['live_url', 'https://sarasotaflpestcontrol.com/lawn-care/fertilizer-blackout-sarasota-county/']);
+    expect(seen).toContainEqual(['live_url', '/lawn-care/fertilizer-blackout-sarasota-county/']);
+    expect(seen).toContainEqual(['whereRaw', 'metadata::text ILIKE ?', ['%sarasotaflpestcontrol.com%']]);
   });
 });
 

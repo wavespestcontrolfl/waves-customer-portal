@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
+const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS } = require('./spoke-sites');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -513,28 +514,73 @@ async function resolveExistingAstroFileForTarget(targetUrlOrPath) {
 
 async function registryAstroPathForTarget(targetUrlOrPath) {
   if (!targetUrlOrPath || /^src\/content\//.test(String(targetUrlOrPath))) return null;
-  const normalized = normalizedPublicPath(targetUrlOrPath);
-  if (!normalized) return null;
+  const lookup = registryLookupValuesForUrl(targetUrlOrPath);
+  if (!lookup.exact.length) return null;
 
-  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
-  const absolute = `${hub}${normalized}`;
+  const exact = await registryAstroPathForLiveUrl(lookup.exact);
+  if (exact) return exact;
+  if (lookup.host && lookup.pathOnly) {
+    const hostedPath = await registryAstroPathForLiveUrl([lookup.pathOnly], { requiredHost: lookup.host });
+    if (hostedPath) return hostedPath;
+  }
+  return registryAstroPathForCanonicalUrl(lookup.exact, { requiredHost: lookup.host });
+}
+
+async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null } = {}) {
   try {
     const query = db('content_registry');
     if (!query || typeof query.select !== 'function') return null;
-    const row = await query
+    let q = query
       .select('astro_source_path')
       .whereNotNull('astro_source_path')
+      .whereNot('reconciliation_status', 'conflict')
       .andWhere(function registryUrlMatch() {
-        this.where('canonical_url_normalized', normalized)
-          .orWhere('canonical_target_url', absolute)
-          .orWhere('live_url', absolute);
-      })
+        const [first, ...rest] = liveUrlValues;
+        this.where('live_url', first);
+        for (const value of rest) {
+          this.orWhere('live_url', value);
+        }
+      });
+    if (requiredHost) q = q.whereRaw('metadata::text ILIKE ?', [`%${requiredHost}%`]);
+    const row = await q
       .orderByRaw("CASE WHEN astro_status = 'present' THEN 0 ELSE 1 END")
+      .orderBy('astro_source_path', 'asc')
       .first();
     const sourcePath = row?.astro_source_path;
     return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
   } catch (err) {
-    logger.warn(`[astro-publisher] content registry path lookup failed for ${normalized}: ${err.message}`);
+    logger.warn(`[astro-publisher] content registry path lookup failed for ${liveUrlValues[0]}: ${err.message}`);
+    return null;
+  }
+}
+
+async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null } = {}) {
+  try {
+    const query = db('content_registry');
+    if (!query || typeof query.select !== 'function') return null;
+    let q = query
+      .select('astro_source_path')
+      .whereNotNull('astro_source_path')
+      .whereNot('reconciliation_status', 'conflict')
+      .andWhere(function registryCanonicalMatch() {
+        const [first, ...rest] = urlValues;
+        this.where('canonical_url_normalized', first)
+          .orWhere('canonical_target_url', first);
+        for (const value of rest) {
+          this.orWhere('canonical_url_normalized', value)
+            .orWhere('canonical_target_url', value);
+        }
+      });
+    if (requiredHost) q = q.whereRaw('metadata::text ILIKE ?', [`%${requiredHost}%`]);
+    const rows = await q
+      .orderByRaw("CASE WHEN astro_status = 'present' THEN 0 ELSE 1 END")
+      .orderBy('astro_source_path', 'asc')
+      .limit(2);
+    if (!Array.isArray(rows) || rows.length !== 1) return null;
+    const sourcePath = rows[0]?.astro_source_path;
+    return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
+  } catch (err) {
+    logger.warn(`[astro-publisher] content registry canonical lookup failed for ${urlValues[0]}: ${err.message}`);
     return null;
   }
 }
@@ -1284,20 +1330,46 @@ function isSafeSlugPath(value) {
   return s.split('/').every((segment) => SLUG_SEGMENT.test(segment));
 }
 
-function normalizedPublicPath(urlOrPath) {
-  const cleaned = String(urlOrPath || '')
-    .replace(/^https?:\/\/[^/]+/i, '')
-    .split(/[?#]/)[0]
-    .replace(/^\/+|\/+$/g, '');
-  if (!cleaned || !isSafeSlugPath(cleaned)) return null;
-  return `/${cleaned}/`;
-}
-
 function isSafeAstroContentPath(value) {
   const path = String(value || '').replace(/^\/+/, '');
   const match = path.match(/^src\/content\/(?:blog|services|locations)\/(.+)\.mdx?$/);
   if (!match) return false;
   return isSafeSlugPath(match[1]);
+}
+
+function registryLookupValuesForUrl(urlOrPath) {
+  const normalized = normalizeContentUrl(urlOrPath);
+  if (!normalized) return { exact: [], host: null, pathOnly: null };
+  const normalizedPath = normalized.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '');
+  if (normalizedPath && !isSafeSlugPath(normalizedPath)) return { exact: [], host: null, pathOnly: null };
+
+  const values = [normalized];
+  const raw = String(urlOrPath || '').trim();
+  let host = null;
+  let pathOnly = null;
+  if (normalized.startsWith('/')) {
+    const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+    values.push(`${hub}${normalized}`);
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      const normalizedPathOnly = normalizeContentUrl(parsed.pathname);
+      const parsedHost = parsed.hostname.toLowerCase().replace(/^www\./, '');
+      if (normalizedPathOnly) values.push(`${parsed.origin.replace(/\/$/, '')}${normalizedPathOnly}`);
+      if (normalizedPathOnly && !isHubHost(parsedHost)) {
+        host = parsedHost;
+        pathOnly = normalizedPathOnly;
+      }
+    } catch {
+      // normalizeContentUrl already rejected malformed absolute URLs.
+    }
+  }
+  return { exact: [...new Set(values)], host, pathOnly };
+}
+
+function isHubHost(host) {
+  return host === 'wavespestcontrol.com' || host === 'www.wavespestcontrol.com';
 }
 
 function urlToAstroPath(url) {
