@@ -32,6 +32,7 @@ const {
   SURCHARGE_API_VERSION,
   SURCHARGE_POLICY_VERSION,
   CONFIGURED_COST_BPS,
+  isCardMethodType,
   shouldSurcharge,
   computeChargeAmount,
   buildSurchargeAmountDetails,
@@ -1151,15 +1152,12 @@ const StripeService = {
     const base = parseFloat(invoice.total);
     const baseCents = Math.round(base * 100);
 
-    // Keep BOTH tender families enabled on the PI. Narrowing
-    // payment_method_types to a single family fails once an incompatible
-    // PaymentMethod is already attached — a customer who enters bank details
-    // (attaching a us_bank_account PM) and then switches back to Card hits
-    // Stripe's "The allowed types provided (card) are incompatible with the
-    // attached PaymentMethod on the PaymentIntent" error. Surcharge is still
-    // enforced at /quote → /finalize from the actual PM funding, independent
-    // of the allowed types here, so leaving both enabled is safe.
-    const paymentMethodTypes = ['card', 'us_bank_account'];
+    // Lock the PI to the selected tender family before Stripe can confirm.
+    // The pay page exposes Card/ACH with its own selector; Stripe Elements
+    // then refreshes to the one tender family that matches this amount.
+    const paymentMethodTypes = isCardMethodType(selectedMethodCategory)
+      ? ['card']
+      : ['us_bank_account'];
 
     const updateParams = {
       amount: baseCents,
