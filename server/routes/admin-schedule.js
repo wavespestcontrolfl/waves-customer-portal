@@ -704,6 +704,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       serviceName: addon.name || addon.serviceName,
       base,
       price: net,
+      estimatedDuration: addon.estimatedDuration ?? addon.duration ?? addon.default_duration_minutes ?? null,
       discount: lineDiscount,
       recurringPattern: addon.recurringPattern || addon.cadence || null,
       recurringIntervalDays: addon.recurringIntervalDays ?? addon.intervalDays ?? null,
@@ -759,6 +760,9 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
       estimated_price: addon.price != null ? addon.price : null,
     };
     if (addonCols.base_price && addon.base != null) addonData.base_price = addon.base;
+    if (addonCols.estimated_duration_minutes && addon.estimatedDuration != null && addon.estimatedDuration !== '' && !isNaN(parseInt(addon.estimatedDuration, 10))) {
+      addonData.estimated_duration_minutes = parseInt(addon.estimatedDuration, 10);
+    }
     if (addonCols.recurring_pattern && addon.recurringPattern) addonData.recurring_pattern = addon.recurringPattern;
     if (addonCols.recurring_interval_days && addon.recurringIntervalDays != null && addon.recurringIntervalDays !== '') addonData.recurring_interval_days = parseInt(addon.recurringIntervalDays, 10);
     if (addonCols.recurring_nth && addon.recurringNth != null && addon.recurringNth !== '') addonData.recurring_nth = parseInt(addon.recurringNth, 10);
@@ -881,6 +885,7 @@ function mapAddonRow(row) {
     id: row.id,
     serviceId: row.service_id || null,
     serviceName: row.service_name,
+    estimatedDuration: row.estimated_duration_minutes ?? null,
     basePrice: row.base_price != null ? Number(row.base_price) : null,
     estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
     discountId: row.discount_id || null,
@@ -1094,6 +1099,7 @@ router.get('/', async (req, res, next) => {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+        primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
@@ -1234,6 +1240,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
           'scheduled_services.estimated_price',
+          'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
           'scheduled_services.technician_id',
@@ -1300,6 +1307,7 @@ router.get('/week', async (req, res, next) => {
           windowEnd: s.window_end,
           estimatedDuration: s.estimated_duration_minutes,
           estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
@@ -1986,6 +1994,7 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
         'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
         'scheduled_services.estimated_duration_minutes', 'scheduled_services.estimated_price',
+        'scheduled_services.primary_line_price',
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
         'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
@@ -1998,6 +2007,11 @@ router.get('/list', async (req, res, next) => {
       .limit(limit)
       .offset(offset);
 
+    // Add-on lines so the Edit appointment modal opened from the list view
+    // knows the full visit composition (primary + add-ons) and edits totals
+    // correctly rather than rebasing the visit price down to the primary line.
+    const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+
     const mapped = services.map(s => ({
       id: s.id,
       customerId: s.customer_id,
@@ -2009,6 +2023,8 @@ router.get('/list', async (req, res, next) => {
       windowEnd: s.window_end,
       estimatedDuration: s.estimated_duration_minutes || 30,
       estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+      primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+      serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
       prepaidAt: s.prepaid_at || null,
@@ -2141,10 +2157,17 @@ router.put('/:id/update-details', async (req, res, next) => {
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
       discountType, discountAmount, estimatedPrice,
+      primaryLinePrice,
+      addons,
       createInvoice,
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
+    // When the Edit appointment "Services and items" section sends an explicit
+    // `addons` array, we treat it as the full desired set of additional service
+    // lines for this appointment (replace strategy) and recompute the stored
+    // visit financials from the primary line + add-on lines.
+    let replaceAddons = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
@@ -2206,8 +2229,114 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.create_invoice_on_complete) updates.create_invoice_on_complete = !!createInvoice;
       } catch {}
     }
-    // Price + discount (apply discount to the final stored price used at invoicing)
-    if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
+    // Multi-line edit: an explicit `addons` array describes the full set of
+    // additional service lines. Recompute stored visit financials from the
+    // primary line + add-on lines, then replace add-on rows in the transaction.
+    if (Array.isArray(addons)) {
+      const cols = await db('scheduled_services').columnInfo();
+      const toMoney = (v) => {
+        if (v == null || v === '') return null;
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
+      };
+      const normalizedAddons = [];
+      for (const a of addons) {
+        const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
+        if (!serviceName) continue;
+        const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
+        const lineType = a.discountType || null;
+        const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
+        let net = gross;
+        let lineDiscount = null;
+        if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
+          net = applyDiscount(gross, lineType, lineAmount);
+          const dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
+          lineDiscount = {
+            discountId: a.discountId || null,
+            discountName: a.discountName || null,
+            discountType: lineType,
+            discountAmount: lineAmount,
+            discountDollars: dollars > 0 ? dollars : null,
+          };
+        }
+        normalizedAddons.push({
+          serviceId: a.serviceId || null,
+          serviceName: serviceName.slice(0, 200),
+          base: gross,
+          price: net,
+          estimatedDuration: (a.estimatedDuration != null && a.estimatedDuration !== '' && !isNaN(parseInt(a.estimatedDuration, 10))) ? parseInt(a.estimatedDuration, 10) : null,
+          recurringPattern: a.recurringPattern || null,
+          recurringIntervalDays: a.recurringIntervalDays ?? null,
+          recurringNth: a.recurringNth ?? null,
+          recurringWeekday: a.recurringWeekday ?? null,
+          skipWeekends: a.skipWeekends,
+          weekendShift: a.weekendShift,
+          discount: lineDiscount,
+        });
+      }
+      replaceAddons = normalizedAddons;
+
+      let primaryGross = toMoney(primaryLinePrice);
+      if (primaryGross == null) {
+        const total = toMoney(estimatedPrice);
+        if (total != null) {
+          const addonGross = normalizedAddons.reduce((s, l) => s + (l.base || 0), 0);
+          primaryGross = Math.max(0, Math.round((total - addonGross) * 100) / 100);
+        }
+      }
+      const addonNetTotal = normalizedAddons.reduce((s, l) => s + (l.price || 0), 0);
+      const hasAnyPrice = primaryGross != null || normalizedAddons.some((l) => l.price != null);
+      if (hasAnyPrice) {
+        // This editor neither displays nor edits the appointment-level discount
+        // or the primary line discount, and it runs on every save once an
+        // appointment has add-ons. Preserve both so an unrelated edit can't
+        // silently drop a discount and overcharge at invoicing.
+        const existing = await db('scheduled_services')
+          .where({ id: req.params.id })
+          .first('discount_type', 'discount_amount', 'line_discount_dollars')
+          .catch(() => null);
+
+        // Appointment-level discount: the editor only sends discountType/
+        // discountAmount when one is actively selected; an omitted value means
+        // "leave it alone".
+        const discountProvided = discountType !== undefined;
+        let effDiscountType = discountType || null;
+        let effDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (!discountProvided) {
+          effDiscountType = existing?.discount_type || null;
+          effDiscountAmount = (existing?.discount_amount != null && existing.discount_amount !== '')
+            ? Number(existing.discount_amount)
+            : null;
+        }
+
+        // Primary line discount is not exposed here — back it out of the gross
+        // primary price so the subtotal matches what was originally stored
+        // (mirrors calculateStoredVisitFinancials).
+        const primaryLineDiscountDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
+          ? Math.max(0, Number(existing.line_discount_dollars))
+          : 0;
+        const primaryNet = primaryGross != null
+          ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
+          : 0;
+
+        const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
+        const finalPrice = applyDiscount(subtotal, effDiscountType, effDiscountAmount);
+        const discountDollars = Math.max(0, Math.round((subtotal - finalPrice) * 100) / 100);
+        if (cols.estimated_price) updates.estimated_price = finalPrice;
+        if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
+        // Only rewrite the appointment-level discount columns when the request
+        // explicitly carried a discount value; otherwise leave them as-is.
+        if (discountProvided) {
+          if (cols.discount_id) updates.discount_id = null;
+          if (cols.discount_name) updates.discount_name = null;
+          if (cols.discount_type) updates.discount_type = effDiscountType;
+          if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
+        }
+        if (cols.discount_dollars) updates.discount_dollars = discountDollars > 0 ? discountDollars : null;
+        // Leave the primary line_discount_* columns untouched — invoicing reads
+        // them and this editor can't resend them.
+      }
+    } else if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
       try {
         const cols = await db('scheduled_services').columnInfo();
         const basePrice = Number(estimatedPrice);
@@ -2274,6 +2403,7 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
       } catch {}
     }
+    const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
     let assignmentChanged = false;
     let assignmentUpdatedJobIds = [];
@@ -2299,6 +2429,13 @@ router.put('/:id/update-details', async (req, res, next) => {
 
       if (detailsChanged) {
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+      }
+      // Replace the appointment's additional service lines with the submitted
+      // set (add / edit / remove handled uniformly by delete + re-insert).
+      if (addonsReplaced) {
+        const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
+        await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).del();
+        await insertScheduledServiceAddons(trx, req.params.id, replaceAddons, addonCols);
       }
       if (clearAddonDiscountsOnPriceEdit) {
         const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
@@ -2542,6 +2679,7 @@ router.put('/:id/update-details', async (req, res, next) => {
                     estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
                   };
                   if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+                  if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
                   if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
                   if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
                   if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
@@ -2560,9 +2698,9 @@ router.put('/:id/update-details', async (req, res, next) => {
       }
     });
 
-    if (assignmentChanged || detailsChanged) {
+    if (assignmentChanged || detailsChanged || addonsReplaced) {
       try {
-        const broadcastJobIds = new Set(detailsChanged ? [req.params.id] : []);
+        const broadcastJobIds = new Set((detailsChanged || addonsReplaced) ? [req.params.id] : []);
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
@@ -2574,7 +2712,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       }
     }
 
-    if (detailsChanged || recurringCreated > 0) {
+    if (detailsChanged || addonsReplaced || recurringCreated > 0) {
       const touched = await db('scheduled_services').where({ id: req.params.id }).first('customer_id');
       await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
     }
@@ -3315,6 +3453,7 @@ router.put('/:id/status', async (req, res, next) => {
                         estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
                       };
                       if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+                      if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
                       if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
                       if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
                       if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
@@ -4357,6 +4496,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
             estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
           };
           if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+          if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
           if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
           if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
           if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
