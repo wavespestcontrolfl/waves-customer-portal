@@ -1309,6 +1309,21 @@ const StripeService = {
         throw err;
       }
 
+      // Cancel before repointing the invoice. If the old PI races into
+      // processing after the status read above, Stripe will reject this cancel;
+      // failing here keeps the invoice bound to the in-flight payment instead
+      // of orphaning a bank debit behind a fresh card PI.
+      if (oldIntent.status !== 'canceled') {
+        try {
+          await stripe.paymentIntents.cancel(oldPaymentIntentId);
+        } catch (cancelErr) {
+          logger.warn(`[stripe] Could not cancel stale PI ${oldPaymentIntentId} during tender switch: ${cancelErr.message}`);
+          const err = new Error('Payment is already in progress. Please refresh the invoice and try again.');
+          err.statusCode = 409;
+          throw err;
+        }
+      }
+
       const saveFlag = metadata?.save_card_opt_in === 'true' ? 'save' : 'nosave';
       newIntent = await stripe.paymentIntents.create(piParams, {
         idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}`,
@@ -1320,15 +1335,6 @@ const StripeService = {
         .update({ processor: 'stripe', stripe_payment_intent_id: newIntent.id });
       if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
     });
-
-    // Cancel the orphaned old PI now that the invoice points at the new one.
-    if (oldIntent && REPLACEABLE_PI_STATUSES.has(oldIntent.status)) {
-      try {
-        await stripe.paymentIntents.cancel(oldPaymentIntentId);
-      } catch (cancelErr) {
-        logger.warn(`[stripe] Could not cancel replaced PI ${oldPaymentIntentId}: ${cancelErr.message}`);
-      }
-    }
 
     logger.info(
       `[stripe] Replaced PI ${oldPaymentIntentId} → ${newIntent.id} for invoice ${invoice.invoice_number} `

@@ -291,8 +291,9 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       }),
       expect.objectContaining({ idempotencyKey: expect.stringContaining('invoice_pi_replace_') }),
     );
-    // Stale PI canceled now that the invoice points at the replacement.
     expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_invoice');
+    expect(stripeClient.paymentIntents.cancel.mock.invocationCallOrder[0])
+      .toBeLessThan(stripeClient.paymentIntents.create.mock.invocationCallOrder[0]);
     expect(result).toEqual(expect.objectContaining({
       replaced: true,
       paymentIntentId: 'pi_replacement',
@@ -314,6 +315,22 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     ).rejects.toThrow(/already in progress/);
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+  });
+
+  test('tender switch fails closed when the stale PI cannot be canceled before replacement', async () => {
+    stripeClient.paymentIntents.update.mockRejectedValueOnce(new Error(
+      'The allowed types provided (card) are incompatible with the attached PaymentMethod on the PaymentIntent.',
+    ));
+    stripeClient.paymentIntents.cancel.mockRejectedValueOnce(new Error(
+      'You cannot cancel this PaymentIntent because it has a status of processing.',
+    ));
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
+    ).rejects.toThrow(/already in progress/);
+    expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_invoice');
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('tender switch fails closed when the stale PI status cannot be read', async () => {
