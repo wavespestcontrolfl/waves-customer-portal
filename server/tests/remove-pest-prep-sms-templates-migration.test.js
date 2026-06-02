@@ -1,3 +1,4 @@
+const cleanTemplateSeed = require('../models/migrations/20260514000002_tighten_sms_template_copy');
 const migration = require('../models/migrations/20260602000002_remove_pest_prep_sms_templates');
 
 describe('remove pest prep SMS templates migration', () => {
@@ -40,5 +41,12 @@ describe('remove pest prep SMS templates migration', () => {
     await migration.up(knex);
 
     expect(knex).not.toHaveBeenCalled();
+  });
+
+  test('keeps removed prep templates out of the runtime default seed list', () => {
+    const defaultKeys = cleanTemplateSeed.TEMPLATES.map((template) => template.template_key);
+
+    expect(defaultKeys).not.toContain('pest_prep_cockroach');
+    expect(defaultKeys).not.toContain('pest_prep_bed_bug');
   });
 });
