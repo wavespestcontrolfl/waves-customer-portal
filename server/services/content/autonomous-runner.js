@@ -1738,7 +1738,11 @@ function envInt(key, defaultValue = null) {
 }
 
 function agentSessionTimeoutMs(actionType, brief = {}) {
-  const fallback = actionType === 'new_supporting_blog' || brief?.page_type === 'supporting-blog'
+  const longRunningAgent = actionType === 'new_supporting_blog'
+    || actionType === 'refresh_existing_page'
+    || brief?.page_type === 'supporting-blog'
+    || brief?.page_type === 'refresh';
+  const fallback = longRunningAgent
     ? 10 * 60 * 1000
     : 5 * 60 * 1000;
   return envInt('AUTONOMOUS_CONTENT_AGENT_SESSION_TIMEOUT_MS', fallback);

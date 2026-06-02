@@ -17,6 +17,7 @@ jest.mock('../services/content-astro/github-client', () => ({
 
 const gh = require('../services/content-astro/github-client');
 const fm = require('../services/content-astro/frontmatter');
+const db = require('../models/db');
 const pub = require('../services/content-astro/astro-publisher');
 
 const FILE_PATH = 'src/content/services/pest-control-sarasota-fl.md';
@@ -56,6 +57,35 @@ function refreshDraft(overrides = {}) {
   };
 }
 const BRIEF = { action_type: 'refresh_existing_page', target_url: '/pest-control-sarasota-fl/', city: 'Sarasota', service: 'pest' };
+
+beforeEach(() => {
+  db.mockReset();
+});
+
+function registryQuery(row, seen = []) {
+  const query = {};
+  query.select = jest.fn(() => query);
+  query.whereNotNull = jest.fn(() => query);
+  query.whereNot = jest.fn(() => query);
+  query.andWhere = jest.fn((callback) => {
+    const whereScope = {
+      where: jest.fn((column, value) => {
+        seen.push([column, value]);
+        return whereScope;
+      }),
+      orWhere: jest.fn((column, value) => {
+        seen.push([column, value]);
+        return whereScope;
+      }),
+    };
+    callback.call(whereScope);
+    return query;
+  });
+  query.orderByRaw = jest.fn(() => query);
+  query.orderBy = jest.fn(() => query);
+  query.first = jest.fn(async () => row);
+  return query;
+}
 
 describe('publishRefresh frontmatter freeze', () => {
   beforeEach(() => {
@@ -141,6 +171,41 @@ describe('getLiveFrontmatter', () => {
     const r = await pub.getLiveFrontmatter('src/content/services/termite-control-venice-fl.md');
     expect(r).not.toBeNull();
     expect(r.domains).toEqual(['veniceflpestcontrol.com']);
+  });
+
+  test('falls back to content_registry source path for canonical blog URLs outside /blog', async () => {
+    const seen = [];
+    db.mockReturnValue(registryQuery({ astro_source_path: 'src/content/blog/fertilizer-blackout-sarasota-county.md' }, seen));
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/fertilizer-blackout-sarasota-county.md') {
+        return {
+          content: '---\nslug: "/lawn-care/fertilizer-blackout-sarasota-county/"\ndomains:\n  - sarasotaflpestcontrol.com\n---\nbody',
+          sha: 'registry-sha',
+        };
+      }
+      return null;
+    });
+    const r = await pub.getLiveFrontmatter('/lawn-care/fertilizer-blackout-sarasota-county/');
+    expect(r).not.toBeNull();
+    expect(r.domains).toEqual(['sarasotaflpestcontrol.com']);
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/locations/lawn-care/fertilizer-blackout-sarasota-county.md');
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/fertilizer-blackout-sarasota-county.mdx');
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/fertilizer-blackout-sarasota-county.md');
+    expect(seen).toContainEqual(['live_url', '/lawn-care/fertilizer-blackout-sarasota-county/']);
+    expect(seen).not.toContainEqual(['canonical_url_normalized', '/lawn-care/fertilizer-blackout-sarasota-county/']);
+  });
+
+  test('preserves external host in content_registry lookup keys', async () => {
+    const seen = [];
+    db.mockReturnValue(registryQuery(null, seen));
+    gh.getFile.mockResolvedValue(null);
+    const r = await pub.getLiveFrontmatter('https://sarasotaflpestcontrol.com/lawn-care/fertilizer-blackout-sarasota-county/');
+    expect(r).toBeNull();
+    expect(seen).toContainEqual(['live_url', 'https://sarasotaflpestcontrol.com/lawn-care/fertilizer-blackout-sarasota-county/']);
+    expect(seen).not.toContainEqual([
+      'live_url',
+      '/lawn-care/fertilizer-blackout-sarasota-county/',
+    ]);
   });
 });
 
@@ -254,5 +319,31 @@ describe('publishRefresh blog-schema validation gate', () => {
     );
     expect(res.status).toBe('pr_open');
     expect(gh.putFile).toHaveBeenCalledTimes(1);
+  });
+
+  test('publishes a refresh through registry source path when canonical blog URL is not under /blog', async () => {
+    db.mockReturnValue(registryQuery({ astro_source_path: 'src/content/blog/fertilizer-blackout-sarasota-county.md' }));
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/fertilizer-blackout-sarasota-county.md') {
+        return { content: VALID_BLOG, sha: 'blog-sha' };
+      }
+      return null;
+    });
+    const res = await pub.publishRefresh({
+      type: 'draft',
+      page_url: '/lawn-care/fertilizer-blackout-sarasota-county/',
+      frontmatter: {
+        meta_description: 'Spot Sarasota fertilizer blackout rules and lawn-care timing for Southwest Florida yards before summer restrictions change your treatment plan.',
+      },
+      body: 'Refreshed Sarasota fertilizer blackout content with local timing, customer questions, and careful lawn-care compliance guidance.',
+    }, {
+      action_type: 'refresh_existing_page',
+      target_url: '/lawn-care/fertilizer-blackout-sarasota-county/',
+    });
+    expect(res.status).toBe('pr_open');
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/fertilizer-blackout-sarasota-county.md',
+      sha: 'blog-sha',
+    }));
   });
 });

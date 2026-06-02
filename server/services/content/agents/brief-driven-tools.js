@@ -25,6 +25,7 @@
  */
 
 const db = require('../../../models/db');
+const { normalizeContentUrl } = require('../content-registry');
 const logger = require('../../logger');
 const { etDateString, addETDays } = require('../../../utils/datetime-et');
 const { buildSeoRequirements } = require('../blog-seo-contract');
@@ -156,20 +157,14 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       try {
         const resolvedPath = urlToAstroPath(page_url);
         if (!resolvedPath) return { error: `could not resolve page_url ${page_url} to Astro file` };
-        // Tolerate the .md->.mdx migration for BLOG posts only (autonomous posts
-        // are now .mdx). Service/location pages stay .md, so only probe .mdx for
-        // blog paths — mirrors resolveExistingAstroFile / resolveContentFileByPath
-        // so a stale same-slug .mdx can't feed the refresh agent the wrong page.
-        const isBlog = String(resolvedPath).startsWith('src/content/blog/');
-        const base = String(resolvedPath).replace(/\.mdx?$/, '');
-        const candidates = isBlog ? [`${base}.mdx`, `${base}.md`] : [resolvedPath];
-        let filePath = null;
-        let file = null;
-        for (const candidate of candidates) {
-          const f = await gh.getFile(candidate);
-          if (f) { filePath = candidate; file = f; break; }
+        let { filePath, file } = await readAstroFileCandidates(gh, resolvedPath);
+        if (!file) {
+          const registryPath = await registryAstroPathForPage(page_url);
+          if (registryPath && registryPath !== resolvedPath) {
+            ({ filePath, file } = await readAstroFileCandidates(gh, registryPath));
+          }
         }
-        if (!file) return { error: `Astro file not found: ${isBlog ? `${base}.{mdx,md}` : resolvedPath}` };
+        if (!file) return { error: `Astro file not found: ${missingAstroFileLabel(resolvedPath)}` };
         // gh.getFile returns { sha, path, content, raw }. The frontmatter
         // parser expects a markdown STRING, not the wrapper object —
         // passing the wrapper yields empty frontmatter and a serialized
@@ -288,6 +283,54 @@ function parseJsonbColumns(row, keys) {
   return out;
 }
 
+async function readAstroFileCandidates(gh, resolvedPath) {
+  // Tolerate the .md->.mdx migration for BLOG posts only (autonomous posts
+  // are now .mdx). Service/location pages stay .md, so only probe .mdx for
+  // blog paths — mirrors resolveExistingAstroFile / resolveContentFileByPath
+  // so a stale same-slug .mdx can't feed the refresh agent the wrong page.
+  const isBlog = String(resolvedPath).startsWith('src/content/blog/');
+  const base = String(resolvedPath).replace(/\.mdx?$/, '');
+  const candidates = isBlog ? [`${base}.mdx`, `${base}.md`] : [resolvedPath];
+  for (const candidate of candidates) {
+    const file = await gh.getFile(candidate);
+    if (file) return { filePath: candidate, file };
+  }
+  return { filePath: null, file: null };
+}
+
+function missingAstroFileLabel(resolvedPath) {
+  const isBlog = String(resolvedPath).startsWith('src/content/blog/');
+  const base = String(resolvedPath).replace(/\.mdx?$/, '');
+  return isBlog ? `${base}.{mdx,md}` : String(resolvedPath);
+}
+
+async function registryAstroPathForPage(pageUrl) {
+  const lookupValues = registryLookupValuesForUrl(pageUrl);
+  if (!lookupValues.length) return null;
+  try {
+    const query = db('content_registry');
+    if (!query || typeof query.select !== 'function') return null;
+    const row = await query
+      .select('astro_source_path')
+      .whereNotNull('astro_source_path')
+      .whereNot('reconciliation_status', 'conflict')
+      .andWhere(function registryUrlMatch() {
+        const [first, ...rest] = lookupValues;
+        this.where('live_url', first);
+        for (const value of rest) {
+          this.orWhere('live_url', value);
+        }
+      })
+      .orderByRaw("CASE WHEN astro_status = 'present' THEN 0 ELSE 1 END")
+      .orderBy('astro_source_path', 'asc')
+      .first();
+    const sourcePath = row?.astro_source_path;
+    return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
+  } catch {
+    return null;
+  }
+}
+
 // Bare service hub slugs (e.g. /lawn-care/, /mosquito-control/) live
 // in src/content/services/ alongside the city-service combos — same
 // Astro collection, no -fl suffix. The earlier heuristic sent them to
@@ -316,6 +359,37 @@ const SLUG_SEGMENT = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 function isSafeSlugPath(s) {
   if (!s || s.includes('..') || s.includes('%') || s.includes('\\')) return false;
   return s.split('/').every((seg) => SLUG_SEGMENT.test(seg));
+}
+
+function isSafeAstroContentPath(value) {
+  const path = String(value || '').replace(/^\/+/, '');
+  const match = path.match(/^src\/content\/(?:blog|services|locations)\/(.+)\.mdx?$/);
+  if (!match) return false;
+  return isSafeSlugPath(match[1]);
+}
+
+function registryLookupValuesForUrl(urlOrPath) {
+  const normalized = normalizeContentUrl(urlOrPath);
+  if (!normalized) return [];
+  const normalizedPath = normalized.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '');
+  if (normalizedPath && !isSafeSlugPath(normalizedPath)) return [];
+
+  const values = [normalized];
+  const raw = String(urlOrPath || '').trim();
+  if (normalized.startsWith('/')) {
+    const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+    values.push(`${hub}${normalized}`);
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      const pathOnly = normalizeContentUrl(parsed.pathname);
+      if (pathOnly) values.push(`${parsed.origin.replace(/\/$/, '')}${pathOnly}`);
+    } catch {
+      // normalizeContentUrl already rejected malformed absolute URLs.
+    }
+  }
+  return [...new Set(values)];
 }
 
 /**
