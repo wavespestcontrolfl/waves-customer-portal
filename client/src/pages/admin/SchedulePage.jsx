@@ -730,7 +730,23 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     windowStart: service.windowStart || "",
     windowEnd: service.windowEnd || "",
     serviceType: service.serviceType || "",
-    estimatedDuration: service.estimatedDuration || 60,
+    // The stored estimated_duration_minutes is the whole-visit total (primary +
+    // add-ons). Show the primary line's own duration here by backing out the
+    // add-on durations, so on save primary + add-ons re-sum to the total.
+    estimatedDuration: (() => {
+      const total = service.estimatedDuration;
+      if (total == null) return 60;
+      const addons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
+      const addonDur = addons.reduce(
+        (s, a) =>
+          s +
+          (a.estimatedDuration != null && !isNaN(Number(a.estimatedDuration))
+            ? Number(a.estimatedDuration)
+            : 0),
+        0,
+      );
+      return Math.max(0, Number(total) - addonDur);
+    })(),
     technicianId: service.technicianId || "",
     routeOrder: service.routeOrder || "",
     notes: service.notes || "",
@@ -779,11 +795,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       id: a.id || null,
       serviceId: a.serviceId || null,
       serviceType: a.serviceName || "",
+      // Seed the editable line Price from the net charge (estimated_price) so it
+      // matches what's invoiced; this editor treats the line as a flat net
+      // amount with no separate line discount.
       price:
-        a.basePrice != null
-          ? String(a.basePrice)
-          : a.estimatedPrice != null
-            ? String(a.estimatedPrice)
+        a.estimatedPrice != null
+          ? String(a.estimatedPrice)
+          : a.basePrice != null
+            ? String(a.basePrice)
             : "",
       technicianId: a.technicianId || "",
       estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
@@ -974,6 +993,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         ? cleanLines.map((l) => ({
             serviceId: l.serviceId || null,
             serviceName: l.serviceType,
+            // The editor has no per-line discount UI, so the Price field is the
+            // final (net) charge for the line. We deliberately do NOT resend a
+            // stored line discount — re-applying it would double-discount rows
+            // whose seeded price was already net (e.g. legacy rows lacking
+            // base_price).
             price:
               l.price !== "" && !isNaN(parseFloat(l.price))
                 ? parseFloat(l.price)
@@ -983,10 +1007,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
                 ? parseInt(l.estimatedDuration, 10)
                 : null,
-            discountType: l.discountType || null,
-            discountAmount: l.discountAmount != null ? l.discountAmount : null,
-            discountId: l.discountId || null,
-            discountName: l.discountName || null,
             recurringPattern: l.recurringPattern || null,
             recurringIntervalDays: l.recurringIntervalDays ?? null,
             recurringNth: l.recurringNth ?? null,
@@ -1006,6 +1026,23 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   form.price !== "" && !isNaN(parseFloat(form.price))
                     ? parseFloat(form.price)
                     : undefined,
+                // Parent estimated_duration_minutes drives schedule-grid sizing
+                // and capacity, so send the summed group duration (primary line
+                // + add-on lines), matching the create flow.
+                estimatedDuration: (() => {
+                  const primaryDur = parseInt(form.estimatedDuration, 10);
+                  const base = Number.isInteger(primaryDur) && primaryDur > 0 ? primaryDur : 0;
+                  const addonDur = cleanLines.reduce(
+                    (s, l) =>
+                      s +
+                      (l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
+                        ? parseInt(l.estimatedDuration, 10)
+                        : 0),
+                    0,
+                  );
+                  const total = base + addonDur;
+                  return total > 0 ? String(total) : form.estimatedDuration;
+                })(),
               }
             : {}),
           isRecurring: recurringControlsActive,
