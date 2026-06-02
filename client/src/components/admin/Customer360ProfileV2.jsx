@@ -47,6 +47,7 @@
  */
 
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -1837,7 +1838,7 @@ export default function Customer360ProfileV2({
   ]);
 
   if (loading)
-    return (
+    return createPortal(
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
@@ -1852,11 +1853,12 @@ export default function Customer360ProfileV2({
             Loading customer profile…
           </div>{" "}
         </div>{" "}
-      </div>
+      </div>,
+      document.body,
     );
 
   if (!data || !data.customer)
-    return (
+    return createPortal(
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
@@ -1871,7 +1873,8 @@ export default function Customer360ProfileV2({
             Failed to load customer
           </div>{" "}
         </div>{" "}
-      </div>
+      </div>,
+      document.body,
     );
 
   const c = data.customer;
@@ -2129,7 +2132,7 @@ export default function Customer360ProfileV2({
     { key: "compliance", label: "Compliance" },
   ];
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
@@ -4097,6 +4100,7 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
