@@ -126,8 +126,15 @@ function serializeProtocolProduct(product) {
 }
 
 function parsePositiveNumber(value) {
+  if (value === '' || value == null) return null;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function parseInventoryQuantity(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function numberOrNull(value) {
@@ -149,9 +156,10 @@ function stringArray(value) {
 
 function stockStatusForProduct(product) {
   if (!product) return 'unmapped';
-  const onHand = parsePositiveNumber(product.inventory_on_hand);
+  const onHand = parseInventoryQuantity(product.inventory_on_hand);
   const threshold = parsePositiveNumber(product.low_stock_threshold);
   if (onHand == null) return 'not_tracked';
+  if (onHand <= 0) return 'depleted';
   if (threshold != null && onHand <= threshold) return 'low';
   return 'ok';
 }
@@ -1148,6 +1156,37 @@ function addPublishIssue(issues, severity, code, message, metadata = {}) {
   issues.push({ severity, code, message, metadata });
 }
 
+function defaultProductStockPublishIssue(status, { product = {}, catalog = {}, window = {} } = {}) {
+  const metadata = {
+    windowKey: window?.window_key || null,
+    productId: product.id,
+    catalogProductId: catalog.id,
+    onHand: catalog.inventory_on_hand,
+    lowStockThreshold: catalog.low_stock_threshold,
+    unit: catalog.inventory_unit,
+  };
+
+  if (status === 'depleted') {
+    return {
+      severity: 'block',
+      code: 'depleted_default_product',
+      message: `${catalog.name} is depleted and is required by the draft.`,
+      metadata,
+    };
+  }
+
+  if (status === 'low') {
+    return {
+      severity: 'block',
+      code: 'low_stock_default_product',
+      message: `${catalog.name} is low stock and is required by the draft.`,
+      metadata,
+    };
+  }
+
+  return null;
+}
+
 async function validateLawnProtocolForPublish(knex, protocolId) {
   const protocol = await knex('lawn_protocols').where({ id: protocolId }).first();
   if (!protocol) {
@@ -1216,15 +1255,9 @@ async function validateLawnProtocolForPublish(knex, protocolId) {
         continue;
       }
       const status = stockStatusForProduct(catalog);
-      if (status === 'low') {
-        addPublishIssue(issues, 'block', 'low_stock_default_product', `${catalog.name} is low stock and is required by the draft.`, {
-          windowKey: window?.window_key || null,
-          productId: product.id,
-          catalogProductId: catalog.id,
-          onHand: catalog.inventory_on_hand,
-          lowStockThreshold: catalog.low_stock_threshold,
-          unit: catalog.inventory_unit,
-        });
+      const stockIssue = defaultProductStockPublishIssue(status, { product, catalog, window });
+      if (stockIssue) {
+        addPublishIssue(issues, stockIssue.severity, stockIssue.code, stockIssue.message, stockIssue.metadata);
       }
     }
   }
@@ -1917,7 +1950,8 @@ router.get('/lawn/command-center', async (req, res, next) => {
       },
       health: {
         requiredProfileFields: context.protocol.required_profile_fields || [],
-        lowStockProducts: products.filter((p) => p.inventory?.status === 'low').length,
+        lowStockProducts: products.filter((p) => ['low', 'depleted'].includes(p.inventory?.status)).length,
+        depletedStockProducts: products.filter((p) => p.inventory?.status === 'depleted').length,
         unmappedProducts: products.filter((p) => !p.inventory?.mapped).length,
         activeCalibrations: calibrations.length,
         expiredCalibrations: calibrations.filter((row) => row.expires_at && new Date(row.expires_at) < new Date()).length,
@@ -2400,5 +2434,10 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
     res.json({ visit, trackName: trackData.name, notes: trackData.notes });
   } catch (err) { next(err); }
 });
+
+router._internals = {
+  defaultProductStockPublishIssue,
+  stockStatusForProduct,
+};
 
 module.exports = router;
