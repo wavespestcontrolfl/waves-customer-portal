@@ -23,14 +23,16 @@ describe('PaymentPreferenceButtons', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /pay the 12-month plan in full/i }));
 
-    expect(screen.getByText('12-month invoice after approval.')).toBeInTheDocument();
+    expect(screen.getByText('12-month invoice opens after confirmation.')).toBeInTheDocument();
     expect(onSelect).toHaveBeenCalledWith('prepay_annual');
   });
 
-  it('shows setup invoice total and first visit amount for pay-after-visit setup', () => {
+  it('shows setup plus first visit invoice total for pay per application', () => {
+    const onSelect = vi.fn();
+
     render(
       <PaymentPreferenceButtons
-        onSelect={vi.fn()}
+        onSelect={onSelect}
         disabled={false}
         serviceMode="recurring"
         setupFee={{ amount: 99, waivedWithPrepay: true }}
@@ -38,15 +40,18 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: /pay after each visit/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /pay per application/i }));
+
+    expect(onSelect).toHaveBeenCalledWith('pay_at_visit');
     expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
     expect(screen.getByText('First service visit')).toBeInTheDocument();
     expect(screen.getByText('Invoice total')).toBeInTheDocument();
     expect(screen.getAllByText('$99').length).toBeGreaterThan(0);
     expect(screen.getByText('$125')).toBeInTheDocument();
+    expect(screen.getByText('$224')).toBeInTheDocument();
   });
 
-  it('uses same-day treatment total for the first service visit amount', () => {
+  it('prefers discounted treatment rows for the first service visit amount', () => {
     render(
       <PaymentPreferenceButtons
         onSelect={vi.fn()}
@@ -56,7 +61,7 @@ describe('PaymentPreferenceButtons', () => {
         selectedFrequency={{
           key: 'quarterly',
           monthly: 200,
-          sameDayTreatmentTotal: 125,
+          sameDayTreatmentTotal: 244,
           perServiceTreatments: [
             { service: 'pest_control', displayPrice: 75 },
             { service: 'lawn_care', displayPrice: 50 },
@@ -68,9 +73,10 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText('First service visit')).toBeInTheDocument();
     expect(screen.getByText('$125')).toBeInTheDocument();
     expect(screen.queryByText('$600')).not.toBeInTheDocument();
+    expect(screen.queryByText('$244')).not.toBeInTheDocument();
   });
 
-  it('uses monthly amount for monthly-billed tiers even when treatment totals are higher', () => {
+  it('excludes monthly-billed service tiers from the immediate first-visit invoice', () => {
     render(
       <PaymentPreferenceButtons
         onSelect={vi.fn()}
@@ -89,8 +95,11 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    expect(screen.getByText('First service visit')).toBeInTheDocument();
-    expect(screen.getByText('$72')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
+    expect(screen.queryByText('First service visit')).not.toBeInTheDocument();
+    expect(screen.getAllByText('$99').length).toBeGreaterThan(0);
+    expect(screen.getByText('Choose pay per application with a setup invoice after confirmation, or annual prepay to approve the 12-month plan up front with setup included.')).toBeInTheDocument();
+    expect(screen.queryByText('$72')).not.toBeInTheDocument();
     expect(screen.queryByText('$144')).not.toBeInTheDocument();
   });
 });

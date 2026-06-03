@@ -16,7 +16,7 @@
  *   selectedSlotId       — string | null
  *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict' | 'reservation_expired'
  *   reservation          — { scheduledServiceId, expiresAt } | null
- *   paymentPreference    — 'card_on_file' | 'pay_at_visit' | 'prepay_annual' | null
+ *   paymentPreference    — 'pay_at_visit' | 'prepay_annual' | null
  *   countdownSeconds     — derived from reservation.expiresAt
  *
  * Matches PayPage / TrackPage convention: inline styles + W palette,
@@ -979,27 +979,28 @@ function ExistingAppointmentCard({ appointment }) {
   );
 }
 
-function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode }) {
+function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, serviceMode }) {
   const usingExistingAppointment = !!existingAppointment;
+  const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   const paymentLabel = invoiceMode
     ? 'Invoice due now'
-    : paymentPreference === 'card_on_file'
-      ? 'Pay after each visit'
+    : recurringPayPerApplication
+      ? 'Pay per application'
       : paymentPreference === 'prepay_annual'
         ? 'Pay the 12-month plan in full'
         : 'Pay at the visit';
   const confirmLabel = usingExistingAppointment
-    ? paymentPreference === 'card_on_file'
-      ? 'Confirm and save card'
+    ? recurringPayPerApplication
+      ? 'Confirm invoice'
       : paymentPreference === 'prepay_annual'
         ? 'Confirm annual prepay'
         : 'Confirm appointment'
     : 'Confirm booking';
   const confirmSub = usingExistingAppointment
-    ? paymentPreference === 'card_on_file'
-      ? 'Your existing appointment stays scheduled. next step saves your card for autopay. Service visits are billed after completion.'
+    ? recurringPayPerApplication
+      ? 'Your existing appointment stays scheduled. Next step creates your invoice and opens secure payment.'
       : paymentPreference === 'prepay_annual'
-        ? 'Your existing appointment stays scheduled. Annual prepay invoice will be reviewed and sent after approval.'
+        ? 'Your existing appointment stays scheduled. Annual prepay invoice opens for secure payment after confirmation.'
         : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
     : '';
   return (
@@ -1009,10 +1010,10 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        {usingExistingAppointment ? 'Confirm payment setup' : 'Confirm your booking'}
+        {usingExistingAppointment ? 'Confirm invoice option' : 'Confirm your booking'}
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
-        {usingExistingAppointment ? 'Selected payment setup: ' : 'Pay option: '}
+        {usingExistingAppointment ? 'Selected invoice option: ' : 'Pay option: '}
         <strong>{paymentLabel}</strong>{usingExistingAppointment ? '.' : null}
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
@@ -1054,6 +1055,7 @@ function SuccessCard({ acceptResult }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const onboardingToken = acceptResult?.onboardingToken || null;
   const bookingUrl = acceptResult?.bookingUrl || null;
+  const invoicePayUrl = acceptResult?.invoicePayUrl || null;
   const invoiceLinkDelivered = !!acceptResult?.invoiceLinkDelivered;
   const prepayInvoiceAmount = Number(acceptResult?.prepayInvoiceAmount);
   const prepayAmountText = Number.isFinite(prepayInvoiceAmount) && prepayInvoiceAmount > 0
@@ -1073,8 +1075,20 @@ function SuccessCard({ acceptResult }) {
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
         {invoiceLinkDelivered
           ? 'Use the invoice pay link we sent to complete payment. Your service request has been received and our team will confirm the schedule.'
-          : 'Our team will follow up with the invoice details. Your service request has been received and our team will confirm the schedule.'}
+          : (invoicePayUrl
+              ? 'Your invoice is ready. Continue to payment to finish setup.'
+              : 'Our team will follow up with the invoice details. Your service request has been received and our team will confirm the schedule.')}
       </div>
+      {invoicePayUrl ? (
+        <a
+          href={invoicePayUrl}
+          style={{
+            display: 'inline-block', marginTop: 16, padding: '14px 20px',
+            background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
+            borderRadius: 12, fontWeight: 600, fontSize: 15,
+          }}
+        >Pay invoice</a>
+      ) : null}
     </div>
     );
   }
@@ -1090,7 +1104,7 @@ function SuccessCard({ acceptResult }) {
           Your annual prepay is approved.
         </div>
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
-          Our team will review and send the annual prepay invoice{prepayAmountText}. Your service request has been received and our team will confirm the schedule.
+          Your annual prepay{prepayAmountText} is approved. Our team will follow up with the invoice details and confirm the schedule.
         </div>
       </div>
     );
@@ -1570,6 +1584,10 @@ export default function EstimateViewPage() {
       }
       const body = await r.json();
       setAcceptResult(body);
+      if (body?.nextStep === 'pay_invoice' && body.invoicePayUrl) {
+        window.location.href = body.invoicePayUrl;
+        return;
+      }
       setCtaPhase('success');
       setReservation(null);
     } catch (err) {
@@ -1708,6 +1726,7 @@ export default function EstimateViewPage() {
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
             invoiceMode={!!estimate.billByInvoice}
+            serviceMode={serviceMode}
           />
           {aiPanelBlock}
         </>

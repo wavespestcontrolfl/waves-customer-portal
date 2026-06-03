@@ -612,6 +612,29 @@ const InvoiceService = {
         }
       }
     }
+    if (!serviceRecordId && scheduledServiceId) {
+      let scheduled = null;
+      try {
+        scheduled = await db("scheduled_services")
+          .where({ "scheduled_services.id": scheduledServiceId })
+          .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+          .select("scheduled_services.*", "technicians.name as tech_name")
+          .first();
+      } catch (err) {
+        logger.warn(
+          `[invoice] scheduled service context lookup skipped for ${scheduledServiceId}: ${err.message}`,
+        );
+      }
+      if (scheduled && String(scheduled.customer_id || customerId) === String(customerId)) {
+        serviceData = {
+          ...serviceData,
+          technician_id: scheduled.technician_id || serviceData.technician_id || null,
+          service_date: serviceDate || scheduled.scheduled_date || serviceData.service_date,
+          service_type: scheduled.service_type || serviceData.service_type || null,
+          tech_name: scheduled.tech_name || serviceData.tech_name || null,
+        };
+      }
+    }
 
     // Calculate financials
     const items = (lineItems || []).map((item) => {
@@ -1209,11 +1232,13 @@ const InvoiceService = {
     const { sendInvoiceEmail } = require("./invoice-email");
     const sms = { ok: false };
     const email = { ok: false };
+    let payUrl = null;
 
     try {
       const smsResult = await this.sendViaSMS(invoiceId, {
         allowClaimed: true,
       });
+      if (smsResult?.payUrl) payUrl = smsResult.payUrl;
       if (smsResult?.sent) {
         sms.ok = true;
       } else {
@@ -1231,6 +1256,7 @@ const InvoiceService = {
       });
       if (r?.ok) email.ok = true;
       else if (r?.error) email.error = r.error;
+      if (!payUrl && r?.payUrl) payUrl = r.payUrl;
       if (r?.recipient) email.recipient = r.recipient;
       if (r?.messageId) email.messageId = r.messageId;
     } catch (err) {
@@ -1278,7 +1304,7 @@ const InvoiceService = {
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
     }
-    return { ok, sms, email };
+    return { ok, sms, email, payUrl };
   },
 
   async markDeliverySent(

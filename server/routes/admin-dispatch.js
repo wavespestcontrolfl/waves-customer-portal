@@ -50,6 +50,9 @@ const {
   resolveCompletionProfileForServiceId,
 } = require('../services/service-completion-profiles');
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
+const {
+  findFirstApplicationInvoiceForEstimateService,
+} = require('../services/estimate-first-application-invoice');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
   recordTrackTransitionFailure,
@@ -2575,6 +2578,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             updated_at: new Date(),
           });
         }
+      }
+      if (!existingCompletionInvoice) {
+        existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;

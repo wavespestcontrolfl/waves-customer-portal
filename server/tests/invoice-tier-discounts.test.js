@@ -63,8 +63,14 @@ function setupDb({
       const q = {
         criteria: {},
         where: jest.fn((criteria) => { q.criteria = criteria || {}; return q; }),
+        leftJoin: jest.fn(() => q),
+        select: jest.fn(() => q),
         first: jest.fn(async () => scheduledServices.find((row) => (
           !q.criteria.id || String(row.id) === String(q.criteria.id)
+        ) && (
+          !q.criteria['scheduled_services.id'] || String(row.id) === String(q.criteria['scheduled_services.id'])
+        ) && (
+          !q.criteria.customer_id || String(row.customer_id) === String(q.criteria.customer_id)
         )) || null),
       };
       return q;
@@ -324,6 +330,37 @@ describe('invoice tier discounts', () => {
     expect(invoice.subtotal).toBe(100);
     expect(invoice.discount_amount).toBe(100);
     expect(invoice.total).toBe(0);
+  });
+
+  test('scheduled invoice creation hydrates service date and type', async () => {
+    const ctx = setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
+      scheduledServices: [{
+        id: 'scheduled-1',
+        customer_id: 'customer-1',
+        scheduled_date: '2026-06-12',
+        service_type: 'Quarterly Pest Control',
+        technician_id: 'tech-1',
+        tech_name: 'Taylor',
+      }],
+    });
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      scheduledServiceId: 'scheduled-1',
+      title: 'First Service Application',
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 125 }],
+    });
+
+    expect(invoice.service_date).toBe('2026-06-12');
+    expect(invoice.service_type).toBe('Quarterly Pest Control');
+    expect(ctx.getInsertedInvoice()).toMatchObject({
+      scheduled_service_id: 'scheduled-1',
+      service_date: '2026-06-12',
+      service_type: 'Quarterly Pest Control',
+      technician_id: 'tech-1',
+      tech_name: 'Taylor',
+    });
   });
 
   test('scheduled invoice replay uses persisted discount dollars instead of current catalog amounts', async () => {

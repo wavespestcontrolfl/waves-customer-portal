@@ -193,7 +193,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
       });
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload };
+      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl };
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
@@ -225,7 +225,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       }],
     });
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
-    return { ok: true, recipient: recipientPayload };
+    return { ok: true, recipient: recipientPayload, payUrl };
   } catch (err) {
     logger.error(`[invoice-email] Send failed for ${invoice.invoice_number}: ${err.message}`);
     return { ok: false, error: err.message, recipient: recipientPayload };

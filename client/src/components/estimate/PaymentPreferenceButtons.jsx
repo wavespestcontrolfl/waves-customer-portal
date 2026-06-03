@@ -1,3 +1,5 @@
+import React from 'react';
+
 /**
  * Payment preference picker. Rendered after a slot is selected. Clicking
  * any button triggers the /reserve -> confirm -> /accept flow.
@@ -8,10 +10,8 @@
  * Third annual prepay button renders when the server marks the
  * recurring service mix as annual-prepay eligible. Older pricing bundles can
  * still surface it through a waivable setupFee.
- * Selection encodes as 'prepay_annual' - the server treats it like
- * pay_at_visit for reservation purposes (no immediate charge) but
- * the converter creates the prepaid-annual draft invoice instead of
- * the standard $99 setup draft invoice.
+ * Selection encodes as 'pay_at_visit' or 'prepay_annual'. After confirmation
+ * the server creates/sends the matching invoice and returns a pay link.
  */
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -59,19 +59,19 @@ function treatmentRowAmount(row = {}) {
 
 function firstVisitAmount(frequency = {}) {
   const monthly = Number(frequency.monthly);
-  if (frequency.billingFrequencyKey === 'monthly' && Number.isFinite(monthly) && monthly > 0) {
-    return Math.round(monthly * 100) / 100;
+  if (frequency.billingFrequencyKey === 'monthly') {
+    return null;
   }
+  const treatments = Array.isArray(frequency.perServiceTreatments) ? frequency.perServiceTreatments : [];
+  const treatmentAmounts = treatments.map(treatmentRowAmount);
+  const treatmentTotal = treatmentAmounts.length > 0 && treatmentAmounts.every((amount) => amount > 0)
+    ? treatmentAmounts.reduce((sum, amount) => sum + amount, 0)
+    : 0;
+  if (treatmentTotal > 0) return Math.round(treatmentTotal * 100) / 100;
   const sameDayTreatmentTotal = Number(frequency.sameDayTreatmentTotal);
   if (Number.isFinite(sameDayTreatmentTotal) && sameDayTreatmentTotal > 0) {
     return Math.round(sameDayTreatmentTotal * 100) / 100;
   }
-  const treatments = Array.isArray(frequency.perServiceTreatments) ? frequency.perServiceTreatments : [];
-  const treatmentTotal = treatments.reduce((sum, row) => {
-    const amount = treatmentRowAmount(row);
-    return amount ? sum + amount : sum;
-  }, 0);
-  if (treatmentTotal > 0) return Math.round(treatmentTotal * 100) / 100;
   const perVisit = firstPositiveNumber(frequency.perVisit, frequency.perApp, frequency.pa);
   if (perVisit) return Math.round(perVisit * 100) / 100;
   if (Number.isFinite(monthly) && monthly > 0) {
@@ -116,17 +116,29 @@ export default function PaymentPreferenceButtons({
     ...(hasSetupInvoice ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
     ...(firstVisit ? [{ label: 'First service visit', amount: firstVisit }] : []),
   ];
+  const invoiceTotal = Math.round(invoiceRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) * 100) / 100;
+  const hasFirstVisitInvoice = Number(firstVisit || 0) > 0;
+  const payPerApplicationInvoiceLabel = hasSetupInvoice && hasFirstVisitInvoice
+    ? 'setup + first application invoice'
+    : hasSetupInvoice
+      ? 'setup invoice'
+      : hasFirstVisitInvoice
+        ? 'first application invoice'
+        : 'invoice';
 
-  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Pay after each visit';
+  const payPerApplicationLabel = isOneTime ? 'Book visit' : 'Pay per application';
   const fineprint = offerPrepay
-    ? 'Choose autopay to be billed after each completed service visit, or annual prepay to approve the 12-month plan up front with setup included.'
+    ? `Choose pay per application with a ${payPerApplicationInvoiceLabel} after confirmation, or annual prepay to approve the 12-month plan up front with setup included.`
     : invoiceMode
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
-        : 'Choose pay-after-visit setup to be billed after each completed service visit through autopay.';
-  const cardNextStep = 'Next: confirm your booking. If card setup is required, we send you to the secure setup screen after confirmation.';
-  const prepayNextStep = 'Next: confirm annual prepay. No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.';
+        : invoiceRows.length > 0
+          ? `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`
+          : 'Choose pay per application. Your first service visit will be billed after completion.';
+  const payPerApplicationOptionNote = invoiceRows.length > 0
+    ? 'Approve now; after confirmation we send the invoice and open secure payment.'
+    : 'Approve now; your first service visit will be billed after completion.';
 
   if (invoiceMode) {
     return (
@@ -197,10 +209,10 @@ export default function PaymentPreferenceButtons({
           <button
             type="button"
             disabled={disabled}
-            onClick={() => onSelect('card_on_file')}
+            onClick={() => onSelect('pay_at_visit')}
             style={{ ...btnBase, background: ACTION_BG, color: W.white }}
-          >{cardOnFileLabel}</button>
-          <div style={optionNote}>Approve now, then save a card for autopay after each completed service visit.</div>
+          >{payPerApplicationLabel}</button>
+          <div style={optionNote}>{payPerApplicationOptionNote}</div>
           {invoiceRows.length > 0 ? (
             <div style={{
               marginTop: 14,
@@ -228,7 +240,7 @@ export default function PaymentPreferenceButtons({
                   <strong style={{ whiteSpace: 'nowrap' }}>{fmtMoney(row.amount)}</strong>
                 </div>
               ))}
-              {hasSetupInvoice ? (
+              {invoiceTotal > 0 ? (
                 <div style={{
                   borderTop: `1px solid ${W.border}`,
                   paddingTop: 10,
@@ -242,12 +254,12 @@ export default function PaymentPreferenceButtons({
                   color: W.blueDeeper,
                 }}>
                   <span>Invoice total</span>
-                  <strong>{fmtMoney(setupAmount)}</strong>
+                  <strong>{fmtMoney(invoiceTotal)}</strong>
                 </div>
               ) : null}
               <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 10 }}>
-                No payment is charged on this page. {hasSetupInvoice ? `The ${fmtMoney(setupAmount)} setup invoice is prepared after approval; ` : ''}
-                {firstVisit ? `your first service visit bills after completion at ${fmtMoney(firstVisit)}.` : 'your service visits bill after completion.'}
+                No payment is charged on this page. After confirmation, we open the invoice
+                {invoiceTotal > 0 ? ` for ${fmtMoney(invoiceTotal)}` : ''} so you can pay in-flow.
               </div>
             </div>
           ) : null}
@@ -265,7 +277,7 @@ export default function PaymentPreferenceButtons({
             <div style={optionNote}>
               {waivableSetupFee
                 ? `Approve annual prepay and the setup is included at no charge.`
-                : '12-month invoice after approval.'}
+                : '12-month invoice opens after confirmation.'}
             </div>
           </div>
         )}
