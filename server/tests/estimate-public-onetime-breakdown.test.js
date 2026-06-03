@@ -11,6 +11,7 @@ const {
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
   buildPricingBundle,
+  buildStandardPayPerApplicationInvoiceCopy,
   buildWaveGuardIntelligencePayload,
   defaultServiceModeForEstimate,
   deriveServiceCategory,
@@ -1443,7 +1444,7 @@ describe('public estimate one-time breakdown', () => {
       },
     })).toEqual({
       mode: 'existing_appointment',
-      ctaLabel: 'Confirm payment setup',
+      ctaLabel: 'Confirm invoice option',
       reason: null,
       appointment: {
         id: 'svc-123',
@@ -2116,10 +2117,10 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(html).toContain('id="payment-setup-card"');
-    expect(html).toContain('Pay at the visit');
+    expect(html).toContain('Pay per application');
     expect(html).toContain('Annual prepay');
-    expect(html).toContain('If card setup is required, we send you to the secure setup screen after confirmation.');
-    expect(html).toContain('No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.');
+    expect(html).toContain('We send the invoice automatically and open secure payment.');
+    expect(html).toContain('After confirmation, your annual prepay invoice totals');
     expect(html).toContain('id="payment-setup-summary"');
     expect(html).toContain('id="change-payment-setup-btn"');
     expect(html).toContain('function updatePaymentSetupSummary(pref)');
@@ -2142,7 +2143,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('body: JSON.stringify(reservePayload)');
     expect(html).toContain('bookingState.isReserving = true;');
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
-    expect(html).toContain("toast('Choose a payment setup first.')");
+    expect(html).toContain("toast('Choose a payment option first.')");
     expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
   });
 
@@ -3284,6 +3285,26 @@ describe('public estimate one-time breakdown', () => {
     expect(amount).toBe(219.6);
   });
 
+  test('recurring first-visit amount does not return partial bundle totals', () => {
+    const amount = resolveRecurringFirstVisitAmount([
+      { name: 'Pest Control', mo: 128 },
+      { name: 'Lawn Care' },
+    ], {
+      tierDiscount: 0.1,
+      pestRecurring: { monthlyBase: 128, visitsPerYear: 4 },
+      estData: {
+        result: {
+          results: {
+            pest: { apps: 4 },
+            pestTiers: [{ label: 'Quarterly', mo: 128, pa: 128, apps: 4 }],
+          },
+        },
+      },
+    });
+
+    expect(amount).toBeNull();
+  });
+
   test('recurring first-visit amount can come from the selected frequency', () => {
     const frequency = {
       key: 'monthly',
@@ -3393,9 +3414,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$116 / application</span>');
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
-    expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total>$219.60</strong></div>');
-    expect(html).toContain('data-first-visit-copy-total>$219.60</span>');
-    expect(html).toContain("document.querySelectorAll('[data-first-visit-copy-total]')");
+    expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total data-first-visit-amount="219.6">$219.60</strong></div>');
+    expect(html).toContain('<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="99">$318.60</strong></div>');
+    expect(html).toContain('setup plus the first application totaling <span data-standard-invoice-copy-total data-standard-setup-due="99">$318.60</span>');
+    expect(html).not.toContain('data-first-visit-copy-total');
+    expect(html).toContain("document.querySelectorAll('[data-standard-invoice-total]')");
+    expect(html).toContain("document.querySelectorAll('[data-standard-invoice-copy-total]')");
     expect(html).not.toContain('data-first-visit-grand-total');
     expect(html).toContain('let firstVisitTotal = 0;');
     expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
@@ -3446,6 +3470,49 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('data-first-visit-total>$115.20</strong>');
   });
 
+  test('server-rendered monthly service-tier setup invoice excludes first application from invoice total', () => {
+    const html = renderPage('monthly-tier-token', {
+      status: 'sent',
+      customerName: 'Jane Customer',
+      address: '6539 Field Sparrow Gln',
+      monthlyTotal: 55,
+      annualTotal: 660,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      pricingFrequencies: [{
+        key: 'standard',
+        label: 'Bi-monthly',
+        monthly: 55,
+        annual: 660,
+        perTreatment: 73.33,
+        visitsPerYear: 9,
+        billingFrequencyKey: 'monthly',
+        selected: true,
+      }],
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Lawn Care', mo: 55, perTreatment: 73.33, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          lawn: [{ selected: true, v: 9 }],
+        },
+      },
+    });
+
+    expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total data-first-visit-amount="73.33">$73.33</strong></div>');
+    expect(html).toContain('<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="99">$99</strong></div>');
+    expect(html).toContain('Invoice includes WaveGuard setup ($99).');
+    expect(html).toContain('we open the $99 setup invoice');
+    expect(html).toContain('const invoiceFirstVisitTotal = STANDARD_INVOICE_HAS_FIRST_APPLICATION && firstVisitTotal > 0 ? firstVisitTotal : 0;');
+    expect(html).not.toContain('setup + first application ($172.33)');
+    expect(html).not.toContain('totaling $172.33');
+  });
+
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
     const html = renderPage('lawn-only-token', {
       status: 'sent',
@@ -3488,8 +3555,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('What your lawn care plan includes');
     expect(html).toContain('Ready to start lawn care?');
     expect(html).toContain('Let&#39;s get your lawn on the schedule.');
-    expect(html).toContain('Confirm and save card');
-    expect(html).toContain('next step saves your card for autopay');
+    expect(html).toContain('Confirm invoice');
+    expect(html).toContain('next step creates your invoice and opens secure payment');
     expect(html).not.toContain('Confirm and set up billing');
     expect(html).not.toContain('pay-after-visit billing');
     expect(html).toContain('/day to stop lawn pests before they turn green grass brown.');
@@ -3500,7 +3567,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Lawn notes carried forward for future visits');
     expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
     expect(html).toContain('Pay the 12-month plan in full');
-    expect(html).toContain('we send one prepay invoice after approval and waive the setup.');
+    expect(html).toContain('we send the annual invoice automatically after confirmation and waive the setup.');
     expect(html).not.toContain('Net setup fee: $0');
     expect(html).toContain('<strong><s>$99</s> $0</strong>');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
@@ -3511,7 +3578,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
     expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 660;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
-    expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.");
+    expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will open for secure payment after confirmation.");
     expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
     expect(html).not.toContain('How billing works');
     expect(html).not.toContain('For comparison, your lawn care plan averages');
@@ -4474,6 +4541,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoiceId: 'inv-123',
       invoiceAmount: 249,
+      invoicePayUrl: '/pay/token-123',
       treatAsOneTime: true,
     })).toEqual(expect.objectContaining({
       success: true,
@@ -4483,20 +4551,25 @@ describe('public estimate one-time breakdown', () => {
       invoiceLinkDelivered: false,
       invoiceId: 'inv-123',
       invoiceAmount: 249,
+      invoicePayUrl: '/pay/token-123',
     }));
   });
 
-  test('accept success payload marks annual prepay as invoice follow-up without onboarding', () => {
+  test('accept success payload marks annual prepay as invoice payment without onboarding', () => {
     expect(buildAcceptSuccessPayload({
+      invoiceMode: true,
+      invoiceId: 'inv-annual',
+      invoicePayUrl: '/pay/annual-token',
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
       onboardingToken: null,
       treatAsOneTime: false,
     })).toEqual(expect.objectContaining({
       success: true,
-      nextStep: 'prepay_invoice',
+      nextStep: 'pay_invoice',
       serviceMode: 'recurring',
       onboardingToken: null,
+      invoicePayUrl: '/pay/annual-token',
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
     }));
@@ -4520,29 +4593,29 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('accept payment preference canonicalizes card-on-file aliases', () => {
-    expect(normalizeAcceptPaymentMethodPreference('card_on_file')).toBe('card_on_file');
-    expect(normalizeAcceptPaymentMethodPreference('deposit_now')).toBe('card_on_file');
+    expect(normalizeAcceptPaymentMethodPreference('card_on_file')).toBe('pay_at_visit');
+    expect(normalizeAcceptPaymentMethodPreference('deposit_now')).toBe('pay_at_visit');
     expect(normalizeAcceptPaymentMethodPreference('pay_at_visit')).toBe('pay_at_visit');
     expect(normalizeAcceptPaymentMethodPreference('prepay_annual')).toBe('prepay_annual');
     expect(normalizeAcceptPaymentMethodPreference('deposit_later')).toBeNull();
   });
 
-  test('recurring appointment accepts require a setup payment preference', () => {
+  test('recurring appointment accepts require an invoice payment preference', () => {
     expect(validateRecurringSlotPaymentPreference({
       slotId: 'slot-123',
       treatAsOneTime: false,
       paymentMethodPreference: null,
-    })).toMatch(/Choose card-on-file autopay/);
+    })).toMatch(/Choose pay per application/);
     expect(validateRecurringSlotPaymentPreference({
       slotId: 'slot-123',
       treatAsOneTime: false,
       paymentMethodPreference: 'pay_at_visit',
-    })).toMatch(/Choose card-on-file autopay/);
+    })).toBeNull();
     expect(validateRecurringSlotPaymentPreference({
       slotId: 'slot-123',
       treatAsOneTime: false,
       paymentMethodPreference: 'card_on_file',
-    })).toBeNull();
+    })).toMatch(/Choose pay per application/);
     expect(validateRecurringSlotPaymentPreference({
       slotId: 'slot-123',
       treatAsOneTime: false,
@@ -4563,12 +4636,44 @@ describe('public estimate one-time breakdown', () => {
       existingAppointmentId: 'appointment-123',
       treatAsOneTime: false,
       paymentMethodPreference: 'pay_at_visit',
-    })).toMatch(/Choose card-on-file autopay/);
+    })).toBeNull();
     expect(validateRecurringSlotPaymentPreference({
       existingAppointmentId: 'appointment-123',
       treatAsOneTime: false,
       paymentMethodPreference: 'card_on_file',
-    })).toBeNull();
+    })).toMatch(/Choose pay per application/);
+  });
+
+  test('pay-per-application invoice copy matches setup and first application charges', () => {
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      firstApplicationAmount: 128,
+    })).toEqual(expect.objectContaining({
+      hasSetup: true,
+      hasFirstApplication: true,
+      totalAmount: 227,
+      payPrefCardSub: 'Invoice includes WaveGuard setup + first application ($227).',
+    }));
+
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      firstApplicationAmount: 0,
+    })).toEqual(expect.objectContaining({
+      hasSetup: true,
+      hasFirstApplication: false,
+      totalAmount: 99,
+      payPrefCardSub: 'Invoice includes WaveGuard setup ($99).',
+    }));
+
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 0,
+      firstApplicationAmount: 88.5,
+    })).toEqual(expect.objectContaining({
+      hasSetup: false,
+      hasFirstApplication: true,
+      totalAmount: 88.5,
+      payPrefCardSub: 'Invoice includes the first application ($88.50).',
+    }));
   });
 
   test('acceptance visit pricing uses displayed per-application totals before cadence fallback', () => {
@@ -4599,6 +4704,29 @@ describe('public estimate one-time breakdown', () => {
         { service: 'lawn_care', label: 'Lawn Care', visitsPerYear: 9 },
       ],
     })).toBeNull();
+  });
+
+  test('acceptance same-day pricing requires priced rows for every accepted service when service list is known', () => {
+    const services = [
+      { service: 'pest_control', name: 'Pest Control' },
+      { service: 'lawn_care', name: 'Lawn Care' },
+    ];
+
+    expect(sameDayVisitTotalForPricingFrequency({
+      sameDayTreatmentTotal: 244,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', visitsPerYear: 4, displayPrice: 115.2 },
+        { service: 'lawn_care', label: 'Lawn Care', visitsPerYear: 9 },
+      ],
+    }, { services })).toBeNull();
+
+    expect(sameDayVisitTotalForPricingFrequency({
+      sameDayTreatmentTotal: 244,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', visitsPerYear: 4, displayPrice: 115.2 },
+        { service: 'lawn_care', label: 'Lawn Care', visitsPerYear: 9, displayPrice: 104.4 },
+      ],
+    }, { services })).toBe(219.6);
   });
 
   test('acceptance visit pricing applies pest preference discounts to same-day totals', () => {
@@ -4739,11 +4867,13 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoiceLinkDelivered: true,
       invoiceId: 'inv-123',
+      invoicePayUrl: '/pay/inv-123',
     })).toEqual(expect.objectContaining({
       nextStep: 'pay_invoice',
       invoiceMode: true,
       invoiceLinkDelivered: true,
       invoiceId: 'inv-123',
+      invoicePayUrl: '/pay/inv-123',
     }));
   });
 
@@ -4807,7 +4937,10 @@ describe('public estimate one-time breakdown', () => {
       waveguardTier: 'Gold',
       monthlyTotal: 89,
       billByInvoice: true,
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Gold WaveGuard $89/mo. Invoice mode selected.');
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoicePayUrl: '/pay/gold-token',
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Gold WaveGuard $89/mo. Invoice pay link sent.');
 
     expect(buildAcceptOfficeFallback({
       customerName: 'Jane Doe',
@@ -4815,14 +4948,18 @@ describe('public estimate one-time breakdown', () => {
       waveguardTier: 'Bronze',
       billingTerm: 'prepay_annual',
       annualPrepayAmount: 660,
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660. Invoice follow-up needed.');
+      invoiceMode: true,
+      invoicePayUrl: '/pay/annual-token',
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660. Invoice created; customer redirected to pay page.');
 
     expect(buildAcceptOfficeFallback({
       customerName: null,
       address: null,
       waveguardTier: 'Bronze',
       monthlyTotal: 89,
-    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Onboarding link sent.');
+      invoiceMode: true,
+      invoicePayUrl: '/pay/setup-token',
+    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Setup + first application invoice created; customer redirected to pay page.');
   });
 
   test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {
@@ -4855,11 +4992,14 @@ describe('public estimate one-time breakdown', () => {
       waveguardTier: 'Gold',
       monthlyTotal: 89,
       treatAsOneTime: false,
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoicePayUrl: '/pay/gold-token',
     })).toEqual(expect.objectContaining({
       adminTitle: 'Estimate accepted: Jane Doe',
-      adminBody: 'Gold WaveGuard $89/mo approved. Onboarding link sent.',
-      customerBody: 'Your Gold WaveGuard plan is confirmed. Complete onboarding to get started.',
-      customerLink: '/?tab=plan',
+      adminBody: 'Gold WaveGuard $89/mo approved. Invoice pay link sent.',
+      customerBody: 'Your Gold WaveGuard plan is approved. Use the invoice pay link to complete payment.',
+      customerLink: '/pay/gold-token',
     }));
 
     expect(buildAcceptNotificationPayload({
@@ -4867,11 +5007,13 @@ describe('public estimate one-time breakdown', () => {
       waveguardTier: 'Bronze',
       billingTerm: 'prepay_annual',
       annualPrepayAmount: 660,
+      invoiceMode: true,
+      invoicePayUrl: '/pay/annual-token',
     })).toEqual(expect.objectContaining({
       adminTitle: 'Estimate accepted: Jane Doe',
-      adminBody: 'Bronze WaveGuard annual prepay $660 approved. Invoice follow-up needed.',
-      customerBody: 'Your Bronze WaveGuard plan is approved. Our team will follow up with the annual prepay invoice details.',
-      customerLink: '/?tab=billing',
+      adminBody: 'Bronze WaveGuard annual prepay $660 approved. Invoice created; customer redirected to pay page.',
+      customerBody: 'Your Bronze WaveGuard plan is approved. Use the invoice pay link to complete payment.',
+      customerLink: '/pay/annual-token',
     }));
   });
 
@@ -4883,10 +5025,11 @@ describe('public estimate one-time breakdown', () => {
       billByInvoice: true,
       invoiceMode: true,
       invoiceLinkDelivered: true,
+      invoicePayUrl: '/pay/rodent-token',
     })).toEqual(expect.objectContaining({
       adminBody: 'Rodent Service approved. Invoice pay link is being sent.',
       customerBody: 'Your Rodent Service estimate is approved. Use the invoice pay link we sent to complete payment.',
-      customerLink: '/?tab=billing',
+      customerLink: '/pay/rodent-token',
     }));
 
     expect(buildAcceptNotificationPayload({

@@ -16,6 +16,9 @@ const {
   resolveBillingCadence,
 } = require('./billing-cadence');
 const AccountMembershipEmail = require('./account-membership-email');
+const { etDateString } = require('../utils/datetime-et');
+
+const WAVEGUARD_SETUP_FEE = 99;
 
 /**
  * Pick the first service date for a freshly-converted customer.
@@ -116,11 +119,41 @@ function countTierQualifyingRecurringServices(services = []) {
 }
 
 function hasWaveGuardSetupService(services = []) {
-  return services.some((svc) => recurringServiceKey(svc) === 'pest_control');
+  return shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: services });
 }
 
 function calculateAnnualPrepayAmount(monthlyRate) {
   return Math.round((parseFloat(monthlyRate || 0) || 0) * 12 * 100) / 100;
+}
+
+function roundMoney(value) {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 0;
+}
+
+function resolveFirstApplicationAmount({
+  firstApplicationAmount,
+  billingCadence,
+  monthlyRate,
+  allowFallback = true,
+} = {}) {
+  const explicit = roundMoney(firstApplicationAmount);
+  if (explicit > 0) return explicit;
+  if (allowFallback === false) return 0;
+  const cadenceAmount = roundMoney(billingCadence?.amount);
+  if (cadenceAmount > 0) return cadenceAmount;
+  return roundMoney(monthlyRate);
+}
+
+function canAutoSendDraftInvoice({ billingTerm = 'standard', annualPrepayTermId = null } = {}) {
+  return billingTerm !== 'prepay_annual' || !!annualPrepayTermId;
+}
+
+function shouldAttachScheduledServiceToStandardDraftInvoice({
+  firstApplicationAmount,
+  firstScheduledServiceId,
+} = {}) {
+  return !!firstScheduledServiceId && roundMoney(firstApplicationAmount) > 0;
 }
 
 function normalizeEstimateData(value) {
@@ -138,6 +171,91 @@ function estimateLineItemsFromData(estimateData = {}) {
     || data.engineResult?.lineItems
     || data.estimate?.lineItems
     || [];
+}
+
+function estimateOneTimeItemsFromData(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const result = data.result && typeof data.result === 'object' ? data.result : data;
+  const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+  const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
+    ? result.results.oneTime
+    : {};
+  const rows = [
+    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+    ...(Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
+    ...(Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems : []),
+    ...(Array.isArray(result.specItems) ? result.specItems : []),
+    ...(Array.isArray(data.one_time?.items) ? data.one_time.items : []),
+    ...(Array.isArray(data.oneTimeItems) ? data.oneTimeItems : []),
+  ].filter((item) => item && item.onProg !== true && item.includedOnProgram !== true);
+  const seen = new Set();
+  return rows.filter((item) => {
+    if (seen.has(item)) return false;
+    seen.add(item);
+    return true;
+  });
+}
+
+function oneTimeRawText(item = {}) {
+  return [item.service, item.name, item.displayName, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+}
+
+function isIgnorableSetupOneTimeItem(item = {}) {
+  const service = String(item.service || '').toLowerCase();
+  const raw = oneTimeRawText(item);
+  return !raw
+    || service === 'waveguard_setup'
+    || service === 'one_time_adjustment'
+    || service === 'rodent_bundle_discount'
+    || raw.includes('waveguard setup')
+    || raw.includes('membership');
+}
+
+function isGeneralPestOneTimeItem(item = {}) {
+  const service = String(item.service || '').toLowerCase();
+  if (service === 'one_time_pest' || service === 'pest_control') return true;
+  if (service === 'german_roach') return false;
+  const raw = oneTimeRawText(item);
+  if (/roach|cockroach|wasp|bee|hornet|stinging|exclusion|flea|bed\s*bug|termite|rodent|wdo|mosquito|tree|shrub|lawn/.test(raw)) return false;
+  return /pest|\bant\b/.test(raw);
+}
+
+function isLawnCareOneTimeItem(item = {}) {
+  if (isIgnorableSetupOneTimeItem(item)) return true;
+  return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(oneTimeRawText(item));
+}
+
+function isTermiteBaitOneTimeItem(item = {}) {
+  if (isIgnorableSetupOneTimeItem(item)) return true;
+  const service = String(item.service || '').toLowerCase();
+  const raw = oneTimeRawText(item);
+  return service === 'termite_bait'
+    || service.includes('termite_bait')
+    || (raw.includes('termite') && /(bait|station|install|trelona|advance)/.test(raw));
+}
+
+function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
+  const recurring = Array.isArray(recurringServices) ? recurringServices : [];
+  if (recurring.length === 0) return false;
+  const keys = recurring.map(recurringServiceKey).filter(Boolean);
+  if (keys.includes('pest_control')) return true;
+
+  const oneTimeItems = estimateOneTimeItemsFromData(estimateData);
+  const hasPestOneTime = oneTimeItems.some(isGeneralPestOneTimeItem);
+  if (hasPestOneTime) return false;
+
+  if (keys.every((key) => key === 'lawn_care')) {
+    return oneTimeItems.every(isLawnCareOneTimeItem);
+  }
+  if (keys.every((key) => key === 'termite_bait')) {
+    return oneTimeItems.every(isTermiteBaitOneTimeItem);
+  }
+  return false;
 }
 
 function isNonDiscountableRecurringLine(item = {}) {
@@ -170,7 +288,7 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
 function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
   if (!Array.isArray(recurringServices) || recurringServices.length === 0) return false;
   if (billingTerm === 'prepay_annual') return true;
-  return hasWaveGuardSetupService(recurringServices);
+  return true;
 }
 
 const EstimateConverter = {
@@ -179,15 +297,16 @@ const EstimateConverter = {
    * @param {number} estimateId - The ID of the accepted estimate
    * @param {object} [opts]
    * @param {'standard'|'prepay_annual'} [opts.billingTerm='standard'] — when
-   *   'prepay_annual', a draft invoice is created for (monthlyRate × 12) and
-   *   the $99 WaveGuard setup fee is WAIVED. When 'standard', a $99 WaveGuard
-   *   setup draft invoice is created. Either way the invoice is 'draft' —
-   *   operator reviews + sends via /admin/invoices. Nothing is auto-charged.
+   *   'prepay_annual', an invoice is created for the accepted annual total and
+   *   the $99 WaveGuard setup fee is WAIVED. When 'standard', an invoice is
+   *   created for the setup fee plus the accepted first application amount.
+   *   Public accepts auto-send the invoice unless opts.autoSendInvoice is false.
    * @returns {object} Conversion result summary
    */
   async convertEstimate(estimateId, opts = {}) {
     const billingTerm = opts.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
     const skipSetupInvoice = opts.skipSetupInvoice === true;
+    const autoSendInvoice = opts.autoSendInvoice !== false;
     // Manual Mark Won path passes skipAutoSchedule=true — Adam wants to
     // schedule the visit himself on the calendar rather than have the
     // converter auto-pick the next feasible zone date. Self-accept paths
@@ -268,6 +387,7 @@ const EstimateConverter = {
     //    is already working the zone (falls back safely if we can't resolve).
     let scheduledCount = 0;
     let termStartDate = null;
+    let firstScheduledServiceId = null;
     const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .whereNotNull('customer_id')
@@ -286,8 +406,9 @@ const EstimateConverter = {
         .whereNotNull('customer_id')
         .whereNull('reservation_expires_at')
         .orderBy('scheduled_date', 'asc')
-        .first('scheduled_date');
+        .first('id', 'scheduled_date');
       termStartDate = reservedStart?.scheduled_date || null;
+      firstScheduledServiceId = reservedStart?.id || null;
     } else if (skipAutoSchedule) {
       logger.info(
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
@@ -314,7 +435,11 @@ const EstimateConverter = {
             source_estimate_id: estimateId,
           };
           if (estimatedPrice) row.estimated_price = estimatedPrice;
-          await database('scheduled_services').insert(row);
+          const inserted = await database('scheduled_services').insert(row).returning('id');
+          const insertedId = Array.isArray(inserted)
+            ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
+            : (typeof inserted === 'object' ? inserted?.id : inserted);
+          if (!firstScheduledServiceId && insertedId) firstScheduledServiceId = insertedId;
           scheduledCount++;
         } catch (e) {
           logger.error(`[estimate-converter] Failed to create scheduled_service: ${e.message}`);
@@ -328,17 +453,19 @@ const EstimateConverter = {
       action: 'estimate_converted',
       description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${serviceCount} services, ${scheduledCount} scheduled)`,
       metadata: JSON.stringify({
-        estimateId, tier, discount, monthlyRate, serviceCount, scheduledCount,
+        estimateId, tier, discount, monthlyRate, serviceCount, scheduledCount, firstScheduledServiceId,
       }),
     });
 
-    // 4. Create draft setup/prepay invoice so Virginia sees it in
-    //    /admin/invoices and can review + send. Nothing auto-charges.
-    //    Standard setup invoices stay scoped to recurring pest. Annual
-    //    prepay invoices are created for any recurring plan that offered
-    //    annual prepay on the public estimate, including lawn-only.
+    // 4. Create the setup/prepay invoice. Public accepts auto-send it and
+    //    return the pay URL; admin/manual conversion can disable auto-send.
+    //    Standard pay-per-application invoices include first app and the
+    //    setup line only when the public estimate displayed that setup fee.
     let draftInvoiceId = null;
     let draftInvoiceAmount = null;
+    let draftInvoicePayUrl = null;
+    let invoiceDelivery = null;
+    let annualPrepayTermId = null;
     try {
       const annualPrepayAmountRaw = resolveAnnualPrepayDraftAmount({
         prepayInvoiceAmount: opts.prepayInvoiceAmount,
@@ -349,9 +476,20 @@ const EstimateConverter = {
       const annualPrepayAmount = billingTerm === 'prepay_annual'
         ? Math.max(annualPrepayAmountRaw, nonDiscountableFloor)
         : annualPrepayAmountRaw;
+      const standardFirstApplicationAmount = billingTerm === 'standard'
+        ? resolveFirstApplicationAmount({
+          firstApplicationAmount: opts.firstApplicationAmount,
+          billingCadence,
+          monthlyRate,
+          allowFallback: opts.allowFirstApplicationFallback !== false,
+        })
+        : 0;
+      const setupFeeApplies = billingTerm === 'standard'
+        ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices, estimateData })
+        : false;
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
-        : monthlyRate > 0;
+        : setupFeeApplies || standardFirstApplicationAmount > 0;
       if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
@@ -368,13 +506,15 @@ const EstimateConverter = {
               unit_price: annualAmount,
             }],
             notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`,
+            dueDate: etDateString(),
           });
           draftInvoiceId = inv?.id || null;
           draftInvoiceAmount = annualAmount;
+          draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
 
           try {
             const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-            await AnnualPrepayRenewals.createTermForAnnualPrepay({
+            const annualPrepayTerm = await AnnualPrepayRenewals.createTermForAnnualPrepay({
               customerId,
               sourceEstimateId: estimateId,
               prepayInvoiceId: draftInvoiceId,
@@ -383,27 +523,84 @@ const EstimateConverter = {
               prepayAmount: annualAmount,
               termStart: termStartDate || null,
             });
+            if (!annualPrepayTerm?.id) {
+              throw new Error('annual prepay term was not created');
+            }
+            annualPrepayTermId = annualPrepayTerm.id;
           } catch (termErr) {
             logger.error(`[estimate-converter] Annual prepay term creation failed for estimate ${estimateId}: ${termErr.message}`);
+            if (draftInvoiceId) {
+              try {
+                await InvoiceService.voidInvoice(draftInvoiceId);
+              } catch (voidErr) {
+                logger.error(`[estimate-converter] Annual prepay invoice void failed for estimate ${estimateId}: ${voidErr.message}`);
+              }
+            }
+            draftInvoiceId = null;
+            draftInvoiceAmount = null;
+            draftInvoicePayUrl = null;
           }
         } else {
-          const inv = await InvoiceService.create({
-            customerId,
-            title: 'WaveGuard Membership Setup',
-            lineItems: [{
+          const firstApplicationAmount = standardFirstApplicationAmount;
+          const includesFirstApplicationLine = firstApplicationAmount > 0;
+          const scheduledServiceId = shouldAttachScheduledServiceToStandardDraftInvoice({
+            firstApplicationAmount,
+            firstScheduledServiceId,
+          }) ? firstScheduledServiceId : undefined;
+          const lineItems = [];
+          if (setupFeeApplies) {
+            lineItems.push({
               description: 'WaveGuard Membership — one-time setup fee',
               quantity: 1,
-              unit_price: 99,
-            }],
-            notes: `Auto-generated from accepted estimate #${estimateId}. Standard monthly billing — $99 setup fee applies (waivable if customer later switches to annual prepay).`,
+              unit_price: WAVEGUARD_SETUP_FEE,
+            });
+          }
+          if (firstApplicationAmount > 0) {
+            lineItems.push({
+              description: 'First service application',
+              quantity: 1,
+              unit_price: firstApplicationAmount,
+            });
+          }
+          const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
+            ? 'WaveGuard Membership Setup + First Application'
+            : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
+          const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99 setup fee plus first application.`
+            : (setupFeeApplies
+                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99 setup fee only.`
+                : `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`);
+          const inv = await InvoiceService.create({
+            customerId,
+            scheduledServiceId,
+            title: invoiceTitle,
+            lineItems,
+            notes: invoiceNotes,
+            dueDate: etDateString(),
           });
           draftInvoiceId = inv?.id || null;
-          draftInvoiceAmount = 99;
+          draftInvoiceAmount = (setupFeeApplies ? WAVEGUARD_SETUP_FEE : 0) + firstApplicationAmount;
+          draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
+        }
+      }
+      if (draftInvoiceId && autoSendInvoice && canAutoSendDraftInvoice({ billingTerm, annualPrepayTermId })) {
+        try {
+          const InvoiceService = require('./invoice');
+          invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(draftInvoiceId);
+          if (invoiceDelivery?.payUrl) draftInvoicePayUrl = invoiceDelivery.payUrl;
+        } catch (deliveryErr) {
+          invoiceDelivery = {
+            ok: false,
+            sms: { ok: false },
+            email: { ok: false },
+            error: deliveryErr.message,
+          };
+          logger.error(`[estimate-converter] Draft invoice delivery failed for estimate ${estimateId}: ${deliveryErr.message}`);
         }
       }
     } catch (err) {
       // Don't let an invoice-creation failure block the conversion.
-      // Virginia can manually draft the setup invoice if this misfires.
+      // The accept route will fall back to office follow-up if this misfires.
       logger.error(`[estimate-converter] Draft invoice creation failed for estimate ${estimateId}: ${err.message}`);
     }
 
@@ -434,9 +631,12 @@ const EstimateConverter = {
       monthlyRate,
       serviceCount,
       scheduledCount,
+      firstScheduledServiceId,
       billingTerm,
       draftInvoiceId,
       draftInvoiceAmount,
+      draftInvoicePayUrl,
+      invoiceDelivery,
       membershipEmail,
     };
   },
@@ -449,6 +649,10 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
+module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
+module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
+module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;

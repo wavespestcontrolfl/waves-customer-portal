@@ -461,11 +461,16 @@ function recurringServiceFirstVisitPrice(svc = {}, {
 }
 
 function resolveRecurringFirstVisitAmount(services = [], opts = {}) {
+  let missingServicePrice = false;
   const total = (Array.isArray(services) ? services : []).reduce((sum, svc) => {
     const { price } = recurringServiceFirstVisitPrice(svc, opts);
-    return Number.isFinite(price) && price > 0 ? Math.round((sum + price) * 100) / 100 : sum;
+    if (!Number.isFinite(price) || price <= 0) {
+      missingServicePrice = true;
+      return sum;
+    }
+    return Math.round((sum + price) * 100) / 100;
   }, 0);
-  return total > 0 ? total : null;
+  return !missingServicePrice && total > 0 ? total : null;
 }
 
 function frequencyTreatmentAmount(row = {}) {
@@ -1200,6 +1205,73 @@ function fmtMoney(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
 }
 
+function roundPositiveMoney(value) {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 0;
+}
+
+function buildStandardPayPerApplicationInvoiceCopy({
+  setupAmount = 0,
+  firstApplicationAmount = 0,
+  fallbackNoPaymentCopy = 'No payment is charged on this page. Your first service visit will be billed after completion.',
+} = {}) {
+  const setup = roundPositiveMoney(setupAmount);
+  const firstApplication = roundPositiveMoney(firstApplicationAmount);
+  const total = Math.round((setup + firstApplication) * 100) / 100;
+  const hasSetup = setup > 0;
+  const hasFirstApplication = firstApplication > 0;
+
+  if (hasSetup && hasFirstApplication) {
+    return {
+      hasSetup,
+      hasFirstApplication,
+      setupAmount: setup,
+      firstApplicationAmount: firstApplication,
+      totalAmount: total,
+      payAfterBody: `Approve now; after you confirm, we send the setup + first application invoice for ${fmtMoney(total)} so you can pay before service.`,
+      payPrefCardSub: `Invoice includes WaveGuard setup + first application (${fmtMoney(total)}).`,
+      billingSmall: `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${fmtMoney(total)}.`,
+    };
+  }
+
+  if (hasSetup) {
+    return {
+      hasSetup,
+      hasFirstApplication,
+      setupAmount: setup,
+      firstApplicationAmount: firstApplication,
+      totalAmount: total,
+      payAfterBody: `Approve now; after you confirm, we send the WaveGuard setup invoice for ${fmtMoney(setup)} so you can pay before service.`,
+      payPrefCardSub: `Invoice includes WaveGuard setup (${fmtMoney(setup)}).`,
+      billingSmall: `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
+    };
+  }
+
+  if (hasFirstApplication) {
+    return {
+      hasSetup,
+      hasFirstApplication,
+      setupAmount: setup,
+      firstApplicationAmount: firstApplication,
+      totalAmount: total,
+      payAfterBody: `Approve now; after you confirm, we send the first application invoice for ${fmtMoney(firstApplication)} so you can pay before service.`,
+      payPrefCardSub: `Invoice includes the first application (${fmtMoney(firstApplication)}).`,
+      billingSmall: `No payment is charged on this page. After confirmation, we open the first application invoice for ${fmtMoney(firstApplication)}.`,
+    };
+  }
+
+  return {
+    hasSetup,
+    hasFirstApplication,
+    setupAmount: setup,
+    firstApplicationAmount: firstApplication,
+    totalAmount: total,
+    payAfterBody: fallbackNoPaymentCopy,
+    payPrefCardSub: 'Your first service visit will be billed after completion.',
+    billingSmall: fallbackNoPaymentCopy,
+  };
+}
+
 function firstPositiveNumber(...values) {
   for (const value of values) {
     const n = Number(value);
@@ -1257,6 +1329,7 @@ function sameDayVisitTotalForPricingFrequency(frequency = {}, opts = {}) {
   const rows = Array.isArray(frequency?.perServiceTreatments)
     ? frequency.perServiceTreatments
     : [];
+  if (opts.services && !frequencyTreatmentsCoverServices(rows, opts.services)) return null;
   const fallback = Number(frequency?.sameDayTreatmentTotal);
   const prefMonthlyOff = opts.preferences
     ? computePrefDiscount(opts.preferences, pestRecurringForPricingRows(rows), false, 0).monthlyOff
@@ -2222,6 +2295,7 @@ function renderPage(token, estimate, estData) {
     : escapeHtml(est.customerPhone || '');
 
   const estResult = estData?.result || estData || {};
+  const pricingFrequenciesForView = Array.isArray(est.pricingFrequencies) ? est.pricingFrequencies : [];
   const savedEstimateTierDiscount = Number(estResult?.recurring?.discount);
   const estimateTierDiscount = tierDiscountForEstimate(
     estData,
@@ -2260,19 +2334,19 @@ function renderPage(token, estimate, estData) {
         aggregateDayLabel: 'lawn care',
         billingHeading: 'Choose how you want to pay',
         billingLede: null,
-        payAfterTitle: 'Pay after each visit',
-        payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+        payAfterTitle: 'Pay per application',
+        payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
         noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
         bookingTitle: 'Pick your first lawn care visit',
         bookingSubhead: 'Choose a window to get your lawn care plan started.',
         payPrefHeading: 'Choose how you want to pay',
-        payPrefCardTitle: 'Pay after each visit',
-        payPrefCardSub: 'Billed after each completed service through autopay.',
+        payPrefCardTitle: 'Pay per application',
+        payPrefCardSub: 'Invoice includes WaveGuard setup + first application.',
         prepayTitle: 'Pay the 12-month plan in full',
-        prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+        prepayBody: 'Choose the 12-month plan up front; we send the annual invoice automatically after confirmation and waive the setup.',
         prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
-        cardConfirmTitle: 'Confirm and save card',
-        cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+        cardConfirmTitle: 'Confirm invoice',
+        cardConfirmSub: 'next step creates your invoice and opens secure payment.',
         perksHeading: 'What your lawn care plan includes',
         perksBody: 'Your plan includes visit notes, locked-in pricing, and treatment timing for Southwest Florida lawns.',
         finalHeading: 'Ready to start lawn care?',
@@ -2286,19 +2360,19 @@ function renderPage(token, estimate, estData) {
           aggregateDayLabel: 'mosquito control',
           billingHeading: 'Choose how you want to pay',
           billingLede: null,
-          payAfterTitle: 'Pay after each visit',
-          payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+          payAfterTitle: 'Pay per application',
+          payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
           noPaymentCopy: 'No payment is charged on this page. Your first mosquito control visit will be billed after completion.',
           bookingTitle: 'Pick your first mosquito control visit',
           bookingSubhead: 'Choose a window to get your mosquito control plan started.',
           payPrefHeading: 'Choose how you want to pay',
-          payPrefCardTitle: 'Pay after each visit',
-          payPrefCardSub: 'Billed after each completed service through autopay.',
+          payPrefCardTitle: 'Pay per application',
+          payPrefCardSub: 'Invoice includes WaveGuard setup + first application.',
           prepayTitle: 'Pay the 12-month plan in full',
-          prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval.',
+          prepayBody: 'Choose the 12-month plan up front; we send the annual invoice automatically after confirmation.',
           prepayButtonSub: 'Approve annual prepay for the mosquito control plan.',
-          cardConfirmTitle: 'Confirm and save card',
-          cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+          cardConfirmTitle: 'Confirm invoice',
+          cardConfirmSub: 'next step creates your invoice and opens secure payment.',
           perksHeading: 'What your mosquito control plan includes',
           perksBody: 'Your plan includes directed barrier treatments, resting-zone targeting, and source-reduction notes for Southwest Florida mosquito pressure.',
           finalHeading: 'Ready to start mosquito control?',
@@ -2312,19 +2386,19 @@ function renderPage(token, estimate, estData) {
           aggregateDayLabel: 'tree & shrub care',
           billingHeading: 'Choose how you want to pay',
           billingLede: null,
-          payAfterTitle: 'Pay after each visit',
-          payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+          payAfterTitle: 'Pay per application',
+          payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
           noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
           bookingTitle: 'Pick your first tree & shrub visit',
           bookingSubhead: 'Choose a window to get your tree & shrub plan started.',
           payPrefHeading: 'Choose how you want to pay',
-          payPrefCardTitle: 'Pay after each visit',
-          payPrefCardSub: 'Billed after each completed service through autopay.',
+          payPrefCardTitle: 'Pay per application',
+          payPrefCardSub: 'Invoice includes WaveGuard setup + first application.',
           prepayTitle: 'Pay the 12-month plan in full',
-          prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+          prepayBody: 'Choose the 12-month plan up front; we send the annual invoice automatically after confirmation and waive the setup.',
           prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
-          cardConfirmTitle: 'Confirm and save card',
-          cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+          cardConfirmTitle: 'Confirm invoice',
+          cardConfirmSub: 'next step creates your invoice and opens secure payment.',
           perksHeading: 'What your tree & shrub plan includes',
           perksBody: 'Your plan includes ornamental treatments, visit notes, and service timing for Southwest Florida landscapes.',
           finalHeading: 'Ready to start tree & shrub?',
@@ -2338,19 +2412,19 @@ function renderPage(token, estimate, estData) {
             aggregateDayLabel: 'termite protection',
             billingHeading: 'Choose how you want to pay',
             billingLede: null,
-            payAfterTitle: 'Pay after each visit',
-            payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+            payAfterTitle: 'Pay per application',
+            payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
             noPaymentCopy: 'No payment is charged on this page. Your first termite protection visit will be billed after completion.',
             bookingTitle: 'Pick your first termite protection visit',
             bookingSubhead: 'Choose a window to get your termite protection plan started.',
             payPrefHeading: 'Choose how you want to pay',
-            payPrefCardTitle: 'Pay after each visit',
-            payPrefCardSub: 'Billed after each completed service through autopay.',
+            payPrefCardTitle: 'Pay per application',
+            payPrefCardSub: 'Invoice includes WaveGuard setup + first application.',
             prepayTitle: 'Pay the 12-month plan in full',
-            prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval.',
+            prepayBody: 'Choose the 12-month plan up front; we send the annual invoice automatically after confirmation.',
             prepayButtonSub: 'Approve annual prepay for the termite protection plan.',
-            cardConfirmTitle: 'Confirm and save card',
-            cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+            cardConfirmTitle: 'Confirm invoice',
+            cardConfirmSub: 'next step creates your invoice and opens secure payment.',
             perksHeading: 'What your termite protection plan includes',
             perksBody: 'Your plan includes termite station service, visit notes, and treatment details tied to your home perimeter.',
             finalHeading: 'Ready to start termite protection?',
@@ -2364,19 +2438,19 @@ function renderPage(token, estimate, estData) {
               aggregateDayLabel: 'termite trenching',
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
-              payAfterTitle: 'Pay after service',
-              payAfterBody: 'Approve now, then save a card for autopay after the completed service visit.',
+              payAfterTitle: 'Pay per application',
+              payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. Waves will finish the inspection review before pricing is finalized.',
               bookingTitle: 'Review your termite trenching quote with Waves',
               bookingSubhead: 'Waves will confirm the treatment path before a normal service slot is reserved online.',
               payPrefHeading: 'Choose how you want to pay',
-              payPrefCardTitle: 'Pay after service',
-              payPrefCardSub: 'Billed after completed service through autopay.',
+              payPrefCardTitle: 'Pay per application',
+              payPrefCardSub: 'Invoice is sent automatically after confirmation.',
               prepayTitle: 'Pay in full',
               prepayBody: 'Waves will confirm final pricing before collecting payment.',
               prepayButtonSub: 'Approve termite trenching follow-up.',
-              cardConfirmTitle: 'Confirm and save card',
-              cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+              cardConfirmTitle: 'Confirm invoice',
+              cardConfirmSub: 'next step creates your invoice and opens secure payment.',
               perksHeading: 'What this termite trenching quote includes',
               perksBody: 'This quote uses the measured trenching path and any field review needed before final approval.',
               finalHeading: 'Ready to review termite trenching?',
@@ -2389,19 +2463,19 @@ function renderPage(token, estimate, estData) {
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
-              payAfterTitle: 'Pay after each visit',
-              payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+              payAfterTitle: 'Pay per application',
+              payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
               bookingTitle: 'Find a date & time that works for you',
               bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
               payPrefHeading: 'Choose how you want to pay',
-              payPrefCardTitle: 'Pay after each visit',
-              payPrefCardSub: 'Billed after each completed service through autopay.',
+              payPrefCardTitle: 'Pay per application',
+              payPrefCardSub: 'Invoice includes WaveGuard setup + first application.',
               prepayTitle: 'Pay the 12-month plan in full',
-              prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+              prepayBody: 'Choose the 12-month plan up front; we send the annual invoice automatically after confirmation and waive the setup.',
               prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
-              cardConfirmTitle: 'Confirm and save card',
-              cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+              cardConfirmTitle: 'Confirm invoice',
+              cardConfirmSub: 'next step creates your invoice and opens secure payment.',
               perksHeading: 'What WaveGuard members get',
               perksBody: 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
@@ -2523,6 +2597,11 @@ function renderPage(token, estimate, estData) {
     return pestRecurring ? 'quarterly' : null;
   })();
   const selectedRecurringFrequencyKey = selectedPestFrequencyKey || (hasTermiteBait ? 'quarterly' : null);
+  const selectedRecurringFrequencyForView = selectedRecurringFrequencyKey
+    ? (pricingFrequenciesForView.find((frequency) => frequency?.key === selectedRecurringFrequencyKey) || null)
+    : defaultFrequencyFromList(pricingFrequenciesForView);
+  const selectedServiceTierBillsMonthlyForView = !!selectedRecurringFrequencyForView?.billingFrequencyKey
+    && selectedRecurringFrequencyForView.billingFrequencyKey === 'monthly';
   const pestChoiceLabel = pestRecurring && canChooseOneTime
     ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
     : null;
@@ -2618,6 +2697,25 @@ function renderPage(token, estimate, estData) {
     : null;
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
+  const standardInvoiceFirstApplicationAmount = !selectedServiceTierBillsMonthlyForView
+    && firstServiceVisitTotal != null
+    && firstServiceVisitTotal > 0
+    ? firstServiceVisitTotal
+    : 0;
+  const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
+    setupAmount: setupDueToday,
+    firstApplicationAmount: standardInvoiceFirstApplicationAmount,
+    fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
+  });
+  const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
+  const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
+  const standardInvoiceBillingSmallHtml = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
+    ? `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`
+    : (standardInvoiceCopy.hasSetup
+        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setupDueToday)} setup invoice so you can pay in-flow.`
+        : (standardInvoiceCopy.hasFirstApplication
+            ? `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`
+            : escapeHtml(pageCopy.noPaymentCopy)));
   const showAnnualPrepayOption = showMembershipFee;
   const annualPrepayWaivesMembership = showMembershipFee;
   const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
@@ -2630,9 +2728,16 @@ function renderPage(token, estimate, estData) {
     : '';
   const showBillingCard = !quoteRequired && !locked && billingRecurring.length > 0;
   const requirePaymentSetupBeforeSlots = showBillingCard;
+  const standardInvoiceLede = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
+    ? 'Pay per application with a setup + first application invoice after confirmation.'
+    : (standardInvoiceCopy.hasSetup
+        ? 'Pay per application with a setup invoice after confirmation.'
+        : (standardInvoiceCopy.hasFirstApplication
+            ? 'Pay per application with a first application invoice after confirmation.'
+            : 'Pay per application after completion.'));
   const billingLede = pageCopy.billingLede || (showAnnualPrepayOption
-    ? 'Billed after each completed service visit through autopay, or choose the 12-month prepay option and we send one annual invoice after approval.'
-    : 'Billed after each completed service visit through autopay.');
+    ? `${standardInvoiceLede} Or choose the 12-month prepay option and pay the annual invoice in-flow.`
+    : standardInvoiceLede);
   const billingCardHtml = showBillingCard ? `
   <section class="card billing-card" id="payment-setup-card"${billingModeAttr}>
     <h2>${escapeHtml(pageCopy.billingHeading)}</h2>
@@ -2642,14 +2747,15 @@ function renderPage(token, estimate, estData) {
         <div class="payment-choice-head">
           <h3>${escapeHtml(pageCopy.payAfterTitle)}</h3>
         </div>
-        <p class="payment-choice-body">${escapeHtml(pageCopy.payAfterBody)}</p>
+        <p class="payment-choice-body">${escapeHtml(standardInvoiceCopy.payAfterBody)}</p>
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
-          <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
+          <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
+          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
-        <p class="billing-small">${showMembershipFee && firstServiceVisitTotal > 0 ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; your first service visit bills after completion at <span data-first-visit-copy-total>${fmtMoney(firstServiceVisitTotal)}</span>.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
-        <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
-        <p class="billing-small">Next: pick a time, then confirm. If card setup is required, we send you to the secure setup screen after confirmation.</p>
+        <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
+        <button type="button" class="payment-choice-cta" data-payment-setup="pay_at_visit">Choose pay per application</button>
+        <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and open secure payment.</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
@@ -2663,10 +2769,10 @@ function renderPage(token, estimate, estData) {
           ${prepayMembershipSummaryHtml}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">No payment is charged on this page. Your annual prepay invoice totals <span data-prepay-copy-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</span> and is prepared after approval.</p>
+        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</span> and opens for secure payment.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
-        <p class="billing-small">Next: pick a time, then confirm. No payment screen opens here; our team reviews and sends the annual prepay invoice after approval.</p>
+        <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and open secure payment.</p>
       </div>` : ''}
     </div>
   </section>` : '';
@@ -3319,8 +3425,8 @@ ${shellTopBar()}
       <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
       <div id="payment-setup-summary" class="payment-setup-summary" style="display:none">
         <div class="payment-setup-summary-main">
-          <div class="payment-setup-summary-kicker">Selected payment setup</div>
-          <div class="payment-setup-summary-title" id="payment-setup-summary-title">Payment setup selected</div>
+          <div class="payment-setup-summary-kicker">Selected invoice option</div>
+          <div class="payment-setup-summary-title" id="payment-setup-summary-title">Invoice option selected</div>
           <div class="payment-setup-summary-body" id="payment-setup-summary-body">Review the invoice setup, then choose a service window.</div>
         </div>
         <button type="button" class="payment-setup-summary-change" id="change-payment-setup-btn">Change payment option</button>
@@ -3345,8 +3451,8 @@ ${shellTopBar()}
       <p class="card-sub" id="pay-pref-subhead" style="margin:0">${escapeHtml(billingLede)}</p>
       <div class="pay-pref-grid options">
         <div class="pay-pref-choice">
-          <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">${escapeHtml(pageCopy.payPrefCardTitle)}</span></button>
-          <div class="pay-pref-note">${escapeHtml(pageCopy.payPrefCardSub)}</div>
+          <button type="button" class="pay-pref-btn primary" data-pay-pref="pay_at_visit" data-pay-pref-card><span class="pay-pref-title">${escapeHtml(pageCopy.payPrefCardTitle)}</span></button>
+          <div class="pay-pref-note">${escapeHtml(standardInvoiceCopy.payPrefCardSub)}</div>
         </div>
         <div class="pay-pref-choice">
           <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span></button>
@@ -3438,7 +3544,11 @@ ${shellQuestionsBar()}
   const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
   const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
+  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(setupDueToday)};
+  const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
+  const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
   // Subtle click pulse on any button — fires once per click, self-removes after animation
@@ -3484,10 +3594,22 @@ ${shellQuestionsBar()}
       el.textContent = fmt(adjusted);
     });
     document.querySelectorAll('[data-first-visit-total]').forEach((el) => {
-      if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
+      if (firstVisitTotal > 0) {
+        el.textContent = fmt(firstVisitTotal);
+        el.dataset.firstVisitAmount = String(firstVisitTotal);
+      }
     });
-    document.querySelectorAll('[data-first-visit-copy-total]').forEach((el) => {
-      if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
+    document.querySelectorAll('[data-standard-invoice-total]').forEach((el) => {
+      const setupDue = Number(el.dataset.standardSetupDue || 0);
+      const invoiceFirstVisitTotal = STANDARD_INVOICE_HAS_FIRST_APPLICATION && firstVisitTotal > 0 ? firstVisitTotal : 0;
+      const invoiceTotal = roundMoney(setupDue + invoiceFirstVisitTotal);
+      if (invoiceTotal > 0) el.textContent = fmt(invoiceTotal);
+    });
+    document.querySelectorAll('[data-standard-invoice-copy-total]').forEach((el) => {
+      const setupDue = Number(el.dataset.standardSetupDue || 0);
+      const invoiceFirstVisitTotal = STANDARD_INVOICE_HAS_FIRST_APPLICATION && firstVisitTotal > 0 ? firstVisitTotal : 0;
+      const invoiceTotal = roundMoney(setupDue + invoiceFirstVisitTotal);
+      if (invoiceTotal > 0) el.textContent = fmt(invoiceTotal);
     });
     document.querySelectorAll('[data-service-card-savings]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
@@ -3687,6 +3809,38 @@ ${shellQuestionsBar()}
     return text || 'after completion';
   }
 
+  function currentFirstVisitAmount() {
+    if (!STANDARD_INVOICE_HAS_FIRST_APPLICATION) return 0;
+    const el = document.querySelector('[data-first-visit-total]');
+    const amount = Number(el?.dataset?.firstVisitAmount || 0);
+    return Number.isFinite(amount) && amount > 0 ? amount : 0;
+  }
+
+  function currentStandardInvoiceTotal() {
+    return roundMoney(Number(STANDARD_INVOICE_SETUP_DUE || 0) + currentFirstVisitAmount());
+  }
+
+  function standardInvoiceTotalText() {
+    const total = currentStandardInvoiceTotal();
+    return total > 0 ? fmt(total) : 'after completion';
+  }
+
+  function standardPayPerApplicationSummaryBody() {
+    const setupDue = Number(STANDARD_INVOICE_SETUP_DUE || 0);
+    const hasSetup = setupDue > 0;
+    const hasFirstApplication = STANDARD_INVOICE_HAS_FIRST_APPLICATION && currentFirstVisitAmount() > 0;
+    if (hasSetup && hasFirstApplication) {
+      return 'No payment is charged here. After confirmation, we open an invoice for setup plus the first application totaling ' + standardInvoiceTotalText() + '; choose a service window to continue.';
+    }
+    if (hasSetup) {
+      return 'No payment is charged here. After confirmation, we open the setup invoice for ' + fmt(setupDue) + '; choose a service window to continue.';
+    }
+    if (hasFirstApplication) {
+      return 'No payment is charged here. After confirmation, we open the first application invoice for ' + firstVisitTotalText() + '; choose a service window to continue.';
+    }
+    return STANDARD_NO_PAYMENT_COPY + ' Choose a service window to continue.';
+  }
+
   function updatePaymentSetupSummary(pref) {
     const summary = document.getElementById('payment-setup-summary');
     if (!summary) return;
@@ -3698,11 +3852,11 @@ ${shellQuestionsBar()}
     if (pref === 'prepay_annual') {
       if (bookingSubhead) bookingSubhead.textContent = 'Annual prepay is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Annual prepay invoice';
-      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is prepared after approval; choose a service window to continue.';
+      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
     } else {
-      if (bookingSubhead) bookingSubhead.textContent = 'Pay at the visit is selected. Review the setup, then choose a service window.';
-      if (title) title.textContent = 'Pay at the visit';
-      if (body) body.textContent = 'No payment is charged here. Your first service visit bills after completion at ' + firstVisitTotalText() + '; choose a service window to continue.';
+      if (bookingSubhead) bookingSubhead.textContent = 'Pay per application is selected. Review the invoice setup, then choose a service window.';
+      if (title) title.textContent = 'Pay per application';
+      if (body) body.textContent = standardPayPerApplicationSummaryBody();
     }
     summary.style.display = '';
     if (location.hash !== '#invoice-setup') {
@@ -3772,7 +3926,7 @@ ${shellQuestionsBar()}
       return;
     }
     if (bookingState.reservation) {
-      toast('Use Change my pick before switching payment setup.');
+      toast('Use Change my pick before switching payment option.');
       const reviewArea = document.getElementById('review-area');
       if (reviewArea) reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       return;
@@ -4146,12 +4300,12 @@ ${shellQuestionsBar()}
       if (confirmBtn) confirmBtn.disabled = false;
       const title = document.getElementById('confirm-book-title');
       const sub = document.getElementById('confirm-book-sub');
-      if (pref === 'card_on_file') {
-        if (title) title.textContent = CARD_CONFIRM_TITLE;
-        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · ' + CARD_CONFIRM_SUB;
-      } else if (pref === 'prepay_annual') {
-        if (title) title.textContent = 'Confirm annual prepay';
-        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.';
+    if (pref === 'pay_at_visit' && bookingState.serviceMode === 'recurring') {
+      if (title) title.textContent = CARD_CONFIRM_TITLE;
+      if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · ' + CARD_CONFIRM_SUB;
+    } else if (pref === 'prepay_annual') {
+      if (title) title.textContent = 'Confirm annual prepay';
+      if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will open for secure payment after confirmation.';
       } else {
         if (title) title.textContent = 'Confirm and book';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
@@ -4190,16 +4344,16 @@ ${shellQuestionsBar()}
     });
     if (pref === 'prepay_annual') {
       if (title) title.textContent = 'Confirm annual prepay';
-      if (sub) sub.textContent = 'Your existing appointment stays scheduled. Annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.';
-      if (summary) summary.textContent = 'Selected payment setup: Pay the 12-month plan in full.';
-    } else if (pref === 'pay_at_visit') {
+      if (sub) sub.textContent = 'Your existing appointment stays scheduled. Annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will open for secure payment after confirmation.';
+      if (summary) summary.textContent = 'Selected invoice option: Pay the 12-month plan in full.';
+    } else if (pref === 'pay_at_visit' && bookingState.serviceMode === 'one_time') {
       if (title) title.textContent = 'Confirm appointment';
       if (sub) sub.textContent = 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.';
-      if (summary) summary.textContent = 'Selected payment setup: Pay at the visit.';
+      if (summary) summary.textContent = 'Selected payment option: Pay at the visit.';
     } else {
       if (title) title.textContent = CARD_CONFIRM_TITLE;
       if (sub) sub.textContent = 'Your existing appointment stays scheduled. ' + CARD_CONFIRM_SUB;
-      if (summary) summary.textContent = 'Selected payment setup: Pay after each visit.';
+      if (summary) summary.textContent = 'Selected invoice option: Pay per application.';
     }
     if (reviewArea) reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -4298,15 +4452,16 @@ ${shellQuestionsBar()}
       }
       if (!r.ok) throw new Error(data.error || 'accept failed');
       if (bookingState.countdownTimer) clearInterval(bookingState.countdownTimer);
-      // Card-on-file continues in /onboard/:token for the Stripe setup step.
-      // Annual prepay stops here; the office reviews and sends the prepared
-      // annual invoice after approval.
+      // Recurring accepts continue directly into the invoice payment flow.
       if (data.onboardingToken) {
         window.location.href = '/onboard/' + data.onboardingToken;
+      } else if (data.nextStep === 'pay_invoice' && data.invoicePayUrl) {
+        toast('Approved! Opening your invoice.');
+        setTimeout(() => { window.location.href = data.invoicePayUrl; }, 350);
       } else {
         const prepayAmount = data.prepayInvoiceAmount != null ? fmt(Number(data.prepayInvoiceAmount)) : null;
         toast(data.nextStep === 'prepay_invoice'
-          ? 'Approved! Annual prepay invoice' + (prepayAmount ? ' for ' + prepayAmount : '') + ' will be reviewed and sent.'
+          ? 'Approved! Annual prepay' + (prepayAmount ? ' for ' + prepayAmount : '') + ' is confirmed. Our team will follow up with the invoice.'
           : 'Booked! We will be in touch shortly.');
         setTimeout(() => location.reload(), 1200);
       }
@@ -4467,7 +4622,7 @@ ${shellQuestionsBar()}
             { boxShadow: '0 0 0 6px rgba(27,44,91,.16)' },
             { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
           ], { duration: 900, easing: 'ease-out' });
-          toast('Choose a payment setup first.');
+          toast('Choose a payment option first.');
           return;
         }
         scrollToBookingCard();
@@ -4623,6 +4778,9 @@ async function handleEstimateView(req, res, next) {
       satelliteUrl: estimate.satellite_url || null,
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
+      pricingFrequencies: Array.isArray(pricingBundleForView?.frequencies)
+        ? pricingBundleForView.frequencies
+        : [],
       existingAppointment: shapeLinkedAppointment(linkedAppointment),
     }, estData);
   } catch (err) { next(err); }
@@ -4672,21 +4830,19 @@ router.put('/:token/accept', async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
-    // Card-on-file and annual prepay are only meaningful for recurring accepts: the
-    // post-commit branch that creates the SetupIntent / onboarding session
-    // and the converter's annual-prepay invoice are gated on !treatAsOneTime.
+    // Billing choices are only meaningful for recurring accepts: the
+    // converter creates the matching invoice after the slot is confirmed.
     // Reject up front rather than fulfill the request half-way.
-    if (requestedOneTime && ['card_on_file', 'prepay_annual'].includes(paymentMethodPreference)) {
+    if (requestedOneTime && paymentMethodPreference === 'prepay_annual') {
       return res.status(400).json({ error: `${paymentMethodPreference} is not available for one-time visits — pick pay_at_visit instead` });
     }
     const selectedFrequencyKey = (() => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
     })();
-    // Invoice-mode: admin opted the estimate into auto-invoicing. Skips
-    // onboarding/SetupIntent; after commit we generate an invoice (due
-    // immediately) for the first visit's amount and send SMS + email
-    // with the pay link.
+    // Invoice-mode: admin opted the estimate into legacy auto-invoicing.
+    // Standard recurring accepts now also use invoice payment links, while
+    // this flag keeps the older bill-by-invoice amount rules in place.
     const billByInvoice = !!estimate.bill_by_invoice;
     if (annualPrepaySelected && billByInvoice) {
       return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
@@ -4765,7 +4921,7 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
-    if (treatAsOneTime && ['card_on_file', 'prepay_annual'].includes(paymentMethodPreference)) {
+    if (treatAsOneTime && paymentMethodPreference === 'prepay_annual') {
       return res.status(400).json({ error: `${paymentMethodPreference} is not available for one-time visits — pick pay_at_visit instead` });
     }
     const paymentPreferenceError = validateRecurringSlotPaymentPreference({
@@ -4859,11 +5015,14 @@ router.put('/:token/accept', async (req, res, next) => {
         })
       : null;
     const sameDayVisitTotal = !treatAsOneTime && !selectedServiceTierBillsMonthly
-      ? sameDayVisitTotalForPricingFrequency(pricingVisitFrequency, { preferences: acceptPrefs })
+      ? sameDayVisitTotalForPricingFrequency(pricingVisitFrequency, { preferences: acceptPrefs, services: recurringSvcList })
+      : null;
+    const firstApplicationInvoiceAmount = !treatAsOneTime && !selectedServiceTierBillsMonthly && billingTerm !== 'prepay_annual'
+      ? (sameDayVisitTotal || recurringFirstVisitAmount || null)
       : null;
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : (sameDayVisitTotal || recurringFirstVisitAmount || effectiveBillingCadence?.amount));
+      : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || effectiveBillingCadence?.amount));
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -5067,29 +5226,9 @@ router.put('/:token/accept', async (req, res, next) => {
       }
 
       let onboardingToken = null;
-      // Invoice-mode skips onboarding entirely — the payment method gets
-      // captured on the /pay page when they click the invoice link, not
-      // through a SetupIntent up front.
-      if (customerId && !treatAsOneTime && !billByInvoice && !annualPrepaySelected) {
-        const obToken = crypto.randomUUID();
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + 7);
-
-        const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
-
-        const [ob] = await trx('onboarding_sessions').insert({
-          customer_id: customerId,
-          token: obToken,
-          service_type: `WaveGuard ${estimate.waveguard_tier || 'Bronze'} — ${svcType}`,
-          waveguard_tier: estimate.waveguard_tier,
-          monthly_rate: effectiveMonthlyTotal,
-          status: 'started',
-          expires_at: expiresAt,
-        }).returning('*');
-
-        await trx('estimates').where({ id: estimate.id }).update({ onboarding_session_id: ob.id });
-        onboardingToken = obToken;
-      }
+      // Recurring public accepts continue through the invoice payment page.
+      // The payment method is captured on /pay/:token, so no separate
+      // onboarding SetupIntent is created here.
 
       return { customerId, onboardingToken, reservationCommitted, acceptedAppointmentsToRegister };
     });
@@ -5142,7 +5281,7 @@ router.put('/:token/accept', async (req, res, next) => {
         customerId,
       });
     }
-    if (estimate.customer_phone && !billByInvoice) {
+    if (estimate.customer_phone && !billByInvoice && treatAsOneTime) {
       try {
         if (treatAsOneTime) {
           const primarySvc = oneTimeBookingService || bookingServiceFor(oneTimeList[0]?.name || '');
@@ -5292,6 +5431,12 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
+    let invoiceMode = false;
+    let invoiceId = null;
+    let invoiceAmount = null;
+    let invoicePayUrl = null;
+    let invoiceLinkDelivered = false;
+
     // Auto-convert estimate to active customer (Feature #5). Skip entirely
     // when this is a one-time booking — EstimateConverter creates recurring
     // scheduled_services rows + upgrades the customer's WaveGuard tier +
@@ -5300,14 +5445,23 @@ router.put('/:token/accept', async (req, res, next) => {
     if (customerId && !treatAsOneTime) {
       try {
         const EstimateConverter = require('../services/estimate-converter');
-        // In invoice-mode we generate our own "first quarter" invoice
-        // below — the converter's $99 setup / annual-prepay draft would
-        // either duplicate or conflict, so we suppress it.
-        await EstimateConverter.convertEstimate(estimate.id, {
+        // In legacy invoice-mode we generate the first-visit invoice below,
+        // so suppress converter setup/prepay invoices to avoid duplicates.
+        const conversion = await EstimateConverter.convertEstimate(estimate.id, {
           billingTerm,
           skipSetupInvoice: billByInvoice,
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
+          firstApplicationAmount: firstApplicationInvoiceAmount,
+          allowFirstApplicationFallback: false,
+          autoSendInvoice: true,
         });
+        if (conversion?.draftInvoiceId) {
+          invoiceMode = true;
+          invoiceId = conversion.draftInvoiceId;
+          invoiceAmount = conversion.draftInvoiceAmount || null;
+          invoicePayUrl = conversion.draftInvoicePayUrl || null;
+          invoiceLinkDelivered = !!conversion.invoiceDelivery?.ok;
+        }
         logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm}, invoiceMode=${billByInvoice})`);
       } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
     } else if (customerId && treatAsOneTime) {
@@ -5318,10 +5472,6 @@ router.put('/:token/accept', async (req, res, next) => {
     // on the accepted selection. Recurring → first quarter (monthly × 3);
     // one-time → the one-time total. Pay-link delivery is attempted via
     // SMS and email; no onboarding, no payment-method capture up front.
-    let invoiceMode = false;
-    let invoiceId = null;
-    let invoiceAmount = null;
-    let invoiceLinkDelivered = false;
     if (customerId && billByInvoice) {
       try {
         const InvoiceService = require('../services/invoice');
@@ -5365,9 +5515,11 @@ router.put('/:token/accept', async (req, res, next) => {
             dueDate: etDateString(),  // due immediately
           });
           invoiceId = inv?.id || null;
+          invoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
           if (invoiceId) {
             try {
               const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId);
+              if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
               if (delivery?.ok) {
                 invoiceLinkDelivered = true;
               } else {
@@ -5404,6 +5556,7 @@ router.put('/:token/accept', async (req, res, next) => {
         billByInvoice,
         invoiceMode,
         invoiceLinkDelivered,
+        invoicePayUrl,
         reservationCommitted,
         bookingUrl,
         billingTerm,
@@ -5436,6 +5589,9 @@ router.put('/:token/accept', async (req, res, next) => {
           serviceLabel: oneTimeList[0]?.name || 'One-time service',
           treatAsOneTime,
           billByInvoice,
+          invoiceMode,
+          invoiceLinkDelivered,
+          invoicePayUrl,
           reservationCommitted,
           billingTerm,
           annualPrepayAmount: annualPrepayInvoiceAmount,
@@ -5451,6 +5607,7 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceLinkDelivered,
       invoiceId,
       invoiceAmount,
+      invoicePayUrl,
       billingTerm,
       prepayInvoiceAmount: annualPrepayInvoiceAmount,
       bookingUrl,
@@ -6446,8 +6603,8 @@ function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
 }
 
 function normalizeAcceptPaymentMethodPreference(raw) {
-  if (raw === 'card_on_file' || raw === 'deposit_now') return 'card_on_file';
-  if (raw === 'pay_at_visit' || raw === 'prepay_annual') return raw;
+  if (raw === 'card_on_file' || raw === 'deposit_now' || raw === 'pay_at_visit') return 'pay_at_visit';
+  if (raw === 'prepay_annual') return raw;
   return null;
 }
 
@@ -6459,8 +6616,8 @@ function validateRecurringSlotPaymentPreference({
   paymentMethodPreference = null,
 } = {}) {
   if ((!slotId && !existingAppointmentId) || treatAsOneTime || billByInvoice) return null;
-  if (paymentMethodPreference === 'card_on_file' || paymentMethodPreference === 'prepay_annual') return null;
-  return 'Choose card-on-file autopay or annual prepay before booking this recurring plan';
+  if (paymentMethodPreference === 'pay_at_visit' || paymentMethodPreference === 'prepay_annual') return null;
+  return 'Choose pay per application or annual prepay before booking this recurring plan';
 }
 
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
@@ -6492,6 +6649,7 @@ function buildAcceptSuccessPayload({
   invoiceLinkDelivered = false,
   invoiceId = null,
   invoiceAmount = null,
+  invoicePayUrl = null,
   billingTerm = 'standard',
   prepayInvoiceAmount = null,
   bookingUrl = null,
@@ -6499,7 +6657,7 @@ function buildAcceptSuccessPayload({
   reservationCommitted = false,
 } = {}) {
   let nextStep = 'confirmed';
-  if (invoiceMode) nextStep = 'pay_invoice';
+  if (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl)) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
   else if (!treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
   else if (onboardingToken) nextStep = 'complete_onboarding';
@@ -6514,6 +6672,7 @@ function buildAcceptSuccessPayload({
     invoiceLinkDelivered,
     invoiceId,
     invoiceAmount,
+    invoicePayUrl,
     billingTerm,
     prepayInvoiceAmount,
     bookingUrl,
@@ -6528,6 +6687,9 @@ function buildAcceptOfficeFallback({
   serviceLabel = 'service',
   treatAsOneTime = false,
   billByInvoice = false,
+  invoiceMode = false,
+  invoiceLinkDelivered = false,
+  invoicePayUrl = null,
   reservationCommitted = false,
   billingTerm = 'standard',
   annualPrepayAmount = null,
@@ -6539,7 +6701,10 @@ function buildAcceptOfficeFallback({
     const label = treatAsOneTime
       ? `${serviceLabel} one-time service`
       : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
-    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${label}. Invoice mode selected.`;
+    const invoiceText = invoiceLinkDelivered
+      ? 'Invoice pay link sent.'
+      : (invoiceMode || invoicePayUrl ? 'Invoice created; customer redirected to pay page.' : 'Invoice mode selected.');
+    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${label}. ${invoiceText}`;
   }
   if (treatAsOneTime) {
     const nextStep = reservationCommitted ? 'Appointment confirmed.' : 'Booking link sent.';
@@ -6547,9 +6712,18 @@ function buildAcceptOfficeFallback({
   }
   if (billingTerm === 'prepay_annual') {
     const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
-    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard annual prepay${amountText}. Invoice follow-up needed.`;
+    const invoiceText = invoiceLinkDelivered
+      ? 'Invoice pay link sent.'
+      : (invoiceMode || invoicePayUrl ? 'Invoice created; customer redirected to pay page.' : 'Invoice follow-up needed.');
+    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard annual prepay${amountText}. ${invoiceText}`;
   }
-  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Onboarding link sent.`;
+  if (invoiceMode || invoicePayUrl) {
+    const invoiceText = invoiceLinkDelivered
+      ? 'Setup + first application invoice pay link sent.'
+      : 'Setup + first application invoice created; customer redirected to pay page.';
+    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. ${invoiceText}`;
+  }
+  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Invoice follow-up needed.`;
 }
 
 async function fireBundleQuoteRequestedNotification({ estimate, suggestedService, bundled }, triggerFn) {
@@ -6577,6 +6751,7 @@ function buildAcceptNotificationPayload({
   billByInvoice = false,
   invoiceMode = false,
   invoiceLinkDelivered = false,
+  invoicePayUrl = null,
   reservationCommitted = false,
   bookingUrl = null,
   billingTerm = 'standard',
@@ -6590,7 +6765,7 @@ function buildAcceptNotificationPayload({
           adminBody: `${serviceLabel} approved. Invoice was not sent automatically; office follow-up needed.`,
           customerTitle: 'Estimate accepted',
           customerBody: `Your ${serviceLabel} estimate is approved. Our team will follow up with the invoice details.`,
-          customerLink: '/?tab=billing',
+          customerLink: invoicePayUrl || '/?tab=billing',
         };
       }
       return {
@@ -6598,7 +6773,7 @@ function buildAcceptNotificationPayload({
         adminBody: `${serviceLabel} approved. Invoice pay link is being sent.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${serviceLabel} estimate is approved. Use the invoice pay link we sent to complete payment.`,
-        customerLink: '/?tab=billing',
+        customerLink: invoicePayUrl || '/?tab=billing',
       };
     }
     if (!invoiceMode || !invoiceLinkDelivered) {
@@ -6607,7 +6782,7 @@ function buildAcceptNotificationPayload({
         adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice was not sent automatically; office follow-up needed.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
-        customerLink: '/?tab=billing',
+        customerLink: invoicePayUrl || '/?tab=billing',
       };
     }
     return {
@@ -6615,7 +6790,7 @@ function buildAcceptNotificationPayload({
       adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice pay link is being sent.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link we sent to complete payment.`,
-      customerLink: '/?tab=billing',
+      customerLink: invoicePayUrl || '/?tab=billing',
     };
   }
 
@@ -6639,21 +6814,42 @@ function buildAcceptNotificationPayload({
 
   if (billingTerm === 'prepay_annual') {
     const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
+    if (!invoiceMode && !invoicePayUrl) {
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. Invoice follow-up needed.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the annual prepay invoice details.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    const sentText = invoiceLinkDelivered ? 'Invoice pay link sent.' : 'Invoice created; customer redirected to pay page.';
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. Invoice follow-up needed.`,
+      adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. ${sentText}`,
       customerTitle: 'Estimate accepted',
-      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the annual prepay invoice details.`,
-      customerLink: '/?tab=billing',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link to complete payment.`,
+      customerLink: invoicePayUrl || '/?tab=billing',
+    };
+  }
+
+  if (invoiceMode || invoicePayUrl) {
+    const sentText = invoiceLinkDelivered ? 'Invoice pay link sent.' : 'Invoice created; customer redirected to pay page.';
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. ${sentText}`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link to complete payment.`,
+      customerLink: invoicePayUrl || '/?tab=billing',
     };
   }
 
   return {
     adminTitle: `Estimate accepted: ${customerName}`,
-    adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Onboarding link sent.`,
+    adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice follow-up needed.`,
     customerTitle: 'Estimate accepted',
-    customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Complete onboarding to get started.`,
-    customerLink: '/?tab=plan',
+    customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Our team will follow up with the invoice details.`,
+    customerLink: '/?tab=billing',
   };
 }
 
@@ -7961,7 +8157,7 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
   if (existingAppointment) {
     return {
       mode: 'existing_appointment',
-      ctaLabel: 'Confirm payment setup',
+      ctaLabel: 'Confirm invoice option',
       reason: null,
       appointment: shapeLinkedAppointment(existingAppointment),
     };
@@ -8606,6 +8802,7 @@ module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
+module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
