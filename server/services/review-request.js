@@ -614,7 +614,7 @@ const ReviewService = {
         service_type: serviceType,
         service_date: serviceDate,
         triggered_by: "auto_inline",
-        scheduled_for: null,
+        scheduled_for: new Date(Date.now() + 120 * 60000),
         sms_sent_at: null,
         status: "pending",
       })
@@ -640,6 +640,7 @@ const ReviewService = {
     if (!requestId) return;
     await db("review_requests").where({ id: requestId }).update({
       sms_sent_at: new Date(),
+      scheduled_for: null,
       status: "sent",
     });
   },
@@ -1032,7 +1033,12 @@ const ReviewService = {
           logger.warn(
             `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
           );
-          if (result.blocked && !result.retryable && !result.deferred) {
+          if (
+            result.blocked &&
+            result.code !== "CONSENT_LOOKUP_FAILED" &&
+            !result.retryable &&
+            !result.deferred
+          ) {
             await db("review_requests").where({ id: request.id }).update({
               followup_sent: true,
               followup_sent_at: new Date(),

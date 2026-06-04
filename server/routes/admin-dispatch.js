@@ -2856,7 +2856,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       if (!bundledReviewRequestId) return;
       try {
         const ReviewService = require('../services/review-request');
-        if (sendResult.blocked && !sendResult.retryable && !sendResult.deferred) {
+        if (
+          sendResult.blocked &&
+          sendResult.code !== 'CONSENT_LOOKUP_FAILED' &&
+          !sendResult.retryable &&
+          !sendResult.deferred
+        ) {
           await ReviewService.markInlineDeliveryFailed(bundledReviewRequestId);
         } else {
           await ReviewService.markInlineRetryable(bundledReviewRequestId, bundledReviewRetryAt(sendResult));
