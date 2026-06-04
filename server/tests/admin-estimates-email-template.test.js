@@ -199,6 +199,16 @@ describe('admin estimate email delivery', () => {
     })).toThrow(/Quote-required estimates need manual review/);
   });
 
+  test('blocks sending estimates without a billable total', () => {
+    expect(() => router._internals.assertEstimateSendable({
+      id: 'estimate-zero-total',
+      status: 'draft',
+      monthly_total: 0,
+      onetime_total: 0,
+      estimate_data: {},
+    })).toThrow(/positive monthly or one-time total/);
+  });
+
   test('summarizes lead estimate automation and blocks manual-review automated drafts', () => {
     const estimateData = {
       automation: {
@@ -265,6 +275,7 @@ describe('admin estimate email delivery', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-auto-generated',
       status: 'draft',
+      monthly_total: 89,
       estimate_data: estimateData,
     })).not.toThrow();
   });
@@ -394,6 +405,7 @@ describe('admin estimate email delivery', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-manager-approved',
       status: 'draft',
+      onetime_total: 150,
       estimate_data: {
         inputs: {
           dethatchingManagerApproved: true,
