@@ -3085,7 +3085,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id}: ${statusErr.message}`);
               }
             }
-            await markBundledReviewDelivered();
+            if (!bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl)) {
+              await markBundledReviewDelivered();
+            } else {
+              await markBundledReviewFailed();
+            }
             record.structured_notes = sentNotes;
           }
         }
