@@ -520,6 +520,20 @@ const ReviewService = {
     // as "skip the review suffix" so the completion SMS goes out clean.
     if (customer.has_left_google_review) return null;
 
+    try {
+      const prefs = await db("notification_prefs")
+        .where({ customer_id: customerId })
+        .first();
+      if (prefs && (prefs.sms_enabled === false || prefs.review_request === false)) {
+        return null;
+      }
+    } catch (err) {
+      logger.warn(
+        `[review] Inline request skipped; prefs lookup failed (customerId=${customerId} errType=${err?.name || "Error"})`,
+      );
+      return null;
+    }
+
     // Reuse an existing request for this service so we don't stack tokens.
     if (serviceRecordId) {
       const existing = await db("review_requests")
@@ -528,7 +542,7 @@ const ReviewService = {
       if (existing) {
         if (
           existing.sms_sent_at ||
-          ["sent", "opened"].includes(String(existing.status || "").toLowerCase())
+          String(existing.status || "").toLowerCase() !== "pending"
         ) {
           return null;
         }

@@ -155,6 +155,14 @@ describe('review request follow-up flow', () => {
           }),
         });
       }
+      if (table === 'notification_prefs') {
+        return chain({
+          first: jest.fn().mockResolvedValue({
+            sms_enabled: true,
+            review_request: true,
+          }),
+        });
+      }
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'service_records') return serviceRecordQuery;
       throw new Error(`Unexpected table query: ${table}`);
@@ -189,6 +197,14 @@ describe('review request follow-up flow', () => {
           }),
         });
       }
+      if (table === 'notification_prefs') {
+        return chain({
+          first: jest.fn().mockResolvedValue({
+            sms_enabled: true,
+            review_request: true,
+          }),
+        });
+      }
       if (table === 'review_requests') {
         return chain({
           first: jest.fn().mockResolvedValue({
@@ -196,6 +212,76 @@ describe('review request follow-up flow', () => {
             token: 'token-sent',
             status: 'sent',
             sms_sent_at: new Date('2026-06-03T13:00:00.000Z'),
+          }),
+        });
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      serviceRecordId: 'sr-1',
+    });
+
+    expect(result).toBeNull();
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+  });
+
+  test('does not create inline review rows when review requests are disabled', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({
+            id: 'cust-1',
+            has_left_google_review: false,
+          }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({
+          first: jest.fn().mockResolvedValue({
+            sms_enabled: true,
+            review_request: false,
+          }),
+        });
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      serviceRecordId: 'sr-1',
+    });
+
+    expect(result).toBeNull();
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+  });
+
+  test('does not rebundle an existing suppressed inline review request', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({
+            id: 'cust-1',
+            has_left_google_review: false,
+          }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({
+          first: jest.fn().mockResolvedValue({
+            sms_enabled: true,
+            review_request: true,
+          }),
+        });
+      }
+      if (table === 'review_requests') {
+        return chain({
+          first: jest.fn().mockResolvedValue({
+            id: 'rr-suppressed',
+            token: 'token-suppressed',
+            status: 'suppressed',
+            sms_sent_at: null,
           }),
         });
       }
