@@ -60,9 +60,129 @@ describe('admin estimate delivery option validation', () => {
           recurring: {
             services: [{ name: 'Quarterly Pest Control', mo: 89 }],
           },
+          oneTime: {
+            total: 250,
+            items: [{ service: 'one_time_pest', name: 'One-Time Pest', price: 250 }],
+          },
         },
       },
     })).toBeNull();
+  });
+
+  test('allows one-time option from recurring pest pricing without a saved one-time total', () => {
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: true,
+      billByInvoice: false,
+      onetimeTotal: 0,
+      monthlyTotal: 30.67,
+      annualTotal: 368.04,
+      estimateData: {
+        result: {
+          results: {
+            pestTiers: [{ label: 'Quarterly', mo: 30.67, ann: 368.04, pa: 92, apps: 4 }],
+          },
+          recurring: {
+            services: [{ name: 'Quarterly Pest Control', mo: 30.67 }],
+          },
+          oneTime: {
+            total: 99,
+            membershipFee: 99,
+            items: [],
+          },
+        },
+      },
+    })).toBeNull();
+  });
+
+  test('allows one-time option for agent draft engineResult recurring pest pricing', () => {
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: true,
+      billByInvoice: false,
+      onetimeTotal: 0,
+      monthlyTotal: 30.67,
+      annualTotal: 368.04,
+      estimateData: {
+        engineInputs: {
+          services: { pest: { frequency: 'quarterly' } },
+        },
+        engineResult: {
+          monthlyTotal: 30.67,
+          annualTotal: 368.04,
+          lineItems: [{
+            service: 'pest_control',
+            name: 'Pest Control',
+            monthly: 30.67,
+            annual: 368.04,
+            basePrice: 92,
+            perApp: 92,
+            visitsPerYear: 4,
+          }],
+        },
+        agentDraft: true,
+      },
+    })).toBeNull();
+  });
+
+  test('rejects one-time option when pest recurring row lacks derivable choice pricing and no fallback total exists', () => {
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: true,
+      billByInvoice: false,
+      onetimeTotal: 0,
+      monthlyTotal: 89,
+      annualTotal: 1068,
+      estimateData: {
+        result: {
+          recurring: {
+            services: [{ name: 'Quarterly Pest Control', mo: 89 }],
+          },
+          oneTime: {
+            total: 0,
+            items: [],
+          },
+        },
+      },
+    })).toMatch(/per-application pricing/i);
+  });
+
+  test('rejects one-time option when only setup fee supplies the one-time total', () => {
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: true,
+      billByInvoice: false,
+      onetimeTotal: 99,
+      monthlyTotal: 89,
+      annualTotal: 1068,
+      estimateData: {
+        result: {
+          recurring: {
+            services: [{ name: 'Quarterly Pest Control', mo: 89 }],
+          },
+          oneTime: {
+            total: 99,
+            membershipFee: 99,
+            items: [],
+          },
+        },
+      },
+    })).toMatch(/per-application pricing|priced one-time pest row/i);
+  });
+
+  test('rejects one-time option when estimate data has no recurring pest pricing', () => {
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: true,
+      billByInvoice: false,
+      onetimeTotal: 250,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        result: {
+          recurring: { services: [] },
+          oneTime: {
+            total: 250,
+            items: [{ service: 'one_time_pest', name: 'One-Time Pest', price: 250 }],
+          },
+        },
+      },
+    })).toMatch(/recurring pest pricing/i);
   });
 
   test('rejects invoice mode when estimate has no billable total', () => {

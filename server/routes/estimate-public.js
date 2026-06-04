@@ -4921,6 +4921,12 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+    const acceptedOneTimeChoiceList = treatAsOneTime && !isOneTimeOnly
+      ? acceptedOneTimeChoiceListForEstimate(estimate, estData, pricingBundle, oneTimeChoicePrice)
+      : null;
+    if (acceptedOneTimeChoiceList) {
+      oneTimeList = acceptedOneTimeChoiceList;
+    }
     if (treatAsOneTime && paymentMethodPreference === 'prepay_annual') {
       return res.status(400).json({ error: `${paymentMethodPreference} is not available for one-time visits — pick pay_at_visit instead` });
     }
@@ -5758,7 +5764,14 @@ router.put('/:token/preferences', async (req, res, next) => {
       ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - manualMonthlyOff - monthlyOff) * 100) / 100)
       : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
     const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
-    const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
+    const derivedOneTimeChoiceBase = estimate.show_one_time_option
+      ? oneTimeChoiceAmountForEstimate(
+          { ...estimate, estimate_data: parsedData },
+          { ...parsedData, preferences: nextPrefs },
+          null,
+        )
+      : null;
+    const onetimeBase = Number(derivedOneTimeChoiceBase || parsedData.onetimeTotalBase || estimate.onetime_total || 0);
     const onetimeTotal = Math.max(0, Math.round((onetimeBase - oneTimeOff) * 100) / 100);
     const tierPrices = {};
     ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
@@ -6196,6 +6209,26 @@ function isOneTimePestChoiceItem(item = {}) {
     || text.includes('onetime pest');
 }
 
+function oneTimeItemLooksPestSpecialty(item = {}) {
+  const service = String(item.service || '').toLowerCase();
+  const text = oneTimeItemSearchText(item);
+  if (service === 'one_time_adjustment' || isWaveGuardSetupOneTimeItem(item) || isOneTimePestChoiceItem(item)) {
+    return false;
+  }
+  if (
+    service === 'pest_control'
+    || service === 'pest_initial_cleanout'
+    || service === 'initial_pest_cleanout'
+    || service === 'pest_cleanout'
+    || text.includes('initial pest cleanout')
+    || text.includes('general pest cleanout')
+  ) {
+    return false;
+  }
+  return service === 'pest_initial_roach'
+    || /\b(roach|cockroach|ant|spider|flea|wasp|bee|hornet|stinging|bed\s*bug|bedbug)\b/.test(text);
+}
+
 function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
   if (category === 'pest_control') return isOneTimePestChoiceItem(item);
   const itemCategory = serviceCategoryForOneTimeItem(item);
@@ -6207,6 +6240,190 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
 
 function oneTimePestChoiceAmountFromBreakdown(breakdown = {}) {
   return oneTimeChoiceAmountFromBreakdown(breakdown, 'pest_control');
+}
+
+function oneTimePestChoiceAmountFromPerApp(perApp) {
+  const amount = Number(perApp);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const multiplier = Number(ONE_TIME.pest?.multiplier);
+  const floor = Number(ONE_TIME.pest?.floor);
+  return Math.max(
+    Number.isFinite(floor) && floor > 0 ? floor : 199,
+    Math.round(amount * (Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 2.2)),
+  );
+}
+
+function rowLooksQuarterly(row = {}) {
+  const label = String(row.label || row.name || row.key || row.frequency || row.billingFrequencyKey || '').toLowerCase();
+  const visits = Number(row.apps ?? row.v ?? row.visitsPerYear ?? row.visits);
+  return label.includes('quarter')
+    || row.key === 'quarterly'
+    || row.billingFrequencyKey === 'quarterly'
+    || (Number.isFinite(visits) && visits > 0 && visits <= 4);
+}
+
+function pestTierPerApp(row = {}) {
+  if (!row || typeof row !== 'object') return null;
+  const explicit = firstPositiveNumber(
+    row.pa,
+    row.perApp,
+    row.perVisit,
+    row.perTreatment,
+    row.basePrice,
+  );
+  if (explicit) return Math.round(explicit * 100) / 100;
+  const visits = firstPositiveNumber(row.apps, row.v, row.visitsPerYear, row.visits);
+  const monthly = firstPositiveNumber(row.mo, row.monthly, row.monthlyBase);
+  if (visits && monthly) return Math.round(((monthly * 12) / visits) * 100) / 100;
+  const annual = firstPositiveNumber(row.ann, row.annual, row.annualTotal);
+  if (visits && annual) return Math.round((annual / visits) * 100) / 100;
+  return null;
+}
+
+function oneTimePestChoiceAmountFromResultStats(estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData && typeof estData === 'object' ? estData : {});
+  const innerResults = result.results && typeof result.results === 'object'
+    ? result.results
+    : {};
+  const tiers = [
+    ...(Array.isArray(innerResults.pestTiers) ? innerResults.pestTiers : []),
+    ...(Array.isArray(result.pestTiers) ? result.pestTiers : []),
+  ];
+  if (!tiers.length) return null;
+  const tier = tiers.find(rowLooksQuarterly) || tiers[0];
+  return oneTimePestChoiceAmountFromPerApp(pestTierPerApp(tier));
+}
+
+function pestPerAppFromFrequency(frequency = {}) {
+  const pestRow = pestTreatmentRowForFrequency(frequency);
+  if (!pestRow) return null;
+  return pestTierPerApp(pestRow);
+}
+
+function oneTimePestChoiceAmountFromFrequencies(frequencies = []) {
+  if (!Array.isArray(frequencies) || !frequencies.length) return null;
+  const ordered = [
+    ...frequencies.filter(rowLooksQuarterly),
+    ...frequencies.filter((row) => !rowLooksQuarterly(row)),
+  ];
+  for (const frequency of ordered) {
+    const amount = oneTimePestChoiceAmountFromPerApp(pestPerAppFromFrequency(frequency));
+    if (amount) return amount;
+  }
+  return null;
+}
+
+function oneTimePestChoiceAmountFromRecurringServices(recurringServices = []) {
+  const services = Array.isArray(recurringServices) ? recurringServices : [];
+  for (const service of services) {
+    if (!isPestServiceName(service?.name || service?.label || service?.service)) continue;
+    const amount = oneTimePestChoiceAmountFromPerApp(pestTierPerApp(service));
+    if (amount) return amount;
+  }
+  return null;
+}
+
+function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
+  return oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies)
+    || oneTimePestChoiceAmountFromResultStats(estData)
+    || oneTimePestChoiceAmountFromRecurringServices(
+      recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
+    )
+    || oneTimePestChoiceAmountFromBreakdown(
+      pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData),
+    );
+}
+
+function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}) {
+  const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+  return items.map((item) => {
+    if (!item || typeof item !== 'object') return null;
+    if (item.quoteRequired === true) return null;
+    if (isWaveGuardSetupOneTimeItem(item)) return null;
+    if (isOneTimePestChoiceItem(item)) return null;
+    if (String(item.service || '').toLowerCase() === 'one_time_adjustment') return null;
+    if (!oneTimeItemLooksPestSpecialty(item)) return null;
+    const amount = oneTimeItemAmount(item);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    const label = item.label || item.name || 'Pest treatment';
+    return {
+      service: item.service || null,
+      name: item.name || label,
+      label,
+      price: Math.round(amount * 100) / 100,
+      detail: item.detail || null,
+    };
+  }).filter(Boolean);
+}
+
+function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
+  if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return null;
+  const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  const recurring = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
+  const category = deriveServiceCategory(estData, recurring, breakdown.items);
+  if (category === 'pest_control') {
+    const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
+    if (!pestChoiceAmount) return null;
+    const specialtyTotal = preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown)
+      .reduce((sum, item) => Math.round((sum + Number(item.price || 0)) * 100) / 100, 0);
+    return Math.round((pestChoiceAmount + specialtyTotal) * 100) / 100;
+  }
+  return oneTimeChoiceAmountFromBreakdown(breakdown, category);
+}
+
+function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, pricingBundle = null, choicePrice = null) {
+  if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return null;
+  const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  const recurring = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
+  const category = deriveServiceCategory(estData, recurring, breakdown.items);
+  if (category !== 'pest_control') return null;
+  const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
+  const amount = Number(pestChoiceAmount || choicePrice);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return [{
+    service: 'one_time_pest',
+    name: 'One-Time Pest Control',
+    label: 'One-Time Pest Control',
+    price: Math.round(amount * 100) / 100,
+  }, ...preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown)];
+}
+
+function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingBundle = null, choicePrice = null) {
+  const choiceList = acceptedOneTimeChoiceListForEstimate(estimate, estData, pricingBundle, choicePrice);
+  if (!choiceList) return null;
+  const existingBreakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  const hasQuoteRequiredItems = existingBreakdown?.quoteRequired === true
+    || (Array.isArray(existingBreakdown?.quoteRequiredItems) && existingBreakdown.quoteRequiredItems.length > 0)
+    || (Array.isArray(existingBreakdown?.items) && existingBreakdown.items.some((item) => item.quoteRequired === true));
+  if (hasQuoteRequiredItems) return null;
+  const items = choiceList.map((item) => ({
+    service: item.service,
+    label: item.label || item.name,
+    amount: Number(item.price || 0),
+    detail: item.detail || 'Single treatment',
+    kind: 'charge',
+  }));
+  const total = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  return {
+    items,
+    total: Math.round(total * 100) / 100,
+    quoteRequired: false,
+    quoteRequiredItems: [],
+  };
+}
+
+function alignOneTimeChoiceBreakdown(payload = {}, estimate = {}, estData = {}) {
+  if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return payload;
+  const choicePrice = oneTimeChoiceAmountForEstimate(estimate, estData, payload);
+  const choiceBreakdown = oneTimeChoiceBreakdownForEstimate(estimate, estData, payload, choicePrice);
+  if (!choiceBreakdown) return payload;
+  return {
+    ...payload,
+    anchorOneTimePrice: choiceBreakdown.total,
+    oneTimeBreakdown: choiceBreakdown,
+  };
 }
 
 function oneTimeChoiceAmountFromBreakdown(breakdown = {}, category = 'pest_control') {
@@ -6488,7 +6705,7 @@ function defaultServiceModeForEstimate(estData, estimate = {}) {
 
 function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
   if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return false;
-  return oneTimePestChoiceAmountFromBreakdown(normalizeOneTimeBreakdown(estData)) > 0;
+  return oneTimePestChoiceAmountForEstimate(estimate, estData) > 0;
 }
 
 function acceptanceServiceLists(estData) {
@@ -6577,15 +6794,25 @@ function withSupplementedRecurringServices(estData) {
 function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
   if (estimate.show_one_time_option || estimate.showOneTimeOption) {
     let breakdown = pricingBundle?.oneTimeBreakdown || null;
+    let estData = null;
     if (!breakdown && estimate.estimate_data) {
       try {
-        const estData = typeof estimate.estimate_data === 'string'
+        estData = typeof estimate.estimate_data === 'string'
           ? JSON.parse(estimate.estimate_data)
           : estimate.estimate_data;
         breakdown = normalizeOneTimeBreakdown(estData);
       } catch { /* fall through to legacy candidates */ }
+    } else if (estimate.estimate_data) {
+      try {
+        estData = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data)
+          : estimate.estimate_data;
+      } catch { estData = null; }
     }
-    const choicePrice = oneTimePestChoiceAmountFromBreakdown(breakdown || {});
+    const choicePrice = oneTimeChoiceAmountForEstimate(estimate, estData || {}, {
+      ...(pricingBundle || {}),
+      oneTimeBreakdown: breakdown || pricingBundle?.oneTimeBreakdown,
+    });
     if (choicePrice) return choicePrice;
   }
   const candidates = [
@@ -7007,7 +7234,7 @@ function serviceCategoryForOneTimeItem(item = {}) {
   const service = String(item?.service || '').toLowerCase();
   if (!name && !service) return null;
   if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
-  if (service === 'pest_initial_roach' || service === 'one_time_pest' || isPestServiceName(name)) return 'pest_control';
+  if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   if (isTermiteInstallItem(item)) return 'termite_bait';
   if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
@@ -8134,7 +8361,8 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
 }
 
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
-  const withQuoteState = attachQuoteRequirement(payload, estData);
+  const alignedPayload = alignOneTimeChoiceBreakdown(payload, estimate, estData);
+  const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
@@ -8323,8 +8551,10 @@ async function buildPricingBundle(estimate) {
   };
   const withChoiceOneTimePrice = (payload = {}) => {
     if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return payload;
-    const category = deriveServiceCategory(estData, recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}), (payload.oneTimeBreakdown || storedOneTimeBreakdown)?.items || []);
-    const choicePrice = oneTimeChoiceAmountFromBreakdown(payload.oneTimeBreakdown || storedOneTimeBreakdown, category);
+    const choicePrice = oneTimeChoiceAmountForEstimate(estimate, estData, {
+      ...payload,
+      oneTimeBreakdown: payload.oneTimeBreakdown || storedOneTimeBreakdown,
+    });
     return choicePrice
       ? {
           ...payload,
@@ -8413,9 +8643,8 @@ async function buildPricingBundle(estimate) {
     // suppresses that fee for non-pest estimates; strip it from the anchor
     // price too so resolveAcceptOneTimeTotal doesn't end up charging it.
     const rawV1OneTimeTotal = v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null;
-    const v1ServiceCategory = deriveServiceCategory(estData, v1.services, storedOneTimeBreakdown.items);
     const choiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
-      ? oneTimeChoiceAmountFromBreakdown(storedOneTimeBreakdown, v1ServiceCategory)
+      ? oneTimeChoiceAmountForEstimate(estimate, estData, { frequencies, oneTimeBreakdown: storedOneTimeBreakdown })
       : null;
     const anchorOneTimePrice = choiceOneTimePrice ?? ((!hasPest && rawV1OneTimeTotal && v1.membershipFee > 0)
       ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
@@ -8446,10 +8675,7 @@ async function buildPricingBundle(estimate) {
   // ladder from nothing. React renders a simplified PriceCard.
   if (!engineInputs) {
     const storedChoiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
-      ? oneTimeChoiceAmountFromBreakdown(
-          storedOneTimeBreakdown,
-          deriveServiceCategory(estData, recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}), storedOneTimeBreakdown.items),
-        )
+      ? oneTimeChoiceAmountForEstimate(estimate, estData, { oneTimeBreakdown: storedOneTimeBreakdown })
       : null;
     const manualDiscount = normalizeManualDiscountSummary(estData);
     const payload = finalizePricingBundle(withManualDiscount({
@@ -8513,10 +8739,7 @@ async function buildPricingBundle(estimate) {
     ? generatedOneTimeBreakdown
     : storedOneTimeBreakdown;
   const choiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
-    ? oneTimeChoiceAmountFromBreakdown(
-        oneTimeBreakdown,
-        deriveServiceCategory(estData, recurringServicesWithSupplements(anchorEngineResult || estData?.result || estData?.engineResult || estData || {}), oneTimeBreakdown.items),
-      )
+    ? oneTimeChoiceAmountForEstimate(estimate, estData, { frequencies, oneTimeBreakdown })
     : null;
   const oneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
   const anchorOneTimePrice = choiceOneTimePrice
@@ -8782,6 +9005,8 @@ module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
+module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
+module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;

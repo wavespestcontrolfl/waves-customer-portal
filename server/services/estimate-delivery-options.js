@@ -8,15 +8,21 @@ function validateEstimateDeliveryOptions({
 }) {
   const oneTimeAmount = Number(onetimeTotal || 0);
   const recurringAmount = Math.max(Number(monthlyTotal || 0), Number(annualTotal || 0));
-  if (showOneTimeOption && oneTimeAmount <= 0) {
-    return 'Offer one-time option requires a one-time total on the estimate.';
-  }
   if (showOneTimeOption) {
     const nonPestRecurring = nonPestRecurringServicesForOneTimeOption(estimateData);
     if (nonPestRecurring.length > 0) {
       const names = nonPestRecurring.slice(0, 3).join(', ');
       const suffix = nonPestRecurring.length > 3 ? ', and other recurring services' : '';
       return `Offer one-time option is only supported for pest-only recurring estimates. Remove ${names}${suffix} or turn off the one-time choice.`;
+    }
+    if (estimateData && !hasPestRecurringServiceForOneTimeOption(estimateData)) {
+      return 'Offer one-time option requires recurring pest pricing on the estimate.';
+    }
+    if (estimateData && !hasDerivableOneTimePestChoicePricing(estimateData) && !hasGeneralOneTimePestChoicePricing(estimateData)) {
+      return 'Offer one-time option requires recurring pest per-application pricing or a priced one-time pest row on the estimate.';
+    }
+    if (!estimateData && oneTimeAmount <= 0) {
+      return 'Offer one-time option requires a one-time total on the estimate.';
     }
   }
   if (billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
@@ -458,9 +464,22 @@ function recurringServiceRowsFromEstimateData(estimateData) {
   const nestedRecurring = result.results?.recurring && typeof result.results.recurring === 'object'
     ? result.results.recurring
     : {};
+  const resultCandidates = [
+    result,
+    data?.engineResult,
+    result?.engineResult,
+  ].filter((item) => item && typeof item === 'object');
+  const engineRecurringRows = resultCandidates.flatMap((candidate) => {
+    const services = Array.isArray(candidate.recurring?.services) ? candidate.recurring.services : [];
+    const lineItems = Array.isArray(candidate.lineItems)
+      ? candidate.lineItems.filter(rowLooksRecurringEngineLineItem)
+      : [];
+    return [...services, ...lineItems];
+  });
   return [
     ...(Array.isArray(result.recurring?.services) ? result.recurring.services : []),
     ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
+    ...engineRecurringRows,
   ].filter((row) => row && typeof row === 'object');
 }
 
@@ -472,6 +491,194 @@ function isPestRecurringService(row) {
   const label = recurringServiceLabel(row).toLowerCase();
   const service = String(row?.service || '').toLowerCase();
   return label.includes('pest') || service.includes('pest');
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function rowLooksRecurringEngineLineItem(row = {}) {
+  return firstPositiveNumber(
+    row.monthly,
+    row.monthlyAfterDiscount,
+    row.monthlyTotal,
+    row.annual,
+    row.annualAfterDiscount,
+    row.annualAfterCredits,
+    row.annualTotal,
+  ) > 0;
+}
+
+function recurringServiceHasPositivePricing(row = {}) {
+  return firstPositiveNumber(
+    row.mo,
+    row.monthly,
+    row.monthlyAfterDiscount,
+    row.monthlyTotal,
+    row.ann,
+    row.annual,
+    row.annualAfterDiscount,
+    row.annualAfterCredits,
+    row.annualTotal,
+    row.perTreatment,
+    row.perApp,
+    row.perVisit,
+    row.pa,
+    row.basePrice,
+    row.price,
+    row.amount,
+  ) > 0;
+}
+
+function pestTierRowsFromEstimateData(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const result = data?.result && typeof data.result === 'object'
+    ? data.result
+    : (data && typeof data === 'object' ? data : {});
+  const innerResults = result.results && typeof result.results === 'object'
+    ? result.results
+    : {};
+  return [
+    ...(Array.isArray(innerResults.pestTiers) ? innerResults.pestTiers : []),
+    ...(Array.isArray(result.pestTiers) ? result.pestTiers : []),
+  ].filter((row) => row && typeof row === 'object');
+}
+
+function pestTierHasPositivePricing(row = {}) {
+  return firstPositiveNumber(
+    row.mo,
+    row.monthly,
+    row.monthlyAfterDiscount,
+    row.ann,
+    row.annual,
+    row.annualAfterDiscount,
+    row.annualAfterCredits,
+    row.pa,
+    row.perApp,
+    row.perVisit,
+    row.perTreatment,
+    row.basePrice,
+  ) > 0;
+}
+
+function rowHasDerivableOneTimePestChoicePricing(row = {}) {
+  if (firstPositiveNumber(row.pa, row.perApp, row.perVisit, row.perTreatment, row.basePrice)) {
+    return true;
+  }
+  const visits = firstPositiveNumber(row.apps, row.v, row.visitsPerYear, row.visits, row.frequency);
+  const recurringAmount = firstPositiveNumber(
+    row.mo,
+    row.monthly,
+    row.monthlyAfterDiscount,
+    row.monthlyTotal,
+    row.ann,
+    row.annual,
+    row.annualAfterDiscount,
+    row.annualAfterCredits,
+    row.annualTotal,
+  );
+  return visits > 0 && recurringAmount > 0;
+}
+
+function oneTimeRowsFromEstimateData(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const result = data?.result && typeof data.result === 'object'
+    ? data.result
+    : (data && typeof data === 'object' ? data : {});
+  const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
+    ? result.results.oneTime
+    : {};
+  const engineResult = data?.engineResult || result?.engineResult || {};
+  return [
+    ...(Array.isArray(result.oneTime?.items) ? result.oneTime.items : []),
+    ...(Array.isArray(result.oneTime?.specItems) ? result.oneTime.specItems : []),
+    ...(Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
+    ...(Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems : []),
+    ...(Array.isArray(result.specItems) ? result.specItems : []),
+    ...(Array.isArray(result.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(engineResult.oneTime?.items) ? engineResult.oneTime.items : []),
+    ...(Array.isArray(engineResult.oneTime?.specItems) ? engineResult.oneTime.specItems : []),
+    ...(Array.isArray(engineResult.specItems) ? engineResult.specItems : []),
+    ...(Array.isArray(engineResult.lineItems) ? engineResult.lineItems : []),
+  ].filter((row) => row && typeof row === 'object');
+}
+
+function isGeneralOneTimePestChoiceRow(row = {}) {
+  const service = String(row.service || row.key || '').toLowerCase();
+  const text = String([
+    service,
+    row.name,
+    row.label,
+    row.displayName,
+  ].filter(Boolean).join(' ')).toLowerCase().replace(/[_-]+/g, ' ');
+  if (text.includes('pest initial') || /\binitial\b.*\broach\b/.test(text)) return false;
+  return service === 'one_time_pest' ||
+    text.includes('one time pest') ||
+    text.includes('one-time pest') ||
+    text.includes('onetime pest');
+}
+
+function rowHasPositiveOneTimeAmount(row = {}) {
+  return firstPositiveNumber(
+    row.priceAfterDiscount,
+    row.totalAfterDiscount,
+    row.price,
+    row.amount,
+    row.total,
+  ) > 0;
+}
+
+function hasGeneralOneTimePestChoicePricing(estimateData) {
+  return oneTimeRowsFromEstimateData(estimateData)
+    .some((row) => isGeneralOneTimePestChoiceRow(row) && rowHasPositiveOneTimeAmount(row));
+}
+
+function engineInputsRequestPest(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const candidates = [
+    data?.engineInputs,
+    data?.result?.engineInputs,
+    data?.inputs,
+    data?.result?.inputs,
+  ].filter((item) => item && typeof item === 'object');
+  return candidates.some((inputs) => (
+    inputs.svcPest === true ||
+    inputs.services?.pest === true ||
+    (inputs.services?.pest && typeof inputs.services.pest === 'object')
+  ));
+}
+
+function hasPositiveEngineRecurringTotal(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const candidates = [
+    data?.engineResult,
+    data?.result?.engineResult,
+    data?.result,
+    data,
+  ].filter((item) => item && typeof item === 'object');
+  return candidates.some((result) => firstPositiveNumber(
+    result.monthlyTotal,
+    result.annualTotal,
+    result.summary?.recurringMonthlyAfterDiscount,
+    result.summary?.recurringAnnualAfterDiscount,
+  ) > 0);
+}
+
+function hasPestRecurringServiceForOneTimeOption(estimateData) {
+  return recurringServiceRowsFromEstimateData(estimateData)
+    .some((row) => isPestRecurringService(row) && recurringServiceHasPositivePricing(row))
+    || pestTierRowsFromEstimateData(estimateData).some(pestTierHasPositivePricing)
+    || (engineInputsRequestPest(estimateData) && hasPositiveEngineRecurringTotal(estimateData));
+}
+
+function hasDerivableOneTimePestChoicePricing(estimateData) {
+  return recurringServiceRowsFromEstimateData(estimateData)
+    .some((row) => isPestRecurringService(row) && rowHasDerivableOneTimePestChoicePricing(row))
+    || pestTierRowsFromEstimateData(estimateData).some(rowHasDerivableOneTimePestChoicePricing);
 }
 
 function nonPestRecurringServicesForOneTimeOption(estimateData) {
@@ -490,6 +697,8 @@ function nonPestRecurringServicesForOneTimeOption(estimateData) {
 module.exports = {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
+  hasDerivableOneTimePestChoicePricing,
+  hasPestRecurringServiceForOneTimeOption,
   normalizeEstimateDethatchingManagerApproval,
   nonPestRecurringServicesForOneTimeOption,
   validateEstimateDeliveryOptions,

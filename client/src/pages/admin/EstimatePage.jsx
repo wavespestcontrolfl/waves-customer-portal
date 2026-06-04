@@ -5072,7 +5072,7 @@ function EstimateToolView() {
                                 <TierRow
                                   name={
                                     item.lawnType ||
-                                    (item.name === "OT Pest"
+                                    (item.service === "one_time_pest" || item.name === "OT Pest"
                                       ? "Full Spray"
                                       : item.name === "OT Mosquito"
                                         ? "Event Spray"

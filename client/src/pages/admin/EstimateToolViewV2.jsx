@@ -420,6 +420,7 @@ const CONTACT_FIELDS = new Set([
 ]);
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
+const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
 const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "dethatchingCleanupLevel",
   "dethatchingDebrisRemovalIncluded",
@@ -500,19 +501,23 @@ function buildMosquitoRecommendations(form) {
 }
 
 function validateDeliveryOptions(form, estimate) {
-  const oneTimeAmount = Number(estimate?.oneTime?.total || 0);
+  const oneTimeAmount = oneTimePestChoiceAmountForPreview(estimate?.results, form)
+    || Number(estimate?.oneTime?.total || 0);
   const recurringAmount = Math.max(
     Number(estimate?.recurring?.grandTotal || 0),
     Number(estimate?.recurring?.monthlyTotal || 0),
     Number(estimate?.recurring?.annualAfterDiscount || 0),
   );
-  if (form.showOneTimeOption && oneTimeAmount <= 0) {
-    return "Offer one-time option requires a one-time total on the generated estimate.";
-  }
   if (form.showOneTimeOption) {
     const nonPestRecurring = nonPestRecurringServicesForDelivery(estimate);
     if (nonPestRecurring.length > 0) {
       return `Offer one-time option is only supported for pest-only recurring estimates. Remove ${nonPestRecurring.join(", ")} or turn off the one-time choice.`;
+    }
+    if (!hasPestRecurringServiceForDelivery(estimate)) {
+      return "Offer one-time option requires recurring pest pricing on the generated estimate.";
+    }
+    if (oneTimeAmount <= 0) {
+      return "Offer one-time option requires a one-time total on the generated estimate.";
     }
   }
   if (form.billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
@@ -553,6 +558,95 @@ function nonPestRecurringServicesForDelivery(estimate) {
       seen.add(key);
       return true;
     });
+}
+
+function firstPositivePreviewNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function hasPestRecurringServiceForDelivery(estimate) {
+  const rows = Array.isArray(estimate?.recurring?.services)
+    ? estimate.recurring.services
+    : [];
+  const rowHasPestPrice = rows.some((service) => {
+    const label = String(
+      service?.displayName || service?.name || service?.label || service?.service || "",
+    ).toLowerCase();
+    const key = String(service?.service || "").toLowerCase();
+    if (!label.includes("pest") && !key.includes("pest")) return false;
+    return firstPositivePreviewNumber(
+      service.mo,
+      service.monthly,
+      service.monthlyTotal,
+      service.ann,
+      service.annual,
+      service.annualTotal,
+      service.perTreatment,
+      service.perApp,
+      service.perVisit,
+      service.pa,
+      service.price,
+      service.amount,
+    ) > 0;
+  });
+  if (rowHasPestPrice) return true;
+  const tiers = Array.isArray(estimate?.results?.pestTiers)
+    ? estimate.results.pestTiers
+    : [];
+  return tiers.some((tier) => firstPositivePreviewNumber(
+    tier.pa,
+    tier.perApp,
+    tier.perVisit,
+    tier.perTreatment,
+    tier.mo,
+    tier.monthly,
+    tier.ann,
+    tier.annual,
+  ) > 0);
+}
+
+function rowLooksQuarterlyPestTier(tier = {}) {
+  const label = String(tier.label || tier.name || tier.frequency || "").toLowerCase();
+  const apps = Number(tier.apps || tier.v || tier.visitsPerYear || tier.frequency);
+  return label.includes("quarter") || (Number.isFinite(apps) && apps > 0 && apps <= 4);
+}
+
+function pestTierPerAppForOneTimeChoice(tier = {}) {
+  if (!tier || typeof tier !== "object") return null;
+  const explicit = firstPositivePreviewNumber(
+    tier.pa,
+    tier.perApp,
+    tier.perVisit,
+    tier.perTreatment,
+  );
+  if (explicit) return explicit;
+  const apps = firstPositivePreviewNumber(tier.apps, tier.v, tier.visitsPerYear);
+  const monthly = firstPositivePreviewNumber(tier.mo, tier.monthly);
+  if (apps && monthly) return Math.round(((monthly * 12) / apps) * 100) / 100;
+  const annual = firstPositivePreviewNumber(tier.ann, tier.annual);
+  if (apps && annual) return Math.round((annual / apps) * 100) / 100;
+  return null;
+}
+
+function oneTimePestChoiceAmountFromTier(tier = {}) {
+  if (!tier || typeof tier !== "object") return null;
+  const perApp = pestTierPerAppForOneTimeChoice(tier);
+  if (!perApp) return null;
+  return Math.max(
+    ONE_TIME_PEST_CHOICE.floor,
+    Math.round(perApp * ONE_TIME_PEST_CHOICE.multiplier),
+  );
+}
+
+function oneTimePestChoiceAmountForPreview(R = {}, form = {}) {
+  const tiers = Array.isArray(R?.pestTiers) ? R.pestTiers : [];
+  const selected = selectedPestTierForPreview(R, form);
+  const tier = tiers.find(rowLooksQuarterlyPestTier) || selected;
+  return oneTimePestChoiceAmountFromTier(tier);
 }
 
 function formatDatetimeLocal(date) {
@@ -917,10 +1011,11 @@ function fallbackCadenceForPreview() {
 }
 
 function customerPreviewPricing(E, pestTier, form) {
+  const oneTimeChoiceAmount = oneTimePestChoiceAmountForPreview(E?.results, form);
   const pestOnlyChoice =
     !!form.showOneTimeOption &&
     !!pestTier &&
-    Number(E?.oneTime?.total || 0) > 0;
+    oneTimeChoiceAmount > 0;
 
   if (pestOnlyChoice) {
     const baseMonthly = Number(pestTier.mo || 0);
@@ -1036,7 +1131,7 @@ function previewServiceLabel(E, R, form) {
   const pestTier = selectedPestTierForPreview(R, form);
   if (pestTier) {
     const cadence = cadenceFromPestTier(pestTier);
-    if (form.showOneTimeOption && Number(E?.oneTime?.total || 0) > 0) {
+    if (form.showOneTimeOption && oneTimePestChoiceAmountForPreview(R, form) > 0) {
       return `${cadence.label} Pest Control or One-Time Pest Control`;
     }
     const bundledNames = (E?.recurring?.services || [])
@@ -1203,6 +1298,66 @@ function oneTimeRowsForCustomerPreview(E, {
   return displayRows;
 }
 
+function isWaveGuardSetupPreviewRow(row = {}) {
+  const service = String(row.service || "").toLowerCase();
+  const text = `${row.name || ""} ${row.label || ""} ${row.detail || ""}`.toLowerCase();
+  return service === "waveguard_setup" ||
+    text.includes("waveguard setup") ||
+    text.includes("waveguard membership") ||
+    text.includes("membership setup fee");
+}
+
+function isOneTimePestChoicePreviewRow(row = {}) {
+  const service = String(row.service || "").toLowerCase();
+  const text = `${service} ${row.name || ""} ${row.label || ""}`.toLowerCase().replace(/[_-]+/g, " ");
+  if (service === "pest_initial_roach" || INITIAL_ROACH_PREVIEW_RE.test(text)) return false;
+  return service === "one_time_pest" ||
+    text.includes("one time pest") ||
+    text.includes("one-time pest") ||
+    text.includes("onetime pest");
+}
+
+function isPestSpecialtyPreviewRow(row = {}) {
+  const service = String(row.service || "").toLowerCase();
+  const text = `${service} ${row.name || ""} ${row.label || ""}`.toLowerCase().replace(/[_-]+/g, " ");
+  if (
+    service === "pest_control" ||
+    service === "pest_initial_cleanout" ||
+    service === "initial_pest_cleanout" ||
+    service === "pest_cleanout" ||
+    text.includes("initial pest cleanout") ||
+    text.includes("general pest cleanout")
+  ) {
+    return false;
+  }
+  return service === "pest_initial_roach" ||
+    /\b(roach|cockroach|ant|spider|flea|wasp|bee|hornet|stinging|bed\s*bug|bedbug)\b/.test(text);
+}
+
+function oneTimePestSpecialtyRowsForCustomerPreview(E) {
+  return oneTimeRowsForCustomerPreview(E).filter((row) => {
+    const price = Number(row.price || 0);
+    const service = String(row.service || "").toLowerCase();
+    return Number.isFinite(price) &&
+      price > 0 &&
+      service !== "one_time_adjustment" &&
+      !isWaveGuardSetupPreviewRow(row) &&
+      !isOneTimePestChoicePreviewRow(row) &&
+      isPestSpecialtyPreviewRow(row);
+  });
+}
+
+function oneTimePestChoiceRowsForCustomerPreview(E, pestChoiceAmount) {
+  const amount = Number(pestChoiceAmount || 0);
+  if (!Number.isFinite(amount) || amount <= 0) return [];
+  return [{
+    service: "one_time_pest",
+    name: "One-Time Pest Control",
+    price: Math.round(amount * 100) / 100,
+    detail: "Single treatment",
+  }, ...oneTimePestSpecialtyRowsForCustomerPreview(E)];
+}
+
 function firstVisitFeesForCustomerPreview(E, pestTier) {
   const rows = [];
   const hasRecurringPest = !!pestTier;
@@ -1354,15 +1509,27 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
   const serviceLabel = previewServiceLabel(E, R, form);
   const propertyLine = propertyLineForPreview(E, R);
   const oneTimeStandaloneTotal = Number(E.oneTime?.total || 0);
-  const hasOneTimeChoice = !!form.showOneTimeOption && oneTimeStandaloneTotal > 0 && monthlyTotal > 0;
+  const oneTimePestChoiceAmount = oneTimePestChoiceAmountForPreview(R, form);
+  const pestChoiceRows = oneTimePestChoiceRowsForCustomerPreview(E, oneTimePestChoiceAmount);
+  const oneTimeChoiceAmount = pestChoiceRows.length
+    ? pestChoiceRows.reduce((sum, row) => Math.round((sum + Number(row.price || 0)) * 100) / 100, 0)
+    : oneTimeStandaloneTotal;
+  const hasOneTimeChoice = !!form.showOneTimeOption && oneTimeChoiceAmount > 0 && monthlyTotal > 0;
   const oneTimeRows = oneTimeRowsForCustomerPreview(E, {
     excludeServices: firstVisitFees.map((fee) => fee.service),
   });
-  const oneTimeChoiceRows = oneTimeRowsForCustomerPreview(E, {
-    includeSetupFees: true,
-    setupFeeAmount: firstVisitFees.find((fee) => fee.service === "waveguard_setup")?.price || 0,
-    oneTimeTotal: oneTimeStandaloneTotal,
-  });
+  const oneTimeChoiceRows = hasOneTimeChoice
+    ? (pestChoiceRows.length ? pestChoiceRows : [{
+        service: "one_time_pest",
+        name: "One-Time Pest Control",
+        price: oneTimeChoiceAmount,
+        detail: "Single treatment",
+      }])
+    : oneTimeRowsForCustomerPreview(E, {
+        includeSetupFees: true,
+        setupFeeAmount: firstVisitFees.find((fee) => fee.service === "waveguard_setup")?.price || 0,
+        oneTimeTotal: oneTimeStandaloneTotal,
+      });
   const oneTimeChoiceMeta = oneTimeChoicePreviewMeta(E, pestTier, oneTimeChoiceRows);
   const aiMetrics = [
     E.property?.homeSqFt ? { label: "Home", value: `${Math.round(E.property.homeSqFt).toLocaleString()} sq ft` } : null,
@@ -1507,7 +1674,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
             </div>
             <div className="flex items-baseline gap-2 flex-wrap">
               <span className="customer-preview-serif text-[42px] leading-none font-medium text-[#1B2C5B]">
-                {fmt(oneTimeStandaloneTotal)}
+                {fmt(oneTimeChoiceAmount)}
               </span>
               <span className="text-20 font-medium text-[#6B7280]">one-time</span>
             </div>
@@ -6797,6 +6964,8 @@ export default function EstimateToolViewV2({
                           const displayName = item.lawnType
                             ? `One-Time Lawn (${item.lawnType})`
                             : nameMap[item.name] || item.name;
+                          const isGeneralOneTimePest =
+                            item.service === "one_time_pest" || item.name === "OT Pest";
                           return (
                             <div key={i} className="mb-6">
                               {" "}
@@ -6812,7 +6981,7 @@ export default function EstimateToolViewV2({
                                 <TierRowV2
                                   name={
                                     item.lawnType ||
-                                    (item.name === "OT Pest"
+                                    (isGeneralOneTimePest
                                       ? "Full Spray"
                                       : item.name === "OT Mosquito"
                                         ? "Event Spray"

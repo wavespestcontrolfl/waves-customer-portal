@@ -81,6 +81,22 @@ function loadClientEstimator(source) {
   return module.exports;
 }
 
+function loadAdminPreviewOneTimeHelpers(source) {
+  const start = source.indexOf('const INITIAL_ROACH_PREVIEW_RE');
+  const end = source.indexOf('function firstVisitFeesForCustomerPreview');
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  const helperSource = source.slice(start, end);
+  // eslint-disable-next-line no-new-func
+  return new Function('serviceDetailText', 'fmtInt', `
+    ${helperSource}
+    return { oneTimePestChoiceRowsForCustomerPreview };
+  `)(
+    (item = {}) => item.detail || item.det || item.note || '',
+    (value) => `$${Math.round(Number(value || 0)).toLocaleString('en-US')}`,
+  );
+}
+
 function buildClientTopDressingEstimate(calculateEstimate, { lawnSqFt, hasRecurringLawn }) {
   const estimate = calculateEstimate({
     homeSqFt: 2000,
@@ -316,9 +332,75 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(source).toContain('const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));');
     expect(source).toContain('let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));');
     expect(source).toContain('if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;');
+    expect(source).toContain("service: 'one_time_pest'");
     // The legacy 1.75× and the setup+premium forms must both be gone.
     expect(source).not.toContain('Math.round(bpp * 1.75)');
     expect(source).not.toContain('(quarterlyBase + 99) * 1.20');
+
+    const estimate = calculateEstimate({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      propertyType: 'single_family',
+      svcOnetimePest: true,
+      urgency: 'NONE',
+      isAfterHours: false,
+      isRecurringCustomer: false,
+    });
+    const item = estimate.oneTime.items.find((row) => row.service === 'one_time_pest');
+    expect(item).toEqual(expect.objectContaining({
+      name: 'One-Time Pest Control',
+      price: 257,
+    }));
+  });
+
+  test('admin customer preview adds preserved pest specialty rows to one-time pest choice', () => {
+    const { oneTimePestChoiceRowsForCustomerPreview } = loadAdminPreviewOneTimeHelpers(adminToolViewSource);
+    const rows = oneTimePestChoiceRowsForCustomerPreview({
+      oneTime: {
+        total: 468,
+        membershipFee: 99,
+        items: [
+          { service: 'pest_initial_roach', name: 'Initial Roach Knockdown', price: 119, detail: 'Heavy roach activity' },
+          { service: 'stinging_insect', name: 'Stinging Insect', price: 175 },
+          { service: 'native_cockroach', name: 'Native Cockroach Treatment', price: 145 },
+          { service: 'hornet_treatment', name: 'Hornet Treatment', price: 155 },
+          { service: 'pest_initial_cleanout', name: 'Initial Pest Cleanout', price: 199 },
+          { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 },
+          { service: 'one_time_pest', name: 'One-Time Pest', price: 250 },
+          { service: 'one_time_adjustment', name: 'Other one-time services', price: 50 },
+          { service: 'termite_bait_installation', name: 'Termite bait installation', price: 300 },
+        ],
+      },
+    }, 202);
+
+    expect(rows).toEqual([{
+      service: 'one_time_pest',
+      name: 'One-Time Pest Control',
+      price: 202,
+      detail: 'Single treatment',
+    }, {
+      service: 'pest_initial_roach',
+      name: 'Initial Roach Knockdown',
+      price: 119,
+      detail: 'Heavy roach activity',
+    }, {
+      service: 'stinging_insect',
+      name: 'Stinging Insect',
+      price: 175,
+      detail: '',
+    }, {
+      service: 'native_cockroach',
+      name: 'Native Cockroach Treatment',
+      price: 145,
+      detail: '',
+    }, {
+      service: 'hornet_treatment',
+      name: 'Hornet Treatment',
+      price: 155,
+      detail: '',
+    }]);
+    expect(rows.reduce((sum, row) => Math.round((sum + row.price) * 100) / 100, 0)).toBe(796);
   });
 
   test('bed bug fallback no longer treats invalid methods as quote-both', () => {
@@ -338,6 +420,10 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(legacyAdminSource).toContain('Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.');
     expect(legacyAdminSource).toContain('form.svcBedbug && !canUseServerForBedBug');
     expect(legacyAdminSource).toContain('Enter home sq ft or run Property Lookup before generating a mixed bed bug estimate.');
+  });
+
+  test('legacy admin page recognizes canonical one-time pest rows', () => {
+    expect(legacyAdminSource).toContain('item.service === "one_time_pest" || item.name === "OT Pest"');
   });
 
   test('matches server Top Dressing pricing for supported depths and recurring lawn states', () => {
