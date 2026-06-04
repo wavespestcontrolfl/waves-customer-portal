@@ -2844,11 +2844,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.warn(`[dispatch] Inline review delivery mark failed for ${bundledReviewRequestId}: ${e.message}`);
       }
     };
-    const markBundledReviewFailed = async () => {
+    const bundledReviewRetryAt = (sendResult = {}) => {
+      const explicit = sendResult.nextAllowedAt ? new Date(sendResult.nextAllowedAt) : null;
+      if (explicit && !Number.isNaN(explicit.getTime())) return explicit;
+      const delayMinutes = completionReviewDelayMinutes === undefined
+        ? 120
+        : Math.max(5, Number(completionReviewDelayMinutes) || 5);
+      return new Date(Date.now() + delayMinutes * 60000);
+    };
+    const markBundledReviewFailed = async (sendResult = {}) => {
       if (!bundledReviewRequestId) return;
       try {
         const ReviewService = require('../services/review-request');
-        await ReviewService.markInlineDeliveryFailed(bundledReviewRequestId);
+        if (sendResult.blocked && !sendResult.retryable && !sendResult.deferred) {
+          await ReviewService.markInlineDeliveryFailed(bundledReviewRequestId);
+        } else {
+          await ReviewService.markInlineRetryable(bundledReviewRequestId, bundledReviewRetryAt(sendResult));
+        }
       } catch (e) {
         logger.warn(`[dispatch] Inline review failure mark failed for ${bundledReviewRequestId}: ${e.message}`);
       }
@@ -3024,7 +3036,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               structured_notes: serializeJsonb(failedNotes),
             });
             record.structured_notes = failedNotes;
-            await markBundledReviewFailed();
+            await markBundledReviewFailed(smsResult);
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
             const sentNotes = {

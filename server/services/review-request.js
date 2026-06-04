@@ -651,6 +651,14 @@ const ReviewService = {
     });
   },
 
+  async markInlineRetryable(requestId, scheduledFor) {
+    if (!requestId) return;
+    await db("review_requests").where({ id: requestId }).update({
+      status: "pending",
+      scheduled_for: scheduledFor || new Date(Date.now() + 120 * 60000),
+    });
+  },
+
   /**
    * Get review page data by public token.
    */

@@ -430,4 +430,20 @@ describe('review request follow-up flow', () => {
       ReviewService.sendSMS = originalSendSMS;
     }
   });
+
+  test('requeues inline review rows for retryable bundled completion SMS failures', async () => {
+    const updateQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return updateQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const scheduledFor = new Date('2026-06-03T16:00:00.000Z');
+    await ReviewService.markInlineRetryable('rr-inline', scheduledFor);
+
+    expect(updateQuery.update).toHaveBeenCalledWith({
+      status: 'pending',
+      scheduled_for: scheduledFor,
+    });
+  });
 });
