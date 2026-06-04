@@ -2980,6 +2980,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
             completionSmsAttemptedAt: new Date().toISOString(),
+            ...(bundledReviewRequestId ? {
+              completionSmsBundledReviewRequestId: bundledReviewRequestId,
+              completionSmsBundledReviewUrl: bundledReviewUrl,
+            } : {}),
           };
           await db('service_records').where({ id: record.id }).update({
             structured_notes: serializeJsonb(sendingNotes),
@@ -3113,6 +3117,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.error(`Completion SMS failed: ${e.message}`);
       }
     } else if (sendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
+      const bundledReviewId = recordStructuredNotes.completionSmsBundledReviewRequestId || null;
+      const bundledReviewUrlFromNotes = recordStructuredNotes.completionSmsBundledReviewUrl || null;
+      const sentBody = String(recordStructuredNotes.sentSmsBody || '');
+      if (
+        recordStructuredNotes.completionSmsStatus === 'sent' &&
+        bundledReviewId &&
+        bundledReviewUrlFromNotes &&
+        sentBody.includes(bundledReviewUrlFromNotes)
+      ) {
+        try {
+          const ReviewService = require('../services/review-request');
+          await ReviewService.markInlineDelivered(bundledReviewId);
+        } catch (e) {
+          logger.warn(`[dispatch] Inline review delivery repair failed for ${bundledReviewId}: ${e.message}`);
+        }
+      }
       logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
 

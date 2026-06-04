@@ -206,9 +206,6 @@ const ReviewService = {
         const manualTrigger = triggeredBy !== "auto";
         const pending = String(existing.status || "").toLowerCase() === "pending";
         if (manualTrigger && pending && !existing.sms_sent_at) {
-          await db("review_requests").where({ id: existing.id }).update({
-            scheduled_for: null,
-          });
           await this.sendSMS(existing.id);
           return (
             (await db("review_requests").where({ id: existing.id }).first()) ||

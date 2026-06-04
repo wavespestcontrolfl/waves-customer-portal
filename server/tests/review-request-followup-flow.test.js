@@ -434,7 +434,6 @@ describe('review request follow-up flow', () => {
   test('manual create accelerates an existing pending request for the same service', async () => {
     const originalSendSMS = ReviewService.sendSMS;
     ReviewService.sendSMS = jest.fn().mockResolvedValue();
-    const updateQuery = chain();
     const refreshedQuery = chain({
       first: jest.fn().mockResolvedValue({
         id: 'rr-existing',
@@ -452,7 +451,6 @@ describe('review request follow-up flow', () => {
           scheduled_for: new Date('2026-06-03T16:00:00.000Z'),
         }),
       }),
-      updateQuery,
       refreshedQuery,
     ];
 
@@ -473,7 +471,6 @@ describe('review request follow-up flow', () => {
         triggeredBy: 'tech',
       });
 
-      expect(updateQuery.update).toHaveBeenCalledWith({ scheduled_for: null });
       expect(ReviewService.sendSMS).toHaveBeenCalledWith('rr-existing');
       expect(result).toMatchObject({ id: 'rr-existing', status: 'sent' });
     } finally {
