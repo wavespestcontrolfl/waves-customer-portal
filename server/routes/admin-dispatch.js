@@ -2856,11 +2856,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       if (!bundledReviewRequestId) return;
       try {
         const ReviewService = require('../services/review-request');
-        if (
-          sendResult.blocked &&
+        const terminalPolicyBlock = sendResult.blocked &&
           sendResult.code !== 'CONSENT_LOOKUP_FAILED' &&
           !sendResult.retryable &&
-          !sendResult.deferred
+          !sendResult.deferred;
+        const terminalProviderFailure = sendResult.terminal === true ||
+          (!sendResult.blocked &&
+            sendResult.sent === false &&
+            sendResult.code === 'PROVIDER_FAILURE' &&
+            sendResult.retryable === false);
+        if (
+          terminalPolicyBlock ||
+          terminalProviderFailure
         ) {
           await ReviewService.markInlineDeliveryFailed(bundledReviewRequestId);
         } else {
