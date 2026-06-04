@@ -384,15 +384,21 @@ async function triggerReviewRequest(input) {
       customerId: customer.id,
       triggeredBy: 'intelligence_bar',
     });
+    const fresh = await db('review_requests').where({ id: request.id }).first().catch(() => null);
+    const status = fresh?.status || request.status || 'pending';
 
-    logger.info(`[intelligence-bar:reviews] Triggered review request for ${customer.first_name} ${customer.last_name}`);
+    logger.info(`[intelligence-bar:reviews] Triggered review request for customer ${customer.id}`);
 
     return {
       success: true,
       customer: `${customer.first_name} ${customer.last_name}`,
       phone: customer.phone,
       request_id: request.id,
-      note: 'Review request SMS will be sent via the automated flow (90-180 min delay after service).',
+      status,
+      sent_at: fresh?.sms_sent_at || null,
+      note: fresh?.sms_sent_at
+        ? 'Review request SMS sent through the centralized messaging policy.'
+        : 'Review request created; status reflects whether it is queued, blocked, or awaiting retry.',
     };
   } catch (err) {
     return { error: `Failed to create review request: ${err.message}` };

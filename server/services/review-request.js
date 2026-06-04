@@ -202,7 +202,18 @@ const ReviewService = {
       const existing = await db("review_requests")
         .where({ service_record_id: serviceRecordId })
         .first();
-      if (existing) return existing;
+      if (existing) {
+        const manualTrigger = triggeredBy !== "auto";
+        const pending = String(existing.status || "").toLowerCase() === "pending";
+        if (manualTrigger && pending && !existing.sms_sent_at) {
+          await this.sendSMS(existing.id);
+          return (
+            (await db("review_requests").where({ id: existing.id }).first()) ||
+            existing
+          );
+        }
+        return existing;
+      }
     }
 
     // Pull service + tech context
@@ -262,8 +273,12 @@ const ReviewService = {
       } else {
         scheduledFor = calculateReviewSendTime(new Date(), serviceType);
       }
+    } else if (delayMinutes !== undefined && delayMinutes !== null && Number(delayMinutes) > 0) {
+      scheduledFor = new Date(Date.now() + Number(delayMinutes) * 60000);
     }
-    // 'tech' trigger = immediate (delayMinutes = 0 or null)
+    // Non-auto manual triggers send immediately unless the caller explicitly
+    // supplied a future delay. Auto rows are always picked up by the scheduler.
+    const shouldSendImmediately = triggeredBy !== "auto" && !scheduledFor;
 
     const token = generateToken();
     const [request] = await db("review_requests")
@@ -289,8 +304,7 @@ const ReviewService = {
       `[review] Created request (customerId=${customer.id} requestId=${request.id} trigger=${triggeredBy} scheduled=${scheduledFor || "immediate"})`,
     );
 
-    // If tech-triggered, send immediately
-    if (triggeredBy === "tech") {
+    if (shouldSendImmediately) {
       await this.sendSMS(request.id);
     }
 
@@ -489,11 +503,12 @@ const ReviewService = {
    * bundle the review link into the service-complete SMS so the customer
    * gets a single message instead of two.
    *
-   * Marks sms_sent_at = now() so the scheduled-sender cron skips this
-   * record — the outer caller is responsible for the actual SMS body.
+   * Leaves sms_sent_at empty until the outer completion-SMS caller confirms
+   * delivery. Failed/blocked completion SMS attempts suppress the inline row
+   * so it does not look delivered or become eligible for a follow-up.
    *
-   * @returns {string|null} shortened review URL, or null on no-phone /
-   * existing-duplicate cases (outer caller can just skip the suffix).
+   * @returns {{ url: string, requestId: string, token: string }|null}
+   * shortened review URL metadata, or null when the caller should skip the suffix.
    */
   async createInline({ customerId, serviceRecordId }) {
     const customer = await db("customers").where({ id: customerId }).first();
@@ -502,20 +517,41 @@ const ReviewService = {
     // as "skip the review suffix" so the completion SMS goes out clean.
     if (customer.has_left_google_review) return null;
 
+    try {
+      const prefs = await db("notification_prefs")
+        .where({ customer_id: customerId })
+        .first();
+      if (prefs && (prefs.sms_enabled === false || prefs.review_request === false)) {
+        return null;
+      }
+    } catch (err) {
+      logger.warn(
+        `[review] Inline request skipped; prefs lookup failed (customerId=${customerId} errType=${err?.name || "Error"})`,
+      );
+      return null;
+    }
+
     // Reuse an existing request for this service so we don't stack tokens.
     if (serviceRecordId) {
       const existing = await db("review_requests")
         .where({ service_record_id: serviceRecordId })
         .first();
       if (existing) {
+        if (
+          existing.sms_sent_at ||
+          String(existing.status || "").toLowerCase() !== "pending"
+        ) {
+          return null;
+        }
         const domain = publicPortalUrl();
         const longUrl = `${domain}/rate/${existing.token}`;
-        return shortenOrPassthrough(longUrl, {
+        const url = await shortenOrPassthrough(longUrl, {
           kind: "review",
           entityType: "review_requests",
           entityId: existing.id,
           customerId,
         });
+        return { url, requestId: existing.id, token: existing.token };
       }
     }
 
@@ -565,7 +601,6 @@ const ReviewService = {
     }
 
     const token = generateToken();
-    const now = new Date();
     const [request] = await db("review_requests")
       .insert({
         token,
@@ -576,9 +611,9 @@ const ReviewService = {
         service_type: serviceType,
         service_date: serviceDate,
         triggered_by: "auto_inline",
-        scheduled_for: null,
-        sms_sent_at: now,
-        status: "sent",
+        scheduled_for: new Date(Date.now() + 120 * 60000),
+        sms_sent_at: null,
+        status: "pending",
       })
       .returning("*");
 
@@ -589,11 +624,40 @@ const ReviewService = {
 
     const domain = publicPortalUrl();
     const longUrl = `${domain}/rate/${request.token}`;
-    return shortenOrPassthrough(longUrl, {
+    const url = await shortenOrPassthrough(longUrl, {
       kind: "review",
       entityType: "review_requests",
       entityId: request.id,
       customerId,
+    });
+    return { url, requestId: request.id, token: request.token };
+  },
+
+  async markInlineDelivered(requestId) {
+    if (!requestId) return;
+    await db("review_requests")
+      .where({ id: requestId })
+      .whereNull("sms_sent_at")
+      .where("status", "pending")
+      .update({
+        sms_sent_at: new Date(),
+        scheduled_for: null,
+        status: "sent",
+      });
+  },
+
+  async markInlineDeliveryFailed(requestId) {
+    if (!requestId) return;
+    await db("review_requests").where({ id: requestId }).update({
+      status: "suppressed",
+    });
+  },
+
+  async markInlineRetryable(requestId, scheduledFor) {
+    if (!requestId) return;
+    await db("review_requests").where({ id: requestId }).update({
+      status: "pending",
+      scheduled_for: scheduledFor || new Date(Date.now() + 120 * 60000),
     });
   },
 
@@ -938,7 +1002,11 @@ const ReviewService = {
           first_name: contact.name || customer.first_name || "",
           google_review_url: googleReviewUrl,
         },
-        { workflow: "review_request_followup", entity_type: "review_request", entity_id: reviewReq.id },
+        {
+          workflow: "review_request_followup",
+          entity_type: "review_request",
+          entity_id: request.id,
+        },
       );
       if (!body) {
         logger.warn(
@@ -966,6 +1034,18 @@ const ReviewService = {
           logger.warn(
             `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
           );
+          if (
+            result.blocked &&
+            result.code !== "CONSENT_LOOKUP_FAILED" &&
+            !result.retryable &&
+            !result.deferred
+          ) {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+            suppressed++;
+          }
           continue;
         }
 

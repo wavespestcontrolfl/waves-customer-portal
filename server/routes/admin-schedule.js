@@ -3782,7 +3782,7 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
  * scheduler.js (every 15 min) picks it up and sends via ReviewService.sendSMS,
  * so the request survives Railway restarts/deploys.
  *
- * Checks: customer has sms_enabled, hasn't been asked in 30 days.
+ * Checks: customer has sms_enabled + review_request enabled, hasn't been asked in 30 days.
  */
 async function scheduleReviewRequest(svc) {
   try {
@@ -3790,8 +3790,8 @@ async function scheduleReviewRequest(svc) {
     if (!customer || !customer.phone) return;
 
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-    if (prefs && prefs.sms_enabled === false) {
-      logger.info(`[review-auto] Skipping review request for ${customer.first_name} — SMS disabled`);
+    if (prefs && (prefs.sms_enabled === false || prefs.review_request === false)) {
+      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — SMS/review request disabled`);
       return;
     }
 
@@ -3804,19 +3804,29 @@ async function scheduleReviewRequest(svc) {
         .first();
     } catch { /* table may not exist yet */ }
     if (recentRequest) {
-      logger.info(`[review-auto] Skipping review request for ${customer.first_name} — already asked recently`);
+      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — already asked recently`);
       return;
     }
 
-    // Look up the matching service_record so ReviewService can dedup + attach tech/service metadata.
+    // Look up the service_record created for this scheduled service so
+    // ReviewService can dedup + attach exact tech/service metadata. Do not
+    // fall back to the customer's newest service_record; that can attach the
+    // review ask to a different completed job.
     let serviceRecordId = null;
     try {
       const sr = await db('service_records')
-        .where({ customer_id: customer.id })
-        .orderBy('created_at', 'desc')
+        .where({ customer_id: customer.id, scheduled_service_id: svc.id })
         .first();
       if (sr) serviceRecordId = sr.id;
     } catch { /* service_records lookup is best-effort */ }
+
+    let techName = svc.tech_name || null;
+    if (!techName && svc.technician_id) {
+      try {
+        const tech = await db('technicians').where({ id: svc.technician_id }).first('name');
+        techName = tech?.name || null;
+      } catch { /* technician lookup is best-effort */ }
+    }
 
     const ReviewService = require('../services/review-request');
     await ReviewService.create({
@@ -3824,9 +3834,13 @@ async function scheduleReviewRequest(svc) {
       serviceRecordId,
       triggeredBy: 'auto',
       delayMinutes: 120,
+      techName,
+      serviceType: svc.service_type || null,
+      serviceDate: svc.scheduled_date || null,
+      technicianId: svc.technician_id || null,
     });
 
-    logger.info(`[review-auto] Review request queued for ${customer.first_name} ${customer.last_name} (sends in 2h)`);
+    logger.info(`[review-auto] Review request queued for customer ${customer.id} (sends in 2h)`);
   } catch (err) {
     logger.error(`[review-auto] Failed to queue review request: ${err.message}`);
   }

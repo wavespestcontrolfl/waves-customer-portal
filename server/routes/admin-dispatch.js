@@ -2798,27 +2798,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
-    const shouldBundleReview =
-      sendCompletionSms &&
-      effectiveRequestReview &&
-      svc.cust_phone &&
-      !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
-
-    let bundledReviewUrl = null;
-    if (shouldBundleReview) {
-      try {
-        const ReviewService = require('../services/review-request');
-        bundledReviewUrl = await ReviewService.createInline({
-          customerId: svc.customer_id,
-          serviceRecordId: record.id,
-        });
-      } catch (e) { logger.error(`[dispatch] Inline review mint failed: ${e.message}`); }
-    }
-    const reviewSuffix = bundledReviewUrl
-      ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
-      : '';
-
     const suppressCompletionInvoiceLink = !!invoiceAlreadySent;
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
@@ -2830,6 +2809,77 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       || completionSmsSendingFresh;
+
+    const shouldBundleReview =
+      sendCompletionSms &&
+      !completionSmsAlreadyHandled &&
+      effectiveRequestReview &&
+      svc.cust_phone &&
+      !serviceReportV1Delivery &&
+      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
+
+    let bundledReviewUrl = null;
+    let bundledReviewRequestId = null;
+    if (shouldBundleReview) {
+      try {
+        const ReviewService = require('../services/review-request');
+        const inlineReview = await ReviewService.createInline({
+          customerId: svc.customer_id,
+          serviceRecordId: record.id,
+        });
+        if (typeof inlineReview === 'string') {
+          bundledReviewUrl = inlineReview;
+        } else if (inlineReview) {
+          bundledReviewUrl = inlineReview.url || null;
+          bundledReviewRequestId = inlineReview.requestId || null;
+        }
+      } catch (e) { logger.error(`[dispatch] Inline review mint failed: ${e.message}`); }
+    }
+    const markBundledReviewDelivered = async () => {
+      if (!bundledReviewRequestId) return;
+      try {
+        const ReviewService = require('../services/review-request');
+        await ReviewService.markInlineDelivered(bundledReviewRequestId);
+      } catch (e) {
+        logger.warn(`[dispatch] Inline review delivery mark failed for ${bundledReviewRequestId}: ${e.message}`);
+      }
+    };
+    const bundledReviewRetryAt = (sendResult = {}) => {
+      const explicit = sendResult.nextAllowedAt ? new Date(sendResult.nextAllowedAt) : null;
+      if (explicit && !Number.isNaN(explicit.getTime())) return explicit;
+      const delayMinutes = completionReviewDelayMinutes === undefined
+        ? 120
+        : Math.max(5, Number(completionReviewDelayMinutes) || 5);
+      return new Date(Date.now() + delayMinutes * 60000);
+    };
+    const markBundledReviewFailed = async (sendResult = {}) => {
+      if (!bundledReviewRequestId) return;
+      try {
+        const ReviewService = require('../services/review-request');
+        const terminalPolicyBlock = sendResult.blocked &&
+          sendResult.code !== 'CONSENT_LOOKUP_FAILED' &&
+          !sendResult.retryable &&
+          !sendResult.deferred;
+        const terminalProviderFailure = sendResult.terminal === true ||
+          (!sendResult.blocked &&
+            sendResult.sent === false &&
+            sendResult.code === 'PROVIDER_FAILURE' &&
+            sendResult.retryable === false);
+        if (
+          terminalPolicyBlock ||
+          terminalProviderFailure
+        ) {
+          await ReviewService.markInlineDeliveryFailed(bundledReviewRequestId);
+        } else {
+          await ReviewService.markInlineRetryable(bundledReviewRequestId, bundledReviewRetryAt(sendResult));
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] Inline review failure mark failed for ${bundledReviewRequestId}: ${e.message}`);
+      }
+    };
+    const reviewSuffix = bundledReviewUrl
+      ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
+      : '';
 
     if (sendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
       try {
@@ -2937,6 +2987,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
             completionSmsAttemptedAt: new Date().toISOString(),
+            ...(bundledReviewRequestId ? {
+              completionSmsBundledReviewRequestId: bundledReviewRequestId,
+              completionSmsBundledReviewUrl: bundledReviewUrl,
+            } : {}),
           };
           await db('service_records').where({ id: record.id }).update({
             structured_notes: serializeJsonb(sendingNotes),
@@ -2998,6 +3052,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               structured_notes: serializeJsonb(failedNotes),
             });
             record.structured_notes = failedNotes;
+            await markBundledReviewFailed(smsResult);
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
             const sentNotes = {
@@ -3046,6 +3101,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id}: ${statusErr.message}`);
               }
             }
+            if (!bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl)) {
+              await markBundledReviewDelivered();
+            } else {
+              await markBundledReviewFailed();
+            }
             record.structured_notes = sentNotes;
           }
         }
@@ -3060,9 +3120,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           structured_notes: serializeJsonb(failedNotes),
         }).catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
         record.structured_notes = failedNotes;
+        await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
       }
     } else if (sendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
+      const bundledReviewId = recordStructuredNotes.completionSmsBundledReviewRequestId || null;
+      const bundledReviewUrlFromNotes = recordStructuredNotes.completionSmsBundledReviewUrl || null;
+      const sentBody = String(recordStructuredNotes.sentSmsBody || '');
+      if (
+        recordStructuredNotes.completionSmsStatus === 'sent' &&
+        bundledReviewId &&
+        bundledReviewUrlFromNotes &&
+        sentBody.includes(bundledReviewUrlFromNotes)
+      ) {
+        try {
+          const ReviewService = require('../services/review-request');
+          await ReviewService.markInlineDelivered(bundledReviewId);
+        } catch (e) {
+          logger.warn(`[dispatch] Inline review delivery repair failed for ${bundledReviewId}: ${e.message}`);
+        }
+      }
       logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
 
