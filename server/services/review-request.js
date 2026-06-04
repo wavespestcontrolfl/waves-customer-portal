@@ -1024,6 +1024,13 @@ const ReviewService = {
           logger.warn(
             `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
           );
+          if (result.blocked && !result.retryable && !result.deferred) {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+            suppressed++;
+          }
           continue;
         }
 
