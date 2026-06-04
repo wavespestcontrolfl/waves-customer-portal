@@ -6,6 +6,7 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
 }));
 
 const { _internals } = require('../services/messaging/send-customer-message');
+const { resolvePolicy } = require('../services/messaging/policy');
 
 describe('sendCustomerMessage contract guardrails', () => {
   test('blocks internal briefing purpose for customer audiences', () => {
@@ -84,5 +85,11 @@ describe('sendCustomerMessage contract guardrails', () => {
       audience: 'customer',
       purpose: 'appointment',
     })).toEqual({ ok: true });
+  });
+
+  test('review requests honor the review_request notification preference', () => {
+    expect(resolvePolicy('customer', 'review_request')).toEqual(expect.objectContaining({
+      prefsColumn: 'review_request',
+    }));
   });
 });

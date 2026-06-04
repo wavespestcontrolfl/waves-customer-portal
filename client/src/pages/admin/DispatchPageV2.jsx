@@ -389,6 +389,7 @@ function ServiceCardV2({
         method: "POST",
         body: JSON.stringify({
           customerId: service.customerId,
+          scheduledServiceId: service.id,
           triggeredBy: "tech",
         }),
       });

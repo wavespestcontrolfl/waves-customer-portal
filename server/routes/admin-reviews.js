@@ -567,7 +567,6 @@ router.post('/send-request', async (req, res, next) => {
       serviceDate: lastSvc?.scheduled_date || null,
     });
 
-    await ReviewService.sendSMS(reviewReq.id);
     const sentReq = await db('review_requests').where({ id: reviewReq.id }).first();
     if (!sentReq?.sms_sent_at) {
       return res.status(422).json({ error: 'Review request SMS was blocked, deferred, or failed. Check the request status and messaging audit log.' });
