@@ -493,4 +493,22 @@ describe('review request follow-up flow', () => {
       scheduled_for: scheduledFor,
     });
   });
+
+  test('marks inline delivery only for pending unsent rows', async () => {
+    const updateQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return updateQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await ReviewService.markInlineDelivered('rr-inline');
+
+    expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline' });
+    expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
+    expect(updateQuery.where).toHaveBeenCalledWith('status', 'pending');
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_for: null,
+      status: 'sent',
+    }));
+  });
 });

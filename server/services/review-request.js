@@ -635,11 +635,15 @@ const ReviewService = {
 
   async markInlineDelivered(requestId) {
     if (!requestId) return;
-    await db("review_requests").where({ id: requestId }).update({
-      sms_sent_at: new Date(),
-      scheduled_for: null,
-      status: "sent",
-    });
+    await db("review_requests")
+      .where({ id: requestId })
+      .whereNull("sms_sent_at")
+      .where("status", "pending")
+      .update({
+        sms_sent_at: new Date(),
+        scheduled_for: null,
+        status: "sent",
+      });
   },
 
   async markInlineDeliveryFailed(requestId) {
