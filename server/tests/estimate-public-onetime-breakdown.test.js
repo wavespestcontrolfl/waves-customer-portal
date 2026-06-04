@@ -6,6 +6,7 @@ const {
   buildAcceptNotificationPayload,
   buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
+  acceptedOneTimeChoiceListForEstimate,
   acceptanceServiceLists,
   applySelectedTreeShrubTierToEstimateData,
   buildEstimateAskQueryLog,
@@ -22,6 +23,7 @@ const {
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
+  oneTimeChoiceAmountForEstimate,
   pestMonthlyBaseForFrequency,
   preferenceMonthlyOffForPestVisits,
   renderPage,
@@ -2177,12 +2179,12 @@ describe('public estimate one-time breakdown', () => {
       waveguard_tier: 'Bronze',
     });
 
-    expect(pricing.anchorOneTimePrice).toBe(199);
+    expect(pricing.anchorOneTimePrice).toBe(213);
     expect(resolveAcceptOneTimeTotal({
       show_one_time_option: true,
       estimate_data: estimateData,
       onetime_total: 298,
-    }, pricing)).toBe(199);
+    }, pricing)).toBe(213);
 
     const html = renderPage('choice-token', {
       status: 'sent',
@@ -2196,11 +2198,287 @@ describe('public estimate one-time breakdown', () => {
       oneTimeChoicePrice: pricing.anchorOneTimePrice,
     }, estimateData);
 
-    expect(html).toContain('<span class="num" id="onetime-display">$199</span>');
+    expect(html).toContain('<span class="num" id="onetime-display">$213</span>');
     expect(html).toContain('<div class="choice-treatment" data-mode-only="recurring">');
     expect(html).toContain('<div class="choice-treatment" data-mode-only="one_time" hidden>');
     expect(html).not.toContain('One-time items (billed separately)');
     expect(html).not.toContain('These are scheduled after your recurring service starts.');
+  });
+
+  test('one-time pest choice is derived from recurring pest pricing when saved one-time rows only contain setup', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 30.67, ann: 368.04, pa: 92, apps: 4 }],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 30.67,
+          annualAfterDiscount: 368.04,
+          services: [{ name: 'Quarterly Pest Control', mo: 30.67 }],
+        },
+        oneTime: {
+          total: 99,
+          membershipFee: 99,
+          items: [],
+        },
+        specItems: [],
+      },
+    };
+    const pricing = await buildPricingBundle({
+      id: 'estimate-public-choice-pest-setup-only-test',
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      monthly_total: 30.67,
+      annual_total: 368.04,
+      onetime_total: 99,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(pricing.anchorOneTimePrice).toBe(202);
+    expect(oneTimeChoiceAmountForEstimate({
+      show_one_time_option: true,
+      estimate_data: estimateData,
+    }, estimateData, pricing)).toBe(202);
+    expect(pricing.oneTimeBreakdown).toMatchObject({
+      total: 202,
+      items: [expect.objectContaining({
+        service: 'one_time_pest',
+        label: 'One-Time Pest Control',
+        amount: 202,
+      })],
+    });
+    expect(pricing.oneTimeBreakdown.items.some((item) => item.service === 'waveguard_setup')).toBe(false);
+    expect(resolveAcceptOneTimeTotal({
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      onetime_total: 99,
+    }, pricing)).toBe(202);
+    expect(acceptedOneTimeChoiceListForEstimate({
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      onetime_total: 99,
+    }, estimateData, pricing, pricing.anchorOneTimePrice)).toEqual([{
+      service: 'one_time_pest',
+      name: 'One-Time Pest Control',
+      label: 'One-Time Pest Control',
+      price: 202,
+    }]);
+
+    const html = renderPage('choice-setup-token', {
+      status: 'sent',
+      customerName: 'Dana Medlin',
+      address: '13524 Camelot Ct',
+      monthlyTotal: 30.67,
+      annualTotal: 368.04,
+      onetimeTotal: 99,
+      tier: 'Bronze',
+      showOneTimeOption: true,
+      oneTimeChoicePrice: pricing.anchorOneTimePrice,
+    }, estimateData);
+
+    expect(html).toContain('Hey Dana, choose your pest control option.');
+    expect(html).toContain('<span class="num" id="onetime-display">$202</span>');
+    expect(html).toContain('One-Time Pest Control');
+    expect(html).not.toContain('One-time items (billed separately)');
+  });
+
+  test('one-time pest choice preserves billable pest specialty one-time rows', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 30.67, ann: 368.04, pa: 92, apps: 4 }],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 30.67,
+          annualAfterDiscount: 368.04,
+          services: [{ name: 'Quarterly Pest Control', mo: 30.67 }],
+        },
+        oneTime: {
+          total: 218,
+          membershipFee: 99,
+          items: [{
+            service: 'pest_initial_roach',
+            name: 'Initial Roach Knockdown',
+            price: 119,
+            detail: 'Heavy roach activity',
+          }],
+        },
+        specItems: [],
+      },
+    };
+    const estimate = {
+      id: 'estimate-public-choice-pest-specialty-test',
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      monthly_total: 30.67,
+      annual_total: 368.04,
+      onetime_total: 218,
+      waveguard_tier: 'Bronze',
+    };
+    const pricing = await buildPricingBundle(estimate);
+
+    expect(pricing.anchorOneTimePrice).toBe(321);
+    expect(oneTimeChoiceAmountForEstimate(estimate, estimateData, pricing)).toBe(321);
+    expect(pricing.oneTimeBreakdown).toMatchObject({
+      total: 321,
+      items: [
+        expect.objectContaining({
+          service: 'one_time_pest',
+          label: 'One-Time Pest Control',
+          amount: 202,
+        }),
+        expect.objectContaining({
+          service: 'pest_initial_roach',
+          label: 'Initial Roach Knockdown',
+          amount: 119,
+          detail: 'Heavy roach activity',
+        }),
+      ],
+    });
+    expect(pricing.oneTimeBreakdown.items.some((item) => item.service === 'waveguard_setup')).toBe(false);
+    expect(resolveAcceptOneTimeTotal(estimate, pricing)).toBe(321);
+    expect(acceptedOneTimeChoiceListForEstimate(
+      estimate,
+      estimateData,
+      pricing,
+      pricing.anchorOneTimePrice,
+    )).toEqual([{
+      service: 'one_time_pest',
+      name: 'One-Time Pest Control',
+      label: 'One-Time Pest Control',
+      price: 202,
+    }, {
+      service: 'pest_initial_roach',
+      name: 'Initial Roach Knockdown',
+      label: 'Initial Roach Knockdown',
+      price: 119,
+      detail: 'Heavy roach activity',
+    }]);
+
+    const html = renderPage('choice-specialty-token', {
+      status: 'sent',
+      customerName: 'Dana Medlin',
+      address: '13524 Camelot Ct',
+      monthlyTotal: 30.67,
+      annualTotal: 368.04,
+      onetimeTotal: 218,
+      tier: 'Bronze',
+      showOneTimeOption: true,
+      oneTimeChoicePrice: pricing.anchorOneTimePrice,
+    }, estimateData);
+
+    expect(html).toContain('<span class="num" id="onetime-display">$321</span>');
+    expect(html).not.toContain('<td>WaveGuard setup');
+  });
+
+  test('one-time pest choice preserves broader pest specialty service keys', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 30.67, ann: 368.04, pa: 92, apps: 4 }],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 30.67,
+          annualAfterDiscount: 368.04,
+          services: [{ name: 'Quarterly Pest Control', mo: 30.67 }],
+        },
+        oneTime: {
+          total: 1198,
+          membershipFee: 99,
+          items: [
+            { service: 'one_time_pest', name: 'One-Time Pest', price: 250 },
+            { service: 'pest_initial_cleanout', name: 'Initial Pest Cleanout', price: 199 },
+            { service: 'flea_package', name: 'Flea Package', price: 125 },
+          ],
+        },
+        specItems: [
+          { service: 'stinging_insect', name: 'Stinging Insect', price: 175 },
+          { service: 'german_roach', name: 'German Roach Cleanout', price: 350, detail: 'Two visits' },
+        ],
+      },
+    };
+    const estimate = {
+      id: 'estimate-public-choice-pest-specialty-keys-test',
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      monthly_total: 30.67,
+      annual_total: 368.04,
+      onetime_total: 1198,
+      waveguard_tier: 'Bronze',
+    };
+    const pricing = await buildPricingBundle(estimate);
+
+    expect(pricing.anchorOneTimePrice).toBe(852);
+    expect(pricing.oneTimeBreakdown.items).toEqual([
+      expect.objectContaining({ service: 'one_time_pest', amount: 202 }),
+      expect.objectContaining({ service: 'flea_package', amount: 125 }),
+      expect.objectContaining({ service: 'stinging_insect', amount: 175 }),
+      expect.objectContaining({ service: 'german_roach', amount: 350, detail: 'Two visits' }),
+    ]);
+    expect(pricing.oneTimeBreakdown.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'waveguard_setup' }),
+      expect.objectContaining({ service: 'pest_initial_cleanout' }),
+    ]));
+    expect(acceptedOneTimeChoiceListForEstimate(
+      estimate,
+      estimateData,
+      pricing,
+      pricing.anchorOneTimePrice,
+    )).toEqual([
+      expect.objectContaining({ service: 'one_time_pest', price: 202 }),
+      expect.objectContaining({ service: 'flea_package', price: 125 }),
+      expect.objectContaining({ service: 'stinging_insect', price: 175 }),
+      expect.objectContaining({ service: 'german_roach', price: 350, detail: 'Two visits' }),
+    ]);
+    expect(resolveAcceptOneTimeTotal(estimate, pricing)).toBe(852);
+  });
+
+  test('one-time pest choice alignment preserves quote-required blockers', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 32.33, ann: 387.96, pa: 97, apps: 4 }],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 32.33,
+          annualAfterDiscount: 387.96,
+          services: [{ name: 'Pest Control', mo: 32.33 }],
+        },
+        oneTime: {
+          total: 0,
+          specItems: [{
+            service: 'bed_bug',
+            name: 'Bed Bug Chemical/IPM Program - Quote Required',
+            price: null,
+            quoteRequired: true,
+            reason: 'SEVERE_INFESTATION',
+          }],
+        },
+      },
+    };
+
+    const pricing = await buildPricingBundle({
+      id: 'estimate-public-choice-pest-quote-required-test',
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      monthly_total: 32.33,
+      annual_total: 387.96,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(pricing.anchorOneTimePrice).toBe(213);
+    expect(pricing.quoteRequired).toBe(true);
+    expect(pricing.quoteRequiredReason).toBe('SEVERE_INFESTATION');
+    expect(pricing.oneTimeBreakdown.quoteRequired).toBe(true);
+    expect(pricing.oneTimeBreakdown.items).toContainEqual(expect.objectContaining({
+      service: 'bed_bug',
+      quoteRequired: true,
+    }));
   });
 
   test('server-rendered slot selection ignores clicks while a reservation is in flight', () => {

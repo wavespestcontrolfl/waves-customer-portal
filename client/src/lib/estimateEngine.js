@@ -1891,7 +1891,14 @@ export function calculateEstimate(inputs) {
     const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));
     let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
     if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;
-    otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
+    otItems.push({
+      service: 'one_time_pest',
+      name: 'One-Time Pest Control',
+      displayName: 'One-Time Pest Control',
+      label: 'One-Time Pest Control',
+      price: fp,
+      detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)',
+    });
   }
 
   /* ── One-Time Lawn ───────────────────────────────────────── */
