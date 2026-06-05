@@ -150,6 +150,10 @@ function formatTimestamp(dateStr) {
   );
 }
 
+function phoneKey(value) {
+  return String(value || "").replace(/\D/g, "").slice(-10);
+}
+
 function getInitials(nameOrPhone) {
   if (!nameOrPhone) return "?";
   const trimmed = String(nameOrPhone).trim();
@@ -576,6 +580,7 @@ function SmsTab() {
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
   const [selectedAgentDraft, setSelectedAgentDraft] = useState(null);
+  const [loadedMessageDraft, setLoadedMessageDraft] = useState(null);
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
@@ -760,7 +765,7 @@ function SmsTab() {
     });
   }, [agentDraft?.decisionId]);
 
-  // Prefill compose "To" from ?phone= deep-link (Estimates/Customers SMS button)
+  // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const phone = params.get("phone");
@@ -769,7 +774,48 @@ function SmsTab() {
       setToSearch("");
       setSelectedCustomerId(null);
     }
+    const draftId = params.get("draftId");
+    if (draftId) {
+      adminFetch(`/admin/drafts/${encodeURIComponent(draftId)}`)
+        .then((draft) => {
+          if (draft?.draftResponse) setMsgBody(draft.draftResponse.slice(0, 1000));
+          const draftPhone = draft?.recipientPhone || draft?.customerPhone || "";
+          let finalPhone = phone || draftPhone;
+          if (draftPhone && (!phone || phoneKey(phone) !== phoneKey(draftPhone))) {
+            setToNumber(draftPhone);
+            finalPhone = draftPhone;
+          }
+          setLoadedMessageDraft(draft?.id ? {
+            id: draft.id,
+            draftResponse: draft.draftResponse || "",
+            recipientPhone: finalPhone,
+            fromNumber,
+          } : null);
+          if (draft?.customerId && draft?.customerPhone && phoneKey(finalPhone) === phoneKey(draft.customerPhone)) {
+            setSelectedCustomerId(draft.customerId);
+          } else {
+            setSelectedCustomerId(null);
+          }
+        })
+        .catch(() => {
+          setLoadedMessageDraft(null);
+        });
+      return;
+    }
+    const draft = params.get("draft");
+    if (draft) setMsgBody(draft.slice(0, 1000));
+    setLoadedMessageDraft(null);
   }, []);
+
+  useEffect(() => {
+    if (!loadedMessageDraft?.id) return;
+    if (
+      phoneKey(toNumber) !== phoneKey(loadedMessageDraft.recipientPhone) ||
+      fromNumber !== loadedMessageDraft.fromNumber
+    ) {
+      setLoadedMessageDraft(null);
+    }
+  }, [fromNumber, loadedMessageDraft, toNumber]);
 
   const toggleAiAutoReply = async () => {
     setTogglingAi(true);
@@ -847,10 +893,33 @@ function SmsTab() {
       });
       return;
     }
+    if (loadedMessageDraft?.id && scheduledFor) {
+      setSendResult({ ok: false, text: "Send draft SMS now, or clear the draft before scheduling." });
+      return;
+    }
+    if (loadedMessageDraft?.id && attachments.length > 0) {
+      setSendResult({ ok: false, text: "Draft approval does not support attachments. Remove attachments or start a new SMS." });
+      return;
+    }
     setSending(true);
     setSendResult(null);
     try {
-      if (scheduledFor) {
+      if (loadedMessageDraft?.id) {
+        const original = String(loadedMessageDraft.draftResponse || "").trim();
+        const revised = msgBody.trim();
+        if (revised === original) {
+          await adminFetch(`/admin/drafts/${encodeURIComponent(loadedMessageDraft.id)}/approve`, {
+            method: "PUT",
+            body: JSON.stringify({ fromNumber }),
+          });
+        } else {
+          await adminFetch(`/admin/drafts/${encodeURIComponent(loadedMessageDraft.id)}/revise`, {
+            method: "PUT",
+            body: JSON.stringify({ revisedResponse: revised, fromNumber }),
+          });
+        }
+        setSendResult({ ok: true, text: "Draft sent." });
+      } else if (scheduledFor) {
         await adminFetch("/admin/communications/schedule-sms", {
           method: "POST",
           body: JSON.stringify({
@@ -895,6 +964,7 @@ function SmsTab() {
       setMsgBody("");
       setAgentDraft(null);
       setSelectedAgentDraft(null);
+      setLoadedMessageDraft(null);
       // Release blob preview URLs before clearing so we don't leak them.
       for (const a of attachments) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);

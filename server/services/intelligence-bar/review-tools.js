@@ -11,6 +11,26 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays, startOfETMonth, etMonthStart, parseETDateTime } = require('../../utils/datetime-et');
 
+const DRAFT_REPLY_PREFIX = '[DRAFT]';
+
+function isDraftReply(reply) {
+  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
+}
+
+function hasRealReply(reply) {
+  return Boolean(reply) && !isDraftReply(reply);
+}
+
+function whereNeedsRealReply(qb, column = 'review_reply') {
+  qb.where(function needsRealReply() {
+    this.whereNull(column).orWhere(column, 'like', `${DRAFT_REPLY_PREFIX}%`);
+  });
+}
+
+function whereHasRealReply(qb, column = 'review_reply') {
+  qb.whereNotNull(column).where(column, 'not like', `${DRAFT_REPLY_PREFIX}%`);
+}
+
 const REVIEW_TOOLS = [
   {
     name: 'get_review_stats',
@@ -155,7 +175,7 @@ async function getReviewStats() {
 
   const [totals, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
     reviews.clone().select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).first(),
-    reviews.clone().whereNull('review_reply').whereNotNull('review_text').count('* as count').first(),
+    reviews.clone().whereNotNull('review_text').modify(whereNeedsRealReply).count('* as count').first(),
     reviews.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
     reviews.clone().select('location_id', db.raw('COUNT(*) as count'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).groupBy('location_id'),
     reviews.clone().select('star_rating', db.raw('COUNT(*) as count')).groupBy('star_rating').orderBy('star_rating', 'desc'),
@@ -190,7 +210,7 @@ async function getUnrespondedReviews(input) {
 
   let query = db('google_reviews')
     .where('reviewer_name', '!=', '_stats')
-    .whereNull('review_reply')
+    .modify(whereNeedsRealReply)
     .whereNotNull('review_text')
     .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
     .select('google_reviews.*', 'customers.first_name as cust_first', 'customers.last_name as cust_last', 'customers.waveguard_tier')
@@ -421,8 +441,8 @@ async function searchReviews(input) {
   });
   if (rating) query = query.where('star_rating', rating);
   if (location) query = query.where('location_id', location);
-  if (responded === true) query = query.whereNotNull('review_reply');
-  if (responded === false) query = query.whereNull('review_reply');
+  if (responded === true) query = query.modify(whereHasRealReply);
+  if (responded === false) query = query.modify(whereNeedsRealReply);
 
   const reviews = await query.limit(limit);
 
@@ -432,8 +452,9 @@ async function searchReviews(input) {
       reviewer: r.reviewer_name,
       rating: r.star_rating,
       text: r.review_text,
-      reply: r.review_reply ? r.review_reply.substring(0, 100) + '...' : null,
-      has_reply: !!r.review_reply,
+      reply: hasRealReply(r.review_reply) ? r.review_reply.substring(0, 100) + '...' : null,
+      draft_reply: isDraftReply(r.review_reply) ? r.review_reply.replace(/^\[DRAFT\]\s*/, '').substring(0, 100) + '...' : null,
+      has_reply: hasRealReply(r.review_reply),
       location: r.location_id,
       date: r.review_created_at,
       customer: r.cust_first ? `${r.cust_first} ${r.cust_last}` : null,
@@ -462,7 +483,7 @@ async function getReviewTrends(months) {
       .select(
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
-        db.raw("COUNT(*) FILTER (WHERE review_reply IS NOT NULL) as responded"),
+        db.raw("COUNT(*) FILTER (WHERE review_reply IS NOT NULL AND review_reply NOT LIKE '[DRAFT]%') as responded"),
         db.raw("COUNT(*) FILTER (WHERE star_rating >= 4) as positive"),
         db.raw("COUNT(*) FILTER (WHERE star_rating <= 2) as negative"),
       ).first();

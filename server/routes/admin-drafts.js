@@ -1,10 +1,85 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+function parseFlags(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (_err) {
+    return {};
+  }
+}
+
+function normalizeE164(phone) {
+  if (!phone) return null;
+  const trimmed = String(phone).trim();
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return trimmed.startsWith('+') ? trimmed : trimmed || null;
+}
+
+function samePhone(a, b) {
+  const left = String(a || '').replace(/\D/g, '');
+  const right = String(b || '').replace(/\D/g, '');
+  return Boolean(left && right && left.slice(-10) === right.slice(-10));
+}
+
+async function resolveDraftRecipient(draft) {
+  const flags = parseFlags(draft.flags);
+  if (draft.sms_log_id) {
+    const smsLog = await db('sms_log').where({ id: draft.sms_log_id }).first();
+    if (smsLog?.from_phone) {
+      return {
+        toPhone: smsLog.from_phone,
+        fromNumber: TWILIO_NUMBERS.findByNumber(smsLog.to_phone) ? smsLog.to_phone : undefined,
+        customerId: draft.customer_id || smsLog.customer_id || null,
+        identityTrustLevel: draft.customer_id || smsLog.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+      };
+    }
+  }
+
+  const customer = draft.customer_id
+    ? await db('customers').where({ id: draft.customer_id }).select('id', 'phone').first()
+    : null;
+  const metadataPhone = normalizeE164(flags.toPhone || flags.phone || flags.leadPhone);
+  if (metadataPhone) {
+    const customerMatches = customer?.phone && samePhone(metadataPhone, customer.phone);
+    return {
+      toPhone: metadataPhone,
+      customerId: customerMatches ? customer.id : null,
+      identityTrustLevel: customerMatches ? 'phone_matches_customer' : 'phone_provided_unverified',
+    };
+  }
+
+  if (draft.customer_id) {
+    if (customer?.phone) {
+      return {
+        toPhone: customer.phone,
+        customerId: customer.id,
+        identityTrustLevel: 'phone_matches_customer',
+      };
+    }
+  }
+
+  return { toPhone: null, customerId: draft.customer_id || null, identityTrustLevel: 'phone_provided_unverified' };
+}
+
+async function releaseDraftClaim(draftId, fields = {}) {
+  await db('message_drafts').where({ id: draftId }).update({
+    status: 'pending',
+    approved_by: null,
+    approved_at: null,
+    ...fields,
+  }).catch(() => {});
+}
 
 // GET /api/admin/drafts — pending drafts
 router.get('/', async (req, res, next) => {
@@ -19,22 +94,26 @@ router.get('/', async (req, res, next) => {
       .limit(50);
 
     res.json({
-      drafts: drafts.map(d => ({
-        id: d.id, smsLogId: d.sms_log_id,
-        customerId: d.customer_id,
-        customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
-        customerPhone: d.phone,
-        tier: d.waveguard_tier, stage: d.pipeline_stage,
-        inboundMessage: d.inbound_message,
-        draftResponse: d.draft_response,
-        revisedResponse: d.revised_response,
-        finalResponse: d.final_response,
-        intent: d.intent, intentConfidence: d.intent_confidence,
-        contextSummary: d.context_summary,
-        flags: typeof d.flags === 'string' ? JSON.parse(d.flags) : (d.flags || []),
-        status: d.status, responseTimeSeconds: d.response_time_seconds,
-        createdAt: d.created_at, approvedAt: d.approved_at, sentAt: d.sent_at,
-      })),
+      drafts: drafts.map(d => {
+        const flags = parseFlags(d.flags);
+        return {
+          id: d.id, smsLogId: d.sms_log_id,
+          customerId: d.customer_id,
+          customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
+          customerPhone: d.phone || null,
+          recipientPhone: flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+          tier: d.waveguard_tier, stage: d.pipeline_stage,
+          inboundMessage: d.inbound_message,
+          draftResponse: d.draft_response,
+          revisedResponse: d.revised_response,
+          finalResponse: d.final_response,
+          intent: d.intent, intentConfidence: d.intent_confidence,
+          contextSummary: d.context_summary,
+          flags,
+          status: d.status, responseTimeSeconds: d.response_time_seconds,
+          createdAt: d.created_at, approvedAt: d.approved_at, sentAt: d.sent_at,
+        };
+      }),
       pendingCount: await db('message_drafts').where({ status: 'pending' }).count('* as count').first().then(r => parseInt(r.count)),
     });
   } catch (err) { next(err); }
@@ -43,37 +122,67 @@ router.get('/', async (req, res, next) => {
 // PUT /api/admin/drafts/:id/approve — approve and send as-is
 router.put('/:id/approve', async (req, res, next) => {
   try {
-    const draft = await db('message_drafts').where({ id: req.params.id }).first();
-    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const requestedFromNumber = req.body?.fromNumber || null;
+    if (requestedFromNumber && !TWILIO_NUMBERS.findByNumber(requestedFromNumber)) {
+      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
+    }
 
-    // Get the inbound SMS to find the FROM number
-    const smsLog = draft.sms_log_id ? await db('sms_log').where({ id: draft.sms_log_id }).first() : null;
-    const toPhone = smsLog?.from_phone;
+    const claimTime = new Date();
+    const [draft] = await db('message_drafts')
+      .where({ id: req.params.id, status: 'pending' })
+      .update({
+        status: 'approved',
+        approved_by: req.technicianId,
+        approved_at: claimTime,
+      })
+      .returning('*');
+    if (!draft) {
+      const existing = await db('message_drafts').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Draft not found' });
+      return res.status(409).json({ error: 'Draft is no longer pending' });
+    }
 
-    if (!toPhone) return res.status(400).json({ error: 'Cannot determine recipient phone' });
+    const recipient = await resolveDraftRecipient(draft);
+    const toPhone = recipient.toPhone;
+    const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
-    const smsResult = await sendCustomerMessage({
-      to: toPhone,
-      body: draft.draft_response,
-      channel: 'sms',
-      audience: 'lead',
-      purpose: 'conversational',
-      customerId: draft.customer_id || undefined,
-      identityTrustLevel: draft.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-      entryPoint: 'admin_draft_approve',
-      metadata: {
-        original_message_type: 'ai_approved',
-        draft_id: draft.id,
-        adminUserId: req.technicianId,
-      },
-    });
-    if (!smsResult.sent) return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    if (!toPhone) {
+      await releaseDraftClaim(draft.id);
+      return res.status(400).json({ error: 'Cannot determine recipient phone' });
+    }
+
+    let smsResult;
+    try {
+      smsResult = await sendCustomerMessage({
+        to: toPhone,
+        body: draft.draft_response,
+        channel: 'sms',
+        audience: 'lead',
+        purpose: 'conversational',
+        customerId: recipient.customerId || undefined,
+        identityTrustLevel: recipient.identityTrustLevel,
+        entryPoint: 'admin_draft_approve',
+        metadata: {
+          original_message_type: 'ai_approved',
+          draft_id: draft.id,
+          adminUserId: req.technicianId,
+          fromNumber,
+        },
+      });
+    } catch (sendErr) {
+      await releaseDraftClaim(draft.id);
+      throw sendErr;
+    }
+    if (!smsResult.sent) {
+      await releaseDraftClaim(draft.id);
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
     await db('message_drafts').where({ id: draft.id }).update({
-      status: 'approved', final_response: draft.draft_response,
-      approved_by: req.technicianId, approved_at: new Date(), sent_at: new Date(),
+      final_response: draft.draft_response,
+      sent_at: new Date(),
       response_time_seconds: responseTime,
     });
 
@@ -86,37 +195,68 @@ router.put('/:id/revise', async (req, res, next) => {
   try {
     const { revisedResponse } = req.body;
     if (!revisedResponse) return res.status(400).json({ error: 'revisedResponse required' });
+    const requestedFromNumber = req.body?.fromNumber || null;
+    if (requestedFromNumber && !TWILIO_NUMBERS.findByNumber(requestedFromNumber)) {
+      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
+    }
 
-    const draft = await db('message_drafts').where({ id: req.params.id }).first();
-    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const claimTime = new Date();
+    const [draft] = await db('message_drafts')
+      .where({ id: req.params.id, status: 'pending' })
+      .update({
+        status: 'revised',
+        revised_response: revisedResponse,
+        final_response: revisedResponse,
+        approved_by: req.technicianId,
+        approved_at: claimTime,
+      })
+      .returning('*');
+    if (!draft) {
+      const existing = await db('message_drafts').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Draft not found' });
+      return res.status(409).json({ error: 'Draft is no longer pending' });
+    }
 
-    const smsLog = draft.sms_log_id ? await db('sms_log').where({ id: draft.sms_log_id }).first() : null;
-    const toPhone = smsLog?.from_phone;
+    const recipient = await resolveDraftRecipient(draft);
+    const toPhone = recipient.toPhone;
+    const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
-    if (!toPhone) return res.status(400).json({ error: 'Cannot determine recipient' });
+    if (!toPhone) {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      return res.status(400).json({ error: 'Cannot determine recipient' });
+    }
 
-    const smsResult = await sendCustomerMessage({
-      to: toPhone,
-      body: revisedResponse,
-      channel: 'sms',
-      audience: 'lead',
-      purpose: 'conversational',
-      customerId: draft.customer_id || undefined,
-      identityTrustLevel: draft.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-      entryPoint: 'admin_draft_revise',
-      metadata: {
-        original_message_type: 'ai_revised',
-        draft_id: draft.id,
-        adminUserId: req.technicianId,
-      },
-    });
-    if (!smsResult.sent) return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    let smsResult;
+    try {
+      smsResult = await sendCustomerMessage({
+        to: toPhone,
+        body: revisedResponse,
+        channel: 'sms',
+        audience: 'lead',
+        purpose: 'conversational',
+        customerId: recipient.customerId || undefined,
+        identityTrustLevel: recipient.identityTrustLevel,
+        entryPoint: 'admin_draft_revise',
+        metadata: {
+          original_message_type: 'ai_revised',
+          draft_id: draft.id,
+          adminUserId: req.technicianId,
+          fromNumber,
+        },
+      });
+    } catch (sendErr) {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      throw sendErr;
+    }
+    if (!smsResult.sent) {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
     await db('message_drafts').where({ id: draft.id }).update({
-      status: 'revised', revised_response: revisedResponse, final_response: revisedResponse,
-      approved_by: req.technicianId, approved_at: new Date(), sent_at: new Date(),
+      sent_at: new Date(),
       response_time_seconds: responseTime,
     });
 
@@ -156,6 +296,50 @@ router.get('/stats', async (req, res, next) => {
       under15min: parseInt(stats.under_15min || 0),
       over1hr: parseInt(stats.over_1hr || 0),
       total: parseInt(stats.total || 0),
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/drafts/:id — single draft for compose deep-links
+router.get('/:id', async (req, res, next) => {
+  try {
+    const d = await db('message_drafts')
+      .where('message_drafts.id', req.params.id)
+      .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
+      .select(
+        'message_drafts.*',
+        'customers.first_name',
+        'customers.last_name',
+        'customers.phone',
+        'customers.waveguard_tier',
+        'customers.pipeline_stage'
+      )
+      .first();
+    if (!d) return res.status(404).json({ error: 'Draft not found' });
+
+    const flags = parseFlags(d.flags);
+    res.json({
+      id: d.id,
+      smsLogId: d.sms_log_id,
+      customerId: d.customer_id,
+      customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
+      customerPhone: d.phone || null,
+      recipientPhone: flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+      tier: d.waveguard_tier,
+      stage: d.pipeline_stage,
+      inboundMessage: d.inbound_message,
+      draftResponse: d.draft_response,
+      revisedResponse: d.revised_response,
+      finalResponse: d.final_response,
+      intent: d.intent,
+      intentConfidence: d.intent_confidence,
+      contextSummary: d.context_summary,
+      flags,
+      status: d.status,
+      responseTimeSeconds: d.response_time_seconds,
+      createdAt: d.created_at,
+      approvedAt: d.approved_at,
+      sentAt: d.sent_at,
     });
   } catch (err) { next(err); }
 });

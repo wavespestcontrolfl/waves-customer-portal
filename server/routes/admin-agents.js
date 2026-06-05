@@ -65,6 +65,7 @@ const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 const ACTIVE_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 const CLOSED_LEAD_STATUSES = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
 const TASK_LIFECYCLE_STATUSES = new Set(['done', 'dismissed']);
+const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
 async function tableExists(table) {
   return db.schema.hasTable(table).catch(() => false);
@@ -93,6 +94,12 @@ function compact(value, max = 160) {
 
 function customerName(row) {
   return [row.first_name, row.last_name].filter(Boolean).join(' ').trim();
+}
+
+function firstName(row = {}) {
+  const raw = String(row.first_name || row.reviewer_name || '').trim();
+  const [first] = raw.split(/\s+/);
+  return /^[a-z][a-z'-]{1,24}$/i.test(first || '') ? first : '';
 }
 
 function actorName(req) {
@@ -148,6 +155,38 @@ function followUpDateFromPreset(preset, explicitDate) {
     candidate = addETDays(new Date(), offset);
   }
   return formatETWallDate(candidate, 9, 0);
+}
+
+function leadDraftMessage(lead, taskType) {
+  const name = firstName(lead);
+  const greeting = `Hi${name ? ` ${name}` : ''}, this is Waves Pest Control.`;
+  const service = compact(lead.service_interest || '', 42);
+  const servicePhrase = service ? ` with ${service}` : '';
+
+  if (taskType === 'missed_call_unanswered') {
+    return `${greeting} Sorry we missed your call. I can help${servicePhrase}. What is the best time today for a quick call?`;
+  }
+  if (taskType === 'estimate_viewed_not_booked') {
+    return `${greeting} I saw you viewed your estimate. Any questions I can answer, or would you like help getting scheduled?`;
+  }
+  if (taskType === 'follow_up_due') {
+    return `${greeting} Just following up on your${servicePhrase || ' pest control'} request. Can I answer questions or help get you scheduled?`;
+  }
+  return `${greeting} Thanks for reaching out${servicePhrase ? ` about${servicePhrase.replace(/^ with/, '')}` : ''}. I can help get this moving. What is the best time to talk today?`;
+}
+
+function reviewDraftMessage(review) {
+  const rating = asNumber(review.star_rating, 0);
+  const name = firstName(review);
+  const greeting = name ? `Hi ${name},` : 'Hi there,';
+
+  if (rating > 0 && rating <= 3) {
+    return `${greeting} thank you for sharing this feedback. I am sorry your experience did not meet expectations. Please call or text us so we can review the visit and make it right. - Waves Pest Control`;
+  }
+  if (review.review_text) {
+    return `${greeting} thank you for the kind review. We appreciate you choosing Waves Pest Control and are glad our team could help. - Waves Pest Control`;
+  }
+  return `${greeting} thank you for the ${rating || 5}-star review. We appreciate you choosing Waves Pest Control. - Waves Pest Control`;
 }
 
 function stableStringify(value) {
@@ -414,12 +453,21 @@ async function loadLeadTasks() {
         ? `/admin/leads?search=${encodeURIComponent(phone)}`
         : '/admin/leads';
       const actions = [
+        (phone || row.customer_id) ? {
+          type: 'mutation',
+          key: 'create_lead_draft',
+          label: 'Create draft',
+          endpoint: `/admin/agents/leads/${row.id}/draft-response`,
+          method: 'POST',
+          body: { taskType },
+          variant: 'primary',
+        } : null,
         phone ? {
           type: 'link',
-          key: 'draft_sms',
-          label: 'Draft SMS',
+          key: 'open_sms',
+          label: 'Open SMS',
           url: `/admin/communications?phone=${encodeURIComponent(phone)}&action=sms`,
-          variant: 'primary',
+          variant: 'secondary',
         } : null,
         row.status === 'new' ? {
           type: 'mutation',
@@ -677,26 +725,50 @@ async function loadReviewTasks() {
     .where(function needsReply() {
       this.whereNull('review_reply').orWhere('review_reply', 'like', '[DRAFT]%');
     })
-    .select('id', 'reviewer_name', 'star_rating', 'review_text', 'review_created_at', 'created_at')
+    .select('id', 'reviewer_name', 'star_rating', 'review_text', 'review_reply', 'review_created_at', 'created_at')
     .orderBy('review_created_at', 'desc')
     .limit(12);
 
   return {
     count: rows.length,
-    tasks: rows.map((row) => task({
-      id: `google_review:${row.id}`,
-      agentId: 'reviews',
-      title: `Reply to ${row.reviewer_name || 'Google review'}`,
-      summary: compact(row.review_text || `${row.star_rating || '?'} star review`, 180),
-      priority: asNumber(row.star_rating, 5) <= 3 ? 'high' : 'medium',
-      source: 'google_reviews',
-      sourceLabel: 'Google Reviews',
-      sourceId: row.id,
-      createdAt: row.review_created_at || row.created_at,
-      actionUrl: '/admin/reviews',
-      actionLabel: 'Open Reviews',
-      impact: row.star_rating ? `${row.star_rating} star` : null,
-    })),
+    tasks: rows.map((row) => {
+      const hasDraft = String(row.review_reply || '').trim().startsWith(DRAFT_REPLY_PREFIX);
+      return task({
+        id: `google_review:${row.id}`,
+        agentId: 'reviews',
+        title: `Reply to ${row.reviewer_name || 'Google review'}`,
+        summary: compact(row.review_text || `${row.star_rating || '?'} star review`, 180),
+        priority: asNumber(row.star_rating, 5) <= 3 ? 'high' : 'medium',
+        source: 'google_reviews',
+        sourceLabel: 'Google Reviews',
+        sourceId: row.id,
+        createdAt: row.review_created_at || row.created_at,
+        actionUrl: '/admin/reviews',
+        actionLabel: 'Open Reviews',
+        impact: row.star_rating ? `${row.star_rating} star` : null,
+        actions: [
+          {
+            type: 'mutation',
+            key: 'create_review_draft',
+            label: hasDraft ? 'Refresh draft' : 'Create draft',
+            endpoint: `/admin/agents/reviews/${row.id}/draft-response`,
+            method: 'POST',
+            variant: 'primary',
+          },
+          {
+            type: 'link',
+            key: 'open_reviews',
+            label: 'Open Reviews',
+            url: '/admin/reviews',
+            variant: 'secondary',
+          },
+        ],
+        metadata: {
+          reviewId: row.id,
+          hasDraft,
+        },
+      });
+    }),
   };
 }
 
@@ -1033,6 +1105,198 @@ router.post('/leads/:id/schedule-follow-up', async (req, res, next) => {
     }).catch(() => {});
 
     res.json({ lead: updated, action: 'schedule_follow_up', followUpAt: followUpAt.toISOString() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/leads/:id/draft-response', async (req, res, next) => {
+  try {
+    if (!(await tableExists('leads'))) return res.status(404).json({ error: 'Lead pipeline is not available' });
+    if (!(await tableExists('message_drafts'))) return res.status(404).json({ error: 'Message draft queue is not available' });
+
+    const lead = await db('leads').where('id', req.params.id).first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    if (CLOSED_LEAD_STATUSES.includes(lead.status)) {
+      return res.status(409).json({ error: 'Closed leads cannot have Agent Ops drafts created' });
+    }
+
+    const customer = lead.customer_id
+      ? await db('customers').where({ id: lead.customer_id }).select('id', 'first_name', 'last_name', 'phone').first().catch(() => null)
+      : null;
+    const recipientPhone = lead.phone || customer?.phone || null;
+    if (!recipientPhone) {
+      return res.status(409).json({ error: 'Lead needs a phone number before Agent Ops can create an SMS draft' });
+    }
+
+    const draftLead = {
+      ...lead,
+      phone: recipientPhone,
+      first_name: lead.first_name || customer?.first_name || null,
+      last_name: lead.last_name || customer?.last_name || null,
+    };
+    const taskType = String(req.body?.taskType || '').trim() || (
+      isMissedCallLead(lead) && lead.status === 'new'
+        ? 'missed_call_unanswered'
+        : lead.status === 'estimate_viewed'
+          ? 'estimate_viewed_not_booked'
+          : isPastDue(lead.next_follow_up_at)
+            ? 'follow_up_due'
+            : 'new_unanswered'
+    );
+    const draftResponse = leadDraftMessage(draftLead, taskType);
+    const name = customerName(draftLead) || 'lead';
+    const flags = {
+      source: 'agent_ops',
+      agentId: 'lead_conversion',
+      taskType,
+      leadId: lead.id,
+      phone: recipientPhone,
+      email: lead.email || null,
+      customerId: lead.customer_id || null,
+      createdBy: actorName(req),
+      noAutoSend: true,
+    };
+
+    const now = new Date();
+    const draftValues = {
+      sms_log_id: null,
+      customer_id: uuidOrNull(lead.customer_id),
+      inbound_message: [
+        `Lead: ${name}`,
+        `Phone: ${recipientPhone}`,
+        lead.email ? `Email: ${lead.email}` : null,
+        lead.service_interest ? `Interest: ${lead.service_interest}` : null,
+        `Status: ${lead.status}`,
+      ].filter(Boolean).join('\n'),
+      draft_response: draftResponse,
+      intent: 'agent_ops_lead_followup',
+      intent_confidence: 0.82,
+      context_summary: compact(`Agent Ops ${taskType} draft for ${name} (${lead.status || 'unknown'}).`, 500),
+      flags: JSON.stringify(flags),
+      status: 'pending',
+    };
+
+    const { draft, refreshed } = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`agent_ops_lead_draft:${lead.id}:${taskType}`]).catch(() => {});
+      const matches = await trx('message_drafts')
+        .where({ status: 'pending', intent: 'agent_ops_lead_followup' })
+        .whereRaw("flags ->> 'source' = ?", ['agent_ops'])
+        .whereRaw("flags ->> 'leadId' = ?", [String(lead.id)])
+        .whereRaw("flags ->> 'taskType' = ?", [taskType])
+        .select('id')
+        .orderBy('created_at', 'desc');
+
+      const [existing, ...stale] = matches;
+      if (stale.length) {
+        await trx('message_drafts').whereIn('id', stale.map((row) => row.id)).update({
+          status: 'rejected',
+          approved_by: uuidOrNull(req.technicianId),
+          approved_at: now,
+        });
+      }
+      if (existing?.id) {
+        const [updated] = await trx('message_drafts')
+          .where({ id: existing.id })
+          .update(draftValues)
+          .returning('*');
+        return { draft: updated, refreshed: true };
+      }
+
+      const [inserted] = await trx('message_drafts')
+        .insert({ ...draftValues, created_at: now })
+        .returning('*');
+      return { draft: inserted, refreshed: false };
+    });
+
+    await db('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'draft_queued',
+      description: refreshed ? 'Agent Ops refreshed a draft SMS for review.' : 'Agent Ops queued a draft SMS for review.',
+      performed_by: actorName(req),
+      metadata: JSON.stringify({
+        source: 'agent_ops',
+        draftId: draft?.id || null,
+        taskType,
+        noAutoSend: true,
+        refreshed,
+      }),
+    }).catch(() => {});
+
+    const actionParams = new URLSearchParams();
+    actionParams.set('phone', recipientPhone);
+    actionParams.set('action', 'sms');
+    if (draft?.id) actionParams.set('draftId', draft.id);
+    const actionUrl = `/admin/communications?${actionParams.toString()}`;
+
+    res.json({
+      success: true,
+      draft: {
+        id: draft?.id || null,
+        leadId: lead.id,
+        draftResponse,
+        status: 'pending',
+      },
+      actionUrl,
+      actionLabel: 'Open SMS draft',
+      message: refreshed ? 'Draft refreshed for review. Nothing was sent.' : 'Draft saved for review. Nothing was sent.',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/reviews/:id/draft-response', async (req, res, next) => {
+  try {
+    if (!(await tableExists('google_reviews'))) return res.status(404).json({ error: 'Google reviews are not available' });
+
+    const review = await db('google_reviews').where('id', req.params.id).first();
+    if (!review || review.reviewer_name === '_stats') return res.status(404).json({ error: 'Review not found' });
+
+    const existingReply = String(review.review_reply || '').trim();
+    if (existingReply && !existingReply.startsWith(DRAFT_REPLY_PREFIX)) {
+      return res.status(409).json({ error: 'This review already has a posted reply' });
+    }
+
+    const draftResponse = reviewDraftMessage(review);
+    const updated = await db('google_reviews')
+      .where('id', req.params.id)
+      .where('reviewer_name', '!=', '_stats')
+      .where(function needsRealReply() {
+        this.whereNull('review_reply').orWhere('review_reply', 'like', `${DRAFT_REPLY_PREFIX}%`);
+      })
+      .update({
+        review_reply: `${DRAFT_REPLY_PREFIX} ${draftResponse}`,
+        reply_updated_at: null,
+      })
+      .returning('id');
+    if (Array.isArray(updated) ? updated.length === 0 : updated === 0) {
+      return res.status(409).json({ error: 'This review already has a posted reply' });
+    }
+
+    await db('activity_log').insert({
+      admin_user_id: uuidOrNull(req.technicianId),
+      action: 'review_reply_draft_created',
+      description: `Agent Ops saved a draft reply for ${review.star_rating}-star review from ${review.reviewer_name || 'Google reviewer'}.`,
+      metadata: JSON.stringify({
+        source: 'agent_ops',
+        reviewId: review.id,
+        noAutoPost: true,
+      }),
+    }).catch(() => {});
+
+    res.json({
+      success: true,
+      review: {
+        id: review.id,
+        reviewerName: review.reviewer_name,
+        starRating: review.star_rating,
+        draftReply: draftResponse,
+      },
+      actionUrl: '/admin/reviews',
+      actionLabel: 'Open review draft',
+      message: 'Review reply draft saved. Nothing was posted to Google.',
+    });
   } catch (err) {
     next(err);
   }
