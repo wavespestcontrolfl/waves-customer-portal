@@ -78,7 +78,7 @@
 //   the operator to review before any further charges fire.
 import { COLORS, FONTS } from '../theme-brand';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
 import {
   WavesShell,
@@ -92,6 +92,16 @@ import { computeCardTotal } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+function shouldDefaultSaveCard(search = '') {
+  try {
+    const params = new URLSearchParams(search);
+    const raw = params.get('saveCard') || params.get('save_card') || params.get('save-card');
+    return /^(1|true|yes|default)$/i.test(String(raw || ''));
+  } catch {
+    return false;
+  }
+}
 
 // ── Stripe SDK loader (loads once, caches) ─────────────────────────
 let stripePromise = null;
@@ -920,13 +930,15 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 export default function PayPageV2() {
   const { token } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const saveCardDefault = shouldDefaultSaveCard(location.search);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
-  const [saveCard, setSaveCard] = useState(false);
+  const [saveCard, setSaveCard] = useState(saveCardDefault);
 
   useEffect(() => {
     fetch(`${API_BASE}/pay/${token}`)
@@ -970,7 +982,11 @@ export default function PayPageV2() {
       return;
     }
     setPaymentState('setup');
-    fetch(`${API_BASE}/pay/${token}/setup`, { method: 'POST' })
+    fetch(`${API_BASE}/pay/${token}/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ saveCard: saveCardDefault }),
+    })
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
         if (!r.ok) throw serverReportedError(setup.error || 'Failed to initialize payment');
@@ -996,7 +1012,11 @@ export default function PayPageV2() {
           }));
         }
       });
-  }, [data, token]);
+  }, [data, token, saveCardDefault]);
+
+  useEffect(() => {
+    setSaveCard(saveCardDefault);
+  }, [saveCardDefault, token, location.search]);
 
   // The server replaced the PaymentIntent for a tender switch (the old PI had
   // an incompatible PaymentMethod attached). Swap in the fresh clientSecret —

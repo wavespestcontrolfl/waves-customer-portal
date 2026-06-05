@@ -586,8 +586,13 @@ const EstimateConverter = {
       if (draftInvoiceId && autoSendInvoice && canAutoSendDraftInvoice({ billingTerm, annualPrepayTermId })) {
         try {
           const InvoiceService = require('./invoice');
-          invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(draftInvoiceId);
-          if (invoiceDelivery?.payUrl) draftInvoicePayUrl = invoiceDelivery.payUrl;
+          invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(draftInvoiceId, {
+            payUrlParams: {
+              source: 'estimate',
+              saveCard: '1',
+              billingTerm,
+            },
+          });
         } catch (deliveryErr) {
           invoiceDelivery = {
             ok: false,

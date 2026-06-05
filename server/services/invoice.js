@@ -19,6 +19,20 @@ const SEND_CLAIMABLE_STATUSES = [
 ];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
 
+function appendPayUrlParams(url, params = null) {
+  if (!params || typeof params !== "object") return url;
+  try {
+    const parsed = new URL(url);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === "") return;
+      parsed.searchParams.set(key, String(value));
+    });
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function generateToken() {
   // 32 random bytes → 64 hex chars. Unguessable. Legacy short tokens still resolve via DB lookup.
   return crypto.randomBytes(32).toString("hex");
@@ -1050,7 +1064,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null } = {}) {
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { invoice, previousStatus, claimed } = claim;
 
@@ -1063,7 +1077,7 @@ const InvoiceService = {
     }
 
     const domain = publicPortalUrl();
-    const longPayUrl = `${domain}/pay/${invoice.token}`;
+    const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, payUrlParams);
     const payUrl = await shortenOrPassthrough(longPayUrl, {
       kind: "invoice",
       entityType: "invoices",
@@ -1225,6 +1239,7 @@ const InvoiceService = {
       reviewDelayMinutes = null,
       allowClaimed = false,
       emailRecipientOverride = null,
+      payUrlParams = null,
     } = {},
   ) {
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
@@ -1237,6 +1252,7 @@ const InvoiceService = {
     try {
       const smsResult = await this.sendViaSMS(invoiceId, {
         allowClaimed: true,
+        payUrlParams,
       });
       if (smsResult?.payUrl) payUrl = smsResult.payUrl;
       if (smsResult?.sent) {
@@ -1253,6 +1269,7 @@ const InvoiceService = {
     try {
       const r = await sendInvoiceEmail(invoiceId, {
         recipientOverride: emailRecipientOverride,
+        payUrlParams,
       });
       if (r?.ok) email.ok = true;
       else if (r?.error) email.error = r.error;

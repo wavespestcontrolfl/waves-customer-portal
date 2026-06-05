@@ -72,6 +72,20 @@ function publicRecipient(recipient = {}) {
   };
 }
 
+function appendPayUrlParams(url, params = null) {
+  if (!params || typeof params !== 'object') return url;
+  try {
+    const parsed = new URL(url);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === '') return;
+      parsed.searchParams.set(key, String(value));
+    });
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function invoiceRecipientFor(customer, prefs, recipientOverride) {
   const overrideEmail = cleanEmail(recipientOverride?.email);
   if (overrideEmail) {
@@ -104,7 +118,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const recipientPayload = publicRecipient(recipient);
 
   const domain = publicPortalUrl();
-  const longPayUrl = `${domain}/pay/${invoice.token}`;
+  const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, options.payUrlParams);
   const payUrl = await shortenOrPassthrough(longPayUrl, {
     kind: 'invoice',
     entityType: 'invoices',

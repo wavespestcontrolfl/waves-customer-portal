@@ -998,9 +998,9 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
     : 'Confirm booking';
   const confirmSub = usingExistingAppointment
     ? recurringPayPerApplication
-      ? 'Your existing appointment stays scheduled. Next step creates your invoice and opens secure payment.'
+      ? 'Your existing appointment stays scheduled. Next step creates your invoice and makes secure payment available.'
       : paymentPreference === 'prepay_annual'
-        ? 'Your existing appointment stays scheduled. Annual prepay invoice opens for secure payment after confirmation.'
+        ? 'Your existing appointment stays scheduled. Annual prepay invoice is available for optional payment after confirmation.'
         : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
     : '';
   return (
@@ -1057,12 +1057,26 @@ function SuccessCard({ acceptResult }) {
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
   const invoiceLinkDelivered = !!acceptResult?.invoiceLinkDelivered;
+  const reservationCommitted = acceptResult?.reservationCommitted === true;
+  const isAnnualPrepay = acceptResult?.billingTerm === 'prepay_annual';
+  const isOneTimeInvoice = acceptResult?.serviceMode === 'one_time';
   const prepayInvoiceAmount = Number(acceptResult?.prepayInvoiceAmount);
   const prepayAmountText = Number.isFinite(prepayInvoiceAmount) && prepayInvoiceAmount > 0
     ? ` for ${fmtMoney(prepayInvoiceAmount)}`
     : '';
 
   if (nextStep === 'pay_invoice') {
+    const title = reservationCommitted
+      ? 'Your appointment is booked.'
+      : (invoiceLinkDelivered ? 'Thanks — your invoice is on the way.' : 'Thanks — your estimate is approved.');
+    const invoiceLabel = isAnnualPrepay
+      ? 'annual prepay invoice'
+      : (isOneTimeInvoice ? 'one-time service invoice' : 'setup + first application invoice');
+    const payNowLabel = isOneTimeInvoice ? 'Pay invoice' : 'Pay now and save card';
+    const serviceProgressLabel = reservationCommitted ? 'Your appointment' : 'Your service request';
+    const deferredPaymentCopy = invoicePayUrl || invoiceLinkDelivered
+      ? `${serviceProgressLabel} is not held up by payment, and you can use the invoice link later.`
+      : `${serviceProgressLabel} is not held up by payment.`;
     return (
       <div style={{
         background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
@@ -1070,14 +1084,16 @@ function SuccessCard({ acceptResult }) {
         marginBottom: 16,
       }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
-          {invoiceLinkDelivered ? 'Thanks — your invoice is on the way.' : 'Thanks — your estimate is approved.'}
+          {title}
         </div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
-        {invoiceLinkDelivered
-          ? 'Use the invoice pay link we sent to complete payment. Your service request has been received and our team will confirm the schedule.'
-          : (invoicePayUrl
-              ? 'Your invoice is ready. Continue to payment to finish setup.'
-              : 'Our team will follow up with the invoice details. Your service request has been received and our team will confirm the schedule.')}
+        {invoicePayUrl
+          ? (isOneTimeInvoice
+              ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay online.`
+              : `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay now and save a card for future Waves payments.`)
+          : invoiceLinkDelivered
+            ? `Use the ${invoiceLabel} link we sent whenever you are ready. Payment is optional right now.`
+            : `Our team will follow up with the ${invoiceLabel} details. Payment is optional right now.`}
       </div>
       {invoicePayUrl ? (
         <a
@@ -1087,8 +1103,11 @@ function SuccessCard({ acceptResult }) {
             background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
             borderRadius: 12, fontWeight: 600, fontSize: 15,
           }}
-        >Pay invoice</a>
+        >{payNowLabel}</a>
       ) : null}
+      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.45 }}>
+        {deferredPaymentCopy}
+      </div>
     </div>
     );
   }
@@ -1584,10 +1603,6 @@ export default function EstimateViewPage() {
       }
       const body = await r.json();
       setAcceptResult(body);
-      if (body?.nextStep === 'pay_invoice' && body.invoicePayUrl) {
-        window.location.href = body.invoicePayUrl;
-        return;
-      }
       setCtaPhase('success');
       setReservation(null);
     } catch (err) {
