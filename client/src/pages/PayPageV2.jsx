@@ -1015,8 +1015,8 @@ export default function PayPageV2() {
   }, [data, token, saveCardDefault]);
 
   useEffect(() => {
-    if (saveCardDefault) setSaveCard(true);
-  }, [saveCardDefault]);
+    setSaveCard(saveCardDefault);
+  }, [saveCardDefault, token, location.search]);
 
   // The server replaced the PaymentIntent for a tender switch (the old PI had
   // an incompatible PaymentMethod attached). Swap in the fresh clientSecret —
