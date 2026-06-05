@@ -2005,6 +2005,8 @@ export default function Customer360ProfileV2({
     return (
       status !== "cancelled" &&
       status !== "completed" &&
+      status !== "rescheduled" &&
+      status !== "skipped" &&
       scheduledDate >= today
     );
   });

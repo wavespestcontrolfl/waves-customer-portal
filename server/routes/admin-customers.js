@@ -1466,7 +1466,7 @@ router.get('/:id', async (req, res, next) => {
       db('scheduled_services')
         .where({ customer_id: c.id })
         .where('scheduled_date', '>=', etDateString())
-        .whereNotIn('status', ['cancelled', 'completed'])
+        .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped'])
         .orderBy('scheduled_date')
         .orderBy('window_start')
         .limit(20),
