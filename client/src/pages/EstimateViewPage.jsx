@@ -1059,6 +1059,7 @@ function SuccessCard({ acceptResult }) {
   const invoiceLinkDelivered = !!acceptResult?.invoiceLinkDelivered;
   const reservationCommitted = acceptResult?.reservationCommitted === true;
   const isAnnualPrepay = acceptResult?.billingTerm === 'prepay_annual';
+  const isOneTimeInvoice = acceptResult?.serviceMode === 'one_time';
   const prepayInvoiceAmount = Number(acceptResult?.prepayInvoiceAmount);
   const prepayAmountText = Number.isFinite(prepayInvoiceAmount) && prepayInvoiceAmount > 0
     ? ` for ${fmtMoney(prepayInvoiceAmount)}`
@@ -1068,7 +1069,10 @@ function SuccessCard({ acceptResult }) {
     const title = reservationCommitted
       ? 'Your appointment is booked.'
       : (invoiceLinkDelivered ? 'Thanks — your invoice is on the way.' : 'Thanks — your estimate is approved.');
-    const invoiceLabel = isAnnualPrepay ? 'annual prepay invoice' : 'setup + first application invoice';
+    const invoiceLabel = isAnnualPrepay
+      ? 'annual prepay invoice'
+      : (isOneTimeInvoice ? 'one-time service invoice' : 'setup + first application invoice');
+    const payNowLabel = isOneTimeInvoice ? 'Pay invoice' : 'Pay now and save card';
     const serviceProgressLabel = reservationCommitted ? 'Your appointment' : 'Your service request';
     const deferredPaymentCopy = invoicePayUrl || invoiceLinkDelivered
       ? `${serviceProgressLabel} is not held up by payment, and you can use the invoice link later.`
@@ -1084,7 +1088,9 @@ function SuccessCard({ acceptResult }) {
         </div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
         {invoicePayUrl
-          ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay now and save a card for future Waves payments.`
+          ? (isOneTimeInvoice
+              ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay online.`
+              : `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay now and save a card for future Waves payments.`)
           : invoiceLinkDelivered
             ? `Use the ${invoiceLabel} link we sent whenever you are ready. Payment is optional right now.`
             : `Our team will follow up with the ${invoiceLabel} details. Payment is optional right now.`}
@@ -1097,7 +1103,7 @@ function SuccessCard({ acceptResult }) {
             background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
             borderRadius: 12, fontWeight: 600, fontSize: 15,
           }}
-        >Pay now and save card</a>
+        >{payNowLabel}</a>
       ) : null}
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.45 }}>
         {deferredPaymentCopy}

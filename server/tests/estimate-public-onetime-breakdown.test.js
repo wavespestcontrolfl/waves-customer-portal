@@ -4829,7 +4829,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceLinkDelivered: false,
       invoiceId: 'inv-123',
       invoiceAmount: 249,
-      invoicePayUrl: '/pay/token-123?source=estimate&saveCard=1&billingTerm=standard',
+      invoicePayUrl: '/pay/token-123?source=estimate&billingTerm=standard',
     }));
   });
 

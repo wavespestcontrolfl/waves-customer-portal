@@ -4433,9 +4433,12 @@ ${shellQuestionsBar()}
     if (payArea) payArea.style.display = 'none';
     if (setupCard) setupCard.style.display = 'none';
     if (!reviewArea) return;
+    const isOneTimeInvoice = data && data.serviceMode === 'one_time';
     const invoiceName = data && data.billingTerm === 'prepay_annual'
       ? 'annual prepay invoice'
-      : 'setup + first application invoice';
+      : (isOneTimeInvoice ? 'one-time service invoice' : 'setup + first application invoice');
+    const payTitle = isOneTimeInvoice ? 'Pay invoice' : 'Pay now and save card';
+    const paySub = 'Your ' + invoiceName + ' is ready. Payment is optional right now.';
     reviewArea.style.display = '';
     reviewArea.innerHTML = '';
 
@@ -4449,8 +4452,8 @@ ${shellQuestionsBar()}
     const payLink = document.createElement('a');
     payLink.className = 'pay-pref-btn primary';
     payLink.href = data.invoicePayUrl;
-    payLink.innerHTML = '<span class="pay-pref-title">Pay now and save card</span>'
-      + '<span class="pay-pref-sub">Your ' + invoiceName + ' is ready. Payment is optional right now.</span>';
+    payLink.innerHTML = '<span class="pay-pref-title">' + payTitle + '</span>'
+      + '<span class="pay-pref-sub">' + paySub + '</span>';
 
     const doneBtn = document.createElement('button');
     doneBtn.type = 'button';
@@ -5576,8 +5579,12 @@ router.put('/:token/accept', async (req, res, next) => {
           invoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
           if (invoiceId) {
             try {
-              const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId);
-              if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
+              const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
+                payUrlParams: estimateInvoicePayUrlParams({
+                  billingTerm,
+                  saveCard: !treatAsOneTime,
+                }),
+              });
               if (delivery?.ok) {
                 invoiceLinkDelivered = true;
               } else {
@@ -6941,7 +6948,10 @@ function buildAcceptSuccessPayload({
   else if (!treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
   else if (onboardingToken) nextStep = 'complete_onboarding';
 
-  const decoratedInvoicePayUrl = decorateEstimateInvoicePayUrl(invoicePayUrl, { billingTerm });
+  const decoratedInvoicePayUrl = decorateEstimateInvoicePayUrl(invoicePayUrl, {
+    billingTerm,
+    saveCard: !treatAsOneTime,
+  });
 
   return {
     success: true,
@@ -6960,24 +6970,33 @@ function buildAcceptSuccessPayload({
   };
 }
 
-function decorateEstimateInvoicePayUrl(rawUrl, { billingTerm = 'standard' } = {}) {
+function decorateEstimateInvoicePayUrl(rawUrl, { billingTerm = 'standard', saveCard = true } = {}) {
   if (!rawUrl) return null;
   const value = String(rawUrl);
   try {
     const isAbsolute = /^https?:\/\//i.test(value);
     const parsed = new URL(value, 'https://portal.wavespestcontrol.com');
-    parsed.searchParams.set('source', 'estimate');
-    parsed.searchParams.set('saveCard', '1');
-    if (billingTerm) parsed.searchParams.set('billingTerm', billingTerm);
+    const params = estimateInvoicePayUrlParams({ billingTerm, saveCard });
+    Object.entries(params).forEach(([key, paramValue]) => parsed.searchParams.set(key, paramValue));
+    if (!saveCard) parsed.searchParams.delete('saveCard');
     return isAbsolute
       ? parsed.toString()
       : `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
     const [beforeHash, hash = ''] = value.split('#');
     const joiner = beforeHash.includes('?') ? '&' : '?';
-    const params = `source=estimate&saveCard=1&billingTerm=${encodeURIComponent(billingTerm || 'standard')}`;
-    return `${beforeHash}${joiner}${params}${hash ? `#${hash}` : ''}`;
+    const params = new URLSearchParams(estimateInvoicePayUrlParams({ billingTerm, saveCard }));
+    return `${beforeHash}${joiner}${params.toString()}${hash ? `#${hash}` : ''}`;
   }
+}
+
+function estimateInvoicePayUrlParams({ billingTerm = 'standard', saveCard = true } = {}) {
+  const params = {
+    source: 'estimate',
+  };
+  if (saveCard) params.saveCard = '1';
+  if (billingTerm) params.billingTerm = String(billingTerm);
+  return params;
 }
 
 function buildAcceptOfficeFallback({

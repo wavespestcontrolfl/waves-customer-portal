@@ -18,6 +18,8 @@ jest.mock('../services/short-url', () => ({
 const { _private, sendInvoiceEmail } = require('../services/invoice-email');
 const db = require('../models/db');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
+const sendgrid = require('../services/sendgrid-mail');
+const { shortenOrPassthrough } = require('../services/short-url');
 
 const customer = {
   id: 'cust-1',
@@ -31,6 +33,16 @@ function query(result) {
   const chain = {
     where: jest.fn(() => chain),
     select: jest.fn(() => chain),
+    first: jest.fn(() => Promise.resolve(result)),
+    catch: jest.fn((handler) => Promise.resolve(result).catch(handler)),
+  };
+  return chain;
+}
+
+function countQuery(result) {
+  const chain = {
+    where: jest.fn(() => chain),
+    count: jest.fn(() => chain),
     first: jest.fn(() => Promise.resolve(result)),
     catch: jest.fn((handler) => Promise.resolve(result).catch(handler)),
   };
@@ -100,5 +112,58 @@ describe('invoice email recipient resolution', () => {
       error: 'Customer not found',
     });
     expect(buildInvoicePDFBuffer).not.toHaveBeenCalled();
+  });
+
+  test('applies optional pay URL params before shortening invoice email links', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(false);
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/inv123');
+
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        return query({
+          id: 'invoice-1',
+          customer_id: 'cust-1',
+          invoice_number: 'INV-1',
+          token: 'token-1',
+          total: 249,
+          line_items: [],
+        });
+      }
+      if (table === 'customers') {
+        return query({ ...customer, id: 'cust-1' });
+      }
+      if (table === 'notification_prefs') {
+        return query({ billing_email: 'billing@example.com', billing_contact_name: 'Billing' });
+      }
+      if (table === 'invoice_attachments') {
+        return countQuery({ count: 0 });
+      }
+      return query(null);
+    });
+
+    await sendInvoiceEmail('invoice-1', {
+      payUrlParams: {
+        source: 'estimate',
+        saveCard: '1',
+        billingTerm: 'prepay_annual',
+      },
+    });
+
+    expect(shortenOrPassthrough).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        kind: 'invoice',
+        entityType: 'invoices',
+        entityId: 'invoice-1',
+        customerId: 'cust-1',
+      }),
+    );
+    const [shortenTarget] = shortenOrPassthrough.mock.calls[0];
+    const parsed = new URL(shortenTarget);
+    expect(parsed.pathname).toBe('/pay/token-1');
+    expect(parsed.searchParams.get('source')).toBe('estimate');
+    expect(parsed.searchParams.get('saveCard')).toBe('1');
+    expect(parsed.searchParams.get('billingTerm')).toBe('prepay_annual');
   });
 });
