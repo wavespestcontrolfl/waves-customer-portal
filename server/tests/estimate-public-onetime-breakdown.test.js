@@ -2121,7 +2121,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('id="payment-setup-card"');
     expect(html).toContain('Pay per application');
     expect(html).toContain('Annual prepay');
-    expect(html).toContain('We send the invoice automatically and open secure payment.');
+    expect(html).toContain('We send the invoice automatically and make secure payment available.');
     expect(html).toContain('After confirmation, your annual prepay invoice totals');
     expect(html).toContain('id="payment-setup-summary"');
     expect(html).toContain('id="change-payment-setup-btn"');
@@ -3834,7 +3834,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Ready to start lawn care?');
     expect(html).toContain('Let&#39;s get your lawn on the schedule.');
     expect(html).toContain('Confirm invoice');
-    expect(html).toContain('next step creates your invoice and opens secure payment');
+    expect(html).toContain('next step creates your invoice and makes secure payment available');
     expect(html).not.toContain('Confirm and set up billing');
     expect(html).not.toContain('pay-after-visit billing');
     expect(html).toContain('/day to stop lawn pests before they turn green grass brown.');
@@ -3856,7 +3856,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
     expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 660;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
-    expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will open for secure payment after confirmation.");
+    expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be available for optional payment after confirmation.");
     expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
     expect(html).not.toContain('How billing works');
     expect(html).not.toContain('For comparison, your lawn care plan averages');
@@ -4829,7 +4829,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceLinkDelivered: false,
       invoiceId: 'inv-123',
       invoiceAmount: 249,
-      invoicePayUrl: '/pay/token-123',
+      invoicePayUrl: '/pay/token-123?source=estimate&saveCard=1&billingTerm=standard',
     }));
   });
 
@@ -4847,7 +4847,7 @@ describe('public estimate one-time breakdown', () => {
       nextStep: 'pay_invoice',
       serviceMode: 'recurring',
       onboardingToken: null,
-      invoicePayUrl: '/pay/annual-token',
+      invoicePayUrl: '/pay/annual-token?source=estimate&saveCard=1&billingTerm=prepay_annual',
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
     }));
@@ -5151,7 +5151,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoiceLinkDelivered: true,
       invoiceId: 'inv-123',
-      invoicePayUrl: '/pay/inv-123',
+      invoicePayUrl: '/pay/inv-123?source=estimate&saveCard=1&billingTerm=standard',
     }));
   });
 
@@ -5228,7 +5228,7 @@ describe('public estimate one-time breakdown', () => {
       annualPrepayAmount: 660,
       invoiceMode: true,
       invoicePayUrl: '/pay/annual-token',
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660. Invoice created; customer redirected to pay page.');
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660. Invoice created; optional pay link available.');
 
     expect(buildAcceptOfficeFallback({
       customerName: null,
@@ -5237,7 +5237,7 @@ describe('public estimate one-time breakdown', () => {
       monthlyTotal: 89,
       invoiceMode: true,
       invoicePayUrl: '/pay/setup-token',
-    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Setup + first application invoice created; customer redirected to pay page.');
+    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Setup + first application invoice created; optional pay link available.');
   });
 
   test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {
@@ -5276,7 +5276,7 @@ describe('public estimate one-time breakdown', () => {
     })).toEqual(expect.objectContaining({
       adminTitle: 'Estimate accepted: Jane Doe',
       adminBody: 'Gold WaveGuard $89/mo approved. Invoice pay link sent.',
-      customerBody: 'Your Gold WaveGuard plan is approved. Use the invoice pay link to complete payment.',
+      customerBody: 'Your Gold WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.',
       customerLink: '/pay/gold-token',
     }));
 
@@ -5289,8 +5289,8 @@ describe('public estimate one-time breakdown', () => {
       invoicePayUrl: '/pay/annual-token',
     })).toEqual(expect.objectContaining({
       adminTitle: 'Estimate accepted: Jane Doe',
-      adminBody: 'Bronze WaveGuard annual prepay $660 approved. Invoice created; customer redirected to pay page.',
-      customerBody: 'Your Bronze WaveGuard plan is approved. Use the invoice pay link to complete payment.',
+      adminBody: 'Bronze WaveGuard annual prepay $660 approved. Invoice created; optional pay link available.',
+      customerBody: 'Your Bronze WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.',
       customerLink: '/pay/annual-token',
     }));
   });
@@ -5306,7 +5306,7 @@ describe('public estimate one-time breakdown', () => {
       invoicePayUrl: '/pay/rodent-token',
     })).toEqual(expect.objectContaining({
       adminBody: 'Rodent Service approved. Invoice pay link is being sent.',
-      customerBody: 'Your Rodent Service estimate is approved. Use the invoice pay link we sent to complete payment.',
+      customerBody: 'Your Rodent Service estimate is approved. Use the invoice pay link if you want to pay now, or pay later.',
       customerLink: '/pay/rodent-token',
     }));
 
