@@ -310,6 +310,7 @@ export default function AgentOpsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [noticeAction, setNoticeAction] = useState(null);
   const [pendingAction, setPendingAction] = useState("");
   const [activeAgent, setActiveAgent] = useState("all");
 
@@ -351,12 +352,14 @@ export default function AgentOpsPage() {
     setPendingAction(key);
     setError("");
     setNotice("");
+    setNoticeAction(null);
     try {
-      await adminFetch(action.endpoint, {
+      const result = await adminFetch(action.endpoint, {
         method: action.method || "POST",
         body: JSON.stringify(body),
       });
-      setNotice(`${action.label} complete.`);
+      setNotice(result?.message || `${action.label} complete.`);
+      setNoticeAction(result?.actionUrl ? { url: result.actionUrl, label: result.actionLabel || "Open" } : null);
       await load();
     } catch (err) {
       setError(err.message || `${action.label} failed.`);
@@ -399,8 +402,13 @@ export default function AgentOpsPage() {
           </div>
         )}
         {notice && (
-          <div style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 750 }}>
-            {notice}
+          <div style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 750, display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+            <span>{notice}</span>
+            {noticeAction?.url && (
+              <Link to={noticeAction.url} style={{ color: D.green, textDecoration: "underline", whiteSpace: "nowrap" }}>
+                {noticeAction.label}
+              </Link>
+            )}
           </div>
         )}
 

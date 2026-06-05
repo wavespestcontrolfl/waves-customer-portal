@@ -12,6 +12,14 @@ const {
 
 router.use(adminAuthenticate, requireAdmin);
 
+const DRAFT_REPLY_PREFIX = '[DRAFT]';
+
+function whereNeedsRealReviewReply(qb, column = 'review_reply') {
+  qb.where(function needsRealReply() {
+    this.whereNull(column).orWhere(column, 'like', `${DRAFT_REPLY_PREFIX}%`);
+  });
+}
+
 // Per-user response cache (60s) for the read-only KPI panels. The underlying
 // SQL aggregates revenue/AR/MRR/attribution windows that don't shift inside a
 // minute, but the dashboard remounts fan out 11 of them at once — a tab
@@ -188,14 +196,19 @@ router.get('/', dashboardCache, async (req, res, next) => {
             }
           }
           if (totalFromPlaces > 0) {
-            const unresponded = await db('google_reviews').where('reviewer_name', '!=', '_stats').whereNull('review_reply').whereNotNull('review_text').count('* as c').first();
+            const unresponded = await db('google_reviews')
+              .where('reviewer_name', '!=', '_stats')
+              .whereNotNull('review_text')
+              .modify(whereNeedsRealReviewReply)
+              .count('* as c')
+              .first();
             return { total: totalFromPlaces, avg_rating: ratingCount > 0 ? (ratingSum / ratingCount).toFixed(1) : '5.0', unresponded: parseInt(unresponded?.c || 0) };
           }
           // Fallback to actual review rows
           return await db('google_reviews').where('reviewer_name', '!=', '_stats').select(
             db.raw('COUNT(*) as total'),
             db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
-            db.raw("COUNT(*) FILTER (WHERE review_reply IS NULL AND review_text IS NOT NULL) as unresponded")
+            db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%')) as unresponded")
           ).first();
         } catch (err) {
           logger.error(`[admin-dashboard] google_reviews query failed: ${err.message}`);

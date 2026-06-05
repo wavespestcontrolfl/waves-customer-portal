@@ -12,6 +12,14 @@ function today() { return etDateString(); }
 function daysAgo(n) { return etDateString(addETDays(new Date(), -n)); }
 function mondayThisWeek() { return etWeekStart(); }
 
+const DRAFT_REPLY_PREFIX = '[DRAFT]';
+
+function whereNeedsRealReviewReply(qb, column = 'review_reply') {
+  qb.where(function needsRealReply() {
+    this.whereNull(column).orWhere(column, 'like', `${DRAFT_REPLY_PREFIX}%`);
+  });
+}
+
 async function executeBITool(toolName, input) {
   switch (toolName) {
 
@@ -182,7 +190,7 @@ async function executeBITool(toolName, input) {
           } catch { return { total: 0, rating: '0' }; }
         })(),
         db('google_reviews').where('reviewer_name', '!=', '_stats').where('created_at', '>=', weekAgo).count('* as count').first(),
-        db('google_reviews').where('reviewer_name', '!=', '_stats').whereNull('review_reply').whereNotNull('review_text')
+        db('google_reviews').where('reviewer_name', '!=', '_stats').whereNotNull('review_text').modify(whereNeedsRealReviewReply)
           .select('reviewer_name', 'star_rating').limit(5),
       ]);
 
@@ -275,7 +283,8 @@ async function executeBITool(toolName, input) {
       // Unresponded reviews > 48 hours
       try {
         const old = await db('google_reviews').where('reviewer_name', '!=', '_stats')
-          .whereNull('review_reply').whereNotNull('review_text')
+          .whereNotNull('review_text')
+          .modify(whereNeedsRealReviewReply)
           .where('created_at', '<', new Date(Date.now() - 48 * 3600000))
           .count('* as count').first();
         if (parseInt(old?.count || 0) > 0) anomalies.push({ type: 'reviews', severity: 'warning', detail: `${old.count} review(s) unresponded >48 hours` });
