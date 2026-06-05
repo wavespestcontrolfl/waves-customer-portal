@@ -417,6 +417,50 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   };
 }
 
+function mapCustomerListRow(c) {
+  return {
+    id: c.id,
+    firstName: c.first_name,
+    lastName: c.last_name,
+    accountId: c.account_id,
+    profileLabel: c.profile_label,
+    isPrimaryProfile: !!c.is_primary_profile,
+    email: c.email,
+    phone: c.phone,
+    city: c.city,
+    address: `${c.address_line1 || ''}, ${c.city || ''}, ${c.state || ''} ${c.zip || ''}`.trim(),
+    tier: c.waveguard_tier,
+    monthlyRate: parseFloat(c.monthly_rate || 0),
+    memberSince: c.member_since,
+    active: c.active,
+    pipelineStage: c.pipeline_stage,
+    leadScore: c.lead_score,
+    leadSource: c.lead_source,
+    leadSourceDetail: c.lead_source_detail,
+    landingPageUrl: c.landing_page_url,
+    companyName: c.company_name,
+    propertyType: c.property_type,
+    serviceContactName: c.service_contact_name,
+    serviceContactPhone: c.service_contact_phone,
+    serviceContactEmail: c.service_contact_email,
+    lastContactDate: c.last_contact_date,
+    lastContactType: c.last_contact_type,
+    nextFollowUp: c.next_follow_up_date,
+    lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
+    totalServices: parseInt(c.total_services || c.services_count || 0),
+    lastServiceDate: c.last_service_date,
+    nextServiceDate: c.next_service_date,
+    serviceTypes: c.service_types || '',
+    serviceCount: parseInt(c.service_type_count || 0),
+    lastRating: c.last_rating != null ? parseInt(c.last_rating) : null,
+    tags: (c.tags_str || '').split(',').filter(Boolean),
+    onboardingComplete: c.onboarding_complete,
+    balanceOwed: parseFloat(c.balance_owed || 0),
+    healthScore: c.health_score != null ? parseInt(c.health_score) : null,
+    cardsOnFile: parseInt(c.cards_on_file || 0),
+  };
+}
+
 function customerSearchTerms(value) {
   return String(value || '')
     .trim()
@@ -954,32 +998,7 @@ router.get('/', async (req, res, next) => {
     const allAreas = await db('customers').whereNull('deleted_at').select('city').whereNotNull('city').where('city', '!=', '').groupBy('city').orderBy('city');
 
     res.json({
-      customers: customers.map(c => ({
-        id: c.id, firstName: c.first_name, lastName: c.last_name,
-        accountId: c.account_id, profileLabel: c.profile_label,
-        isPrimaryProfile: !!c.is_primary_profile,
-        email: c.email, phone: c.phone, city: c.city,
-        address: `${c.address_line1 || ''}, ${c.city || ''}, ${c.state || ''} ${c.zip || ''}`.trim(),
-        tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
-        memberSince: c.member_since, active: c.active,
-        pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
-        leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
-        landingPageUrl: c.landing_page_url, companyName: c.company_name,
-        propertyType: c.property_type,
-        lastContactDate: c.last_contact_date, lastContactType: c.last_contact_type,
-        nextFollowUp: c.next_follow_up_date,
-        lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
-        totalServices: parseInt(c.total_services || c.services_count || 0),
-        lastServiceDate: c.last_service_date, nextServiceDate: c.next_service_date,
-        serviceTypes: c.service_types || '',
-        serviceCount: parseInt(c.service_type_count || 0),
-        lastRating: c.last_rating != null ? parseInt(c.last_rating) : null,
-        tags: (c.tags_str || '').split(',').filter(Boolean),
-        onboardingComplete: c.onboarding_complete,
-        balanceOwed: parseFloat(c.balance_owed || 0),
-        healthScore: c.health_score != null ? parseInt(c.health_score) : null,
-        cardsOnFile: parseInt(c.cards_on_file || 0),
-      })),
+      customers: customers.map(mapCustomerListRow),
       total: totalCount, page, limit,
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
       pipelineCounts: pipelineMap,
@@ -1430,7 +1449,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -1444,6 +1463,13 @@ router.get('/:id', async (req, res, next) => {
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
+      db('scheduled_services')
+        .where({ customer_id: c.id })
+        .where('scheduled_date', '>=', etDateString())
+        .whereNotIn('status', ['cancelled', 'completed'])
+        .orderBy('scheduled_date')
+        .orderBy('window_start')
+        .limit(20),
       db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
       latestHealthScoreForCustomer(c.id),
       db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] invoices: ${e.message}`); return []; }),
@@ -1594,7 +1620,7 @@ router.get('/:id', async (req, res, next) => {
         isPrimaryProfile: !!p.is_primary_profile,
       })),
       tags: tags.map(t => t.tag),
-      interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
+      interactions, preferences: prefs, services, estimates, payments, scheduled, upcomingScheduled, smsLog,
       healthScore: healthScore || null,
       invoices: mappedInvoices,
       cards: cards || [],
@@ -2141,6 +2167,7 @@ router._private = {
   hasMembership,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
   scheduleLinesFromEstimate,

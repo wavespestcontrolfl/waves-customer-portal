@@ -145,6 +145,26 @@ function fmtDate(d) {
   });
 }
 
+function dateInputValue(value) {
+  if (!value) return "";
+  const raw = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function todayDateInput() {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function fmtCurrency(v) {
   return "$" + parseFloat(v || 0).toFixed(2);
 }
@@ -1896,6 +1916,7 @@ export default function Customer360ProfileV2({
   const services = data.services || [];
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
+  const upcomingScheduled = data.upcomingScheduled || scheduled;
   const accountProperties = data.accountProperties || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || annualPrepayTerms[0] || null;
@@ -1977,12 +1998,16 @@ export default function Customer360ProfileV2({
       0,
     );
   const lastPayment = payments[0];
-  const nextService = scheduled.find(
-    (s) =>
-      s.status !== "cancelled" &&
-      s.status !== "completed" &&
-      new Date(s.scheduled_date) >= new Date(),
-  );
+  const today = todayDateInput();
+  const nextService = upcomingScheduled.find((s) => {
+    const status = String(s.status || "").toLowerCase();
+    const scheduledDate = dateInputValue(s.scheduled_date);
+    return (
+      status !== "cancelled" &&
+      status !== "completed" &&
+      scheduledDate >= today
+    );
+  });
 
   const expiringCard = cards.find((cd) => {
     if (!cd.exp_month || !cd.exp_year) return false;
@@ -2653,6 +2678,8 @@ export default function Customer360ProfileV2({
                   id="has-left-review-v2"
                   checked={!!c.hasLeftGoogleReview}
                   onChange={async (val) => {
+                    const previousHasLeftGoogleReview = !!c.hasLeftGoogleReview;
+                    const previousReviewMarkedAt = c.reviewMarkedAt || null;
                     setData((prev) =>
                       prev
                         ? {
@@ -2679,10 +2706,8 @@ export default function Customer360ProfileV2({
                               ...prev,
                               customer: {
                                 ...prev.customer,
-                                hasLeftGoogleReview: !val,
-                                reviewMarkedAt: !val
-                                  ? new Date().toISOString()
-                                  : null,
+                                hasLeftGoogleReview: previousHasLeftGoogleReview,
+                                reviewMarkedAt: previousReviewMarkedAt,
                               },
                             }
                           : prev,

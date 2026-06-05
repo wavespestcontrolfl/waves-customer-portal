@@ -9,6 +9,7 @@ const {
   hasMembership,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
   scheduleLinesFromEstimate,
@@ -62,6 +63,45 @@ describe('admin customers route helpers', () => {
       monthlyRate: 129.5,
       pipelineStage: 'estimate_sent',
       stageEnteredAt: changedAt,
+    });
+  });
+
+  test('maps customer list rows with editable service-contact fields', () => {
+    const mapped = mapCustomerListRow({
+      id: 'customer-1',
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      account_id: 'account-1',
+      profile_label: 'Primary',
+      is_primary_profile: true,
+      email: 'ada@example.com',
+      phone: '+19415550100',
+      city: 'Sarasota',
+      address_line1: '1 Algorithm Way',
+      state: 'FL',
+      zip: '34236',
+      waveguard_tier: 'Gold',
+      monthly_rate: '129.50',
+      service_contact_name: 'Grace Hopper',
+      service_contact_phone: '+19415550199',
+      service_contact_email: 'grace@example.com',
+      services_count: '4',
+      service_type_count: '2',
+      cards_on_file: '1',
+      tags_str: 'gate,pets',
+    });
+
+    expect(mapped).toMatchObject({
+      id: 'customer-1',
+      firstName: 'Ada',
+      lastName: 'Lovelace',
+      serviceContactName: 'Grace Hopper',
+      serviceContactPhone: '+19415550199',
+      serviceContactEmail: 'grace@example.com',
+      totalServices: 4,
+      serviceCount: 2,
+      cardsOnFile: 1,
+      tags: ['gate', 'pets'],
     });
   });
 
