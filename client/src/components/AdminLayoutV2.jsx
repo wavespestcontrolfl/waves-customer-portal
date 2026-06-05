@@ -82,6 +82,7 @@ const NAV_SECTIONS = [
     section: "Operations",
     items: [
       { path: "/admin/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+      { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
       { path: "/admin/customers", icon: Users, label: "Customers" },
       { path: "/admin/pipeline", icon: ClipboardList, label: "Pipeline" },
       { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
