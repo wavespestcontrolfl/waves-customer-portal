@@ -28,6 +28,12 @@ jest.mock('../services/sms-media', () => ({
 jest.mock('../services/twilio-failure-alerts', () => ({
   alertTwilioFailure: jest.fn(),
 }));
+const mockAnthropicCreate = jest.fn();
+jest.mock('@anthropic-ai/sdk', () => (
+  jest.fn().mockImplementation(() => ({
+    messages: { create: mockAnthropicCreate },
+  }))
+));
 
 const express = require('express');
 const db = require('../models/db');
@@ -59,6 +65,15 @@ function makeQueryBuilder(rows = []) {
       return builder;
     }),
     then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+  };
+  return builder;
+}
+
+function makeFirstQueryBuilder(row = null) {
+  const builder = {
+    where: jest.fn(() => builder),
+    whereNull: jest.fn(() => builder),
+    first: jest.fn(() => Promise.resolve(row)),
   };
   return builder;
 }
@@ -110,6 +125,81 @@ describe('admin communications SMS route', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.mockReset();
+  });
+
+  test('cleans rewrite model labels and quotes before returning SMS copy', () => {
+    expect(
+      communicationsRouter._internals.cleanSmsRewriteOutput('SMS: "Hello Taylor, we can help with that."'),
+    ).toBe('Hello Taylor, we can help with that.');
+    expect(
+      communicationsRouter._internals.cleanSmsRewriteOutput('Waves Pest Control: Hello Taylor, we can help.'),
+    ).toBe('Hello Taylor, we can help.');
+  });
+
+  test('builds SMS rewrite prompt with Waves tone and fact-preservation guardrails', () => {
+    const prompt = communicationsRouter._internals.buildSmsRewritePrompt({
+      body: 'we will b their at 8 and it is $250',
+      customer: {
+        first_name: 'Taylor',
+        last_name: 'Reed',
+        city: 'Sarasota',
+        waveguard_tier: 'Green',
+      },
+      lastInboundMessage: 'Can you confirm price?',
+      recentMessages: [
+        { direction: 'inbound', body: 'Can you confirm price?' },
+        { direction: 'outbound', body: 'It is $250.' },
+      ],
+    });
+
+    expect(prompt).toContain('Keep the Waves style');
+    expect(prompt).toContain('Preserve the operator\'s exact meaning');
+    expect(prompt).toContain('Do not invent details');
+    expect(prompt).toContain('Customer context: name: Taylor Reed, city: Sarasota, tier: Green');
+    expect(prompt).toContain('Customer: Can you confirm price?');
+    expect(prompt).toContain('Draft:\nwe will b their at 8 and it is $250');
+  });
+
+  test('requires a full phone before SMS rewrite customer context lookup', () => {
+    const { fullPhoneLast10 } = communicationsRouter._internals;
+    expect(fullPhoneLast10('555-123-4567')).toBe('5551234567');
+    expect(fullPhoneLast10('+1 (555) 123-4567')).toBe('5551234567');
+    expect(fullPhoneLast10('4567')).toBe('');
+    expect(fullPhoneLast10('')).toBe('');
+  });
+
+  test('rejects selected SMS rewrite customer context when phone mismatches recipient', async () => {
+    const customerBuilder = makeFirstQueryBuilder({
+      id: 'customer-1',
+      phone: '+15551234567',
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      city: 'Sarasota',
+      waveguard_tier: 'Green',
+    });
+    db.mockReturnValueOnce(customerBuilder);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/rewrite-sms`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          body: 'can be there tomorow',
+          customerId: 'customer-1',
+          customerPhone: '+15557654321',
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('customerPhone must match the selected customer phone');
+      expect(customerBuilder.where).toHaveBeenCalledWith({ id: 'customer-1' });
+      expect(customerBuilder.whereNull).toHaveBeenCalledWith('deleted_at');
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
   });
 
   test('returns a readable error when policy blocks a send', async () => {

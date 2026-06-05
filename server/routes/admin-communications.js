@@ -732,6 +732,158 @@ function rowsToCsv(rows, columns) {
   ].join('\n');
 }
 
+const SMS_REWRITE_MAX_INPUT = 2000;
+
+function compactPromptText(value, max = 500) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 3)}...`;
+}
+
+function cleanSmsRewriteOutput(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^(rewritten sms|rewritten message|sms|draft|message|waves pest control|waves)\s*:\s*/i, '')
+    .replace(/^[\s"'`]+|[\s"'`]+$/g, '')
+    .trim();
+}
+
+function normalizeRewriteRecentMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter((m) => m && typeof m.body === 'string' && m.body.trim())
+    .slice(-8)
+    .map((m) => ({
+      direction: m.direction === 'inbound' ? 'Customer' : 'Waves',
+      body: compactPromptText(m.body, 260),
+    }));
+}
+
+function fullPhoneLast10(value) {
+  const digits = phoneDigits(value);
+  if (digits.length === 10) return digits;
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return '';
+}
+
+function rewriteCustomerSummary(customer) {
+  if (!customer) return '';
+  const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim();
+  const parts = [
+    name && `name: ${name}`,
+    customer.city && `city: ${customer.city}`,
+    customer.waveguard_tier && `tier: ${customer.waveguard_tier}`,
+  ].filter(Boolean);
+  return parts.length ? `Customer context: ${parts.join(', ')}` : '';
+}
+
+function buildSmsRewritePrompt({ body, customer, lastInboundMessage, recentMessages }) {
+  const recent = normalizeRewriteRecentMessages(recentMessages);
+  const recentContext = recent.length
+    ? `Recent thread:\n${recent.map((m) => `${m.direction}: ${m.body}`).join('\n')}`
+    : '';
+  const lastInbound = compactPromptText(lastInboundMessage, 500);
+  const customerSummary = rewriteCustomerSummary(customer);
+
+  return `Rewrite the SMS draft below for Waves Pest Control.
+
+Goals:
+- Make it more professional, polished, and easy to understand.
+- Correct spelling, grammar, capitalization, and punctuation.
+- Keep the Waves style: warm, neighborly, genuine, plain-spoken, and solution-oriented.
+- Keep it concise for SMS. Do not make it longer unless clarity requires it.
+
+Rules:
+- Preserve the operator's exact meaning, facts, dates, prices, names, addresses, links, phone numbers, promises, and instructions.
+- Do not invent details, offers, discounts, arrival windows, guarantees, diagnoses, or commitments.
+- Do not add emojis, hashtags, markdown, labels, greetings that were not implied, or a sign-off unless the draft already has one.
+- If the draft includes STOP/opt-out, payment, legal, safety, or scheduling language, keep that meaning intact.
+- Return only the rewritten SMS body.
+
+${customerSummary}
+${lastInbound ? `Customer's latest inbound message: ${lastInbound}` : ''}
+${recentContext}
+
+Draft:
+${body}`;
+}
+
+// POST /api/admin/communications/rewrite-sms — polish an operator-written SMS
+// into Waves' customer-facing tone without changing facts or commitments.
+router.post('/rewrite-sms', async (req, res) => {
+  try {
+    const cleanBody = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+    if (!cleanBody) return res.status(400).json({ error: 'body required' });
+    if (cleanBody.length > SMS_REWRITE_MAX_INPUT) {
+      return res.status(400).json({ error: `body must be ${SMS_REWRITE_MAX_INPUT} characters or fewer` });
+    }
+
+    let customer = null;
+    const customerId = req.body?.customerId;
+    if (customerId) {
+      const requestedPhoneLast10 = fullPhoneLast10(req.body?.customerPhone);
+      if (!requestedPhoneLast10) {
+        return res.status(400).json({ error: 'customerPhone required with customerId' });
+      }
+      customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first('id', 'first_name', 'last_name', 'city', 'waveguard_tier', 'phone')
+        .catch((err) => {
+          logger.warn(`[sms-rewrite] customer lookup by id failed: ${err.message}`);
+          return null;
+        });
+      if (!customer) return res.status(404).json({ error: 'customerId not found' });
+      const customerPhoneLast10 = fullPhoneLast10(customer.phone);
+      if (!customerPhoneLast10 || customerPhoneLast10 !== requestedPhoneLast10) {
+        return res.status(400).json({ error: 'customerPhone must match the selected customer phone' });
+      }
+    } else if (req.body?.customerPhone) {
+      const last10 = fullPhoneLast10(req.body.customerPhone);
+      if (last10) {
+        const matches = await db('customers')
+          .whereNull('deleted_at')
+          .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+          .orderBy('updated_at', 'desc')
+          .limit(2)
+          .select('id', 'first_name', 'last_name', 'city', 'waveguard_tier')
+          .catch((err) => {
+            logger.warn(`[sms-rewrite] customer lookup by phone failed: ${err.message}`);
+            return [];
+          });
+        if (matches.length === 1) {
+          customer = matches[0];
+        } else if (matches.length > 1) {
+          logger.warn(`[sms-rewrite] ${matches.length} customers matched ${maskPhone(req.body.customerPhone)}; skipping customer context`);
+        }
+      }
+    }
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const msg = await client.messages.create({
+      model: MODELS.WORKHORSE,
+      max_tokens: 500,
+      messages: [{
+        role: 'user',
+        content: buildSmsRewritePrompt({
+          body: cleanBody,
+          customer,
+          lastInboundMessage: req.body?.lastInboundMessage,
+          recentMessages: req.body?.recentMessages,
+        }),
+      }],
+    });
+
+    const rewritten = cleanSmsRewriteOutput(msg.content?.[0]?.text || '');
+    if (!rewritten) return res.status(502).json({ error: 'rewrite returned empty message' });
+    res.json({ body: rewritten });
+  } catch (err) {
+    logger.error(`SMS rewrite failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/communications/schedule-sms — schedule SMS for later.
 // The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
 // where status='scheduled' AND scheduled_for <= now() and dispatches them
@@ -1042,6 +1194,13 @@ router.post('/contact-compliance-checks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router._internals = { csvEscape, rowsToCsv };
+router._internals = {
+  buildSmsRewritePrompt,
+  cleanSmsRewriteOutput,
+  csvEscape,
+  fullPhoneLast10,
+  normalizeRewriteRecentMessages,
+  rowsToCsv,
+};
 
 module.exports = router;
