@@ -9,6 +9,7 @@
 //   GET  /admin/communications/ai-auto-reply-status
 //   POST /admin/communications/ai-auto-reply
 //   POST /admin/communications/ai-draft
+//   POST /admin/communications/rewrite-sms
 //   GET  /admin/customers?search=...
 //
 // Scope: Full V2 redesign of all tabs. CallLogTabV2, SmsTemplatesTabV2,
@@ -65,9 +66,13 @@ import {
   FileText,
   Headphones,
   Inbox,
+  Loader2,
   Mail,
   MessageSquare,
+  Mic,
+  MicOff,
   PhoneCall,
+  Sparkles,
   Zap,
 } from "lucide-react";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
@@ -222,6 +227,13 @@ const SMS_LOG_PAGE_SIZE = 500;
 
 function smsThreadKey(phone) {
   return String(phone || "").replace(/\D/g, "").slice(-10) || "unknown";
+}
+
+function smsMessageMatchesLine(message, lineNumber) {
+  const lineKey = phoneKey(lineNumber);
+  if (!lineKey || !message) return false;
+  const messageLine = message.direction === "inbound" ? message.to : message.from;
+  return phoneKey(messageLine) === lineKey;
 }
 
 function mergeSmsMessages(existing, incoming) {
@@ -577,6 +589,7 @@ function SmsTab() {
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
+  const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
   const [selectedAgentDraft, setSelectedAgentDraft] = useState(null);
@@ -613,6 +626,18 @@ function SmsTab() {
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
+  const rewriteContextRef = useRef({
+    toNumber: "",
+    selectedCustomerId: null,
+    fromNumber: "",
+    activeThreadKey: "",
+  });
+  rewriteContextRef.current = {
+    toNumber,
+    selectedCustomerId,
+    fromNumber,
+    activeThreadKey: activeThread?.contactPhone ? smsThreadKey(activeThread.contactPhone) : "",
+  };
 
   const loadData = useCallback((search = "", options = {}) => {
     const normalizedSearch = search.trim();
@@ -1112,6 +1137,72 @@ function SmsTab() {
     }
   };
 
+  const handleRewriteSms = async () => {
+    const cleanBody = msgBody.trim();
+    if (!cleanBody || rewritingSms) return;
+    const requestRecipient = toNumber.trim();
+    const requestRecipientKey = requestRecipient ? smsThreadKey(requestRecipient) : "";
+    const requestCustomerId = selectedCustomerId || null;
+    const requestFromNumber = fromNumber;
+    const requestFromNumberKey = phoneKey(requestFromNumber);
+    const activeThreadMatchesRecipient =
+      requestRecipientKey &&
+      activeThread?.contactPhone &&
+      smsThreadKey(activeThread.contactPhone) === requestRecipientKey;
+    const requestActiveThreadKey = activeThreadMatchesRecipient
+      ? smsThreadKey(activeThread.contactPhone)
+      : "";
+    const recentNewestMessages =
+      activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
+        ? activeThread.messages
+            .filter((m) => smsMessageMatchesLine(m, requestFromNumber))
+            .slice(0, 8)
+      : [];
+    const lastInbound = recentNewestMessages.find((m) => m.direction === "inbound");
+    const recentMessages = [...recentNewestMessages].reverse().map((m) => ({
+      direction: m.direction,
+      body: m.body,
+      createdAt: m.createdAt,
+    }));
+
+    setRewritingSms(true);
+    setSendResult(null);
+    try {
+      const d = await adminFetch("/admin/communications/rewrite-sms", {
+        method: "POST",
+        body: JSON.stringify({
+          body: cleanBody,
+          customerId: requestCustomerId || undefined,
+          customerPhone: requestRecipient || undefined,
+          lastInboundMessage: lastInbound?.body || "",
+          recentMessages,
+        }),
+      });
+      if (d?.body) {
+        setMsgBody((current) => {
+          const latestContext = rewriteContextRef.current;
+          const latestRecipient = latestContext.toNumber.trim();
+          const latestRecipientKey = latestRecipient ? smsThreadKey(latestRecipient) : "";
+          const latestCustomerId = latestContext.selectedCustomerId || null;
+          const latestFromNumberKey = phoneKey(latestContext.fromNumber);
+          if (
+            latestRecipientKey !== requestRecipientKey ||
+            latestCustomerId !== requestCustomerId ||
+            latestFromNumberKey !== requestFromNumberKey ||
+            latestContext.activeThreadKey !== requestActiveThreadKey
+          ) {
+            return current;
+          }
+          return current.trim() === cleanBody ? d.body : current;
+        });
+      }
+    } catch (e) {
+      setSendResult({ ok: false, text: `Rewrite failed: ${e.message}` });
+    } finally {
+      setRewritingSms(false);
+    }
+  };
+
   const threads = useMemo(() => {
     const threadMap = {};
     const sorted = [...messages].sort(
@@ -1581,40 +1672,57 @@ function SmsTab() {
             placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}
+            readOnly={rewritingSms}
             rows={3}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 pl-3 pr-11 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 pl-3 pr-20 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           />
-          {/* Mic: voice-to-text dictation via Web Speech API. */}
-          <button
-            type="button"
-            onClick={toggleDictation}
-            aria-label={listening ? "Stop dictation" : "Start voice dictation"}
-            title={listening ? "Stop dictation" : "Start voice dictation"}
-            className={cn(
-              "absolute top-2 right-2 flex items-center justify-center h-8 w-8 rounded-full u-focus-ring",
-              listening
-                ? "bg-alert-fg text-white animate-pulse"
-                : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
-            )}
-          >
-            {/* Mic glyph */}
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+          <div className="absolute top-2 right-2 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={handleRewriteSms}
+              disabled={
+                rewritingSms ||
+                listening ||
+                sending ||
+                uploading ||
+                !msgBody.trim()
+              }
+              aria-label="Rewrite message in Waves tone"
+              title="Rewrite in Waves tone"
+              className={cn(
+                "flex items-center justify-center h-8 w-8 rounded-full u-focus-ring",
+                "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
+                "disabled:opacity-50 disabled:cursor-not-allowed",
+              )}
             >
-              {" "}
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />{" "}
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />{" "}
-              <line x1="12" y1="19" x2="12" y2="23" />{" "}
-              <line x1="8" y1="23" x2="16" y2="23" />{" "}
-            </svg>{" "}
-          </button>{" "}
+              {rewritingSms ? (
+                <Loader2 size={16} strokeWidth={2.2} className="animate-spin" />
+              ) : (
+                <Sparkles size={16} strokeWidth={2.2} />
+              )}
+            </button>
+            {/* Mic: voice-to-text dictation via Web Speech API. */}
+            <button
+              type="button"
+              onClick={toggleDictation}
+              disabled={rewritingSms}
+              aria-label={listening ? "Stop dictation" : "Start voice dictation"}
+              title={listening ? "Stop dictation" : "Start voice dictation"}
+              className={cn(
+                "flex items-center justify-center h-8 w-8 rounded-full u-focus-ring",
+                listening
+                  ? "bg-alert-fg text-white animate-pulse"
+                  : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
+                "disabled:opacity-50 disabled:cursor-not-allowed",
+              )}
+            >
+              {listening ? (
+                <MicOff size={16} strokeWidth={2.2} />
+              ) : (
+                <Mic size={16} strokeWidth={2.2} />
+              )}
+            </button>{" "}
+          </div>
         </div>
         {/* Attachment tray */}
         {attachments.length > 0 && (
@@ -1650,7 +1758,7 @@ function SmsTab() {
           <span>
             {attachments.length > 0 ? `${attachments.length} attached` : ""}
           </span>{" "}
-          <span>{msgBody.length} chars</span>{" "}
+          <span>{rewritingSms ? "Rewriting…" : `${msgBody.length} chars`}</span>{" "}
         </div>
         {/* Hidden file inputs, triggered by the + menu buttons. */}
         <input
@@ -1767,6 +1875,7 @@ function SmsTab() {
             disabled={
               sending ||
               uploading ||
+              rewritingSms ||
               !toNumber.trim() ||
               (!msgBody.trim() && attachments.length === 0)
             }
@@ -1775,6 +1884,8 @@ function SmsTab() {
               ? sendTiming === "now"
                 ? "Sending…"
                 : "Scheduling…"
+              : rewritingSms
+                ? "Rewriting…"
               : uploading
                 ? "Uploading…"
                 : sendTiming === "now"
