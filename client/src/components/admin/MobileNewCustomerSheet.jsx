@@ -57,10 +57,10 @@ export default function MobileNewCustomerSheet({
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
-  // Server quick-add requires first + last + phone at minimum.
+  // Server quick-add only requires first name and phone; last name can be filled later.
   const canSave = useMemo(
-    () => form.firstName.trim() && form.lastName.trim() && form.phone.trim(),
-    [form.firstName, form.lastName, form.phone],
+    () => form.firstName.trim() && form.phone.trim(),
+    [form.firstName, form.phone],
   );
 
   useEffect(() => {
