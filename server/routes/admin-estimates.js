@@ -171,6 +171,15 @@ function moneySummary(estimate = {}) {
   return '';
 }
 
+function estimateSendableAmount(estimate = {}) {
+  const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
+  const oneTimeTotal = parseFloat(estimate.onetime_total || estimate.oneTimeTotal || estimate.onetimeTotal || 0);
+  return Math.max(
+    Number.isFinite(monthlyTotal) ? monthlyTotal : 0,
+    Number.isFinite(oneTimeTotal) ? oneTimeTotal : 0,
+  );
+}
+
 function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine }) {
   const serviceSummary = inferEstimateServiceInterest({
     ...estimate,
@@ -208,6 +217,11 @@ function assertEstimateSendable(estimate) {
     throw err;
   }
   assertEstimateManagerApprovalResolved(estimate);
+  if (estimateSendableAmount(estimate) <= 0) {
+    const err = new Error('Estimate must have a positive monthly or one-time total before it can be sent.');
+    err.statusCode = 400;
+    throw err;
+  }
 }
 
 function assertEstimateManagerApprovalResolved(estimate) {
@@ -878,11 +892,13 @@ router.get('/', async (req, res, next) => {
           customerEmail: e.customer_email,
           updatedAt: e.updated_at,
           monthlyTotal,
+          onetimeTotal,
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at,
           viewedAt: hasBeenSent ? e.viewed_at : null,
           acceptedAt: e.accepted_at,
           scheduledAt: e.scheduled_at,
+          expiresAt: e.expires_at,
           sendMethod: e.send_method,
           declinedAt: e.declined_at,
           viewCount: hasBeenSent ? e.view_count || 0 : 0,

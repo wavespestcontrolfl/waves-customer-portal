@@ -97,6 +97,34 @@ function adminFetch(path, options = {}) {
   });
 }
 
+function mergeEstimateRows(...lists) {
+  const byId = new Map();
+  for (const list of lists) {
+    for (const estimate of list || []) {
+      if (estimate?.id && !byId.has(estimate.id)) byId.set(estimate.id, estimate);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+function estimatePipelineFetchPaths(filter) {
+  const base = `limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+  if (filter === "archived") {
+    return [`/admin/estimates?archived=only&${base}`];
+  }
+  return [
+    `/admin/estimates?sentOnly=1&${base}`,
+    `/admin/estimates?status=draft&${base}`,
+  ];
+}
+
+async function fetchEstimatePipelineRows(filter) {
+  const responses = await Promise.all(
+    estimatePipelineFetchPaths(filter).map((path) => adminFetch(path)),
+  );
+  return mergeEstimateRows(...responses.map((d) => d.estimates || []));
+}
+
 function summarizeEstimateSend(data) {
   const parts = [];
   if (data?.channels?.sms) {
@@ -738,6 +766,26 @@ function FilterSheetV2({ value, onChange, options, counts }) {
 function fmtMoney(value) {
   const n = Number(value || 0);
   return `$${Math.round(n).toLocaleString()}`;
+}
+
+function estimateAmountDisplay(estimate) {
+  const monthly = Number(estimate?.monthlyTotal || 0);
+  const oneTime = Number(estimate?.onetimeTotal || estimate?.oneTimeTotal || 0);
+  if (monthly > 0) return { value: monthly, suffix: "/mo" };
+  if (oneTime > 0) return { value: oneTime, suffix: " one-time" };
+  return { value: 0, suffix: "/mo" };
+}
+
+function canSendEstimate(estimate) {
+  return estimateAmountDisplay(estimate).value > 0;
+}
+
+function classifyEstimateForPipeline(estimate) {
+  if (estimate?.archivedAt) return classifyEstimate(estimate);
+  if (estimate?.status === "draft") {
+    return canSendEstimate(estimate) ? "ready_to_send" : "needs_estimate";
+  }
+  return classifyEstimate(estimate);
 }
 
 function fmtPct(value) {
@@ -1468,18 +1516,11 @@ function EstimatePipelineViewV2() {
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
 
   const refreshEstimates = useCallback(() => {
-    // When the "Archived" filter is picked, ask the API for archived-only;
-    // otherwise the default hides archived rows so closed/old work stops
-    // cluttering the pipeline.
-    const qs =
-      filter === "archived"
-        ? `?archived=only&sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
-        : `?sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
     setLoading(true);
     setError(null);
-    adminFetch(`/admin/estimates${qs}`)
-      .then((d) => {
-        setEstimates(d.estimates || []);
+    fetchEstimatePipelineRows(filter)
+      .then((rows) => {
+        setEstimates(rows);
         setLoading(false);
       })
       .catch((err) => {
@@ -1679,7 +1720,7 @@ function EstimatePipelineViewV2() {
   // Classify + sort newest-first so the most recent estimates stay at the top.
   const classified = estimates.map((e) => ({
     ...e,
-    _class: classifyEstimate(e),
+    _class: classifyEstimateForPipeline(e),
   }));
   const sorted = [...classified].sort(
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
@@ -1821,11 +1862,11 @@ function EstimatePipelineViewV2() {
           {/* Estimates list */}
           {filtered.length === 0 ? (
             <div className="p-10 text-center text-13 text-ink-secondary">
-              No sent estimates{" "}
+              No estimates{" "}
               {filter !== "all"
                 ? `in "${estimateFilterLabel(filter) || filter}"`
                 : "yet"}
-              . Send an estimate from Create Estimate before it appears here.
+              . Create or send an estimate before it appears here.
             </div>
           ) : (
             <div className="flex flex-col gap-2">
@@ -1834,6 +1875,8 @@ function EstimatePipelineViewV2() {
                 const competitor = detectCompetitor(e.notes || e.description);
                 const source = SOURCE_ICON[e.source];
                 const previewHref = estimatePreviewHref(e);
+                const amount = estimateAmountDisplay(e);
+                const canSend = canSendEstimate(e);
 
                 return (
                   <Card
@@ -1946,7 +1989,7 @@ function EstimatePipelineViewV2() {
                     accepted/declined/expired hide it. */}
                     {(e.customerPhone ||
                       estimateHasLawnLine(e) ||
-                      ["draft", "sent", "viewed"].includes(e.status)) && (
+                      (["draft", "sent", "viewed"].includes(e.status) && canSend)) && (
                       <div className="flex gap-1.5">
                         <LawnOutlineQuickButton estimate={e} onClick={setOutlineTarget} compact />
                         {e.customerPhone && (
@@ -2028,7 +2071,7 @@ function EstimatePipelineViewV2() {
                             <FilePlus2 size={16} strokeWidth={1.75} />{" "}
                           </button>
                         )}
-                        {["draft", "sent", "viewed"].includes(e.status) && (
+                        {["draft", "sent", "viewed"].includes(e.status) && canSend && (
                           <button
                             type="button"
                             onClick={async (evt) => {
@@ -2063,20 +2106,20 @@ function EstimatePipelineViewV2() {
                       </div>
                     )}
                     {e.tier && <Badge tone="neutral">{e.tier}</Badge>}
-                    {/* Monthly total */}
+                    {/* Estimate amount */}
                     <div className="text-right min-w-[80px]">
                       {" "}
                       <div
                         className={cn(
                           "text-18 font-medium u-nums",
-                          e.monthlyTotal > 0
+                          amount.value > 0
                             ? "text-zinc-900"
                             : "text-ink-tertiary",
                         )}
                       >
-                        ${e.monthlyTotal?.toFixed(0) || "0"}
+                        ${amount.value.toFixed(0)}
                         <span className="text-11 font-normal text-ink-tertiary">
-                          /mo
+                          {amount.suffix}
                         </span>{" "}
                       </div>{" "}
                     </div>
@@ -2142,7 +2185,7 @@ function EstimatePipelineViewV2() {
                         <Flag size={16} strokeWidth={1.75} aria-hidden />{" "}
                       </button>{" "}
                       <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1 sm:flex-none">
-                        {e.status === "draft" && e.monthlyTotal > 0 && (
+                        {e.status === "draft" && canSend && (
                           <Button
                             size="sm"
                             variant="primary"
@@ -2263,7 +2306,8 @@ function EstimatePipelineViewV2() {
                               onClick: () => toggleBillByInvoice(e),
                             },
                             (e.status === "sent" ||
-                              e.status === "viewed") && {
+                              e.status === "viewed") &&
+                              canSend && {
                               key: "send-booking",
                               label: "Send booking link",
                               icon: (
@@ -2289,7 +2333,8 @@ function EstimatePipelineViewV2() {
                               onClick: () => setExtendTarget(e),
                             },
                             (e.status === "sent" ||
-                              e.status === "viewed") && {
+                              e.status === "viewed") &&
+                              canSend && {
                               key: "resend",
                               label: "Resend estimate",
                               icon: <RotateCw size={16} strokeWidth={1.75} />,
@@ -2677,7 +2722,8 @@ function MobileEstimateRow({
 }) {
   const navigate = useNavigate();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
-  const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
+  const amount = estimateAmountDisplay(estimate);
+  const canSend = canSendEstimate(estimate);
   const customerName = estimate.customerName || "Unknown";
   const isDraftMuted = v3Flag && estimate.status === "draft";
   const hasCustomer = !!estimate.customerId;
@@ -2737,7 +2783,7 @@ function MobileEstimateRow({
           <div className="flex items-center gap-2 flex-wrap">
             {" "}
             <span className="u-nums text-11 text-ink-tertiary">
-              {amount}
+              ${amount.value.toFixed(0)}{amount.suffix}
             </span>{" "}
             <StatusPillV3 status={estimate.status} />
             {estimate.viewCount > 1 && (
@@ -2785,7 +2831,7 @@ function MobileEstimateRow({
         ) : (
           <div className="text-11 text-ink-tertiary truncate">
             {" "}
-            <span className="u-nums">{amount}</span>{" "}
+            <span className="u-nums">${amount.value.toFixed(0)}{amount.suffix}</span>{" "}
             <span
               className={cn(
                 "ml-2 font-medium",
@@ -2919,7 +2965,7 @@ function MobileEstimateRow({
       <RowActionsMenu
         label={`Actions for ${customerName}`}
         items={[
-          ["draft", "sent", "viewed"].includes(estimate.status) && {
+          ["draft", "sent", "viewed"].includes(estimate.status) && canSend && {
             key: "send",
             label: estimate.status === "draft" ? "Send estimate" : "Resend estimate",
             icon: <Send size={16} strokeWidth={1.75} />,
@@ -3047,13 +3093,9 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [sort, setSort] = useState("newest");
 
   const refreshEstimates = useCallback(() => {
-    const qs =
-      filter === "archived"
-        ? `?archived=only&sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
-        : `?sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
     setError(null);
-    adminFetch(`/admin/estimates${qs}`)
-      .then((d) => setEstimates(d.estimates || []))
+    fetchEstimatePipelineRows(filter)
+      .then((rows) => setEstimates(rows))
       .catch((err) => setError(err))
       .finally(() => setLoading(false));
   }, [filter]);
@@ -3165,6 +3207,10 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
 
   const resendEstimateMobile = useCallback(
     async (e) => {
+      if (!canSendEstimate(e)) {
+        window.alert("Estimate needs a positive monthly or one-time total before it can be sent.");
+        return;
+      }
       if (
         !window.confirm(
           `Resend estimate to ${e.customerName || "the customer"} via SMS + email?`,
@@ -3191,7 +3237,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     const q = search.trim().toLowerCase();
     const classified = estimates.map((e) => ({
       ...e,
-      _class: classifyEstimate(e),
+      _class: classifyEstimateForPipeline(e),
     }));
     let list = classified;
     if (v3Flag) {
@@ -3243,7 +3289,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     for (const f of PIPELINE_AND_RISK_FILTERS) {
       if (f.key === "all") continue;
       counts[f.key] = estimates
-        .map((e) => ({ ...e, _class: classifyEstimate(e) }))
+        .map((e) => ({ ...e, _class: classifyEstimateForPipeline(e) }))
         .filter((e) => estimateMatchesFilter(e, f.key)).length;
     }
     return counts;
@@ -3370,12 +3416,12 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
             {" "}
             <div className="text-14 text-ink-primary mb-1">
               {estimates.length === 0
-                ? "No sent estimates yet"
+                ? "No estimates yet"
                 : "No estimates found"}
             </div>{" "}
             <div className="text-13 text-ink-tertiary">
               {estimates.length === 0
-                ? "Send an estimate before it appears here"
+                ? "Create or send an estimate before it appears here"
                 : "Try adjusting your filters"}
             </div>{" "}
           </CardBody>{" "}

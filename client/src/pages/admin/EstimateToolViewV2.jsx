@@ -2290,9 +2290,7 @@ export default function EstimateToolViewV2({
       // that's the single flow the public estimate + accept handler actually
       // support without dropping other recurring services from the persisted
       // total (server/routes/estimate-public.js treats show_one_time_option
-      // as a pest-only choice path). Lawn/mosquito recurring+one-time pairs
-      // still require admin to tick the customer-options box manually until
-      // the downstream choice logic becomes service-aware.
+      // as a pest-only choice path).
       const OTHER_RECURRING_KEYS = [
         "svcLawn", "svcTs", "svcInjection", "svcMosquito",
         "svcTermiteBait", "svcRodentBait",
@@ -2302,8 +2300,7 @@ export default function EstimateToolViewV2({
       // _autoOneTimeOwned marks the flag as "owned by the auto-enable
       // path" so we can safely flip it back when the bundle stops being
       // pest-only — without clobbering a manual customer-options check
-      // (which clears _autoOneTimeOwned in setCustomerChoiceOption /
-      // applyMosquitoCustomerChoice).
+      // (which clears _autoOneTimeOwned in setCustomerChoiceOption).
       if (pestBoth && onlyPestRecurring) {
         next.showOneTimeOption = true;
         next._autoOneTimeOwned = true;
@@ -2319,34 +2316,11 @@ export default function EstimateToolViewV2({
       setSavedViewUrl(null);
     }
   }, []);
-  const applyMosquitoCustomerChoice = useCallback((choice) => {
-    setForm((f) => {
-      // Mark the flag as manually owned so toggle()'s auto-clear path
-      // doesn't wipe it the next time the admin checks any service box.
-      const next = { ...f, showOneTimeOption: true, _autoOneTimeOwned: false };
-      if (choice === "one_time") next.svcOnetimeMosquito = true;
-      if (choice === "recurring") next.svcMosquito = true;
-      if (choice === "both") {
-        next.svcMosquito = true;
-        next.svcOnetimeMosquito = true;
-      }
-      return next;
-    });
-    setEstimate(null);
-    setSavedId(null);
-    setSavedViewUrl(null);
-  }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
       // Manual customer-options checkbox — own the flag, don't let
       // toggle()'s auto-clear wipe it on the next service toggle.
-      const next = { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false };
-      if (enabled) {
-        if (f.svcMosquito && !f.svcOnetimeMosquito)
-          next.svcOnetimeMosquito = true;
-        if (f.svcOnetimeMosquito && !f.svcMosquito) next.svcMosquito = true;
-      }
-      return next;
+      return { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false };
     });
     setSavedId(null);
     setSavedViewUrl(null);
@@ -2636,6 +2610,9 @@ export default function EstimateToolViewV2({
       msg: "Running AI satellite analysis...",
     });
     setForm((f) => ({ ...f, measuredTurfSf: "" }));
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
     try {
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
@@ -3877,6 +3854,9 @@ export default function EstimateToolViewV2({
                           setExistingCustomerMatch(c);
                           setCustomerSearch("");
                           setCustomers([]);
+                          setEstimate(null);
+                          setSavedId(null);
+                          setSavedViewUrl(null);
                         }}
                         className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
                       >
@@ -4713,51 +4693,6 @@ export default function EstimateToolViewV2({
                       </div>{" "}
                     </div>
                   )}
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-11 text-ink-secondary">
-                    {form.svcMosquito && !form.svcOnetimeMosquito && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        className="h-7 px-2 text-11"
-                        onClick={() => applyMosquitoCustomerChoice("one_time")}
-                      >
-                        Offer one-time mosquito option
-                      </Button>
-                    )}
-                    {form.svcOnetimeMosquito && !form.svcMosquito && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        className="h-7 px-2 text-11"
-                        onClick={() => applyMosquitoCustomerChoice("recurring")}
-                      >
-                        Offer recurring mosquito option
-                      </Button>
-                    )}
-                    {form.svcMosquito &&
-                      form.svcOnetimeMosquito &&
-                      !form.showOneTimeOption && (
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          className="h-7 px-2 text-11"
-                          onClick={() => applyMosquitoCustomerChoice("both")}
-                        >
-                          Enable customer choice
-                        </Button>
-                      )}
-                    {form.svcMosquito &&
-                      form.svcOnetimeMosquito &&
-                      form.showOneTimeOption && (
-                        <span>
-                          Customer will see recurring and one-time mosquito
-                          options.
-                        </span>
-                      )}
-                  </div>
                   {(form.svcMosquito || form.svcOnetimeMosquito) && (
                     <div className="mt-3 bg-white border-hairline border-zinc-200 rounded-xs p-3">
                       {" "}
