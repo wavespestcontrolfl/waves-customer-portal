@@ -310,8 +310,10 @@ function visitsPerYearForRecurringService(svc = {}) {
   );
 }
 
-function durationMinutesForRecurringService(svc = {}, pattern = null) {
-  const key = recurringServiceKey(svc);
+function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {
+  const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
+  const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
+  const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
   if (key === 'pest_control' && pattern === 'quarterly') return 60;
   return null;
 }
@@ -331,6 +333,36 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   return key === 'pest_control' && pattern === 'quarterly';
 }
 
+function scheduledDateOnly(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.slice(0, 10);
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+async function registerSeededFollowUpReminders(rows = [], customerId) {
+  const followUps = Array.isArray(rows) ? rows.filter((row) => row?.id) : [];
+  if (!followUps.length || !customerId) return;
+  try {
+    const AppointmentReminders = require('./appointment-reminders');
+    for (const row of followUps) {
+      const scheduledDate = scheduledDateOnly(row.scheduled_date);
+      const windowStart = String(row.window_start || '08:00').slice(0, 5);
+      if (!scheduledDate) continue;
+      await AppointmentReminders.registerAppointment(
+        row.id,
+        customerId,
+        `${scheduledDate}T${windowStart}`,
+        row.service_type || 'Quarterly Pest Control',
+        'estimate_followup',
+        { sendConfirmation: false },
+      );
+    }
+  } catch (err) {
+    logger.error(`[estimate-converter] Failed to register follow-up reminders: ${err.message}`);
+  }
+}
+
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
@@ -341,15 +373,16 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
     return { pattern, insertedCount: 0, insertedRows: [] };
   }
   const visitsPerYear = visitsPerYearForRecurringService(svc);
-  return RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
+  const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
+  const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
     pattern,
     visitsPerYear,
     skipWeekends: true,
     weekendShift: 'forward',
-    durationMinutes: parentRow?.estimated_duration_minutes
-      || durationMinutesForRecurringService(svc, pattern)
-      || undefined,
+    durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
   });
+  await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
+  return seedResult;
 }
 
 const EstimateConverter = {
