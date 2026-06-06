@@ -17,6 +17,7 @@ const {
 } = require('./billing-cadence');
 const AccountMembershipEmail = require('./account-membership-email');
 const { etDateString } = require('../utils/datetime-et');
+const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
@@ -291,6 +292,56 @@ function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurr
   return true;
 }
 
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function visitsPerYearForRecurringService(svc = {}) {
+  return firstPositiveNumber(
+    svc.visitsPerYear,
+    svc.appsPerYear,
+    svc.visits,
+    svc.apps,
+    svc.treatmentsPerYear,
+  );
+}
+
+function durationMinutesForRecurringService(svc = {}, pattern = null) {
+  const key = recurringServiceKey(svc);
+  if (key === 'pest_control' && pattern === 'quarterly') return 60;
+  return null;
+}
+
+function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
+  const rowKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: scheduledRow.service_type });
+  return recurringServices.find((svc) => RecurringAppointmentSeeder.serviceKeyFor(svc) === rowKey)
+    || recurringServices.find((svc) => recurringServiceKey(svc) === 'pest_control')
+    || recurringServices[0]
+    || { service_type: scheduledRow.service_type };
+}
+
+async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
+  const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
+    service: { ...svc, service_type: parentRow?.service_type },
+    fallbackFrequency: opts.fallbackFrequency,
+  });
+  if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
+  const visitsPerYear = visitsPerYearForRecurringService(svc);
+  return RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
+    pattern,
+    visitsPerYear,
+    skipWeekends: true,
+    weekendShift: 'forward',
+    durationMinutes: parentRow?.estimated_duration_minutes
+      || durationMinutesForRecurringService(svc, pattern)
+      || undefined,
+  });
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -406,9 +457,21 @@ const EstimateConverter = {
         .whereNotNull('customer_id')
         .whereNull('reservation_expires_at')
         .orderBy('scheduled_date', 'asc')
-        .first('id', 'scheduled_date');
+        .first('*');
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;
+      scheduledCount = Number(existingFromReservation?.count || 0);
+      if (reservedStart) {
+        try {
+          const seedSvc = recurringServiceForScheduledRow(recurringServices, reservedStart);
+          const seedResult = await seedRecurringFollowUpsForParent(database, reservedStart, seedSvc, {
+            fallbackFrequency: inferredFrequencyKey,
+          });
+          scheduledCount += seedResult.insertedCount || 0;
+        } catch (seedErr) {
+          logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
+        }
+      }
     } else if (skipAutoSchedule) {
       logger.info(
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
@@ -420,10 +483,15 @@ const EstimateConverter = {
 
       for (const svc of recurringServices) {
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
-        const frequency = svc.frequency || 'monthly';
+        const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
+          service: svc,
+          fallbackFrequency: inferredFrequencyKey,
+        });
+        const frequency = svc.frequency || pattern || 'monthly';
         const estimatedPrice = billingCadence && recurringServices.length === 1
           ? billingCadence.amount
           : null;
+        const durationMinutes = durationMinutesForRecurringService(svc, pattern);
 
         try {
           const row = {
@@ -435,12 +503,25 @@ const EstimateConverter = {
             source_estimate_id: estimateId,
           };
           if (estimatedPrice) row.estimated_price = estimatedPrice;
-          const inserted = await database('scheduled_services').insert(row).returning('id');
+          if (durationMinutes) row.estimated_duration_minutes = durationMinutes;
+          const inserted = await database('scheduled_services').insert(row).returning('*');
           const insertedId = Array.isArray(inserted)
             ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
             : (typeof inserted === 'object' ? inserted?.id : inserted);
           if (!firstScheduledServiceId && insertedId) firstScheduledServiceId = insertedId;
-          scheduledCount++;
+          const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
+            ? inserted[0]
+            : { ...row, id: insertedId };
+          let insertedFollowUps = 0;
+          try {
+            const seedResult = await seedRecurringFollowUpsForParent(database, parentRow, svc, {
+              fallbackFrequency: inferredFrequencyKey,
+            });
+            insertedFollowUps = seedResult.insertedCount || 0;
+          } catch (seedErr) {
+            logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
+          }
+          scheduledCount += 1 + insertedFollowUps;
         } catch (e) {
           logger.error(`[estimate-converter] Failed to create scheduled_service: ${e.message}`);
         }

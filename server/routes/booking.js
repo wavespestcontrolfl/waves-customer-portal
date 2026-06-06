@@ -7,6 +7,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 
 // Shared geocoder (same approach as admin-schedule-find-time.js)
 async function geocodeAddress(address) {
@@ -842,18 +843,41 @@ router.post('/confirm', async (req, res, next) => {
       zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
     }).returning('*');
 
+    let followUpRows = [];
+    if (RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control') {
+      try {
+        const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(db, serviceRow, {
+          pattern: 'quarterly',
+          plannedCount: 4,
+          skipWeekends: true,
+          weekendShift: 'forward',
+          durationMinutes: duration,
+          source: source || 'self_booked',
+        });
+        followUpRows = seedResult.insertedRows || [];
+      } catch (err) {
+        logger.error(`[booking:confirm] Quarterly follow-up seeding failed for ${serviceRow.id}: ${err.message}`);
+      }
+    }
+
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
     try {
       const AppointmentReminders = require('../services/appointment-reminders');
-      await AppointmentReminders.registerAppointment(
-        serviceRow.id,
-        custId,
-        `${slot_date}T${slot_start || '08:00'}`,
-        resolvedServiceType,
-        'booking_new',
-        { sendConfirmation: false },
-      );
+      for (const row of [serviceRow, ...followUpRows].filter(r => r?.id)) {
+        const scheduledDate = typeof row.scheduled_date === 'string'
+          ? row.scheduled_date.slice(0, 10)
+          : etDateString(row.scheduled_date);
+        const windowStart = String(row.window_start || slot_start || '08:00').slice(0, 5);
+        await AppointmentReminders.registerAppointment(
+          row.id,
+          custId,
+          `${scheduledDate}T${windowStart}`,
+          row.service_type || resolvedServiceType,
+          row.id === serviceRow.id ? 'booking_new' : 'booking_followup',
+          { sendConfirmation: false },
+        );
+      }
     } catch (err) {
       logger.error(`[booking:confirm] Appointment reminder registration failed for ${serviceRow.id}: ${err.message}`);
     }

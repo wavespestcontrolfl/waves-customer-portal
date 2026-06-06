@@ -180,7 +180,7 @@ function durationForService(row = {}, estData = {}) {
     if (/interior|initial|roach|cockroach/i.test(String(row.label || row.name || row.displayName || ''))) return 60;
     if (visits >= 12) return 30;
     if (visits >= 6) return 40;
-    return 45;
+    return 60;
   }
   if (key === 'lawn_care') {
     const turf = lawnSqFt || lotSqFt;

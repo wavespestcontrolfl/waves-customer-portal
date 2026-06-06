@@ -43,6 +43,26 @@ function fmtDate(d, opts) {
   return isNaN(dt) ? '—' : dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', ...opts });
 }
 
+function formatPortalMoney(n, digits = 2) {
+  return `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+}
+
+function annualPrepayStatusLabel(term) {
+  if (!term) return null;
+  if (term.status === 'payment_pending') return 'Prepay pending';
+  if (term.status === 'renewal_pending') return 'Renewal pending';
+  return 'Annual prepay';
+}
+
+function annualPrepayTermLine(term) {
+  if (!term) return null;
+  const termEnd = term.termEnd ? fmtDate(term.termEnd, { month: 'short', day: 'numeric', year: 'numeric' }) : null;
+  if (term.status === 'payment_pending') {
+    return termEnd ? `Invoice pending · term ends ${termEnd}` : 'Invoice pending';
+  }
+  return termEnd ? `Paid through ${termEnd}` : 'Prepaid account';
+}
+
 // =========================================================================
 // SECTION HEADING HELPER
 // =========================================================================
@@ -1030,6 +1050,9 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [satDismissed, setSatDismissed] = useState(false);
   const lawnHealth = useLawnHealth(customer.id);
   const tier = TIER[customer.tier];
+  const annualPrepay = customer.annualPrepay || null;
+  const annualPrepayLabel = annualPrepayStatusLabel(annualPrepay);
+  const annualPrepayLine = annualPrepayTermLine(annualPrepay);
 
   useEffect(() => {
     api.getNextService()
@@ -1177,7 +1200,7 @@ function DashboardTab({ customer, onSwitchTab }) {
     ? 'Checking...'
     : balanceError
       ? 'Tap to view'
-      : hasBalance ? `$${currentBalance.toFixed(2)} due` : 'All current';
+      : hasBalance ? `$${currentBalance.toFixed(2)} due` : (annualPrepayLabel || 'All current');
   const propertyLine = [
     (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || null,
     customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
@@ -1218,19 +1241,37 @@ function DashboardTab({ customer, onSwitchTab }) {
       <section style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{
-              display: 'inline-flex', alignItems: 'center', gap: 8,
-              padding: '6px 10px',
-              borderRadius: 8,
-              background: PORTAL_SHELL.soft,
-              border: `1px solid ${PORTAL_SHELL.softBorder}`,
-              color: B.blueDeeper,
-              fontSize: 12,
-              fontWeight: 850,
-              fontFamily: FONTS.heading,
-            }}>
-              <Icon name="shield" size={14} strokeWidth={2} />
-              WaveGuard {customer.tier || 'Member'}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                padding: '6px 10px',
+                borderRadius: 8,
+                background: PORTAL_SHELL.soft,
+                border: `1px solid ${PORTAL_SHELL.softBorder}`,
+                color: B.blueDeeper,
+                fontSize: 12,
+                fontWeight: 850,
+                fontFamily: FONTS.heading,
+              }}>
+                <Icon name="shield" size={14} strokeWidth={2} />
+                WaveGuard {customer.tier || 'Member'}
+              </div>
+              {annualPrepay && (
+                <div style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 8,
+                  padding: '6px 10px',
+                  borderRadius: 8,
+                  background: annualPrepay.status === 'payment_pending' ? '#FFF7ED' : '#F0FDF4',
+                  border: `1px solid ${annualPrepay.status === 'payment_pending' ? '#FED7AA' : '#BBF7D0'}`,
+                  color: annualPrepay.status === 'payment_pending' ? '#9A3412' : '#047857',
+                  fontSize: 12,
+                  fontWeight: 850,
+                  fontFamily: FONTS.heading,
+                }}>
+                  <Icon name="card" size={14} strokeWidth={2} />
+                  {annualPrepayLabel}
+                </div>
+              )}
             </div>
             <h1 style={{
               margin: '12px 0 8px',
@@ -1431,7 +1472,13 @@ function DashboardTab({ customer, onSwitchTab }) {
           <div style={dashboardLabel}>At a glance</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
-              { label: 'Monthly rate', value: customer.monthlyRate ? `$${customer.monthlyRate}` : '—', sub: `${tier?.discount || '0%'} discount` },
+              annualPrepay
+                ? {
+                    label: 'Billing',
+                    value: annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid',
+                    sub: annualPrepayLine || `${tier?.discount || '0%'} discount`,
+                  }
+                : { label: 'Monthly rate', value: customer.monthlyRate ? `$${customer.monthlyRate}` : '—', sub: `${tier?.discount || '0%'} discount` },
               { label: 'Services YTD', value: stats?.servicesYTD ?? '—', sub: stats?.celsiusApplicationsThisYear != null ? `${stats.celsiusApplicationsThisYear} weed treatments` : 'completed visits' },
               { label: 'Member since', value: customer.memberSince ? fmtDate(customer.memberSince, { month: 'short', year: 'numeric' }) : '—', sub: 'active customer' },
             ].map(item => (
@@ -6518,6 +6565,16 @@ function MyPlanTab({ customer }) {
   const totalFullPrice = SERVICE_CATALOG.slice(0, numServices).reduce((sum, s) => sum + s.basePrice * 12, 0);
   const annualSavings = totalFullPrice * discount;
   const monthlyRate = customer.monthlyRate || 0;
+  const annualPrepay = customer.annualPrepay || null;
+  const annualPrepayLabel = annualPrepayStatusLabel(annualPrepay);
+  const annualPrepayLine = annualPrepayTermLine(annualPrepay);
+  const planBillingLabel = annualPrepayLabel || 'Active plan';
+  const planBillingValue = annualPrepay
+    ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
+    : formatPortalMoney(monthlyRate);
+  const planBillingSub = annualPrepay
+    ? annualPrepayLine
+    : 'per month';
 
   // Build bundled services one-liner
   const includedServices = SERVICE_CATALOG.slice(0, numServices);
@@ -6763,12 +6820,12 @@ function MyPlanTab({ customer }) {
             boxSizing: 'border-box',
           }}>
             <div style={{ fontSize: 12, color: '#047857', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
-              Active plan
+              {planBillingLabel}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper }}>
-              {money(monthlyRate)}
+              {planBillingValue}
             </div>
-            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>per month</div>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{planBillingSub}</div>
           </div>
         </div>
 

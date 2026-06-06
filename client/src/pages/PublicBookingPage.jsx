@@ -9,7 +9,7 @@ import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const SERVICES = [
-  { id: 'pest_control', label: 'Pest Control', duration: 45, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
+  { id: 'pest_control', label: 'Pest Control', duration: 60, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
   { id: 'lawn_care', label: 'Lawn Care', duration: 60, icon: 'sprout', desc: 'Fertilization + weed control program' },
   { id: 'mosquito', label: 'Mosquito Control', duration: 45, icon: 'bug', desc: 'WaveGuard barrier treatment' },
   { id: 'tree_shrub', label: 'Tree & Shrub', duration: 60, icon: 'tree', desc: 'Ornamental plant care' },

@@ -1920,6 +1920,9 @@ export default function Customer360ProfileV2({
   const accountProperties = data.accountProperties || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || annualPrepayTerms[0] || null;
+  const activeAnnualPrepayStatus = activeAnnualPrepayTerm?.status
+    ? activeAnnualPrepayTerm.status.replace(/_/g, " ")
+    : null;
 
   const updateNotificationPrefs = async (patch) => {
     const previous = data.notificationPrefs || {};
@@ -2800,6 +2803,11 @@ export default function Customer360ProfileV2({
                       <div className="text-12 font-medium text-zinc-900">
                         {activeAnnualPrepayTerm.planLabel || "Annual Prepay"}
                       </div>
+                      {activeAnnualPrepayStatus && (
+                        <div className="text-11 text-ink-secondary mt-0.5 capitalize">
+                          Status: {activeAnnualPrepayStatus}
+                        </div>
+                      )}
                       <div className="text-11 text-ink-secondary mt-0.5">
                         Term ends {fmtDate(activeAnnualPrepayTerm.termEnd)}
                         {activeAnnualPrepayTerm.lastScheduledServiceDate
