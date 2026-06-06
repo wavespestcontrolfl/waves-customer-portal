@@ -53,4 +53,21 @@ describe('recurring appointment seeder', () => {
       customer_confirmed: false,
     }));
   });
+
+  test('does not extend a completed one-year quarterly series on retry', () => {
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-1',
+      customer_id: 'customer-1',
+      scheduled_date: '2026-06-05',
+      window_start: '09:00:00',
+      window_end: '10:00:00',
+      service_type: 'Quarterly Pest Control',
+    }, {
+      pattern: 'quarterly',
+      plannedCount: 4,
+      existingDates: ['2026-06-05', '2026-09-04', '2026-12-04', '2027-03-05'],
+    });
+
+    expect(rows).toHaveLength(0);
+  });
 });

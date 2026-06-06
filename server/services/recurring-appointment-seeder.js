@@ -239,10 +239,12 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   const existingDates = new Set([baseDate, ...(opts.existingDates || []).map(dateOnly).filter(Boolean)]);
   const rows = [];
   const parentId = opts.parentId || parent.id || parent.recurring_parent_id || null;
+  const targetNewRows = Math.max(0, plannedCount - existingDates.size);
+  if (targetNewRows === 0) return rows;
   const maxAttempts = (plannedCount - 1) * 4 + 30;
 
   let attempt = 1;
-  while (rows.length < plannedCount - 1 && attempt < maxAttempts) {
+  while (rows.length < targetNewRows && attempt < maxAttempts) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     attempt++;
     const nextDateStr = shiftPastWeekend(rawNext, skipWeekends, shiftDir);
