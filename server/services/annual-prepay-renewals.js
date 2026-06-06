@@ -403,6 +403,15 @@ async function createTermForAnnualPrepay({
       status: existing.renewal_decision ? existing.status : nextStatus,
       updated_at: new Date(),
     };
+    // Honor explicitly supplied coverage dates so an edit can correct them.
+    // Only the start supplied → recompute the 12-month end from it; neither
+    // supplied → leave the existing window untouched (the estimate flow re-runs
+    // with null dates and must not have its term reset).
+    const suppliedStart = dateOnly(termStart);
+    const suppliedEnd = dateOnly(termEnd);
+    if (suppliedStart) updates.term_start = suppliedStart;
+    if (suppliedEnd) updates.term_end = suppliedEnd;
+    else if (suppliedStart) updates.term_end = addMonthsSameDay(suppliedStart, 12);
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
