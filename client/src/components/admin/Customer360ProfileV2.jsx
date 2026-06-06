@@ -56,8 +56,10 @@ import {
   Droplets,
   FileText,
   Link2,
+  MessageSquare,
   MoreHorizontal,
   PenLine,
+  Phone,
   RotateCcw,
   ShieldCheck,
   Trash2,
@@ -2398,36 +2400,43 @@ export default function Customer360ProfileV2({
                 {c.phone ? (
                   <a
                     href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+                    aria-label="Text customer"
+                    title="Text"
+                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                   >
-                    Text
+                    <MessageSquare size={17} strokeWidth={1.75} />
                   </a>
                 ) : (
                   <button
                     type="button"
                     disabled
+                    aria-label="Text customer"
                     title="No phone number on file — add one with Edit"
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-200 bg-white text-zinc-400 cursor-not-allowed"
+                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm bg-zinc-200 text-zinc-400 cursor-not-allowed border-0"
                   >
-                    Text
+                    <MessageSquare size={17} strokeWidth={1.75} />
                   </button>
                 )}
                 {c.phone ? (
                   <CallBridgeLink
                     phone={c.phone}
                     customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+                    aria-label="Call customer"
+                    title="Call"
+                    style={{ background: "#18181b", color: "#fff" }}
+                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm no-underline u-focus-ring border-0"
                   >
-                    Call
+                    <Phone size={17} strokeWidth={1.75} />
                   </CallBridgeLink>
                 ) : (
                   <button
                     type="button"
                     disabled
+                    aria-label="Call customer"
                     title="No phone number on file — add one with Edit"
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-200 bg-white text-zinc-400 cursor-not-allowed"
+                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm bg-zinc-200 text-zinc-400 cursor-not-allowed border-0"
                   >
-                    Call
+                    <Phone size={17} strokeWidth={1.75} />
                   </button>
                 )}
                 {isAdmin && (
@@ -3888,8 +3897,8 @@ export default function Customer360ProfileV2({
               ))}
             </div>{" "}
           </div>{" "}
-          <div className="max-h-[250px] overflow-y-auto flex flex-col">
-            {filteredTimeline.slice(0, 30).map((item, i) => {
+          <div className="flex flex-col md:max-h-[250px] md:overflow-y-auto">
+            {filteredTimeline.slice(0, 50).map((item, i) => {
               const TYPE_LABEL = {
                 sms: "SMS",
                 call: "CALL",
