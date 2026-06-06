@@ -91,6 +91,13 @@ const LEAD_TYPES = [
   "voicemail",
   "email_inquiry",
 ];
+const LEADS_REFRESH_MS = 10_000;
+const PIPELINE_SUMMARY_REFRESH_MS = 30_000;
+const EXPANDED_LEAD_REFRESH_MS = 15_000;
+
+function isPageVisible() {
+  return typeof document === "undefined" || document.visibilityState !== "hidden";
+}
 
 function daysSinceContact(lead) {
   if (!lead.first_contact_at) return null;
@@ -585,6 +592,7 @@ export function LeadsSection() {
   const [responseBuckets, setResponseBuckets] = useState([]);
   const [lostReasons, setLostReasons] = useState([]);
   const [expandedLead, setExpandedLead] = useState(null);
+  const expandedLeadRef = useRef(null);
   const [leadActivities, setLeadActivities] = useState([]);
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
@@ -603,9 +611,14 @@ export function LeadsSection() {
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
 
-  const loadLeads = useCallback(async () => {
+  const setActiveLead = useCallback((leadId) => {
+    expandedLeadRef.current = leadId;
+    setExpandedLead(leadId);
+  }, []);
+
+  const loadLeads = useCallback(async ({ silent = false } = {}) => {
     try {
-      setLoadError(null);
+      if (!silent) setLoadError(null);
       const params = new URLSearchParams();
       if (filters.status) params.set("status", filters.status);
       if (filters.search) params.set("search", filters.search);
@@ -617,24 +630,24 @@ export function LeadsSection() {
       setLeadsTotal(data.total || 0);
     } catch (e) {
       console.error("loadLeads", e);
-      setLoadError(e);
+      if (!silent) setLoadError(e);
     }
   }, [filters]);
 
-  const loadSources = useCallback(async () => {
+  const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
-      setLoadError(null);
+      if (!silent) setLoadError(null);
       const data = await adminFetch("/admin/leads/sources");
       setSources(data.sources || []);
     } catch (e) {
       console.error("loadSources", e);
-      setLoadError(e);
+      if (!silent) setLoadError(e);
     }
   }, []);
 
-  const loadAnalytics = useCallback(async () => {
+  const loadAnalytics = useCallback(async ({ silent = false } = {}) => {
     try {
-      setLoadError(null);
+      if (!silent) setLoadError(null);
       const [ov, fn, bs, bc, rb, lr] = await Promise.all([
         adminFetch("/admin/leads/analytics/overview"),
         adminFetch("/admin/leads/analytics/funnel"),
@@ -651,7 +664,7 @@ export function LeadsSection() {
       setLostReasons(lr.reasons || []);
     } catch (e) {
       console.error("loadAnalytics", e);
-      setLoadError(e);
+      if (!silent) setLoadError(e);
     }
   }, []);
 
@@ -682,24 +695,74 @@ export function LeadsSection() {
     if (tab === "analytics") loadAnalytics();
   }, [tab, loadLeads, loadSources, loadAnalytics]);
 
+  useEffect(() => {
+    if (tab !== "pipeline") return undefined;
+    const id = window.setInterval(() => {
+      if (!isPageVisible()) return;
+      loadLeads({ silent: true });
+    }, LEADS_REFRESH_MS);
+    return () => window.clearInterval(id);
+  }, [tab, loadLeads]);
+
+  useEffect(() => {
+    if (tab !== "pipeline") return undefined;
+    const id = window.setInterval(() => {
+      if (!isPageVisible()) return;
+      loadAnalytics({ silent: true });
+      loadSources({ silent: true });
+    }, PIPELINE_SUMMARY_REFRESH_MS);
+    return () => window.clearInterval(id);
+  }, [tab, loadAnalytics, loadSources]);
+
+  const loadLeadActivities = useCallback(
+    async (leadId, { silent = false } = {}) => {
+      if (!leadId) return;
+      const requestedLeadId = String(leadId);
+      if (!silent) {
+        setLeadActivities([]);
+        setLeadActivitiesError(null);
+        setLeadActivitiesLoading(true);
+      }
+      try {
+        const data = await adminFetch(`/admin/leads/${leadId}`);
+        if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
+        setLeadActivities(data.activities || []);
+        if (!silent) setLeadActivitiesError(null);
+      } catch (e) {
+        console.error("loadLeadActivities", e);
+        if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
+        if (!silent) {
+          setLeadActivities([]);
+          setLeadActivitiesError(e);
+        }
+      } finally {
+        if (
+          !silent &&
+          String(expandedLeadRef.current || "") === requestedLeadId
+        ) {
+          setLeadActivitiesLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (tab !== "pipeline" || !expandedLead) return undefined;
+    const id = window.setInterval(() => {
+      if (!isPageVisible()) return;
+      loadLeadActivities(expandedLead, { silent: true });
+    }, EXPANDED_LEAD_REFRESH_MS);
+    return () => window.clearInterval(id);
+  }, [tab, expandedLead, loadLeadActivities]);
+
   const expandLead = async (lead) => {
     if (expandedLead === lead.id) {
-      setExpandedLead(null);
+      setActiveLead(null);
       return;
     }
-    setExpandedLead(lead.id);
-    setLeadActivities([]);
-    setLeadActivitiesError(null);
-    setLeadActivitiesLoading(true);
-    try {
-      const data = await adminFetch(`/admin/leads/${lead.id}`);
-      setLeadActivities(data.activities || []);
-    } catch (e) {
-      setLeadActivities([]);
-      setLeadActivitiesError(e);
-    } finally {
-      setLeadActivitiesLoading(false);
-    }
+    setActiveLead(lead.id);
+    loadLeadActivities(lead.id);
   };
 
   const updateLeadStatus = async (leadId, status) => {
@@ -734,7 +797,7 @@ export function LeadsSection() {
       setLeads((rows) => rows.filter((row) => row.id !== lead.id));
       setLeadsTotal((total) => Math.max(0, total - 1));
       if (expandedLead === lead.id) {
-        setExpandedLead(null);
+        setActiveLead(null);
         setLeadActivities([]);
       }
       loadAnalytics();
