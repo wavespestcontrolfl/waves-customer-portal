@@ -502,11 +502,14 @@ const MOSQUITO = {
   },
   basePrices: {
     //           seasonal9, monthly12
-    SMALL:   [r(105), r(90)],
-    QUARTER: [r(115), r(100)],
-    THIRD:   [r(130), r(115)],
-    HALF:    [r(155), r(135)],
-    ACRE:    [r(195), r(175)],
+    // Repriced 2026-06 to match SW-FL market ($45-58/mo recurring); prior
+    // pricing ran ~2x market and the service never sold. Bifen-only barrier
+    // @ ~11min on-site holds ~62-71% real margin at these rates.
+    SMALL:   [r(66), r(60)],
+    QUARTER: [r(69), r(63)],
+    THIRD:   [r(72), r(66)],
+    HALF:    [r(78), r(70)],
+    ACRE:    [r(88), r(78)],
   },
   tierVisits: { seasonal9: 9, monthly12: 12 },
   productCosts: {
@@ -845,15 +848,17 @@ const ONE_TIME = {
     oneTimeMultiplier: 1.50,
   },
   mosquito: {
-    SMALL:   r(225),
-    STANDARD: r(275),
-    LARGE:   r(325),
-    XL:      r(385),
-    ESTATE:  r(425),
-    ACRE_CLASS: r(475),
-    OVER_ACRE: r(475),
+    // Repriced 2026-06 to the SW-FL single-visit band ($80-150 low end,
+    // scaling for big lots); prior pricing ran ~2x market.
+    SMALL:   r(99),
+    STANDARD: r(129),
+    LARGE:   r(159),
+    XL:      r(199),
+    ESTATE:  r(239),
+    ACRE_CLASS: r(269),
+    OVER_ACRE: r(269),
     overAcreIncrementSqFt: 10000,
-    overAcreIncrementPrice: r(75),
+    overAcreIncrementPrice: r(40),
     stationAddOn: r(75),
     dunkAddOn: r(15),
   },
