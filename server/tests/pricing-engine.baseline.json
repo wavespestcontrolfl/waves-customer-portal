@@ -141,9 +141,9 @@
   },
   "mosquito_acre_waterfront_max_pressure": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3972,
-      "recurringMonthlyAfterDiscount": 331,
-      "year1Total": 3972
+      "recurringAnnualAfterDiscount": 1764,
+      "recurringMonthlyAfterDiscount": 147,
+      "year1Total": 1764
     },
     "waveGuard": {
       "tier": "bronze",
@@ -152,8 +152,8 @@
     },
     "lineItems": {
       "mosquito": {
-        "annual": 3972,
-        "monthly": 331
+        "annual": 1764,
+        "monthly": 147
       }
     }
   },
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2855.2,
-      "recurringMonthlyAfterDiscount": 237.93,
-      "year1Total": 2855
+      "recurringAnnualAfterDiscount": 2548,
+      "recurringMonthlyAfterDiscount": 212.33,
+      "year1Total": 2548
     },
     "waveGuard": {
       "tier": "platinum",
@@ -200,8 +200,8 @@
         "monthly": 101.92
       },
       "mosquito": {
-        "annual": 1140,
-        "monthly": 95
+        "annual": 756,
+        "monthly": 63
       }
     }
   },

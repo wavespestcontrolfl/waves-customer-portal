@@ -58,9 +58,48 @@ exports.up = async function (knex) {
       .onConflict('config_key')
       .merge(['name', 'category', 'sort_order', 'data', 'updated_at']);
   }
+
+  // Record the intentional pricing/baseline change.
+  if (await knex.schema.hasTable('pricing_changelog')) {
+    const identity = {
+      version_from: 'v4.3',
+      version_to: 'v4.3',
+      changed_by: 'claude-2026-06-06',
+      category: 'rule',
+      summary: 'Reprice mosquito (recurring + one-time) to SW-FL market band.',
+    };
+    const existing = await knex('pricing_changelog').where(identity).first('id');
+    if (!existing) {
+      await knex('pricing_changelog').insert({
+        ...identity,
+        affected_services: JSON.stringify(['mosquito', 'one_time_mosquito']),
+        before_value: JSON.stringify({
+          mosquito_base_prices: { SMALL: [105, 90], QUARTER: [115, 100], THIRD: [130, 115], HALF: [155, 135], ACRE: [195, 175] },
+          onetime_mosquito: { SMALL: 225, STANDARD: 275, LARGE: 325, XL: 385, ESTATE: 425, ACRE_CLASS: 475, OVER_ACRE: 475, overAcreIncrementPrice: 75 },
+        }),
+        after_value: JSON.stringify({
+          mosquito_base_prices: { SMALL: [66, 60], QUARTER: [69, 63], THIRD: [72, 66], HALF: [78, 70], ACRE: [88, 78] },
+          onetime_mosquito: { SMALL: 99, STANDARD: 129, LARGE: 159, XL: 199, ESTATE: 239, ACRE_CLASS: 269, OVER_ACRE: 269, overAcreIncrementPrice: 40 },
+        }),
+        rationale: 'Mosquito ran ~2x the SW-FL market ($45-58/mo recurring, $80-150 one-time) and effectively never sold (3 of 228 estimates attached it, 0 accepted). Repriced into the market band; real margin stays ~62-71% recurring / ~80%+ one-time (Bifen-only barrier, ~11min on-site). Multipliers unchanged. Local regression baselines + the pure-mosquito DB baseline cases refreshed in the same PR; the prod-divergent platinum-bundle DB cases (edge_large_footprint_5500sf_platinum_bundle, v1adapter_platinum_bundle_4_services_zone_a) require a post-deploy DB-parity recapture once these prices are live in prod.',
+      });
+    }
+  }
 };
 
 exports.down = async function (knex) {
+  if (await knex.schema.hasTable('pricing_changelog')) {
+    await knex('pricing_changelog')
+      .where({
+        version_from: 'v4.3',
+        version_to: 'v4.3',
+        changed_by: 'claude-2026-06-06',
+        category: 'rule',
+        summary: 'Reprice mosquito (recurring + one-time) to SW-FL market band.',
+      })
+      .del();
+  }
+
   if (!(await knex.schema.hasTable('pricing_config'))) return;
 
   const rows = [
