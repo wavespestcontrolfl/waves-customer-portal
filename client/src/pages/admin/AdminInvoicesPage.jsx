@@ -516,6 +516,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
+  const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
 
   const load = useCallback(
@@ -1122,6 +1123,21 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               Payment plan
                             </button>
                           )}
+                          {inv.status !== "void" && (
+                            <button
+                              onClick={() => setAnnualPrepayModalInvoice(inv)}
+                              style={sBtn(
+                                inv.annual_prepay_term_id ? D.heading : D.card,
+                                inv.annual_prepay_term_id ? D.white : D.text,
+                                isMobile,
+                              )}
+                              title="Flag this invoice as a full-year prepayment — adds the coverage banner to the customer's invoice"
+                            >
+                              {inv.annual_prepay_term_id
+                                ? "Annual prepay ✓"
+                                : "Annual prepay"}
+                            </button>
+                          )}
                           {inv.status !== "void" && inv.token && (
                             <a
                               href={
@@ -1352,6 +1368,21 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
           onCreated={() => {
             setPaymentPlanModalInvoice(null);
             showToast("Payment plan created");
+            load();
+            onRefresh();
+          }}
+          onError={(msg) => showToast(msg)}
+        />
+      )}
+
+      {annualPrepayModalInvoice && (
+        <AnnualPrepayModal
+          invoice={annualPrepayModalInvoice}
+          isMobile={isMobile}
+          onClose={() => setAnnualPrepayModalInvoice(null)}
+          onSaved={(msg) => {
+            setAnnualPrepayModalInvoice(null);
+            showToast(msg);
             load();
             onRefresh();
           }}
@@ -2865,6 +2896,243 @@ function RecordPaymentModal({
           </button>{" "}
         </div>{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+// Flags an existing invoice as an annual prepayment so the customer-facing
+// coverage banner renders on the pay page + PDF. Prefills from the linked term
+// when one already exists (edit mode), otherwise from the invoice itself.
+function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
+  const [loading, setLoading] = useState(true);
+  const [existing, setExisting] = useState(null);
+  const [start, setStart] = useState(
+    invoiceDateOnly(invoice.service_date) || todayDateInput(),
+  );
+  const [months, setMonths] = useState(12);
+  const [planLabel, setPlanLabel] = useState(invoice.title || "");
+  const [amount, setAmount] = useState(
+    invoice.total != null ? String(parseFloat(invoice.total).toFixed(2)) : "",
+  );
+  const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    adminFetch(`/admin/invoices/${invoice.id}`)
+      .then((data) => {
+        if (!alive) return;
+        const term = data?.annual_prepay;
+        if (term) {
+          setExisting(term);
+          if (term.termStart) setStart(invoiceDateOnly(term.termStart) || start);
+          if (term.coverageMonths) setMonths(term.coverageMonths);
+          if (term.planLabel) setPlanLabel(term.planLabel);
+          if (term.prepayAmount != null) {
+            setAmount(String(Number(term.prepayAmount).toFixed(2)));
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [invoice.id]);
+
+  const handleSave = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
+        method: "POST",
+        body: JSON.stringify({
+          termStart: start || undefined,
+          months: Number(months) || undefined,
+          planLabel: planLabel.trim() || undefined,
+          prepayAmount: amount !== "" ? Number(amount) : undefined,
+        }),
+      });
+      onSaved(existing ? "Annual prepay updated" : "Marked as annual prepay");
+    } catch (err) {
+      onError(`Annual prepay failed: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRemove = async () => {
+    if (removing) return;
+    if (
+      !confirm(
+        "Remove the annual prepay flag from this invoice? The coverage banner will stop showing.",
+      )
+    )
+      return;
+    setRemoving(true);
+    try {
+      await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
+        method: "DELETE",
+      });
+      onSaved("Annual prepay removed");
+    } catch (err) {
+      onError(`Remove failed: ${err.message}`);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  const labelStyle = {
+    display: "block",
+    fontSize: 12,
+    fontWeight: 600,
+    color: D.text,
+    margin: "16px 0 6px",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        zIndex: 400,
+        display: "flex",
+        alignItems: isMobile ? "flex-end" : "center",
+        justifyContent: "center",
+        padding: isMobile ? 0 : 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card,
+          borderRadius: isMobile ? "16px 16px 0 0" : 14,
+          width: "100%",
+          maxWidth: 460,
+          padding: isMobile ? "24px 20px 28px" : 28,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+          maxHeight: "92vh",
+          overflowY: "auto",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 20,
+            fontWeight: 700,
+            color: D.heading,
+            marginBottom: 4,
+          }}
+        >
+          {existing ? "Annual prepay" : "Mark as annual prepay"}
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
+          Invoice #{invoice.invoice_number} · {invoice.first_name}{" "}
+          {invoice.last_name}
+        </div>
+
+        <div
+          style={{
+            padding: "10px 12px",
+            background: "#F4F4F5",
+            border: `1px solid ${D.border}`,
+            borderRadius: 8,
+            fontSize: 12,
+            color: D.muted,
+            lineHeight: 1.45,
+          }}
+        >
+          Adds the "Annual prepayment" coverage banner to the customer's invoice
+          (pay page + PDF), showing the dates this payment covers. Use it for a
+          customer paying a full year up front.
+        </div>
+
+        <label style={labelStyle}>Coverage start</label>
+        <input
+          type="date"
+          value={start}
+          onChange={(e) => setStart(e.target.value)}
+          style={sInput(isMobile)}
+        />
+
+        <label style={labelStyle}>Term length (months)</label>
+        <input
+          type="number"
+          min={1}
+          max={60}
+          value={months}
+          onChange={(e) => setMonths(e.target.value)}
+          style={sInput(isMobile)}
+        />
+
+        <label style={labelStyle}>Plan label</label>
+        <input
+          value={planLabel}
+          onChange={(e) => setPlanLabel(e.target.value.slice(0, 120))}
+          placeholder="e.g. WaveGuard Bronze Annual Prepay"
+          style={sInput(isMobile)}
+        />
+
+        <label style={labelStyle}>Prepay amount</label>
+        <input
+          type="number"
+          min={0}
+          step="0.01"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          style={sInput(isMobile)}
+        />
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginTop: 22,
+          }}
+        >
+          <div>
+            {existing && (
+              <button
+                onClick={handleRemove}
+                disabled={removing || saving}
+                style={{
+                  ...sBtn("transparent", D.red, isMobile),
+                  opacity: removing ? 0.5 : 1,
+                }}
+              >
+                {removing ? "Removing…" : "Remove"}
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={onClose}
+              disabled={saving || removing}
+              style={sBtn("transparent", D.text, isMobile)}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving || removing || loading}
+              style={{
+                ...sBtn(D.heading, D.white, isMobile),
+                opacity: saving || loading ? 0.5 : 1,
+              }}
+            >
+              {saving ? "Saving…" : existing ? "Update" : "Mark prepaid"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
