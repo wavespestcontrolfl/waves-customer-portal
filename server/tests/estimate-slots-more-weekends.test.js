@@ -185,9 +185,17 @@ describe('estimate slot weekend and expander behavior', () => {
       },
     }, { selectedFrequency: 'quarterly' });
 
-    expect(profile.durationMinutes).toBe(90);
+    expect(profile.durationMinutes).toBe(105);
     expect(profile.serviceLabel).toBe('4x Pest Control + 9x Lawn Care');
     expect(profile.services.map((svc) => svc.service)).toEqual(['pest_control', 'lawn_care']);
+  });
+
+  test('quarterly pest estimate slots default to 60 minutes', () => {
+    expect(slotAvailabilityInternals.durationForService({
+      service: 'pest_control',
+      label: 'Pest Control (Quarterly)',
+      visitsPerYear: 4,
+    })).toBe(60);
   });
 
   test('estimate slot profile honors selected v1 pricing frequency without a send snapshot', () => {
@@ -250,7 +258,7 @@ describe('estimate slot weekend and expander behavior', () => {
       },
     }, { selectedFrequency: 'quarterly' });
 
-    expect(profile.durationMinutes).toBe(90);
+    expect(profile.durationMinutes).toBe(105);
     expect(profile.serviceLabel).toBe('4x Pest Control + 9x Lawn Care');
     expect(profile.services.map((svc) => svc.service)).toEqual(['pest_control', 'lawn_care']);
   });

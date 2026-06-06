@@ -9,7 +9,7 @@ import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const SERVICES = [
-  { id: 'pest_control', label: 'Pest Control', duration: 45, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
+  { id: 'pest_control', label: 'Pest Control', duration: 60, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
   { id: 'lawn_care', label: 'Lawn Care', duration: 60, icon: 'sprout', desc: 'Fertilization + weed control program' },
   { id: 'mosquito', label: 'Mosquito Control', duration: 45, icon: 'bug', desc: 'WaveGuard barrier treatment' },
   { id: 'tree_shrub', label: 'Tree & Shrub', duration: 60, icon: 'tree', desc: 'Ornamental plant care' },
@@ -166,6 +166,8 @@ export default function PublicBookingPage() {
     } catch { /* best-effort */ }
   }, [address, applyCustomer]);
 
+  const isQuarterlyRecurringBooking = service.id === 'pest_control' && source !== 'estimate-accept';
+
   const handleConfirm = async () => {
     setLoading(true);
     setError('');
@@ -181,6 +183,7 @@ export default function PublicBookingPage() {
           technician_id: selectedSlot.technician_id,
           service_type: service.label,
           duration_minutes: service.duration,
+          recurring_pattern: isQuarterlyRecurringBooking ? 'quarterly' : null,
           customer_notes: notes,
           source,
           referrer_url: document.referrer || null,

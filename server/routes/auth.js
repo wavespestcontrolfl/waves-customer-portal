@@ -126,6 +126,61 @@ async function accountPropertiesForCustomer(customer) {
   return rows.map(propertyPayload);
 }
 
+function dateOnlyForApi(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.slice(0, 10);
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+async function annualPrepayForCustomer(customerId) {
+  if (!customerId) return null;
+  const hasTable = await db.schema.hasTable('annual_prepay_terms').catch(() => false);
+  if (!hasTable) return null;
+  const term = await db('annual_prepay_terms as apt')
+    .leftJoin('invoices as inv', 'apt.prepay_invoice_id', 'inv.id')
+    .where('apt.customer_id', customerId)
+    .whereIn('apt.status', ['active', 'renewal_pending', 'payment_pending'])
+    .orderByRaw(`
+      CASE apt.status
+        WHEN 'active' THEN 1
+        WHEN 'renewal_pending' THEN 2
+        WHEN 'payment_pending' THEN 3
+        ELSE 4
+      END
+    `)
+    .orderBy('apt.term_end', 'desc')
+    .first(
+      'apt.id',
+      'apt.status',
+      'apt.plan_label',
+      'apt.monthly_rate',
+      'apt.prepay_amount',
+      'apt.term_start',
+      'apt.term_end',
+      'apt.prepay_invoice_id',
+      'inv.status as prepay_invoice_status',
+      'inv.total as prepay_invoice_total',
+    )
+    .catch((err) => {
+      logger.warn(`[auth] annual prepay lookup skipped for customer ${customerId}: ${err.message}`);
+      return null;
+    });
+  if (!term) return null;
+  return {
+    id: term.id,
+    status: term.status,
+    planLabel: term.plan_label,
+    monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
+    prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+    termStart: dateOnlyForApi(term.term_start),
+    termEnd: dateOnlyForApi(term.term_end),
+    prepayInvoiceId: term.prepay_invoice_id,
+    prepayInvoiceStatus: term.prepay_invoice_status,
+    prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
+  };
+}
+
 // =========================================================================
 // POST /api/auth/send-code — Send OTP to phone number
 // =========================================================================
@@ -252,7 +307,10 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
 router.get('/me', authenticate, async (req, res, next) => {
   try {
   const customer = req.customer;
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  const [prefs, annualPrepay] = await Promise.all([
+    db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null),
+    annualPrepayForCustomer(customer.id),
+  ]);
 
   res.json({
     id: customer.id,
@@ -282,6 +340,7 @@ router.get('/me', authenticate, async (req, res, next) => {
     monthlyRate: parseFloat(customer.monthly_rate),
     memberSince: customer.member_since,
     referralCode: customer.referral_code,
+    annualPrepay,
     notificationPrefs: prefs ? {
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,
