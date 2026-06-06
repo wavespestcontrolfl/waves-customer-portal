@@ -15,6 +15,7 @@ const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
+const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
@@ -281,6 +282,17 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   }
   if (!v1Input) return { recomputed: false, reason: 'NO_INPUTS' };
 
+  // Existing-customer reprice: when the estimate is linked to a customer with
+  // prior qualifying recurring services, fold them into the engine input so the
+  // WaveGuard tier (and thus the persisted, charged total) reflects the
+  // COMBINED tier — not just the services in this one estimate.
+  const priorQualifyingServices = Array.isArray(deps.priorQualifyingServices)
+    ? deps.priorQualifyingServices
+    : [];
+  if (priorQualifyingServices.length) {
+    v1Input = { ...v1Input, priorQualifyingServices };
+  }
+
   try {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();
@@ -298,7 +310,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -315,7 +327,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices });
   } catch (error) {
     result = { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
@@ -407,12 +419,25 @@ async function createOrReuseAdminEstimate({
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
+  // For an estimate linked to an existing customer, load the WaveGuard-qualifying
+  // recurring services they already have so the engine reprices at the COMBINED
+  // tier. Best-effort: a failure here must not block the save, it just means the
+  // estimate prices on its own services as before.
+  let priorQualifyingServices = [];
+  if (body.customerId) {
+    try {
+      priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
+    } catch (err) {
+      logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+    }
+  }
   const pricing = await resolveServerAuthoritativePricing({
     estimateData: trustedEstimateData,
     clientPreview,
     quoteRequired,
     now,
     recompute,
+    priorQualifyingServices,
   });
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);

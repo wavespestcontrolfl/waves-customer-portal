@@ -4,17 +4,19 @@
 // Builds the customer-facing "WaveGuard membership" context for an estimate
 // that is linked to an existing, active customer (estimates.customer_id set).
 //
-// This is a DISPLAY / transparency layer only — it does not change the price
-// the customer is charged. It computes:
+// This module renders the membership card. The NEW-service member discount it
+// shows is honored at the charged total because admin-estimate-persistence.js
+// reprices linked-customer estimates at the same combined tier (both use the
+// shared waveguard-existing-services loader, so display and charge agree). The
+// existing-service per-application figures remain informational (crediting them
+// against existing prepaid visits is a separate billing action).
+//
+// It computes:
 //   1. The combined WaveGuard tier — the customer's existing qualifying
-//      recurring services PLUS the new service(s) in this estimate
-//      ("combine & recompute" per product decision).
-//   2. The tier-upgrade callout (e.g. Silver -> Gold) when adding the new
-//      service bumps them into a higher tier.
-//   3. The per-application discount on their EXISTING recurring services that
-//      results from a tier upgrade — expressed per remaining visit, so a
-//      customer who prepaid the year sees the going-forward benefit rather
-//      than a retroactive re-price.
+//      recurring services PLUS the new service(s) in this estimate.
+//   2. The tier-upgrade callout (e.g. Silver -> Gold).
+//   3. The per-application savings on EXISTING recurring services from a tier
+//      upgrade — per remaining visit, prepaid-aware.
 //   4. The member discount on the NEW service in this estimate.
 //
 // Returns null for leads (no customer_id), inactive customers, or on ANY error
@@ -24,8 +26,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
-const { WAVEGUARD } = require('./pricing-engine/constants');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
+const { toQualifyingKey, loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
 
 const TIER_LABEL = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
 const SERVICE_LABEL = {
@@ -35,30 +37,6 @@ const SERVICE_LABEL = {
   mosquito: 'Mosquito',
   termite_bait: 'Termite Bait',
 };
-// Statuses that mean a scheduled visit is not live, active coverage.
-// 'rescheduled' is included because the customer-portal reschedule flow flips
-// status to 'rescheduled' but leaves the original row in place as a phantom
-// until SmartRebooker actions it — counting it would inflate the tier (see
-// admin-schedule.js, which excludes it for the same reason).
-const TERMINAL_STATUSES = ['cancelled', 'completed', 'no_show', 'skipped', 'rescheduled'];
-
-// Map a free-text service name (scheduled_services.service_type or an estimate
-// line label) to a WaveGuard qualifying service key. Scoped to the five
-// qualifiers — palm_injection and rodent_bait are explicitly NOT qualifiers.
-function toQualifyingKey(raw) {
-  const s = String(raw || '').toLowerCase();
-  if (!s) return null;
-  if (s.includes('rodent') || s.includes('palm')) return null;
-  // One-time treatments (e.g. one_time_pest) never receive the WaveGuard tier
-  // discount and must not count toward the tier.
-  if (/one[\s_-]?time|onetime/.test(s)) return null;
-  if (s.includes('pest')) return 'pest_control';
-  if (s.includes('lawn') || s.includes('turf')) return 'lawn_care';
-  if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) return 'tree_shrub';
-  if (s.includes('mosquito')) return 'mosquito';
-  if (s.includes('termite') && s.includes('bait')) return 'termite_bait';
-  return null;
-}
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
@@ -141,26 +119,9 @@ async function buildEstimateMembershipContext(estimate) {
     if (!customer || customer.active === false) return null;
 
     // ── Existing active recurring services on the account ──────
-    // Restrict to RECURRING rows — a one-time appointment whose service_type
-    // matches a qualifier (e.g. a one-time Pest Control) must not count as
-    // WaveGuard coverage. Recurring = is_recurring OR part of a recurring
-    // series (recurring_parent_id), mirroring project-completion.js. Guarded
-    // on column existence so schema drift degrades to status-only filtering
-    // rather than throwing.
-    const scheduledCols = await db('scheduled_services').columnInfo();
-    const hasIsRecurring = !!scheduledCols.is_recurring;
-    const hasRecurringParent = !!scheduledCols.recurring_parent_id;
-    let existingQuery = db('scheduled_services')
-      .where({ customer_id: customer.id })
-      .whereNotIn('status', TERMINAL_STATUSES);
-    if (hasIsRecurring || hasRecurringParent) {
-      existingQuery = existingQuery.where(function () {
-        if (hasIsRecurring) this.orWhere({ is_recurring: true });
-        if (hasRecurringParent) this.orWhereNotNull('recurring_parent_id');
-      });
-    }
-    const existingRows = await existingQuery
-      .select('id', 'service_type', 'estimated_price', 'annual_prepay_term_id', 'scheduled_date');
+    // Shared loader — same source admin-estimate-persistence.js uses to reprice
+    // the estimate, so the displayed tier matches the charged tier.
+    const existingRows = await loadExistingRecurringQualifyingRows(db, customer.id);
 
     const existingByKey = new Map();
     for (const row of existingRows) {
