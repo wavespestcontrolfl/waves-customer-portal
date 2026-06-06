@@ -12,6 +12,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
+const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -825,6 +826,99 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await InvoiceService.voidInvoice(req.params.id);
     res.json(invoice);
+  } catch (err) { next(err); }
+});
+
+// POST /:id/annual-prepay — flag an existing invoice as an annual prepayment.
+// Creates (or re-activates) the linked annual_prepay_terms row and stamps
+// invoices.annual_prepay_term_id — that link is what surfaces the coverage
+// banner on the pay page + PDF. Defaults: coverage starts on the service date
+// (or today) for 12 months, prepay amount = invoice total. Idempotent per
+// invoice (annual_prepay_terms has a unique prepay_invoice_id).
+router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
+  try {
+    const { termStart, termEnd, months, planLabel, prepayAmount, monthlyRate } = req.body || {};
+    const ymd = /^\d{4}-\d{2}-\d{2}$/;
+    if (termStart && !ymd.test(String(termStart))) {
+      return res.status(400).json({ error: 'termStart must be YYYY-MM-DD' });
+    }
+    if (termEnd && !ymd.test(String(termEnd))) {
+      return res.status(400).json({ error: 'termEnd must be YYYY-MM-DD' });
+    }
+
+    const invoice = await db('invoices').where({ id: req.params.id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+    const { dateOnly, addMonthsSameDay } = AnnualPrepayRenewals._private;
+    const start = termStart || dateOnly(invoice.service_date) || undefined;
+    let end = termEnd || undefined;
+    if (!end && months != null && months !== '') {
+      const span = parseInt(months, 10);
+      if (!Number.isFinite(span) || span < 1 || span > 60) {
+        return res.status(400).json({ error: 'months must be between 1 and 60' });
+      }
+      end = addMonthsSameDay(dateOnly(start) || etDateString(), span);
+    }
+    if (start && end && dateOnly(end) <= dateOnly(start)) {
+      return res.status(400).json({ error: 'termEnd must be after termStart' });
+    }
+
+    const resolvedAmount = prepayAmount != null && prepayAmount !== ''
+      ? Number(prepayAmount)
+      : Number(invoice.total || 0);
+    if (!Number.isFinite(resolvedAmount) || resolvedAmount < 0) {
+      return res.status(400).json({ error: 'prepayAmount must be a non-negative number' });
+    }
+
+    const resolvedMonthly = monthlyRate != null && monthlyRate !== ''
+      ? Number(monthlyRate)
+      : null;
+    if (resolvedMonthly != null && (!Number.isFinite(resolvedMonthly) || resolvedMonthly < 0)) {
+      return res.status(400).json({ error: 'monthlyRate must be a non-negative number' });
+    }
+
+    const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: invoice.customer_id,
+      prepayInvoiceId: invoice.id,
+      planLabel: cleanOptionalText(planLabel) || invoice.title || 'Annual Prepay',
+      monthlyRate: resolvedMonthly,
+      prepayAmount: resolvedAmount,
+      termStart: start || null,
+      termEnd: end || null,
+    });
+    if (!term) {
+      return res.status(409).json({ error: 'Annual prepay is not available for this account' });
+    }
+
+    const updated = await InvoiceService.getById(invoice.id);
+    res.json({ ok: true, term, invoice: updated });
+  } catch (err) { next(err); }
+});
+
+// DELETE /:id/annual-prepay — remove the annual-prepay flag from an invoice.
+// Clears the invoice link and cancels the linked term so the banner stops
+// rendering. Idempotent — re-marking later re-activates the same term row.
+router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
+  try {
+    const invoice = await db('invoices')
+      .where({ id: req.params.id })
+      .first('id', 'annual_prepay_term_id');
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+    const termId = invoice.annual_prepay_term_id;
+    await db.transaction(async (trx) => {
+      await trx('invoices')
+        .where({ id: invoice.id })
+        .update({ annual_prepay_term_id: null, updated_at: new Date() });
+      if (termId) {
+        await trx('annual_prepay_terms')
+          .where({ id: termId })
+          .update({ status: 'cancelled', updated_at: new Date() });
+      }
+    });
+
+    const updated = await InvoiceService.getById(invoice.id);
+    res.json({ ok: true, invoice: updated });
   } catch (err) { next(err); }
 });
 

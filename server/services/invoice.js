@@ -1626,7 +1626,14 @@ const InvoiceService = {
       .orderBy("created_at", "desc")
       .first()
       .catch(() => null);
-    return { ...invoice, customer, active_payment_plan: activePaymentPlan };
+    const annual_prepay = await loadInvoiceAnnualPrepay({
+      ...invoice,
+      line_items:
+        typeof invoice.line_items === "string"
+          ? JSON.parse(invoice.line_items)
+          : invoice.line_items,
+    });
+    return { ...invoice, customer, active_payment_plan: activePaymentPlan, annual_prepay };
   },
 
   async list({
