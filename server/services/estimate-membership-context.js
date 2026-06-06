@@ -137,9 +137,25 @@ async function buildEstimateMembershipContext(estimate) {
     if (!customer || customer.active === false) return null;
 
     // ── Existing active recurring services on the account ──────
-    const existingRows = await db('scheduled_services')
+    // Restrict to RECURRING rows — a one-time appointment whose service_type
+    // matches a qualifier (e.g. a one-time Pest Control) must not count as
+    // WaveGuard coverage. Recurring = is_recurring OR part of a recurring
+    // series (recurring_parent_id), mirroring project-completion.js. Guarded
+    // on column existence so schema drift degrades to status-only filtering
+    // rather than throwing.
+    const scheduledCols = await db('scheduled_services').columnInfo();
+    const hasIsRecurring = !!scheduledCols.is_recurring;
+    const hasRecurringParent = !!scheduledCols.recurring_parent_id;
+    let existingQuery = db('scheduled_services')
       .where({ customer_id: customer.id })
-      .whereNotIn('status', TERMINAL_STATUSES)
+      .whereNotIn('status', TERMINAL_STATUSES);
+    if (hasIsRecurring || hasRecurringParent) {
+      existingQuery = existingQuery.where(function () {
+        if (hasIsRecurring) this.orWhere({ is_recurring: true });
+        if (hasRecurringParent) this.orWhereNotNull('recurring_parent_id');
+      });
+    }
+    const existingRows = await existingQuery
       .select('id', 'service_type', 'estimated_price', 'annual_prepay_term_id', 'scheduled_date');
 
     const existingByKey = new Map();
