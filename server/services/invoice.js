@@ -6,6 +6,7 @@ const DiscountEngine = require("./discount-engine");
 const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
+const { loadInvoiceAnnualPrepay } = require("./invoice-prepay");
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -1042,14 +1043,21 @@ const InvoiceService = {
       )
       .first();
 
+    const line_items =
+      typeof invoice.line_items === "string"
+        ? JSON.parse(invoice.line_items)
+        : invoice.line_items;
+
+    // Annual-prepay coverage callout (null for ordinary invoices). Built from
+    // the parsed line items so setup-fee-waived detection sees the real text.
+    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items });
+
     return {
       ...invoice,
       ...updates,
       customer,
-      line_items:
-        typeof invoice.line_items === "string"
-          ? JSON.parse(invoice.line_items)
-          : invoice.line_items,
+      annual_prepay,
+      line_items,
       products_applied:
         typeof invoice.products_applied === "string"
           ? JSON.parse(invoice.products_applied)

@@ -132,6 +132,7 @@ router.get('/:token', async (req, res, next) => {
         taxAmount: parseFloat(data.tax_amount),
         total: parseFloat(data.total),
         dueDate: data.due_date,
+        annualPrepay: data.annual_prepay || null,
         paidAt: data.paid_at,
         cardBrand: data.card_brand,
         cardLastFour: data.card_last_four,

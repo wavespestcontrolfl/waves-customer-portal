@@ -119,6 +119,40 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
   return y;
 }
 
+// Annual-prepay coverage callout. Renders only for annual-prepay invoices —
+// the raw line item is otherwise the only signal the customer is paying for a
+// full year. prepay is the normalized descriptor from services/invoice-prepay.
+function annualPrepayCallout(doc, prepay, x, y, width) {
+  if (!prepay) return y;
+
+  const startStr = formatInvoiceDateOnly(prepay.termStart);
+  const endStr = formatInvoiceDateOnly(prepay.termEnd);
+  const months = prepay.coverageMonths;
+  const spanLabel = months ? `${months} months of service` : 'a full year of service';
+  let body = `This is an annual prepayment — it covers ${spanLabel}`;
+  if (startStr !== '—' && endStr !== '—') body += `, ${startStr} – ${endStr}`;
+  body += '.';
+  if (prepay.setupFeeWaived) body += ' Your one-time setup fee is waived.';
+
+  const padX = 12;
+  const padY = 10;
+  const labelGap = 16;
+  const textW = width - padX * 2;
+
+  doc.save();
+  doc.fontSize(10).font('Helvetica');
+  const bodyH = doc.heightOfString(body, { width: textW, lineGap: 2 });
+  const boxH = padY * 2 + labelGap + bodyH;
+  doc.roundedRect(x, y, width, boxH, 6).lineWidth(1).fillAndStroke(SOFT, WAVES_BLUE);
+  doc.fontSize(8).font('Helvetica-Bold').fillColor(WAVES_BLUE)
+    .text('ANNUAL PREPAYMENT', x + padX, y + padY, { characterSpacing: 1.2 });
+  doc.fontSize(10).font('Helvetica').fillColor(BODY)
+    .text(body, x + padX, y + padY + labelGap, { width: textW, lineGap: 2 });
+  doc.restore();
+
+  return y + boxH + 14;
+}
+
 function lineItemsTable(doc, lineItems, x, y, width) {
   const visibleLineItems = (lineItems || []).filter((item) => {
     const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
@@ -255,6 +289,7 @@ function generateInvoicePDF(invoice, res) {
   yRight = invoiceMetaBlock(doc, invoice, null, L + W / 2 + 20, yRight, 'invoice');
 
   let y = Math.max(yLeft, yRight) + 16;
+  y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
   y = lineItemsTable(doc, invoice.line_items, L, y, W);
   y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer });
 
