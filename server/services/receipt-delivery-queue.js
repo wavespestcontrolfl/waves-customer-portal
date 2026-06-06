@@ -101,6 +101,16 @@ function actionableEmailFailure(result) {
   return result && result.ok === false && !expectedEmailSkip(result);
 }
 
+function shouldRetryReceiptDelivery({ smsResult = null, emailResult = null } = {}) {
+  return actionableSmsFailure(smsResult) || actionableEmailFailure(emailResult);
+}
+
+function receiptDeliveryFailureError({ smsResult = null, emailResult = null } = {}) {
+  const smsReason = actionableSmsFailure(smsResult) ? (smsResult.reason || 'unknown') : 'ok';
+  const emailReason = actionableEmailFailure(emailResult) ? (emailResult.error || 'unknown') : 'ok';
+  return new Error(`receipt channel failed: sms=${smsReason} email=${emailReason}`);
+}
+
 async function markJobCompleted(job, { smsResult, emailResult }) {
   await db('receipt_delivery_jobs')
     .where({ id: job.id })
@@ -163,12 +173,8 @@ async function processReceiptDeliveryJob(job) {
       logger.warn(`[receipt-delivery-queue] Receipt email not sent for invoice ${invoice.invoice_number}: ${emailResult.error || 'unknown'}`);
     }
 
-    if (actionableSmsFailure(smsResult) || actionableEmailFailure(emailResult)) {
-      const failures = [
-        actionableSmsFailure(smsResult) && `sms=${smsResult.reason || 'unknown'}`,
-        actionableEmailFailure(emailResult) && `email=${emailResult.error || 'unknown'}`,
-      ].filter(Boolean).join(' ');
-      throw new Error(`receipt channel failed: ${failures}`);
+    if (shouldRetryReceiptDelivery({ smsResult, emailResult })) {
+      throw receiptDeliveryFailureError({ smsResult, emailResult });
     }
 
     await markJobCompleted(job, { smsResult, emailResult });
@@ -208,4 +214,10 @@ module.exports = {
   processDueReceiptDeliveryJobs,
   processReceiptDeliveryJob,
   scheduleReceiptDeliveryDrain,
+  _internals: {
+    actionableSmsFailure,
+    actionableEmailFailure,
+    shouldRetryReceiptDelivery,
+    receiptDeliveryFailureError,
+  },
 };

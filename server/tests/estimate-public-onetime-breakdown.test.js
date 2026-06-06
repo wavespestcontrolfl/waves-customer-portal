@@ -9,17 +9,21 @@ const {
   acceptedOneTimeChoiceListForEstimate,
   acceptanceServiceLists,
   applySelectedTreeShrubTierToEstimateData,
+  assertExistingAppointmentUpdateApplied,
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
+  buildEstimateInvoiceModeDraft,
   buildPricingBundle,
   buildStandardPayPerApplicationInvoiceCopy,
   buildWaveGuardIntelligencePayload,
   defaultServiceModeForEstimate,
   deriveServiceCategory,
+  estimateInvoicePayUrlParams,
   isEstimateAcceptActive,
   isEstimateAskAnswerable,
   isAnnualPrepayEligibleServiceMix,
   isStructuralOneTimeOnlyEstimate,
+  isReservationHeldAppointment,
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
@@ -1460,6 +1464,63 @@ describe('public estimate one-time breakdown', () => {
     });
   });
 
+  test('server-rendered existing appointments route pay choices through existing appointment flow', () => {
+    const html = renderPage('existing-appt-token', {
+      id: 'estimate-existing-appt',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 95,
+      annualTotal: 1140,
+      onetimeTotal: 0,
+      tier: 'Silver',
+      existingAppointment: {
+        id: 'svc-123',
+        scheduledDate: '2026-06-03',
+        windowStart: '09:00',
+        windowEnd: '11:00',
+        windowDisplay: 'Wednesday, June 3 - 9:00 AM-11:00 AM',
+        serviceType: 'Initial Pest Control',
+        status: 'confirmed',
+      },
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 95 }] },
+        oneTime: { items: [] },
+        results: { pestTiers: [{ label: 'Quarterly', mo: 95, pa: 285, apps: 4 }] },
+      },
+    });
+
+    expect(html).toContain('const EXISTING_APPOINTMENT_ID = "svc-123";');
+    expect(html).toContain('if (EXISTING_APPOINTMENT_ID) pickExistingAppointmentPref(b.dataset.payPref);');
+    expect(html).toContain('else pickPaymentPref(b.dataset.payPref);');
+  });
+
+  test('server-rendered accept shows optional invoice payment for invoice-mode accepts', () => {
+    const html = renderPage('invoice-mode-token', {
+      id: 'estimate-invoice-mode',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 95,
+      annualTotal: 1140,
+      onetimeTotal: 0,
+      tier: 'Silver',
+      bill_by_invoice: true,
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 95 }] },
+        oneTime: { items: [] },
+        results: { pestTiers: [{ label: 'Quarterly', mo: 95, pa: 285, apps: 4 }] },
+      },
+    });
+
+    expect(html).toContain("} else if (data.nextStep === 'pay_invoice' && data.invoicePayUrl) {");
+    expect(html).toContain('showInvoiceOptionalSuccess(data);');
+    expect(html).toContain('Payment is optional right now.');
+    expect(html).toContain('I will pay later');
+  });
+
   test('public pricing bundle preserves saved manual recurring discounts', async () => {
     const estimateData = savedAdminEstimateData();
     estimateData.result.manualDiscount = {
@@ -2220,7 +2281,7 @@ describe('public estimate one-time breakdown', () => {
         oneTime: {
           total: 99,
           membershipFee: 99,
-          items: [],
+          items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
         },
         specItems: [],
       },
@@ -2479,6 +2540,65 @@ describe('public estimate one-time breakdown', () => {
       service: 'bed_bug',
       quoteRequired: true,
     }));
+  });
+
+  test('setup-only one-time choice creates a pest-control invoice draft', () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 30.67, ann: 368.04, pa: 92, apps: 4 }],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 30.67,
+          annualAfterDiscount: 368.04,
+          services: [{ name: 'Pest Control', mo: 30.67 }],
+        },
+        oneTime: {
+          total: 99,
+          membershipFee: 99,
+          items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+        },
+        specItems: [],
+      },
+    };
+    const lists = acceptanceServiceLists(estimateData);
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: {
+        id: 'estimate-setup-only',
+        show_one_time_option: true,
+        estimate_data: estimateData,
+        onetime_total: 99,
+      },
+      estData: estimateData,
+      pricingBundle: { oneTimeBreakdown: normalizeOneTimeBreakdown(estimateData) },
+      oneTimeList: lists.oneTimeList,
+      recurringSvcList: lists.recurringSvcList,
+      treatAsOneTime: true,
+      effectiveOneTimeTotal: 202,
+    });
+
+    expect(draft).toMatchObject({
+      invoiceKind: 'one_time',
+      serviceLabel: 'One-Time Pest Control',
+      amount: 202,
+      title: 'One-Time Pest Control — one-time service',
+      lineItems: [{ description: 'One-Time Pest Control', quantity: 1, unit_price: 202 }],
+    });
+    expect(draft.title).not.toContain('WaveGuard setup');
+  });
+
+  test('one-time invoice draft rejects non-billable invoice-mode accepts', () => {
+    expect(() => buildEstimateInvoiceModeDraft({
+      estimate: {
+        id: 'estimate-zero-one-time',
+        show_one_time_option: true,
+      },
+      estData: { result: { oneTime: { items: [] } } },
+      oneTimeList: [],
+      treatAsOneTime: true,
+      effectiveOneTimeTotal: 0,
+    })).toThrow('billable one-time amount');
   });
 
   test('server-rendered slot selection ignores clicks while a reservation is in flight', () => {
@@ -4954,6 +5074,24 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('existing appointment accepts reject stale active-row updates', () => {
+    expect(assertExistingAppointmentUpdateApplied(1)).toBe(1);
+
+    try {
+      assertExistingAppointmentUpdateApplied(0);
+      throw new Error('expected stale appointment update to throw');
+    } catch (err) {
+      expect(err.message).toBe('existing appointment is no longer available — re-pick a slot');
+      expect(err.status).toBe(409);
+    }
+  });
+
+  test('existing appointment accepts distinguish reservation-held rows', () => {
+    expect(isReservationHeldAppointment({ reservation_expires_at: '2026-06-06T12:15:00.000Z' })).toBe(true);
+    expect(isReservationHeldAppointment({ reservation_expires_at: null })).toBe(false);
+    expect(isReservationHeldAppointment({})).toBe(false);
+  });
+
   test('acceptance visit pricing uses displayed per-application totals before cadence fallback', () => {
     expect(sameDayVisitTotalForPricingFrequency({
       sameDayTreatmentTotal: 244,
@@ -5153,6 +5291,25 @@ describe('public estimate one-time breakdown', () => {
       invoiceId: 'inv-123',
       invoicePayUrl: '/pay/inv-123?source=estimate&saveCard=1&billingTerm=standard',
     }));
+  });
+
+  test('estimate invoice delivery params default save-card only for recurring accepts', () => {
+    expect(estimateInvoicePayUrlParams({
+      billingTerm: 'standard',
+      saveCard: true,
+    })).toEqual({
+      source: 'estimate',
+      saveCard: '1',
+      billingTerm: 'standard',
+    });
+
+    expect(estimateInvoicePayUrlParams({
+      billingTerm: 'standard',
+      saveCard: false,
+    })).toEqual({
+      source: 'estimate',
+      billingTerm: 'standard',
+    });
   });
 
   test('accept success payload distinguishes one-time booking from onboarding', () => {

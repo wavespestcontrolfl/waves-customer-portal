@@ -155,6 +155,37 @@ describe('invoice tier discounts', () => {
     DiscountEngine.getDiscountForTier.mockResolvedValue(0.10);
   });
 
+  test('identifies invoice-number unique collisions', () => {
+    expect(InvoiceService._internals.isInvoiceNumberCollision({
+      code: '23505',
+      constraint: 'invoices_invoice_number_unique',
+    })).toBe(true);
+    expect(InvoiceService._internals.isInvoiceNumberCollision({
+      code: '23505',
+      constraint: 'invoices_token_unique',
+    })).toBe(false);
+  });
+
+  test('uses a nested transaction for invoice inserts inside caller transactions', async () => {
+    const insert = jest.fn(() => ({
+      returning: jest.fn(async () => [{ id: 'invoice-1', invoice_number: 'WPC-2026-0001' }]),
+    }));
+    const attemptClient = jest.fn((table) => {
+      expect(table).toBe('invoices');
+      return { insert };
+    });
+    const outerTrx = jest.fn();
+    outerTrx.transaction = jest.fn(async (callback) => callback(attemptClient));
+
+    const invoice = await InvoiceService._internals.insertInvoiceRow(outerTrx, {
+      invoice_number: 'WPC-2026-0001',
+    });
+
+    expect(outerTrx.transaction).toHaveBeenCalledWith(expect.any(Function));
+    expect(insert).toHaveBeenCalledWith({ invoice_number: 'WPC-2026-0001' });
+    expect(invoice).toEqual({ id: 'invoice-1', invoice_number: 'WPC-2026-0001' });
+  });
+
   test('does not apply Silver automatically when no discount was selected manually', async () => {
     const ctx = setupDb({
       customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },

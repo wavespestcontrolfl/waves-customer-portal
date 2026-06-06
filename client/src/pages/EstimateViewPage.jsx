@@ -1086,29 +1086,29 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {title}
         </div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
-        {invoicePayUrl
-          ? (isOneTimeInvoice
-              ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay online.`
-              : `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay now and save a card for future Waves payments.`)
-          : invoiceLinkDelivered
-            ? `Use the ${invoiceLabel} link we sent whenever you are ready. Payment is optional right now.`
-            : `Our team will follow up with the ${invoiceLabel} details. Payment is optional right now.`}
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+          {invoicePayUrl
+            ? (isOneTimeInvoice
+                ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay online.`
+                : `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay now and save a card for future Waves payments.`)
+            : invoiceLinkDelivered
+              ? `Use the ${invoiceLabel} link we sent whenever you are ready. Payment is optional right now.`
+              : `Our team will follow up with the ${invoiceLabel} details. Payment is optional right now.`}
+        </div>
+        {invoicePayUrl ? (
+          <a
+            href={invoicePayUrl}
+            style={{
+              display: 'inline-block', marginTop: 16, padding: '14px 20px',
+              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
+              borderRadius: 12, fontWeight: 600, fontSize: 15,
+            }}
+          >{payNowLabel}</a>
+        ) : null}
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.45 }}>
+          {deferredPaymentCopy}
+        </div>
       </div>
-      {invoicePayUrl ? (
-        <a
-          href={invoicePayUrl}
-          style={{
-            display: 'inline-block', marginTop: 16, padding: '14px 20px',
-            background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
-            borderRadius: 12, fontWeight: 600, fontSize: 15,
-          }}
-        >{payNowLabel}</a>
-      ) : null}
-      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.45 }}>
-        {deferredPaymentCopy}
-      </div>
-    </div>
     );
   }
 

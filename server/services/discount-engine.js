@@ -231,7 +231,7 @@ const DiscountEngine = {
   /**
    * Record which discounts were applied to an invoice.
    */
-  async recordInvoiceDiscounts(invoiceId, discounts, appliedBy) {
+  async recordInvoiceDiscounts(invoiceId, discounts, appliedBy, database = db) {
     if (!discounts || !discounts.length) return;
     const rows = discounts.map(d => ({
       invoice_id: invoiceId,
@@ -242,12 +242,12 @@ const DiscountEngine = {
       discount_dollars: d.discount_dollars,
       applied_by: appliedBy || 'system',
     }));
-    await db('invoice_discounts').insert(rows);
+    await database('invoice_discounts').insert(rows);
 
     // Update usage stats
     for (const d of discounts) {
       if (d.id) {
-        await db('discounts').where({ id: d.id })
+        await database('discounts').where({ id: d.id })
           .increment('times_applied', 1)
           .increment('total_discount_given', d.discount_dollars);
       }

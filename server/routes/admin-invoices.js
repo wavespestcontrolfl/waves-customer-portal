@@ -151,6 +151,27 @@ function parseScheduledReviewDelayMinutes(body = {}, scheduledSendAt = new Date(
   return parseReviewDelayMinutes(body);
 }
 
+function paymentPlanFollowupStopReason(paymentPlanId) {
+  return `payment_plan_created:${paymentPlanId || 'unknown'}`;
+}
+
+async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
+  paymentPlanId = null,
+  adminId = null,
+  database = db,
+} = {}) {
+  if (!invoiceId) return 0;
+  return database('invoice_followup_sequences')
+    .where({ invoice_id: invoiceId })
+    .whereIn('status', ['active', 'paused', 'autopay_hold'])
+    .update({
+      status: 'stopped',
+      stopped_reason: paymentPlanFollowupStopReason(paymentPlanId),
+      stopped_by_admin_id: adminId || null,
+      next_touch_at: null,
+    });
+}
+
 function cleanOptionalText(value, max = 120) {
   if (value == null) return null;
   const trimmed = String(value).trim().replace(/\s+/g, ' ');
@@ -1284,22 +1305,33 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
 
     let paymentPlan;
     try {
-      [paymentPlan] = await db('payment_plans')
-        .insert({
-          customer_id: invoice.customer_id,
-          invoice_id: invoice.id,
-          payment_method_id: paymentMethodId,
-          total_balance: totalBalance,
-          payment_amount: paymentAmount,
-          payment_frequency: paymentFrequency,
-          plan_start_date: planStartDate,
-          next_payment_date: nextPaymentDate,
-          status: 'active',
-          notes,
-          created_by: createdBy,
-          created_by_user_id: req.technicianId || null,
-        })
-        .returning('*');
+      const adminId = req.user?.id || req.technicianId || null;
+      paymentPlan = await db.transaction(async (trx) => {
+        const [createdPlan] = await trx('payment_plans')
+          .insert({
+            customer_id: invoice.customer_id,
+            invoice_id: invoice.id,
+            payment_method_id: paymentMethodId,
+            total_balance: totalBalance,
+            payment_amount: paymentAmount,
+            payment_frequency: paymentFrequency,
+            plan_start_date: planStartDate,
+            next_payment_date: nextPaymentDate,
+            status: 'active',
+            notes,
+            created_by: createdBy,
+            created_by_user_id: req.technicianId || null,
+          })
+          .returning('*');
+
+        await stopInvoiceFollowupsForPaymentPlan(invoice.id, {
+          paymentPlanId: createdPlan?.id,
+          adminId,
+          database: trx,
+        });
+
+        return createdPlan;
+      });
     } catch (err) {
       if (err?.code === '23505' && String(err.constraint || '').includes('payment_plans_one_active_per_invoice')) {
         return res.status(409).json({ error: 'Invoice already has an active payment plan' });
@@ -1415,6 +1447,8 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
 
 router._private = {
   invoiceRecipientOverrideError,
+  paymentPlanFollowupStopReason,
+  stopInvoiceFollowupsForPaymentPlan,
 };
 
 module.exports = router;
