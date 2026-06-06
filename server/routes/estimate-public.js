@@ -271,13 +271,16 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const q = conn('scheduled_services')
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', today)
-    .whereNull('reservation_expires_at')
     .where((builder) => {
       if (estimate.customer_id) {
         builder.whereNull('customer_id').orWhere('customer_id', estimate.customer_id);
       } else {
         builder.whereNull('customer_id');
       }
+    })
+    .andWhere((builder) => {
+      builder.whereNull('reservation_expires_at')
+        .orWhereRaw('reservation_expires_at > NOW()');
     })
     .where((builder) => {
       if (linkedId) builder.where('id', linkedId);
@@ -535,6 +538,149 @@ function resolveRecurringInvoiceFirstVisitAmount({
   return Number.isFinite(monthly) && monthly > 0
     ? Math.round(monthly * 3 * 100) / 100
     : null;
+}
+
+function estimateAcceptError(message, status = 422) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+function roundInvoiceAmount(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
+}
+
+function oneTimeInvoiceLabelForCategory(category, fallback = 'One-time service') {
+  switch (category) {
+    case 'pest_control': return 'One-Time Pest Control';
+    case 'lawn_care': return 'One-Time Lawn Care';
+    case 'tree_shrub': return 'One-Time Tree & Shrub Service';
+    case 'mosquito': return 'One-Time Mosquito Control';
+    case 'termite_bait': return 'Termite Bait Installation';
+    case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
+    case 'termite_trenching': return 'Termite Treatment';
+    case 'rodent': return 'Rodent Remediation';
+    case 'bundle': return 'One-Time Service';
+    default: return fallback;
+  }
+}
+
+function oneTimeInvoiceRowLabel(row = {}) {
+  return String(row.displayName || row.label || row.name || row.service || '').trim();
+}
+
+function isBillableOneTimeInvoiceItem(row = {}) {
+  if (!row || typeof row !== 'object') return false;
+  if (row.quoteRequired === true || row.requiresCustomQuote === true) return false;
+  const service = String(row.service || '').toLowerCase();
+  if (service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return false;
+  if (isWaveGuardSetupOneTimeItem(row)) return false;
+  return oneTimeItemAmount(row) > 0;
+}
+
+function buildOneTimeInvoiceServiceLabel({
+  estimate = {},
+  estData = {},
+  pricingBundle = null,
+  oneTimeList = [],
+} = {}) {
+  const hasCustomerChoice = !!(estimate.show_one_time_option || estimate.showOneTimeOption);
+  if (hasCustomerChoice) {
+    const category = serviceCategoryForOneTimeChoice(estData, pricingBundle);
+    return oneTimeInvoiceLabelForCategory(category, 'One-Time Pest Control');
+  }
+
+  const listRow = Array.isArray(oneTimeList)
+    ? oneTimeList.find(isBillableOneTimeInvoiceItem)
+    : null;
+  const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  const breakdownRow = Array.isArray(breakdown?.items)
+    ? breakdown.items.find(isBillableOneTimeInvoiceItem)
+    : null;
+  const row = listRow || breakdownRow || null;
+  const rowLabel = row ? oneTimeInvoiceRowLabel(row) : '';
+  const category = row ? serviceCategoryForOneTimeItem(row) : serviceCategoryForOneTimeChoice(estData, pricingBundle);
+
+  if (rowLabel) return rowLabel;
+  return oneTimeInvoiceLabelForCategory(category);
+}
+
+function recurringInvoiceServiceLabel(rows = []) {
+  const labels = (Array.isArray(rows) ? rows : [])
+    .map((svc) => String(
+      svc?.displayName
+        || svc?.name
+        || svc?.label
+        || recurringServiceDisplayName(recurringServiceKey(svc))
+        || '',
+    ).trim())
+    .filter(Boolean);
+  return labels.length ? labels.join(' + ') : 'Pest Control';
+}
+
+function buildEstimateInvoiceModeDraft({
+  estimate = {},
+  estData = {},
+  pricingBundle = null,
+  oneTimeList = [],
+  recurringSvcList = [],
+  treatAsOneTime = false,
+  effectiveOneTimeTotal = null,
+  effectiveMonthlyTotal = null,
+  recurringFirstVisitAmount = null,
+  effectiveBillingCadence = null,
+  selectedFrequency = null,
+} = {}) {
+  if (treatAsOneTime) {
+    const amount = roundInvoiceAmount(effectiveOneTimeTotal);
+    if (!(amount > 0)) {
+      throw estimateAcceptError('Invoice-mode one-time acceptance requires a billable one-time amount.');
+    }
+    const serviceLabel = buildOneTimeInvoiceServiceLabel({
+      estimate,
+      estData,
+      pricingBundle,
+      oneTimeList,
+    });
+    return {
+      invoiceKind: 'one_time',
+      serviceLabel,
+      amount,
+      title: `${serviceLabel} — one-time service`,
+      lineItems: [{ description: serviceLabel, quantity: 1, unit_price: amount }],
+      notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode one-time).`,
+    };
+  }
+
+  const monthly = roundInvoiceAmount(effectiveMonthlyTotal ?? estimate.monthly_total ?? estimate.monthlyTotal ?? 0) || 0;
+  const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({
+    recurringFirstVisitAmount,
+    effectiveBillingCadence,
+    monthlyTotal: monthly,
+  });
+  const amount = roundInvoiceAmount(firstVisitInvoiceAmount);
+  if (!(amount > 0)) {
+    throw estimateAcceptError('Invoice-mode recurring acceptance requires a billable first-visit amount.');
+  }
+  const svcType = recurringInvoiceServiceLabel(recurringSvcList);
+  const cadenceLabel = String(effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
+  const visitNoun = String(effectiveBillingCadence?.visitChargeLabel || '')
+    .replace(/^Charged after each\s+/i, '')
+    || `${cadenceLabel} visit`;
+
+  return {
+    invoiceKind: 'recurring_first_visit',
+    serviceLabel: svcType,
+    amount,
+    title: `${svcType} — first ${visitNoun}`,
+    lineItems: [{
+      description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
+      quantity: 1,
+      unit_price: amount,
+    }],
+    notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
+  };
 }
 
 function pestTreatmentRowForFrequency(frequency = {}) {
@@ -4529,15 +4675,12 @@ ${shellQuestionsBar()}
 
   // Wire pay-pref buttons once DOM is ready (script runs after the card
   // is emitted inline so the nodes already exist).
-  document.querySelectorAll('[data-pay-pref]').forEach((b) => {
-    b.addEventListener('click', () => {
-      if (EXISTING_APPOINTMENT_ID) {
-        pickExistingAppointmentPref(b.dataset.payPref);
-      } else {
-        pickPaymentPref(b.dataset.payPref);
-      }
-    });
-  });
+      document.querySelectorAll('[data-pay-pref]').forEach((b) => {
+        b.addEventListener('click', () => {
+          if (EXISTING_APPOINTMENT_ID) pickExistingAppointmentPref(b.dataset.payPref);
+          else pickPaymentPref(b.dataset.payPref);
+        });
+      });
   document.querySelectorAll('[data-payment-setup]').forEach((b) => {
     b.addEventListener('click', () => choosePaymentSetup(b.dataset.paymentSetup));
   });
@@ -4902,6 +5045,9 @@ router.put('/:token/accept', async (req, res, next) => {
     if (annualPrepaySelected && billByInvoice) {
       return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
     }
+    if (billByInvoice && !estimate.customer_id && !estimate.customer_phone) {
+      return res.status(400).json({ error: 'invoice-mode estimates require a linked customer or customer phone before online acceptance' });
+    }
 
     let reservationRow = null;
     if (slotId) {
@@ -5084,6 +5230,14 @@ router.put('/:token/accept', async (req, res, next) => {
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
       : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || effectiveBillingCadence?.amount));
+    const acceptedOneTimeServiceLabel = treatAsOneTime
+      ? buildOneTimeInvoiceServiceLabel({
+          estimate,
+          estData: acceptedEstDataForPricing,
+          pricingBundle,
+          oneTimeList,
+        })
+      : null;
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -5254,36 +5408,63 @@ router.put('/:token/accept', async (req, res, next) => {
           err.status = 409;
           throw err;
         }
-        const updates = {
-          source_estimate_id: estimate.id,
-          customer_id: existingAppointmentRow.customer_id || customerId,
-          reservation_expires_at: null,
-          payment_method_preference: paymentMethodPreference,
-        };
-        if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
-          updates.estimated_price = Number(visitEstimatedPrice);
+        if (isReservationHeldAppointment(existingAppointmentRow)) {
+          try {
+            const committedAppointment = await slotReservation.commitReservation({
+              scheduledServiceId: existingAppointmentRow.id,
+              customerId,
+              paymentMethodPreference,
+              estimatedPrice: visitEstimatedPrice,
+              estimate: acceptedEstimateForScheduling,
+              serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
+              selectedFrequency: acceptedSchedulingFrequencyKey,
+              trx,
+            });
+            reservationCommitted = true;
+            if (committedAppointment?.id) {
+              acceptedAppointmentsToRegister.push(committedAppointment);
+            }
+          } catch (commitErr) {
+            if (commitErr.code === 'RESERVATION_EXPIRED') {
+              const err = new Error('reservation expired — re-pick a slot');
+              err.status = 409;
+              throw err;
+            }
+            if (commitErr.code === 'SLOT_UNAVAILABLE') {
+              const err = new Error('slot no longer available — re-pick a slot');
+              err.status = 409;
+              throw err;
+            }
+            throw commitErr;
+          }
+        } else {
+          const updates = {
+            source_estimate_id: estimate.id,
+            customer_id: existingAppointmentRow.customer_id || customerId,
+            reservation_expires_at: null,
+            payment_method_preference: paymentMethodPreference,
+          };
+          if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
+            updates.estimated_price = Number(visitEstimatedPrice);
+          }
+          const updatedCount = await trx('scheduled_services')
+            .where({ id: existingAppointmentRow.id })
+            .whereIn('status', ['pending', 'confirmed'])
+            .where('scheduled_date', '>=', etDateString())
+            .where((builder) => {
+              builder.whereNull('customer_id').orWhere('customer_id', customerId);
+            })
+            .where((builder) => {
+              builder.whereNull('source_estimate_id').orWhere('source_estimate_id', estimate.id);
+            })
+            .update(updates);
+          assertExistingAppointmentUpdateApplied(updatedCount);
+          reservationCommitted = true;
+          acceptedAppointmentsToRegister.push({
+            ...existingAppointmentRow,
+            ...updates,
+          });
         }
-        const updatedCount = await trx('scheduled_services')
-          .where({ id: existingAppointmentRow.id })
-          .whereIn('status', ['pending', 'confirmed'])
-          .where('scheduled_date', '>=', etDateString())
-          .where((builder) => {
-            builder.whereNull('customer_id').orWhere('customer_id', customerId);
-          })
-          .where((builder) => {
-            builder.whereNull('source_estimate_id').orWhere('source_estimate_id', estimate.id);
-          })
-          .update(updates);
-        if (Number(updatedCount) !== 1) {
-          const err = new Error('existing appointment no longer available');
-          err.status = 409;
-          throw err;
-        }
-        reservationCommitted = true;
-        acceptedAppointmentsToRegister.push({
-          ...existingAppointmentRow,
-          ...updates,
-        });
       }
 
       let onboardingToken = null;
@@ -5291,15 +5472,72 @@ router.put('/:token/accept', async (req, res, next) => {
       // The payment method is captured on /pay/:token, so no separate
       // onboarding SetupIntent is created here.
 
-      return { customerId, onboardingToken, reservationCommitted, acceptedAppointmentsToRegister };
+      let invoiceModeResult = false;
+      let invoiceIdResult = null;
+      let invoiceAmountResult = null;
+      let invoicePayUrlResult = null;
+      let invoiceServiceLabelResult = acceptedOneTimeServiceLabel || null;
+      let invoiceKindResult = null;
+      if (billByInvoice) {
+        if (!customerId) {
+          throw estimateAcceptError('invoice-mode acceptance requires a customer record before creating the invoice');
+        }
+        const InvoiceService = require('../services/invoice');
+        const invoiceDraft = buildEstimateInvoiceModeDraft({
+          estimate,
+          estData: acceptedEstDataForPricing,
+          pricingBundle,
+          oneTimeList,
+          recurringSvcList,
+          treatAsOneTime,
+          effectiveOneTimeTotal,
+          effectiveMonthlyTotal,
+          recurringFirstVisitAmount,
+          effectiveBillingCadence,
+          selectedFrequency,
+        });
+        const inv = await InvoiceService.create({
+          database: trx,
+          customerId,
+          title: invoiceDraft.title,
+          lineItems: invoiceDraft.lineItems,
+          notes: invoiceDraft.notes,
+          dueDate: etDateString(),
+        });
+        if (!inv?.id) {
+          throw new Error('Invoice-mode acceptance could not create an invoice');
+        }
+        invoiceModeResult = true;
+        invoiceIdResult = inv.id;
+        invoiceAmountResult = invoiceDraft.amount;
+        invoicePayUrlResult = inv.token ? `/pay/${inv.token}` : null;
+        invoiceServiceLabelResult = invoiceDraft.serviceLabel;
+        invoiceKindResult = invoiceDraft.invoiceKind;
+      }
+
+      return {
+        customerId,
+        onboardingToken,
+        reservationCommitted,
+        acceptedAppointmentsToRegister,
+        invoiceMode: invoiceModeResult,
+        invoiceId: invoiceIdResult,
+        invoiceAmount: invoiceAmountResult,
+        invoicePayUrl: invoicePayUrlResult,
+        invoiceServiceLabel: invoiceServiceLabelResult,
+        invoiceKind: invoiceKindResult,
+      };
     });
 
-    const {
-      customerId,
-      onboardingToken,
-      reservationCommitted,
-      acceptedAppointmentsToRegister = [],
-    } = txResult;
+    const { customerId, onboardingToken, reservationCommitted } = txResult;
+    let invoiceMode = txResult.invoiceMode === true;
+    let invoiceId = txResult.invoiceId || null;
+    let invoiceAmount = txResult.invoiceAmount || null;
+    let invoicePayUrl = txResult.invoicePayUrl || null;
+    let invoiceLinkDelivered = false;
+    let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
+    const invoiceKind = txResult.invoiceKind || null;
+    const acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];
     for (const appointment of acceptedAppointmentsToRegister) {
       try {
         await registerAcceptedEstimateAppointmentReminder({
@@ -5333,7 +5571,7 @@ router.put('/:token/accept', async (req, res, next) => {
     let oneTimeBookingService = null;
     const confirmedAppointmentRow = reservationRow || (existingAppointmentId ? existingAppointmentRow : null);
     if (treatAsOneTime && !billByInvoice && !reservationCommitted) {
-      oneTimeBookingService = bookingServiceFor(oneTimeList[0]?.name || '');
+      oneTimeBookingService = bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
       const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept`;
       bookingUrl = await shortenOrPassthrough(longBookingUrl, {
         kind: 'booking',
@@ -5345,8 +5583,8 @@ router.put('/:token/accept', async (req, res, next) => {
     if (estimate.customer_phone && !billByInvoice && treatAsOneTime) {
       try {
         if (treatAsOneTime) {
-          const primarySvc = oneTimeBookingService || bookingServiceFor(oneTimeList[0]?.name || '');
-          const confirmedServiceLabel = confirmationServiceLabel(oneTimeList, estimate, primarySvc.label);
+          const primarySvc = oneTimeBookingService || bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
+          const confirmedServiceLabel = confirmationServiceLabel(oneTimeList, estimate, acceptedOneTimeServiceLabel || primarySvc.label);
           if (bookingUrl) {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
@@ -5492,11 +5730,25 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
-    let invoiceMode = false;
-    let invoiceId = null;
-    let invoiceAmount = null;
-    let invoicePayUrl = null;
-    let invoiceLinkDelivered = false;
+    if (invoiceId && billByInvoice) {
+      try {
+        const InvoiceService = require('../services/invoice');
+        const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId);
+        if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
+        if (delivery?.ok) {
+          invoiceLinkDelivered = true;
+        } else {
+          const errors = [
+            delivery?.sms?.error && `sms: ${delivery.sms.error}`,
+            delivery?.email?.error && `email: ${delivery.email.error}`,
+          ].filter(Boolean).join(' | ');
+          logger.error(`[estimate-accept] Invoice delivery failed: ${errors || 'unknown error'}`);
+        }
+      } catch (deliveryErr) {
+        logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
+      }
+      logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+    }
 
     // Auto-convert estimate to active customer (Feature #5). Skip entirely
     // when this is a one-time booking — EstimateConverter creates recurring
@@ -5506,8 +5758,9 @@ router.put('/:token/accept', async (req, res, next) => {
     if (customerId && !treatAsOneTime) {
       try {
         const EstimateConverter = require('../services/estimate-converter');
-        // In legacy invoice-mode we generate the first-visit invoice below,
-        // so suppress converter setup/prepay invoices to avoid duplicates.
+        // In invoice-mode we generated the invoice inside the accept
+        // transaction. Suppress converter setup/prepay invoices to avoid
+        // duplicates.
         const conversion = await EstimateConverter.convertEstimate(estimate.id, {
           billingTerm,
           skipSetupInvoice: billByInvoice,
@@ -5529,84 +5782,6 @@ router.put('/:token/accept', async (req, res, next) => {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }
 
-    // Invoice-mode: auto-generate + send an invoice due immediately based
-    // on the accepted selection. Recurring → first quarter (monthly × 3);
-    // one-time → the one-time total. Pay-link delivery is attempted via
-    // SMS and email; no onboarding, no payment-method capture up front.
-    if (customerId && billByInvoice) {
-      try {
-        const InvoiceService = require('../services/invoice');
-
-        let title; let lineItems; let notes;
-        if (treatAsOneTime) {
-          const oneTimeLabel = oneTimeList[0]?.name || 'One-time pest control';
-          const amount = effectiveOneTimeTotal;
-          invoiceAmount = amount;
-          title = `${oneTimeLabel} — one-time service`;
-          lineItems = [{ description: oneTimeLabel, quantity: 1, unit_price: amount }];
-          notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode one-time).`;
-        } else {
-          const monthly = parseFloat(effectiveMonthlyTotal || estimate.monthly_total || 0);
-          const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({
-            recurringFirstVisitAmount,
-            effectiveBillingCadence,
-            monthlyTotal: monthly,
-          });
-          invoiceAmount = firstVisitInvoiceAmount;
-          const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
-          const cadenceLabel = (effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
-          const visitNoun = String(effectiveBillingCadence?.visitChargeLabel || '')
-            .replace(/^Charged after each\s+/i, '')
-            || `${cadenceLabel} visit`;
-          title = `${svcType} — first ${visitNoun}`;
-          lineItems = [{
-            description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
-            quantity: 1,
-            unit_price: firstVisitInvoiceAmount,
-          }];
-          notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`;
-        }
-
-        if (invoiceAmount > 0) {
-          const inv = await InvoiceService.create({
-            customerId,
-            title,
-            lineItems,
-            notes,
-            dueDate: etDateString(),  // due immediately
-          });
-          invoiceId = inv?.id || null;
-          invoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
-          if (invoiceId) {
-            try {
-              const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
-                payUrlParams: estimateInvoicePayUrlParams({
-                  billingTerm,
-                  saveCard: !treatAsOneTime,
-                }),
-              });
-              if (delivery?.ok) {
-                invoiceLinkDelivered = true;
-              } else {
-                const errors = [
-                  delivery?.sms?.error && `sms: ${delivery.sms.error}`,
-                  delivery?.email?.error && `email: ${delivery.email.error}`,
-                ].filter(Boolean).join(' | ');
-                logger.error(`[estimate-accept] Invoice delivery failed: ${errors || 'unknown error'}`);
-              }
-            }
-            catch (deliveryErr) { logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`); }
-            invoiceMode = true;
-            logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
-          }
-        } else {
-          logger.warn(`[estimate-accept] Invoice-mode skipped for estimate ${estimate.id} — amount is 0 (monthly=${estimate.monthly_total}, onetime=${estimate.onetime_total})`);
-        }
-      } catch (e) {
-        logger.error(`[estimate-accept] Invoice-mode failed for estimate ${estimate.id}: ${e.message}`);
-      }
-    }
-
     // In-app notifications for estimate accepted. Invoice-mode copy uses
     // invoiceMode, not billByInvoice, so we don't promise a pay link if
     // invoice creation/send failed or was skipped for a zero amount.
@@ -5616,7 +5791,7 @@ router.put('/:token/accept', async (req, res, next) => {
         customerName: estimate.customer_name,
         waveguardTier: estimate.waveguard_tier || 'Bronze',
         monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
-        serviceLabel: oneTimeList[0]?.name || 'One-time service',
+        serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
         treatAsOneTime,
         billByInvoice,
         invoiceMode,
@@ -5651,7 +5826,7 @@ router.put('/:token/accept', async (req, res, next) => {
           address: estimate.address,
           waveguardTier: estimate.waveguard_tier || 'Bronze',
           monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
-          serviceLabel: oneTimeList[0]?.name || 'One-time service',
+          serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
           treatAsOneTime,
           billByInvoice,
           invoiceMode,
@@ -5673,6 +5848,8 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceId,
       invoiceAmount,
       invoicePayUrl,
+      invoiceKind,
+      invoiceServiceLabel,
       billingTerm,
       prepayInvoiceAmount: annualPrepayInvoiceAmount,
       bookingUrl,
@@ -6297,6 +6474,16 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
   return !isWaveGuardSetupOneTimeItem(item) && String(item.service || '').toLowerCase() !== 'one_time_adjustment';
 }
 
+function serviceCategoryForOneTimeChoice(estData = {}, pricingBundle = null) {
+  const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  const result = estData?.result || estData?.engineResult || estData || {};
+  return deriveServiceCategory(
+    estData,
+    recurringServicesWithSupplements(result),
+    breakdown.items || [],
+  );
+}
+
 function oneTimePestChoiceAmountFromBreakdown(breakdown = {}) {
   return oneTimeChoiceAmountFromBreakdown(breakdown, 'pest_control');
 }
@@ -6906,6 +7093,19 @@ function validateRecurringSlotPaymentPreference({
   return 'Choose pay per application or annual prepay before booking this recurring plan';
 }
 
+function isReservationHeldAppointment(row = {}) {
+  return !!row?.reservation_expires_at;
+}
+
+function assertExistingAppointmentUpdateApplied(updatedCount) {
+  const count = Array.isArray(updatedCount) ? updatedCount.length : Number(updatedCount) || 0;
+  if (count > 0) return count;
+
+  const err = new Error('existing appointment is no longer available — re-pick a slot');
+  err.status = 409;
+  throw err;
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
@@ -6936,6 +7136,8 @@ function buildAcceptSuccessPayload({
   invoiceId = null,
   invoiceAmount = null,
   invoicePayUrl = null,
+  invoiceKind = null,
+  invoiceServiceLabel = null,
   billingTerm = 'standard',
   prepayInvoiceAmount = null,
   bookingUrl = null,
@@ -6964,6 +7166,8 @@ function buildAcceptSuccessPayload({
     invoiceId,
     invoiceAmount,
     invoicePayUrl: decoratedInvoicePayUrl,
+    invoiceKind,
+    invoiceServiceLabel,
     billingTerm,
     prepayInvoiceAmount,
     bookingUrl,
@@ -9103,6 +9307,8 @@ module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListF
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
+module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
+module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
@@ -9110,6 +9316,8 @@ module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
 module.exports.resolveRecurringFirstVisitAmount = resolveRecurringFirstVisitAmount;
 module.exports.resolveRecurringFirstVisitAmountFromFrequency = resolveRecurringFirstVisitAmountFromFrequency;
 module.exports.resolveRecurringInvoiceFirstVisitAmount = resolveRecurringInvoiceFirstVisitAmount;
+module.exports.buildEstimateInvoiceModeDraft = buildEstimateInvoiceModeDraft;
+module.exports.buildOneTimeInvoiceServiceLabel = buildOneTimeInvoiceServiceLabel;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;

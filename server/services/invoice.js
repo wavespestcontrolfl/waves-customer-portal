@@ -39,10 +39,10 @@ function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-async function nextInvoiceNumber() {
+async function nextInvoiceNumber(database = db) {
   const year = new Date().getFullYear();
   const prefix = `WPC-${year}-`;
-  const last = await db("invoices")
+  const last = await database("invoices")
     .where("invoice_number", "like", `${prefix}%`)
     .orderBy("invoice_number", "desc")
     .first();
@@ -59,6 +59,26 @@ async function stopInvoiceFollowupSequence(invoiceId, reason) {
       `[invoice-followups] stopSequence failed for invoice ${invoiceId}: ${err.message}`,
     );
   }
+}
+
+function isInvoiceNumberCollision(err) {
+  return err?.code === "23505" &&
+    `${err.constraint || ""} ${err.detail || ""}`.includes("invoice_number");
+}
+
+async function insertInvoiceRow(database, invoiceRow) {
+  const insertWith = async (client) => {
+    const [invoice] = await client("invoices")
+      .insert(invoiceRow)
+      .returning("*");
+    return invoice;
+  };
+
+  if (database !== db && typeof database.transaction === "function") {
+    return database.transaction(insertWith);
+  }
+
+  return insertWith(database);
 }
 
 function normalizeInvoiceLineItems(lineItems = []) {
@@ -169,10 +189,10 @@ function resolveLineItemDiscount(row, item, parentAmount) {
   return { amount: roundMoney(amount), dollars };
 }
 
-async function loadInvoiceDiscountRows(ids = []) {
+async function loadInvoiceDiscountRows(ids = [], database = db) {
   const uniqueIds = [...new Set((ids || []).filter(Boolean).map(String))];
   if (!uniqueIds.length) return [];
-  return db("discounts")
+  return database("discounts")
     .whereIn("id", uniqueIds)
     .where({ is_active: true, show_in_invoices: true });
 }
@@ -548,6 +568,7 @@ const InvoiceService = {
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
   async create({
+    database = db,
     customerId,
     serviceRecordId,
     scheduledServiceId,
@@ -560,14 +581,14 @@ const InvoiceService = {
     serviceDate,
     trustedStoredDiscountSources = [],
   }) {
-    const customer = await db("customers").where({ id: customerId }).first();
+    const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
 
     // Pull service record context if linked
     let serviceData = serviceDate ? { service_date: serviceDate } : {};
     if (serviceRecordId) {
-      const sr = await db("service_records")
+      const sr = await database("service_records")
         .where({ "service_records.id": serviceRecordId })
         .andWhere({ "service_records.customer_id": customerId })
         .leftJoin(
@@ -583,7 +604,7 @@ const InvoiceService = {
       }
 
       if (sr) {
-        const products = await db("service_products")
+        const products = await database("service_products")
           .where({ service_record_id: serviceRecordId })
           .select(
             "product_name",
@@ -594,7 +615,7 @@ const InvoiceService = {
             "notes",
           );
 
-        const photos = await db("service_photos")
+        const photos = await database("service_photos")
           .where({ service_record_id: serviceRecordId })
           .orderBy("sort_order", "asc")
           .select("photo_type", "s3_url", "caption");
@@ -681,7 +702,7 @@ const InvoiceService = {
     // valid choices here, but customer tier never applies a hidden discount.
     const manualDiscountRows =
       Array.isArray(discountIds) && discountIds.length
-        ? await loadInvoiceDiscountRows(discountIds)
+        ? await loadInvoiceDiscountRows(discountIds, database)
         : [];
     const manualDiscounts = manualDiscountRows.map((d) => {
       const amt = Number(d.amount) || 0;
@@ -707,7 +728,7 @@ const InvoiceService = {
       .filter((item) => Number(item.amount) < 0 && item.discount_id)
       .map((item) => item.discount_id);
     const lineItemDiscountRows =
-      await loadInvoiceDiscountRows(lineItemDiscountIds);
+      await loadInvoiceDiscountRows(lineItemDiscountIds, database);
     const trustedStoredDiscountIds = new Set(
       items
         .filter(
@@ -881,38 +902,31 @@ const InvoiceService = {
     let invoice = null;
     let invoiceNumber = null;
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      invoiceNumber = await nextInvoiceNumber();
+      invoiceNumber = await nextInvoiceNumber(database);
       try {
-        [invoice] = await db("invoices")
-          .insert({
-            token,
-            invoice_number: invoiceNumber,
-            customer_id: customerId,
-            title,
-            line_items: JSON.stringify(items),
-            subtotal,
-            discount_amount: discountAmount,
-            discount_label: discountLabel,
-            tax_rate: rate,
-            tax_amount: taxAmount,
-            total,
-            notes: notes || null,
-            due_date: dueDate || etDateString(addETDays(new Date(), 30)),
-            status: "draft",
-            ...(scheduledServiceId
-              ? { scheduled_service_id: scheduledServiceId }
-              : {}),
-            ...serviceData,
-          })
-          .returning("*");
+        invoice = await insertInvoiceRow(database, {
+          token,
+          invoice_number: invoiceNumber,
+          customer_id: customerId,
+          title,
+          line_items: JSON.stringify(items),
+          subtotal,
+          discount_amount: discountAmount,
+          discount_label: discountLabel,
+          tax_rate: rate,
+          tax_amount: taxAmount,
+          total,
+          notes: notes || null,
+          due_date: dueDate || etDateString(addETDays(new Date(), 30)),
+          status: "draft",
+          ...(scheduledServiceId
+            ? { scheduled_service_id: scheduledServiceId }
+            : {}),
+          ...serviceData,
+        });
         break;
       } catch (err) {
-        const uniqueInvoiceNumberCollision =
-          err.code === "23505" &&
-          `${err.constraint || ""} ${err.detail || ""}`.includes(
-            "invoice_number",
-          );
-        if (uniqueInvoiceNumberCollision) {
+        if (isInvoiceNumberCollision(err)) {
           logger.warn(
             `[invoice] Invoice number collision on ${invoiceNumber}; retrying`,
           );
@@ -945,11 +959,9 @@ const InvoiceService = {
         });
       }
       if (auditRows.length > 0) {
-        await DiscountEngine.recordInvoiceDiscounts(
-          invoice.id,
-          auditRows,
-          "system",
-        );
+        const recordArgs = [invoice.id, auditRows, "system"];
+        if (database !== db) recordArgs.push(database);
+        await DiscountEngine.recordInvoiceDiscounts(...recordArgs);
       }
     } catch (err) {
       logger.warn(
@@ -1894,6 +1906,11 @@ const InvoiceService = {
       totalOutstanding: parseFloat(totals.total_outstanding),
     };
   },
+};
+
+InvoiceService._internals = {
+  insertInvoiceRow,
+  isInvoiceNumberCollision,
 };
 
 module.exports = InvoiceService;
