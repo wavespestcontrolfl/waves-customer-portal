@@ -63,13 +63,16 @@ exports.up = async function (knex) {
   // the new estimator pricing so manually added mosquito lines don't default
   // to the old band.
   if (await knex.schema.hasTable('services')) {
+    // mosquito_monthly = active recurring catalog row; mosquito_one_time =
+    // active one-time row (mosquito_event was archived by the 2026-05-19
+    // service-library cleanup and is no longer surfaced).
     await knex('services').where({ service_key: 'mosquito_monthly' }).update({
       base_price: 60,
       price_range_min: 60,
       price_range_max: 175,
       updated_at: knex.fn.now(),
     });
-    await knex('services').where({ service_key: 'mosquito_event' }).update({
+    await knex('services').where({ service_key: 'mosquito_one_time' }).update({
       base_price: 99,
       price_range_min: 99,
       price_range_max: 269,
@@ -171,10 +174,11 @@ exports.down = async function (knex) {
       price_range_max: 235,
       updated_at: knex.fn.now(),
     });
-    await knex('services').where({ service_key: 'mosquito_event' }).update({
-      base_price: 225,
-      price_range_min: 225,
-      price_range_max: 475,
+    // mosquito_one_time was seeded with null prices (variable, manually scoped).
+    await knex('services').where({ service_key: 'mosquito_one_time' }).update({
+      base_price: null,
+      price_range_min: null,
+      price_range_max: null,
       updated_at: knex.fn.now(),
     });
   }
