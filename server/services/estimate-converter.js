@@ -347,8 +347,8 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
     const AppointmentReminders = require('./appointment-reminders');
     for (const row of followUps) {
       const scheduledDate = scheduledDateOnly(row.scheduled_date);
-      const windowStart = String(row.window_start || '08:00').slice(0, 5);
-      if (!scheduledDate) continue;
+      if (!scheduledDate || !row.window_start) continue;
+      const windowStart = String(row.window_start).slice(0, 5);
       await AppointmentReminders.registerAppointment(
         row.id,
         customerId,

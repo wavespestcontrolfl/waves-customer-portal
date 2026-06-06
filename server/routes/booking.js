@@ -872,9 +872,13 @@ router.post('/confirm', async (req, res, next) => {
     try {
       const AppointmentReminders = require('../services/appointment-reminders');
       for (const row of [serviceRow, ...followUpRows].filter(r => r?.id)) {
-        const scheduledDate = typeof row.scheduled_date === 'string'
-          ? row.scheduled_date.slice(0, 10)
-          : etDateString(row.scheduled_date);
+        const scheduledDate = row.id === serviceRow.id
+          ? slot_date
+          : (typeof row.scheduled_date === 'string'
+              ? row.scheduled_date.slice(0, 10)
+              : row.scheduled_date instanceof Date
+                ? row.scheduled_date.toISOString().slice(0, 10)
+                : String(row.scheduled_date || '').slice(0, 10));
         const windowStart = String(row.window_start || slot_start || '08:00').slice(0, 5);
         await AppointmentReminders.registerAppointment(
           row.id,
