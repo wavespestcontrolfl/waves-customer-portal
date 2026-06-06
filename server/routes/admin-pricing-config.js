@@ -180,7 +180,7 @@ async function ensureTable() {
 
       // Mosquito
       { config_key: 'mosquito_lot_sizes', name: 'Mosquito Treatable Area Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 7999 }, QUARTER: { max_sqft: 11999 }, THIRD: { max_sqft: 17999 }, HALF: { max_sqft: 34999 }, ACRE: { max_sqft: 999999 } }) },
-      { config_key: 'mosquito_base_prices', name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2, data: JSON.stringify({ SMALL: { seasonal9: 105, monthly12: 90 }, QUARTER: { seasonal9: 115, monthly12: 100 }, THIRD: { seasonal9: 130, monthly12: 115 }, HALF: { seasonal9: 155, monthly12: 135 }, ACRE: { seasonal9: 195, monthly12: 175 } }) },
+      { config_key: 'mosquito_base_prices', name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2, data: JSON.stringify({ SMALL: { seasonal9: 66, monthly12: 60 }, QUARTER: { seasonal9: 69, monthly12: 63 }, THIRD: { seasonal9: 72, monthly12: 66 }, HALF: { seasonal9: 78, monthly12: 70 }, ACRE: { seasonal9: 88, monthly12: 78 } }) },
       { config_key: 'mosquito_visits', name: 'Mosquito Program Visits', category: 'mosquito', sort_order: 3, data: JSON.stringify({ seasonal9: 9, monthly12: 12 }) },
       { config_key: 'mosquito_pressure', name: 'Mosquito Pressure Factors', category: 'mosquito', sort_order: 4, data: JSON.stringify({ trees_heavy: 0.15, trees_moderate: 0.05, complexity_complex: 0.10, complexity_moderate: 0.05, pool: 0.05, near_water: 0.10, irrigation: 0.08, lot_acre: 0.15, lot_half: 0.05, cap: 2.0 }) },
 
@@ -206,7 +206,7 @@ async function ensureTable() {
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
       { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 2.2 }) },
       { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 115, fungicide_floor: 115, recurringPerAppMultiplier: 1.50, treatment_multipliers: { fert: 1.00, fertilization: 1.00, weed: 1.12, pest: 1.30, fungicide: 1.38 } }) },
-      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 225, STANDARD: 275, LARGE: 325, XL: 385, ESTATE: 425, ACRE_CLASS: 475, OVER_ACRE: 475, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 75, stationAddOn: 75, dunkAddOn: 15 }) },
+      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 99, STANDARD: 129, LARGE: 159, XL: 199, ESTATE: 239, ACRE_CLASS: 269, OVER_ACRE: 269, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 40, stationAddOn: 75, dunkAddOn: 15 }) },
       { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 6, data: JSON.stringify({
         per_lf_dirt: 10,
         per_lf_concrete: 14,

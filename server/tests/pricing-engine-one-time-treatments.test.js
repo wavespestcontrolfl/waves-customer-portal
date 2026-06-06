@@ -138,8 +138,8 @@ describe('pricing engine one-time treatment rules', () => {
 
     expect(result.mosquitoTreatableSqFt).toBe(7500);
     expect(result.areaBucket).toBe('SMALL');
-    expect(result.basePrice).toBe(225);
-    expect(result.price).toBe(225);
+    expect(result.basePrice).toBe(99);
+    expect(result.price).toBe(99);
     expect(result.recurringCustomerDiscountRate).toBe(0);
   });
 
@@ -150,10 +150,10 @@ describe('pricing engine one-time treatment rules', () => {
     });
 
     expect(result.areaBucket).toBe('STANDARD');
-    expect(result.basePrice).toBe(275);
+    expect(result.basePrice).toBe(129);
     expect(result.stationAddOnTotal).toBe(150);
     expect(result.dunkAddOnTotal).toBe(45);
-    expect(result.price).toBe(470);
+    expect(result.price).toBe(324);
   });
 
   test('one-time mosquito recurring-customer perk is 15%, with no urgency or WaveGuard discount', () => {
@@ -165,9 +165,9 @@ describe('pricing engine one-time treatment rules', () => {
       afterHours: true,
     });
 
-    expect(result.subtotalBeforeRecurringCustomerDiscount).toBe(425);
+    expect(result.subtotalBeforeRecurringCustomerDiscount).toBe(279);
     expect(result.recurringCustomerDiscountRate).toBe(0.15);
-    expect(result.price).toBe(Math.round(425 * 0.85));
+    expect(result.price).toBe(Math.round(279 * 0.85));
   });
 
   test('one-time mosquito does not qualify for WaveGuard but can receive recurring-customer perk', () => {

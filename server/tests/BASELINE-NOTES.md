@@ -8,6 +8,40 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-06-06 mosquito market reprice
+
+Mosquito (recurring + one-time) repriced to the SW-FL market band — it ran ~2x
+market and effectively never sold. See `pricing_changelog` entry
+`claude-2026-06-06` and migration `20260606000001_mosquito_market_reprice`
+(updates `pricing_config.mosquito_base_prices` + `onetime_mosquito`, the
+DB-authoritative source synced by `syncConstantsFromDB`).
+
+Baselines refreshed for the mosquito-bearing cases only:
+- **Local** (`pricing-engine.local-baseline.json`): `mosquito_acre_waterfront_max_pressure`,
+  `platinum_bundle_4_qualifying_services_zone_a`, `edge_large_footprint_5500sf_platinum_bundle`
+  (mosquito line + dependent summary totals only).
+- **Local** (`pricing-engine-v1-adapter.local-baseline.json`): full recapture. The
+  mosquito cases (`v1adapter_mosquito_waterfront_heavy_pressure`,
+  `v1adapter_platinum_bundle_4_services_zone_a`) carry the reprice; the remaining
+  cases (`v1adapter_baseline_zone_a_quarterly_pest_lawn`,
+  `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub`, `v1adapter_zone_d_quarterly_pest_bahia`)
+  changed only in **lawn** fields — pre-existing prod-snapshot drift in this `.local-baseline`
+  file (this engine's pest/lawn constants are unchanged in this PR; see the `constants.js`
+  diff). Recaptured so the suite is green in local/no-DB mode rather than left half-stale.
+- **DB** (`pricing-engine.baseline.json`): `mosquito_acre_waterfront_max_pressure`,
+  `platinum_bundle_4_qualifying_services_zone_a` (both verified mosquito-only; DB == local for these).
+- **DB** (`pricing-engine-v1-adapter.baseline.json`): `v1adapter_mosquito_waterfront_heavy_pressure`.
+
+**Pending post-deploy DB-parity recapture:** the prod-divergent platinum-bundle DB
+cases — `edge_large_footprint_5500sf_platinum_bundle` (pricing-engine) and
+`v1adapter_platinum_bundle_4_services_zone_a` (v1-adapter) — carry prod-captured
+lawn/pest values that differ from local constants, so their bundle totals can't be
+recomputed in-sandbox without pulling in unrelated drift. Recapture them with
+`CAPTURE_BASELINE=1` against prod once the new prices are live (the only field that
+changes is the mosquito line + its contribution to the bundle total).
+
+---
+
 ## 2026-05-16 service zone pricing removal
 
 Service Zone A/B/C/D is now routing/metadata only in the modular estimator. It no longer applies a recurring-service price multiplier.
