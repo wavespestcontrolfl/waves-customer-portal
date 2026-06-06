@@ -59,6 +59,24 @@ exports.up = async function (knex) {
       .merge(['name', 'category', 'sort_order', 'data', 'updated_at']);
   }
 
+  // Keep the service catalog (manual-appointment price defaults) aligned with
+  // the new estimator pricing so manually added mosquito lines don't default
+  // to the old band.
+  if (await knex.schema.hasTable('services')) {
+    await knex('services').where({ service_key: 'mosquito_monthly' }).update({
+      base_price: 60,
+      price_range_min: 60,
+      price_range_max: 175,
+      updated_at: knex.fn.now(),
+    });
+    await knex('services').where({ service_key: 'mosquito_event' }).update({
+      base_price: 99,
+      price_range_min: 99,
+      price_range_max: 269,
+      updated_at: knex.fn.now(),
+    });
+  }
+
   // Record the intentional pricing/baseline change.
   if (await knex.schema.hasTable('pricing_changelog')) {
     const identity = {
@@ -144,5 +162,20 @@ exports.down = async function (knex) {
       .insert(row)
       .onConflict('config_key')
       .merge(['name', 'category', 'sort_order', 'data', 'updated_at']);
+  }
+
+  if (await knex.schema.hasTable('services')) {
+    await knex('services').where({ service_key: 'mosquito_monthly' }).update({
+      base_price: 90,
+      price_range_min: 79,
+      price_range_max: 235,
+      updated_at: knex.fn.now(),
+    });
+    await knex('services').where({ service_key: 'mosquito_event' }).update({
+      base_price: 225,
+      price_range_min: 225,
+      price_range_max: 475,
+      updated_at: knex.fn.now(),
+    });
   }
 };
