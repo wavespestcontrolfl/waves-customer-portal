@@ -47,12 +47,23 @@ const {
 const {
   estimateDataHasUnresolvedManagerApproval,
 } = require('../services/estimate-delivery-options');
+const {
+  createEstimateAddServiceRequest,
+} = require('../services/estimate-add-service-request');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
   || config.jwt.secret
   || crypto.randomBytes(32).toString('hex');
 const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+
+const addServiceRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many service requests submitted. Please wait before sending another or call our office.' },
+});
 
 function scheduledDateOnly(value) {
   if (!value) return null;
@@ -3432,9 +3443,14 @@ function renderPage(token, estimate, estData) {
   .upsell:hover{background:#EDE8D8;border-color:#C9C0AA;box-shadow:0 8px 22px rgba(15,23,42,.14),0 3px 6px rgba(15,23,42,.08)}
   .upsell:active{background:#EDE8D8}
   .upsell:disabled{opacity:.7;cursor:wait}
+  .upsell.requested{background:#ECFDF5;border-color:#86EFAC;box-shadow:0 6px 18px rgba(22,101,52,.12),0 2px 4px rgba(22,101,52,.08)}
+  .upsell.requested:disabled{opacity:1;cursor:default}
   .upsell .txt{flex:1;min-width:200px}
   .upsell h3{color:#1B2C5B;margin:0 0 4px}
   .upsell-btn{background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;border:none;font-weight:500;cursor:pointer;font-size:14px;min-height:44px;pointer-events:none}
+  .upsell.requested .upsell-btn{background:#166534}
+  .upsell-request-status{background:#ECFDF5;border:1px solid #86EFAC;color:#14532D;border-radius:10px;padding:12px 14px;margin:-4px 0 16px;font-size:14px;line-height:1.45}
+  .upsell-request-status strong{display:block;color:#14532D;margin-bottom:2px}
   @media(max-width:520px){.upsell-btn{width:100%}}
   .perks-list{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
   @media(max-width:640px){.perks-list{grid-template-columns:1fr}}
@@ -3555,7 +3571,11 @@ ${shellTopBar()}
           : `Bundling unlocks ${nextTierName} tier pricing (${nextTierPct}% off qualifying services). Curious what that looks like?`)}</div>
 	    </span>
     <span class="upsell-btn">Get a bundle quote</span>
-  </button>` : ''}
+  </button>
+  <div class="upsell-request-status" id="upsell-request-status" hidden>
+    <strong>Request received.</strong>
+    <span id="upsell-request-status-copy">Got it. We are reviewing this service for your property and will follow up with a revised estimate shortly.</span>
+  </div>` : ''}
 
   ${locked ? '' : `
   <section class="card booking-card" id="booking-card"${existingAppointment ? '' : (requirePaymentSetupBeforeSlots && !isOneTimeOnly ? ' style="display:none"' : '')}>
@@ -4794,7 +4814,10 @@ ${shellQuestionsBar()}
     var div = document.createElement('div');
     div.setAttribute('role', 'status');
     div.style.cssText = 'background:#ECFDF5;border:1px solid #10B981;color:#064E3B;padding:12px 16px;border-radius:8px;margin:0 auto 16px;max-width:820px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:14px;';
-    div.innerHTML = '<span><strong>Bundle applied.</strong> Silver tier pricing is now reflected below. We also sent a heads-up to our office.</span><button type="button" aria-label="Dismiss" style="background:none;border:none;color:#064E3B;cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;">\u00D7</button>';
+    var params = new URLSearchParams(location.search);
+    var tier = (params.get('bundle_tier') || 'updated').replace(/[^A-Za-z ]/g, '').slice(0, 24) || 'updated';
+    var tierText = tier === 'updated' ? 'Updated bundle pricing' : tier + ' tier pricing';
+    div.innerHTML = '<span><strong>Bundle applied.</strong> ' + tierText + ' is now reflected below. We also sent a heads-up to our office.</span><button type="button" aria-label="Dismiss" style="background:none;border:none;color:#064E3B;cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;">\u00D7</button>';
     div.querySelector('button').addEventListener('click', function () { div.remove(); });
     var wrap = document.querySelector('.wrap') || document.body;
     wrap.insertBefore(div, wrap.firstChild);
@@ -4831,22 +4854,35 @@ ${shellQuestionsBar()}
   async function inquireBundle(svc) {
     var card = document.querySelector('.upsell');
     var pill = document.querySelector('.upsell-btn');
+    var status = document.getElementById('upsell-request-status');
     try {
       if (card) card.disabled = true;
-      if (pill) pill.textContent = 'Applying bundle\u2026';
+      if (pill) pill.textContent = 'Sending request\u2026';
       var r = await fetch(API + '/bundle-inquiry', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ suggestedService: svc })
       });
       var data = await r.json().catch(function () { return {}; });
+      if (!r.ok) throw new Error(data && data.error ? data.error : 'request failed');
       if (data && data.bundled) {
         toast('Bundle applied \u2014 ' + data.bundled.tier + ' tier pricing');
         var sep = location.search ? '&' : '?';
-        setTimeout(function () { location.href = location.pathname + location.search + sep + 'bundle_applied=1'; }, 700);
+        var tierParam = data.bundled.tier ? '&bundle_tier=' + encodeURIComponent(data.bundled.tier) : '';
+        setTimeout(function () { location.href = location.pathname + location.search + sep + 'bundle_applied=1' + tierParam; }, 700);
       } else {
-        toast('Got it \u2014 we\u2019ll text you a bundle quote shortly.');
-        if (card) card.disabled = false;
-        if (pill) pill.textContent = 'Get a bundle quote';
+        toast('Request received.');
+        if (card) {
+          card.disabled = true;
+          card.classList.add('requested');
+        }
+        if (pill) pill.textContent = 'Request received';
+        if (status) {
+          var copy = document.getElementById('upsell-request-status-copy');
+          if (copy && data && data.confirmation && data.confirmation.message) copy.textContent = data.confirmation.message;
+          status.hidden = false;
+          try { status.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+          catch (scrollErr) { status.scrollIntoView(false); }
+        }
       }
     } catch (e) {
       toast('Could not send. Call (941) 297-5749.');
@@ -6073,129 +6109,23 @@ router.put('/:token/preferences', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/estimates/:token/bundle-inquiry — customer taps "Get a bundle quote"
-// Re-runs the pricing engine with the suggested service added, writes the new
-// bundled pricing back to the estimate, and tells the client to reload. Falls
-// back to the inquiry-only SMS path if re-pricing fails (missing lawn_sqft,
-// unsupported service combo, engine error, etc.).
-router.post('/:token/bundle-inquiry', async (req, res, next) => {
+// POST /api/estimates/:token/bundle-inquiry — customer requests an add-on.
+// Creates a durable service request, sends customer confirmation, notifies
+// the team, and stores any pricing attempt as a draft revision only.
+router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res, next) => {
   try {
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Estimate already accepted — bundle must be manually requoted' });
-
-    const { suggestedService } = req.body;
-
-    // Attempt auto re-price with the added service.
-    let bundled = null;
-    try {
-      const estData = typeof estimate.estimate_data === 'string'
-        ? JSON.parse(estimate.estimate_data)
-        : estimate.estimate_data;
-      const engineInputs = extractEngineInputs(estData);
-
-      if (engineInputs && suggestedService) {
-        const updatedInputs = JSON.parse(JSON.stringify(engineInputs));
-        updatedInputs.services = updatedInputs.services || {};
-
-        const addLawn = /lawn/i.test(suggestedService);
-        const addPest = /pest/i.test(suggestedService);
-        const addMosquito = /mosquito/i.test(suggestedService);
-
-        if (addLawn && !updatedInputs.services.lawn) {
-          // Lawn area: prefer explicit input → engine-derived result →
-          // property-calculator will auto-derive from lotSqFt if neither
-          // is present. Only bail if we have no lot info to work with.
-          const existingLawn = Number(updatedInputs.lawnSqFt || estData?.result?.property?.lawnSqFt || 0);
-          if (existingLawn > 0) updatedInputs.lawnSqFt = existingLawn;
-          const hasLot = Number(updatedInputs.lotSqFt || estData?.result?.property?.lotSqFt || 0) > 0;
-          if (existingLawn > 0 || hasLot) {
-            if (!updatedInputs.lotSqFt && hasLot) {
-              updatedInputs.lotSqFt = Number(estData?.result?.property?.lotSqFt || 0);
-            }
-            updatedInputs.services.lawn = {
-              track: 'st_augustine',
-              tier: 'enhanced',
-            };
-          }
-        } else if (addPest && !updatedInputs.services.pest) {
-          updatedInputs.services.pest = { frequency: 'quarterly', version: 'v1', roachType: 'none' };
-        } else if (addMosquito && !updatedInputs.services.mosquito) {
-          updatedInputs.services.mosquito = { tier: 'monthly' };
-        }
-
-        // Only re-price if we actually added a service this round.
-        const didAdd =
-          (addLawn && updatedInputs.services.lawn)
-          || (addPest && updatedInputs.services.pest)
-          || (addMosquito && updatedInputs.services.mosquito);
-        if (didAdd) {
-          const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
-          const v1Result = generateEstimate(updatedInputs);
-          const legacyResult = mapV1ToLegacyShape(v1Result);
-
-          const newMonthly = Number(legacyResult?.recurring?.monthlyTotal || 0);
-          const newAnnual = Number(legacyResult?.recurring?.annualAfterDiscount || newMonthly * 12);
-          const newOneTime = Number(legacyResult?.oneTime?.total || estimate.onetime_total || 0);
-          const newTier = String(legacyResult?.recurring?.tier || 'silver').replace(/^./, (c) => c.toUpperCase());
-          // Pre-discount monthly for the new bundle. Required so downstream
-          // pref toggles apply WaveGuard tier math against a fresh anchor
-          // instead of a stale (pre-bundle, single-service) baseMonthly.
-          const newBaseMonthly = Math.round((Number(legacyResult?.recurring?.annualBeforeDiscount || 0) / 12) * 100) / 100;
-
-          const newEstimateData = {
-            ...(estData || {}),
-            inputs: updatedInputs,
-            result: legacyResult,
-            baseMonthly: newBaseMonthly > 0 ? newBaseMonthly : (estData?.baseMonthly || 0),
-            onetimeTotalBase: newOneTime,
-            bundleAutoApplied: {
-              addedService: suggestedService,
-              previousMonthly: Number(estimate.monthly_total || 0),
-              previousTier: estimate.waveguard_tier || 'Bronze',
-              newMonthly,
-              newBaseMonthly,
-              newTier,
-              appliedAt: new Date().toISOString(),
-            },
-          };
-          invalidateSendSnapshotPricingBundle(newEstimateData);
-
-          await db('estimates').where({ id: estimate.id }).update({
-            estimate_data: JSON.stringify(newEstimateData),
-            monthly_total: newMonthly,
-            annual_total: newAnnual,
-            onetime_total: newOneTime,
-            waveguard_tier: newTier,
-            updated_at: db.fn.now(),
-          });
-
-          // Bust the per-estimate pricing cache so the next GET re-reads from DB.
-          clearEstimatePricingCache(estimate.id);
-
-          bundled = {
-            addedService: suggestedService,
-            previousMonthly: Number(estimate.monthly_total || 0),
-            newMonthly,
-            tier: newTier,
-            savingsPerMonth: Math.max(0, Math.round((Number(estimate.monthly_total || 0) + newMonthly - newMonthly) * 100) / 100),
-          };
-          logger.info(`[estimate] Bundle auto-applied for ${estimate.customer_name}: ${estimate.waveguard_tier} $${estimate.monthly_total}/mo → ${newTier} $${newMonthly}/mo`);
-        }
-      }
-    } catch (err) {
-      logger.error(`[estimate] Bundle re-price failed, falling back to inquiry: ${err.message}`);
+    const result = await createEstimateAddServiceRequest({
+      estimateToken: req.params.token,
+      requestedService: req.body?.requestedService || req.body?.suggestedService,
+    });
+    res.status(result.deduped ? 200 : 201).json(result);
+  } catch (err) {
+    const status = Number(err.statusCode || err.status || 0);
+    if (status >= 400 && status < 500) {
+      return res.status(status).json({ error: err.message || 'Request could not be processed' });
     }
-
-    // Always fire the admin notification so the team has a
-    // heads-up — either the customer wants a bundle we couldn't auto-apply,
-    // or they've just self-served a tier upgrade and we should follow up.
-    try {
-      await fireBundleQuoteRequestedNotification({ estimate, suggestedService, bundled });
-    } catch (e) { logger.error(`[estimate] Bundle inquiry notification failed: ${e.message}`); }
-
-    res.json({ success: true, bundled });
-  } catch (err) { next(err); }
+    next(err);
+  }
 });
 
 // PUT /api/estimates/:token/decline
@@ -8403,6 +8333,7 @@ function buildServiceSection({ key, category, label, isRecurring, isPest, freque
   const shapedFrequencies = (Array.isArray(frequencies) ? frequencies : [])
     .map((frequency) => shapeServiceFrequency(frequency, { allowAddOns: isPest && isRecurring }));
   const sectionQuoteRequired = quoteRequired === true || shapedFrequencies.some((frequency) => frequency.quoteRequired === true);
+  const normalizedMemberKeys = Array.isArray(memberKeys) && memberKeys.length ? memberKeys : [key];
   return {
     key,
     label: label || serviceLabelForCategory(category || key),
@@ -8411,7 +8342,8 @@ function buildServiceSection({ key, category, label, isRecurring, isPest, freque
     // Single source of truth for the tier badge: eligible iff this section covers
     // at least one badge-eligible service (memberKeys defaults to [key]; a 'bundle'
     // passes all its recurring keys). The client reads this directly.
-    waveGuardTierEligible: sectionTierEligibleFromKeys(isRecurring, Array.isArray(memberKeys) && memberKeys.length ? memberKeys : [key]),
+    waveGuardTierEligible: sectionTierEligibleFromKeys(isRecurring, normalizedMemberKeys),
+    memberKeys: normalizedMemberKeys,
     isWaveGuardQualifier: PRICING_WAVEGUARD.qualifyingServices.includes(key),
     excludeFromPctDiscount: PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true,
     defaultFrequencyKey: defaultFrequencyKeyFor(shapedFrequencies),

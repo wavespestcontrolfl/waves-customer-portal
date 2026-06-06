@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { EstimateAskBar, OneTimeBreakdownCard, ServiceSection, getServiceLabel } from './EstimateViewPage';
+import { EstimateAskBar, OneTimeBreakdownCard, ServiceSection, estimateAddServiceOffer, getServiceLabel } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -192,6 +192,21 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getByText('Flea Treatment Package')).toBeInTheDocument();
     expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
     expect(screen.getByText('Exterior yard area exceeds automatic quote threshold.')).toBeInTheDocument();
+  });
+});
+
+describe('estimateAddServiceOffer', () => {
+  it('uses member keys from collapsed bundle sections', () => {
+    expect(estimateAddServiceOffer([{
+      key: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      memberKeys: ['pest_control', 'lawn_care'],
+      frequencies: [],
+    }], 'recurring')).toEqual(expect.objectContaining({
+      serviceKey: 'mosquito',
+      label: 'Mosquito',
+    }));
   });
 });
 

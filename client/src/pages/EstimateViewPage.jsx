@@ -134,6 +134,97 @@ function serviceLabelForKey(key) {
   }
 }
 
+function serviceKeysForEstimateSection(section = {}) {
+  const keys = new Set();
+
+  const collectText = (value) => {
+    if (!value) return;
+    if (typeof value === 'string' || typeof value === 'number') {
+      const text = String(value).toLowerCase();
+      if (text.includes('pest')) keys.add('pest_control');
+      if (text.includes('lawn')) keys.add('lawn_care');
+      if (text.includes('mosquito')) keys.add('mosquito');
+      if (text.includes('tree') || text.includes('shrub')) keys.add('tree_shrub');
+      if (text.includes('termite')) keys.add('termite_bait');
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(collectText);
+      return;
+    }
+    if (typeof value === 'object') {
+      [
+        value.key,
+        value.service,
+        value.serviceKey,
+        value.service_key,
+        value.category,
+        value.label,
+        value.name,
+        value.title,
+        value.description,
+      ].forEach(collectText);
+    }
+  };
+
+  if (section.isPest) keys.add('pest_control');
+  collectText(section.memberKeys);
+  collectText(`${section.key || ''} ${section.label || ''}`);
+  collectText(section.services);
+  collectText(section.serviceRows);
+  collectText(section.serviceLines);
+  collectText(section.recurringServices);
+  const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
+  frequencies.forEach((frequency) => {
+    collectText(frequency.perServiceTreatments);
+    collectText(frequency.treatments);
+    collectText(frequency.services);
+    collectText(frequency.included);
+    collectText(frequency.addOns);
+  });
+
+  return keys;
+}
+
+export function estimateAddServiceOffer(services = [], serviceMode = 'recurring') {
+  if (serviceMode !== 'recurring') return null;
+  const currentKeys = new Set();
+  services
+    .filter((section) => section && section.isRecurring !== false)
+    .forEach((section) => {
+      serviceKeysForEstimateSection(section).forEach((key) => currentKeys.add(key));
+    });
+
+  if (currentKeys.has('pest_control') && !currentKeys.has('lawn_care')) {
+    return {
+      serviceKey: 'lawn_care',
+      label: 'Lawn Care',
+      icon: 'leaf',
+      title: 'Add Lawn Care and save more',
+      body: 'Bundling lawn care with your current service can unlock the next WaveGuard pricing tier.',
+    };
+  }
+  if (currentKeys.has('lawn_care') && !currentKeys.has('pest_control')) {
+    return {
+      serviceKey: 'pest_control',
+      label: 'Pest Control',
+      icon: 'bug',
+      title: 'Add Pest Control for bundled pricing',
+      body: 'Add perimeter pest coverage and our team will send a revised bundled option.',
+    };
+  }
+  if (currentKeys.has('pest_control') && currentKeys.has('lawn_care') && !currentKeys.has('mosquito')) {
+    return {
+      serviceKey: 'mosquito',
+      label: 'Mosquito',
+      icon: 'sparkles',
+      title: 'Add Mosquito and save more',
+      body: 'Add mosquito protection and our team will send an updated bundle option.',
+    };
+  }
+  return null;
+}
+
 function recurringServiceForEstimate(pricing = {}) {
   const services = Array.isArray(pricing?.services) ? pricing.services : [];
   return services.find((service) => service?.isRecurring) || services[0] || null;
@@ -721,6 +812,102 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         }}
       >One-Time Pest Control</button>
     </div>
+  );
+}
+
+function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
+  if (!offer) return null;
+  const status = requestState?.status || 'idle';
+  const isSubmitting = status === 'submitting';
+  const isReceived = status === 'received';
+  const isError = status === 'error';
+  return (
+    <section style={{
+      background: COLORS.white,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 16,
+      boxShadow: '0 1px 6px rgba(15,23,42,0.04)',
+    }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+        <div style={{
+          width: 36,
+          height: 36,
+          borderRadius: 10,
+          background: '#ECFDF5',
+          color: '#166534',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          <Icon name={offer.icon || 'plus'} size={19} strokeWidth={2.1} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
+            {offer.title}
+          </div>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 4 }}>
+            {offer.body}
+          </div>
+          <button
+            type="button"
+            onClick={onRequest}
+            disabled={isSubmitting || isReceived}
+            style={{
+              marginTop: 12,
+              width: '100%',
+              minHeight: 44,
+              border: 'none',
+              borderRadius: 10,
+              background: isReceived ? '#166534' : ESTIMATE_BUTTON_BG,
+              color: COLORS.white,
+              fontSize: 15,
+              fontWeight: 800,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              cursor: isSubmitting || isReceived ? 'default' : 'pointer',
+              opacity: isSubmitting ? 0.72 : 1,
+            }}
+          >
+            <Icon name={isReceived ? 'check' : 'plus'} size={17} strokeWidth={2.4} />
+            {isSubmitting ? 'Sending request...' : isReceived ? 'Request received' : `Add ${offer.label}`}
+          </button>
+          {isReceived ? (
+            <div role="status" style={{
+              marginTop: 10,
+              background: '#ECFDF5',
+              border: '1px solid #86EFAC',
+              color: '#14532D',
+              borderRadius: 10,
+              padding: '10px 12px',
+              fontSize: 14,
+              lineHeight: 1.45,
+            }}>
+              <strong style={{ display: 'block', marginBottom: 2 }}>Request received.</strong>
+              {requestState?.message || 'Got it. We are reviewing this service for your property and will follow up with a revised estimate shortly.'}
+            </div>
+          ) : null}
+          {isError ? (
+            <div role="alert" style={{
+              marginTop: 10,
+              background: '#FEF2F2',
+              border: `1px solid ${COLORS.red}`,
+              color: COLORS.red,
+              borderRadius: 10,
+              padding: '10px 12px',
+              fontSize: 14,
+              lineHeight: 1.45,
+            }}>
+              {requestState?.message || `Could not send the request. Call ${WAVES_PHONE_DISPLAY}.`}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1351,6 +1538,7 @@ export default function EstimateViewPage() {
   const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
+  const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const countdownRef = useRef(null);
@@ -1371,10 +1559,18 @@ export default function EstimateViewPage() {
     const primarySection = pestSection || services.find((section) => section.isRecurring) || services[0];
     return selectedFrequencyForSection(primarySection, selected);
   }, [services, selected]);
+  const addServiceOffer = useMemo(
+    () => estimateAddServiceOffer(services, serviceMode),
+    [services, serviceMode]
+  );
 
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
   }, [selectedFrequency]);
+
+  useEffect(() => {
+    setAddServiceRequestState({ status: 'idle', message: '' });
+  }, [token, addServiceOffer?.serviceKey]);
 
   const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
     setLoading(true);
@@ -1621,6 +1817,32 @@ export default function EstimateViewPage() {
     // is idempotent.
   }, []);
 
+  const handleAddServiceRequest = useCallback(async () => {
+    if (!addServiceOffer || addServiceRequestState.status === 'submitting') return;
+    setAddServiceRequestState({ status: 'submitting', message: '' });
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/bundle-inquiry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestedService: addServiceOffer.serviceKey,
+          suggestedService: addServiceOffer.label,
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || `request failed: ${r.status}`);
+      setAddServiceRequestState({
+        status: 'received',
+        message: body?.confirmation?.message || `Got it. We're reviewing ${addServiceOffer.label.toLowerCase()} for your property and will follow up shortly.`,
+      });
+    } catch (err) {
+      setAddServiceRequestState({
+        status: 'error',
+        message: err.message || `Could not send the request. Call ${WAVES_PHONE_DISPLAY}.`,
+      });
+    }
+  }, [addServiceOffer, addServiceRequestState.status, token]);
+
   if (loading) {
     return <Page><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
   }
@@ -1696,6 +1918,11 @@ export default function EstimateViewPage() {
         selectedFrequency={selectedFrequency}
         serviceMode={serviceMode}
         chips={pricing.askChips}
+      />
+      <EstimateAddServiceRequestCard
+        offer={addServiceOffer}
+        requestState={addServiceRequestState}
+        onRequest={handleAddServiceRequest}
       />
     </>
   );
