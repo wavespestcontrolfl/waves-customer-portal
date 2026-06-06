@@ -685,6 +685,7 @@ router.post('/confirm', async (req, res, next) => {
       technician_id,
       service_type,
       duration_minutes,
+      recurring_pattern,
       customer_notes,
       source,
       referrer_url,
@@ -844,7 +845,13 @@ router.post('/confirm', async (req, res, next) => {
     }).returning('*');
 
     let followUpRows = [];
-    if (RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control') {
+    const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
+    const isOneTimeEstimateBooking = String(source || '').toLowerCase() === 'estimate-accept';
+    const shouldSeedQuarterlyPestFollowUps =
+      !isOneTimeEstimateBooking
+      && requestedRecurringPattern === 'quarterly'
+      && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
+    if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(db, serviceRow, {
           pattern: 'quarterly',
