@@ -23,6 +23,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
 
@@ -44,6 +45,9 @@ function toQualifyingKey(raw) {
   const s = String(raw || '').toLowerCase();
   if (!s) return null;
   if (s.includes('rodent') || s.includes('palm')) return null;
+  // One-time treatments (e.g. one_time_pest) never receive the WaveGuard tier
+  // discount and must not count toward the tier.
+  if (/one[\s_-]?time|onetime/.test(s)) return null;
   if (s.includes('pest')) return 'pest_control';
   if (s.includes('lawn') || s.includes('turf')) return 'lawn_care';
   if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) return 'tree_shrub';
@@ -62,16 +66,36 @@ function parseEstimateData(estimate) {
   } catch { return {}; }
 }
 
+// A row from estimate_data.lineItems / .services counts as a recurring service
+// only if it carries recurring pricing (annual/monthly). One-time and specialty
+// lines carry .price / .total and must NOT count toward the WaveGuard tier —
+// one-time services never receive the tier discount and the charged price is
+// unchanged, so advertising a tier upgrade off them would be wrong.
+function isRecurringLineRow(c) {
+  if (!c || typeof c !== 'object') return false;
+  if (c.isOneTime === true || c.oneTime === true || c.one_time === true) return false;
+  const hasAnnual = Number(c.annual ?? c.ann ?? c.annualBeforeDiscount) > 0;
+  const hasMonthly = Number(c.monthly ?? c.mo ?? c.monthlyBeforeDiscount) > 0;
+  if (hasAnnual || hasMonthly) return true;
+  // price/total only (no recurring figure) → one-time / specialty.
+  if (Number(c.price) > 0 || Number(c.total) > 0) return false;
+  return c.recurring === true || c.isRecurring === true || !!c.frequency;
+}
+
 // Collect the candidate recurring-service rows across the several estimate_data
-// shapes (v1 admin shape, engineResult, lineItems, services).
+// shapes (v1 admin shape, engineResult, lineItems, services). The explicit
+// recurring sections are trusted; the mixed lineItems / services arrays are
+// filtered to recurring rows so one-time treatments don't inflate the tier.
 function recurringCandidates(estData) {
   const out = [];
   const pushAll = (arr) => { if (Array.isArray(arr)) out.push(...arr); };
   pushAll(estData?.result?.recurring?.services);
   pushAll(estData?.engineResult?.recurring?.services);
   pushAll(estData?.recurring?.services);
-  pushAll(estData?.lineItems);
-  pushAll(estData?.services);
+  const mixed = [];
+  if (Array.isArray(estData?.lineItems)) mixed.push(...estData.lineItems);
+  if (Array.isArray(estData?.services)) mixed.push(...estData.services);
+  for (const row of mixed) { if (isRecurringLineRow(row)) out.push(row); }
   return out;
 }
 
@@ -154,10 +178,15 @@ async function buildEstimateMembershipContext(estimate) {
         .first();
     } catch { prepaidTerm = null; }
 
-    const today = new Date().toISOString().slice(0, 10);
+    // Compare against today's date in the business timezone (ET). Using a UTC
+    // ISO date would roll over after ~8pm ET and treat a visit still scheduled
+    // for today as past, undercounting remaining per-visit savings.
+    const today = etDateString();
     const isFuture = (d) => {
       if (!d) return false;
-      const iso = (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
+      const iso = typeof d === 'string'
+        ? d.slice(0, 10)
+        : (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
       return iso >= today;
     };
 
