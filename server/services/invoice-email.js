@@ -11,6 +11,7 @@
 const logger = require('./logger');
 const db = require('../models/db');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
+const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
 const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./email-template');
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
@@ -127,6 +128,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     codePrefix: invoiceShortCodePrefix(invoice),
   });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
+  invoiceForPdf.annual_prepay = await loadInvoiceAnnualPrepay(invoiceForPdf);
   let pdfBuffer;
   try {
     pdfBuffer = await buildInvoicePDFBuffer(invoiceForPdf);

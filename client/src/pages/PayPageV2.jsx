@@ -172,6 +172,21 @@ function fmtDate(d) {
   return formatInvoiceDate(d);
 }
 
+// Coverage sentence for an annual-prepay invoice. Returns null for ordinary
+// invoices. prepay is the normalized descriptor from the /pay/:token payload.
+function annualPrepayCalloutText(prepay) {
+  if (!prepay) return null;
+  const months = prepay.coverageMonths;
+  const spanLabel = months ? `${months} months of service` : 'a full year of service';
+  const start = prepay.termStart ? fmtDate(prepay.termStart) : null;
+  const end = prepay.termEnd ? fmtDate(prepay.termEnd) : null;
+  let body = `This is an annual prepayment — it covers ${spanLabel}`;
+  if (start && end) body += `, ${start} through ${end}`;
+  body += '.';
+  if (prepay.setupFeeWaived) body += ' Your one-time setup fee is waived.';
+  return body;
+}
+
 const subtlePanel = {
   background: '#FAF8F3',
   border: '1px solid #E7E2D7',
@@ -1138,6 +1153,7 @@ export default function PayPageV2() {
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
   const invoiceStatusLabel = isOverdue ? 'Overdue' : dueLabel ? `Due ${dueLabel}` : 'Due now';
+  const prepayCalloutText = annualPrepayCalloutText(invoice.annualPrepay);
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -1233,6 +1249,40 @@ export default function PayPageV2() {
               <Icon name="document" size={20} strokeWidth={2} />
             </span>
           </div>
+
+            {prepayCalloutText && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 12,
+                padding: 16,
+                borderRadius: 8,
+                marginBottom: 20,
+                background: '#EEF6FF',
+                border: '1px solid #BFE4F8',
+              }}>
+                <span style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 8,
+                  flexShrink: 0,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: '#FFFFFF',
+                  color: '#065A8C',
+                  border: '1px solid #BFE4F8',
+                }}>
+                  <Icon name="calendar" size={18} strokeWidth={2} />
+                </span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ ...eyebrow, color: '#065A8C', marginBottom: 5 }}>Annual prepayment</div>
+                  <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.5 }}>
+                    {prepayCalloutText}
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div style={{
               display: 'grid',
