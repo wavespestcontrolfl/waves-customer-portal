@@ -413,6 +413,29 @@ async function createTermForAnnualPrepay({
     if (suppliedEnd) updates.term_end = suppliedEnd;
     else if (suppliedStart) updates.term_end = addMonthsSameDay(suppliedStart, 12);
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
+    // When the coverage window is edited (start/end actually supplied), detach
+    // any visits attachScheduledServices() stamped under the old window that now
+    // fall outside it — refreshTermSnapshot only re-attaches in-window visits, it
+    // never removes out-of-window ones, so a shortened/moved window would keep
+    // reporting stale visits as Annual Prepay. Skipped when no dates were given
+    // (the estimate re-run path), so it only fires on a real window change.
+    if (updates.term_start || updates.term_end) {
+      const scCols = await scheduledServiceColumns();
+      if (scCols.annual_prepay_term_id) {
+        const winStart = dateOnly(updates.term_start || existing.term_start);
+        const winEnd = dateOnly(updates.term_end || existing.term_end);
+        try {
+          await conn('scheduled_services')
+            .where({ annual_prepay_term_id: existing.id })
+            .andWhere(function () {
+              this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
+            })
+            .update({ annual_prepay_term_id: null, updated_at: new Date() });
+        } catch (err) {
+          logger.warn(`[annual-prepay] scheduled service detach skipped: ${err.message}`);
+        }
+      }
+    }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
