@@ -35,8 +35,12 @@ const SERVICE_LABEL = {
   mosquito: 'Mosquito',
   termite_bait: 'Termite Bait',
 };
-// Statuses that mean a scheduled visit is no longer live coverage.
-const TERMINAL_STATUSES = ['cancelled', 'completed', 'no_show', 'skipped'];
+// Statuses that mean a scheduled visit is not live, active coverage.
+// 'rescheduled' is included because the customer-portal reschedule flow flips
+// status to 'rescheduled' but leaves the original row in place as a phantom
+// until SmartRebooker actions it — counting it would inflate the tier (see
+// admin-schedule.js, which excludes it for the same reason).
+const TERMINAL_STATUSES = ['cancelled', 'completed', 'no_show', 'skipped', 'rescheduled'];
 
 // Map a free-text service name (scheduled_services.service_type or an estimate
 // line label) to a WaveGuard qualifying service key. Scoped to the five
@@ -184,11 +188,15 @@ async function buildEstimateMembershipContext(estimate) {
     const deltaPct = Math.round(delta * 100);
 
     // ── Active prepaid term (drives prepaid-aware copy) ────────
+    // Only a genuinely active term counts as prepaid. 'payment_pending' means
+    // the customer selected annual prepay but hasn't paid yet, so it must not
+    // render "remaining prepaid" savings (mirrors ACTIVE_STATUSES in
+    // annual-prepay-renewals.js).
     let prepaidTerm = null;
     try {
       prepaidTerm = await db('annual_prepay_terms')
         .where({ customer_id: customer.id })
-        .whereNotIn('status', ['cancelled', 'lapsed', 'refunded'])
+        .whereIn('status', ['active', 'renewal_pending'])
         .andWhere('term_end', '>=', db.fn.now())
         .orderBy('term_end', 'desc')
         .first();
