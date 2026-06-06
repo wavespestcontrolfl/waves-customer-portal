@@ -324,12 +324,22 @@ function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = 
     || { service_type: scheduledRow.service_type };
 }
 
+function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
+  const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
+  const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
+  const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
+  return key === 'pest_control' && pattern === 'quarterly';
+}
+
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: opts.fallbackFrequency,
   });
   if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
+  if (!supportsConverterFollowUpSeeding(svc, parentRow, pattern)) {
+    return { pattern, insertedCount: 0, insertedRows: [] };
+  }
   const visitsPerYear = visitsPerYearForRecurringService(svc);
   return RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
     pattern,
