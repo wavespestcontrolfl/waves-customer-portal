@@ -18,6 +18,7 @@ const {
   buildWaveGuardIntelligencePayload,
   defaultServiceModeForEstimate,
   deriveServiceCategory,
+  estimateInvoicePayUrlParams,
   isEstimateAcceptActive,
   isEstimateAskAnswerable,
   isAnnualPrepayEligibleServiceMix,
@@ -5290,6 +5291,25 @@ describe('public estimate one-time breakdown', () => {
       invoiceId: 'inv-123',
       invoicePayUrl: '/pay/inv-123?source=estimate&saveCard=1&billingTerm=standard',
     }));
+  });
+
+  test('estimate invoice delivery params default save-card only for recurring accepts', () => {
+    expect(estimateInvoicePayUrlParams({
+      billingTerm: 'standard',
+      saveCard: true,
+    })).toEqual({
+      source: 'estimate',
+      saveCard: '1',
+      billingTerm: 'standard',
+    });
+
+    expect(estimateInvoicePayUrlParams({
+      billingTerm: 'standard',
+      saveCard: false,
+    })).toEqual({
+      source: 'estimate',
+      billingTerm: 'standard',
+    });
   });
 
   test('accept success payload distinguishes one-time booking from onboarding', () => {

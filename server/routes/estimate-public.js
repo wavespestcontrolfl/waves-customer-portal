@@ -5733,7 +5733,12 @@ router.put('/:token/accept', async (req, res, next) => {
     if (invoiceId && billByInvoice) {
       try {
         const InvoiceService = require('../services/invoice');
-        const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId);
+        const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
+          payUrlParams: estimateInvoicePayUrlParams({
+            billingTerm,
+            saveCard: !treatAsOneTime,
+          }),
+        });
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
         if (delivery?.ok) {
           invoiceLinkDelivered = true;
@@ -9318,6 +9323,7 @@ module.exports.resolveRecurringFirstVisitAmountFromFrequency = resolveRecurringF
 module.exports.resolveRecurringInvoiceFirstVisitAmount = resolveRecurringInvoiceFirstVisitAmount;
 module.exports.buildEstimateInvoiceModeDraft = buildEstimateInvoiceModeDraft;
 module.exports.buildOneTimeInvoiceServiceLabel = buildOneTimeInvoiceServiceLabel;
+module.exports.estimateInvoicePayUrlParams = estimateInvoicePayUrlParams;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
