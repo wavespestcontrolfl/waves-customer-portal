@@ -16,6 +16,7 @@ const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+const { computeMembershipContext } = require('./estimate-membership-context');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
@@ -441,6 +442,26 @@ async function createOrReuseAdminEstimate({
   });
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
+  // Freeze the WaveGuard membership card onto the estimate, computed from the
+  // SAME repriced data + prior services, so the customer-facing card reflects
+  // exactly what was priced/charged and never re-derives from mutable service
+  // rows at view time. Cleared if the estimate no longer qualifies, and never
+  // blocks the save on error.
+  if (body.customerId) {
+    try {
+      const snapshot = await computeMembershipContext(database, {
+        customerId: body.customerId,
+        estData: trustedEstimateData,
+      });
+      if (snapshot) trustedEstimateData.membershipSnapshot = snapshot;
+      else delete trustedEstimateData.membershipSnapshot;
+    } catch (err) {
+      logger.warn(`[admin-estimate] membership snapshot skipped: ${err.message}`);
+      delete trustedEstimateData.membershipSnapshot;
+    }
+  } else {
+    delete trustedEstimateData.membershipSnapshot;
+  }
   const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
     showOneTimeOption: !!showOneTimeOption,

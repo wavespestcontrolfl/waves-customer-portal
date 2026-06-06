@@ -4,26 +4,32 @@
 // Builds the customer-facing "WaveGuard membership" context for an estimate
 // that is linked to an existing, active customer (estimates.customer_id set).
 //
-// This module renders the membership card. The NEW-service member discount it
-// shows is honored at the charged total because admin-estimate-persistence.js
-// reprices linked-customer estimates at the same combined tier (both use the
-// shared waveguard-existing-services loader, so display and charge agree). The
-// existing-service per-application figures remain informational (crediting them
-// against existing prepaid visits is a separate billing action).
+// computeMembershipContext() is run ONCE at estimate save/reprice time
+// (admin-estimate-persistence.js) and the result is frozen onto the estimate as
+// estimate_data.membershipSnapshot. buildEstimateMembershipContext() then just
+// reads that snapshot at view time. This keeps the card tied to the saved
+// pricing — it can never diverge from the charged total because of mutable
+// scheduled_services changing between save and view, and legacy estimates with
+// no snapshot render no card.
 //
-// It computes:
-//   1. The combined WaveGuard tier — the customer's existing qualifying
-//      recurring services PLUS the new service(s) in this estimate.
+// The NEW-service member discount it shows is honored at the charged total
+// because the same combined tier (from the same shared waveguard-existing-
+// services loader) reprices the estimate at save. The existing-service
+// per-application figures remain informational (crediting them against existing
+// prepaid visits is a separate billing action).
+//
+// The snapshot captures:
+//   1. The combined WaveGuard tier — existing qualifying services PLUS the
+//      new service(s) in this estimate.
 //   2. The tier-upgrade callout (e.g. Silver -> Gold).
 //   3. The per-application savings on EXISTING recurring services from a tier
 //      upgrade — per remaining visit, prepaid-aware.
 //   4. The member discount on the NEW service in this estimate.
 //
 // Returns null for leads (no customer_id), inactive customers, or on ANY error
-// so the public estimate endpoints never break on this (CLAUDE.md rule 6).
+// so neither save nor the public estimate endpoints ever break (CLAUDE.md r6).
 // ============================================================
 
-const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
@@ -111,17 +117,17 @@ function estimateMonthlyFor(estData, key) {
   return null;
 }
 
-async function buildEstimateMembershipContext(estimate) {
+async function computeMembershipContext(database, { customerId, estData } = {}) {
   try {
-    if (!estimate || !estimate.customer_id) return null;
+    if (!customerId) return null;
 
-    const customer = await db('customers').where({ id: estimate.customer_id }).first();
+    const customer = await database('customers').where({ id: customerId }).first();
     if (!customer || customer.active === false) return null;
 
     // ── Existing active recurring services on the account ──────
     // Shared loader — same source admin-estimate-persistence.js uses to reprice
     // the estimate, so the displayed tier matches the charged tier.
-    const existingRows = await loadExistingRecurringQualifyingRows(db, customer.id);
+    const existingRows = await loadExistingRecurringQualifyingRows(database, customerId);
 
     const existingByKey = new Map();
     for (const row of existingRows) {
@@ -133,8 +139,7 @@ async function buildEstimateMembershipContext(estimate) {
     const existingKeys = [...existingByKey.keys()];
 
     // ── New qualifying services in this estimate ───────────────
-    const estData = parseEstimateData(estimate);
-    const newKeys = estimateQualifyingKeys(estData);
+    const newKeys = estimateQualifyingKeys(estData || {});
     const addedKeys = newKeys.filter((k) => !existingKeys.includes(k));
 
     // No membership story to tell if there are no qualifying services on
@@ -155,10 +160,10 @@ async function buildEstimateMembershipContext(estimate) {
     // annual-prepay-renewals.js).
     let prepaidTerm = null;
     try {
-      prepaidTerm = await db('annual_prepay_terms')
-        .where({ customer_id: customer.id })
+      prepaidTerm = await database('annual_prepay_terms')
+        .where({ customer_id: customerId })
         .whereIn('status', ['active', 'renewal_pending'])
-        .andWhere('term_end', '>=', db.fn.now())
+        .andWhere('term_end', '>=', database.fn.now())
         .orderBy('term_end', 'desc')
         .first();
     } catch { prepaidTerm = null; }
@@ -228,9 +233,25 @@ async function buildEstimateMembershipContext(estimate) {
       newServices,
     };
   } catch (err) {
-    logger.warn(`[membership-context] skipped for estimate ${estimate?.id}: ${err.message}`);
+    logger.warn(`[membership-context] compute skipped for customer ${customerId}: ${err.message}`);
     return null;
   }
 }
 
-module.exports = { buildEstimateMembershipContext };
+// View-time accessor. Returns the membership snapshot that was frozen onto the
+// estimate at save time (estimate_data.membershipSnapshot), so the card can
+// NEVER diverge from the price saved/charged with the estimate. Estimates
+// created before this snapshot existed (or that aren't customer-linked) simply
+// have no snapshot and render no card — no risk of advertising an unapplied
+// discount.
+function buildEstimateMembershipContext(estimate) {
+  try {
+    const estData = parseEstimateData(estimate);
+    const snapshot = estData && estData.membershipSnapshot;
+    return snapshot && snapshot.isExistingCustomer ? snapshot : null;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { buildEstimateMembershipContext, computeMembershipContext };
