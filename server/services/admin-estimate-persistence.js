@@ -15,6 +15,8 @@ const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
+const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+const { computeMembershipContext } = require('./estimate-membership-context');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
@@ -281,6 +283,17 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   }
   if (!v1Input) return { recomputed: false, reason: 'NO_INPUTS' };
 
+  // Existing-customer reprice: when the estimate is linked to a customer with
+  // prior qualifying recurring services, fold them into the engine input so the
+  // WaveGuard tier (and thus the persisted, charged total) reflects the
+  // COMBINED tier — not just the services in this one estimate.
+  const priorQualifyingServices = Array.isArray(deps.priorQualifyingServices)
+    ? deps.priorQualifyingServices
+    : [];
+  if (priorQualifyingServices.length) {
+    v1Input = { ...v1Input, priorQualifyingServices };
+  }
+
   try {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();
@@ -298,7 +311,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -315,7 +328,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices });
   } catch (error) {
     result = { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
@@ -407,15 +420,70 @@ async function createOrReuseAdminEstimate({
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
+  // For an estimate linked to an existing customer, load the WaveGuard-qualifying
+  // recurring services they already have so the engine reprices at the COMBINED
+  // tier. Best-effort: a failure here must not block the save, it just means the
+  // estimate prices on its own services as before.
+  let priorQualifyingServices = [];
+  if (body.customerId) {
+    try {
+      priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
+    } catch (err) {
+      logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+    }
+  }
   const pricing = await resolveServerAuthoritativePricing({
     estimateData: trustedEstimateData,
     clientPreview,
     quoteRequired,
     now,
     recompute,
+    priorQualifyingServices,
   });
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
+  // The combined-tier reprice only landed in the persisted/charged totals when
+  // the server authoritatively recomputed. On CLIENT_FALLBACK (no replayable
+  // engine input) the saved totals are the un-repriced client preview, so we
+  // must NOT write any membership artifacts that would advertise a discount the
+  // charge doesn't include.
+  const repricedAtServer = pricing.audit?.pricing_authority === 'SERVER';
+  // Persist the prior qualifying services into the replayable estimate data so
+  // any LATER recompute from stored inputs (public bundle CTA, frequency
+  // slider) keeps the combined WaveGuard tier (extractEngineInputs re-injects).
+  if (repricedAtServer && priorQualifyingServices.length) {
+    trustedEstimateData.priorQualifyingServices = priorQualifyingServices;
+  } else {
+    delete trustedEstimateData.priorQualifyingServices;
+  }
+  // Freeze the WaveGuard membership card onto the estimate, computed from the
+  // SAME repriced data + prior services, so the customer-facing card reflects
+  // exactly what was priced/charged and never re-derives from mutable service
+  // rows at view time. Cleared if the estimate no longer qualifies or wasn't
+  // server-repriced, and never blocks the save on error.
+  let membershipSnapshot = null;
+  if (repricedAtServer && body.customerId) {
+    try {
+      membershipSnapshot = await computeMembershipContext(database, {
+        customerId: body.customerId,
+        estData: trustedEstimateData,
+      });
+      if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
+      else delete trustedEstimateData.membershipSnapshot;
+    } catch (err) {
+      logger.warn(`[admin-estimate] membership snapshot skipped: ${err.message}`);
+      delete trustedEstimateData.membershipSnapshot;
+    }
+  } else {
+    delete trustedEstimateData.membershipSnapshot;
+  }
+  // When prior services raised the combined tier, persist that authoritative
+  // tier into the estimates.waveguard_tier column (the client preview may still
+  // say Bronze). The public bundle + acceptance read this column for badges and
+  // some tier math, so it must match the repriced estimate_data totals.
+  const resolvedWaveguardTier = (repricedAtServer && priorQualifyingServices.length && membershipSnapshot?.tierLabel)
+    ? membershipSnapshot.tierLabel
+    : body.waveguardTier;
   const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
     showOneTimeOption: !!showOneTimeOption,
@@ -430,7 +498,7 @@ async function createOrReuseAdminEstimate({
   const expiresAt = estimateExpiresAt(now);
   const writeFields = {
     ...buildEstimatePersistenceFields(
-      { ...body, estimateData: trustedEstimateData },
+      { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
       { technician, technicianId, now },
     ),
     ...pricing.audit,

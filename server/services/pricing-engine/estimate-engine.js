@@ -698,11 +698,26 @@ function generateEstimate(input) {
   // Explicit input.recurringCustomer (v2 vocab) or input.isRecurringCustomer
   // (v1 test vocab) overrides auto-derivation — matches v2 which takes the
   // flag straight from the UI toggle rather than inferring from cart contents.
-  const isRecurringCustomer = input.recurringCustomer !== undefined
-    ? !!input.recurringCustomer
-    : input.isRecurringCustomer !== undefined
-      ? !!input.isRecurringCustomer
-      : activeServiceKeys.length > 0;
+  // priorQualifyingServices: WaveGuard-qualifying recurring services the
+  // customer ALREADY has (passed when an estimate is priced for an existing
+  // linked customer). They combine with this estimate's services to determine
+  // the WaveGuard tier, and they make the customer a recurring customer for
+  // the one-time perk even if this estimate has no recurring line.
+  const priorQualifyingServices = Array.isArray(input.priorQualifyingServices)
+    ? input.priorQualifyingServices
+    : [];
+  // A customer with prior qualifying recurring services IS a recurring customer,
+  // so prior services force this true even when the form serialized an explicit
+  // recurringCustomer:false (e.g. a one-time-only estimate for an existing
+  // member still earns the recurring-customer one-time perk). With no prior
+  // services, the explicit flag / auto-derivation behave exactly as before.
+  const isRecurringCustomer = priorQualifyingServices.length > 0
+    ? true
+    : input.recurringCustomer !== undefined
+      ? !!input.recurringCustomer
+      : input.isRecurringCustomer !== undefined
+        ? !!input.isRecurringCustomer
+        : activeServiceKeys.length > 0;
 
   // One-time and specialty services are zone-agnostic.
   if (services.oneTimePest) {
@@ -1163,7 +1178,16 @@ function generateEstimate(input) {
   }
 
   // ── 4. Determine WaveGuard tier ────────────────────────────
-  const waveGuardTier = determineWaveGuardTier(activeServiceKeys);
+  // Combine this estimate's services with any prior qualifying services the
+  // existing customer already holds, deduped by key so a re-quote of a service
+  // they already have can't double-count toward the tier. determineWaveGuardTier
+  // filters to qualifying services internally, so non-qualifying prior keys are
+  // ignored in the count. When there are no prior services the original
+  // activeServiceKeys is passed through unchanged, preserving legacy behavior.
+  const tierServiceKeys = priorQualifyingServices.length
+    ? [...new Set([...activeServiceKeys, ...priorQualifyingServices])]
+    : activeServiceKeys;
+  const waveGuardTier = determineWaveGuardTier(tierServiceKeys);
 
   // ── 5. Apply discounts to each line item ───────────────────
   // paymentMethod is no longer a pricing input (ACH discount retired in an

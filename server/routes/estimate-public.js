@@ -23,6 +23,7 @@ const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
+const { buildEstimateMembershipContext, computeMembershipContext } = require('../services/estimate-membership-context');
 const {
   cleanupEstimatePricingCache,
   clearEstimatePricingCache,
@@ -2426,7 +2427,72 @@ ${shellTopBar()}
 }
 
 
-function renderPage(token, estimate, estData) {
+// Server-rendered "Your WaveGuard membership" block for existing customers.
+// Mirrors the React MembershipCard in EstimateViewPage.jsx. Returns '' when
+// there is no membership context (leads, or any error upstream).
+function renderMembershipBlockHtml(membership) {
+  if (!membership || !membership.isExistingCustomer) return '';
+  const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+  const hello = membership.firstName
+    ? `Welcome back, ${escapeHtml(membership.firstName)}`
+    : 'Welcome back';
+
+  const upgradeHtml = membership.upgrade ? `
+    <div class="wg-upgrade">
+      Adding ${escapeHtml(membership.upgrade.addedServiceLabels.join(' & ') || 'this service')}
+      moves you from <strong>${escapeHtml(membership.upgrade.fromLabel)}</strong>
+      to <strong>${escapeHtml(membership.upgrade.toLabel)}</strong>
+      &mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service.
+    </div>` : '';
+
+  const existing = Array.isArray(membership.existingServices) ? membership.existingServices : [];
+  const existingHtml = existing.length ? `
+    <div class="wg-section">
+      <div class="wg-section-title">Your existing services</div>
+      ${existing.map((s) => `
+        <div class="wg-row">
+          <span class="wg-row-label">${escapeHtml(s.label)}</span>
+          <span class="wg-row-val">
+            +${s.extraDiscountPct}% off${s.perVisitSavings != null
+              ? ` &middot; ${money(s.perVisitSavings)}/visit`
+              : ''}${(s.perVisitSavings != null && s.remainingVisits > 0)
+              ? ` on ${s.remainingVisits} ${s.prepaid ? 'remaining prepaid' : 'remaining'} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+              : ''}
+          </span>
+        </div>`).join('')}
+    </div>` : '';
+
+  const added = Array.isArray(membership.newServices) ? membership.newServices : [];
+  const addedHtml = added.length ? `
+    <div class="wg-section">
+      <div class="wg-section-title">This estimate</div>
+      ${added.map((s) => `
+        <div class="wg-row">
+          <span class="wg-row-label">${escapeHtml(s.label)}</span>
+          <span class="wg-row-val">
+            ${s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}${s.monthlySavings != null
+              ? ` &middot; ${money(s.monthlySavings)}/mo off`
+              : ''}
+          </span>
+        </div>`).join('')}
+    </div>` : '';
+
+  return `
+  <section class="card wg-member-card">
+    <div class="wg-member-header">
+      <div>
+        <h2>${hello}</h2>
+        <p class="ai-blurb">Here are the WaveGuard member benefits on this estimate.</p>
+      </div>
+      <span class="wg-tier-badge wg-tier-${escapeHtml(membership.tier)}">WaveGuard ${escapeHtml(membership.tierLabel)}</span>
+    </div>
+    ${upgradeHtml}
+    ${existingHtml}
+    ${addedHtml}
+  </section>`;
+}
+
+function renderPage(token, estimate, estData, membership) {
   const est = estimate;
   const estimateAskToken = signEstimateAskToken(est, token);
   const tier = est.tier || 'Bronze';
@@ -3099,6 +3165,7 @@ function renderPage(token, estimate, estData) {
       ${intelligence.signals.map((signal) => `<div class="intelligence-signal">${escapeHtml(signal)}</div>`).join('')}
     </div>` : ''}
   </section>` : '';
+  const membershipBlockHtml = renderMembershipBlockHtml(membership);
   // Service-aware quick-question chips: 2 estimate-specific service prompts,
   // a safety chip for any chemical service, then 1 universal billing chip —
   // capped at 4 so the prompt row stays scannable.
@@ -3291,6 +3358,21 @@ function renderPage(token, estimate, estData) {
   .intelligence-signals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px}
   @media(max-width:760px){.intelligence-header{display:grid}.intelligence-signals{grid-template-columns:1fr}}
   .intelligence-signal{border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;background:#fff;padding:10px 12px;color:#3F4A65;font-size:16px;line-height:1.45}
+  .wg-member-card{display:grid;gap:14px}
+  .wg-member-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+  .wg-member-header h2{margin-bottom:0}
+  @media(max-width:760px){.wg-member-header{display:grid}}
+  .wg-tier-badge{flex:none;align-self:flex-start;padding:6px 12px;border-radius:999px;font-size:13px;font-weight:800;line-height:1;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;border:1px solid #D9D3C4}
+  .wg-tier-bronze{background:#F3E7D8;color:#8A5A21}
+  .wg-tier-silver{background:#ECEEF1;color:#525B66}
+  .wg-tier-gold{background:#FBF1D6;color:#8A6A12}
+  .wg-tier-platinum{background:#EDEFF2;color:#2B3340}
+  .wg-upgrade{background:#fff;border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:15px;line-height:1.5}
+  .wg-section{display:grid;gap:8px}
+  .wg-section-title{font-size:13px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .wg-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
+  .wg-row-label{color:#1B2C5B;font-weight:600;font-size:15px}
+  .wg-row-val{color:#1F7A4D;font-size:14px;font-weight:600;text-align:right}
   .estimate-ask-card{display:grid;gap:12px}
   .estimate-ask-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .estimate-ask-form{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
@@ -3537,6 +3619,8 @@ ${shellTopBar()}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
+
+  ${membershipBlockHtml}
 
   ${aiBlockHtml}
 
@@ -4858,13 +4942,13 @@ ${shellQuestionsBar()}
 </body></html>`;
 }
 
-function sendEstimatePage(res, token, estimate, estData) {
+function sendEstimatePage(res, token, estimate, estData, membership) {
   res
     .set('Cache-Control', 'no-cache, no-store, must-revalidate')
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
     .set('Content-Type', 'text/html; charset=utf-8')
-    .send(renderPage(token, estimate, estData));
+    .send(renderPage(token, estimate, estData, membership));
 }
 
 async function handleEstimateView(req, res, next) {
@@ -4956,6 +5040,9 @@ async function handleEstimateView(req, res, next) {
       oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundleForView);
     }
 
+    // Existing-customer WaveGuard membership context (null for leads / on error).
+    const membership = await buildEstimateMembershipContext(estimate);
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       status: estimate.status === 'accepted'
@@ -4980,7 +5067,7 @@ async function handleEstimateView(req, res, next) {
         ? pricingBundleForView.frequencies
         : [],
       existingAppointment: shapeLinkedAppointment(linkedAppointment),
-    }, estData);
+    }, estData, membership);
   } catch (err) { next(err); }
 }
 
@@ -6161,6 +6248,24 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
           };
           invalidateSendSnapshotPricingBundle(newEstimateData);
 
+          // Refresh the frozen membership snapshot to match the repriced bundle
+          // so the card can't show stale tier/savings next to the new price.
+          if (estimate.customer_id) {
+            try {
+              const refreshed = await computeMembershipContext(db, {
+                customerId: estimate.customer_id,
+                estData: newEstimateData,
+              });
+              if (refreshed) newEstimateData.membershipSnapshot = refreshed;
+              else delete newEstimateData.membershipSnapshot;
+            } catch (e) {
+              logger.warn(`[estimate] membership snapshot refresh skipped: ${e.message}`);
+              delete newEstimateData.membershipSnapshot;
+            }
+          } else {
+            delete newEstimateData.membershipSnapshot;
+          }
+
           await db('estimates').where({ id: estimate.id }).update({
             estimate_data: JSON.stringify(newEstimateData),
             monthly_total: newMonthly,
@@ -6274,13 +6379,20 @@ function isAdminIp(ip) {
 // estimates carry { engineInputs, engineResult }. Either works.
 function extractEngineInputs(estData) {
   if (!estData || typeof estData !== 'object') return null;
-  if (estData.engineInputs && typeof estData.engineInputs === 'object') {
-    return estData.engineInputs;
+  const base = (estData.engineInputs && typeof estData.engineInputs === 'object')
+    ? estData.engineInputs
+    : (estData.inputs && typeof estData.inputs === 'object')
+      ? estData.inputs
+      : null;
+  if (!base) return null;
+  // Existing-customer reprice: replay the prior qualifying services persisted at
+  // save so any public recompute (bundle CTA, frequency slider) keeps the
+  // COMBINED WaveGuard tier instead of reverting to this estimate's services
+  // alone. Shallow copy so the stored object isn't mutated.
+  if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
+    return { ...base, priorQualifyingServices: estData.priorQualifyingServices };
   }
-  if (estData.inputs && typeof estData.inputs === 'object') {
-    return estData.inputs;
-  }
-  return null;
+  return base;
 }
 
 function canVaryPestFrequency(engineInputs) {
@@ -9179,6 +9291,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     })();
     const ctaTerminalState = terminalState || (quoteRequirement.quoteRequired ? 'quote_required' : null);
 
+    const membership = await buildEstimateMembershipContext(estimate);
+
     res.json({
       estimate: {
         id: estimate.id,
@@ -9204,6 +9318,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         billByInvoice: !!estimate.bill_by_invoice,
         serviceCategory,
         acceptance,
+        membership,
       },
       pricing: {
         ...pricingBundle,
