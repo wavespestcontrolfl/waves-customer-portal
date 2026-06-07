@@ -427,7 +427,7 @@ function MembershipCard({ membership }) {
     background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 10, padding: '10px 12px',
   };
   const sectionTitle = {
-    fontSize: 13, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
+    fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
   };
   const labelStyle = { color: ESTIMATE_TEXT, fontWeight: 600, fontSize: 15 };
   const valStyle = { color: '#1F7A4D', fontSize: 14, fontWeight: 600, textAlign: 'right' };
@@ -448,7 +448,7 @@ function MembershipCard({ membership }) {
         </div>
         <span style={{
           flex: 'none', alignSelf: 'flex-start', padding: '6px 12px', borderRadius: 999,
-          background: tc.bg, color: tc.fg, fontSize: 13, fontWeight: 800, lineHeight: 1,
+          background: tc.bg, color: tc.fg, fontSize: 14, fontWeight: 800, lineHeight: 1,
           letterSpacing: '0.04em', textTransform: 'uppercase', whiteSpace: 'nowrap',
           border: `1px solid ${ESTIMATE_BORDER}`,
         }}>
