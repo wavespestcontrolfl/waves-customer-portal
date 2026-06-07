@@ -35,6 +35,14 @@ describe('normalizeTag', () => {
     expect(normalizeTag(null)).toBe('Pest Control');
   });
 
+  test('does not match aliases as substrings (word boundaries only)', () => {
+    // "ant" must not match inside "Plant" / "important".
+    expect(normalizeTag('Plant Health')).toBe('Pest Control');
+    expect(normalizeTag('important info')).toBe('Pest Control');
+    // but a real whole-word alias still resolves.
+    expect(normalizeTag('carpenter ant damage')).toBe('Ants');
+  });
+
   test('every alias resolves to a canonical tag', () => {
     for (const tag of BLOG_TAGS) expect(BLOG_TAGS).toContain(normalizeTag(tag));
   });

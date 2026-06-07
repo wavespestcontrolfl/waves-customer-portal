@@ -37,13 +37,23 @@ const TAG_ALIASES = new Map([
   ['lawn fungus', 'Lawn Disease'], ['lawn pest', 'Lawn Pests'], ['lawn care', 'Lawn Care'],
 ]);
 
+// Word-boundary matchers for the fuzzy alias pass. Substring matching wrongly
+// mapped out-of-taxonomy labels to the wrong tag (e.g. "Plant Health" and
+// "important info" both became Ants via the "ant" alias); \b...\b prevents
+// that — a near-miss that doesn't match a whole alias token falls back to the
+// documented 'Pest Control'.
+const TAG_ALIAS_PATTERNS = [...TAG_ALIASES].map(([alias, canon]) => [
+  new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`),
+  canon,
+]);
+
 function normalizeTag(raw) {
   const t = String(raw || '').trim();
   if (BLOG_TAGS.includes(t)) return t;
   const key = t.toLowerCase();
   if (TAG_ALIASES.has(key)) return TAG_ALIASES.get(key);
-  for (const [alias, canon] of TAG_ALIASES) {
-    if (key.includes(alias)) return canon;
+  for (const [pattern, canon] of TAG_ALIAS_PATTERNS) {
+    if (pattern.test(key)) return canon;
   }
   return 'Pest Control';
 }
