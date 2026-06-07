@@ -117,6 +117,27 @@ function estimateMonthlyFor(estData, key) {
   return null;
 }
 
+// The discount rate ACTUALLY applied to the estimate's recurring services,
+// derived from the repriced aggregate (annualBeforeDiscount/After). For
+// pest_control / tree_shrub the pricing engine's margin guard can cap the tier
+// rate, so this can be lower than combinedTier.discount — using it keeps the
+// card from advertising a larger member discount than the total includes.
+// Falls back to the requested rate when the aggregate isn't available.
+function appliedRecurringRate(estData, fallbackRate) {
+  const rec = estData?.result?.recurring
+    || estData?.engineResult?.recurring
+    || estData?.recurring
+    || {};
+  const before = Number(rec.annualBeforeDiscount);
+  const after = Number(rec.annualAfterDiscount);
+  if (before > 0 && after >= 0 && after <= before) {
+    return Math.max(0, Math.min(1, 1 - after / before));
+  }
+  const explicit = Number(rec.discount);
+  if (explicit >= 0 && explicit <= 1) return explicit;
+  return fallbackRate;
+}
+
 async function computeMembershipContext(database, { customerId, estData } = {}) {
   try {
     if (!customerId) return null;
@@ -205,13 +226,17 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     }
 
     // ── New-service member discount ────────────────────────────
+    // Use the rate actually applied to the recurring total (margin-guard caps
+    // included), never more than the combined tier rate, so the advertised
+    // discount can't exceed what the charged total includes.
+    const appliedRate = Math.min(combinedTier.discount, appliedRecurringRate(estData, combinedTier.discount));
     const newServices = addedKeys.map((key) => {
       const monthly = estimateMonthlyFor(estData, key);
       return {
         key,
         label: SERVICE_LABEL[key] || key,
-        discountPct: Math.round(combinedTier.discount * 100),
-        monthlySavings: monthly ? round2(monthly * combinedTier.discount) : null,
+        discountPct: Math.round(appliedRate * 100),
+        monthlySavings: monthly ? round2(monthly * appliedRate) : null,
       };
     });
 

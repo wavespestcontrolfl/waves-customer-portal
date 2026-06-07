@@ -442,11 +442,16 @@ async function createOrReuseAdminEstimate({
   });
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
+  // The combined-tier reprice only landed in the persisted/charged totals when
+  // the server authoritatively recomputed. On CLIENT_FALLBACK (no replayable
+  // engine input) the saved totals are the un-repriced client preview, so we
+  // must NOT write any membership artifacts that would advertise a discount the
+  // charge doesn't include.
+  const repricedAtServer = pricing.audit?.pricing_authority === 'SERVER';
   // Persist the prior qualifying services into the replayable estimate data so
   // any LATER recompute from stored inputs (public bundle CTA, frequency
-  // slider) keeps the combined WaveGuard tier instead of reverting to this
-  // estimate's services alone (extractEngineInputs re-injects them).
-  if (priorQualifyingServices.length) {
+  // slider) keeps the combined WaveGuard tier (extractEngineInputs re-injects).
+  if (repricedAtServer && priorQualifyingServices.length) {
     trustedEstimateData.priorQualifyingServices = priorQualifyingServices;
   } else {
     delete trustedEstimateData.priorQualifyingServices;
@@ -454,10 +459,10 @@ async function createOrReuseAdminEstimate({
   // Freeze the WaveGuard membership card onto the estimate, computed from the
   // SAME repriced data + prior services, so the customer-facing card reflects
   // exactly what was priced/charged and never re-derives from mutable service
-  // rows at view time. Cleared if the estimate no longer qualifies, and never
-  // blocks the save on error.
+  // rows at view time. Cleared if the estimate no longer qualifies or wasn't
+  // server-repriced, and never blocks the save on error.
   let membershipSnapshot = null;
-  if (body.customerId) {
+  if (repricedAtServer && body.customerId) {
     try {
       membershipSnapshot = await computeMembershipContext(database, {
         customerId: body.customerId,
@@ -476,7 +481,7 @@ async function createOrReuseAdminEstimate({
   // tier into the estimates.waveguard_tier column (the client preview may still
   // say Bronze). The public bundle + acceptance read this column for badges and
   // some tier math, so it must match the repriced estimate_data totals.
-  const resolvedWaveguardTier = (priorQualifyingServices.length && membershipSnapshot?.tierLabel)
+  const resolvedWaveguardTier = (repricedAtServer && priorQualifyingServices.length && membershipSnapshot?.tierLabel)
     ? membershipSnapshot.tierLabel
     : body.waveguardTier;
   const linkedLeadId = normalizeLinkedLeadId(leadId);
