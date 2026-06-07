@@ -442,6 +442,15 @@ async function createOrReuseAdminEstimate({
   });
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
+  // Persist the prior qualifying services into the replayable estimate data so
+  // any LATER recompute from stored inputs (public bundle CTA, frequency
+  // slider) keeps the combined WaveGuard tier instead of reverting to this
+  // estimate's services alone (extractEngineInputs re-injects them).
+  if (priorQualifyingServices.length) {
+    trustedEstimateData.priorQualifyingServices = priorQualifyingServices;
+  } else {
+    delete trustedEstimateData.priorQualifyingServices;
+  }
   // Freeze the WaveGuard membership card onto the estimate, computed from the
   // SAME repriced data + prior services, so the customer-facing card reflects
   // exactly what was priced/charged and never re-derives from mutable service

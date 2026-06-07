@@ -6179,13 +6179,20 @@ function isAdminIp(ip) {
 // estimates carry { engineInputs, engineResult }. Either works.
 function extractEngineInputs(estData) {
   if (!estData || typeof estData !== 'object') return null;
-  if (estData.engineInputs && typeof estData.engineInputs === 'object') {
-    return estData.engineInputs;
+  const base = (estData.engineInputs && typeof estData.engineInputs === 'object')
+    ? estData.engineInputs
+    : (estData.inputs && typeof estData.inputs === 'object')
+      ? estData.inputs
+      : null;
+  if (!base) return null;
+  // Existing-customer reprice: replay the prior qualifying services persisted at
+  // save so any public recompute (bundle CTA, frequency slider) keeps the
+  // COMBINED WaveGuard tier instead of reverting to this estimate's services
+  // alone. Shallow copy so the stored object isn't mutated.
+  if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
+    return { ...base, priorQualifyingServices: estData.priorQualifyingServices };
   }
-  if (estData.inputs && typeof estData.inputs === 'object') {
-    return estData.inputs;
-  }
-  return null;
+  return base;
 }
 
 function canVaryPestFrequency(engineInputs) {
