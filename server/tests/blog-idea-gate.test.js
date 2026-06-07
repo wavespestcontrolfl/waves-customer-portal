@@ -29,6 +29,14 @@ describe('normalizeTag', () => {
     expect(normalizeTag('yellow jacket')).toBe('Stinging Insects');
   });
 
+  test('resolves canonical tags case-insensitively (incl. plurals)', () => {
+    expect(normalizeTag('roaches')).toBe('Roaches');
+    expect(normalizeTag('ants')).toBe('Ants');
+    expect(normalizeTag('rodents')).toBe('Rodents');
+    expect(normalizeTag('LAWN DISEASE')).toBe('Lawn Disease');
+    expect(normalizeTag('fleas & ticks')).toBe('Fleas & Ticks');
+  });
+
   test('falls back to Pest Control for unknown labels', () => {
     expect(normalizeTag('Nonsense Category')).toBe('Pest Control');
     expect(normalizeTag('')).toBe('Pest Control');

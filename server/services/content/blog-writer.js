@@ -47,10 +47,15 @@ const TAG_ALIAS_PATTERNS = [...TAG_ALIASES].map(([alias, canon]) => [
   canon,
 ]);
 
+// Case-insensitive lookup of the canonical labels, so model output like
+// "roaches", "ants", or "LAWN DISEASE" resolves to its canonical tag instead
+// of falling through to Pest Control (which would flatten the taxonomy this
+// change is meant to enforce).
+const BLOG_TAG_BY_LOWER = new Map(BLOG_TAGS.map((t) => [t.toLowerCase(), t]));
+
 function normalizeTag(raw) {
-  const t = String(raw || '').trim();
-  if (BLOG_TAGS.includes(t)) return t;
-  const key = t.toLowerCase();
+  const key = String(raw || '').trim().toLowerCase();
+  if (BLOG_TAG_BY_LOWER.has(key)) return BLOG_TAG_BY_LOWER.get(key);
   if (TAG_ALIASES.has(key)) return TAG_ALIASES.get(key);
   for (const [pattern, canon] of TAG_ALIAS_PATTERNS) {
     if (pattern.test(key)) return canon;
