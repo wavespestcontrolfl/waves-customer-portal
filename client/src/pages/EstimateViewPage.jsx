@@ -496,6 +496,105 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
   );
 }
 
+// Existing-customer WaveGuard membership benefits. Rendered only when the
+// estimate is linked to an active customer (server returns estimate.membership).
+// Display/transparency only — warm tone, matches the customer-facing brief.
+function MembershipCard({ membership }) {
+  if (!membership || !membership.isExistingCustomer) return null;
+  const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+  const TIER_COLORS = {
+    bronze: { bg: '#F3E7D8', fg: '#8A5A21' },
+    silver: { bg: '#ECEEF1', fg: '#525B66' },
+    gold: { bg: '#FBF1D6', fg: '#8A6A12' },
+    platinum: { bg: '#EDEFF2', fg: '#2B3340' },
+  };
+  const tc = TIER_COLORS[membership.tier] || TIER_COLORS.bronze;
+  const existing = Array.isArray(membership.existingServices) ? membership.existingServices : [];
+  const added = Array.isArray(membership.newServices) ? membership.newServices : [];
+  const hello = membership.firstName ? `Welcome back, ${membership.firstName}` : 'Welcome back';
+
+  const rowStyle = {
+    display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12,
+    background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 10, padding: '10px 12px',
+  };
+  const sectionTitle = {
+    fontSize: 13, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
+  };
+  const labelStyle = { color: ESTIMATE_TEXT, fontWeight: 600, fontSize: 15 };
+  const valStyle = { color: '#1F7A4D', fontSize: 14, fontWeight: 600, textAlign: 'right' };
+
+  return (
+    <section style={{
+      background: '#F2EEE0', border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12,
+      padding: 24, marginBottom: 16, display: 'grid', gap: 14,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 0 }}>
+          <h2 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
+            {hello}
+          </h2>
+          <p style={{ margin: '6px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.55 }}>
+            Here are your WaveGuard member benefits on this estimate.
+          </p>
+        </div>
+        <span style={{
+          flex: 'none', alignSelf: 'flex-start', padding: '6px 12px', borderRadius: 999,
+          background: tc.bg, color: tc.fg, fontSize: 13, fontWeight: 800, lineHeight: 1,
+          letterSpacing: '0.04em', textTransform: 'uppercase', whiteSpace: 'nowrap',
+          border: `1px solid ${ESTIMATE_BORDER}`,
+        }}>
+          WaveGuard {membership.tierLabel}
+        </span>
+      </div>
+
+      {membership.upgrade ? (
+        <div style={{
+          background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`,
+          borderLeft: `4px solid ${COLORS.blueBright}`, borderRadius: 10, padding: '12px 14px',
+          color: ESTIMATE_TEXT, fontSize: 15, lineHeight: 1.5,
+        }}>
+          Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} moves you from{' '}
+          <strong>{membership.upgrade.fromLabel}</strong> to <strong>{membership.upgrade.toLabel}</strong>
+          {' '}— an extra {membership.upgrade.deltaPct}% off every qualifying service.
+        </div>
+      ) : null}
+
+      {existing.length ? (
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={sectionTitle}>Your existing services</div>
+          {existing.map((s) => (
+            <div key={s.key} style={rowStyle}>
+              <span style={labelStyle}>{s.label}</span>
+              <span style={valStyle}>
+                +{s.extraDiscountPct}% off
+                {s.perVisitSavings != null ? ` · ${money(s.perVisitSavings)}/visit` : ''}
+                {(s.perVisitSavings != null && s.remainingVisits > 0)
+                  ? ` on ${s.remainingVisits} ${s.prepaid ? 'remaining prepaid' : 'remaining'} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+                  : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {added.length ? (
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={sectionTitle}>This estimate</div>
+          {added.map((s) => (
+            <div key={s.key} style={rowStyle}>
+              <span style={labelStyle}>{s.label}</span>
+              <span style={valStyle}>
+                {s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}
+                {s.monthlySavings != null ? ` · ${money(s.monthlySavings)}/mo off` : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 const ESTIMATE_ASK_PROMPTS = [
   'What is included?',
   'How does billing work?',
@@ -1874,6 +1973,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
+        <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
         {showAskBar ? (
           <EstimateAskBar
@@ -1911,6 +2011,7 @@ export default function EstimateViewPage() {
   // during the held-slot review step too.
   const aiPanelBlock = (
     <>
+      <MembershipCard membership={estimate.membership} />
       <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
       <EstimateAskBar
         token={token}
