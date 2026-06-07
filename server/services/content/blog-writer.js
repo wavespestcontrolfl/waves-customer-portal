@@ -109,9 +109,18 @@ function conceptKey(idea) {
 }
 
 // Max cities a single concept may fan across (counting what's already in the
-// library). Keeps local coverage possible over time while killing the
-// "wall of identical roach posts" in any one batch.
-const CONCEPT_CITY_CAP = 2;
+// library). Tiered so a strong concept CAN cover the priority/staffed-office
+// markets, while service-area cities don't get the same idea spun into them
+// unless a demand signal points there — that's what kills the "wall of
+// identical roach posts" without starving legitimate local coverage.
+const PRIORITY_CONCEPT_CITY_CAP = 3;
+const SERVICE_AREA_CONCEPT_CITY_CAP = 1;
+
+function conceptCapForCity(city) {
+  return STAFFED_CITIES.includes(city)
+    ? PRIORITY_CONCEPT_CITY_CAP
+    : SERVICE_AREA_CONCEPT_CITY_CAP;
+}
 
 class BlogWriter {
   async getVoiceConfig() {
@@ -400,8 +409,8 @@ EDITORIAL BRIEF — every idea must be a real, specific local problem, structure
 
 ANTI-SAMENESS RULES (critical — the current backlog is a wall of near-identical titles):
 - Do NOT open every title with "Your [City]…". No more than ${Math.max(2, Math.round(requestCount * 0.25))} titles may share the same opening structure. Vary it: questions, surprising claims, a number, a myth-bust, a "here's what's actually happening".
-- No two ideas may be the same pest concept simply swapped to a different city. If a concept is strong, pick the ONE best city for it.
-- Each idea needs a distinct angle, not a distinct city.
+- A strong concept may cover up to 3 of the priority cities (${STAFFED_CITIES.join(', ')}) — but do NOT spin the same concept into a service-area city (${SERVICE_AREA_CITIES.join(', ')}) unless a demand signal above points there.
+- Most ideas should still be a distinct angle, not just the same idea re-aimed at another city.
 
 TARGETING:
 - City must be one of: ${(CITIES || []).join(', ')}.
@@ -460,10 +469,10 @@ Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "s
       );
       if (tooSimilar) { rejected++; continue; }
 
-      // Concept-fan-out cap — the same pest concept may not sprawl across
-      // more than CONCEPT_CITY_CAP cities (existing library + this batch).
+      // Concept-fan-out cap — a concept may cover up to 3 priority cities
+      // but only 1 service-area city (existing library + this batch).
       const ckey = conceptKey({ tag, keyword, title: raw.title });
-      if ((conceptCount.get(ckey) || 0) >= CONCEPT_CITY_CAP) { rejected++; continue; }
+      if ((conceptCount.get(ckey) || 0) >= conceptCapForCity(city)) { rejected++; continue; }
 
       const row = {
         title: String(raw.title).trim(),
@@ -504,7 +513,9 @@ blogWriter._internals = {
   SEASONAL_PESTS,
   STAFFED_CITIES,
   IDEA_NOVELTY_JACCARD_MAX,
-  CONCEPT_CITY_CAP,
+  conceptCapForCity,
+  PRIORITY_CONCEPT_CITY_CAP,
+  SERVICE_AREA_CONCEPT_CITY_CAP,
 };
 
 module.exports = blogWriter;

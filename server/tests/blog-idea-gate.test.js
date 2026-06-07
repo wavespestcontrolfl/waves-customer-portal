@@ -8,7 +8,10 @@
 jest.mock('../models/db', () => jest.fn());
 
 const { _internals } = require('../services/content/blog-writer');
-const { normalizeTag, conceptKey, slugify, BLOG_TAGS, SEASONAL_PESTS } = _internals;
+const {
+  normalizeTag, conceptKey, slugify, BLOG_TAGS, SEASONAL_PESTS,
+  conceptCapForCity, PRIORITY_CONCEPT_CITY_CAP, SERVICE_AREA_CONCEPT_CITY_CAP,
+} = _internals;
 
 describe('normalizeTag', () => {
   test('passes canonical tags through unchanged', () => {
@@ -71,6 +74,22 @@ describe('slugify', () => {
       .toBe('your-venice-lawn-has-dollar-spot-and-no-more-fertilizer-won-t-fix-it');
     expect(slugify('  Multiple   Spaces  ')).toBe('multiple-spaces');
     expect(slugify('')).toBe('');
+  });
+});
+
+describe('conceptCapForCity (tiered fan-out)', () => {
+  test('priority/staffed cities get the higher cap', () => {
+    for (const c of ['Bradenton', 'Parrish', 'Lakewood Ranch', 'Sarasota', 'Venice']) {
+      expect(conceptCapForCity(c)).toBe(PRIORITY_CONCEPT_CITY_CAP);
+    }
+    expect(PRIORITY_CONCEPT_CITY_CAP).toBe(3);
+  });
+
+  test('service-area cities and unknown/null get the tight cap', () => {
+    for (const c of ['North Port', 'Palmetto', 'Port Charlotte', null, 'Nowhere']) {
+      expect(conceptCapForCity(c)).toBe(SERVICE_AREA_CONCEPT_CITY_CAP);
+    }
+    expect(SERVICE_AREA_CONCEPT_CITY_CAP).toBe(1);
   });
 });
 
