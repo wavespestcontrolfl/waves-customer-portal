@@ -706,11 +706,18 @@ function generateEstimate(input) {
   const priorQualifyingServices = Array.isArray(input.priorQualifyingServices)
     ? input.priorQualifyingServices
     : [];
-  const isRecurringCustomer = input.recurringCustomer !== undefined
-    ? !!input.recurringCustomer
-    : input.isRecurringCustomer !== undefined
-      ? !!input.isRecurringCustomer
-      : (activeServiceKeys.length > 0 || priorQualifyingServices.length > 0);
+  // A customer with prior qualifying recurring services IS a recurring customer,
+  // so prior services force this true even when the form serialized an explicit
+  // recurringCustomer:false (e.g. a one-time-only estimate for an existing
+  // member still earns the recurring-customer one-time perk). With no prior
+  // services, the explicit flag / auto-derivation behave exactly as before.
+  const isRecurringCustomer = priorQualifyingServices.length > 0
+    ? true
+    : input.recurringCustomer !== undefined
+      ? !!input.recurringCustomer
+      : input.isRecurringCustomer !== undefined
+        ? !!input.isRecurringCustomer
+        : activeServiceKeys.length > 0;
 
   // One-time and specialty services are zone-agnostic.
   if (services.oneTimePest) {
