@@ -456,13 +456,14 @@ async function createOrReuseAdminEstimate({
   // exactly what was priced/charged and never re-derives from mutable service
   // rows at view time. Cleared if the estimate no longer qualifies, and never
   // blocks the save on error.
+  let membershipSnapshot = null;
   if (body.customerId) {
     try {
-      const snapshot = await computeMembershipContext(database, {
+      membershipSnapshot = await computeMembershipContext(database, {
         customerId: body.customerId,
         estData: trustedEstimateData,
       });
-      if (snapshot) trustedEstimateData.membershipSnapshot = snapshot;
+      if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;
     } catch (err) {
       logger.warn(`[admin-estimate] membership snapshot skipped: ${err.message}`);
@@ -471,6 +472,13 @@ async function createOrReuseAdminEstimate({
   } else {
     delete trustedEstimateData.membershipSnapshot;
   }
+  // When prior services raised the combined tier, persist that authoritative
+  // tier into the estimates.waveguard_tier column (the client preview may still
+  // say Bronze). The public bundle + acceptance read this column for badges and
+  // some tier math, so it must match the repriced estimate_data totals.
+  const resolvedWaveguardTier = (priorQualifyingServices.length && membershipSnapshot?.tierLabel)
+    ? membershipSnapshot.tierLabel
+    : body.waveguardTier;
   const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
     showOneTimeOption: !!showOneTimeOption,
@@ -485,7 +493,7 @@ async function createOrReuseAdminEstimate({
   const expiresAt = estimateExpiresAt(now);
   const writeFields = {
     ...buildEstimatePersistenceFields(
-      { ...body, estimateData: trustedEstimateData },
+      { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
       { technician, technicianId, now },
     ),
     ...pricing.audit,

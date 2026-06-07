@@ -23,7 +23,7 @@ const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
-const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const { buildEstimateMembershipContext, computeMembershipContext } = require('../services/estimate-membership-context');
 const {
   cleanupEstimatePricingCache,
   clearEstimatePricingCache,
@@ -6065,6 +6065,24 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
             },
           };
           invalidateSendSnapshotPricingBundle(newEstimateData);
+
+          // Refresh the frozen membership snapshot to match the repriced bundle
+          // so the card can't show stale tier/savings next to the new price.
+          if (estimate.customer_id) {
+            try {
+              const refreshed = await computeMembershipContext(db, {
+                customerId: estimate.customer_id,
+                estData: newEstimateData,
+              });
+              if (refreshed) newEstimateData.membershipSnapshot = refreshed;
+              else delete newEstimateData.membershipSnapshot;
+            } catch (e) {
+              logger.warn(`[estimate] membership snapshot refresh skipped: ${e.message}`);
+              delete newEstimateData.membershipSnapshot;
+            }
+          } else {
+            delete newEstimateData.membershipSnapshot;
+          }
 
           await db('estimates').where({ id: estimate.id }).update({
             estimate_data: JSON.stringify(newEstimateData),
