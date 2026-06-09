@@ -344,9 +344,17 @@ Return JSON: {
     try {
       const hasTable = await db.schema.hasTable('opportunity_queue');
       if (!hasTable) return [];
-      // Live, un-actioned opportunities. The queue's actionable states are
-      // 'pending' (freshly mined) and 'pending_review' (awaiting human
-      // triage); 'claimed'/'done'/'skipped' are out of play.
+      // ONLY truly un-actioned opportunities — status='pending'. The queue's
+      // lifecycle is pending → claimed → done \→ pending_review
+      // (opportunity-queue.js). A 'pending_review' row has already been
+      // claimed and DRAFTED by the autonomous runner (pendingReview() sets
+      // completed_at and only transitions from 'claimed'); it's parked for a
+      // human approve/dismiss/requeue decision, not waiting to be written.
+      // Seeding a blog idea from one would duplicate a draft already in
+      // review — the novelty gate compares blog_posts only, not
+      // autonomous_runs/briefs, so it wouldn't catch the dup. 'claimed' is
+      // in-flight; 'done'/'skipped' are finished. So 'pending' is the only
+      // demand pool that's safe to seed from.
       //
       // Filter on action_type — the queue's AUTHORITATIVE routing decision
       // (actionForOpportunity in gsc-opportunity-miner). That router
@@ -354,14 +362,13 @@ Return JSON: {
       // (create_or_refresh_city_service_page / refresh_existing_page) and only
       // emits new_supporting_blog / create_customer_question_page when the
       // demand is a non-geo supporting topic or a customer-question cluster.
-      // So consuming exactly those two actions is intentional, not an
-      // oversight: pulling the city+service gap rows in here would spawn blogs
-      // that compete with the very service pages the queue wants
-      // (doorway / cannibalization — the thing the uniqueness gate guards).
+      // So consuming exactly those two actions is intentional: pulling the
+      // city+service gap rows in here would spawn blogs that compete with the
+      // service pages the queue wants (doorway / cannibalization).
       // query is usually present but not required (a customer-question cluster
       // can be query-less), so it is rendered with a city+service fallback.
       return await db('opportunity_queue')
-        .whereIn('status', ['pending', 'pending_review'])
+        .where('status', 'pending')
         .whereIn('action_type', ['new_supporting_blog', 'create_customer_question_page'])
         .orderBy('score', 'desc')
         .limit(limit)
