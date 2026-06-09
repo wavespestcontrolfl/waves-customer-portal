@@ -498,6 +498,13 @@ async function publishAstro(postId) {
       astro_preview_url: previewUrl,
       astro_publish_error: null,
       astro_published_at: null,
+      // Persist the committed hero's public path (short — fits the column;
+      // never the data: URL). Downstream consumers — auto social-share
+      // (content-scheduler publicBlogImageUrl) and any republish — read
+      // featured_image_url, so a generated hero must be recorded here or
+      // shares would go out image-less. A /images/blog/ value also makes the
+      // next publish reference the committed file instead of regenerating.
+      ...(heroPublicRef ? { featured_image_url: heroPublicRef } : {}),
       updated_at: new Date(),
     });
 
