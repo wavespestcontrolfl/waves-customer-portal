@@ -2174,3 +2174,8 @@ router._private = {
 };
 
 module.exports = router;
+// Reusable customer-provisioning helpers for other route modules (e.g. creating
+// a customer from a lead when booking an appointment). Attached to the router
+// export so the account-dedup + default-rows logic lives in one place.
+module.exports.ensureCustomerAccount = ensureCustomerAccount;
+module.exports.createDefaultCustomerRows = createDefaultCustomerRows;

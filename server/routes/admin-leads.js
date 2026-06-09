@@ -4,7 +4,8 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const logger = require('../services/logger');
-const { startOfETMonth } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString } = require('../utils/datetime-et');
+const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -867,6 +868,125 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/leads/:id/schedule-appointment — book an appointment for a lead.
+// Auto-creates (or reuses) a customer from the lead, creates the scheduled
+// service, and marks the lead converted.
+router.post('/:id/schedule-appointment', async (req, res, next) => {
+  try {
+    const { date, time, serviceType, serviceId, technicianId, notes, durationMinutes } = req.body;
+    if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
+    const svcType = typeof serviceType === 'string' ? serviceType.trim() : '';
+    if (!svcType) return res.status(400).json({ error: 'Service type is required' });
+
+    const lead = await db('leads').where('id', req.params.id).first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    // Resolve appointment duration: explicit override → service default → 60 min.
+    let duration = Number.parseInt(durationMinutes, 10);
+    if (!Number.isInteger(duration) || duration <= 0) {
+      duration = 60;
+      if (serviceId) {
+        try {
+          const svc = await db('services').where({ id: serviceId }).first();
+          if (svc?.default_duration_minutes) duration = svc.default_duration_minutes;
+        } catch (e) { logger.warn(`[leads] service duration lookup failed: ${e.message}`); }
+      }
+    }
+
+    // Compute the time window from start + duration.
+    const windowStart = /^\d{2}:\d{2}$/.test(time) ? time : null;
+    let windowEnd = null;
+    if (windowStart) {
+      const [h, m] = windowStart.split(':').map(Number);
+      const endMin = h * 60 + m + duration;
+      windowEnd = `${String(Math.floor(endMin / 60) % 24).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+    }
+
+    // Resolve the customer: reuse the lead's linked customer if it still exists,
+    // otherwise provision one from the lead's contact fields.
+    let customerId = lead.customer_id || null;
+    if (customerId) {
+      const existing = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+      if (!existing) customerId = null;
+    }
+
+    let createdCustomer = false;
+    if (!customerId) {
+      const fallbackName =
+        (lead.first_name && lead.first_name.trim()) ||
+        (lead.email ? String(lead.email).split('@')[0] : '') ||
+        'New Lead';
+      const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+
+      customerId = await db.transaction(async (trx) => {
+        const account = await ensureCustomerAccount(trx, {
+          firstName: fallbackName,
+          lastName: lead.last_name || '',
+          phone: lead.phone || '',
+          email: lead.email || null,
+        });
+        const [created] = await trx('customers').insert({
+          account_id: account.accountId,
+          is_primary_profile: !account.existingCustomer,
+          profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
+          first_name: fallbackName,
+          last_name: lead.last_name || '',
+          phone: lead.phone || '',
+          email: lead.email || null,
+          address_line1: lead.address || '',
+          city: lead.city || '',
+          state: 'FL',
+          zip: lead.zip || '',
+          member_since: etDateString(),
+          referral_code: code,
+          lead_source: 'lead_pipeline',
+          pipeline_stage: 'won',
+          pipeline_stage_changed_at: new Date(),
+          assigned_to: req.technicianId,
+        }).returning('*');
+        await createDefaultCustomerRows(trx, created.id);
+        return created.id;
+      });
+      createdCustomer = true;
+    }
+
+    // Create the scheduled service. Only set workflow columns the schema has.
+    const cols = await db('scheduled_services').columnInfo();
+    const insertData = {
+      customer_id: customerId,
+      technician_id: technicianId || null,
+      scheduled_date: date,
+      window_start: windowStart,
+      window_end: windowEnd,
+      service_type: svcType,
+      status: 'pending',
+      estimated_duration_minutes: duration,
+      notes: notes || null,
+    };
+    if (cols.service_id && serviceId) insertData.service_id = serviceId;
+    if (cols.urgency) insertData.urgency = 'routine';
+    const [appt] = await db('scheduled_services').insert(insertData).returning('*');
+
+    // Mark the lead converted (also writes a 'converted' activity).
+    await leadAttribution.markConverted(req.params.id, { customerId });
+
+    await db('lead_activities').insert({
+      lead_id: req.params.id,
+      activity_type: 'appointment_scheduled',
+      description: `Appointment scheduled: ${svcType} on ${date}${windowStart ? ` at ${time}` : ''}`,
+      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      metadata: JSON.stringify({
+        appointmentId: appt.id, customerId, date, time,
+        serviceType: svcType, serviceId: serviceId || null,
+        technicianId: technicianId || null, createdCustomer,
+      }),
+    });
+
+    const updated = await db('leads').where('id', req.params.id).first();
+    res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer });
   } catch (err) { next(err); }
 });
 
