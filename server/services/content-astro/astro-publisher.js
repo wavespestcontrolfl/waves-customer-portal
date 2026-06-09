@@ -1037,6 +1037,20 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
     return;
   }
   const slug = post.slug || slugify(post.title);
+  // Persist the now-live hero path ONLY at merge — the asset exists on main
+  // exactly now. Persisting earlier (at PR open) would point downstream
+  // consumers (auto social-share, republish) at a file that lives only on a
+  // PR branch and vanishes if the build fails and the branch is deleted.
+  //
+  // Claim hero.webp ONLY when this publish committed fresh WebP bytes. A
+  // republish of an already-merged post whose featured_image_url is an existing
+  // repo asset (e.g. a pre-WebP /images/blog/<slug>/hero.png) does NOT recommit
+  // a hero, so rewriting it to hero.webp would point at a file that isn't on
+  // main. In that case preserve the existing committed path.
+  const existingHero = post.featured_image_url;
+  const heroRef = (existingHero && existingHero.startsWith('/images/blog/'))
+    ? existingHero
+    : `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
   await db('blog_posts').where({ id: postId }).update({
     astro_status: 'merged',
     astro_merged_at: mergedAt,
@@ -1044,12 +1058,7 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
     status: 'published',
     astro_live_url: liveUrlForPost(post),
     astro_published_at: null,
-    // Persist the now-live hero path ONLY at merge — the asset exists on main
-    // exactly now. Persisting earlier (at PR open) would point downstream
-    // consumers (auto social-share, republish) at a file that lives only on a
-    // PR branch and vanishes if the build fails and the branch is deleted.
-    // publishAstro always commits the hero as hero.webp, so this is deterministic.
-    featured_image_url: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
+    featured_image_url: heroRef,
     updated_at: new Date(),
   });
 }
