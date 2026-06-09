@@ -304,6 +304,9 @@ async function fetchImageBuffer(url) {
 async function compressToWebp(buffer) {
   const sharp = require('sharp');
   return sharp(buffer)
+    // Bake EXIF orientation into pixels before stripping metadata — a curated
+    // phone/camera JPEG with an Orientation tag would otherwise serve sideways.
+    .rotate()
     .resize({ width: 1600, withoutEnlargement: true })
     .webp({ quality: 80 })
     .toBuffer();
