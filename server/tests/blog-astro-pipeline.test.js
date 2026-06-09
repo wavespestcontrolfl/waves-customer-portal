@@ -803,7 +803,7 @@ describe('Astro publisher hero image republish', () => {
     }));
     gh.createBranch.mockResolvedValue({});
     gh.getFile.mockImplementation(async (path) => (
-      path.endsWith('/hero.png') ? { sha: 'existing-hero-sha' } : null
+      path.endsWith('/hero.webp') ? { sha: 'existing-hero-sha' } : null
     ));
     gh.putBinary.mockResolvedValue({});
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-commit-sha' } });
@@ -828,7 +828,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nAnt trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
     };
@@ -840,7 +840,7 @@ describe('Astro publisher hero image republish', () => {
     await AstroPublisher.publishAstro('post-1');
 
     expect(gh.putBinary).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'public/images/blog/ant-trails-bradenton/hero.png',
+      path: 'public/images/blog/ant-trails-bradenton/hero.webp',
       sha: 'existing-hero-sha',
     }));
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -866,7 +866,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       // Hardcoded monthly price with no calculator/quote framing — a P0 the
       // legacy publish path previously shipped (only schema validation ran).
@@ -902,7 +902,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments and exterior sealing.',
     };
@@ -936,7 +936,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Rodent exclusion around a Bradenton home',
       content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
     };
@@ -967,7 +967,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       // Literal brand would leak across every spoke domain — must use {{brandName}}.
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
@@ -1133,5 +1133,22 @@ describe('generateHeroBuffer (publish-time AI hero)', () => {
     await expect(
       AstroPublisher._internals.generateHeroBuffer({ title: 'T' })
     ).rejects.toThrow(/no usable image/);
+  });
+});
+
+describe('compressToWebp (hero LCP optimization)', () => {
+  test('converts an image buffer to a smaller WebP (RIFF/WEBP magic)', async () => {
+    const sharp = require('sharp');
+    // a 2000x2000 red PNG — larger than the 1600px hero cap
+    const png = await sharp({ create: { width: 2000, height: 2000, channels: 3, background: { r: 200, g: 30, b: 30 } } })
+      .png().toBuffer();
+    const webp = await AstroPublisher._internals.compressToWebp(png);
+    // WebP container: "RIFF"...."WEBP"
+    expect(webp.slice(0, 4).toString('ascii')).toBe('RIFF');
+    expect(webp.slice(8, 12).toString('ascii')).toBe('WEBP');
+    expect(webp.length).toBeLessThan(png.length);
+    const meta = await sharp(webp).metadata();
+    expect(meta.format).toBe('webp');
+    expect(meta.width).toBeLessThanOrEqual(1600);
   });
 });
