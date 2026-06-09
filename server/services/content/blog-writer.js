@@ -346,16 +346,19 @@ Return JSON: {
       if (!hasTable) return [];
       // Live, un-actioned opportunities. The queue's actionable states are
       // 'pending' (freshly mined) and 'pending_review' (awaiting human
-      // triage); 'claimed'/'done'/'skipped' are out of play. Prefer the
-      // blog-shaped work — content/answer-engine gaps and supporting-blog /
-      // customer-question actions map to educational posts; refresh and
-      // internal-link actions don't. A query string is the strongest signal
-      // but isn't required: a content/AEO gap on a city+service is still one.
+      // triage); 'claimed'/'done'/'skipped' are out of play.
+      //
+      // Filter on action_type, NOT bucket. action_type is the queue's final
+      // decision about what to DO: a content/AEO gap with no good existing
+      // page is classified 'new_supporting_blog', while the same bucket on an
+      // existing page becomes 'refresh_existing_page'. Keying off the bucket
+      // would pull those refresh-only rows into idea generation and spawn new
+      // posts the queue already says should refresh an existing page.
+      // A query string is the strongest signal but isn't required — a
+      // blog-shaped gap on a city+service is still one.
       return await db('opportunity_queue')
         .whereIn('status', ['pending', 'pending_review'])
-        .where((b) => b
-          .whereIn('action_type', ['new_supporting_blog', 'create_customer_question_page'])
-          .orWhereIn('bucket', ['content_gap', 'aeo_gap']))
+        .whereIn('action_type', ['new_supporting_blog', 'create_customer_question_page'])
         .orderBy('score', 'desc')
         .limit(limit)
         .select('query', 'city', 'service', 'score', 'action_type', 'bucket');
