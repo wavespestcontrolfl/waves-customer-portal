@@ -22,6 +22,9 @@ jest.mock('../services/content-astro/github-client', () => ({
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
 }));
+jest.mock('../services/content/image-generator', () => ({
+  generate: jest.fn(),
+}));
 
 const db = require('../models/db');
 const gh = require('../services/content-astro/github-client');
@@ -1102,5 +1105,33 @@ describe('Pages poll auto-merge per-tick cap', () => {
     expect(result.deferred).toBe(1);
     const deferred = result.results.filter((r) => r.mergeDeferred);
     expect(deferred).toHaveLength(1);
+  });
+});
+
+describe('generateHeroBuffer (publish-time AI hero)', () => {
+  const imageGenerator = require('../services/content/image-generator');
+  // 1x1 transparent PNG
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('decodes a generated data: URL into image bytes + ext, with blog-hero mode', async () => {
+    imageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${PNG_B64}`, model: 'test-model' });
+    const img = await AstroPublisher._internals.generateHeroBuffer({
+      title: 'Dollar Spot', meta_description: 'm', keyword: 'k', slug: 's',
+    });
+    expect(Buffer.isBuffer(img.buffer)).toBe(true);
+    expect(img.buffer.length).toBeGreaterThan(0);
+    expect(img.ext).toBe('png');
+    expect(imageGenerator.generate).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'blog-hero', title: 'Dollar Spot', keyword: 'k' })
+    );
+  });
+
+  test('throws when generation yields no usable image (so publish fails loudly, not hero-less)', async () => {
+    imageGenerator.generate.mockResolvedValue({ dataUrl: 'not-a-data-url', model: 'x' });
+    await expect(
+      AstroPublisher._internals.generateHeroBuffer({ title: 'T' })
+    ).rejects.toThrow(/no usable image/);
   });
 });

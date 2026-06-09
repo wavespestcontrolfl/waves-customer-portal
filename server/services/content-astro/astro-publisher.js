@@ -293,6 +293,28 @@ async function fetchImageBuffer(url) {
   }
 }
 
+// ── Hero generation (publish-time) ─────────────────────────────────
+
+// Generate a unique AI hero image for a post that has no curated
+// featured_image_url, and return its bytes. The image-generator returns a
+// `data:` URL (~5MB); we decode it to a Buffer in memory and the caller
+// commits it into the PR branch as /images/blog/<slug>/hero.<ext>. The data
+// URL is never written to the DB — featured_image_url is varchar(255) and the
+// blog list does SELECT *, so persisting it would break/bloat both.
+async function generateHeroBuffer(post) {
+  const imageGenerator = require('../content/image-generator');
+  const gen = await imageGenerator.generate({
+    title: post.title,
+    topic: post.meta_description,
+    keyword: post.keyword,
+    mode: 'blog-hero',
+  });
+  const img = await fetchImageBuffer(gen.dataUrl);
+  if (!img?.buffer) throw new Error('hero image generation produced no usable image');
+  logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${gen.model}`);
+  return img;
+}
+
 // ── Main publish ───────────────────────────────────────────────────
 
 // Close + delete a post's still-open PR/branch before a build_failed retry so
@@ -354,16 +376,36 @@ async function publishAstro(postId) {
   try {
     // 1. Hero image (required by the Astro schema). Fetch before branch
     // creation so validation/fetch failures do not leave orphan branches.
+    //
+    // Three cases:
+    //   - featured_image_url is a curated/hosted URL → fetch its bytes and
+    //     commit them as the hero (a real photo always wins).
+    //   - featured_image_url is empty → generate a unique AI hero at publish
+    //     time and commit it. The bytes stay in memory; we never persist the
+    //     ~5MB data: URL to the DB (featured_image_url is varchar(255) and the
+    //     blog list does SELECT *, so storing it there would bloat every load).
+    //   - featured_image_url already points at /images/blog/ → it's committed
+    //     in the repo from a prior publish; reference it as-is.
     let heroImageExt = imageExtFromSource(post.featured_image_url);
     let heroImage = null;
     if (post.featured_image_url && !post.featured_image_url.startsWith('/images/blog/')) {
       heroImage = await fetchImageBuffer(post.featured_image_url);
       if (!heroImage?.buffer) throw new Error('featured image could not be fetched for Astro publish');
       heroImageExt = heroImage.ext || heroImageExt;
+    } else if (!post.featured_image_url) {
+      heroImage = await generateHeroBuffer(post);
+      heroImageExt = heroImage.ext || heroImageExt;
     }
 
+    // Public path the frontmatter references. Whenever we have bytes to commit
+    // (curated-fetched or generated), they land at /images/blog/<slug>/hero.<ext>;
+    // a /images/blog/ featured_image_url is already there from a prior publish.
+    const heroPublicRef = heroImage?.buffer
+      ? `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.${heroImageExt}`
+      : (post.featured_image_url || null);
+
     // 2. Markdown frontmatter/body validation
-    const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt });
+    const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt, featured_image_url: heroPublicRef });
     assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
 
@@ -1506,6 +1548,7 @@ module.exports = {
   buildFrontmatter,
   liveUrlForPost,
   _internals: {
+    generateHeroBuffer,
     slugPathFromFrontmatter,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
