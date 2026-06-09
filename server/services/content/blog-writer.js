@@ -348,14 +348,18 @@ Return JSON: {
       // 'pending' (freshly mined) and 'pending_review' (awaiting human
       // triage); 'claimed'/'done'/'skipped' are out of play.
       //
-      // Filter on action_type, NOT bucket. action_type is the queue's final
-      // decision about what to DO: a content/AEO gap with no good existing
-      // page is classified 'new_supporting_blog', while the same bucket on an
-      // existing page becomes 'refresh_existing_page'. Keying off the bucket
-      // would pull those refresh-only rows into idea generation and spawn new
-      // posts the queue already says should refresh an existing page.
-      // A query string is the strongest signal but isn't required — a
-      // blog-shaped gap on a city+service is still one.
+      // Filter on action_type — the queue's AUTHORITATIVE routing decision
+      // (actionForOpportunity in gsc-opportunity-miner). That router
+      // DELIBERATELY sends a city+service gap to a SERVICE page
+      // (create_or_refresh_city_service_page / refresh_existing_page) and only
+      // emits new_supporting_blog / create_customer_question_page when the
+      // demand is a non-geo supporting topic or a customer-question cluster.
+      // So consuming exactly those two actions is intentional, not an
+      // oversight: pulling the city+service gap rows in here would spawn blogs
+      // that compete with the very service pages the queue wants
+      // (doorway / cannibalization — the thing the uniqueness gate guards).
+      // query is usually present but not required (a customer-question cluster
+      // can be query-less), so it is rendered with a city+service fallback.
       return await db('opportunity_queue')
         .whereIn('status', ['pending', 'pending_review'])
         .whereIn('action_type', ['new_supporting_blog', 'create_customer_question_page'])
