@@ -344,9 +344,18 @@ Return JSON: {
     try {
       const hasTable = await db.schema.hasTable('opportunity_queue');
       if (!hasTable) return [];
+      // Live, un-actioned opportunities. The queue's actionable states are
+      // 'pending' (freshly mined) and 'pending_review' (awaiting human
+      // triage); 'claimed'/'done'/'skipped' are out of play. Prefer the
+      // blog-shaped work — content/answer-engine gaps and supporting-blog /
+      // customer-question actions map to educational posts; refresh and
+      // internal-link actions don't. A query string is the strongest signal
+      // but isn't required: a content/AEO gap on a city+service is still one.
       return await db('opportunity_queue')
-        .where('status', 'pending')
-        .whereNotNull('query')
+        .whereIn('status', ['pending', 'pending_review'])
+        .where((b) => b
+          .whereIn('action_type', ['new_supporting_blog', 'create_customer_question_page'])
+          .orWhereIn('bucket', ['content_gap', 'aeo_gap']))
         .orderBy('score', 'desc')
         .limit(limit)
         .select('query', 'city', 'service', 'score', 'action_type', 'bucket');
@@ -401,7 +410,11 @@ Return JSON: {
     const demandBlock = demand.length
       ? `PRIORITY — REAL SEARCH DEMAND (ground ideas in these where they fit an educational blog; these are scored GSC/answer-engine gaps where Waves is weak):\n${demand
           .slice(0, 18)
-          .map((d) => `• "${d.query}"${d.city ? ` — ${d.city}` : ''}${d.service ? ` [${d.service}]` : ''} (score ${d.score})`)
+          .map((d) => {
+            const core = d.query ? `"${d.query}"` : `${d.service || 'pest'} content gap (${d.bucket})`;
+            const loc = d.city ? ` — ${d.city}` : '';
+            return `• ${core}${loc} (score ${d.score})`;
+          })
           .join('\n')}`
       : 'No live demand signals available this run — lead with seasonality and coverage gaps below.';
 
