@@ -2108,7 +2108,21 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             if (reminderSyncTime) {
               try {
                 const AppointmentReminders = require('../services/appointment-reminders');
+                // handleReschedule claims a still-pending creation
+                // confirmation (its reschedule notice normally replaces
+                // it), but with sendNotification:false no notice goes
+                // out — the customer would get neither message. Re-arm
+                // the deferred confirmation afterwards; it renders the
+                // NEW date/window from the resynced reminder row.
+                const reminderBefore = await db('appointment_reminders')
+                  .where({ scheduled_service_id: id })
+                  .first('id', 'confirmation_sent');
                 await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: false });
+                if (reminderBefore && !reminderBefore.confirmation_sent) {
+                  await db('appointment_reminders')
+                    .where({ id: reminderBefore.id })
+                    .update({ confirmation_sent: false, confirmation_sent_at: null });
+                }
               } catch {}
             }
             break;
