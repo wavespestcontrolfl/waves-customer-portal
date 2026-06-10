@@ -1082,41 +1082,53 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
       astro_publish_error: null,
       astro_commit_sha: sha || post.astro_commit_sha,
       status: 'draft',
-      // The revert PR deleted the hero from the repo, so drop the stale
-      // path — a future republish regenerates/recommits.
-      featured_image_url: null,
+      // The revert PR deleted the committed hero asset, so drop a stale
+      // committed ref — a future republish regenerates/recommits. A CURATED
+      // source URL is preserved: it's the only reference to the original
+      // image, and clearing it would make a republish silently swap the
+      // curated photo for a generated AI hero.
+      ...(isCommittedHeroUrl(post.featured_image_url) ? { featured_image_url: null } : {}),
       updated_at: new Date(),
     });
     return;
   }
   const slug = post.slug || slugify(post.title);
-  // Persist the now-live hero path ONLY at merge — the asset exists on main
-  // exactly now. Persisting earlier (at PR open) would point downstream
-  // consumers (auto social-share, republish) at a file that lives only on a
-  // PR branch and vanishes if the build fails and the branch is deleted.
-  //
-  // Read the authoritative path straight from the merged frontmatter rather
-  // than assuming an extension: a PR opened by the new code committed
-  // hero.webp, but one opened by the OLD path (still in flight when this
-  // deploys) committed hero.png/.jpg, and guessing webp would record a broken
-  // path. Fall back to the existing committed path, then to hero.webp.
-  const rawHeroRef =
-    (await mergedHeroRef(slug))
-    || (isCommittedHeroUrl(post.featured_image_url) ? post.featured_image_url : null)
-    || `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
-  // Store an ABSOLUTE hub URL for DB/admin/social consumers; the relative
-  // /images/blog path only resolves on the Astro site, not the portal origin.
-  const heroRef = absoluteHeroUrl(rawHeroRef);
-  await db('blog_posts').where({ id: postId }).update({
+  const updates = {
     astro_status: 'merged',
     astro_merged_at: mergedAt,
     astro_commit_sha: sha || post.astro_commit_sha,
     status: 'published',
     astro_live_url: liveUrlForPost(post),
     astro_published_at: null,
-    featured_image_url: heroRef,
     updated_at: new Date(),
-  });
+  };
+  // Persist the now-live hero path ONLY at merge — the asset exists on main
+  // exactly now. Persisting earlier (at PR open) would point downstream
+  // consumers (auto social-share, republish) at a file that lives only on a
+  // PR branch and vanishes if the build fails and the branch is deleted.
+  //
+  // And ONLY for generated/already-committed heroes. A curated
+  // featured_image_url is the sole reference to the original source image —
+  // overwriting it with the Astro copy means unpublish (which deletes that
+  // copy) leaves the draft with nothing to refetch, and a republish would
+  // silently replace the curated photo with a generated AI hero. Curated
+  // URLs are already absolute and renderable for admin/social, so they need
+  // no rewrite.
+  if (!post.featured_image_url || isCommittedHeroUrl(post.featured_image_url)) {
+    // Read the authoritative path straight from the merged frontmatter rather
+    // than assuming an extension: a PR opened by the new code committed
+    // hero.webp, but one opened by the OLD path (still in flight when this
+    // deploys) committed hero.png/.jpg, and guessing webp would record a
+    // broken path. Fall back to the existing committed path, then hero.webp.
+    const rawHeroRef =
+      (await mergedHeroRef(slug))
+      || (isCommittedHeroUrl(post.featured_image_url) ? post.featured_image_url : null)
+      || `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
+    // Store an ABSOLUTE hub URL for DB/admin/social consumers; the relative
+    // /images/blog path only resolves on the Astro site, not the portal origin.
+    updates.featured_image_url = absoluteHeroUrl(rawHeroRef);
+  }
+  await db('blog_posts').where({ id: postId }).update(updates);
 }
 
 // ── Unpublish (soft, via revert PR) ────────────────────────────────
@@ -1648,6 +1660,9 @@ module.exports = {
   _internals: {
     generateHeroBuffer,
     compressToWebp,
+    applyMergeEffect,
+    isCommittedHeroUrl,
+    absoluteHeroUrl,
     slugPathFromFrontmatter,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,

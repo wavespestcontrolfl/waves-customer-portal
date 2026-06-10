@@ -1187,3 +1187,55 @@ describe('automated blog posts target the hub only', () => {
     expect(data.domains).toContain('wavespestcontrol.com');
   });
 });
+
+describe('applyMergeEffect hero persistence (curated vs generated)', () => {
+  const { applyMergeEffect } = AstroPublisher._internals;
+
+  function mergePost(overrides = {}) {
+    return {
+      id: 'post-1',
+      title: 'Dollar Spot in Venice',
+      slug: 'dollar-spot-venice',
+      target_sites: ['wavespestcontrol.com'],
+      astro_commit_sha: 'sha-1',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gh.getFile.mockResolvedValue(null); // mergedHeroRef falls back
+  });
+
+  test('generated hero (no featured_image_url) persists the absolute hub hero.webp URL', async () => {
+    const update = chain();
+    db.mockImplementation(() => update);
+    await applyMergeEffect('post-1', mergePost({ featured_image_url: null }), new Date(), false, 'sha-2');
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      featured_image_url: 'https://www.wavespestcontrol.com/images/blog/dollar-spot-venice/hero.webp',
+    }));
+  });
+
+  test('curated hero source is PRESERVED (not overwritten with the Astro copy)', async () => {
+    const update = chain();
+    db.mockImplementation(() => update);
+    await applyMergeEffect('post-1', mergePost({ featured_image_url: 'https://www.wavespestcontrol.com/images/2025/10/curated.webp' }), new Date(), false, 'sha-2');
+    const args = update.update.mock.calls[0][0];
+    expect('featured_image_url' in args).toBe(false);
+  });
+
+  test('unpublish clears a committed hero ref but preserves a curated source URL', async () => {
+    for (const [value, shouldClear] of [
+      ['https://www.wavespestcontrol.com/images/blog/dollar-spot-venice/hero.webp', true],
+      ['/images/blog/dollar-spot-venice/hero.webp', true],
+      ['https://www.wavespestcontrol.com/images/2025/10/curated.webp', false],
+    ]) {
+      const update = chain();
+      db.mockImplementation(() => update);
+      await applyMergeEffect('post-1', mergePost({ featured_image_url: value, astro_status: 'unpublish_pending' }), new Date(), true, 'sha-2');
+      const args = update.update.mock.calls[0][0];
+      if (shouldClear) expect(args.featured_image_url).toBeNull();
+      else expect('featured_image_url' in args).toBe(false);
+    }
+  });
+});
