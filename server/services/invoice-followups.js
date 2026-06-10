@@ -336,6 +336,12 @@ async function fireStep(row) {
   }
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
+  // Guard every send path (cron runPending filters too, but sendNextTouchNow
+  // reaches here directly) — soft-deleted customers get no follow-up touches.
+  if (customer?.deleted_at) {
+    logger.info(`[invoice-followups] skipping sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
+    return;
+  }
   const amount = parseFloat(row.total || 0).toFixed(2);
   const serviceDate = row.service_date
     ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
