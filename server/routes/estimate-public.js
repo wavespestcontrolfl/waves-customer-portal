@@ -127,6 +127,39 @@ function phoneLast10(phone) {
   return digits.length >= 10 ? digits.slice(-10) : '';
 }
 
+function normalizeAddressForMatch(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Multiple live profiles can legitimately share a phone (landlord + rental
+// property via quick-add). Only reuse one when the match is unambiguous: a
+// single phone hit, or — among several — a unique email or service-address
+// match. Otherwise return null so the accept creates a fresh profile;
+// attaching the tier/monthly_rate/schedules to a guessed profile splits the
+// real customer's history.
+function pickAcceptCustomerMatch(candidates, estimate) {
+  if (!candidates.length) return null;
+  if (candidates.length === 1) return candidates[0];
+  let pool = candidates;
+  const email = String(estimate.customer_email || '').trim().toLowerCase();
+  if (email) {
+    const byEmail = pool.filter((c) => String(c.email || '').trim().toLowerCase() === email);
+    if (byEmail.length === 1) return byEmail[0];
+    if (byEmail.length > 1) pool = byEmail;
+  }
+  const estAddr = normalizeAddressForMatch(estimate.address);
+  if (estAddr) {
+    const byAddress = pool.filter((c) => {
+      const line1 = normalizeAddressForMatch(c.address_line1);
+      // estimate.address is the full address; address_line1 is the street
+      // line. Require a meaningful street line so '' never matches.
+      return line1.length >= 5 && estAddr.startsWith(line1);
+    });
+    if (byAddress.length === 1) return byAddress[0];
+  }
+  return null;
+}
+
 // Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
 function readCookie(req, name) {
   const header = req.headers.cookie;
@@ -5457,10 +5490,10 @@ router.put('/:token/accept', async (req, res, next) => {
       if (!customerId && estimate.customer_phone) {
         // Match on last-10 digits (format-insensitive), skip soft-deleted
         // rows, and order deterministically: exact raw match first, then the
-        // most recently updated profile (multiple profiles can legitimately
-        // share a phone — e.g. landlord + rental property).
+        // most recently updated profile. Reuse a profile only when the match
+        // is unambiguous (pickAcceptCustomerMatch).
         const matchDigits = phoneLast10(estimate.customer_phone);
-        const existing = await trx('customers')
+        const candidates = await trx('customers')
           .where((q) => {
             q.where({ phone: estimate.customer_phone });
             if (matchDigits) {
@@ -5470,7 +5503,11 @@ router.put('/:token/accept', async (req, res, next) => {
           .whereNull('deleted_at')
           .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
           .orderBy('updated_at', 'desc')
-          .first();
+          .limit(10);
+        const existing = pickAcceptCustomerMatch(candidates, estimate);
+        if (!existing && candidates.length > 1) {
+          logger.warn(`[estimate-accept] ${candidates.length} live customers share phone for estimate ${estimate.id}; no unique email/address match — creating a new profile`);
+        }
         if (existing) {
           customerId = existing.id;
         } else {
