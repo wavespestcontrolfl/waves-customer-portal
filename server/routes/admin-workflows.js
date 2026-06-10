@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+
+router.use(adminAuthenticate, requireAdmin);
 
 /**
  * GET /api/admin/workflows/status

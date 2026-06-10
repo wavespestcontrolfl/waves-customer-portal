@@ -206,6 +206,7 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
+app.use('/api/admin/auth/login', authLimiter);
 
 // Body parsing
 // Stripe webhook must use raw body for signature verification — mount BEFORE json parser
