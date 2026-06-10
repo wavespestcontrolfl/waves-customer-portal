@@ -913,15 +913,27 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (!existing) customerId = null;
     }
 
-    let createdCustomer = false;
-    if (!customerId) {
-      const fallbackName =
-        (lead.first_name && lead.first_name.trim()) ||
+    const needsCustomer = !customerId;
+    const fallbackName = needsCustomer
+      ? (lead.first_name && lead.first_name.trim()) ||
         (lead.email ? String(lead.email).split('@')[0] : '') ||
-        'New Lead';
-      const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+        'New Lead'
+      : null;
+    const code = needsCustomer
+      ? 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('')
+      : null;
 
-      customerId = await db.transaction(async (trx) => {
+    // Workflow columns vary by environment — probe before the transaction so the
+    // insert only sets columns the live schema actually has.
+    const cols = await db('scheduled_services').columnInfo();
+
+    const performedBy = req.technician.first_name + ' ' + (req.technician.last_name || '');
+
+    // Everything that mutates state runs in one transaction so a failure anywhere
+    // (customer create, appointment insert, lead conversion) rolls back the whole
+    // booking — no orphaned customer that a retry would duplicate.
+    const { appt } = await db.transaction(async (trx) => {
+      if (needsCustomer) {
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,
           lastName: lead.last_name || '',
@@ -948,45 +960,60 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           assigned_to: req.technicianId,
         }).returning('*');
         await createDefaultCustomerRows(trx, created.id);
-        return created.id;
+        customerId = created.id;
+      }
+
+      // Create the scheduled service. Only set workflow columns the schema has.
+      const insertData = {
+        customer_id: customerId,
+        technician_id: technicianId || null,
+        scheduled_date: date,
+        window_start: windowStart,
+        window_end: windowEnd,
+        service_type: svcType,
+        status: 'pending',
+        estimated_duration_minutes: duration,
+        notes: notes || null,
+      };
+      if (cols.service_id && serviceId) insertData.service_id = serviceId;
+      if (cols.urgency) insertData.urgency = 'routine';
+      const [appt] = await trx('scheduled_services').insert(insertData).returning('*');
+
+      // Mark the lead converted (mirrors leadAttribution.markConverted, but on the
+      // same transaction so the conversion can't commit without the appointment).
+      await trx('leads').where('id', req.params.id).update({
+        status: 'won',
+        customer_id: customerId,
+        converted_at: new Date(),
+        is_qualified: true,
+        updated_at: new Date(),
       });
-      createdCustomer = true;
-    }
+      await trx('lead_activities').insert({
+        lead_id: req.params.id,
+        activity_type: 'converted',
+        description: `Converted to customer (${customerId})`,
+        performed_by: 'system',
+        metadata: JSON.stringify({ customerId }),
+      });
+      await trx('lead_activities').insert({
+        lead_id: req.params.id,
+        activity_type: 'appointment_scheduled',
+        description: `Appointment scheduled: ${svcType} on ${date}${windowStart ? ` at ${time}` : ''}`,
+        performed_by: performedBy,
+        metadata: JSON.stringify({
+          appointmentId: appt.id, customerId, date, time,
+          serviceType: svcType, serviceId: serviceId || null,
+          technicianId: technicianId || null, createdCustomer: needsCustomer,
+        }),
+      });
 
-    // Create the scheduled service. Only set workflow columns the schema has.
-    const cols = await db('scheduled_services').columnInfo();
-    const insertData = {
-      customer_id: customerId,
-      technician_id: technicianId || null,
-      scheduled_date: date,
-      window_start: windowStart,
-      window_end: windowEnd,
-      service_type: svcType,
-      status: 'pending',
-      estimated_duration_minutes: duration,
-      notes: notes || null,
-    };
-    if (cols.service_id && serviceId) insertData.service_id = serviceId;
-    if (cols.urgency) insertData.urgency = 'routine';
-    const [appt] = await db('scheduled_services').insert(insertData).returning('*');
-
-    // Mark the lead converted (also writes a 'converted' activity).
-    await leadAttribution.markConverted(req.params.id, { customerId });
-
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'appointment_scheduled',
-      description: `Appointment scheduled: ${svcType} on ${date}${windowStart ? ` at ${time}` : ''}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
-      metadata: JSON.stringify({
-        appointmentId: appt.id, customerId, date, time,
-        serviceType: svcType, serviceId: serviceId || null,
-        technicianId: technicianId || null, createdCustomer,
-      }),
+      return { appt };
     });
 
+    logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
+
     const updated = await db('leads').where('id', req.params.id).first();
-    res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer });
+    res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
   } catch (err) { next(err); }
 });
 
