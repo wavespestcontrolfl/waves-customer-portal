@@ -845,6 +845,25 @@ const ReviewService = {
    * Runs every 15 minutes, picks up requests whose scheduled_for has passed.
    */
   async processScheduled() {
+    // Terminate (not just skip) due requests whose customer was
+    // soft-deleted: a row left 'pending' forever would become eligible
+    // again — and fire very late — if the customer is ever restored.
+    const terminated = await db("review_requests")
+      .where({ status: "pending" })
+      .whereNotNull("scheduled_for")
+      .where("scheduled_for", "<=", new Date())
+      .whereNull("sms_sent_at")
+      .whereExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
+      .update({ status: "suppressed" });
+    if (terminated > 0) {
+      logger.info(`[review] Suppressed ${terminated} scheduled requests (reason=customer-deleted)`);
+    }
+
     const pending = await db("review_requests")
       .where({ status: "pending" })
       .whereNotNull("scheduled_for")
