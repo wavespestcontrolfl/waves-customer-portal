@@ -82,7 +82,7 @@ async function executeRetentionTool(toolName, input) {
 
       if (!customer) return { error: 'Customer not found' };
 
-      const overdue = billing.filter(p => ['failed', 'overdue'].includes(p.status));
+      const overdue = billing.filter(p => ['failed', 'overdue'].includes(p.status) && !p.superseded_by_payment_id);
 
       return {
         customer: {

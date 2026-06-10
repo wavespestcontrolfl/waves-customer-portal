@@ -68,6 +68,7 @@ async function computeDashboardAlerts() {
   try {
     const failed = await db('payments')
       .where({ status: 'failed' })
+      .whereNull('superseded_by_payment_id')
       .where('payment_date', today)
       .count('* as count').first();
     const count = parseInt(failed?.count || 0);

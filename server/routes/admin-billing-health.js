@@ -81,6 +81,42 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     try {
       payment = await service.chargeOneTime(customerId, chargeAmount, desc);
     } catch (err) {
+      // Stripe ACCEPTED the charge but the ledger write failed — the
+      // customer WAS billed (orphan row recorded by the service). This
+      // must not look retryable: a second "Charge now" click would use
+      // a fresh idempotency key and take the money again.
+      if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+        await logAutopay(customerId, 'orphan_charge', {
+          amountCents: Math.round(chargeAmount * 100),
+          details: { source: 'manual_charge', stripe_payment_intent_id: err.stripePaymentIntentId, reason: err.message, admin_id: req.technicianId || null },
+        }).catch(() => {});
+        return res.status(409).json({
+          error: `Charge SUCCEEDED at Stripe (PI ${err.stripePaymentIntentId}) but could not be recorded in the ledger. DO NOT charge again — reconcile via stripe_orphan_charges.`,
+          orphan: true,
+          stripe_payment_intent_id: err.stripePaymentIntentId,
+        });
+      }
+      // Ambiguous outcome — Stripe may have processed the charge even
+      // though the request errored. Don't present as retryable: a
+      // re-click would mint a fresh idempotency key and could charge
+      // twice. charge() already flagged its failed row; park it
+      // non-collectible until reconciled.
+      if (err.code === 'STRIPE_AMBIGUOUS_OUTCOME') {
+        if (err.paymentRecord?.id) {
+          await db('payments').where({ id: err.paymentRecord.id }).update({
+            superseded_by_payment_id: err.paymentRecord.id,
+            failure_reason: 'Ambiguous Stripe outcome (manual charge) — reconcile before re-charging',
+          }).catch(() => {});
+        }
+        await logAutopay(customerId, 'charge_failed', {
+          amountCents: Math.round(chargeAmount * 100),
+          details: { source: 'manual_charge', reason: 'ambiguous_stripe_outcome', admin_id: req.technicianId || null },
+        }).catch(() => {});
+        return res.status(409).json({
+          error: 'Charge outcome is AMBIGUOUS — Stripe may have processed it. Check the Stripe dashboard before charging again.',
+          ambiguous: true,
+        });
+      }
       await logAutopay(customerId, 'charge_failed', {
         amountCents: Math.round(chargeAmount * 100),
         details: { source: 'manual_charge', reason: err.message, admin_id: req.technicianId || null },
@@ -183,15 +219,19 @@ router.get('/billing-health', async (req, res, next) => {
       .whereNull('autopay_payment_method_id')
       .count('* as n').first();
 
-    // Failed payments in the last 30 days
+    // Failed payments in the last 30 days. Superseded rows (retry
+    // collected, or duplicate attempt rows) are resolved — not active
+    // failures.
     const failedRecent = await db('payments')
       .where({ status: 'failed' })
+      .whereNull('superseded_by_payment_id')
       .where('payment_date', '>=', thirtyDaysAgo.toISOString().split('T')[0])
       .count('* as n').first();
 
     // Payments in retry queue (pending retry)
     const inRetry = await db('payments')
       .where({ status: 'failed' })
+      .whereNull('superseded_by_payment_id')
       .where('retry_count', '<', 3)
       .whereNotNull('next_retry_at')
       .count('* as n').first();
@@ -199,6 +239,7 @@ router.get('/billing-health', async (req, res, next) => {
     // Escalated (3 retries exhausted)
     const escalated = await db('payments')
       .where({ status: 'failed' })
+      .whereNull('superseded_by_payment_id')
       .where('retry_count', '>=', 3)
       .where('payment_date', '>=', thirtyDaysAgo.toISOString().split('T')[0])
       .count('* as n').first();
@@ -262,6 +303,7 @@ router.get('/billing-health/at-risk', async (req, res, next) => {
     const inRetry = await db('payments')
       .join('customers', 'customers.id', 'payments.customer_id')
       .where('payments.status', 'failed')
+      .whereNull('payments.superseded_by_payment_id')
       .where('payments.retry_count', '<', 3)
       .whereNotNull('payments.next_retry_at')
       .select(
@@ -274,6 +316,7 @@ router.get('/billing-health/at-risk', async (req, res, next) => {
     const escalated = await db('payments')
       .join('customers', 'customers.id', 'payments.customer_id')
       .where('payments.status', 'failed')
+      .whereNull('payments.superseded_by_payment_id')
       .where('payments.retry_count', '>=', 3)
       .select(
         'customers.id', 'customers.first_name', 'customers.last_name',

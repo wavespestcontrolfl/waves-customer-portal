@@ -169,6 +169,7 @@ class SignalDetector {
       const failedPayments = await db('payments')
         .where('customer_id', customerId)
         .where('status', 'failed')
+        .whereNull('superseded_by_payment_id')
         .where('payment_date', '>', new Date(now - 60 * 86400000))
         .count('* as count').first();
 

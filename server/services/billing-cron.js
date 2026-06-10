@@ -214,7 +214,7 @@ const BillingCron = {
               severity: 'high',
               title: `Charge succeeded but unrecorded — $${err.amount} (PI ${err.stripePaymentIntentId})`,
               description: `Stripe accepted the autopay charge but our DB ledger insert failed. The customer WAS billed; reconcile via stripe_orphan_charges before next month's run. DO NOT manually retry — that would double-charge.`,
-              metadata: JSON.stringify({
+              trigger_data: JSON.stringify({
                 stripe_payment_intent_id: err.stripePaymentIntentId,
                 amount: err.amount,
                 source: 'autopay_orphan',
@@ -253,6 +253,49 @@ const BillingCron = {
             details: { source: 'autopay', stripe_payment_intent_id: err.stripePaymentIntentId },
           }).catch(() => {});
           logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — webhook handles SMS, skipping retry`);
+          continue;
+        }
+
+        // STRIPE_AMBIGUOUS_OUTCOME — the create() call died on a
+        // connection/API error with no PI returned. Stripe may have
+        // processed the charge, so arming the retry ladder (fresh
+        // idempotency key in 2 days) is a double-charge vector, and the
+        // "payment failed" SMS may be false. Park non-collectible for
+        // manual reconciliation against the Stripe dashboard.
+        if (err.code === 'STRIPE_AMBIGUOUS_OUTCOME') {
+          if (err.paymentRecord?.id) {
+            await db('payments').where({ id: err.paymentRecord.id }).update({
+              next_retry_at: null,
+              superseded_by_payment_id: err.paymentRecord.id,
+              failure_reason: 'Ambiguous Stripe outcome — reconcile against the Stripe dashboard before re-charging',
+            }).catch((parkErr) => logger.error(`[billing-cron] Could not park ambiguous payment ${err.paymentRecord.id}: ${parkErr.message}`));
+          }
+          await logAutopay(customer.id, 'charge_failed', {
+            amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
+            paymentId: err.paymentRecord?.id || null,
+            details: { source: 'autopay', reason: 'ambiguous_stripe_outcome', parked: true },
+          }).catch(() => {});
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: customer.id,
+              alert_type: 'payment_failure',
+              severity: 'high',
+              title: `Autopay outcome AMBIGUOUS — $${customer.monthly_rate} (${customer.first_name} ${customer.last_name})`,
+              description: `The Stripe request failed without returning a PaymentIntent — the charge may or may not have gone through. Verify in the Stripe dashboard, then re-charge or mark reconciled. No retry was scheduled and no failure SMS was sent.`,
+              trigger_data: JSON.stringify({ payment_id: err.paymentRecord?.id || null, amount: customer.monthly_rate, source: 'autopay_ambiguous_parked' }),
+            });
+          } catch (alertErr) {
+            logger.error(`[billing-cron] Ambiguous-outcome alert creation failed: ${alertErr.message}`);
+          }
+          try {
+            await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+              `⚠️ Ambiguous autopay outcome: ${customer.first_name} ${customer.last_name} — $${customer.monthly_rate}. Stripe request died without a PaymentIntent; verify in the Stripe dashboard before re-charging. Parked, no retry scheduled.`,
+              { messageType: 'internal_alert', link: '/admin/revenue' },
+            );
+          } catch (smsErr) {
+            logger.error(`[billing-cron] Ambiguous-outcome office SMS failed: ${smsErr.message}`);
+          }
+          logger.warn(`[billing-cron] AMBIGUOUS outcome for customer id=${customer.id} — parked, no retry`);
           continue;
         }
 
@@ -332,6 +375,7 @@ const BillingCron = {
 
     const failedPayments = await db('payments')
       .where({ status: 'failed' })
+      .whereNull('superseded_by_payment_id')
       .where('retry_count', '<', 3)
       .whereNotNull('next_retry_at')
       .where('next_retry_at', '<=', now)
@@ -352,73 +396,286 @@ const BillingCron = {
         continue;
       }
 
+      // Ambiguous no-PI failure: paymentIntents.create() died on a
+      // connection/API error without Stripe returning an intent, so
+      // Stripe may have accepted the charge even though we never saw
+      // the PI — retrying with a fresh idempotency key could
+      // double-charge. Park the ladder for manual reconciliation
+      // against the Stripe dashboard. Deterministic no-PI failures
+      // (invalid params, detached payment method — classified at
+      // record time via metadata.ambiguous_outcome) moved no money and
+      // keep retrying normally.
+      let guardMeta = {};
+      try {
+        guardMeta = payment.metadata
+          ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+          : {};
+      } catch (e) { /* unparseable legacy metadata — treat as unclassified */ }
+      if (!payment.stripe_payment_intent_id && guardMeta.ambiguous_outcome) {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            next_retry_at: null,
+            // Self-referencing superseded marker (same convention as the
+            // orphan path): the outcome is AMBIGUOUS — Stripe may have
+            // taken the money — so the row must not be presented as
+            // collectible until an admin reconciles it against the
+            // Stripe dashboard (re-arm or re-charge manually from there).
+            superseded_by_payment_id: payment.id,
+            failure_reason: `${payment.failure_reason || 'Charge failed without a PaymentIntent'} — parked: ambiguous Stripe outcome, reconcile manually before re-charging`,
+          }).catch(() => {});
+        try {
+          await db('customer_health_alerts').insert({
+            customer_id: payment.customer_id,
+            alert_type: 'payment_failure',
+            severity: 'high',
+            title: `Autopay retry parked — ambiguous Stripe outcome ($${parseFloat(payment.amount).toFixed(2)})`,
+            description: `Failed payment ${payment.id} has no PaymentIntent id, so Stripe may or may not have accepted the original charge. Verify in the Stripe dashboard before charging ${customer.first_name} ${customer.last_name} again.`,
+            trigger_data: JSON.stringify({ payment_id: payment.id, amount: payment.amount, source: 'autopay_retry_parked' }),
+          });
+        } catch (alertErr) {
+          logger.error(`[billing-cron] Parked-retry alert creation failed: ${alertErr.message}`);
+        }
+        logger.warn(`[billing-cron] Parked retry for payment ${payment.id} (no PI — ambiguous outcome)`);
+        continue;
+      }
+
+      // Declared outside the try so the post-success section below can
+      // use them: once the charge has gone through, control must NEVER
+      // re-enter the failure ladder (a post-charge DB error would arm
+      // another retry against money already taken).
+      let newPayment = null;
+      let originalMeta = {};
+      let baseAmount = parseFloat(payment.amount);
+
       try {
         // Get the correct processor
         const service = await PaymentRouter.getServiceForCustomer(payment.customer_id);
 
-        // Re-attempt the charge
-        const amount = parseFloat(payment.amount);
-        const description = payment.description.replace(' — FAILED', '');
-        let newPayment;
+        // Re-attempt the charge. payment.amount is the GROSS the failed
+        // attempt asked for — it includes the 3% credit-card surcharge
+        // when that attempt ran on a credit card. chargeOneTime treats
+        // its amount as a fresh base and surcharges again, so replaying
+        // the gross compounds the surcharge (3% on 103% — past the
+        // network cap). Re-derive the base from the recorded breakdown;
+        // fall back to the gross only for legacy rows that predate base
+        // tracking.
+        originalMeta = {};
+        try {
+          originalMeta = payment.metadata
+            ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+            : {};
+        } catch (e) { /* unparseable legacy metadata — fall through */ }
+        baseAmount = payment.base_amount_cents != null
+          ? payment.base_amount_cents / 100
+          : (originalMeta.base_amount != null ? parseFloat(originalMeta.base_amount) : parseFloat(payment.amount));
+        const description = payment.description
+          .replace(' — FAILED', '')
+          .replace(/ \(includes \$[\d.]+ credit card surcharge\)/, '');
+
+        // Key on the failed payment + ladder rung: overlapping sweep
+        // instances replay the same PI, while the next scheduled rung
+        // (retry_count incremented) mints a fresh charge. The monthly
+        // branch must NOT use chargeMonthly's default date key — two
+        // distinct failed monthly rows retried the same day would
+        // replay one PaymentIntent while both originals get marked
+        // superseded.
+        const retryIdempotencyKey = `autopay_retry_${payment.id}_${payment.retry_count}`;
 
         if (description.includes('WaveGuard Monthly')) {
-          newPayment = await service.chargeMonthly(payment.customer_id);
+          // Charge the failed row's own base — chargeMonthly re-reads the
+          // customer's CURRENT monthly_rate, so a rate change between the
+          // attempt and the retry would collect a different amount than
+          // the obligation being retried (and then supersede the original
+          // as if it had been collected in full).
+          const monthlyCustomer = await db('customers').where({ id: payment.customer_id }).first();
+          const monthlyDescription = description
+            || `${monthlyCustomer?.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${monthlyCustomer?.first_name} ${monthlyCustomer?.last_name}`;
+          newPayment = await service.charge(payment.customer_id, baseAmount, monthlyDescription, {
+            type: 'monthly_autopay',
+            tier: monthlyCustomer?.waveguard_tier || '',
+          }, retryIdempotencyKey);
         } else {
-          newPayment = await service.chargeOneTime(payment.customer_id, amount, description);
+          newPayment = await service.chargeOneTime(
+            payment.customer_id,
+            baseAmount,
+            description,
+            retryIdempotencyKey,
+          );
         }
 
-        // Mark original failed payment as superseded
-        await db('payments')
-          .where({ id: payment.id })
-          .update({
-            status: 'paid',
+      } catch (err) {
+        // STRIPE_CHARGED_DB_FAILED — Stripe accepted the retry charge but
+        // the ledger write failed. The customer WAS billed (orphan row
+        // already recorded by the service), so the ladder must STOP: the
+        // generic failure path below would schedule another retry and
+        // take the money again, plus text the customer that their
+        // payment failed when it succeeded. Mirror of the same guard in
+        // processMonthlyBilling.
+        if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+          // Self-referencing superseded marker: the customer WAS
+          // charged (the collected row is missing — that's the orphan),
+          // so this failed row must drop out of every outstanding-
+          // balance sum immediately or the portal shows the already-
+          // taken amount as owed and lets the customer pay it again.
+          // superseded_by = own id is the queryable "resolved, not
+          // collectible — see stripe_orphan_charges" state. This write
+          // is what keeps the row out of the retry queue, so it must
+          // NOT be swallowed: retry a minimal disarm and escalate hard
+          // if both fail.
+          let orphanDisarmed = false;
+          try {
+            await db('payments')
+              .where({ id: payment.id })
+              .update({
+                retry_count: payment.retry_count + 1,
+                next_retry_at: null,
+                superseded_by_payment_id: payment.id,
+                failure_reason: `Retry charged but unrecorded (PI ${err.stripePaymentIntentId}) — reconcile via stripe_orphan_charges`,
+              });
+            orphanDisarmed = true;
+          } catch (disarmErr) {
+            logger.error(`[billing-cron] Orphan disarm failed for payment ${payment.id}: ${disarmErr.message} — retrying minimal disarm`);
+            await db('payments')
+              .where({ id: payment.id })
+              .update({ next_retry_at: null, superseded_by_payment_id: payment.id })
+              .then(() => { orphanDisarmed = true; })
+              .catch(() => {});
+          }
+          if (!orphanDisarmed) {
+            logger.error(`[billing-cron] CRITICAL: payment ${payment.id} was charged at Stripe (PI ${err.stripePaymentIntentId}) but could NOT be disarmed — it remains in the retry queue and balance sums`);
+            try {
+              await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+                `🚨🚨 URGENT: payment ${payment.id} (customer id=${payment.customer_id}) was CHARGED at Stripe but could not be removed from the retry queue. It WILL be re-charged and shows as owed. Fix the payments row now (PI ${err.stripePaymentIntentId}).`,
+                { messageType: 'internal_alert', link: '/admin/revenue' },
+              );
+            } catch (smsErr) {
+              logger.error(`[billing-cron] Urgent disarm-failure SMS failed: ${smsErr.message}`);
+            }
+          }
+          await logAutopay(payment.customer_id, 'orphan_charge', {
+            amountCents: Math.round(parseFloat(payment.amount) * 100),
+            paymentId: payment.id,
+            details: { source: 'autopay_retry', stripe_payment_intent_id: err.stripePaymentIntentId, reason: err.message },
+          }).catch(() => {});
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: payment.customer_id,
+              alert_type: 'stripe_orphan_charge',
+              severity: 'high',
+              title: `Retry charge succeeded but unrecorded — $${err.amount} (PI ${err.stripePaymentIntentId})`,
+              description: `Stripe accepted the retry charge but our DB ledger insert failed. The customer WAS billed; reconcile via stripe_orphan_charges. DO NOT manually retry — that would double-charge.`,
+              trigger_data: JSON.stringify({
+                stripe_payment_intent_id: err.stripePaymentIntentId,
+                amount: err.amount,
+                source: 'autopay_retry_orphan',
+                original_payment_id: payment.id,
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[billing-cron] Retry orphan alert creation failed: ${alertErr.message}`);
+          }
+          try {
+            await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+              `🚨 Stripe orphan charge (retry): customer id=${payment.customer_id} — $${err.amount} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. DO NOT retry.`,
+              { messageType: 'internal_alert', link: '/admin/revenue' },
+            );
+          } catch (smsErr) {
+            logger.error(`[billing-cron] Office orphan SMS failed: ${smsErr.message}`);
+          }
+          logger.error(`[billing-cron] ORPHAN on retry: customer id=${customer.id}, PI ${err.stripePaymentIntentId} — ladder stopped`);
+          continue;
+        }
+
+        // STRIPE_REQUIRES_ACTION — the bank demands 3DS step-up. The
+        // requires_action webhook already texts the customer a link to
+        // authenticate; burning the remaining retry slots against the
+        // same SCA wall only generates repeat "payment failed" SMS.
+        // Park the ladder; collection resumes through the customer's
+        // authenticated payment.
+        if (err.code === 'STRIPE_REQUIRES_ACTION') {
+          await db('payments')
+            .where({ id: payment.id })
+            .update({
+              retry_count: payment.retry_count + 1,
+              next_retry_at: null,
+              // charge() already inserted a fresh REQUIRES AUTH failed
+              // row for the retry PI; that row is the one collectible
+              // representation of this obligation (the webhook flips it
+              // to paid once the customer authenticates). Supersede the
+              // original so the same amount isn't shown as owed twice —
+              // and doesn't remain payable after authentication. Guard
+              // against the replay-dedupe case where the failure record
+              // IS this row: self-superseding would hide real debt.
+              superseded_by_payment_id: (err.paymentRecord?.id && err.paymentRecord.id !== payment.id)
+                ? err.paymentRecord.id
+                : null,
+              failure_reason: 'Customer authentication required (3DS) — webhook prompted customer',
+            }).catch(() => {});
+          await logAutopay(payment.customer_id, 'sca_required', {
+            amountCents: Math.round(parseFloat(payment.amount) * 100),
+            paymentId: payment.id,
+            details: { source: 'autopay_retry', stripe_payment_intent_id: err.stripePaymentIntentId },
+          }).catch(() => {});
+          logger.warn(`[billing-cron] SCA required on retry for customer id=${customer.id} — ladder parked, webhook handles customer SMS`);
+          continue;
+        }
+
+        // STRIPE_AMBIGUOUS_OUTCOME — the retry attempt died without a
+        // PI; Stripe may have processed it. A further rung with a fresh
+        // key is a double-charge vector. Park BOTH rows non-collectible
+        // for manual reconciliation.
+        if (err.code === 'STRIPE_AMBIGUOUS_OUTCOME') {
+          if (err.paymentRecord?.id && err.paymentRecord.id !== payment.id) {
+            await db('payments').where({ id: err.paymentRecord.id }).update({
+              next_retry_at: null,
+              superseded_by_payment_id: err.paymentRecord.id,
+              failure_reason: 'Ambiguous Stripe outcome on retry — reconcile before re-charging',
+            }).catch((parkErr) => logger.error(`[billing-cron] Could not park ambiguous attempt row ${err.paymentRecord.id}: ${parkErr.message}`));
+          }
+          await db('payments').where({ id: payment.id }).update({
             retry_count: payment.retry_count + 1,
             next_retry_at: null,
-            metadata: JSON.stringify({
-              ...(payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {}),
-              retried_at: now,
-              retry_payment_id: newPayment?.id || null,
-            }),
-          });
-
-        succeeded++;
-
-        await logAutopay(payment.customer_id, 'retry_success', {
-          amountCents: Math.round(parseFloat(payment.amount) * 100),
-          paymentId: newPayment?.id || null,
-          details: { source: 'autopay', retry_count: payment.retry_count + 1, original_payment_id: payment.id },
-        });
-
-        // Send success SMS with receipt
-        let retryReceiptUrl = null;
-        try {
-          const rawMeta = newPayment?.metadata;
-          const meta = rawMeta ? (typeof rawMeta === 'string' ? JSON.parse(rawMeta) : rawMeta) : {};
-          retryReceiptUrl = meta.stripe_receipt_url || null;
-        } catch (e) { /* ignore */ }
-        try {
-          const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
-          const body = await renderTemplate('autopay_retry_success',
-            { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
-            { workflow: 'autopay_retry_success', entity_type: 'payment', entity_id: payment.id },
-          );
-          await sendCustomerBillingSms({
-            customer,
-            body,
-            purpose: 'payment_receipt',
-            messageType: 'autopay_retry_success',
-            entryPoint: 'autopay_retry_success',
-          });
-        } catch (smsErr) {
-          logger.error(`[billing-cron] Success SMS failed: ${smsErr.message}`);
+            superseded_by_payment_id: payment.id,
+            failure_reason: 'Retry outcome ambiguous at Stripe — parked for manual reconciliation',
+          }).catch((parkErr) => logger.error(`[billing-cron] Could not park original row ${payment.id} after ambiguous retry: ${parkErr.message}`));
+          await logAutopay(payment.customer_id, 'retry_failed', {
+            amountCents: Math.round(parseFloat(payment.amount) * 100),
+            paymentId: payment.id,
+            details: { source: 'autopay_retry', reason: 'ambiguous_stripe_outcome', parked: true },
+          }).catch(() => {});
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: payment.customer_id,
+              alert_type: 'payment_failure',
+              severity: 'high',
+              title: `Autopay retry outcome AMBIGUOUS — $${parseFloat(payment.amount).toFixed(2)}`,
+              description: `The retry of payment ${payment.id} failed without Stripe returning a PaymentIntent — the charge may or may not have gone through. Verify in the Stripe dashboard, then re-charge or mark reconciled. The ladder is parked.`,
+              trigger_data: JSON.stringify({ payment_id: payment.id, attempt_payment_id: err.paymentRecord?.id || null, source: 'autopay_retry_ambiguous_parked' }),
+            });
+          } catch (alertErr) {
+            logger.error(`[billing-cron] Ambiguous-retry alert creation failed: ${alertErr.message}`);
+          }
+          logger.warn(`[billing-cron] AMBIGUOUS retry outcome for payment ${payment.id} — both rows parked`);
+          continue;
         }
 
-        logger.info(`[billing-cron] Retry succeeded for customer id=${customer.id}: $${amount}`);
-      } catch (err) {
         failedAgain++;
         const newRetryCount = payment.retry_count + 1;
 
         logger.error(`[billing-cron] Retry #${newRetryCount} failed for customer id=${customer.id}: ${err.message}`);
+
+        // charge() inserted a fresh failed row for this declined retry
+        // attempt. The ORIGINAL row stays canonical — it carries the
+        // retry ladder — so supersede the new attempt row, otherwise
+        // one obligation is summed twice by /balance and the AI
+        // billing tools (and could be paid twice).
+        if (err.paymentRecord?.id && err.paymentRecord.id !== payment.id) {
+          await db('payments')
+            .where({ id: err.paymentRecord.id })
+            .update({ superseded_by_payment_id: payment.id })
+            .catch((updateErr) => logger.error(`[billing-cron] Could not supersede retry-attempt row ${err.paymentRecord.id}: ${updateErr.message}`));
+        }
 
         if (newRetryCount >= 3) {
           // Final failure — escalate
@@ -488,7 +745,7 @@ const BillingCron = {
               severity: 'high',
               title: `Payment failed after 3 retries — $${amount}`,
               description: `Monthly payment for ${customer.first_name} ${customer.last_name} failed 3 times. Service auto-paused. Last error: ${err.message}`,
-              metadata: JSON.stringify({
+              trigger_data: JSON.stringify({
                 payment_id: payment.id,
                 amount: payment.amount,
                 retry_count: newRetryCount,
@@ -551,7 +808,100 @@ const BillingCron = {
             logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
           });
         }
+        continue;
       }
+
+      // ── Charge succeeded — from here on, NEVER re-enter the failure
+      // ladder. A post-charge DB error must not arm another retry
+      // against money already taken.
+
+      // Resolve the original attempt WITHOUT flipping it to 'paid' —
+      // the retry charge inserted its own paid row, and one Stripe
+      // charge must produce exactly one paid ledger row (the old
+      // status flip double-counted revenue and showed a duplicate
+      // charge in the customer's payment history, with the FAILED
+      // attempt's PI id wearing status='paid'). The attempt stays
+      // 'failed' (it did fail); superseded_by_payment_id is what
+      // takes it out of every outstanding-balance sum (billing-v2
+      // /balance, AI tools), and next_retry_at=null drops it out of
+      // the sweep.
+      try {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            retry_count: payment.retry_count + 1,
+            next_retry_at: null,
+            superseded_by_payment_id: newPayment?.id || null,
+            metadata: JSON.stringify({
+              ...originalMeta,
+              retried_at: now,
+              retry_payment_id: newPayment?.id || null,
+              superseded_by_retry: true,
+            }),
+          });
+      } catch (supersedeErr) {
+        logger.error(`[billing-cron] CRITICAL: retry charged (payment ${newPayment?.id}) but supersede update on original ${payment.id} failed: ${supersedeErr.message}`);
+        // Minimal fallback: disarm the sweep AND mark the row
+        // superseded so it can't be shown as owed (the full update may
+        // have failed on the metadata write). If even this fails, the
+        // durable rung key makes the next run replay the same PI and
+        // land back here.
+        await db('payments').where({ id: payment.id }).update({
+          next_retry_at: null,
+          superseded_by_payment_id: newPayment?.id || payment.id,
+          failure_reason: `Collected by retry payment ${newPayment?.id || '(id unknown)'} — full supersede update failed, reconcile metadata manually`,
+        }).catch(() => {});
+        try {
+          await db('customer_health_alerts').insert({
+            customer_id: payment.customer_id,
+            alert_type: 'payment_failure',
+            severity: 'high',
+            title: `Retry collected but original payment ${payment.id} not superseded`,
+            description: `The retry charge succeeded (payment ${newPayment?.id || 'unknown'}) but the original failed row could not be marked superseded — it may still show as owed. Reconcile manually.`,
+            trigger_data: JSON.stringify({ payment_id: payment.id, retry_payment_id: newPayment?.id || null, source: 'autopay_retry_supersede_failed' }),
+          });
+        } catch (alertErr) {
+          logger.error(`[billing-cron] Supersede-failure alert creation failed: ${alertErr.message}`);
+        }
+      }
+
+      succeeded++;
+
+      // Log what was ACTUALLY collected — the retry recomputes the
+      // total for the customer's current tender (a credit-card failure
+      // retried on ACH/debit collects less than the old surcharged
+      // gross), and autopay_log is the billing-dispute audit trail.
+      await logAutopay(payment.customer_id, 'retry_success', {
+        amountCents: Math.round(parseFloat(newPayment?.amount ?? baseAmount) * 100),
+        paymentId: newPayment?.id || null,
+        details: { source: 'autopay', retry_count: payment.retry_count + 1, original_payment_id: payment.id, original_amount: payment.amount },
+      }).catch((logErr) => logger.error(`[billing-cron] retry_success log failed: ${logErr.message}`));
+
+      // Send success SMS with receipt
+      let retryReceiptUrl = null;
+      try {
+        const rawMeta = newPayment?.metadata;
+        const meta = rawMeta ? (typeof rawMeta === 'string' ? JSON.parse(rawMeta) : rawMeta) : {};
+        retryReceiptUrl = meta.stripe_receipt_url || null;
+      } catch (e) { /* ignore */ }
+      try {
+        const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
+        const body = await renderTemplate('autopay_retry_success',
+          { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
+          { workflow: 'autopay_retry_success', entity_type: 'payment', entity_id: payment.id },
+        );
+        await sendCustomerBillingSms({
+          customer,
+          body,
+          purpose: 'payment_receipt',
+          messageType: 'autopay_retry_success',
+          entryPoint: 'autopay_retry_success',
+        });
+      } catch (smsErr) {
+        logger.error(`[billing-cron] Success SMS failed: ${smsErr.message}`);
+      }
+
+      logger.info(`[billing-cron] Retry succeeded for customer id=${customer.id}: $${newPayment?.amount ?? baseAmount}`);
     }
 
     logger.info(`[billing-cron] Retries complete: ${retried} attempted, ${succeeded} succeeded, ${failedAgain} failed again`);

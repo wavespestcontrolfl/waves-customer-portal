@@ -43,8 +43,10 @@ async function calculateHealthScore(customerId) {
     .limit(20);
 
   if (payments.length > 0) {
-    const hasUnpaid = payments.some(p => ['failed', 'upcoming'].includes(p.status));
-    const allPaid = payments.every(p => p.status === 'paid' || p.status === 'refunded');
+    // Superseded failed rows were collected by their retry — resolved,
+    // not unpaid.
+    const hasUnpaid = payments.some(p => ['failed', 'upcoming'].includes(p.status) && !p.superseded_by_payment_id);
+    const allPaid = payments.every(p => p.status === 'paid' || p.status === 'refunded' || p.superseded_by_payment_id);
     if (allPaid) factors.payment = 20;
     else if (hasUnpaid) factors.payment = 0;
     else factors.payment = 10; // some late

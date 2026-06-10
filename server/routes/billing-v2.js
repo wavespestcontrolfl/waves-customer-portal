@@ -224,8 +224,13 @@ router.get('/balance', async (req, res, next) => {
       .sum('amount as total')
       .first();
 
+    // Failed attempts whose retry later collected are superseded — the
+    // money arrived on the retry's own paid row, so they must not count
+    // as balance still owed (the customer would be shown — and could
+    // pay — an amount already taken).
     const failed = await db('payments')
       .where({ customer_id: req.customerId, status: 'failed' })
+      .whereNull('superseded_by_payment_id')
       .sum('amount as total')
       .first();
 
@@ -246,6 +251,7 @@ router.get('/balance', async (req, res, next) => {
     const mostRecentAttempt = await db('payments')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['paid', 'failed', 'refunded'])
+      .whereNull('superseded_by_payment_id')
       .orderBy('payment_date', 'desc')
       .first();
 
