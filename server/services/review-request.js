@@ -323,6 +323,17 @@ const ReviewService = {
     const customer = await db("customers")
       .where({ id: request.customer_id })
       .first();
+    // Soft-deleted customers get no outbound asks.
+    if (customer && customer.deleted_at) {
+      await db("review_requests").where({ id: requestId }).update({
+        status: "suppressed",
+      });
+      // PII: ID-only per AGENTS.md.
+      logger.info(
+        `[review] Suppressed request (customerId=${customer.id} requestId=${requestId} reason=customer-deleted)`,
+      );
+      return;
+    }
     // Skip customers a CSR has flagged as already-reviewed (Customer 360 toggle).
     if (customer && customer.has_left_google_review) {
       await db("review_requests").where({ id: requestId }).update({
@@ -839,6 +850,12 @@ const ReviewService = {
       .whereNotNull("scheduled_for")
       .where("scheduled_for", "<=", new Date())
       .whereNull("sms_sent_at")
+      .whereNotExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
       .limit(20);
 
     let sent = 0;
@@ -880,6 +897,12 @@ const ReviewService = {
       .where({ followup_sent: false })
       .whereNull("rated_at")
       .where("score", "<", 8)
+      .whereNotExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
       .orderBy("sms_sent_at", "asc")
       .limit(20);
 
@@ -943,6 +966,12 @@ const ReviewService = {
       // straight-to-Google reminder when the draft score already tells us the
       // customer was not a promoter.
       .where((builder) => builder.whereNull("score").orWhere("score", ">=", 8))
+      .whereNotExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
       .orderBy("sms_sent_at", "asc")
       .limit(20);
 

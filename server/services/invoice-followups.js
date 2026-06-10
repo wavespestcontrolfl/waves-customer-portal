@@ -294,6 +294,12 @@ async function runPending() {
     .where('s.status', 'active')
     .where('s.next_touch_at', '<=', now)
     .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    .whereNotExists(function () {
+      this.select(1)
+        .from('customers')
+        .whereRaw('customers.id = s.customer_id')
+        .whereNotNull('customers.deleted_at');
+    })
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.status as invoice_status',

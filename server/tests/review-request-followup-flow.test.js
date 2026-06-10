@@ -30,6 +30,7 @@ function chain(overrides = {}) {
     whereIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
     whereNotNull: jest.fn(function () { return this; }),
+    whereNotExists: jest.fn(function () { return this; }),
     leftJoin: jest.fn(function () { return this; }),
     select: jest.fn(function () { return this; }),
     orderBy: jest.fn(function () { return this; }),

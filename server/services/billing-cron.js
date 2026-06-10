@@ -85,6 +85,7 @@ const BillingCron = {
       .where({ active: true })
       .where('monthly_rate', '>', 0)
       .whereNull('service_paused_at')
+      .whereNull('deleted_at')
       .select(
         'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
@@ -349,6 +350,11 @@ const BillingCron = {
 
       if (!customer) {
         logger.warn(`[billing-cron] Customer ${payment.customer_id} not found for retry — skipping`);
+        continue;
+      }
+
+      if (customer.deleted_at) {
+        logger.warn(`[billing-cron] Customer ${payment.customer_id} is soft-deleted — skipping retry for payment ${payment.id}`);
         continue;
       }
 

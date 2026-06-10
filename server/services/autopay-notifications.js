@@ -32,6 +32,7 @@ async function sendPreChargeReminders() {
     .where({ active: true, autopay_enabled: true })
     .where('monthly_rate', '>', 0)
     .where('billing_day', targetDay)
+    .whereNull('deleted_at')
     .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until');
 
   let sent = 0;
@@ -99,6 +100,7 @@ async function sendCardExpiryWarnings() {
     .join('customers', 'customers.id', 'payment_methods.customer_id')
     .where('customers.active', true)
     .where('customers.autopay_enabled', true)
+    .whereNull('customers.deleted_at')
     .where('payment_methods.autopay_enabled', true)
     .whereRaw(
       "make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) <= ?",
