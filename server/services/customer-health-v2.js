@@ -43,13 +43,18 @@ async function calculateHealthScore(customerId) {
     .limit(20);
 
   if (payments.length > 0) {
-    // Superseded failed rows were collected by their retry — resolved,
-    // not unpaid.
-    const hasUnpaid = payments.some(p => ['failed', 'upcoming'].includes(p.status) && !p.superseded_by_payment_id);
-    const allPaid = payments.every(p => p.status === 'paid' || p.status === 'refunded' || p.superseded_by_payment_id);
+    // Rows superseded by ANOTHER payment were collected by their retry —
+    // resolved, not unpaid. SELF-superseded rows are parked ambiguous/
+    // orphan outcomes awaiting manual reconciliation: neither evidence
+    // of payment nor of non-payment, so exclude them entirely rather
+    // than letting them count toward a perfect "allPaid" score.
+    const considered = payments.filter(p => p.superseded_by_payment_id !== p.id);
+    const hasUnpaid = considered.some(p => ['failed', 'upcoming'].includes(p.status) && !p.superseded_by_payment_id);
+    const allPaid = considered.length > 0
+      && considered.every(p => p.status === 'paid' || p.status === 'refunded' || p.superseded_by_payment_id);
     if (allPaid) factors.payment = 20;
     else if (hasUnpaid) factors.payment = 0;
-    else factors.payment = 10; // some late
+    else factors.payment = 10; // some late, or only parked rows
   } else {
     factors.payment = 0;
   }
