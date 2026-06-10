@@ -581,6 +581,9 @@ export function LeadsSection() {
   const [tab, setTab] = useState("pipeline");
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
+  const [apptForm, setApptForm] = useState(null); // { leadId, date, time, serviceId, serviceType, technicianId, notes }
+  const [apptSaving, setApptSaving] = useState(false);
+  const [services, setServices] = useState([]);
   const [smsSending, setSmsSending] = useState(false);
   const [leads, setLeads] = useState([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
@@ -681,9 +684,21 @@ export function LeadsSection() {
     }
   }, []);
 
+  const loadServices = useCallback(async () => {
+    try {
+      const data = await adminFetch(
+        "/admin/services?is_active=true&limit=200",
+      ).catch(() => ({ services: [] }));
+      setServices(data.services || []);
+    } catch (e) {
+      setServices([]);
+    }
+  }, []);
+
   useEffect(() => {
     loadTechs();
-  }, [loadTechs]);
+    loadServices();
+  }, [loadTechs, loadServices]);
 
   useEffect(() => {
     if (tab === "pipeline") {
@@ -1677,6 +1692,41 @@ export function LeadsSection() {
                                     }
                                   >
                                     Schedule Callback
+                                  </Btn>{" "}
+                                  <Btn
+                                    small
+                                    color={C.green}
+                                    onClick={() => {
+                                      const interest = (
+                                        lead.service_interest || ""
+                                      )
+                                        .trim()
+                                        .toLowerCase();
+                                      const match = interest
+                                        ? services.find((s) =>
+                                            [s.name, s.short_name, s.service_key]
+                                              .filter(Boolean)
+                                              .some((v) =>
+                                                v
+                                                  .toLowerCase()
+                                                  .includes(interest),
+                                              ),
+                                          )
+                                        : null;
+                                      setApptForm({
+                                        leadId: lead.id,
+                                        date: "",
+                                        time: "",
+                                        serviceId: match ? match.id : "",
+                                        serviceType: match
+                                          ? match.name
+                                          : lead.service_interest || "",
+                                        technicianId: "",
+                                        notes: "",
+                                      });
+                                    }}
+                                  >
+                                    Add Appt
                                   </Btn>
                                   {lead.phone && (
                                     <Btn
@@ -1991,6 +2041,228 @@ export function LeadsSection() {
                                       </div>{" "}
                                     </div>
                                   )}
+                                {/* Inline Add Appointment */}
+                                {apptForm && apptForm.leadId === lead.id && (
+                                  <div
+                                    style={{
+                                      border: `1px solid ${C.border}`,
+                                      borderRadius: 10,
+                                      padding: 14,
+                                      marginBottom: 12,
+                                      backgroundColor: C.card,
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        fontSize: 12,
+                                        color: C.green,
+                                        fontWeight: 600,
+                                        marginBottom: 8,
+                                      }}
+                                    >
+                                      Add Appointment
+                                    </div>
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        gap: 8,
+                                        marginBottom: 8,
+                                      }}
+                                    >
+                                      <input
+                                        type="date"
+                                        value={apptForm.date}
+                                        onChange={(e) =>
+                                          setApptForm((prev) => ({
+                                            ...prev,
+                                            date: e.target.value,
+                                          }))
+                                        }
+                                        style={{
+                                          flex: 1,
+                                          backgroundColor: C.input,
+                                          border: `1px solid ${C.inputBorder}`,
+                                          borderRadius: 8,
+                                          padding: "6px 10px",
+                                          color: C.text,
+                                          fontSize: 13,
+                                        }}
+                                      />
+                                      <input
+                                        type="time"
+                                        value={apptForm.time}
+                                        onChange={(e) =>
+                                          setApptForm((prev) => ({
+                                            ...prev,
+                                            time: e.target.value,
+                                          }))
+                                        }
+                                        style={{
+                                          flex: 1,
+                                          backgroundColor: C.input,
+                                          border: `1px solid ${C.inputBorder}`,
+                                          borderRadius: 8,
+                                          padding: "6px 10px",
+                                          color: C.text,
+                                          fontSize: 13,
+                                        }}
+                                      />
+                                    </div>
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        gap: 8,
+                                        marginBottom: 8,
+                                      }}
+                                    >
+                                      <select
+                                        value={apptForm.serviceId}
+                                        onChange={(e) => {
+                                          const sid = e.target.value;
+                                          const svc = services.find(
+                                            (s) => String(s.id) === sid,
+                                          );
+                                          setApptForm((prev) => ({
+                                            ...prev,
+                                            serviceId: sid,
+                                            serviceType: svc
+                                              ? svc.name
+                                              : lead.service_interest || "",
+                                          }));
+                                        }}
+                                        style={{
+                                          flex: 2,
+                                          backgroundColor: C.input,
+                                          border: `1px solid ${C.inputBorder}`,
+                                          borderRadius: 8,
+                                          padding: "6px 10px",
+                                          color: C.text,
+                                          fontSize: 13,
+                                        }}
+                                      >
+                                        <option value="">
+                                          {lead.service_interest
+                                            ? `${lead.service_interest} (from lead)`
+                                            : "— Select a service —"}
+                                        </option>
+                                        {services.map((s) => (
+                                          <option key={s.id} value={s.id}>
+                                            {s.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <select
+                                        value={apptForm.technicianId}
+                                        onChange={(e) =>
+                                          setApptForm((prev) => ({
+                                            ...prev,
+                                            technicianId: e.target.value,
+                                          }))
+                                        }
+                                        style={{
+                                          flex: 1,
+                                          backgroundColor: C.input,
+                                          border: `1px solid ${C.inputBorder}`,
+                                          borderRadius: 8,
+                                          padding: "6px 10px",
+                                          color: C.text,
+                                          fontSize: 13,
+                                        }}
+                                      >
+                                        <option value="">— Unassigned —</option>
+                                        {techs.map((t) => (
+                                          <option key={t.id} value={t.id}>
+                                            {t.first_name} {t.last_name || ""}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                    <textarea
+                                      value={apptForm.notes || ""}
+                                      onChange={(e) =>
+                                        setApptForm((prev) => ({
+                                          ...prev,
+                                          notes: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="Notes for this appointment..."
+                                      style={{
+                                        width: "100%",
+                                        minHeight: 40,
+                                        backgroundColor: C.input,
+                                        border: `1px solid ${C.inputBorder}`,
+                                        borderRadius: 8,
+                                        padding: "8px 12px",
+                                        color: C.text,
+                                        fontSize: 13,
+                                        resize: "vertical",
+                                        boxSizing: "border-box",
+                                        marginBottom: 8,
+                                      }}
+                                    />
+                                    <div
+                                      style={{
+                                        fontSize: 11,
+                                        color: C.muted,
+                                        marginBottom: 8,
+                                      }}
+                                    >
+                                      Saving creates a customer from this lead
+                                      (if not already linked) and marks the lead
+                                      won.
+                                    </div>
+                                    <div style={{ display: "flex", gap: 8 }}>
+                                      <Btn
+                                        small
+                                        color={C.green}
+                                        disabled={
+                                          apptSaving ||
+                                          !apptForm.date ||
+                                          !apptForm.time ||
+                                          !(apptForm.serviceType || "").trim()
+                                        }
+                                        onClick={async () => {
+                                          setApptSaving(true);
+                                          try {
+                                            await adminFetch(
+                                              `/admin/leads/${lead.id}/schedule-appointment`,
+                                              {
+                                                method: "POST",
+                                                body: {
+                                                  date: apptForm.date,
+                                                  time: apptForm.time,
+                                                  serviceType:
+                                                    apptForm.serviceType,
+                                                  serviceId:
+                                                    apptForm.serviceId || null,
+                                                  technicianId:
+                                                    apptForm.technicianId ||
+                                                    null,
+                                                  notes: apptForm.notes,
+                                                },
+                                              },
+                                            );
+                                            setApptForm(null);
+                                            loadLeads();
+                                            expandLead(lead);
+                                          } catch (e) {
+                                            alert("Failed: " + e.message);
+                                          }
+                                          setApptSaving(false);
+                                        }}
+                                      >
+                                        {apptSaving ? "Saving..." : "Save"}
+                                      </Btn>
+                                      <Btn
+                                        small
+                                        color={C.muted}
+                                        onClick={() => setApptForm(null)}
+                                      >
+                                        Cancel
+                                      </Btn>
+                                    </div>
+                                  </div>
+                                )}
                               </div>{" "}
                             </td>
                           </tr>
