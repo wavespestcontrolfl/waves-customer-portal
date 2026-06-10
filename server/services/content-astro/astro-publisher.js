@@ -1019,6 +1019,21 @@ async function mergeAstro(postId) {
   }
 }
 
+// Read the hero_image.src that the just-merged post's frontmatter actually
+// references on main. Authoritative across publish-path versions (hero.webp
+// from the new path, hero.png/.jpg from older in-flight PRs). Returns null if
+// the file/field can't be read so the caller can fall back.
+async function mergedHeroRef(slug) {
+  try {
+    const found = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+    const src = found?.file?.content ? fm.parse(found.file.content)?.data?.hero_image?.src : null;
+    return (typeof src === 'string' && src.startsWith('/images/blog/')) ? src : null;
+  } catch (err) {
+    logger.warn(`[astro-publisher] could not read merged hero ref for ${slug}: ${err.message}`);
+    return null;
+  }
+}
+
 async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
   if (isUnpublish) {
     await db('blog_posts').where({ id: postId }).update({
@@ -1045,15 +1060,16 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
   // consumers (auto social-share, republish) at a file that lives only on a
   // PR branch and vanishes if the build fails and the branch is deleted.
   //
-  // Claim hero.webp ONLY when this publish committed fresh WebP bytes. A
-  // republish of an already-merged post whose featured_image_url is an existing
-  // repo asset (e.g. a pre-WebP /images/blog/<slug>/hero.png) does NOT recommit
-  // a hero, so rewriting it to hero.webp would point at a file that isn't on
-  // main. In that case preserve the existing committed path.
+  // Read the authoritative path straight from the merged frontmatter rather
+  // than assuming an extension: a PR opened by the new code committed
+  // hero.webp, but one opened by the OLD path (still in flight when this
+  // deploys) committed hero.png/.jpg, and guessing webp would record a broken
+  // path. Fall back to the existing committed path, then to hero.webp.
   const existingHero = post.featured_image_url;
-  const heroRef = (existingHero && existingHero.startsWith('/images/blog/'))
-    ? existingHero
-    : `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
+  const heroRef =
+    (await mergedHeroRef(slug))
+    || (existingHero && existingHero.startsWith('/images/blog/') ? existingHero : null)
+    || `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
   await db('blog_posts').where({ id: postId }).update({
     astro_status: 'merged',
     astro_merged_at: mergedAt,
