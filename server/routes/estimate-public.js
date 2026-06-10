@@ -5503,8 +5503,12 @@ router.put('/:token/accept', async (req, res, next) => {
           })
           .whereNull('deleted_at')
           .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
-          .orderBy('updated_at', 'desc')
-          .limit(10);
+          .orderBy('updated_at', 'desc');
+        // No row cap: a property manager can hold many profiles on one
+        // phone, and truncating by recency could drop the one profile
+        // whose email/address uniquely matches — splitting the estimate
+        // off the existing account. pickAcceptCustomerMatch needs the
+        // full set to judge ambiguity.
         const existing = pickAcceptCustomerMatch(candidates, estimate);
         if (!existing && candidates.length > 1) {
           logger.warn(`[estimate-accept] ${candidates.length} live customers share phone for estimate ${estimate.id}; no unique email/address match — creating a new profile`);
