@@ -152,8 +152,9 @@ function pickAcceptCustomerMatch(candidates, estimate) {
     const byAddress = pool.filter((c) => {
       const line1 = normalizeAddressForMatch(c.address_line1);
       // estimate.address is the full address; address_line1 is the street
-      // line. Require a meaningful street line so '' never matches.
-      return line1.length >= 5 && estAddr.startsWith(line1);
+      // line. Require a meaningful street line so '' never matches, and a
+      // token boundary so '12 oak' can't match '12 oakridge dr'.
+      return line1.length >= 5 && (estAddr === line1 || estAddr.startsWith(line1 + ' '));
     });
     if (byAddress.length === 1) return byAddress[0];
   }
