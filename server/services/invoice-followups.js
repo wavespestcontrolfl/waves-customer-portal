@@ -289,17 +289,15 @@ async function runPending() {
     return { sent: 0, skipped: 0 };
   }
 
+  // No deleted-customer filter here: fireStep() pauses those sequences
+  // (status='paused', next_touch_at=null) so they're handled terminally
+  // rather than staying armed and past-due until a restore fires a
+  // stale collection touch.
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'active')
     .where('s.next_touch_at', '<=', now)
     .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
-    .whereNotExists(function () {
-      this.select(1)
-        .from('customers')
-        .whereRaw('customers.id = s.customer_id')
-        .whereNotNull('customers.deleted_at');
-    })
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.status as invoice_status',

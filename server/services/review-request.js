@@ -910,6 +910,25 @@ const ReviewService = {
     );
     const recentFollowupCutoff = new Date(Date.now() - 14 * 24 * 3600000); // 14 days
 
+    // Terminally mark due follow-ups for soft-deleted customers as
+    // handled (mirrors processScheduled): filtering alone leaves
+    // followup_sent=false rows eligible forever, so a restored customer
+    // would get a stale follow-up.
+    const followupsClosed = await db("review_requests")
+      .whereIn("status", ["sent", "opened"])
+      .where("sms_sent_at", "<", cutoff)
+      .where({ followup_sent: false })
+      .whereExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
+      .update({ followup_sent: true, followup_sent_at: new Date() });
+    if (followupsClosed > 0) {
+      logger.info(`[review] Closed ${followupsClosed} due follow-ups (reason=customer-deleted)`);
+    }
+
     const nonPromoterDrafts = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
       .where("sms_sent_at", "<", cutoff)
