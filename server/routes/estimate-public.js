@@ -119,6 +119,14 @@ function clientIp(req) {
     .toString().split(',')[0].trim().slice(0, 64);
 }
 
+// estimates.customer_phone may be freeform (admin input) or E.164 (quote
+// wizard) while customers.phone is freeform — compare on the last 10 digits
+// like admin-customers/admin-communications do, never on the raw string.
+function phoneLast10(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+
 // Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
 function readCookie(req, name) {
   const header = req.headers.cookie;
@@ -5447,7 +5455,22 @@ router.put('/:token/accept', async (req, res, next) => {
 
       let customerId = estimate.customer_id;
       if (!customerId && estimate.customer_phone) {
-        const existing = await trx('customers').where({ phone: estimate.customer_phone }).first();
+        // Match on last-10 digits (format-insensitive), skip soft-deleted
+        // rows, and order deterministically: exact raw match first, then the
+        // most recently updated profile (multiple profiles can legitimately
+        // share a phone — e.g. landlord + rental property).
+        const matchDigits = phoneLast10(estimate.customer_phone);
+        const existing = await trx('customers')
+          .where((q) => {
+            q.where({ phone: estimate.customer_phone });
+            if (matchDigits) {
+              q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${matchDigits}`]);
+            }
+          })
+          .whereNull('deleted_at')
+          .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
+          .orderBy('updated_at', 'desc')
+          .first();
         if (existing) {
           customerId = existing.id;
         } else {
@@ -5460,8 +5483,13 @@ router.put('/:token/accept', async (req, res, next) => {
             email: estimate.customer_email || null,
             address_line1: estimate.address || '',
             city: '', state: 'FL', zip: '',
-            waveguard_tier: estimate.waveguard_tier || 'Bronze',
-            monthly_rate: effectiveMonthlyTotal,
+            // One-time accepts must not look like WaveGuard members: a
+            // monthly_rate > 0 with active+autopay defaults would put them
+            // in billing-cron's monthly charge sweep. 'One-Time' is an
+            // explicit non-membership tier (the column defaults to 'Bronze'
+            // if omitted, so it must be set).
+            waveguard_tier: treatAsOneTime ? 'One-Time' : (estimate.waveguard_tier || 'Bronze'),
+            monthly_rate: treatAsOneTime ? null : effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
           }).returning('*');
