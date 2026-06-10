@@ -43,6 +43,29 @@ function isBlogTarget(filePath) {
   return typeof filePath === 'string' && filePath.startsWith(`${ASTRO_BLOG_DIR}/`);
 }
 const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
+const HUB_ORIGIN = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+
+// A hero already committed to the Astro repo — either the relative /images/blog
+// path or its absolute hub URL. These are NOT re-fetched on republish (the
+// asset already lives in the repo / on the live site).
+function isCommittedHeroUrl(url) {
+  return !!url && (
+    url.startsWith(`${ASTRO_HERO_PUBLIC_BASE}/`)
+    || url.startsWith(`${HUB_ORIGIN}${ASTRO_HERO_PUBLIC_BASE}/`)
+  );
+}
+
+// Absolute public URL for DB/admin consumers. The portal admin editor renders
+// blog_posts.featured_image_url directly, served from the PORTAL origin — which
+// does not host the Astro repo's /images/blog assets — so a bare relative path
+// would show a broken hero preview. Frontmatter keeps relative paths; the DB
+// stores absolute.
+function absoluteHeroUrl(ref) {
+  if (!ref) return null;
+  if (/^https?:\/\//i.test(ref)) return ref;
+  if (ref.startsWith('/')) return `${HUB_ORIGIN}${ref}`;
+  return null;
+}
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
@@ -403,10 +426,11 @@ async function publishAstro(postId) {
     //     time and commit it. The bytes stay in memory; we never persist the
     //     ~5MB data: URL to the DB (featured_image_url is varchar(255) and the
     //     blog list does SELECT *, so storing it there would bloat every load).
-    //   - featured_image_url already points at /images/blog/ → it's committed
-    //     in the repo from a prior publish; reference it as-is.
+    //   - featured_image_url already references a committed hero (relative
+    //     /images/blog/ path or its absolute hub URL) → it's in the repo from a
+    //     prior merged publish; reference it as-is, don't re-fetch.
     let heroImage = null;
-    if (post.featured_image_url && !post.featured_image_url.startsWith('/images/blog/')) {
+    if (post.featured_image_url && !isCommittedHeroUrl(post.featured_image_url)) {
       heroImage = await fetchImageBuffer(post.featured_image_url);
       if (!heroImage?.buffer) throw new Error('featured image could not be fetched for Astro publish');
     } else if (!post.featured_image_url) {
@@ -1065,11 +1089,13 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
   // hero.webp, but one opened by the OLD path (still in flight when this
   // deploys) committed hero.png/.jpg, and guessing webp would record a broken
   // path. Fall back to the existing committed path, then to hero.webp.
-  const existingHero = post.featured_image_url;
-  const heroRef =
+  const rawHeroRef =
     (await mergedHeroRef(slug))
-    || (existingHero && existingHero.startsWith('/images/blog/') ? existingHero : null)
+    || (isCommittedHeroUrl(post.featured_image_url) ? post.featured_image_url : null)
     || `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
+  // Store an ABSOLUTE hub URL for DB/admin/social consumers; the relative
+  // /images/blog path only resolves on the Astro site, not the portal origin.
+  const heroRef = absoluteHeroUrl(rawHeroRef);
   await db('blog_posts').where({ id: postId }).update({
     astro_status: 'merged',
     astro_merged_at: mergedAt,
