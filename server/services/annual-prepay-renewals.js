@@ -448,7 +448,7 @@ async function createTermForAnnualPrepay({
     customer_id: customerId,
     source_estimate_id: sourceEstimateId || null,
     prepay_invoice_id: prepayInvoiceId || null,
-    plan_label,
+    plan_label: planLabel,
     monthly_rate: monthlyRate != null ? monthlyRate : null,
     prepay_amount: prepayAmount != null ? prepayAmount : null,
     term_start: normalizedStart,
