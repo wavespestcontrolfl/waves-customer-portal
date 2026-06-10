@@ -89,10 +89,12 @@ class SmartRebooker {
     const today = new Date();
 
     for (let d = 1; d <= 10; d++) {
-      const candidateDate = new Date(today);
-      candidateDate.setDate(today.getDate() + d);
+      // ET calendar math — toISOString() reads the UTC date while displayDate
+      // below formats in ET, so between 8 PM and midnight ET the customer would
+      // see "Thu Jun 11" but the system would book Jun 12. Derive both from ET.
+      const candidateDate = addETDays(today, d); // anchored at noon UTC on the ET calendar day
 
-      const dateStr = candidateDate.toISOString().split('T')[0];
+      const dateStr = etDateString(candidateDate);
 
       const dayLoad = await db('scheduled_services')
         .where('scheduled_date', dateStr)

@@ -8,6 +8,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 class AvailabilityEngine {
 
@@ -36,11 +37,13 @@ class AvailabilityEngine {
     const today = new Date();
 
     for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
-      const date = new Date(today);
-      date.setDate(date.getDate() + i);
-      if (date.getDay() === 0) continue; // skip Sunday
+      // ET calendar math — toISOString() reads the UTC date (already tomorrow
+      // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
+      // the offered day and the ET labels below would diverge in that window.
+      const date = addETDays(today, i); // anchored at noon UTC on the ET calendar day
+      if (etParts(date).dayOfWeek === 0) continue; // skip Sunday (ET)
 
-      const dateStr = date.toISOString().split('T')[0];
+      const dateStr = etDateString(date);
 
       // Find techs working in this zone on this day
       const techBlocks = await db('tech_schedule_blocks')
@@ -98,7 +101,7 @@ class AvailabilityEngine {
         days.push({
           date: dateStr,
           dayOfWeek: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
-          dayNum: date.getDate(),
+          dayNum: date.getUTCDate(),
           month: date.toLocaleDateString('en-US', { month: 'short', timeZone: 'America/New_York' }),
           fullDate: date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
           slots: slots.map(s => ({

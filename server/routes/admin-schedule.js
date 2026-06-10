@@ -2086,6 +2086,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           }
           case 'reschedule': {
             if (!payload?.scheduledDate) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
+            let reminderSyncTime = null;
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
@@ -2093,7 +2094,23 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (payload?.windowStart) updates.window_start = payload.windowStart;
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
               await trx('scheduled_services').where({ id }).update(updates);
+              const prevDate = svc.scheduled_date instanceof Date
+                ? svc.scheduled_date.toISOString().split('T')[0]
+                : normalizeDateOnly(svc.scheduled_date);
+              const nextDate = normalizeDateOnly(payload.scheduledDate);
+              const nextStart = payload?.windowStart || svc.window_start;
+              if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
+                reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
+              }
             });
+            // Resync the reminder row so the 72h/24h cron texts the new date —
+            // mirrors the cancel branch's handleCancellation call below.
+            if (reminderSyncTime) {
+              try {
+                const AppointmentReminders = require('../services/appointment-reminders');
+                await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: false });
+              } catch {}
+            }
             break;
           }
           case 'cancel': {
@@ -2428,7 +2445,35 @@ router.put('/:id/update-details', async (req, res, next) => {
       }
 
       if (detailsChanged) {
+        // When the appointment's own date or arrival window changes, resync its
+        // reminder row in the same transaction — otherwise the 72h/24h cron
+        // texts the customer the old date/time. (Recurring children get the
+        // same treatment via resetAppointmentReminderForScheduleRewrite below.)
+        const reminderFieldsTouched = updates.scheduled_date !== undefined || updates.window_start !== undefined;
+        const reminderBefore = reminderFieldsTouched
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
+          : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        if (reminderBefore) {
+          const prevDate = reminderBefore.scheduled_date instanceof Date
+            ? reminderBefore.scheduled_date.toISOString().split('T')[0]
+            : normalizeDateOnly(reminderBefore.scheduled_date);
+          const nextDate = updates.scheduled_date !== undefined
+            ? normalizeDateOnly(updates.scheduled_date)
+            : prevDate;
+          const prevStart = normalizeHHMM(reminderBefore.window_start);
+          const nextStart = updates.window_start !== undefined
+            ? normalizeHHMM(updates.window_start)
+            : prevStart;
+          if (nextDate && (nextDate !== prevDate || nextStart !== prevStart)) {
+            await resetAppointmentReminderForScheduleRewrite(
+              trx,
+              req.params.id,
+              nextDate,
+              updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
+            );
+          }
+        }
       }
       // Replace the appointment's additional service lines with the submitted
       // set (add / edit / remove handled uniformly by delete + re-insert).
