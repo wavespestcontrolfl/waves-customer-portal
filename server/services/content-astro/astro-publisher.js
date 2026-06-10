@@ -129,7 +129,18 @@ async function buildFrontmatter(post) {
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
   const targetSites = normalizeTargetSites(post.target_sites);
   const relatedServices = normalizeArray(post.related_services);
-  const domains = targetSites.length > 0 ? targetSites : undefined;
+  // Automated blog posts (idea generator / demand miner / content calendar)
+  // target the hub only — they're general SWFL educational content, not
+  // spoke-domain material. Without an explicit target the empty-list default
+  // would fan them across every spoke domain, so pin automated, untargeted
+  // posts to wavespestcontrol.com. Manually-authored posts keep the existing
+  // empty-means-astro-default behavior (so the "publish to all domains" option
+  // still works for hand-curated content).
+  const AUTOMATED_BLOG_SOURCES = new Set(['ai_generated', 'demand_mined', 'calendar']);
+  const effectiveTargets = targetSites.length > 0
+    ? targetSites
+    : (AUTOMATED_BLOG_SOURCES.has(post.source) ? ['wavespestcontrol.com'] : []);
+  const domains = effectiveTargets.length > 0 ? effectiveTargets : undefined;
 
   const data = {
     title: post.title,

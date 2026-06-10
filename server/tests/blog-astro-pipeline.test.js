@@ -1152,3 +1152,38 @@ describe('compressToWebp (hero LCP optimization)', () => {
     expect(meta.width).toBeLessThanOrEqual(1600);
   });
 });
+
+describe('automated blog posts target the hub only', () => {
+  const base = {
+    title: 'Dollar Spot in Venice', slug: 'dollar-spot-venice',
+    meta_description: 'A short guide to dollar spot on Venice lawns and how to actually treat it.',
+    keyword: 'dollar spot Venice', tag: 'Lawn Disease',
+    featured_image_url: '/images/blog/dollar-spot-venice/hero.webp',
+    content: 'Dollar spot shows up as small bleached patches on warm-season turf.',
+  };
+
+  test('an automated (ai_generated) post with no target_sites pins to wavespestcontrol.com', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, source: 'ai_generated' });
+    expect(data.domains).toEqual(['wavespestcontrol.com']);
+    expect(data.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
+  });
+
+  test('demand_mined and calendar sources also pin to the hub', async () => {
+    for (const source of ['demand_mined', 'calendar']) {
+      const data = await AstroPublisher.buildFrontmatter({ ...base, source });
+      expect(data.domains).toEqual(['wavespestcontrol.com']);
+    }
+  });
+
+  test('a manual post with no target_sites keeps the empty/astro-default (undefined domains)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, source: 'manual' });
+    expect(data.domains).toBeUndefined();
+  });
+
+  test('an explicit target_sites is always respected, even for automated posts', async () => {
+    const data = await AstroPublisher.buildFrontmatter({
+      ...base, source: 'ai_generated', target_sites: ['wavespestcontrol.com', 'example-spoke.com'],
+    });
+    expect(data.domains).toContain('wavespestcontrol.com');
+  });
+});
