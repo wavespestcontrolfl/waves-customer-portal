@@ -9,6 +9,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import PendingActionsCard from "./PendingActionsCard";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const D = {
@@ -175,6 +176,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
+  const [pendingActions, setPendingActions] = useState([]);
   const [structuredData, setStructuredData] = useState(null);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
@@ -243,6 +245,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
       setLoading(true);
       setExpanded(true);
       setResponse(null);
+      setPendingActions([]);
       setStructuredData(null);
 
       try {
@@ -256,6 +259,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
           }),
         });
         setResponse(data.response);
+        setPendingActions(data.pendingActions || []);
         setStructuredData(data.structuredData);
         setConversationHistory(data.conversationHistory || []);
 
@@ -290,6 +294,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
   const clear = () => {
     setConversationHistory([]);
     setResponse(null);
+    setPendingActions([]);
     setStructuredData(null);
     setExpanded(false);
   };
@@ -513,6 +518,15 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
           >
             {renderMarkdown(response)}
           </div>
+          <PendingActionsCard
+            actions={pendingActions}
+            variant="dark"
+            onResolved={(action, decision, body) => {
+              if (decision === "confirm" && body?.success && onRefresh) {
+                setTimeout(() => onRefresh(), 500);
+              }
+            }}
+          />
           {/* Follow-up */}
           <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
             {" "}

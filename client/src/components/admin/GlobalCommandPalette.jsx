@@ -22,6 +22,7 @@ import {
 import { useLocation } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
 import DictationButton from "../tech/DictationButton";
+import PendingActionsCard from "./PendingActionsCard";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
@@ -254,6 +255,7 @@ function GlobalCommandPalette(_props, ref) {
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
+  const [pendingActions, setPendingActions] = useState([]);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
@@ -313,6 +315,7 @@ function GlobalCommandPalette(_props, ref) {
   useEffect(() => {
     setConversationHistory([]);
     setResponse(null);
+    setPendingActions([]);
   }, [context]);
 
   const submit = useCallback(
@@ -321,6 +324,7 @@ function GlobalCommandPalette(_props, ref) {
       if (!q || loading) return;
       setLoading(true);
       setResponse(null);
+      setPendingActions([]);
       saveRecent(q);
       setRecents(loadRecents());
 
@@ -335,6 +339,7 @@ function GlobalCommandPalette(_props, ref) {
           }),
         });
         setResponse(data.response);
+        setPendingActions(data.pendingActions || []);
         setConversationHistory(data.conversationHistory || []);
       } catch (err) {
         setResponse(`Error: ${err.message}`);
@@ -358,6 +363,7 @@ function GlobalCommandPalette(_props, ref) {
   const clear = () => {
     setConversationHistory([]);
     setResponse(null);
+    setPendingActions([]);
     setPrompt("");
   };
 
@@ -406,6 +412,7 @@ function GlobalCommandPalette(_props, ref) {
         handleKeyDown={handleKeyDown}
         loading={loading}
         response={response}
+        pendingActions={pendingActions}
         recents={recents}
         quickActions={quickActions}
         contextLabel={contextLabel}
@@ -646,6 +653,7 @@ function GlobalCommandPalette(_props, ref) {
             >
               {renderMarkdown(response)}
             </div>{" "}
+            <PendingActionsCard actions={pendingActions} variant="dark" />
           </div>
         )}
         {response && !loading && (
@@ -759,6 +767,7 @@ function MobileSheet({
   handleKeyDown,
   loading,
   response,
+  pendingActions,
   recents,
   quickActions,
   contextLabel,
@@ -997,6 +1006,9 @@ function MobileSheet({
             >
               {renderMarkdown(response)}
             </div>
+          )}
+          {response && !loading && (
+            <PendingActionsCard actions={pendingActions} variant="light" />
           )}
 
           {!response && !loading && recents.length > 0 && (
