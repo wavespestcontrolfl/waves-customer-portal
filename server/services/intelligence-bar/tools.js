@@ -137,10 +137,11 @@ Only returns active customers with prior service history in that category.`,
     name: 'create_customer',
     description: `Create a new customer record (new lead or new account). Use when the operator asks to add a customer who is not in the database yet.
 Checks for an existing customer with the same phone number first — if one exists, returns that customer instead of creating a duplicate.
-IMPORTANT: Always confirm with the operator before creating. Show the name, phone, and address you plan to save and ask for approval.`,
+Without confirm: true this returns a PREVIEW only and writes nothing. Workflow: call once to get the preview, show it to the operator, and only after they approve call again with confirm: true.`,
     input_schema: {
       type: 'object',
       properties: {
+        confirm: { type: 'boolean', description: 'Must be true to actually create the record. Omit on the first call to get a no-write preview.' },
         first_name: { type: 'string' },
         last_name: { type: 'string' },
         phone: { type: 'string' },
@@ -822,6 +823,27 @@ async function createCustomer(input) {
     };
   }
 
+  const record = {
+    first_name: firstName,
+    last_name: lastName,
+    phone,
+    email,
+    address_line1: String(input.address_line1 || '').trim() || null,
+    city: String(input.city || '').trim() || null,
+    state: String(input.state || '').trim().toUpperCase().slice(0, 2) || 'FL',
+    zip: String(input.zip || '').trim() || null,
+    pipeline_stage: stage,
+    lead_source: String(input.lead_source || '').trim() || 'intelligence_bar',
+  };
+
+  if (input.confirm !== true) {
+    return {
+      preview: true,
+      would_create: record,
+      note: 'PREVIEW ONLY — nothing was created. Show these details to the operator, and after they approve, call create_customer again with the same fields plus confirm: true.',
+    };
+  }
+
   const created = await db.transaction(async (trx) => {
     const [account] = await trx('customer_accounts').insert({
       first_name: firstName,
@@ -831,20 +853,11 @@ async function createCustomer(input) {
     }).returning('*');
 
     const [customer] = await trx('customers').insert({
+      ...record,
       account_id: account.id,
       is_primary_profile: true,
       profile_label: 'Primary',
-      first_name: firstName,
-      last_name: lastName,
-      phone,
-      email,
-      address_line1: String(input.address_line1 || '').trim() || null,
-      city: String(input.city || '').trim() || null,
-      state: String(input.state || '').trim().toUpperCase().slice(0, 2) || 'FL',
-      zip: String(input.zip || '').trim() || null,
-      pipeline_stage: stage,
       pipeline_stage_changed_at: new Date(),
-      lead_source: String(input.lead_source || '').trim() || 'intelligence_bar',
       crm_notes: input.notes ? String(input.notes).trim() : null,
       active: true,
     }).returning('*');
@@ -865,7 +878,7 @@ async function createCustomer(input) {
     return customer;
   });
 
-  logger.info(`[intelligence-bar] Created customer ${created.id} (${firstName} ${lastName || ''})`);
+  logger.info(`[intelligence-bar] Created customer ${created.id} (source: ${record.lead_source}, stage: ${record.pipeline_stage})`);
 
   return {
     success: true,

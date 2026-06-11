@@ -98,6 +98,18 @@ describe('intelligence bar create_customer', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('returns a no-write preview when confirm is not true', async () => {
+    db.mockImplementation(() => makeDuplicateLookup(undefined));
+
+    const result = await executeTool('create_customer', {
+      first_name: 'Jeffrey', last_name: 'Menard', phone: '(941) 524-0066',
+    });
+
+    expect(result.preview).toBe(true);
+    expect(result.would_create).toMatchObject({ first_name: 'Jeffrey', state: 'FL', pipeline_stage: 'new_lead' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('creates account, customer, default rows, and tags inside one transaction', async () => {
     db.mockImplementation(() => makeDuplicateLookup(undefined));
     const calls = [];
@@ -105,6 +117,7 @@ describe('intelligence bar create_customer', () => {
     db.transaction.mockImplementation(async (cb) => cb(trx));
 
     const result = await executeTool('create_customer', {
+      confirm: true,
       first_name: 'Jeffrey',
       last_name: 'Menard',
       phone: '(941) 524-0066',

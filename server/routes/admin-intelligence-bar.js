@@ -651,7 +651,7 @@ RULES:
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
-- You CAN create new customers with create_customer — confirm name/phone/address with the operator first
+- You CAN create new customers with create_customer — first call returns a preview, show it to the operator, then re-call with confirm: true after they approve
 - You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
 
@@ -745,7 +745,11 @@ router.post('/query', async (req, res, next) => {
       // Execute all tool calls using context-aware router
       const results = [];
       for (const toolUse of toolUses) {
-        logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, toolUse.input);
+        // create_customer inputs carry PII (name/phone/email/address) — log keys only
+        const loggableInput = toolUse.name === 'create_customer'
+          ? { fields: Object.keys(toolUse.input || {}), confirm: toolUse.input?.confirm === true }
+          : toolUse.input;
+        logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
 
         let result;
         let failed = false;
