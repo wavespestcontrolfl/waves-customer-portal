@@ -416,7 +416,22 @@ class SmartRebooker {
           updateData.recurring_weekday = opts.weekday;
         }
 
-        await trx('scheduled_services').where({ id: sib.id }).update(updateData);
+        const rowUpdate = trx('scheduled_services').where({ id: sib.id });
+        if (isLiveAnchor) {
+          // Atomic guard for the live anchor — same contract as the
+          // single-job override: the tech can complete/cancel this job
+          // between the sibling SELECT above and this UPDATE, and a
+          // terminal row must not be steamrolled back to confirmed +
+          // a rewound tracker. 0 rows updated → the whole series trx
+          // rolls back (all-or-none).
+          rowUpdate.where({ status: sib.status });
+        }
+        const updated = await rowUpdate.update(updateData);
+        if (isLiveAnchor && updated === 0) {
+          throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
+            statusCode: 409,
+          });
+        }
 
         if (sib.status !== 'confirmed') {
           // transitioned_by is a UUID FK to technicians; the route

@@ -319,6 +319,31 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(updates[2].update).not.toHaveBeenCalled();
   });
 
+  test('rescheduleSeries live anchor is status-guarded — a concurrent completion aborts the whole trx', async () => {
+    const { updates, historyInsert } = wireSeriesMocks('on_site', [
+      { id: 'svc-1', status: 'on_site', scheduled_date: '2026-06-10', window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
+    ]);
+    // Tech completes the job between the sibling SELECT and the UPDATE —
+    // the status-guarded write matches 0 rows.
+    updates[0].update.mockResolvedValue(0);
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      { allowLive: true },
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining('transitioned to a non-reschedulable state concurrently'),
+    });
+
+    // Anchor write carried the status guard; nothing after it ran.
+    expect(updates[0].where).toHaveBeenCalledWith({ status: 'on_site' });
+    expect(updates[1].update).not.toHaveBeenCalled();
+    expect(historyInsert.insert).not.toHaveBeenCalled();
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).not.toHaveBeenCalled();
+  });
+
   test('rescheduleSeries allowLive never permits a terminal anchor', async () => {
     const serviceLookup = chain({ first: jest.fn().mockResolvedValue(liveService('completed')) });
     db.mockImplementation(() => serviceLookup);
