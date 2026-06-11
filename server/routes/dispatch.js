@@ -311,10 +311,21 @@ function matchTechs(techs, serviceType, zip, jobCategoryKey) {
   }).sort((a, b) => b.matchScore - a.matchScore);
 }
 
+// pg returns DATE columns as JS Date objects; normalize to YYYY-MM-DD so the
+// string comparison against `since` works (Date >= 'YYYY-MM-DD' is always false).
+function dateOnly(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().split('T')[0];
+  return String(value).split('T')[0];
+}
+
 async function getInsights(days) {
   const since = etDateString(addETDays(new Date(), -days));
   const jobs = await canonicalJobs({});
-  const recent = jobs.filter((job) => !job.scheduled_date || job.scheduled_date >= since);
+  const recent = jobs.filter((job) => {
+    const scheduled = dateOnly(job.scheduled_date);
+    return !scheduled || scheduled >= since;
+  });
   const completed = recent.filter((job) => job.canonical_status === 'completed');
   const callbacks = recent.filter((job) => job.job_category === 'callback');
   const actualRevenue = completed.reduce((sum, job) => sum + Number(job.estimated_revenue || 0), 0);

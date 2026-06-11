@@ -65,12 +65,15 @@ function normalizeReplyForComparison(value) {
 }
 
 async function findSingleCustomerForPhone(phone) {
-  const digits = phoneDigits(normalizePhone(phone) || phone);
-  if (!digits) return null;
+  // Compare on the last 10 digits so stored formats ('+19415551234',
+  // '9415551234', '(941) 555-1234') all match the same dialable number —
+  // full-digit equality misses customers stored without the country code.
+  const last10 = normalizePhoneLast10(normalizePhone(phone) || phone);
+  if (!last10) return null;
 
   const matches = await db('customers')
     .whereNull('deleted_at')
-    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [digits])
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
     .orderBy('updated_at', 'desc')
     .limit(2);
 
@@ -116,7 +119,7 @@ router.post('/sms', async (req, res, next) => {
     }
     let trustedCustomerId;
     if (customerId) {
-      const customer = await db('customers').where({ id: customerId }).first('id', 'phone');
+      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
       const normalizedCustomerPhone = normalizePhone(customer.phone);
@@ -912,7 +915,7 @@ router.post('/schedule-sms', async (req, res, next) => {
 
     let trustedCustomerId = null;
     if (customerId) {
-      const customer = await db('customers').where({ id: customerId }).first('id', 'phone');
+      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
       const normalizedCustomerPhone = normalizePhone(customer.phone);
@@ -921,7 +924,10 @@ router.post('/schedule-sms', async (req, res, next) => {
       }
       trustedCustomerId = customer.id;
     } else {
-      const fallback = await db('customers').where({ phone: to }).first('id');
+      // Digit-normalized, deleted-filtered, ambiguity-aware lookup — a raw
+      // exact-string phone match misses formatting variants and can link the
+      // scheduled SMS to a soft-deleted or arbitrary duplicate customer.
+      const fallback = await findSingleCustomerForPhone(to).catch(() => null);
       if (fallback) trustedCustomerId = fallback.id;
     }
 

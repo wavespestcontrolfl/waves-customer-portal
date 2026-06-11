@@ -6,6 +6,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { auditPaymentReconcile, ipFromReq, uaFromReq } = require('../services/audit-log');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
 
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require('stripe')(stripeKey) : null;
@@ -77,14 +78,19 @@ router.post('/reconcile', async (req, res, next) => {
     const { invoiceId, stripeChargeId, collectedVia, amount, note } = req.body || {};
     if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
     if (!collectedVia) return res.status(400).json({ error: 'collectedVia required' });
+    if (amount != null && (!Number.isFinite(Number(amount)) || Number(amount) <= 0)) {
+      return res.status(400).json({ error: 'amount must be a positive number' });
+    }
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoice.status === 'paid') {
-      return res.status(409).json({ error: 'Invoice already paid' });
-    }
-    if (invoice.status === 'void') {
-      return res.status(409).json({ error: 'Invoice is void' });
+    // Uncollectible invoices (paid/processing/void/refunded/canceled) can't be
+    // reconciled — 'processing' especially: an ACH payment in flight will
+    // settle on its own, so a cash/check reconcile would double-collect.
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (e) {
+      return res.status(409).json({ error: e.message });
     }
 
     const updates = {
@@ -132,17 +138,47 @@ router.post('/reconcile', async (req, res, next) => {
         || chargeDetails.payment_method_details?.card?.last4 || null;
       updates.receipt_url = chargeDetails.receipt_url || null;
     } else if (amount != null) {
-      // Manual reconciliation — record the amount collected for audit
+      // Manual reconciliation — record the amount collected for audit.
+      // Mirror the Stripe path's $1 tolerance: marking an invoice paid while
+      // recording a materially different collected amount would silently
+      // drift revenue reports from the invoice ledger (e.g. a $1 typo on a
+      // $500 invoice). Edit the invoice first if the total really changed.
+      const invoiceTotal = parseFloat(invoice.total || 0);
+      if (Math.abs(Number(amount) - invoiceTotal) > 1) {
+        return res.status(400).json({
+          error: `Amount mismatch — collected $${Number(amount).toFixed(2)} but invoice is $${invoiceTotal.toFixed(2)}. Edit the invoice total first if it changed.`,
+        });
+      }
       updates.payment_method = collectedVia;
     }
 
-    await db('invoices').where({ id: invoiceId }).update(updates);
+    // Conditional update closes the TOCTOU window: if the invoice became
+    // uncollectible (paid/processing/void/refunded/canceled) between our read
+    // and this write, the UPDATE matches 0 rows and we bail instead of
+    // double-marking it.
+    const updatedRows = await db('invoices')
+      .where({ id: invoiceId })
+      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+      .update(updates);
+    if (!updatedRows) {
+      const current = await db('invoices').where({ id: invoiceId }).first('status');
+      return res.status(409).json({
+        error: `Invoice status changed to '${current?.status || 'unknown'}' while reconciling — no changes applied`,
+      });
+    }
+
+    // What was actually collected: Stripe reconciles record the verified
+    // charge amount (a caller-supplied amount must not override it); manual
+    // reconciles honor the operator-supplied amount, else the invoice total.
+    const collectedAmount = chargeDetails
+      ? chargeDetails.amount / 100
+      : (amount != null ? Number(amount) : parseFloat(invoice.total));
 
     // Also create a payments ledger row so revenue reports pick up the collection
     try {
       await db('payments').insert({
         customer_id: invoice.customer_id,
-        amount: parseFloat(invoice.total),
+        amount: collectedAmount,
         status: 'paid',
         description: `Invoice ${invoice.invoice_number} — ${collectedVia}`,
         payment_date: etDateString(),
@@ -177,7 +213,7 @@ router.post('/reconcile', async (req, res, next) => {
       invoice_number: invoice.invoice_number,
       collected_via: collectedVia,
       stripe_charge_id: stripeChargeId || null,
-      amount: amount != null ? Number(amount) : parseFloat(invoice.total),
+      amount: collectedAmount,
       ip_address: ipFromReq(req),
       user_agent: uaFromReq(req),
     });

@@ -1831,7 +1831,9 @@ const StripeService = {
               severity: 'medium',
               title: `Surcharge bypass blocked — invoice ${invoice.invoice_number}`,
               description: `Credit card confirm attempt without surcharge finalization. PI: ${paymentIntentId}. Customer redirected to retry.`,
-              metadata: JSON.stringify({
+              // customer_health_alerts has trigger_data, not metadata — the old
+              // column name made these alerts silently fail to insert.
+              trigger_data: JSON.stringify({
                 stripe_payment_intent_id: paymentIntentId,
                 card_funding: pmFunding,
               }),
@@ -1855,11 +1857,13 @@ const StripeService = {
           try {
             await db('customer_health_alerts').insert({
               customer_id: invoice.customer_id,
-              alert_type: 'surcharge_bypass_unknown_funding',
+              // alert_type is varchar(30) — 'surcharge_bypass_unknown_funding'
+              // (32 chars) overflowed and made the insert silently fail.
+              alert_type: 'surcharge_unknown_funding',
               severity: 'high',
               title: `Unknown funding on unfinalized card — invoice ${invoice.invoice_number}`,
               description: `Card payment confirmed without /finalize and PM funding lookup failed. PI: ${paymentIntentId}. May be under-collected.`,
-              metadata: JSON.stringify({
+              trigger_data: JSON.stringify({
                 stripe_payment_intent_id: paymentIntentId,
               }),
             });
@@ -1934,7 +1938,7 @@ const StripeService = {
               severity: 'high',
               title: `Surcharge bypass detected — invoice ${invoice.invoice_number}`,
               description: `Customer paid $${(actualCents / 100).toFixed(2)} via ${pmdType}, expected $${(expectedCents / 100).toFixed(2)} (surcharge shortfall). PI: ${paymentIntentId}.`,
-              metadata: JSON.stringify({
+              trigger_data: JSON.stringify({
                 stripe_payment_intent_id: paymentIntentId,
                 method: pmdType,
                 expected_total: expectedCents / 100,
