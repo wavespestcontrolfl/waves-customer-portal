@@ -37,6 +37,22 @@ const { validateBlogFrontmatter } = require('../services/content-astro/schema-va
 const PagesPoll = require('../services/content-astro/pages-poll');
 const AstroPublisher = require('../services/content-astro/astro-publisher');
 const ContentScheduler = require('../services/content-scheduler');
+const heroImageGenerator = require('../services/content/image-generator');
+
+// 1x1 transparent PNG — enough for the real sharp compressToWebp step that
+// runs inside the autonomous hero pipeline.
+const HERO_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+// The autonomous publish path now generates + commits a hero whenever the
+// post has no hero already committed on main, so publish tests must stub the
+// image generator and the binary commit.
+function mockHeroGeneration() {
+  heroImageGenerator.generate.mockResolvedValue({
+    dataUrl: `data:image/png;base64,${HERO_PNG_B64}`,
+    model: 'test-model',
+  });
+  gh.putBinary.mockResolvedValue({});
+}
 
 function chain(overrides = {}) {
   return {
@@ -340,6 +356,7 @@ describe('blog Astro frontmatter validation', () => {
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.createPr.mockResolvedValue({ number: 123, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123' });
     gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
 
     const frontmatter = validFrontmatter({ slug: '/ant-trails-bradenton/' });
     const result = await AstroPublisher.publishOrUpdatePage(
@@ -383,6 +400,7 @@ describe('blog Astro frontmatter validation', () => {
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.createPr.mockResolvedValue({ number: 124, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/124' });
     gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
 
     const result = await AstroPublisher.publishOrUpdatePage(
       {
@@ -486,6 +504,9 @@ describe('Astro publisher autonomous draft adapter', () => {
     )).rejects.toMatchObject({ code: 'BLOG_FACTCHECK_FAILED' });
     expect(gh.createBranch).not.toHaveBeenCalled();
     expect(gh.createPr).not.toHaveBeenCalled();
+    // Hero generation runs AFTER the fact-check gate, so a factually-blocked
+    // post never burns image-generation cost.
+    expect(heroImageGenerator.generate).not.toHaveBeenCalled();
   });
 
   test('opens an Astro PR from a supported emitted blog draft', async () => {
@@ -494,6 +515,7 @@ describe('Astro publisher autonomous draft adapter', () => {
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.createPr.mockResolvedValue({ number: 42, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42' });
     gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
 
     const frontmatter = validFrontmatter({
       title: 'Autonomous Ant Control in Bradenton',
@@ -628,6 +650,150 @@ describe('Astro publisher autonomous draft adapter', () => {
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55',
       url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
     });
+  });
+});
+
+describe('publishOrUpdatePage autonomous hero pipeline', () => {
+  const fmModule = require('../services/content-astro/frontmatter');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+    gh.createBranch.mockResolvedValue({});
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 200, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/200' });
+    gh.createIssueComment.mockResolvedValue({});
+  });
+
+  function heroDraft(fmOverrides = {}) {
+    return {
+      type: 'draft',
+      frontmatter: validFrontmatter({
+        slug: '/dollar-spot-venice/',
+        title: 'Dollar Spot in Venice',
+        canonical: 'https://www.wavespestcontrol.com/dollar-spot-venice/',
+        // Agent-invented hero path — plausible-looking, but no such file was
+        // ever committed to the Astro repo.
+        hero_image: { src: '/images/blog/dollar-spot-venice/hero.png', alt: 'Dollar spot lesions on a Venice lawn' },
+        og_image: '/images/blog/dollar-spot-venice/hero.png',
+        ...fmOverrides,
+      }),
+      body: 'Dollar spot guidance for Venice lawns.',
+    };
+  }
+
+  test('new post without a committed hero: generates, commits hero + markdown in ONE branch, stamps frontmatter', async () => {
+    gh.getFile.mockResolvedValue(null); // nothing exists on main
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
+
+    expect(heroImageGenerator.generate).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'blog-hero',
+      title: 'Dollar Spot in Venice',
+    }));
+    expect(gh.putBinary).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'public/images/blog/dollar-spot-venice/hero.webp',
+      branch: expect.stringMatching(/^content\/autonomous-dollar-spot-venice-/),
+      sha: undefined,
+    }));
+    // Compressed to WebP (RIFF/WEBP container) before commit — LCP path.
+    const committed = gh.putBinary.mock.calls[0][0].buffer;
+    expect(committed.slice(0, 4).toString('ascii')).toBe('RIFF');
+    expect(committed.slice(8, 12).toString('ascii')).toBe('WEBP');
+    // Hero and markdown land on the SAME feature branch, branch cut first.
+    expect(gh.putFile.mock.calls[0][0].branch).toBe(gh.putBinary.mock.calls[0][0].branch);
+    expect(gh.createBranch.mock.invocationCallOrder[0]).toBeLessThan(gh.putBinary.mock.invocationCallOrder[0]);
+    // Frontmatter stamped with the path that was actually committed.
+    const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
+    expect(parsed.data.hero_image).toEqual({
+      src: '/images/blog/dollar-spot-venice/hero.webp',
+      alt: 'Dollar spot lesions on a Venice lawn',
+    });
+    expect(parsed.data.og_image).toBe('/images/blog/dollar-spot-venice/hero.webp');
+  });
+
+  test('existing post with a committed hero: reuses it, no regeneration, no binary commit', async () => {
+    const liveMdx = [
+      '---',
+      'title: Dollar Spot in Venice',
+      'hero_image:',
+      '  src: /images/blog/dollar-spot-venice/hero.webp',
+      '  alt: Existing committed hero',
+      '---',
+      'old body',
+    ].join('\n');
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/dollar-spot-venice.mdx') return { sha: 'mdx-sha', path, content: liveMdx };
+      if (path === 'public/images/blog/dollar-spot-venice/hero.webp') return { sha: 'hero-sha', path };
+      return null;
+    });
+
+    await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
+
+    expect(heroImageGenerator.generate).not.toHaveBeenCalled();
+    expect(gh.putBinary).not.toHaveBeenCalled();
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/dollar-spot-venice.mdx',
+      sha: 'mdx-sha',
+    }));
+    const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
+    expect(parsed.data.hero_image.src).toBe('/images/blog/dollar-spot-venice/hero.webp');
+    expect(parsed.data.og_image).toBe('/images/blog/dollar-spot-venice/hero.webp');
+  });
+
+  test('hero generation failure fails CLOSED with a deterministic publish error and no orphan branch/PR', async () => {
+    gh.getFile.mockResolvedValue(null);
+    heroImageGenerator.generate.mockRejectedValue(new Error('image API down'));
+
+    await expect(AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' }))
+      .rejects.toMatchObject({ code: 'BLOG_HERO_IMAGE_FAILED' });
+
+    // Hero resolution runs before the branch is cut, so nothing is orphaned
+    // and no hero-less markdown is ever committed.
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
+  test('agent-invented bogus hero path is overridden — never committed to frontmatter', async () => {
+    gh.getFile.mockResolvedValue(null); // the agent's hero.png does not exist in the repo
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
+
+    // The publisher probed the agent path before overriding it.
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/dollar-spot-venice/hero.png');
+    const content = gh.putFile.mock.calls[0][0].content;
+    expect(content).not.toContain('hero.png');
+    const parsed = fmModule.parse(content);
+    expect(parsed.data.hero_image.src).toBe('/images/blog/dollar-spot-venice/hero.webp');
+    expect(parsed.data.og_image).toBe('/images/blog/dollar-spot-venice/hero.webp');
+  });
+
+  test('an agent hero path that DOES exist in the repo is kept (no regeneration)', async () => {
+    gh.getFile.mockImplementation(async (path) => (
+      path === 'public/images/blog/dollar-spot-venice/hero.png' ? { sha: 'curated-hero-sha', path } : null
+    ));
+
+    await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
+
+    expect(heroImageGenerator.generate).not.toHaveBeenCalled();
+    expect(gh.putBinary).not.toHaveBeenCalled();
+    const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
+    expect(parsed.data.hero_image.src).toBe('/images/blog/dollar-spot-venice/hero.png');
+  });
+
+  test('schema-invalid drafts still fail before any fact-check or image spend', async () => {
+    gh.getFile.mockResolvedValue(null);
+
+    const draft = heroDraft({ meta_description: 'too short' });
+    await expect(AstroPublisher.publishOrUpdatePage(draft, { action_type: 'new_supporting_blog' }))
+      .rejects.toMatchObject({ code: 'BLOG_FRONTMATTER_INVALID' });
+
+    expect(factCheckGate.evaluate).not.toHaveBeenCalled();
+    expect(heroImageGenerator.generate).not.toHaveBeenCalled();
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 });
 

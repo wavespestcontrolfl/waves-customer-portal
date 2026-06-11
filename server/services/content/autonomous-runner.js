@@ -1713,6 +1713,11 @@ function isDeterministicPublishError(err) {
   // draft. (Guardrails don't run on the autonomous publish path, so the
   // fact-check is the first edit-required gate to reach this publisher.)
   if (err?.code === 'BLOG_FACTCHECK_FAILED') return true;
+  // Hero generation/compression failure is fail-closed: the post cannot ship
+  // without committed hero bytes (the schema requires hero_image and the live
+  // hero is the LCP element), so park the run for review instead of
+  // retry-looping the same draft through image generation.
+  if (err?.code === 'BLOG_HERO_IMAGE_FAILED') return true;
   const message = String(err?.message || '');
   return [
     /^unsupported autonomous draft for Astro publish:/,
