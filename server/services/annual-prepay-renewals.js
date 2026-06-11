@@ -580,6 +580,13 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       await releaseClaim();
       return { sent: false, reason: 'customer_not_found' };
     }
+    // Soft-deleted customers get no renewal outreach — guard the send
+    // path itself, not just the alert/selection queries, since this is
+    // also reachable from admin-triggered sends.
+    if (customer.deleted_at) {
+      await releaseClaim();
+      return { sent: false, reason: 'customer_deleted' };
+    }
 
     const sendRenewalEmail = async () => {
       try {
