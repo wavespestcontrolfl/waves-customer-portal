@@ -50,7 +50,8 @@ function serviceContactSlotUpdates(contacts = []) {
 
 function normalizeContactInput(contact = {}) {
   return {
-    name: [contact.firstName || '', contact.lastName || ''].map(s => String(s).trim()).filter(Boolean).join(' '),
+    // slice: joined first+last (50+1+50) can exceed the varchar(100) column
+    name: [contact.firstName || '', contact.lastName || ''].map(s => String(s).trim()).filter(Boolean).join(' ').slice(0, 100),
     phone: String(contact.phone || '').trim(),
     email: String(contact.email || '').trim(),
   };
@@ -388,16 +389,18 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       serviceReminder24h: Joi.boolean(),
       techEnRoute: Joi.boolean(),
       appointmentNotifyPrimary: Joi.boolean(),
+      // phone max matches the service_contact*_phone column width (varchar 20)
+      // so an over-long value is a 400, not a database length error.
       serviceContact: Joi.object({
         firstName: Joi.string().trim().max(50).allow('', null),
         lastName: Joi.string().trim().max(50).allow('', null),
-        phone: Joi.string().trim().max(30).allow('', null),
+        phone: Joi.string().trim().max(20).allow('', null),
         email: Joi.string().trim().email().max(150).allow('', null),
       }),
       serviceContacts: Joi.array().max(MAX_SERVICE_CONTACTS).items(Joi.object({
         firstName: Joi.string().trim().max(50).allow('', null),
         lastName: Joi.string().trim().max(50).allow('', null),
-        phone: Joi.string().trim().max(30).allow('', null),
+        phone: Joi.string().trim().max(20).allow('', null),
         email: Joi.string().trim().email().max(150).allow('', null),
       })),
     }).min(1);

@@ -1018,6 +1018,12 @@ export default function CustomersPageV2() {
       serviceContactName: c.serviceContactName || "",
       serviceContactPhone: c.serviceContactPhone || "",
       serviceContactEmail: c.serviceContactEmail || "",
+      serviceContact2Name: c.serviceContact2Name || "",
+      serviceContact2Phone: c.serviceContact2Phone || "",
+      serviceContact2Email: c.serviceContact2Email || "",
+      serviceContact3Name: c.serviceContact3Name || "",
+      serviceContact3Phone: c.serviceContact3Phone || "",
+      serviceContact3Email: c.serviceContact3Email || "",
     });
   };
 
@@ -1847,52 +1853,68 @@ export default function CustomersPageV2() {
                           </select>{" "}
                         </div>{" "}
                       </div>
-                      {/* Service contact — routes appointment reminders, post-service
-                          SMS, and review requests to a different person than the
-                          bill-payer (e.g. mother pays, son lives at the property). */}
-                      <div className="border-t border-hairline border-zinc-200 pt-3 mb-3">
-                        {" "}
-                        <div className="u-label text-ink-tertiary mb-2">
-                          Service Contact{" "}
-                          <span className="normal-case text-11 text-ink-tertiary">
-                            (optional — overrides primary for reminders, review
-                            requests)
-                          </span>{" "}
-                        </div>{" "}
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                          {[
-                            { key: "serviceContactName", label: "Name" },
-                            {
-                              key: "serviceContactPhone",
-                              label: "Phone",
-                              type: "tel",
-                            },
-                            {
-                              key: "serviceContactEmail",
-                              label: "Email",
-                              type: "email",
-                            },
-                          ].map((f) => (
-                            <div key={f.key}>
-                              {" "}
-                              <label className="u-label text-ink-tertiary block mb-1">
-                                {f.label}
-                              </label>{" "}
-                              <input
-                                value={editForm[f.key] || ""}
-                                onChange={(e) =>
-                                  setEditForm((p) => ({
-                                    ...p,
-                                    [f.key]: e.target.value,
-                                  }))
-                                }
-                                type={f.type || "text"}
-                                className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
-                              />{" "}
-                            </div>
-                          ))}
-                        </div>{" "}
-                      </div>{" "}
+                      {/* Service contacts — route appointment reminders, post-service
+                          SMS, and review requests to different people than the
+                          bill-payer (e.g. mother pays, son lives at the property).
+                          Up to 3 slots; the server compacts them, so clearing
+                          slot 1 promotes slot 2. */}
+                      {[
+                        {
+                          prefix: "serviceContact",
+                          title: "Service Contact",
+                          hint: "(optional — overrides primary for reminders, review requests)",
+                        },
+                        { prefix: "serviceContact2", title: "Service Contact 2" },
+                        { prefix: "serviceContact3", title: "Service Contact 3" },
+                      ].map((slot) => (
+                        <div
+                          key={slot.prefix}
+                          className="border-t border-hairline border-zinc-200 pt-3 mb-3"
+                        >
+                          {" "}
+                          <div className="u-label text-ink-tertiary mb-2">
+                            {slot.title}{" "}
+                            {slot.hint && (
+                              <span className="normal-case text-11 text-ink-tertiary">
+                                {slot.hint}
+                              </span>
+                            )}{" "}
+                          </div>{" "}
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                            {[
+                              { key: `${slot.prefix}Name`, label: "Name" },
+                              {
+                                key: `${slot.prefix}Phone`,
+                                label: "Phone",
+                                type: "tel",
+                              },
+                              {
+                                key: `${slot.prefix}Email`,
+                                label: "Email",
+                                type: "email",
+                              },
+                            ].map((f) => (
+                              <div key={f.key}>
+                                {" "}
+                                <label className="u-label text-ink-tertiary block mb-1">
+                                  {f.label}
+                                </label>{" "}
+                                <input
+                                  value={editForm[f.key] || ""}
+                                  onChange={(e) =>
+                                    setEditForm((p) => ({
+                                      ...p,
+                                      [f.key]: e.target.value,
+                                    }))
+                                  }
+                                  type={f.type || "text"}
+                                  className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
+                                />{" "}
+                              </div>
+                            ))}
+                          </div>{" "}
+                        </div>
+                      ))}{" "}
                       <div className="flex gap-2">
                         {" "}
                         <Button
