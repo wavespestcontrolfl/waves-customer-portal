@@ -424,9 +424,23 @@ class GoogleBusinessService {
     let synced = 0, newCount = 0;
     for (const review of reviews) {
       const googleId = `places_${loc.googlePlaceId}_${review.time}`;
-      const existing = await db('google_reviews').where({ google_review_id: googleId }).first();
+      let existing = await db('google_reviews').where({ google_review_id: googleId }).first();
+      // The synthetic id embeds the Places `time` field, which moves when a
+      // reviewer EDITS their review — so an edited review comes back with a
+      // brand-new id and used to be re-inserted as a duplicate row (a
+      // GBP-replied review then sat in the "No Portal Reply" queue twice).
+      // Google allows one review per account per listing, so a non-Anonymous
+      // reviewer-name match on the same location IS the same review.
+      const reviewerName = review.author_name || 'Anonymous';
+      if (!existing && reviewerName !== 'Anonymous') {
+        const sameReviewer = await db('google_reviews')
+          .where({ location_id: loc.id })
+          .where('reviewer_name', '!=', '_stats')
+          .whereRaw('LOWER(reviewer_name) = LOWER(?)', [reviewerName]);
+        if (sameReviewer.length === 1) existing = sameReviewer[0];
+      }
       const ownerReply = review.owner_response?.text || null;
-      const customerId = await this._findCustomerIdByReviewerName(review.author_name || 'Anonymous');
+      const customerId = await this._findCustomerIdByReviewerName(reviewerName);
       if (existing) {
         const upd = {
           star_rating: review.rating || 0,
@@ -444,7 +458,7 @@ class GoogleBusinessService {
         await db('google_reviews').insert({
           google_review_id: googleId,
           location_id: loc.id,
-          reviewer_name: review.author_name || 'Anonymous',
+          reviewer_name: reviewerName,
           reviewer_photo_url: review.profile_photo_url || null,
           star_rating: review.rating || 0,
           review_text: review.text || null,

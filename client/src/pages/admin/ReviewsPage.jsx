@@ -3408,7 +3408,19 @@ export default function ReviewsPage() {
                   <LocationCard
                     key={loc.id}
                     loc={loc}
-                    breakdown={locationBreakdown[loc.id] || breakdown}
+                    // A location with no synced reviews (e.g. a brand-new GBP)
+                    // has no locationBreakdown entry — show zero bars, never
+                    // the all-locations breakdown, which painted 178 5-star
+                    // rows under a "0.0 (0)" Venice card.
+                    breakdown={
+                      locationBreakdown[loc.id] || {
+                        5: 0,
+                        4: 0,
+                        3: 0,
+                        2: 0,
+                        1: 0,
+                      }
+                    }
                     onRequestReview={handleRequestReview}
                   />
                 ))}
