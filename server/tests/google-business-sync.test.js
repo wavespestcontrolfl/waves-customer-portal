@@ -55,6 +55,7 @@ function createDbMock(initialRows = {}) {
         return this;
       },
       whereNull(column) { this._whereNull = column; return this; },
+      whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
       whereNot() { return this; },
       select() { return this; },
       limit(n) { this._limit = n; return this; },
@@ -346,6 +347,45 @@ describe('Google Business review sync', () => {
     expect(reviewRows.find(r => r.reviewer_name === 'New Person')).toMatchObject({
       google_review_id: 'places_place-1_1779307900',
       star_rating: 4,
+    });
+  });
+
+  test('Places fallback never name-merges into an un-linked Places row (same display name = new row)', async () => {
+    // Display names are not unique across Google accounts. A row without a
+    // GBP linkage has no authoritative feed to self-heal from, so a same-name
+    // reviewer must insert a distinct row rather than overwrite it.
+    db.__state.rows.google_reviews.push({
+      id: 'places-row-1',
+      google_review_id: 'places_place-1_1700000000',
+      gbp_review_name: null,
+      location_id: 'bradenton',
+      reviewer_name: 'John Smith',
+      star_rating: 5,
+      review_text: 'First John Smith',
+      review_created_at: '2026-01-01T00:00:00Z',
+      review_reply: null,
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'John Smith',
+          rating: 1,
+          text: 'A different John Smith',
+          time: 1779308000,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 4.8, user_ratings_total: 32 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(2);
+    expect(reviewRows.find(r => r.id === 'places-row-1').review_text).toBe('First John Smith');
+    expect(reviewRows.find(r => r.google_review_id === 'places_place-1_1779308000')).toMatchObject({
+      star_rating: 1,
+      review_text: 'A different John Smith',
     });
   });
 });

@@ -430,12 +430,21 @@ class GoogleBusinessService {
       // brand-new id and used to be re-inserted as a duplicate row (a
       // GBP-replied review then sat in the "No Portal Reply" queue twice).
       // Google allows one review per account per listing, so a non-Anonymous
-      // reviewer-name match on the same location IS the same review.
+      // reviewer-name match on the same location identifies the same review —
+      // but display names are not unique across accounts, so the merge is
+      // restricted to GBP-linked rows: if a *different* person sharing the
+      // name ever gets merged here, the next successful GBP sync restores
+      // the linked row from the authoritative feed and inserts the other
+      // person's review under its own GBP resource name (replies are never
+      // touched — Places carries no reply data). Un-linked Places rows have
+      // no such self-heal, so they never name-merge and a same-name reviewer
+      // there always inserts a new row.
       const reviewerName = review.author_name || 'Anonymous';
       if (!existing && reviewerName !== 'Anonymous') {
         const sameReviewer = await db('google_reviews')
           .where({ location_id: loc.id })
           .where('reviewer_name', '!=', '_stats')
+          .whereNotNull('gbp_review_name')
           .whereRaw('LOWER(reviewer_name) = LOWER(?)', [reviewerName]);
         if (sameReviewer.length === 1) existing = sameReviewer[0];
       }
