@@ -1156,6 +1156,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
 
+      // Void any still-open invoices pre-minted for the cancelled visits so
+      // dunning doesn't chase cancelled jobs. The helper enforces the
+      // money-state rules (skips applied payments / live PaymentIntents) and
+      // is best-effort — it never throws.
+      try {
+        const InvoiceService = require('../services/invoice');
+        for (const target of targets) {
+          await InvoiceService.voidOpenInvoicesForCancelledService(target.id);
+        }
+      } catch (e) { logger.error(`[admin-dispatch] series cancellation invoice void sweep failed: ${e.message}`); }
+
       for (const target of targets) {
         try {
           const result = await trackTransitions.cancel(target.id, {
@@ -1309,6 +1320,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
           sendNotification: notifyCustomer !== false,
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
+
+      // Void any still-open invoice pre-minted for this visit so dunning
+      // doesn't chase a cancelled job. Money-state rules live in the shared
+      // helper (skips applied payments / live PaymentIntents); best-effort.
+      try {
+        const InvoiceService = require('../services/invoice');
+        await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
+      } catch (e) { logger.error(`[admin-dispatch] cancellation invoice void sweep failed: ${e.message}`); }
 
       try {
         const result = await trackTransitions.cancel(svc.id, {

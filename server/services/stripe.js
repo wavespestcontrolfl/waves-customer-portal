@@ -312,6 +312,20 @@ const StripeService = {
     return stripe.setupIntents.retrieve(setupIntentId, options);
   },
 
+  /**
+   * Cancel a PaymentIntent. Returns null if Stripe isn't configured.
+   * Throws on Stripe errors — including the race where the intent has
+   * already moved to processing/succeeded and can no longer be cancelled —
+   * so callers can fail closed (e.g. skip auto-voiding an invoice whose
+   * payment may be in flight).
+   */
+  async cancelPaymentIntent(paymentIntentId, options = {}) {
+    if (!paymentIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.paymentIntents.cancel(paymentIntentId, options);
+  },
+
   // =========================================================================
   // REMOVE CARD
   // =========================================================================

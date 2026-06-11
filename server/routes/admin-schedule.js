@@ -438,6 +438,43 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
     });
 }
 
+// Register a reminder row for a visit spawned outside the POST create path
+// (PUT edit-spawn, completion auto-extend, recurring-alert extend/convert).
+// Mirrors how the POST create path handles spawned children: the row is
+// inserted so the 72h/24h reminder cron fires, but no immediate confirmation
+// SMS goes out (spawned children never get one on the create path either —
+// sendConfirmation:false marks confirmation as not-applicable). Best-effort:
+// logs and continues, never fails the caller.
+async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, source }) {
+  if (!scheduledServiceId) return;
+  try {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    await AppointmentReminders.registerAppointment(
+      scheduledServiceId, customerId,
+      `${scheduledDate}T${normalizeHHMM(windowStart) || '08:00'}`,
+      serviceType, source,
+      { sendConfirmation: false },
+    );
+  } catch (e) {
+    logger.error(`[schedule] Reminder registration failed for spawned visit ${scheduledServiceId}: ${e.message}`);
+  }
+}
+
+// Void any still-open invoices minted for a now-cancelled scheduled service
+// so dunning doesn't chase a cancelled job. The money-state rules (skip
+// applied payments / live PaymentIntents, atomic row-locked void) live in
+// InvoiceService.voidOpenInvoicesForCancelledService — shared with the
+// dispatch cancellation paths. Best-effort: never fails the cancellation.
+async function voidOpenInvoicesForCancelledService(scheduledServiceId) {
+  try {
+    const InvoiceService = require('../services/invoice');
+    return await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId);
+  } catch (e) {
+    logger.error(`[schedule] Invoice void sweep failed for cancelled service ${scheduledServiceId}: ${e.message}`);
+    return [];
+  }
+}
+
 // Apply a discount to a price. Returns the discounted price (>= 0).
 function applyDiscount(price, type, amount) {
   if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
@@ -1504,7 +1541,12 @@ router.get('/month', async (req, res, next) => {
 
     res.json({
       yearMonth,
-      monthName: firstDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' }),
+      // Header label must be built from an ET-anchored instant. firstDay is
+      // local/UTC midnight on the 1st; formatting THAT in ET on a UTC server
+      // rolls back to the last day of the previous month (e.g. "May 2026" on
+      // a June calendar). Noon ET on the 1st is unambiguous.
+      monthName: parseETDateTime(`${year}-${String(month).padStart(2, '0')}-01T12:00`)
+        .toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' }),
       weeks,
       summary,
     });
@@ -2145,6 +2187,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const AppointmentReminders = require('../services/appointment-reminders');
               await AppointmentReminders.handleCancellation(id);
             } catch {}
+            // Void any still-open invoice pre-minted for this visit so
+            // dunning doesn't chase a cancelled job. Paid/processing stay put.
+            await voidOpenInvoicesForCancelledService(id);
             break;
           }
           case 'mark_prepaid': {
@@ -2438,6 +2483,10 @@ router.put('/:id/update-details', async (req, res, next) => {
     let assignmentUpdatedJobIds = [];
     let recurringCreated = 0;
     let recurringUpdatedJobIds = [];
+    // Children spawned inside the trx below; reminder rows are registered for
+    // them AFTER commit (mirrors the POST create path) so the 72h/24h cron
+    // never reads a row whose visit could still roll back.
+    const spawnedRecurringChildren = [];
 
     await db.transaction(async (trx) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
@@ -2720,6 +2769,15 @@ router.put('/:id/update-details', async (req, res, next) => {
               if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
             } catch { /* non-blocking */ }
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
+            if (childRow?.id) {
+              spawnedRecurringChildren.push({
+                id: childRow.id,
+                customerId: parent.customer_id,
+                date: nextDateStr,
+                windowStart: parent.window_start,
+                serviceType: parent.service_type,
+              });
+            }
             if (parentAddons.length > 0 && childRow?.id) {
               try {
                 const addonCols = await db('scheduled_service_addons').columnInfo();
@@ -2750,6 +2808,20 @@ router.put('/:id/update-details', async (req, res, next) => {
         }
       }
     });
+
+    // Register reminder rows for the children spawned above — without this
+    // the spawned visits never enter appointment_reminders, so they get no
+    // confirmation and no 72h/24h reminders (the cron reads only that table).
+    for (const child of spawnedRecurringChildren) {
+      await registerSpawnedVisitReminder({
+        scheduledServiceId: child.id,
+        customerId: child.customerId,
+        scheduledDate: child.date,
+        windowStart: child.windowStart,
+        serviceType: child.serviceType,
+        source: 'admin_manual',
+      });
+    }
 
     if (assignmentChanged || detailsChanged || addonsReplaced) {
       try {
@@ -3088,24 +3160,54 @@ router.post('/:id/invoice', async (req, res, next) => {
       fallbackDescription: svc.service_type || 'Service visit',
       extraLineItems: invoiceExtraLines,
     });
-    let invoice = await InvoiceService.create({
-      customerId: svc.customer_id,
-      scheduledServiceId: svc.id,
-      title: formatServiceDisplay(svc.service_type, []),
-      lineItems: scheduledInvoice.lineItems,
-      discountIds: scheduledInvoice.discountIds || [],
-      taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
-      trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
-      dueDate: etDateString(),
+
+    // Mint inside a transaction holding an advisory xact lock keyed on the
+    // scheduled_service_id (same pattern as services/stripe.js
+    // 'stripe.pi.payment'). invoices.scheduled_service_id has no unique
+    // index, so the unlocked check above can race a double-tap into TWO open
+    // invoices — and applyPrepaidCredit dedupes per invoice id, so the
+    // prepaid credit would then apply in full to both. The lock serializes
+    // concurrent mints; the re-check inside the lock returns the first
+    // request's invoice to the replay instead of minting a second one.
+    // InvoiceService.create rides the same trx (database: trx), so the
+    // invoice row commits atomically with the lock release.
+    const minted = await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['schedule.invoice.mint', String(svc.id)],
+      );
+      const replayed = await trx('invoices')
+        .where({ scheduled_service_id: svc.id })
+        .whereNot('status', 'void')
+        .orderBy('created_at', 'desc')
+        .first();
+      if (replayed) return { invoice: replayed, reused: true };
+      const created = await InvoiceService.create({
+        database: trx,
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+        title: formatServiceDisplay(svc.service_type, []),
+        lineItems: scheduledInvoice.lineItems,
+        discountIds: scheduledInvoice.discountIds || [],
+        taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
+        trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
+        dueDate: etDateString(),
+      });
+      return { invoice: created, reused: false };
     });
 
+    let invoice = minted.invoice;
     const applied = await applyPrepaidCredit(invoice);
     invoice = applied.invoice;
 
-    logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} minted for service ${svc.id}: $${invoice.total}`);
+    if (minted.reused) {
+      logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} reused for service ${svc.id} (concurrent mint replay): $${invoice.total}`);
+    } else {
+      logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} minted for service ${svc.id}: $${invoice.total}`);
+    }
     res.json({
       success: true,
-      reused: false,
+      reused: minted.reused,
       invoiceId: invoice.id,
       total: Number(invoice.total),
       prepaidCredit: applied.prepaidCredit,
@@ -3237,6 +3339,9 @@ router.put('/:id/status', async (req, res, next) => {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleCancellation(req.params.id);
       } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
+      // Void any still-open invoice pre-minted for this visit ("Charge now")
+      // so dunning doesn't chase a cancelled job. Paid/processing stay put.
+      await voidOpenInvoicesForCancelledService(svc.id);
     }
 
     // En-route: track-transitions flip (which fires the customer SMS
@@ -3362,10 +3467,13 @@ router.put('/:id/status', async (req, res, next) => {
       try {
         const ComplianceService = require('../services/compliance');
         if (ComplianceService.createComplianceRecords) {
-          // Find the service_record that matches this scheduled_service
+          // Find the service_record created for THIS scheduled_service. Do not
+          // fall back to the customer's newest record — same-day double visits
+          // would pin regulatory records to the wrong visit (the exact
+          // anti-pattern scheduleReviewRequest below forbids). If no record is
+          // scoped to this visit yet, skip rather than guess.
           db('service_records')
-            .where({ customer_id: svc.customer_id })
-            .orderBy('created_at', 'desc')
+            .where({ customer_id: svc.customer_id, scheduled_service_id: svc.id })
             .first()
             .then(sr => {
               if (sr) {
@@ -3533,6 +3641,18 @@ router.put('/:id/status', async (req, res, next) => {
                     }
                   }
                 } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
+                // Register the reminder row — without it the auto-extended
+                // visit never enters appointment_reminders, so the customer
+                // gets no 72h/24h texts for it (the cron reads only that
+                // table). No confirmation SMS, matching spawned children.
+                await registerSpawnedVisitReminder({
+                  scheduledServiceId: autoExtRow?.id,
+                  customerId: parent.customer_id,
+                  scheduledDate: nextStr,
+                  windowStart: parent.window_start,
+                  serviceType: parent.service_type,
+                  source: 'recurring_auto_extend',
+                });
                 logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
               }
             }
@@ -4645,6 +4765,16 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
         await mirrorAddons(row?.id, nd);
+        // Register the reminder row — without it the extended visit never
+        // enters appointment_reminders, so the 72h/24h cron skips it.
+        await registerSpawnedVisitReminder({
+          scheduledServiceId: row?.id,
+          customerId: parent.customer_id,
+          scheduledDate: nd,
+          windowStart: parent.window_start,
+          serviceType: parent.service_type,
+          source: 'recurring_alert_action',
+        });
         inserted++;
         created++;
       }
@@ -4695,6 +4825,15 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
         await mirrorAddons(row?.id, nd);
+        // Register the reminder row — same rationale as the extend branch.
+        await registerSpawnedVisitReminder({
+          scheduledServiceId: row?.id,
+          customerId: parent.customer_id,
+          scheduledDate: nd,
+          windowStart: parent.window_start,
+          serviceType: parent.service_type,
+          source: 'recurring_alert_action',
+        });
         inserted++;
         created++;
       }
