@@ -161,6 +161,26 @@ class HealthScorer {
       }
     }
 
+    // Retain per-day history in customer_health_history (the scores table
+    // holds only the current row per customer). Idempotent per
+    // (customer, day): refresh today's snapshot if one exists (e.g. written
+    // by the 2:15AM v3 scorer), else insert. Snapshot failures must not
+    // abort scoring, but are logged loudly with context.
+    try {
+      const snapshot = { customer_id: customerId, overall_score: score, churn_risk: riskLevel, scored_at: today };
+      const todaysSnapshot = await db('customer_health_history')
+        .where('customer_id', customerId)
+        .where('scored_at', today)
+        .first();
+      if (todaysSnapshot) {
+        await db('customer_health_history').where('id', todaysSnapshot.id).update(snapshot);
+      } else {
+        await db('customer_health_history').insert(snapshot);
+      }
+    } catch (err) {
+      logger.error(`Health scoring: daily history snapshot failed for customer ${customerId}: ${err.message}`);
+    }
+
     return { score, riskLevel, churnProbability, trend, riskFactors, upsellOpps, nextAction };
   }
 

@@ -166,6 +166,50 @@ describe('health-scorer customer_health_scores upsert', () => {
     await expect(healthScorer.calculateHealth('c1')).rejects.toThrow('column "nope" does not exist');
   });
 
+  test('per-day history is retained: inserts a daily snapshot into customer_health_history', async () => {
+    const historyLookup = makeChain(undefined);
+    const historyWrite = makeChain(undefined);
+
+    wireDb({
+      customers: [makeChain(customer)],
+      customer_signals: [makeChain(undefined, [])],
+      service_records: [makeChain(undefined, [])],
+      customer_health_scores: [makeChain(undefined), makeChain(undefined)],
+      customer_health_history: [historyLookup, historyWrite],
+    });
+
+    await healthScorer.calculateHealth('c1');
+
+    expect(historyLookup.whereCalls).toEqual([['customer_id', 'c1'], ['scored_at', '2026-06-10']]);
+    expect(historyWrite.insert).toHaveBeenCalledTimes(1);
+    const snapshot = historyWrite.insert.mock.calls[0][0];
+    expect(snapshot).toMatchObject({
+      customer_id: 'c1',
+      scored_at: '2026-06-10',
+    });
+    expect(snapshot).toHaveProperty('overall_score');
+    expect(snapshot).toHaveProperty('churn_risk');
+  });
+
+  test('history snapshot is idempotent per day: refreshes an existing today-row instead of inserting', async () => {
+    const historyLookup = makeChain({ id: 'h-1', customer_id: 'c1', scored_at: '2026-06-10' });
+    const historyWrite = makeChain(undefined);
+
+    wireDb({
+      customers: [makeChain(customer)],
+      customer_signals: [makeChain(undefined, [])],
+      service_records: [makeChain(undefined, [])],
+      customer_health_scores: [makeChain({ id: 'row-1', customer_id: 'c1' }), makeChain(undefined)],
+      customer_health_history: [historyLookup, historyWrite],
+    });
+
+    await healthScorer.calculateHealth('c1');
+
+    expect(historyWrite.whereCalls).toEqual([['id', 'h-1']]);
+    expect(historyWrite.update).toHaveBeenCalledTimes(1);
+    expect(historyWrite.insert).not.toHaveBeenCalled();
+  });
+
   test('repeat run on the same day stays idempotent — still a single-row update', async () => {
     const lookupChain = makeChain({ id: 'row-1', customer_id: 'c1', scored_at: '2026-06-10T00:00:00.000Z' });
     const writeChain = makeChain(undefined);

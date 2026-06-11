@@ -87,10 +87,22 @@ router.get('/', async (req, res, next) => {
 // GET /api/admin/customers/intelligence/:id/health — single customer health
 router.get('/:id/health', async (req, res, next) => {
   try {
-    const history = await db('customer_health_scores')
+    // Current score lives in customer_health_scores (one row per customer,
+    // updated in place); per-day history lives in customer_health_history.
+    const current = await db('customer_health_scores')
       .where('customer_id', req.params.id)
-      .orderBy('scored_at', 'desc')
-      .limit(30);
+      .orderByRaw('scored_at DESC NULLS LAST')
+      .first();
+
+    let history = [];
+    try {
+      history = await db('customer_health_history')
+        .where('customer_id', req.params.id)
+        .orderBy('scored_at', 'desc')
+        .limit(30);
+    } catch (err) {
+      logger.warn(`[customer-intel:${req.params.id}] health history read failed: ${err.message}`);
+    }
 
     const signals = await db('customer_signals')
       .where('customer_id', req.params.id)
@@ -106,13 +118,12 @@ router.get('/:id/health', async (req, res, next) => {
       .where('customer_id', req.params.id)
       .orderBy('created_at', 'desc');
 
-    const latest = history[0];
-    if (latest) {
-      if (typeof latest.churn_signals === 'string') latest.churn_signals = JSON.parse(latest.churn_signals);
-      if (typeof latest.upsell_opportunities === 'string') latest.upsell_opportunities = JSON.parse(latest.upsell_opportunities);
+    if (current) {
+      if (typeof current.churn_signals === 'string') current.churn_signals = JSON.parse(current.churn_signals);
+      if (typeof current.upsell_opportunities === 'string') current.upsell_opportunities = JSON.parse(current.upsell_opportunities);
     }
 
-    res.json({ current: latest, history, signals, outreach, upsells });
+    res.json({ current: current || null, history, signals, outreach, upsells });
   } catch (err) { next(err); }
 });
 
