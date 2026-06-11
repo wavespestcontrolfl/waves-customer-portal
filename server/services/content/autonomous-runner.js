@@ -490,8 +490,17 @@ class AutonomousRunner {
           liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
         }
       }
+      // Match the FAQ policy against every field the topic can live on —
+      // not just the broad opp/brief service. A 'pest' city-service brief
+      // whose real topic is on customer_signal.service/topic ('rodent',
+      // 'termite') must P0-block an FAQ at the publish path too. Same
+      // single-sourced field list (faqPolicyTopicFields) the quality gates
+      // use, so the publish guard and the scoring checks can never diverge.
       const guardResult = contentGuardrails.evaluate(draft, {
-        service: opp.service || brief.service || null,
+        service: [
+          opp.service || brief.service || null,
+          ...contentGuardrails.faqPolicyTopicFields(draft, brief),
+        ],
         primaryKeyword: brief.target_keyword || null,
         domains: liveDomains,
       });

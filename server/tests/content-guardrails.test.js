@@ -246,3 +246,47 @@ describe('isFaqBlockedService (exported policy helper)', () => {
     }
   });
 });
+
+// faqPolicyTopicFields is the single-sourced list of fields the FAQ policy
+// is matched against — shared by the autonomous runner's publish-path
+// guardrail call, content-quality-gate, and seo-completion-gate. A broad
+// brief.service ('pest') whose real topic lives on customer_signal must be
+// enforced at the publish path, not only in the soft quality checks.
+describe('faqPolicyTopicFields (shared topic-field list)', () => {
+  test('is exported', () => {
+    expect(typeof guardrails.faqPolicyTopicFields).toBe('function');
+  });
+
+  test('includes brief service/tag, customer_signal service/topic, and draft frontmatter category/tag', () => {
+    const fields = guardrails.faqPolicyTopicFields(
+      { frontmatter: { category: 'pest-control', tag: 'Rodents' } },
+      { service: 'pest', tag: 'Roaches', customer_signal: { service: 'rodent', topic: 'rats in attic' } },
+    );
+    expect(fields).toEqual(expect.arrayContaining(['pest', 'Roaches', 'rodent', 'rats in attic', 'pest-control', 'Rodents']));
+  });
+
+  test('tolerates a JSON-string customer_signal (content_briefs round-trip)', () => {
+    const fields = guardrails.faqPolicyTopicFields({}, {
+      service: 'pest',
+      customer_signal: JSON.stringify({ service: 'termite', topic: 'swarmers' }),
+    });
+    expect(fields).toEqual(expect.arrayContaining(['termite', 'swarmers']));
+  });
+
+  test('safe on empty/missing inputs', () => {
+    expect(() => guardrails.faqPolicyTopicFields()).not.toThrow();
+    expect(guardrails.faqPolicyTopicFields({}, {}).filter(Boolean)).toEqual([]);
+  });
+
+  test('publish-path shape: evaluate() P0-blocks a broad-service draft whose blocked topic is on customer_signal', () => {
+    // Mirrors the autonomous runner's guardrail call: service is the array
+    // [opp.service, ...faqPolicyTopicFields(draft, brief)].
+    const draft = { body: '## Frequently Asked Questions\nQ: do rats come back? A: ...' };
+    const brief = { service: 'pest', customer_signal: { service: 'rodent', topic: 'rats in attic' } };
+    const r = guardrails.evaluate(draft, {
+      service: ['pest', ...guardrails.faqPolicyTopicFields(draft, brief)],
+    });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
+  });
+});

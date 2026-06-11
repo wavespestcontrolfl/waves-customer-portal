@@ -147,6 +147,32 @@ function isFaqBlockedService(service) {
   return blockedServiceCandidates(service).some((c) => FAQ_BLOCKED_SERVICES.has(c));
 }
 
+/**
+ * faqPolicyTopicFields(draft, brief) → array — every field a draft/brief
+ * pair can carry the FAQ-policy topic on. Single-sourced here so the
+ * autonomous runner's publish-path guardrail call, content-quality-gate,
+ * and seo-completion-gate all match the policy against the SAME fields:
+ * a broad brief.service ('pest') whose real topic lives on
+ * customer_signal.service/topic ('rodent'/'termite') is enforced at the
+ * publish path too, not only in the quality checks. Tolerates a
+ * JSON-string customer_signal (the content_briefs column round-trips
+ * through JSON.stringify).
+ */
+function faqPolicyTopicFields(draft = {}, brief = {}) {
+  let cs = brief?.customer_signal;
+  if (typeof cs === 'string') {
+    try { cs = JSON.parse(cs); } catch { cs = null; }
+  }
+  return [
+    brief?.service,
+    brief?.tag,
+    cs?.service,
+    cs?.topic,
+    draft?.frontmatter?.category,
+    draft?.frontmatter?.tag,
+  ];
+}
+
 function faqBlockedFinding(body, service) {
   if (!isFaqBlockedService(service)) return null;
   if (/\b(faq|frequently asked|common questions)\b/i.test(String(body || ''))) {
@@ -220,6 +246,7 @@ module.exports = {
   // blog-writer, writer-agent-config, and content-quality-gate so the
   // generators/gates can never contradict the publish-time guard.
   isFaqBlockedService,
+  faqPolicyTopicFields,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
   _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES },

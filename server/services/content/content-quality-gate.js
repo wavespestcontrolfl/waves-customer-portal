@@ -31,7 +31,7 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam } = require('./title-meta-spam-gate');
-const { isFaqBlockedService } = require('./content-guardrails');
+const { isFaqBlockedService, faqPolicyTopicFields } = require('./content-guardrails');
 
 // Compute the achievable maximum score from the weight map so the
 // pass threshold is always a reachable fraction of it. The v3.1 plan
@@ -158,7 +158,10 @@ function evaluate(draft, brief, context = {}) {
     if (typeof result !== 'object' || result === null) result = { ok: !!result };
     result.weight = check.weight;
     if (result.ok) totalScore += check.weight;
-    else if (check.isHard) hardFailures.push({ name: check.name, reason: result.reason });
+    // result.hard lets a soft page-type check escalate a specific failure
+    // mode to hard (e.g. an FAQ present on a FAQ-blocked topic) without
+    // hardening the whole check.
+    else if (check.isHard || result.hard === true) hardFailures.push({ name: check.name, reason: result.reason });
     else softFailures.push({ name: check.name, reason: result.reason });
     results[check.name] = result;
   }
@@ -307,35 +310,19 @@ function checkServiceMenu(draft) {
   return { ok: true };
 }
 
-// Topic fields the FAQ-blocked policy is matched against — same idea as
-// publishAstro's guardrail call ([post.category, post.tag]) plus the brief's
-// service, which is what the autonomous runner feeds content-guardrails.
-// Also consult the brief's customer_signal: a city-service brief can carry
-// the broad service ('pest') while the real topic lives on
-// customer_signal.service/topic ('rodent'/'termite' — persisted by
-// content-brief-builder), and a compliant no-FAQ draft on those topics must
-// not be failed as no_faq_section_heading.
-function faqPolicyTopicFields(draft, brief) {
-  return [
-    brief?.service,
-    brief?.tag,
-    brief?.customer_signal?.service,
-    brief?.customer_signal?.topic,
-    draft?.frontmatter?.category,
-    draft?.frontmatter?.tag,
-  ];
-}
-
 // Shared FAQ-blocked-topic handling for the FAQ checks: a draft on a
-// FAQ-blocked service (content-guardrails.isFaqBlockedService — same module
-// the publish-time P0 enforces) must NOT be scored down for correctly
-// OMITTING the FAQ section the generator is now instructed to skip. Neutral
-// = the check passes at full weight when the FAQ is (correctly) absent;
-// an FAQ that IS present on a blocked topic fails here too (the guardrail
-// P0s it at publish anyway). Returns null when the policy doesn't apply.
+// FAQ-blocked service (content-guardrails.isFaqBlockedService +
+// faqPolicyTopicFields — same single-sourced module/field-list the
+// publish-time P0 enforces) must NOT be scored down for correctly OMITTING
+// the FAQ section the generator is now instructed to skip. Neutral = the
+// check passes at full weight when the FAQ is (correctly) absent; an FAQ
+// that IS present on a blocked topic is a HARD failure (result.hard) — the
+// hosting checks (faq_from_customer_calls, faq_section_present) are soft
+// page-type checks, and a policy violation must not be outscoreable.
+// Returns null when the policy doesn't apply.
 function faqBlockedTopicResult(hasFaqSection, draft, brief) {
   if (!isFaqBlockedService(faqPolicyTopicFields(draft, brief))) return null;
-  if (hasFaqSection) return { ok: false, reason: 'faq_present_on_faq_blocked_service' };
+  if (hasFaqSection) return { ok: false, hard: true, reason: 'faq_present_on_faq_blocked_service' };
   return { ok: true, reason: 'faq_blocked_service_omission_is_correct' };
 }
 

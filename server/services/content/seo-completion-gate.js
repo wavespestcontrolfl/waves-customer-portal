@@ -13,7 +13,7 @@ const {
   extractVisibleFaqs,
   pestPracticesComplete,
 } = require('./blog-seo-contract');
-const { isFaqBlockedService } = require('./content-guardrails');
+const { isFaqBlockedService, faqPolicyTopicFields } = require('./content-guardrails');
 
 const P0_CODES = new Set([
   'P0_MISSING_TITLE',
@@ -212,12 +212,9 @@ function faqRequired(brief = {}) {
   // live AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 canary config — gets routed out
   // of publish as a failure. Belt-and-braces with content-brief-builder, which
   // now omits the FAQ required_section for blocked topics at compose time.
-  if (isFaqBlockedService([
-    brief.service,
-    brief.tag,
-    brief.customer_signal?.service,
-    brief.customer_signal?.topic,
-  ])) return false;
+  // faqPolicyTopicFields = the single-sourced topic-field list shared with
+  // content-quality-gate and the runner's publish-path guardrail call.
+  if (isFaqBlockedService(faqPolicyTopicFields({}, brief))) return false;
   const required = Array.isArray(brief.required_sections) ? brief.required_sections : safeParseArray(brief.required_sections);
   return required.some((section) => /\bfaq|frequently asked|common questions\b/i.test(String(section || '')));
 }

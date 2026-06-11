@@ -355,4 +355,50 @@ describe('FAQ checks are neutral on FAQ-blocked topics', () => {
     expect(result.checks.faq_section_present.ok).toBe(true);
     expect(result.checks.faq_section_present.reason).toBe('faq_blocked_service_omission_is_correct');
   });
+
+  // An FAQ that IS present on a blocked topic must be a HARD failure, not a
+  // soft scoring deduction — faq_from_customer_calls / faq_section_present
+  // are soft page-type checks, so without result-level hard escalation a
+  // city-service draft could exceed MIN_TOTAL_SCORE with the violation and
+  // keep moving toward publish.
+  test('evaluate() hard-fails a blocked-topic draft that contains an FAQ (not outscoreable)', () => {
+    const result = evaluate(
+      fullDraft({ body: FAQ_BODY }),
+      brief({ service: 'rodent', target_keyword: 'rodents bradenton' }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.hard_failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'faq_section_present', reason: 'faq_present_on_faq_blocked_service' }),
+    ]));
+  });
+
+  test('evaluate() hard-fails a city-service draft whose blocked topic lives on customer_signal', () => {
+    const result = evaluate(
+      fullDraft({ body: FAQ_BODY }),
+      brief({
+        page_type: 'city-service',
+        service: 'pest', // broad — the real topic is on the customer signal
+        customer_signal: { service: 'rodent', normalized_question: 'do rats come back after treatment' },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.hard_failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'faq_from_customer_calls', reason: 'faq_present_on_faq_blocked_service' }),
+    ]));
+  });
+
+  test('compliant no-FAQ omission on a blocked topic is NOT a hard failure', () => {
+    const result = evaluate(
+      fullDraft({ body: NO_FAQ_BODY }),
+      brief({ service: 'rodent', target_keyword: 'rodents bradenton' }),
+    );
+    expect(result.hard_failures).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'faq_present_on_faq_blocked_service' }),
+    ]));
+  });
+
+  test('faqBlockedTopicResult tolerates a JSON-string customer_signal', () => {
+    const cs = JSON.stringify({ service: 'termite', normalized_question: 'are termites active in summer' });
+    expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: cs }).ok).toBe(true);
+  });
 });
