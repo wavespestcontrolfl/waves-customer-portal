@@ -139,7 +139,21 @@ describe('estimate add-service request workflow', () => {
     expect(normalizeRequestedServiceKey('Add Lawn Care and save more')).toBe('lawn_care');
     expect(normalizeRequestedServiceKey('Pest Control')).toBe('pest_control');
     expect(normalizeRequestedServiceKey('WaveGuard Mosquito')).toBe('mosquito');
+    expect(normalizeRequestedServiceKey('Termite Bait Stations')).toBe('termite_bait');
     expect(normalizeRequestedServiceKey('pool cleaning')).toBeNull();
+  });
+
+  test('prices termite bait station requests from the saved property inputs', () => {
+    const revision = buildEstimateServiceRevisionDraft(baseEstimate(), 'termite_bait');
+
+    expect(revision.serviceKey).toBe('termite_bait');
+    expect(revision.serviceLabel).toBe('Termite Bait Stations');
+    expect(revision.status).toBe('priced');
+    expect(revision.updated.monthly).toBeGreaterThan(0);
+    expect(revision.draftEstimateData.inputs.services.termite_bait).toEqual(expect.objectContaining({
+      system: 'advance',
+      monitoringTier: 'basic',
+    }));
   });
 
   test('builds a draft revision without mutating the live estimate', () => {

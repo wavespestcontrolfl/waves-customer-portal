@@ -5340,6 +5340,12 @@ router.put('/:token/accept', async (req, res, next) => {
     if (annualPrepaySelected && !isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList)) {
       return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
     }
+    // Existing customers are pay-per-application only — the page never offers
+    // prepay, but a stale/crafted client could still POST it. Reject so
+    // EstimateConverter can't open an annual prepay invoice/term for them.
+    if (annualPrepaySelected && estData?.membershipSnapshot?.isExistingCustomer) {
+      return res.status(400).json({ error: 'annual prepay is not available for existing customers — pick pay_at_visit instead' });
+    }
     const pricingFrequencies = Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : [];
     const selectedFrequency = !treatAsOneTime && pricingFrequencies.length
       ? (selectedFrequencyKey

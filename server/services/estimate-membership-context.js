@@ -170,11 +170,56 @@ function estimatePerApplicationFor(estData, key) {
   return null;
 }
 
+// One-time membership/setup line items must not count toward the per-visit
+// basis — the FIRST standard accept invoice can carry the $99 WaveGuard setup
+// AND the first application on the same service-linked invoice, and reading
+// its raw total would inflate the advertised per-visit savings.
+function isSetupLineItem(line = {}) {
+  return /waveguard|membership|setup fee/i.test(String(line.description || ''));
+}
+
+function invoiceLineItems(row = {}) {
+  const raw = row.line_items;
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  }
+  return [];
+}
+
+function lineItemAmount(line = {}) {
+  const explicit = Number(line.amount);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const qty = Number(line.quantity) || 1;
+  const unit = Number(line.unit_price);
+  return Number.isFinite(unit) && unit > 0 ? unit * qty : 0;
+}
+
+// What the invoice charged for the SERVICE itself: the sum of its
+// non-setup lines, falling back to the invoice total when there are no
+// parseable line items.
+function invoiceServiceAmount(row = {}) {
+  const lines = invoiceLineItems(row);
+  if (lines.length) {
+    const serviceTotal = lines
+      .filter((line) => !isSetupLineItem(line))
+      .reduce((sum, line) => sum + lineItemAmount(line), 0);
+    if (serviceTotal > 0) return round2(serviceTotal);
+    // All lines were setup/membership — not a per-visit price.
+    return null;
+  }
+  const total = Number(row.total);
+  return Number.isFinite(total) && total > 0 ? round2(total) : null;
+}
+
 // What the customer actually LAST PAID per visit, by qualifying key — most
 // recent paid invoice whose service_type maps to the key. Visit invoices
-// minted from the schedule carry service_type; setup/prepay invoices don't,
-// so they never pollute this. Falls back to {} on any error so the snapshot
-// still renders from scheduled_services.estimated_price.
+// minted from the schedule carry service_type; standalone setup/prepay
+// invoices don't, so they never pollute this. Falls back to {} on any error
+// so the snapshot still renders from scheduled_services.estimated_price.
 async function loadLastPaidAmountsByKey(database, customerId) {
   const amounts = {};
   try {
@@ -183,12 +228,12 @@ async function loadLastPaidAmountsByKey(database, customerId) {
       .whereNotNull('service_type')
       .orderBy('paid_at', 'desc')
       .limit(100)
-      .select('service_type', 'total', 'paid_at');
+      .select('service_type', 'total', 'line_items', 'paid_at');
     for (const row of rows) {
       const key = toQualifyingKey(row.service_type);
       if (!key || amounts[key] != null) continue;
-      const total = Number(row.total);
-      if (Number.isFinite(total) && total > 0) amounts[key] = round2(total);
+      const amount = invoiceServiceAmount(row);
+      if (amount != null) amounts[key] = amount;
     }
   } catch (err) {
     logger.warn(`[membership-context] last-paid lookup skipped for customer ${customerId}: ${err.message}`);

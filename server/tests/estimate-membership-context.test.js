@@ -143,6 +143,54 @@ describe('computeMembershipContext', () => {
     ]);
   });
 
+  test('setup line items are excluded from the last-paid per-visit basis', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      // First standard accept invoice: $99 setup + $117 first application on
+      // ONE service-linked invoice. Only the service line may count.
+      paidInvoices: [{
+        service_type: 'pest_control',
+        total: '216.00',
+        paid_at: '2026-05-20',
+        line_items: JSON.stringify([
+          { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+          { description: 'First service application', quantity: 1, unit_price: 117 },
+        ]),
+      }],
+    });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 11.70 });
+  });
+
+  test('an all-setup invoice is skipped in favor of an older service invoice', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [
+        {
+          service_type: 'pest_control',
+          total: '99.00',
+          paid_at: '2026-06-01',
+          line_items: JSON.stringify([
+            { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+          ]),
+        },
+        { service_type: 'pest_control', total: '117.00', paid_at: '2026-05-20', line_items: '[]' },
+      ],
+    });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 11.70 });
+  });
+
   test('setup/prepay invoices without service_type never feed the per-visit basis', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),

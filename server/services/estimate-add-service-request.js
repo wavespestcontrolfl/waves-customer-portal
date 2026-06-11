@@ -171,6 +171,17 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey) {
     return { added: true, updatedInputs };
   }
 
+  if (serviceKey === 'termite_bait') {
+    if (updatedInputs.services.termite || updatedInputs.services.termiteBait || updatedInputs.services.termite_bait) {
+      return { added: false, updatedInputs, reason: 'already_included' };
+    }
+    // Engine defaults (system/monitoring) match estimate-engine's own
+    // fallbacks; footprint/perimeter come from the saved property inputs,
+    // and missing measurements surface as quoteRequired on the draft.
+    updatedInputs.services.termite_bait = { system: 'advance', monitoringTier: 'basic' };
+    return { added: true, updatedInputs };
+  }
+
   return { added: false, updatedInputs, reason: 'unsupported_service' };
 }
 
