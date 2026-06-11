@@ -6279,18 +6279,16 @@ export function CompletionPanel({
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const completionCtaLabel = submitting
     ? "Completing..."
-    : calibrationRequired && !isIncompleteVisit && !equipmentSystemId
-      ? "Select Equipment Calibration"
-      : tankCleanoutCompletionBlocked
-        ? "Tank Cleanout Required"
-        : protocolActualsCompletionBlocked
-          ? missingProtocolTasks.length
-            ? "Protocol Checklist Required"
-            : selectedProductsMissingActualAmount.length
-              ? "Product Actuals Required"
-              : treatmentPlanInventoryBlocks.length
-                ? "Inventory Blocked"
-                : "Product Disposition Required"
+    : tankCleanoutCompletionBlocked
+      ? "Tank Cleanout Required"
+      : protocolActualsCompletionBlocked
+        ? missingProtocolTasks.length
+          ? "Protocol Checklist Required"
+          : selectedProductsMissingActualAmount.length
+            ? "Product Actuals Required"
+            : treatmentPlanInventoryBlocks.length
+              ? "Inventory Blocked"
+              : "Product Disposition Required"
         : blackoutCompletionBlocked
           ? canApproveOfficeExceptions
             ? "Office Approval Required"
@@ -6467,7 +6465,17 @@ export function CompletionPanel({
             : [],
         );
         const selectedCalibration = data?.plan?.equipmentCalibration?.selected;
-        if (!equipmentSystemId && selectedCalibration?.equipment_system_id) {
+        // Only auto-adopt the plan's selected calibration when it's field
+        // verified — i.e. one of the rows that actually appears in the dropdown.
+        // The plan can surface a stale, unverified calibration as `selected`
+        // (it's filtered out of the dropdown); auto-filling that would make the
+        // visit look like the tech chose equipment they can't see, defeating the
+        // calibration advisory bypass and recording an unverified system as used.
+        if (
+          !equipmentSystemId &&
+          selectedCalibration?.equipment_system_id &&
+          selectedCalibration.calibration_status === "field_verified"
+        ) {
           setEquipmentSystemId(selectedCalibration.equipment_system_id);
           setCalibrationId(selectedCalibration.id || "");
         }
@@ -7103,12 +7111,14 @@ export function CompletionPanel({
 
   async function handleSubmit() {
     if (submitting) return;
-    if (calibrationCompletionBlocked) {
-      alert(
-        calibrationHelpText ||
-          "Select calibrated equipment before completing this WaveGuard lawn visit.",
+    if (calibrationAdvisory) {
+      const proceed = window.confirm(
+        `${
+          calibrationHelpText ||
+          "No field-verified calibrated equipment is selected for this WaveGuard lawn visit."
+        }\n\nComplete this visit without field-verified calibrated equipment?`,
       );
-      return;
+      if (!proceed) return;
     }
     if (tankCleanoutCompletionBlocked) {
       alert(tankCleanoutHelpText);
@@ -7408,7 +7418,11 @@ export function CompletionPanel({
   const selectedCalibrationUnverified =
     !!selectedCalibration &&
     selectedCalibration.calibration_status !== "field_verified";
-  const calibrationCompletionBlocked =
+  // WaveGuard calibration is advisory at completion, not a hard gate: when no
+  // field-verified calibrated equipment is on record (or the selected one is
+  // expired/unverified) the tech can still close out — calibrationId is sent as
+  // null — after acknowledging a warning, rather than being trapped on this screen.
+  const calibrationAdvisory =
     calibrationRequired &&
     !isIncompleteVisit &&
     (!equipmentSystemId ||
@@ -7417,12 +7431,14 @@ export function CompletionPanel({
   const calibrationHelpText =
     equipmentCalibrationError ||
     (selectedCalibrationUnverified
-      ? "Selected calibration is not field verified. Verify calibration before completing this visit."
+      ? "Selected calibration is not field verified — verify it when you can. You can still complete this visit."
       : selectedCalibrationExpired
-      ? "Selected calibration is expired. Record a new calibration before completing this visit."
-      : calibrationRequired
-        ? "WaveGuard lawn visits require current field-verified calibrated spray equipment before completion."
-        : "");
+      ? "Selected calibration is expired — record a new one when you can. You can still complete this visit."
+      : !equipmentSystemId && calibrationRequired
+        ? "No field-verified calibrated equipment on record. You can complete without it; calibration is recorded as none."
+        : calibrationRequired
+          ? "WaveGuard lawn visits should use field-verified calibrated spray equipment when available."
+          : "");
   function isProtocolActionSelected(action) {
     const noteText = action?.note || action?.label || action?.raw || "";
     return (
@@ -9423,7 +9439,6 @@ export function CompletionPanel({
               onClick={() => handleSubmit()}
               disabled={
                 submitting ||
-                calibrationCompletionBlocked ||
                 tankCleanoutCompletionBlocked ||
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||
@@ -9435,7 +9450,6 @@ export function CompletionPanel({
                 ...primaryPill,
                 opacity:
                   submitting ||
-                  calibrationCompletionBlocked ||
                   tankCleanoutCompletionBlocked ||
                   blackoutCompletionBlocked ||
                   nLimitCompletionBlocked ||
@@ -11199,7 +11213,6 @@ export function CompletionPanel({
             onClick={() => handleSubmit()}
             disabled={
               submitting ||
-              calibrationCompletionBlocked ||
               tankCleanoutCompletionBlocked ||
               blackoutCompletionBlocked ||
               nLimitCompletionBlocked ||
@@ -11216,7 +11229,6 @@ export function CompletionPanel({
               height: 52,
               opacity:
                 submitting ||
-                calibrationCompletionBlocked ||
                 tankCleanoutCompletionBlocked ||
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||

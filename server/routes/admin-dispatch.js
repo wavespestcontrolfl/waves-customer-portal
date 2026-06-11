@@ -1549,6 +1549,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardBlackoutApproval = null;
     let waveguardNLimitApproval = null;
     let waveguardManagerApproval = null;
+    let waveguardCalibrationAdvisory = null;
+    let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
     let inventoryDeductions = [];
@@ -1698,15 +1700,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
       waveguardPlan = plan;
       const calibrationBlocks = calibrationLockoutBlocks(plan);
-      if (calibrationBlocks.length) {
-        const validationErr = new Error('Equipment calibration lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Equipment calibration lockout',
-          code: 'waveguard_calibration_lockout',
-          details: calibrationBlocks.map((block) => block.message),
-          blocks: calibrationBlocks,
-        });
+      // Calibration is advisory at completion, not a hard gate (mirrors
+      // CompletionPanel's calibrationAdvisory): the tech acknowledges the warning
+      // client-side and may complete a WaveGuard lawn visit without field-verified
+      // equipment. Record the bypass for audit instead of returning a 400 lockout
+      // that would trap the tech on the screen.
+      const calibrationBypass = calibrationBlocks.length > 0;
+      if (calibrationBypass) {
+        waveguardCalibrationAdvisory = {
+          acknowledged: true,
+          acknowledgedByTechnicianId: req.technicianId,
+          acknowledgedByRole: req.techRole || null,
+          acknowledgedAt: new Date().toISOString(),
+          blocks: calibrationBlocks.map((block) => ({
+            code: block.code,
+            message: block.message,
+            source: block.source || null,
+          })),
+        };
       }
       const blackoutBlocks = [
         ...blackoutLockoutBlocks(plan),
@@ -1799,31 +1810,61 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         });
       }
       const selectedCalibration = plan?.equipmentCalibration?.selected;
-      if (selectedCalibration) {
+      // Only adopt the plan's calibration when it's valid (no bypass). On a
+      // calibration bypass we keep whatever the tech explicitly passed (usually
+      // none) rather than recording an auto-picked, non-verified system as used.
+      if (selectedCalibration && !calibrationBypass) {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
         waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
       }
-      const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
-      if (cleanoutBlocks.length) {
-        const validationErr = new Error('WaveGuard tank cleanout lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Tank cleanout record required',
-          code: 'waveguard_tank_cleanout_lockout',
-          details: cleanoutBlocks.map((block) => block.message),
-          blocks: cleanoutBlocks,
-        });
+      // On a calibration bypass, record "none" rather than persisting equipment
+      // the tech could not have chosen. We clear the IDs when EITHER:
+      //   - no equipment was submitted (so any value present is only a stale
+      //     assigned_equipment_system_id/assigned_calibration_id backfill), OR
+      //   - the selected calibration is not field verified — those rows are
+      //     filtered out of the dropdown (SchedulePage.jsx:5670), so a non-empty
+      //     ID for one can only come from a stale draft / direct API, never a real
+      //     tech selection.
+      // A field-verified-but-expired calibration DOES appear in the dropdown and
+      // can be deliberately selected, so we keep it (the advisory still warns).
+      const selectedIsFieldVerified =
+        selectedCalibration?.calibration_status === 'field_verified';
+      if (calibrationBypass && (!equipmentSystemId || !selectedIsFieldVerified)) {
+        waveguardEquipmentSystemId = null;
+        waveguardCalibrationId = null;
+        waveguardCalibrationCleared = true;
       }
-      waveguardTankCleanout = {
-        ...normalizedTankCleanout,
-        equipmentSystemId: waveguardEquipmentSystemId || null,
-        calibrationId: waveguardCalibrationId || null,
-        equipmentName: selectedCalibration?.system_name || selectedCalibration?.name || null,
-        warnings: tankCleanoutWarnings(normalizedTankCleanout, selectedCalibration),
-        recordedByTechnicianId: req.technicianId,
-        recordedByRole: req.techRole || null,
-        recordedAt: new Date().toISOString(),
-      };
+      // Tank cleanout attestation is required whenever we will actually persist an
+      // equipment system as used — i.e. waveguardEquipmentSystemId survived to here
+      // and the calibration was not cleared to "none". Keying off the ID we persist
+      // (rather than the raw request field) closes the gap where a backfilled, valid
+      // field-verified assignment is recorded as used by an older client / direct API
+      // with no cleanout. The earlier empty-dropdown / stale-assignment trap does not
+      // recur: those calibrations are non-field-verified, so the clear above already
+      // nulled the ID and this block is skipped.
+      if (waveguardEquipmentSystemId && !waveguardCalibrationCleared) {
+        const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
+        if (cleanoutBlocks.length) {
+          const validationErr = new Error('WaveGuard tank cleanout lockout');
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+          return res.status(400).json({
+            error: 'Tank cleanout record required',
+            code: 'waveguard_tank_cleanout_lockout',
+            details: cleanoutBlocks.map((block) => block.message),
+            blocks: cleanoutBlocks,
+          });
+        }
+        waveguardTankCleanout = {
+          ...normalizedTankCleanout,
+          equipmentSystemId: waveguardEquipmentSystemId || null,
+          calibrationId: waveguardCalibrationId || null,
+          equipmentName: selectedCalibration?.system_name || selectedCalibration?.name || null,
+          warnings: tankCleanoutWarnings(normalizedTankCleanout, selectedCalibration),
+          recordedByTechnicianId: req.technicianId,
+          recordedByRole: req.techRole || null,
+          recordedAt: new Date().toISOString(),
+        };
+      }
     }
 
     // Status flip + completion artifacts + audit row + lifecycle
@@ -1894,6 +1935,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardBlackoutApproval,
             waveguardNLimitApproval,
             waveguardManagerApproval,
+            waveguardCalibrationAdvisory,
             waveguardTankCleanout,
             ...(treeShrubCloseoutSummary ? {
               treeShrubCloseout: treeShrubCloseoutSummary,
@@ -2230,6 +2272,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             },
             equipmentSystemId: waveguardEquipmentSystemId,
             calibrationId: waveguardCalibrationId,
+            // When the tech bypassed calibration without submitting equipment, the
+            // IDs were intentionally cleared to null — don't let the protocol
+            // completion re-derive the stale assigned system from the plan.
+            calibrationCleared: waveguardCalibrationCleared,
             serviceDate: completionEndedAt,
           });
           if (protocolCompletion) {
