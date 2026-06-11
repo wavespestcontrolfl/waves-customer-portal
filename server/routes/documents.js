@@ -588,6 +588,7 @@ router.get('/', authenticate, async (req, res, next) => {
           'service_records.service_type',
           'service_records.report_view_token',
           'service_records.report_template_version',
+          'service_records.structured_notes',
           'technicians.name as technician_name',
         )
         .orderBy('service_records.service_date', 'desc')
@@ -612,6 +613,15 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const autoGenDocs = [];
     for (const svc of services) {
+      // internal_only typed completions (Phase-1b shadow) store a report for
+      // admin review only — no auto-generated "Visit Report" document entry.
+      let svcNotes = {};
+      try {
+        svcNotes = typeof svc.structured_notes === 'string'
+          ? JSON.parse(svc.structured_notes)
+          : (svc.structured_notes || {});
+      } catch { svcNotes = {}; }
+      if (svcNotes && svcNotes.typedReportDelivery === 'internal_only') continue;
       // Service Report
       if (!linkedServiceIds.has(svc.id) || !docs.find(d => d.linked_service_record_id === svc.id && d.document_type === 'service_report')) {
         const viewUrl = svc.report_view_token ? `/report/${svc.report_view_token}` : null;

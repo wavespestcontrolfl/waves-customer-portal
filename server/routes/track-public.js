@@ -203,8 +203,18 @@ async function buildSummary(service) {
     const record = await db('service_records')
       .where({ scheduled_service_id: service.id })
       .orderBy('created_at', 'desc')
-      .first('id', 'report_view_token');
-    serviceReportToken = record?.report_view_token || null;
+      .first('id', 'report_view_token', 'structured_notes');
+    // internal_only typed completions (Phase-1b shadow) never hand the
+    // customer a report link — not even on the token-scoped tracking page.
+    let trackNotes = {};
+    try {
+      trackNotes = typeof record?.structured_notes === 'string'
+        ? JSON.parse(record.structured_notes)
+        : (record?.structured_notes || {});
+    } catch { trackNotes = {}; }
+    serviceReportToken = trackNotes.typedReportDelivery === 'internal_only'
+      ? null
+      : (record?.report_view_token || null);
     if (record?.id) {
       const photoRows = await db('service_photos')
         .where({ service_record_id: record.id })

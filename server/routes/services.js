@@ -76,6 +76,7 @@ router.get('/', async (req, res, next) => {
       const projectReportUrl = structuredNotes.portalAttached && projectReport.url
         ? projectReport.url
         : null;
+      const internalOnlyReport = structuredNotes.typedReportDelivery === 'internal_only';
       return {
         id: svc.id,
         date: svc.service_date,
@@ -97,15 +98,19 @@ router.get('/', async (req, res, next) => {
         projectId: structuredNotes.projectId || null,
         projectType: structuredNotes.projectType || null,
         projectReportPortalAttached: Boolean(structuredNotes.portalAttached && projectReportUrl),
+        // internal_only typed completions (Phase-1b shadow) store a report
+        // for admin review, but the customer must not see it — the flag is
+        // frozen at completion time, so graduating the profile to auto_send
+        // later never retroactively exposes shadow reports.
         reportUrl: isProjectCompletion
           ? projectReportUrl
-          : (svc.report_view_token ? `/report/${svc.report_view_token}` : null),
+          : (svc.report_view_token && !internalOnlyReport ? `/report/${svc.report_view_token}` : null),
         reportPdfUrl: isProjectCompletion
           ? projectReportUrl
-          : (svc.report_view_token ? `/api/reports/${svc.report_view_token}` : null),
-        reportToken: svc.report_view_token || null,
-        reportGeneratedAt: svc.report_generated_at || null,
-        reportViewedAt: svc.report_viewed_at || null,
+          : (svc.report_view_token && !internalOnlyReport ? `/api/reports/${svc.report_view_token}` : null),
+        reportToken: !internalOnlyReport ? (svc.report_view_token || null) : null,
+        reportGeneratedAt: !internalOnlyReport ? (svc.report_generated_at || null) : null,
+        reportViewedAt: !internalOnlyReport ? (svc.report_viewed_at || null) : null,
       };
     }));
 

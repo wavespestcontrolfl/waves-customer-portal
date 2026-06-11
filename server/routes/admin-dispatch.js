@@ -2200,6 +2200,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
               ? { completionTelemetry }
               : {}),
+            // Delivery posture at completion time, frozen on the record:
+            // /api/services suppresses report links for internal_only rows
+            // (Phase-1b shadow) — a later graduation to auto_send must not
+            // retroactively expose reports that were never sent.
+            ...(typedFindingsType ? { typedReportDelivery: typedDeliveryMode } : {}),
           };
           const serviceData = {
             protocol: {
