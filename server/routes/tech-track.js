@@ -261,10 +261,20 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id');
+      .first('id', 'technician_id', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    // Stale-tap guard — same as /en-route and /on-site: a job dispatch
+    // already moved to a future day must not be rain-out'd back to
+    // today from a stale Tech Home tab.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: 'This job has been rescheduled to a future date. Refresh your route.',
+        code: 'future_scheduled_date',
+      });
     }
 
     const RainOut = require('../services/rain-out');
@@ -285,10 +295,20 @@ router.post('/:id/rain-out', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id');
+      .first('id', 'technician_id', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    // Stale-tap guard — same as /en-route and /on-site. The guard is on
+    // the job's CURRENT date (acting on a job that's no longer today's),
+    // not on the rain-out target, which may legitimately be future.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: 'This job has been rescheduled to a future date. Refresh your route.',
+        code: 'future_scheduled_date',
+      });
     }
 
     const { reasonCode, scope, target, alt, notifyCustomer } = req.body || {};
