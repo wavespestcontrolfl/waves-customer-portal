@@ -408,6 +408,11 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("57%")).toBeInTheDocument();
     expect(screen.getByText("4 accepted of 7 resolved")).toBeInTheDocument();
     expect(screen.getByText("$400")).toBeInTheDocument();
+    // ROI table discloses per-line counting (bundles appear once per quoted
+    // service, so its totals can exceed the estimate-level KPI counts).
+    expect(
+      screen.getByText(/counted per line, so bundled estimates/),
+    ).toBeInTheDocument();
   });
 
   it("keeps still-open offers out of the acceptance denominator", () => {

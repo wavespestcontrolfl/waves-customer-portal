@@ -619,7 +619,10 @@ export default function PipelineAnalytics({
       </Card>
 
       <Card className="mb-5 overflow-hidden">
-        <SectionHeader title="ROI by service line" sub="Offers · accepted · avg ticket" />
+        <SectionHeader
+          title="ROI by service line"
+          sub="Offers · accepted · avg ticket — counted per line, so bundled estimates appear under each service they quote"
+        />
         <div className="hidden md:grid md:grid-cols-4 gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
           <div>Service</div>
           <div className="u-nums">Offers</div>
