@@ -745,12 +745,17 @@ const AppointmentReminders = {
         reminder_24h_sent_at: null,
         updated_at: new Date(),
       };
-      // A reschedule supersedes a still-pending creation confirmation — admin
-      // saves defer the confirmation SMS off the request path, so a reschedule
-      // landing in that window must claim the slot. This suppresses the deferred
-      // sendConfirmation (which skips confirmation_sent rows) so the customer
-      // gets the reschedule notice below, not a stale-time confirmation after it.
-      if (!record.confirmation_sent) {
+      // A reschedule notice supersedes a still-pending creation confirmation —
+      // admin saves defer the confirmation SMS off the request path, so a
+      // reschedule landing in that window must claim the slot. This suppresses
+      // the deferred sendConfirmation (which skips confirmation_sent rows) so
+      // the customer gets the reschedule notice below, not a stale-time
+      // confirmation after it. Only claim when a notice will actually go out:
+      // a suppressed reschedule (sendNotification:false) that also claimed the
+      // slot would leave the customer with NO message at all — instead the
+      // deferred confirmation stays armed and renders the new time from this
+      // update.
+      if (!record.confirmation_sent && sendNotification) {
         rescheduleUpdate.confirmation_sent = true;
         rescheduleUpdate.confirmation_sent_at = new Date();
       }
