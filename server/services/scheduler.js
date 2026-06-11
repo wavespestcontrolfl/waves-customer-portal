@@ -2,7 +2,8 @@ const cron = require('node-cron');
 const db = require('../models/db');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
@@ -918,10 +919,13 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('30 7 * * *', async () => {
     try {
-      const yesterday = new Date(Date.now() - 24 * 3600000);
-      yesterday.setHours(0, 0, 0, 0);
+      // Window opens at ET midnight yesterday. The previous computation
+      // used setHours(0,0,0,0) in server-local time — Railway runs UTC, so
+      // the "overnight" window opened at UTC midnight (= 7–8 PM ET two days
+      // prior) and the 7:30 AM digest counted ~35 hours of email.
+      const windowStart = parseETDateTime(`${etDateString(addETDays(new Date(), -1))}T00:00:00`);
 
-      const emails = await db('emails').where('received_at', '>=', yesterday);
+      const emails = await db('emails').where('received_at', '>=', windowStart);
       const unread = await db('emails')
         .where({ is_read: false, is_archived: false })
         .count('* as c').first();
@@ -1092,10 +1096,15 @@ function initScheduledJobs() {
         return;
       }
 
-      // Build reminder message
+      // Build reminder message. due_date is a DATE column — pg hands it
+      // back as midnight, so `new Date(f.due_date)` rendered in ET shows
+      // the previous day. Anchor the calendar date at ET noon instead
+      // (dateOnly + T12:00 pattern, same as admin-schedule.js) so both the
+      // displayed date and the day-count math stay on the right ET day.
+      const todayNoon = parseETDateTime(`${today}T12:00`);
       const lines = upcomingFilings.map(f => {
-        const dueDate = new Date(f.due_date);
-        const daysUntil = Math.ceil((dueDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+        const dueDate = parseETDateTime(`${dateOnlyString(f.due_date)}T12:00`);
+        const daysUntil = Math.round((dueDate.getTime() - todayNoon.getTime()) / (24 * 60 * 60 * 1000));
         const amountStr = f.amount_due ? ` ($${parseFloat(f.amount_due).toLocaleString()})` : '';
         return `- ${f.title}${amountStr} — due ${dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })} (${daysUntil} day${daysUntil !== 1 ? 's' : ''})`;
       });
@@ -1795,20 +1804,42 @@ function initScheduledJobs() {
     try {
       const missedAppointment = require('./workflows/missed-appointment');
       if (missedAppointment.onSkip) {
-        // Find today's services that were scheduled but not completed
+        // Find today's services that were scheduled but not completed.
+        // In-progress statuses (en_route / on_site) are intentionally
+        // excluded along with completed/cancelled/skipped/rescheduled —
+        // a tech actively on the job is not a no-show.
         const today = etDateString();
-        const missedServices = await db('scheduled_services')
+        const candidates = await db('scheduled_services')
           .where({ scheduled_date: today })
           .whereIn('status', ['pending', 'confirmed'])
-          .select('id');
-        for (const svc of missedServices) {
+          .select('id', 'window_start', 'window_end');
+
+        // Only flag services whose arrival window has already elapsed at
+        // sweep time. Evening jobs (e.g. a 6–8 PM window that completes at
+        // 6:30 PM) are still legitimately pending at the 6 PM sweep and
+        // must not accrue customer_noshow rows in reschedule_log — two of
+        // those in 90 days trigger a false "we've missed you" outreach
+        // task (see workflows/missed-appointment.js onSkip).
+        const { hour, minute } = etParts();
+        const nowET = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+        const windowHasPassed = (svc) => {
+          // window_start/window_end are TIME columns ('HH:MM:SS' strings).
+          const cutoff = svc.window_end || svc.window_start;
+          if (!cutoff) return true; // no window recorded — legacy behavior
+          return String(cutoff).slice(0, 5) <= nowET;
+        };
+
+        let flagged = 0;
+        for (const svc of candidates) {
+          if (!windowHasPassed(svc)) continue;
           try {
             await missedAppointment.onSkip(svc.id, 'no_show');
+            flagged++;
           } catch (skipErr) {
             logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
           }
         }
-        logger.info(`Missed appointment check done: ${missedServices.length} services checked`);
+        logger.info(`Missed appointment check done: ${candidates.length} candidate(s), ${flagged} flagged as no-show`);
       }
     } catch (err) {
       logger.error(`Missed appointment check failed: ${err.message}`);

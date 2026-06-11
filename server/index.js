@@ -706,16 +706,30 @@ httpServer.listen(PORT, () => {
       logger.info(`[mem] RSS: ${Math.round(m.rss/1024/1024)}MB | Heap: ${Math.round(m.heapUsed/1024/1024)}/${Math.round(m.heapTotal/1024/1024)}MB`);
     }, 5 * 60 * 1000);
 
-    // Weekly: recompute all assessment analytics (product efficacy, protocol performance, benchmarks, contradictions)
-    setInterval(async () => {
-      try {
-        const analytics = require('./services/assessment-analytics');
-        const results = await analytics.runAll();
-        logger.info(`[cron] Weekly assessment analytics complete: ${JSON.stringify(results)}`);
-      } catch (err) {
-        logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);
+    // Weekly: recompute all assessment analytics (product efficacy, protocol
+    // performance, benchmarks, contradictions). Sunday 4 AM ET via node-cron —
+    // the old setInterval(7 days) reset on every boot, and Railway redeploys
+    // multiple times daily, so it effectively never fired. Gated like the
+    // other automated jobs (GATE_CRON_JOBS) and wrapped in runExclusive so
+    // overlapping deploy instances don't double-run.
+    {
+      const { isEnabled } = require('./config/feature-gates');
+      if (config.nodeEnv !== 'test' && isEnabled('cronJobs')) {
+        const cron = require('node-cron');
+        const { runExclusive } = require('./utils/cron-lock');
+        cron.schedule('0 4 * * 0', async () => {
+          try {
+            await runExclusive('assessment-analytics-weekly', async () => {
+              const analytics = require('./services/assessment-analytics');
+              const results = await analytics.runAll();
+              logger.info(`[cron] Weekly assessment analytics complete: ${JSON.stringify(results)}`);
+            });
+          } catch (err) {
+            logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
       }
-    }, 7 * 24 * 60 * 60 * 1000); // 7 days
+    }
   })();
 });
 
