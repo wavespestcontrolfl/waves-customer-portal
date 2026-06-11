@@ -1413,9 +1413,20 @@ router.post('/wdo-history', async (req, res, next) => {
       if (cachedHistory) return res.json({ history: cachedHistory, cached: true });
     }
 
-    const history = await lookupWdoHistory(propertyAddress);
+    // A failed lookup must surface as a FAILURE, not as "no history found" —
+    // the tech would otherwise write "no prior treatment" onto a legal filing
+    // off the back of a transient API error. A successful nothing-found comes
+    // back as a normal history object (previousTreatment: false); null means
+    // the lookup is unconfigured/skipped.
+    let history = null;
+    try {
+      history = await lookupWdoHistory(propertyAddress);
+    } catch (err) {
+      logger.warn(`[projects] WDO history lookup failed for "${propertyAddress}": ${err.message}`);
+      return res.status(502).json({ error: 'Treatment/permit history lookup failed — try again in a moment.', code: 'lookup_failed' });
+    }
     if (!history) {
-      return res.json({ history: null, message: 'No treatment or permit history found — verify on site.' });
+      return res.json({ history: null, message: 'History lookup unavailable — verify treatment/permit history on site.' });
     }
 
     if (projectId) {

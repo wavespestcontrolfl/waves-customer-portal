@@ -1,4 +1,17 @@
 const db = require('../models/db');
+const logger = require('./logger');
+
+// Project types that must NEVER route through the generic typed
+// service-report (Specialty V1) completion flow, no matter what
+// service_completion_profiles says. WDO completion is load-bearing legal
+// machinery — licensee e-signature gate, signed FDACS-13645 PDF generation,
+// archived filings, the combined report+invoice send — none of which V1
+// completion performs. Profile rows are data: one bad WHERE clause in a
+// future cutover migration could silently flip the mode and bypass every
+// FDACS gate, so the exclusion is enforced in code at profile resolution
+// (serializeProfile coerces the mode back) and at creation gating
+// (appointmentManagedProjectTypes filters it out).
+const V1_EXCLUDED_PROJECT_TYPES = new Set(['wdo_inspection']);
 
 const DEFAULT_SERVICE_REPORT_PROFILE = {
   serviceKey: null,
@@ -23,7 +36,13 @@ const DEFAULT_SERVICE_REPORT_PROFILE = {
 
 function serializeProfile(row = null) {
   if (!row) return { ...DEFAULT_SERVICE_REPORT_PROFILE };
-  const completionMode = row.completion_mode || 'service_report';
+  let completionMode = row.completion_mode || 'service_report';
+  if (completionMode === 'service_report' && V1_EXCLUDED_PROJECT_TYPES.has(row.project_type)) {
+    logger.warn(
+      `[completion-profiles] profile ${row.service_key || row.id} claims service_report completion for excluded project type "${row.project_type}" — coercing to special_project (compliance-gated flow)`,
+    );
+    completionMode = 'special_project';
+  }
   const projectBacked = completionMode === 'project_required' || completionMode === 'special_project';
   return {
     serviceKey: row.service_key || null,
@@ -124,7 +143,15 @@ async function appointmentManagedProjectTypes(knex = db) {
       .where({ completion_mode: 'service_report', active: true })
       .whereNotNull('project_type')
       .distinct('project_type');
-    return new Set(rows.map((row) => row.project_type).filter(Boolean));
+    return new Set(
+      rows
+        .map((row) => row.project_type)
+        .filter(Boolean)
+        // Code-enforced V1 exclusions (see V1_EXCLUDED_PROJECT_TYPES) — a
+        // flipped profile row must not retire the Projects creation path for
+        // a type whose completion the V1 flow cannot legally perform.
+        .filter((type) => !V1_EXCLUDED_PROJECT_TYPES.has(type)),
+    );
   } catch {
     return new Set();
   }
@@ -136,4 +163,5 @@ module.exports = {
   serializeProfile,
   appointmentManagedProjectTypes,
   DEFAULT_SERVICE_REPORT_PROFILE,
+  V1_EXCLUDED_PROJECT_TYPES,
 };

@@ -154,7 +154,11 @@ class LLMMentionProber {
     if (!process.env.ANTHROPIC_API_KEY || !Anthropic) return null;
     const model = process.env.MODEL_MENTIONS || MODELS.WORKHORSE;
     try {
-      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+      // maxRetries: 0 — same rule as the #1408 lookup clients: an SDK retry
+      // re-runs the whole web_search budget (max_uses), so the default of 2
+      // could fan one probe out to 3x the searches on a transient 429/5xx.
+      // The probe already degrades to null on error.
+      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
       const resp = await client.messages.create({
         model,
         max_tokens: 1024,

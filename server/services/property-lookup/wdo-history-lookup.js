@@ -117,6 +117,13 @@ function normalizeHistory(parsed) {
   };
 }
 
+/**
+ * Web-search the property's treatment/permit history.
+ * Contract: returns the normalized history object on success (a successful
+ * "nothing found" is previousTreatment:false, NOT null); returns null only
+ * when the lookup was SKIPPED (no API key / unusable address); THROWS
+ * (err.code='lookup_failed') when the lookup ran and failed.
+ */
 async function lookupWdoHistory(address, options = {}) {
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.info('[wdo-history] skipped — ANTHROPIC_API_KEY not set');
@@ -144,20 +151,29 @@ async function lookupWdoHistory(address, options = {}) {
 
     const textBlock = (resp.content || []).filter((b) => b.type === 'text').pop();
     if (!textBlock?.text) {
-      logger.warn('[wdo-history] no text block in response', { elapsedMs: Date.now() - t0 });
-      return null;
+      throw new Error('no text block in lookup response');
     }
     const normalized = normalizeHistory(parseJson(textBlock.text));
+    if (!normalized) {
+      throw new Error('unparseable lookup response');
+    }
     logger.info('[wdo-history] resolved', {
       elapsedMs: Date.now() - t0,
-      previousTreatment: normalized?.previousTreatment,
-      confidence: normalized?.confidence,
-      permits: normalized?.permits?.length || 0,
+      previousTreatment: normalized.previousTreatment,
+      confidence: normalized.confidence,
+      permits: normalized.permits?.length || 0,
     });
     return normalized;
   } catch (err) {
-    logger.warn(`[wdo-history] errored: ${err?.message || err}`);
-    return null;
+    // Failures THROW (callers surface "lookup failed — try again"); they must
+    // never collapse into the same null as the skip cases above, or a
+    // transient API error reads as "no treatment or permit history found" and
+    // the tech writes "no prior treatment" onto a legal filing. A successful
+    // "nothing found" is a normal result object (previousTreatment: false).
+    logger.warn(`[wdo-history] errored: ${err?.message || err}`, { elapsedMs: Date.now() - t0 });
+    const failure = new Error(`WDO history lookup failed: ${err?.message || err}`);
+    failure.code = 'lookup_failed';
+    throw failure;
   }
 }
 
