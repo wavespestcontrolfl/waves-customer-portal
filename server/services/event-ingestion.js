@@ -188,8 +188,13 @@ async function pullRssSource(source) {
   const parser = new Parser({
     timeout: HTTP_TIMEOUT_MS,
     headers: {
-      // Some sources block default Node/axios UAs; mimic a browser.
-      'User-Agent': 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
+      // Polite bot UA by default. Some hosts (e.g. The Gabber's WP Engine
+      // host) UA-filter anything that isn't a real browser — those sources
+      // set scrape_config.userAgent to a browser string instead of being
+      // abandoned. Per-source override, not global, so we stay identifiable
+      // everywhere we're allowed to be.
+      'User-Agent': source.scrape_config?.userAgent
+        || 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
     },
   });
 
@@ -551,7 +556,11 @@ async function pullIcalSource(source) {
       {
         timeout: HTTP_TIMEOUT_MS,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
+          // Polite bot UA by default; per-source browser-UA override for
+          // hosts that UA-filter bots (e.g. Visit Venice's WAF serves the
+          // iCal feed a 403 to non-browser UAs). Same convention as RSS.
+          'User-Agent': source.scrape_config?.userAgent
+            || 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
         },
       },
       (err, data) => {
@@ -672,6 +681,12 @@ async function pullScrapeSource(source) {
   const contentSelector = cfg.contentSelector || 'body';
   const waitForSelector = cfg.waitForSelector || null;
   const maxEvents = Math.max(3, Math.min(30, Number(cfg.maxEvents) || 15));
+  // DMO/tourism sites run analytics + ad beacons that keep the network
+  // busy indefinitely — goto(networkidle) at 15s hard-failed Visit
+  // Sarasota / Visit St. Pete every day for weeks. Land on
+  // domcontentloaded (30s ceiling, overridable per source), then give
+  // hydration a best-effort settle window instead of a hard gate.
+  const gotoTimeoutMs = Math.max(5000, Math.min(60000, Number(cfg.gotoTimeoutMs) || 30000));
 
   const browser = await chromium.launch({ headless: true });
   let html;
@@ -681,7 +696,16 @@ async function pullScrapeSource(source) {
       viewport: { width: 1280, height: 1024 },
     });
     const page = await context.newPage();
-    await page.goto(source.feed_url, { timeout: HTTP_TIMEOUT_MS, waitUntil: 'networkidle' });
+    const response = await page.goto(source.feed_url, { timeout: gotoTimeoutMs, waitUntil: 'domcontentloaded' });
+    // A bot wall / 404 serves a perfectly parseable error page — without
+    // this gate the LLM extracts zero events from "Access Denied" and the
+    // pull records a healthy 'success' (the Akamai-walled city sites sat
+    // green for weeks while yielding nothing). Surface it as the failure
+    // it is so consecutive_failures/health escalation see it.
+    if (response && response.status() >= 400) {
+      throw new Error(`HTTP ${response.status()} from ${source.feed_url}`);
+    }
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
     if (waitForSelector) {
       await page.waitForSelector(waitForSelector, { timeout: HTTP_TIMEOUT_MS }).catch(() => {});
     }
@@ -709,8 +733,12 @@ async function pullScrapeSource(source) {
     await browser.close().catch(() => {});
   }
 
-  // Truncate. Cheap insurance against runaway pages.
-  const TRUNC = 25000;
+  // Truncate. Cheap insurance against runaway pages. Default 25k;
+  // per-source override (clamped to 60k) for heavy page-builder sites
+  // (Selby's Divi markup runs 796KB — its server-rendered events sat
+  // past the cut, so extraction silently saw none) — prefer setting
+  // contentSelector first, the budget bump is the fallback.
+  const TRUNC = Math.max(10000, Math.min(60000, Number(cfg.maxHtmlChars) || 25000));
   const truncated = html.length > TRUNC ? html.slice(0, TRUNC) : html;
 
   // Shared Claude extraction + validated upsert — same path the
