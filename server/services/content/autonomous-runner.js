@@ -36,6 +36,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, parseETDateTime, etWeekStart } = require('../../utils/datetime-et');
+const { WAVES_LOCATIONS } = require('../../config/locations');
 const { THRESHOLDS } = require('./scoring-config');
 
 // Database-wide advisory-lock key for the publishing run. Held for the whole
@@ -77,6 +78,27 @@ const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledge
 const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
+const getSocialMedia = lazy('social-media', '../social-media');
+
+// City → GBP location mapping for autonomous gbp_post distribution. A post
+// goes to the single profile whose service area covers the opportunity's
+// city — never blasted to all four profiles (per-location differentiated
+// content policy). Unmapped cities park for manual routing.
+const GBP_CITY_LOCATION_MAP = {
+  'bradenton': 'bradenton',
+  'lakewood-ranch': 'bradenton',
+  'parrish': 'parrish',
+  'palmetto': 'parrish',
+  'ellenton': 'parrish',
+  'sarasota': 'sarasota',
+  'siesta-key': 'sarasota',
+  'venice': 'venice',
+  'north-port': 'venice',
+};
+function gbpLocationIdForCity(city) {
+  const key = String(city || '').trim().toLowerCase().replace(/\s+/g, '-');
+  return GBP_CITY_LOCATION_MAP[key] || null;
+}
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
@@ -300,12 +322,23 @@ class AutonomousRunner {
     }
 
     if (brief.action_type === 'gbp_post') {
-      const finalized = await finalize(run, t0, {
-        outcome: 'completed_pending_review',
-        skip_reason: 'gbp_post_not_implemented',
-        reviewer_notes: 'GBP post distribution handler is not wired yet; route this opportunity manually.',
-      });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'gbp_post_not_implemented', { claimToken });
+      let result;
+      try {
+        result = await this._handleGbpPostAction(brief, run);
+      } catch (err) {
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+        return finalize(run, t0, { outcome: 'failed', failure_message: `gbp_post:${err.message}` });
+      }
+      if (result.claim === 'release') {
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+        return finalize(run, t0, result.patch);
+      }
+      const finalized = await finalize(run, t0, result.patch);
+      if (result.claim === 'complete') {
+        await this._completeClaimOrThrow(queue, opp.id, { claimToken });
+      } else {
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'gbp_post_pending_review', { claimToken });
+      }
       return finalized;
     }
 
@@ -1397,6 +1430,152 @@ class AutonomousRunner {
     };
   }
 
+  // ── gbp_post distribution ──────────────────────────────────────────────
+  // Routes the opportunity to the single GBP location covering brief.city.
+  // Shadow mode (SHADOW_MODE_GBP_POST unset/true) generates the copy and
+  // parks it for review with the would-be post in reviewer_notes; live mode
+  // posts via social-media's postToGBP, subject to the social kill switches
+  // (admin pause / SOCIAL_AUTOMATION_ENABLED / SOCIAL_GBP_ENABLED) and a
+  // daily cap. Returns { claim: 'complete'|'pending'|'release', patch }.
+  async _handleGbpPostAction(brief, run) {
+    const social = getSocialMedia();
+    if (!social?.generateContent || !social?.postToGBP || !social?.validateContent) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_social_module_unavailable',
+          reviewer_notes: 'social-media module unavailable; route this GBP post manually.',
+        },
+      };
+    }
+
+    const locationId = gbpLocationIdForCity(brief.city);
+    const location = WAVES_LOCATIONS.find((l) => l.id === locationId);
+    if (!location) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_post_no_location',
+          reviewer_notes: `No GBP location covers city "${brief.city || '(none)'}" — route manually.`,
+        },
+      };
+    }
+
+    // Cap autonomous posts per ET day. GBP's create quota is generous; the
+    // cap exists so a deep queue can't turn the profiles into a feed.
+    const cap = envInt('AUTONOMOUS_GBP_POST_DAILY_CAP', 1);
+    const [row] = await db('autonomous_runs')
+      .where({ action_type: 'gbp_post', outcome: 'completed_published' })
+      .where('completed_at', '>=', startOfEtDay())
+      .count();
+    if (Number(row?.count || 0) >= cap) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_post_daily_cap',
+          reviewer_notes: `Daily autonomous GBP post cap (${cap}) reached; review the queue or raise AUTONOMOUS_GBP_POST_DAILY_CAP.`,
+        },
+      };
+    }
+
+    // CTA links must stay on the hub — never route GBP traffic to spokes.
+    const link = /^https:\/\/(www\.)?wavespestcontrol\.com\//.test(String(brief.target_url || ''))
+      ? brief.target_url
+      : null;
+    const title = brief.target_keyword
+      || [brief.service, brief.city].filter(Boolean).join(' in ')
+      || 'Seasonal pest update';
+    const description = [
+      brief.customer_signal?.normalized_question,
+      brief.router_notes,
+    ].filter(Boolean).join(' — ').slice(0, 1000);
+
+    const t = Date.now();
+    const content = await social.generateContent('gbp', {
+      title,
+      description,
+      link,
+      locationName: location.name,
+    });
+    run.agent_ms = Date.now() - t;
+    run.draft_payload = { gbp_post: { location_id: location.id, content, link } };
+
+    const validation = social.validateContent(content, 'gbp');
+    if (!validation.valid) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_post_validation_failed',
+          reviewer_notes: `Generated GBP copy failed validation (${validation.issues.join('; ')}): ${content}`,
+        },
+      };
+    }
+
+    if (run.shadow_mode) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'skipped_shadow_mode',
+          skip_reason: 'gbp_post_shadow',
+          reviewer_notes: `SHADOW — would post to ${location.name} GBP: "${content}"${link ? ` (CTA: ${link})` : ''}`,
+        },
+      };
+    }
+
+    const ready = await social.assertSocialPublishingReady('gbp');
+    if (!ready.ready) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_post_social_not_ready',
+          reviewer_notes: `Social publishing gate blocked GBP: ${ready.reason}`,
+        },
+      };
+    }
+
+    const t2 = Date.now();
+    const result = await social.postToGBP(location.id, content, link);
+    run.publish_ms = Date.now() - t2;
+    if (!result?.success) {
+      return {
+        claim: 'release',
+        patch: {
+          outcome: 'failed_publish',
+          failure_message: `gbp:${result?.error || 'unknown error'}`,
+        },
+      };
+    }
+
+    run.draft_payload.gbp_post.post_name = result.postId || null;
+    try {
+      await db('social_media_posts').insert({
+        title: String(title).slice(0, 500),
+        description: content,
+        source_url: link,
+        source_type: 'content_engine',
+        platforms_posted: JSON.stringify([result]),
+        status: 'published',
+        published_at: new Date(),
+      });
+    } catch (err) {
+      logger.warn(`[autonomous-runner] social_media_posts audit insert failed: ${err.message}`);
+    }
+
+    return {
+      claim: 'complete',
+      patch: {
+        outcome: 'completed_published',
+        published_url: link,
+        reviewer_notes: `Posted to ${location.name} GBP (${result.postId || 'no post id returned'}).`,
+      },
+    };
+  }
+
   async _verifyMergedInternalLinkPrs(run) {
     if (!envBool('AUTONOMOUS_INTERNAL_LINK_VERIFY_BEFORE_RUN', false)) return null;
     const executor = getInternalLinkExecutor();
@@ -1954,4 +2133,5 @@ module.exports._internals = {
   extractFrontmatterScalar,
   startOfEtDay,
   startOfEtWeek,
+  gbpLocationIdForCity,
 };

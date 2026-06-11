@@ -968,3 +968,4 @@ module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;
 module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
+module.exports.postToGBP = postToGBP;
