@@ -1,4 +1,17 @@
 const db = require('../models/db');
+const logger = require('./logger');
+
+// Project types that must NEVER route through the generic typed
+// service-report (Specialty V1) completion flow, no matter what
+// service_completion_profiles says. WDO completion is load-bearing legal
+// machinery — licensee e-signature gate, signed FDACS-13645 PDF generation,
+// archived filings, the combined report+invoice send — none of which V1
+// completion performs. Profile rows are data: one bad WHERE clause in a
+// future cutover migration could silently flip the mode and bypass every
+// FDACS gate, so the exclusion is enforced in code at profile resolution
+// (serializeProfile coerces the mode back) and at creation gating
+// (appointmentManagedProjectTypes filters it out).
+const V1_EXCLUDED_PROJECT_TYPES = new Set(['wdo_inspection']);
 
 const DEFAULT_SERVICE_REPORT_PROFILE = {
   serviceKey: null,
@@ -23,6 +36,39 @@ const DEFAULT_SERVICE_REPORT_PROFILE = {
 
 function serializeProfile(row = null) {
   if (!row) return { ...DEFAULT_SERVICE_REPORT_PROFILE };
+  if (row.completion_mode === 'service_report' && V1_EXCLUDED_PROJECT_TYPES.has(row.project_type)) {
+    logger.warn(
+      `[completion-profiles] profile ${row.service_key || row.id} claims service_report completion for excluded project type "${row.project_type}" — coercing to special_project (compliance-gated flow)`,
+    );
+    // The row has been flagged bad — don't half-trust it. Keep only its
+    // identity (service key/name/category/billing), the project-flow pointer,
+    // and active state; every BEHAVIOR field resets FAIL-CLOSED. Portal
+    // policy uses the excluded types' real special-project posture (the
+    // seeded wdo_inspection profile is token_only + recurring_customer —
+    // "keep out of routine service-report surfaces"), NOT the registry's
+    // customer_portal defaults, which would be BROADER sharing than the
+    // legitimate profile this guard is protecting.
+    return {
+      serviceKey: row.service_key || null,
+      serviceName: row.service_name_snapshot || null,
+      category: row.category || null,
+      billingType: row.billing_type || null,
+      completionMode: 'special_project',
+      projectType: row.project_type,
+      findingsType: null,
+      createsServiceRecord: true,
+      portalVisibility: 'token_only',
+      portalAttachPolicy: 'recurring_customer',
+      followupPolicy: 'none',
+      defaultFollowupDays: null,
+      active: row.active !== false,
+      notes: row.notes || null,
+      projectBacked: true,
+      specialProject: true,
+      requiresProject: true,
+      deliveryMode: 'auto_send',
+    };
+  }
   const completionMode = row.completion_mode || 'service_report';
   const projectBacked = completionMode === 'project_required' || completionMode === 'special_project';
   return {
@@ -124,7 +170,15 @@ async function appointmentManagedProjectTypes(knex = db) {
       .where({ completion_mode: 'service_report', active: true })
       .whereNotNull('project_type')
       .distinct('project_type');
-    return new Set(rows.map((row) => row.project_type).filter(Boolean));
+    return new Set(
+      rows
+        .map((row) => row.project_type)
+        .filter(Boolean)
+        // Code-enforced V1 exclusions (see V1_EXCLUDED_PROJECT_TYPES) — a
+        // flipped profile row must not retire the Projects creation path for
+        // a type whose completion the V1 flow cannot legally perform.
+        .filter((type) => !V1_EXCLUDED_PROJECT_TYPES.has(type)),
+    );
   } catch {
     return new Set();
   }
@@ -136,4 +190,5 @@ module.exports = {
   serializeProfile,
   appointmentManagedProjectTypes,
   DEFAULT_SERVICE_REPORT_PROFILE,
+  V1_EXCLUDED_PROJECT_TYPES,
 };
