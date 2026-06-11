@@ -34,9 +34,12 @@ function hourlyAt(chance, when = NOON_ET) {
 }
 
 // db(table) dispatcher: scheduled_services list query (thenable select),
-// tech_notifications dedupe lookup + insert.
-function wireDb({ stops = [], alreadyAlerted = false } = {}) {
+// tech_notifications dedupe lookup + insert. `alertedTechIds` simulates
+// which technicians already received an alert today — the dedupe lookup
+// resolves a row only when the queried technician_id is in the set.
+function wireDb({ stops = [], alertedTechIds = [] } = {}) {
   const notifInsert = jest.fn().mockResolvedValue();
+  const dedupeWhere = jest.fn();
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
       const builder = {
@@ -49,16 +52,22 @@ function wireDb({ stops = [], alreadyAlerted = false } = {}) {
       return builder;
     }
     if (table === 'tech_notifications') {
-      return {
-        where: jest.fn().mockReturnThis(),
+      let queriedTechId = null;
+      const builder = {
+        where: jest.fn((args) => {
+          dedupeWhere(args);
+          if (args && typeof args === 'object') queriedTechId = args.technician_id;
+          return builder;
+        }),
         whereRaw: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue(alreadyAlerted ? { id: 'n-1' } : undefined),
+        first: jest.fn(async () => (alertedTechIds.includes(queriedTechId) ? { id: 'n-1' } : undefined)),
         insert: notifInsert,
       };
+      return builder;
     }
     throw new Error(`Unexpected db('${table}') call`);
   });
-  return { notifInsert };
+  return { notifInsert, dedupeWhere };
 }
 
 describe('storm-watch sweep', () => {
@@ -104,14 +113,30 @@ describe('storm-watch sweep', () => {
     expect(notifInsert).not.toHaveBeenCalled();
   });
 
-  test('one alert per job per day — existing notification suppresses', async () => {
-    const { notifInsert } = wireDb({ stops: [stop()], alreadyAlerted: true });
+  test('one alert per job per day per tech — existing notification suppresses', async () => {
+    const { notifInsert, dedupeWhere } = wireDb({ stops: [stop()], alertedTechIds: ['tech-1'] });
     getHourlyRainOutlook.mockResolvedValue(hourlyAt(90));
 
     const result = await StormWatch.sweep(NOON_ET);
 
     expect(result).toEqual({ checked: 1, alerted: 0 });
     expect(notifInsert).not.toHaveBeenCalled();
+    // Dedupe is scoped to the CURRENT technician.
+    expect(dedupeWhere).toHaveBeenCalledWith(expect.objectContaining({ technician_id: 'tech-1' }));
+  });
+
+  test('a reassigned job still alerts the new tech even though the old tech was already pinged', async () => {
+    // Job moved tech-1 → tech-2 after tech-1 got this morning's alert.
+    const { notifInsert } = wireDb({
+      stops: [stop({ technician_id: 'tech-2' })],
+      alertedTechIds: ['tech-1'],
+    });
+    getHourlyRainOutlook.mockResolvedValue(hourlyAt(80));
+
+    const result = await StormWatch.sweep(NOON_ET);
+
+    expect(result).toEqual({ checked: 1, alerted: 1 });
+    expect(notifInsert).toHaveBeenCalledWith(expect.objectContaining({ technician_id: 'tech-2' }));
   });
 
   test('ungeocoded customers are skipped without probing NWS', async () => {

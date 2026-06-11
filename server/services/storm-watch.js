@@ -102,10 +102,13 @@ async function upcomingStops(todayStr, nowMinutes) {
   });
 }
 
-// One alert per job per day — read/dismissed rows still suppress.
-async function alreadyAlertedToday(jobId, todayStr) {
+// One alert per job per day PER TECH — read/dismissed rows still
+// suppress. Scoped to the CURRENT technician_id so a mid-day
+// reassignment alerts the tech who actually owns the stop now; the
+// old tech's notification stays consumed and doesn't block them.
+async function alreadyAlertedToday(jobId, technicianId, todayStr) {
   const existing = await db('tech_notifications')
-    .where({ type: NOTIFICATION_TYPE })
+    .where({ type: NOTIFICATION_TYPE, technician_id: technicianId })
     .whereRaw("payload->>'job_id' = ?", [String(jobId)])
     .whereRaw('created_at >= ?::date', [todayStr])
     .first('id');
@@ -139,7 +142,7 @@ async function sweep(now = new Date()) {
     }
     if (peak == null || peak < RAIN_CHANCE_THRESHOLD) continue;
 
-    if (await alreadyAlertedToday(job.id, todayStr)) continue;
+    if (await alreadyAlertedToday(job.id, job.technician_id, todayStr)) continue;
 
     const timeLabel = displayTime(job.window_start);
     const where = job.customer_city ? `${job.customer_city} stop` : 'next stop';
