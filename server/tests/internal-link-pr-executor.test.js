@@ -260,7 +260,12 @@ describe('internal-link dry-run executor helpers', () => {
     expect(slugToInternalUrl('pest-control-bradenton-fl')).toBe('/pest-control-bradenton-fl/');
   });
 
-  test('uses Astro entry-id route before legacy blog slug and blocks canonical mismatch', () => {
+  // Regression: the live hub route is the frontmatter slug (Astro's glob
+  // loader honors it as the entry id — the path-derived URL 301s to it), and
+  // the planner derives URLs slug-first. The executor used to prefer the
+  // path-derived URL, so all legacy posts with path-prefixed slugs
+  // (190/193 blog posts) skipped with source_canonical_mismatch.
+  test('prefers the frontmatter slug URL over the path-derived URL for legacy blog sources', () => {
     const legacyBlogBody = [
       '---',
       'title: Local Pest Control Tips',
@@ -283,7 +288,7 @@ describe('internal-link dry-run executor helpers', () => {
     ].join('\n');
 
     const sourcePage = page('src/content/blog/local-pest-control-tips.md', legacyBlogBody);
-    expect(sourcePage.url).toBe('/local-pest-control-tips/');
+    expect(sourcePage.url).toBe('/pest-control/local-pest-control-tips/');
     expect(sourcePage.canonical_url).toBe('/pest-control/local-pest-control-tips/');
 
     const result = evaluateDryRunTask({
@@ -296,8 +301,19 @@ describe('internal-link dry-run executor helpers', () => {
       targetPage: page('src/content/services/pest-control-lakewood-ranch-fl.md', target),
     });
 
-    expect(result.status).toBe('skipped');
-    expect(result.skip_reason).toContain('source_canonical_mismatch');
+    expect(result.status).toBe('patch_candidate');
+    expect(result.source_url).toBe('/pest-control/local-pest-control-tips/');
+    expect(result.source_canonical_matches).toBe(true);
+  });
+
+  test('falls back to the path-derived URL when frontmatter has no slug', () => {
+    const noSlugPage = pageFromAstroFile('src/content/blog/no-slug-post.md', [
+      '---',
+      'title: No Slug Post',
+      '---',
+      'Body.',
+    ].join('\n'));
+    expect(noSlugPage.url).toBe('/no-slug-post/');
   });
 
   test('preserves invalid explicit canonicals so dry-run reports a mismatch', () => {
@@ -431,6 +447,14 @@ describe('internal-link dry-run executor helpers', () => {
       '[External](https://example.com/x)',
       '<a href="https://www.wavespestcontrol.com/pest-control/">Pest</a>',
     ].join('\n'))).toBe(2);
+  });
+
+  test('does not count markdown image embeds as internal links', () => {
+    expect(countInternalLinks([
+      '![Hero image](/images/termite-hero.webp)',
+      '![Diagram](/images/diagram.png "Swarmer diagram")',
+      'Body text with a real [internal link](/termite-inspection/).',
+    ].join('\n'))).toBe(1);
   });
 
   test('loads source and target pages from GitHub for dryRunTask', async () => {
@@ -856,9 +880,10 @@ describe('internal-link dry-run executor helpers', () => {
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
   });
 
-  test('fails PR tasks when the stored Astro PR cannot be loaded', async () => {
+  test('fails PR tasks terminally (clearing lifecycle fields) when the stored Astro PR 404s', async () => {
     const instance = new InternalLinkPrExecutor();
     instance._markTaskVerificationFailed = jest.fn(async () => {});
+    instance._failAbandonedPrTask = jest.fn(async () => {});
     GitHubClient.getPr.mockResolvedValue(null);
 
     const result = await instance.verifyMergedTask({
@@ -872,10 +897,137 @@ describe('internal-link dry-run executor helpers', () => {
       failure_reason: 'internal_link_verify_pr_not_found',
       pr_number: 999,
     });
-    expect(instance._markTaskVerificationFailed).toHaveBeenCalledWith(
+    // Terminal verdict goes through the abandoned-PR path so astro_pr_url /
+    // pr_branch / pr_commit_sha are cleared and the review queue can
+    // requeue/dismiss the task instead of dead-ending it.
+    expect(instance._failAbandonedPrTask).toHaveBeenCalledWith(
       'task-missing-pr',
       'internal_link_verify_pr_not_found'
     );
+    expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
+  });
+
+  test('fails PR tasks terminally (clearing lifecycle fields) when no PR number can be resolved', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    instance._failAbandonedPrTask = jest.fn(async () => {});
+
+    const result = await instance.verifyMergedTask({
+      id: 'task-no-pr-number',
+      status: 'pr_open',
+      astro_pr_url: 'not-a-pr-url',
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      failure_reason: 'internal_link_verify_missing_pr_number',
+    });
+    expect(instance._failAbandonedPrTask).toHaveBeenCalledWith(
+      'task-no-pr-number',
+      'internal_link_verify_missing_pr_number'
+    );
+    expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
+  });
+
+  test('a transient GitHub error during verification leaves the task status unchanged for retry', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._recoverStalePrReservedTasks = jest.fn(async () => 0);
+    instance._loadPrOpenTasks = jest.fn(async () => [{
+      id: 'task-transient',
+      status: 'pr_open',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/172',
+    }]);
+    instance._recordTransientVerificationError = jest.fn(async () => {});
+    instance._markTaskVerificationFailed = jest.fn(async () => {});
+    instance._failAbandonedPrTask = jest.fn(async () => {});
+    GitHubClient.getPr.mockRejectedValue(new Error('GitHub GET /pulls/172 → 502: bad gateway'));
+
+    const { results } = await instance.runPostMergeVerification({ limit: 1 });
+
+    expect(results[0]).toMatchObject({
+      task_id: 'task-transient',
+      status: 'pr_open',
+      transient: true,
+      failure_reason: expect.stringContaining('internal_link_verify_error'),
+    });
+    expect(instance._recoverStalePrReservedTasks).toHaveBeenCalled();
+    expect(instance._recordTransientVerificationError).toHaveBeenCalledWith(
+      'task-transient',
+      expect.stringContaining('502')
+    );
+    // The old behavior set status='failed' with PR fields intact — a state
+    // the review queue blocks from requeue, dismiss AND verify_now.
+    expect(instance._markTaskVerificationFailed).not.toHaveBeenCalled();
+    expect(instance._failAbandonedPrTask).not.toHaveBeenCalled();
+  });
+
+  test('a stale-reservation sweep failure never blocks the verification pass', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._recoverStalePrReservedTasks = jest.fn(async () => { throw new Error('db hiccup'); });
+    instance._loadPrOpenTasks = jest.fn(async () => []);
+
+    const result = await instance.runPostMergeVerification({ limit: 1 });
+
+    expect(result).toEqual({ count: 0, results: [] });
+  });
+
+  test('recovers stale pr_reserved crash orphans back to patch_candidate', async () => {
+    const updates = [];
+    const updateFilters = [];
+    const selectChain = {
+      where: jest.fn(() => selectChain),
+      whereNull: jest.fn(() => selectChain),
+      select: jest.fn(async () => [{
+        id: 'task-stale',
+        pr_branch: 'content/internal-link-orphan-abc123',
+        reviewer_notes: 'prior planner note',
+      }]),
+    };
+    const updateChain = {
+      where: jest.fn((filter) => { updateFilters.push(filter); return updateChain; }),
+      update: jest.fn(async (patch) => { updates.push(patch); return 1; }),
+    };
+    let dbCall = 0;
+    db.mockImplementation(() => (dbCall++ === 0 ? selectChain : updateChain));
+
+    const recovered = await new InternalLinkPrExecutor()._recoverStalePrReservedTasks();
+
+    expect(recovered).toBe(1);
+    expect(selectChain.where).toHaveBeenCalledWith('status', 'pr_reserved');
+    expect(selectChain.whereNull).toHaveBeenCalledWith('astro_pr_url');
+    expect(selectChain.where).toHaveBeenCalledWith('updated_at', '<', expect.any(Date));
+    // Guarded update: only flips rows still in pr_reserved.
+    expect(updateFilters[0]).toEqual({ id: 'task-stale', status: 'pr_reserved' });
+    expect(updates[0]).toMatchObject({
+      status: 'patch_candidate',
+      pr_branch: null,
+    });
+    expect(updates[0].reviewer_notes).toContain('prior planner note');
+    expect(updates[0].reviewer_notes).toContain('recovered stale pr_reserved reservation');
+    expect(updates[0].reviewer_notes).toContain('content/internal-link-orphan-abc123');
+    db.mockImplementation(() => undefined);
+  });
+
+  test('_markReservedTasksFailed clears pr_branch so the failure stays requeue-able', async () => {
+    let patch = null;
+    const builder = {
+      whereIn: jest.fn(() => builder),
+      where: jest.fn(() => builder),
+      update: jest.fn(async (p) => { patch = p; return 1; }),
+    };
+    db.mockImplementation(() => builder);
+
+    await new InternalLinkPrExecutor()._markReservedTasksFailed(
+      [{ task: { id: 'task-open-failed' } }],
+      new Error('createBranch exploded')
+    );
+
+    expect(patch).toMatchObject({
+      status: 'failed',
+      failure_reason: expect.stringContaining('internal_link_pr_open_failed'),
+      pr_branch: null,
+    });
+    db.mockImplementation(() => undefined);
   });
 
   test('keeps merged PR tasks merged when live HTML is empty', async () => {

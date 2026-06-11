@@ -1400,6 +1400,27 @@ describe('post-merge internal-link planning', () => {
     expect(planSpy).not.toHaveBeenCalled();
   });
 
+  test('kill switch honors normalized falsy values (0/no/off), not just the literal "false"', async () => {
+    const { internalLinkPlanningDisabled } = AstroPublisher._internals;
+
+    for (const value of ['false', 'FALSE', '0', 'no', 'off', ' Off ']) {
+      process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = value;
+      expect(internalLinkPlanningDisabled()).toBe(true);
+    }
+    for (const value of ['', 'true', '1', 'yes', 'on']) {
+      process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = value;
+      expect(internalLinkPlanningDisabled()).toBe(false);
+    }
+    delete process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE;
+    expect(internalLinkPlanningDisabled()).toBe(false);
+
+    process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = '0';
+    const corpusSpy = jest.spyOn(planner, 'loadAstroCorpusFromGitHub');
+    queueInternalLinkPlanning(post);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(corpusSpy).not.toHaveBeenCalled();
+  });
+
   test('a planner failure is swallowed (never fails the merge)', async () => {
     jest.spyOn(planner, 'loadAstroCorpusFromGitHub').mockRejectedValue(new Error('github down'));
 
