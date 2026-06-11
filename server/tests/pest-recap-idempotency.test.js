@@ -17,7 +17,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue() }));
-jest.mock('../services/track-transitions', () => ({ markComplete: jest.fn().mockResolvedValue({ ok: true }) }));
+jest.mock('../services/track-transitions', () => ({
+  markComplete: jest.fn().mockResolvedValue({ ok: true }),
+  isFutureScheduledDate: jest.fn(() => false),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
 }));

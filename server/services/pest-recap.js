@@ -158,6 +158,13 @@ async function submitRecap({
   if (!ok) return { ok: false, reason };
   if (!eligible) return { ok: false, reason: 'not_pest_control' };
 
+  // Stale-recap guard: a live job force-rescheduled to a future day
+  // (rebooker allowLive) must not be completed by a recap form opened
+  // before the reschedule. See track-transitions.isFutureScheduledDate.
+  if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+    return { ok: false, reason: 'future_scheduled_date' };
+  }
+
   if (clientPestRating != null
     && (!Number.isInteger(clientPestRating) || clientPestRating < 0 || clientPestRating > 5)) {
     return { ok: false, reason: 'client_pest_rating_invalid' };

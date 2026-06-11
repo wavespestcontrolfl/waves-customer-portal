@@ -1537,6 +1537,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Stale-recap guard: a live job force-rescheduled to a future day
+    // (rebooker allowLive) is rewound to a fresh confirmed appointment —
+    // a recap submit from a CompletionPanel opened before the reschedule
+    // must not complete the future visit. Lifecycle actions only ever
+    // run day-of or late (overdue completion), so a future ET date
+    // marks the attempt stale. The durable-completion resume path is
+    // unaffected: a committed completion can't be rescheduled, so its
+    // date is never future. See track-transitions.isFutureScheduledDate.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: `This job is now scheduled for ${serviceDateOnly(svc.scheduled_date)} — it was rescheduled while this page was open. Refresh and try again.`,
+        code: 'future_scheduled_date',
+      });
+    }
+
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
       waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
     }
@@ -3408,8 +3424,10 @@ async function assertRecapOwnership(req, res) {
 
 function recapStatusForReason(reason) {
   if (reason === 'not_found') return 404;
-  // Conflict: pest-control gate, or a cancelled/skipped visit that can't be recapped.
-  if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped') return 409;
+  // Conflict: pest-control gate, a cancelled/skipped visit that can't be
+  // recapped, or a stale recap against a job rescheduled to a future day.
+  if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped'
+    || reason === 'future_scheduled_date') return 409;
   return 400;
 }
 
