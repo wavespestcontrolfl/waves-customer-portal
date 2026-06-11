@@ -117,6 +117,136 @@ function estimateMonthlyFor(estData, key) {
   return null;
 }
 
+// Visits/year for a qualifying key — explicit row fields first, then the
+// engine's result-stats block (same precedence the public page uses for its
+// per-application price cards).
+function resultStatsRows(estData) {
+  return estData?.result?.results || estData?.results || {};
+}
+
+function selectedStatsRow(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  return rows.find((t) => t?.selected || t?.isSelected)
+    || rows.find((t) => t?.recommended || t?.isRecommended)
+    || rows[0];
+}
+
+function estimateVisitsFor(estData, key) {
+  for (const c of recurringCandidates(estData)) {
+    if (toQualifyingKey(candidateName(c)) !== key) continue;
+    const explicit = Number(c?.visitsPerYear ?? c?.visits ?? c?.apps ?? c?.frequency);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  }
+  const stats = resultStatsRows(estData);
+  if (key === 'pest_control') return Number(stats.pest?.apps) > 0 ? Number(stats.pest.apps) : null;
+  if (key === 'lawn_care') {
+    const sel = (Array.isArray(stats.lawn) && (stats.lawn.find((t) => t.recommended) || stats.lawn[0])) || null;
+    return Number(sel?.v) > 0 ? Number(sel.v) : null;
+  }
+  if (key === 'mosquito') {
+    const sel = selectedStatsRow(stats.mq);
+    return Number(sel?.v) > 0 ? Number(sel.v) : null;
+  }
+  if (key === 'tree_shrub') {
+    const sel = selectedStatsRow(stats.ts);
+    return Number(sel?.v) > 0 ? Number(sel.v) : null;
+  }
+  if (key === 'termite_bait') return 4;
+  return null;
+}
+
+// Pre-discount per-application price for a qualifying key — explicit per-app
+// row fields first, else monthly*12/visits. Used to express the new-service
+// member savings as a per-application dollar figure.
+function estimatePerApplicationFor(estData, key) {
+  for (const c of recurringCandidates(estData)) {
+    if (toQualifyingKey(candidateName(c)) !== key) continue;
+    const explicit = Number(c?.perTreatment ?? c?.perApp ?? c?.perVisit ?? c?.pa);
+    if (Number.isFinite(explicit) && explicit > 0) return round2(explicit);
+  }
+  const monthly = estimateMonthlyFor(estData, key);
+  const visits = estimateVisitsFor(estData, key);
+  if (monthly > 0 && visits > 0) return round2((monthly * 12) / visits);
+  return null;
+}
+
+// One-time membership/setup line items must not count toward the per-visit
+// basis — the FIRST standard accept invoice can carry the $99 WaveGuard setup
+// AND the first application on the same service-linked invoice, and reading
+// its raw total would inflate the advertised per-visit savings.
+// Match the membership/setup wording specifically — a bare /waveguard/ would
+// also swallow tier-discount rows like "WaveGuard Silver — 10% off", which
+// must stay in the net (they're part of what the customer actually paid).
+function isSetupLineItem(line = {}) {
+  return /membership|setup fee|waveguard setup/i.test(String(line.description || ''));
+}
+
+function invoiceLineItems(row = {}) {
+  const raw = row.line_items;
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  }
+  return [];
+}
+
+// Signed — discount/adjustment rows carry negative amounts and must reduce
+// what counts as "last paid", not be dropped.
+function lineItemAmount(line = {}) {
+  const explicit = Number(line.amount);
+  if (Number.isFinite(explicit) && explicit !== 0) return explicit;
+  const qty = Number(line.quantity) || 1;
+  const unit = Number(line.unit_price);
+  return Number.isFinite(unit) ? unit * qty : 0;
+}
+
+// What the invoice charged for the SERVICE itself: the sum of its
+// non-setup lines, falling back to the invoice total when there are no
+// parseable line items.
+function invoiceServiceAmount(row = {}) {
+  const lines = invoiceLineItems(row);
+  if (lines.length) {
+    const serviceTotal = lines
+      .filter((line) => !isSetupLineItem(line))
+      .reduce((sum, line) => sum + lineItemAmount(line), 0);
+    if (serviceTotal > 0) return round2(serviceTotal);
+    // All lines were setup/membership (or discounts netted to zero) — not a
+    // usable per-visit price.
+    return null;
+  }
+  const total = Number(row.total);
+  return Number.isFinite(total) && total > 0 ? round2(total) : null;
+}
+
+// What the customer actually LAST PAID per visit, by qualifying key — most
+// recent paid invoice whose service_type maps to the key. Visit invoices
+// minted from the schedule carry service_type; standalone setup/prepay
+// invoices don't, so they never pollute this. Falls back to {} on any error
+// so the snapshot still renders from scheduled_services.estimated_price.
+async function loadLastPaidAmountsByKey(database, customerId) {
+  const amounts = {};
+  try {
+    const rows = await database('invoices')
+      .where({ customer_id: customerId, status: 'paid' })
+      .whereNotNull('service_type')
+      .orderBy('paid_at', 'desc')
+      .limit(100)
+      .select('service_type', 'total', 'line_items', 'paid_at');
+    for (const row of rows) {
+      const key = toQualifyingKey(row.service_type);
+      if (!key || amounts[key] != null) continue;
+      const amount = invoiceServiceAmount(row);
+      if (amount != null) amounts[key] = amount;
+    }
+  } catch (err) {
+    logger.warn(`[membership-context] last-paid lookup skipped for customer ${customerId}: ${err.message}`);
+  }
+  return amounts;
+}
+
 // The discount rate ACTUALLY applied to the estimate's recurring services,
 // derived from the repriced aggregate (annualBeforeDiscount/After). For
 // pest_control / tree_shrub the pricing engine's margin guard can cap the tier
@@ -202,13 +332,18 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     };
 
     // ── Existing-service per-application savings from the tier delta ──
-    // Only meaningful when the new service upgrades the tier.
+    // Only meaningful when the new service upgrades the tier. The per-visit
+    // basis is what the customer actually LAST PAID for that service (most
+    // recent paid visit invoice), falling back to the scheduled
+    // estimated_price when there's no paid history yet.
+    const lastPaidByKey = upgraded ? await loadLastPaidAmountsByKey(database, customerId) : {};
     const existingServices = [];
     if (upgraded) {
       for (const key of existingKeys) {
         const rows = existingByKey.get(key) || [];
         const priced = rows.find((r) => Number(r.estimated_price) > 0);
-        const perVisitPrice = priced ? round2(priced.estimated_price) : null;
+        const perVisitPrice = lastPaidByKey[key]
+          ?? (priced ? round2(priced.estimated_price) : null);
         const perVisitSavings = perVisitPrice ? round2(perVisitPrice * delta) : null;
         const remainingVisits = rows.filter((r) => isFuture(r.scheduled_date)).length;
         existingServices.push({
@@ -232,11 +367,13 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     const appliedRate = Math.min(combinedTier.discount, appliedRecurringRate(estData, combinedTier.discount));
     const newServices = addedKeys.map((key) => {
       const monthly = estimateMonthlyFor(estData, key);
+      const perApplication = estimatePerApplicationFor(estData, key);
       return {
         key,
         label: SERVICE_LABEL[key] || key,
         discountPct: Math.round(appliedRate * 100),
         monthlySavings: monthly ? round2(monthly * appliedRate) : null,
+        perApplicationSavings: perApplication ? round2(perApplication * appliedRate) : null,
       };
     });
 
@@ -254,6 +391,10 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
             addedServiceLabels: addedKeys.map((k) => SERVICE_LABEL[k] || k),
           }
         : null,
+      // Raw qualifying keys already on the account — lets the public page
+      // pick a cross-sell the customer doesn't already have (existingServices
+      // above is only populated on a tier upgrade).
+      existingServiceKeys: existingKeys,
       existingServices,
       newServices,
     };

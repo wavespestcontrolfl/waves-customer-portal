@@ -16,6 +16,7 @@ const SERVICE_LABELS = {
   pest_control: 'Pest Control',
   mosquito: 'Mosquito',
   tree_shrub: 'Tree & Shrub',
+  termite_bait: 'Termite Bait Stations',
 };
 
 function parseJson(value, fallback = null) {
@@ -101,6 +102,7 @@ function normalizeRequestedServiceKey(value) {
   if (Object.prototype.hasOwnProperty.call(SERVICE_LABELS, raw)) return raw;
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
+  if (raw.includes('termite')) return 'termite_bait';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
   return null;
@@ -169,6 +171,17 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey) {
     return { added: true, updatedInputs };
   }
 
+  if (serviceKey === 'termite_bait') {
+    if (updatedInputs.services.termite || updatedInputs.services.termiteBait || updatedInputs.services.termite_bait) {
+      return { added: false, updatedInputs, reason: 'already_included' };
+    }
+    // Engine defaults (system/monitoring) match estimate-engine's own
+    // fallbacks; footprint/perimeter come from the saved property inputs,
+    // and missing measurements surface as quoteRequired on the draft.
+    updatedInputs.services.termite_bait = { system: 'advance', monitoringTier: 'basic' };
+    return { added: true, updatedInputs };
+  }
+
   return { added: false, updatedInputs, reason: 'unsupported_service' };
 }
 
@@ -207,6 +220,14 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
       reason: reason || 'service_not_added',
       generatedAt: new Date().toISOString(),
     };
+  }
+
+  // Existing-customer estimates persist the account's qualifying services at
+  // save time (estData.priorQualifyingServices) OUTSIDE engineInputs. Replay
+  // them so the draft prices at the COMBINED WaveGuard tier the public page
+  // advertised, not as if the requested service were standalone.
+  if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
+    updatedInputs.priorQualifyingServices = estData.priorQualifyingServices;
   }
 
   try {

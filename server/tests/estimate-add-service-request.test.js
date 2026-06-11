@@ -139,7 +139,34 @@ describe('estimate add-service request workflow', () => {
     expect(normalizeRequestedServiceKey('Add Lawn Care and save more')).toBe('lawn_care');
     expect(normalizeRequestedServiceKey('Pest Control')).toBe('pest_control');
     expect(normalizeRequestedServiceKey('WaveGuard Mosquito')).toBe('mosquito');
+    expect(normalizeRequestedServiceKey('Termite Bait Stations')).toBe('termite_bait');
     expect(normalizeRequestedServiceKey('pool cleaning')).toBeNull();
+  });
+
+  test('prices termite bait station requests from the saved property inputs', () => {
+    const revision = buildEstimateServiceRevisionDraft(baseEstimate(), 'termite_bait');
+
+    expect(revision.serviceKey).toBe('termite_bait');
+    expect(revision.serviceLabel).toBe('Termite Bait Stations');
+    expect(revision.status).toBe('priced');
+    expect(revision.updated.monthly).toBeGreaterThan(0);
+    expect(revision.draftEstimateData.inputs.services.termite_bait).toEqual(expect.objectContaining({
+      system: 'advance',
+      monitoringTier: 'basic',
+    }));
+  });
+
+  test('replays prior qualifying services so cross-sell drafts price at the combined tier', () => {
+    const estimate = baseEstimate();
+    estimate.estimate_data.priorQualifyingServices = ['lawn_care', 'mosquito'];
+
+    const revision = buildEstimateServiceRevisionDraft(estimate, 'termite_bait');
+
+    expect(revision.status).toBe('priced');
+    expect(revision.draftEstimateData.inputs.priorQualifyingServices).toEqual(['lawn_care', 'mosquito']);
+    // pest (this estimate) + lawn + mosquito (prior) + termite bait = 4
+    // qualifying services — Platinum, not a standalone-termite Bronze.
+    expect(revision.updated.tier).toBe('Platinum');
   });
 
   test('builds a draft revision without mutating the live estimate', () => {

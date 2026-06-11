@@ -243,6 +243,10 @@ function isTermiteBaitOneTimeItem(item = {}) {
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
+  // Existing customers never pay the WaveGuard setup again — mirrors the
+  // public estimate page, which shows the fee struck through as waived.
+  const data = normalizeEstimateData(estimateData);
+  if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
   const keys = recurring.map(recurringServiceKey).filter(Boolean);
   if (keys.includes('pest_control')) return true;
 
