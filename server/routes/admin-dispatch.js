@@ -1635,74 +1635,94 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let typedChips = [];
     let typedActivityScore = null;
     let typedScoreSource = null;
-    // Recap-only mode (the lightweight pest recap) has no findings, no
-    // billing gate, and no snapshot — it must not be a side door around the
-    // typed flow (pre-push Codex P1). Typed services complete through the
-    // full typed form only.
-    if (typedFindingsType && oneTimeRecapOnly && !isIncompleteVisit) {
-      return res.status(409).json({
-        error: 'This service completes through its service-specific findings form, not the quick recap. Refresh and complete the visit from the completion form.',
-        code: 'typed_recap_not_allowed',
-        findingsType: typedFindingsType,
-      });
-    }
-    if (typedFindingsType && !isIncompleteVisit && structuredFindings == null) {
-      return res.status(422).json({
-        error: 'This service now completes with its service-specific findings form. Refresh the page and complete the visit again.',
-        code: 'typed_findings_required',
-        findingsType: typedFindingsType,
-      });
-    }
-    if (typedFindingsType && structuredFindings != null && !isIncompleteVisit) {
-      const findingsValidation = ActivityIndicators.validateTypedFindings({
-        type: structuredFindings?.type,
-        values: structuredFindings?.values,
-        expectedType: typedFindingsType,
-        enforceRequired: true,
-      });
-      if (!findingsValidation.ok) {
-        return res.status(findingsValidation.missing.length && !findingsValidation.errors.length ? 422 : 400).json({
-          error: 'Structured findings failed validation',
-          code: 'typed_findings_invalid',
-          details: findingsValidation.errors,
-          missing: findingsValidation.missing,
+    // Typed validation runs AFTER the idempotency claim (Codex P2): a retry
+    // of a completion committed before the type's cutover must replay the
+    // stored response, not 422 on rules that didn't exist when it ran.
+    // Returns {status, body} on rejection, null when valid; mutates the
+    // typed* locals on success.
+    const runTypedValidation = () => {
+      // Recap-only mode (the lightweight pest recap) has no findings, no
+      // billing gate, and no snapshot — it must not be a side door around
+      // the typed flow. Typed services complete through the full form only.
+      if (typedFindingsType && oneTimeRecapOnly && !isIncompleteVisit) {
+        return {
+          status: 409,
+          body: {
+            error: 'This service completes through its service-specific findings form, not the quick recap. Refresh and complete the visit from the completion form.',
+            code: 'typed_recap_not_allowed',
+            findingsType: typedFindingsType,
+          },
+        };
+      }
+      if (typedFindingsType && !isIncompleteVisit && structuredFindings == null) {
+        return {
+          status: 422,
+          body: {
+            error: 'This service now completes with its service-specific findings form. Refresh the page and complete the visit again.',
+            code: 'typed_findings_required',
+            findingsType: typedFindingsType,
+          },
+        };
+      }
+      if (typedFindingsType && structuredFindings != null && !isIncompleteVisit) {
+        const findingsValidation = ActivityIndicators.validateTypedFindings({
+          type: structuredFindings?.type,
+          values: structuredFindings?.values,
+          expectedType: typedFindingsType,
+          enforceRequired: true,
         });
-      }
-      const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips);
-      if (!chipsValidation.ok) {
-        return res.status(400).json({ error: chipsValidation.error, code: 'next_step_chips_invalid' });
-      }
-      typedChips = chipsValidation.chips;
-      typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
+        if (!findingsValidation.ok) {
+          return {
+            status: findingsValidation.missing.length && !findingsValidation.errors.length ? 422 : 400,
+            body: {
+              error: 'Structured findings failed validation',
+              code: 'typed_findings_invalid',
+              details: findingsValidation.errors,
+              missing: findingsValidation.missing,
+            },
+          };
+        }
+        const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, typedFindingsType);
+        if (!chipsValidation.ok) {
+          return { status: 400, body: { error: chipsValidation.error, code: 'next_step_chips_invalid' } };
+        }
+        typedChips = chipsValidation.chips;
+        typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
 
-      // Activity score: strict integer 0-5 or null (same contract as
-      // clientPestRating). Gauge types require a score on a completed visit —
-      // derived prefill fills it when the tech didn't touch the picker.
-      if (activityScore != null
-        && (!Number.isInteger(activityScore) || activityScore < 0 || activityScore > 5)) {
-        return res.status(400).json({
-          error: 'activityScore must be an integer 0-5 (or null/omitted)',
-          code: 'activity_score_invalid',
-        });
-      }
-      if (typedIndicator) {
-        const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
-        if (activityScore != null) {
-          typedActivityScore = activityScore;
-          typedScoreSource = activityScoreSource === 'derived' && derived?.score === activityScore
-            ? 'derived'
-            : 'technician';
-        } else if (derived) {
-          typedActivityScore = derived.score;
-          typedScoreSource = 'derived';
-        } else {
-          return res.status(422).json({
-            error: `${typedIndicator.label} requires an activity score (0-5) on a completed visit`,
-            code: 'activity_score_required',
-          });
+        // Activity score: strict integer 0-5 or null (same contract as
+        // clientPestRating). Gauge types require a score on a completed
+        // visit — derived prefill fills it when the tech didn't touch the
+        // picker.
+        if (activityScore != null
+          && (!Number.isInteger(activityScore) || activityScore < 0 || activityScore > 5)) {
+          return {
+            status: 400,
+            body: { error: 'activityScore must be an integer 0-5 (or null/omitted)', code: 'activity_score_invalid' },
+          };
+        }
+        if (typedIndicator) {
+          const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
+          if (activityScore != null) {
+            typedActivityScore = activityScore;
+            typedScoreSource = activityScoreSource === 'derived' && derived?.score === activityScore
+              ? 'derived'
+              : 'technician';
+          } else if (derived) {
+            typedActivityScore = derived.score;
+            typedScoreSource = 'derived';
+          } else {
+            return {
+              status: 422,
+              body: {
+                error: `${typedIndicator.label} requires an activity score (0-5) on a completed visit`,
+                code: 'activity_score_required',
+              },
+            };
+          }
         }
       }
-    }
+      return null;
+    };
     // Delivery control for typed completions: profile delivery_mode
     // (auto_send | internal_only | disabled) + a global kill env.
     // internal_only renders + stores the report (token/PDF) without customer
@@ -1769,6 +1789,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    // Fresh executions validate typed rules; replays returned above with the
+    // stored payload, and resumes re-enter after an already-committed trx.
+    if (claim.action === 'proceed') {
+      const typedValidationError = runTypedValidation();
+      if (typedValidationError) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error(typedValidationError.body.code),
+        );
+        return res.status(typedValidationError.status).json(typedValidationError.body);
+      }
+    }
 
     // Billing pre-gate for typed one-time completions — ports the project
     // flow's enforcement (resolveProjectCompletionBilling) so a one-time
@@ -2082,7 +2115,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           let typedVisitSequence = 1;
           if (typedFindings) {
             if (typedIndicator && typedActivityScore != null && activityScoresAvailable) {
-              const priorRows = await trx('service_activity_scores')
+              // Latest prior score for the trend (one row) + an UNBOUNDED
+              // count for the visit sequence — a limited fetch would cap
+              // long trapping programs at visit 9 in the immutable snapshot
+              // (Codex P2).
+              const priorScoreRow = await trx('service_activity_scores')
                 .where({
                   customer_id: svc.customer_id,
                   indicator_key: typedIndicator.indicatorKey,
@@ -2090,9 +2127,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 .where('service_date', '<=', completionServiceDate)
                 .orderBy('service_date', 'desc')
                 .orderBy('created_at', 'desc')
-                .limit(8);
-              const priorScore = priorRows.length ? Number(priorRows[0].score) : null;
-              typedVisitSequence = priorRows.length + 1;
+                .first('score');
+              const [priorCountRow] = await trx('service_activity_scores')
+                .where({
+                  customer_id: svc.customer_id,
+                  indicator_key: typedIndicator.indicatorKey,
+                })
+                .where('service_date', '<=', completionServiceDate)
+                .count('* as count');
+              const priorScore = priorScoreRow ? Number(priorScoreRow.score) : null;
+              typedVisitSequence = Number(priorCountRow?.count || 0) + 1;
               const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
               typedActivity = {
                 indicatorKey: typedIndicator.indicatorKey,

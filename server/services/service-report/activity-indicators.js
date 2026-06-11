@@ -294,6 +294,55 @@ const NEXT_STEP_CHIPS = {
 
 const MAX_NEXT_STEP_CHIPS = 4;
 
+// Per-type chip allowlists (contract §7) — the global map alone would let a
+// cockroach completion persist lawn/mosquito guidance into the immutable
+// snapshot. Schema serving and validation both use the type's list.
+const PEST_FAMILY_CHIPS = [
+  'No action needed', 'Monitor activity', 'Sanitation recommended',
+  'Reduce moisture', 'Seal entry gaps', 'Remove cardboard/clutter',
+  'Keep treated areas undisturbed', 'Follow-up recommended',
+];
+const RODENT_FAMILY_CHIPS = [
+  'No action needed', 'Trap check scheduled', 'Seal entry points',
+  'Sanitation recommended', 'Monitor for new activity', 'Exclusion work scheduled',
+  'Follow-up recommended',
+];
+const TYPE_NEXT_STEP_CHIPS = {
+  pest_inspection: PEST_FAMILY_CHIPS,
+  one_time_pest_treatment: PEST_FAMILY_CHIPS,
+  cockroach: PEST_FAMILY_CHIPS,
+  flea: [
+    'No action needed', 'Vacuum daily for 2 weeks', 'Wash pet bedding',
+    'Coordinate vet flea control', 'Stay off treated areas until dry',
+    'Follow-up recommended', 'Monitor activity',
+  ],
+  rodent_trapping: RODENT_FAMILY_CHIPS,
+  rodent_exclusion: RODENT_FAMILY_CHIPS,
+  wildlife_trapping: [
+    'No action needed', 'Daily trap checks underway', 'Avoid trap area',
+    'Secure trash/food sources', 'Monitor for new activity',
+  ],
+  bed_bug: [
+    'Follow prep sheet', 'Wash/dry bedding on high heat',
+    '14-day follow-up scheduled', 'Continue monitoring',
+  ],
+  mosquito_event: [
+    'No action needed', 'Dump standing water weekly', 'Avoid treated foliage until dry',
+  ],
+  one_time_lawn_treatment: [
+    'No action needed', 'Follow watering guidance', 'Mow guidance provided', 'Re-check scheduled',
+  ],
+  palm_injection: [
+    'No action needed', 'Retreatment scheduled', 'Monitor fronds for change',
+  ],
+  termite_inspection: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
+  termite_treatment: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
+};
+
+function chipsForType(projectType) {
+  return TYPE_NEXT_STEP_CHIPS[projectType] || [];
+}
+
 function getActivityIndicator(projectType) {
   return ACTIVITY_INDICATORS[projectType] || null;
 }
@@ -400,18 +449,19 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   return { ok: errors.length === 0 && missing.length === 0, errors, missing };
 }
 
-function validateNextStepChips(chips) {
+function validateNextStepChips(chips, projectType = null) {
   if (chips == null) return { ok: true, chips: [] };
   if (!Array.isArray(chips)) return { ok: false, error: 'nextStepChips must be an array' };
   if (chips.length > MAX_NEXT_STEP_CHIPS) {
     return { ok: false, error: `At most ${MAX_NEXT_STEP_CHIPS} next-step chips allowed` };
   }
+  const allowed = projectType ? chipsForType(projectType) : Object.keys(NEXT_STEP_CHIPS);
   const normalized = [];
   for (const chip of chips) {
     const key = String(chip || '').trim();
     if (!key) continue;
-    if (!Object.prototype.hasOwnProperty.call(NEXT_STEP_CHIPS, key)) {
-      return { ok: false, error: `Unknown next-step chip: ${key}` };
+    if (!allowed.includes(key)) {
+      return { ok: false, error: `Next-step chip not available for this service: ${key}` };
     }
     if (!normalized.includes(key)) normalized.push(key);
   }
@@ -625,7 +675,7 @@ function findingsSchemaForType(projectType) {
     })),
     photoCategories: config.photoCategories || [],
     requiredFields: REQUIRED_FINDINGS_FIELDS[projectType] || [],
-    nextStepChips: Object.keys(NEXT_STEP_CHIPS),
+    nextStepChips: chipsForType(projectType),
     activity: indicator
       ? {
         indicatorKey: indicator.indicatorKey,
@@ -645,6 +695,8 @@ module.exports = {
   ACTIVITY_INDICATORS,
   REQUIRED_FINDINGS_FIELDS,
   NEXT_STEP_CHIPS,
+  TYPE_NEXT_STEP_CHIPS,
+  chipsForType,
   SCORE_LEVEL_WORDS,
   TECH_SCORE_LABELS,
   getActivityIndicator,

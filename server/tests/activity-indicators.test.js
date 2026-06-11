@@ -148,6 +148,16 @@ describe('validateNextStepChips', () => {
     expect(validateNextStepChips(['Definitely Not A Chip']).ok).toBe(false);
     expect(validateNextStepChips(['Monitor activity', 'Sanitation recommended', 'Reduce moisture', 'Seal entry gaps', 'No action needed']).ok).toBe(false);
   });
+
+  test('chips are scoped per type — lawn/mosquito copy cannot enter a cockroach snapshot', () => {
+    expect(validateNextStepChips(['Follow watering guidance'], 'cockroach').ok).toBe(false);
+    expect(validateNextStepChips(['Dump standing water weekly'], 'bed_bug').ok).toBe(false);
+    expect(validateNextStepChips(['Monitor activity'], 'cockroach').ok).toBe(true);
+    expect(validateNextStepChips(['14-day follow-up scheduled'], 'bed_bug').ok).toBe(true);
+    const schema = findingsSchemaForType('mosquito_event');
+    expect(schema.nextStepChips).toContain('Dump standing water weekly');
+    expect(schema.nextStepChips).not.toContain('Trap check scheduled');
+  });
 });
 
 describe('trend words', () => {
