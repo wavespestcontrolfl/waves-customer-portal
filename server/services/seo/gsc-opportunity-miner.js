@@ -188,7 +188,29 @@ function impressionsBoost(impressions) {
   return 0;
 }
 
-function actionForOpportunity({ bucket, query, page_url, city, service }) {
+/**
+ * Near-me / transactional queries are service-page intent, never blog
+ * material (operator directive 2026-06-11): someone typing "exterminator
+ * near me" wants a provider, not an article. The quality gate flags
+ * near-me titles as spam and the brief-builder reroutes these to the
+ * (shadow-gated) city-service lane anyway — so emitting a blog action here
+ * only burns agent time before dead-ending. Demoting to do_not_publish
+ * keeps the demand visible in mineAll's calibration output while the
+ * non-blog floor (75) keeps low-scoring transactional rows out of the
+ * queue entirely. Near-me on PAGE actions (refresh/rewrite/city-service)
+ * is untouched — proximity terms are intentional on pages.
+ */
+function isTransactionalQuery(query) {
+  return /\bnear\s*-?\s*me\b|\bnearby\b/i.test(String(query || ''));
+}
+
+function actionForOpportunity(opp) {
+  const action = baseActionForOpportunity(opp);
+  if (action === 'new_supporting_blog' && isTransactionalQuery(opp.query)) return 'do_not_publish';
+  return action;
+}
+
+function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
   if (bucket === 'cannibalization' || bucket === 'page_type_mismatch') {
     return 'do_not_publish'; // always human review for these
   }
