@@ -96,19 +96,51 @@ describe('token-health checkGBP', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('expired when Google rejects the stored refresh token', async () => {
+  test('expired when Google rejects a revoked token (HTTP 400 invalid_grant)', async () => {
     process.env.GBP_CLIENT_ID_LWR = 'client-id';
     process.env.GBP_CLIENT_SECRET_LWR = 'client-secret';
     mockDb({ storedTokens: { 'gbp.oauth_tokens.bradenton': { refresh_token: 'revoked-rt' } } });
     global.fetch.mockResolvedValue({
       ok: false,
-      status: 401,
-      json: async () => ({ error: 'invalid_grant', error_description: 'Token has been revoked.' }),
+      status: 400,
+      json: async () => ({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }),
     });
 
     const result = await tokenHealth.checkSingle('gbp_lwr');
 
     expect(result.status).toBe('expired');
     expect(result.lastError).toContain('revoked');
+  });
+
+  test('expired when the token was minted by a different OAuth client (HTTP 400 unauthorized_client)', async () => {
+    process.env.GBP_CLIENT_ID_SARASOTA = 'client-id';
+    process.env.GBP_CLIENT_SECRET_SARASOTA = 'client-secret';
+    mockDb({ storedTokens: { 'gbp.oauth_tokens.sarasota': { refresh_token: 'old-client-rt' } } });
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'unauthorized_client' }),
+    });
+
+    const result = await tokenHealth.checkSingle('gbp_sarasota');
+
+    expect(result.status).toBe('expired');
+    expect(result.lastError).toBe('unauthorized_client');
+  });
+
+  test('error (not expired) on non-auth failures like HTTP 500', async () => {
+    process.env.GBP_CLIENT_ID_VENICE = 'client-id';
+    process.env.GBP_CLIENT_SECRET_VENICE = 'client-secret';
+    mockDb({ storedTokens: { 'gbp.oauth_tokens.venice': { refresh_token: 'rt' } } });
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    });
+
+    const result = await tokenHealth.checkSingle('gbp_venice');
+
+    expect(result.status).toBe('error');
+    expect(result.lastError).toBe('HTTP 500');
   });
 });

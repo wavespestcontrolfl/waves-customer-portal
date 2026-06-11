@@ -201,7 +201,13 @@ async function checkGBP(locationKey) {
       return result;
     }
 
-    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    // Google's OAuth endpoint reports dead refresh tokens as HTTP 400 with
+    // error=invalid_grant (revoked/expired) or error=unauthorized_client
+    // (token minted by a different OAuth client), so classify from the error
+    // body rather than only from the HTTP status.
+    const tokenRejected = res.status === 401 || res.status === 403
+      || data.error === 'invalid_grant' || data.error === 'unauthorized_client';
+    const status = tokenRejected ? 'expired' : 'error';
     const result = { platform, status, lastError: data.error_description || data.error || `HTTP ${res.status}`, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'refresh_token', envVarName });
     return result;
