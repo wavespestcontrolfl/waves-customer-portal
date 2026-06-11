@@ -39,7 +39,6 @@ const {
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
-const TaxCalculator = require('../services/tax-calculator');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 
@@ -1829,36 +1828,21 @@ async function persistProjectInvoiceLink(project, invoiceId, runner = db) {
 }
 
 // Compute the WDO invoice total for the dry-run preview WITHOUT creating an
-// invoice. Mirrors the exact inputs InvoiceService.create uses for this WDO draft
-// so preview == billed: residential customers are never taxed; commercial uses
-// the same county-aware TaxCalculator, keyed on the SAME service type the create
-// path resolves — `serviceData.service_type || title`, i.e. the linked service
-// record's type when the project carries one (invoice.js:576-602, 814-817), else
-// the 'WDO Inspection' title — and the same 7% legacy fallback when it throws
-// (invoice.js:821-826).
+// invoice. Delegates to InvoiceService.previewInvoiceTotals — the mirror of
+// create()'s financial path now lives in invoice.js next to create() itself,
+// because keeping a copy here drifted three times (legacy fallback rate,
+// service-record tax key, and the #1520 scheduled-service tax key). The
+// inputs match the InvoiceService.create call in resolveOrCreateProjectInvoice
+// exactly: same service linkage, same 'WDO Inspection' title.
 async function previewWdoInvoiceTotals(project, customer, fee) {
-  const subtotal = Math.round((Number(fee) || 0) * 100) / 100;
-  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
-  if (!isCommercial) return { subtotal, tax_amount: 0, total: subtotal };
-  // Match create's tax key: linked service record's type, else the WDO title.
-  let taxServiceType = 'WDO Inspection';
-  if (project?.service_record_id) {
-    try {
-      const sr = await db('service_records').where({ id: project.service_record_id }).first();
-      if (sr?.service_type) taxServiceType = sr.service_type;
-    } catch (err) {
-      logger.warn(`[projects] WDO preview service-type lookup failed for ${project.id}: ${err.message}`);
-    }
-  }
-  try {
-    const taxResult = await TaxCalculator.calculateTax(customer.id, taxServiceType, subtotal);
-    const tax = Math.round((Number(taxResult?.amount) || 0) * 100) / 100;
-    return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
-  } catch (err) {
-    logger.warn(`[projects] WDO preview tax calc failed for ${customer?.id}: ${err.message}`);
-    const tax = Math.round(subtotal * 0.07 * 100) / 100;
-    return { subtotal, tax_amount: tax, total: Math.round((subtotal + tax) * 100) / 100 };
-  }
+  return InvoiceService.previewInvoiceTotals({
+    customerId: project.customer_id,
+    customer,
+    amount: fee,
+    serviceRecordId: project.service_record_id || null,
+    scheduledServiceId: project.scheduled_service_id || null,
+    title: 'WDO Inspection',
+  });
 }
 
 // Find an invoice already linked to this project, else create a draft. Returns
