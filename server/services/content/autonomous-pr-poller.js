@@ -181,6 +181,19 @@ async function queueRowParkedState(run) {
   const parked = !!row
     && row.status === 'pending_review'
     && row.skip_reason === pendingSkipReasonForRun(run);
+  // status + skip_reason alone are ambiguous across requeue cycles: an
+  // operator requeue followed by a NEWER run re-parking the same opportunity
+  // reproduces the exact parked state this run was selected on, and the
+  // stale run's old PR would look valid again. The opportunity's lifecycle
+  // belongs to its newest run — any newer sibling supersedes this one.
+  if (parked && run.created_at) {
+    const newer = await db('autonomous_runs')
+      .where('opportunity_id', run.opportunity_id)
+      .whereNot('id', run.id)
+      .where('created_at', '>', run.created_at)
+      .first('id');
+    if (newer) return { parked: false, row, supersededByRunId: newer.id };
+  }
   return { parked, row };
 }
 
@@ -306,29 +319,33 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
     return { pending: true, reason: 'live_check_failed', url: target.url, autoMerged };
   }
 
-  // Existing-page lanes (rewrite/refresh/metadata): the target URL returned
-  // 200 BEFORE the merge too, so liveUrlResponds proves nothing about the
-  // merged content. Require a green PRODUCTION deployment matching the merge
-  // commit (exact sha, else a bounded merged-at window — the same matcher
-  // pages-poll uses for scheduler posts) before claiming the run. mergeSha/
-  // mergedAt come from the PR object (human merges) or the merge response +
-  // merge time (auto-merges); when both are missing this fails closed and
-  // the next tick's PR re-fetch supplies merge_commit_sha/merged_at.
-  // New pages skip this: their 404→200 flip IS the production-deploy signal.
-  if (String(run.action_type || '') !== 'new_supporting_blog') {
-    try {
-      const { latestProductionDeploymentForPost } = require('../content-astro/pages-poll');
-      const prodDeploy = await latestProductionDeploymentForPost({
-        astro_commit_sha: mergeSha || null,
-        astro_merged_at: mergedAt || null,
-      });
-      if (!prodDeploy) {
-        return { pending: true, reason: 'awaiting_production_deploy', url: target.url, autoMerged };
-      }
-    } catch (err) {
-      logger.warn(`[autonomous-pr-poller] production deploy check failed for run ${run.id}: ${err.message}`);
-      return { pending: true, reason: 'production_deploy_check_failed', url: target.url, autoMerged };
+  // ALL PR-backed lanes: a 200 on the target URL is not evidence the MERGED
+  // content deployed — existing pages (rewrite/refresh/metadata) were live
+  // before the merge, and even new_supporting_blog can UPDATE an existing
+  // slug via publishOrUpdatePage. Require a successful PRODUCTION deploy
+  // that contains the merge: exact merge-sha match, or the latest success
+  // at/after merged_at (main is linear via squash merges, so any later
+  // production deploy includes the merge — and this stays correct for old
+  // merges whose own deploy has fallen out of the API's recent window).
+  // mergeSha/mergedAt come from the PR object (human merges) or the merge
+  // response + merge time (auto-merges); when neither resolves this fails
+  // closed and the next tick's PR re-fetch supplies merge_commit_sha/
+  // merged_at.
+  try {
+    const { latestSuccessfulProductionDeployment, deploymentCommitSha, deploymentTimestampMs } = require('../content-astro/pages-poll');
+    const prodDeploy = await latestSuccessfulProductionDeployment();
+    const shaMatch = mergeSha && normalizeSha(deploymentCommitSha(prodDeploy)) === normalizeSha(mergeSha);
+    const mergedAtMs = mergedAt ? Date.parse(mergedAt) : NaN;
+    const deployedAtMs = prodDeploy ? deploymentTimestampMs(prodDeploy) : null;
+    const CLOCK_SKEW_MS = 120000;
+    const timeMatch = Number.isFinite(mergedAtMs) && deployedAtMs != null
+      && deployedAtMs >= mergedAtMs - CLOCK_SKEW_MS;
+    if (!prodDeploy || (!shaMatch && !timeMatch)) {
+      return { pending: true, reason: 'awaiting_production_deploy', url: target.url, autoMerged };
     }
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] production deploy check failed for run ${run.id}: ${err.message}`);
+    return { pending: true, reason: 'production_deploy_check_failed', url: target.url, autoMerged };
   }
 
   const now = new Date();
@@ -567,7 +584,7 @@ async function pollPending() {
       .whereNotNull('astro_pr_url')
       .orderBy('claimed_at', 'asc')
       .limit(25)
-      .select('id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes');
+      .select('id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes', 'created_at');
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
     return { count: 0, skipped: true, reason: err.message };

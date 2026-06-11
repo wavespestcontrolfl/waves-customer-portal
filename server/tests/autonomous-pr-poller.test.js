@@ -26,7 +26,8 @@ jest.mock('../services/content-astro/pages-poll', () => ({
   extractStatus: jest.fn(),
   deploymentCommitSha: jest.fn(),
   liveUrlResponds: jest.fn(),
-  latestProductionDeploymentForPost: jest.fn(),
+  latestSuccessfulProductionDeployment: jest.fn(),
+  deploymentTimestampMs: jest.fn(),
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
@@ -53,6 +54,7 @@ function makeRun(overrides = {}) {
     action_type: 'new_supporting_blog',
     skip_reason: 'astro_pr_pending_merge',
     astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
+    created_at: '2026-06-11T04:00:00Z',
     draft_payload: JSON.stringify({
       type: 'draft',
       frontmatter: {
@@ -89,7 +91,7 @@ function makeMetadataRun(overrides = {}) {
 // overrides what the pre-merge .first() re-check sees (simulates an operator
 // action landing AFTER the tick-start snapshot). `briefs` backs the
 // content_briefs target_url fallback lookup.
-function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [] } = {}) {
+function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
@@ -106,6 +108,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         q._filters[col] = vals;
         return q;
       }),
+      whereNot: jest.fn(() => q),
       whereNotNull: jest.fn(() => q),
       orderBy: jest.fn(() => q),
       limit: jest.fn(() => q),
@@ -122,6 +125,8 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         if (table === 'content_briefs') {
           return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
         }
+        // newer-sibling lookup in queueRowParkedState
+        if (table === 'autonomous_runs') return Promise.resolve(newerRun);
         return Promise.resolve(null);
       }),
       update: jest.fn((u) => {
@@ -144,10 +149,12 @@ beforeEach(() => {
   // Default: merged targets respond live (production deploy already done).
   // Individual tests override to exercise the awaiting_live_deploy gate.
   pagesPoll.liveUrlResponds.mockResolvedValue(true);
-  // Default: a green production deployment matching the merge exists.
-  // Individual tests override to exercise the awaiting_production_deploy
-  // gate on existing-page lanes.
-  pagesPoll.latestProductionDeploymentForPost.mockResolvedValue({ id: 'prod-deploy-1' });
+  // Default: a successful production deployment newer than any merge in
+  // these tests exists (timestamp 60s in the future of "now" covers the
+  // auto-merge path, whose mergedAt is stamped at merge time). Individual
+  // tests override to exercise the awaiting_production_deploy gate.
+  pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
+  pagesPoll.deploymentTimestampMs.mockImplementation(() => Date.now() + 60000);
 });
 
 afterEach(() => {
@@ -231,7 +238,7 @@ describe('merged-by-human reconciliation', () => {
 
   test('honors the INTERNAL_LINK_PLAN_ON_BLOG_MERGE kill switch', async () => {
     setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.internalLinkPlanningDisabled.mockReturnValue(true);
 
@@ -242,7 +249,7 @@ describe('merged-by-human reconciliation', () => {
 
   test('compare-and-set claim: an already-finalized run gets no side effects', async () => {
     setupDb({ pending: [makeRun()], updateResult: () => 0 });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
 
     const res = await poller.pollPending();
 
@@ -253,7 +260,7 @@ describe('merged-by-human reconciliation', () => {
 
   test('merged but target URL not yet live: run stays parked, nothing finalized or indexed', async () => {
     const updates = setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
     pagesPoll.liveUrlResponds.mockResolvedValue(false);
 
     const res = await poller.pollPending();
@@ -268,7 +275,7 @@ describe('merged-by-human reconciliation', () => {
 
   test('live check network blip: run stays parked, retried next tick (never failed)', async () => {
     const updates = setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
     pagesPoll.liveUrlResponds.mockRejectedValue(new Error('fetch timed out'));
 
     const res = await poller.pollPending();
@@ -283,7 +290,7 @@ describe('merged-by-human reconciliation', () => {
       pending: [makeRun({ brief_id: 'brief-1', draft_payload: JSON.stringify({ type: 'draft', frontmatter: {} }) })],
       briefs: [{ id: 'brief-1', target_url: null }],
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
 
     const res = await poller.pollPending();
 
@@ -553,7 +560,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
       pending: [makeRun()],
       queue: [{ id: 'opp-1', status: 'pending', skip_reason: null }],
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
 
     const res = await poller.pollPending();
 
@@ -597,7 +604,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
 
   test('missing queue row for a non-null opportunity_id fails closed (skip)', async () => {
     setupDb({ pending: [makeRun()], queue: [] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
 
     const res = await poller.pollPending();
 
@@ -607,7 +614,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
 
   test('run with no opportunity_id has nothing to cross-check and reconciles normally', async () => {
     setupDb({ pending: [makeRun({ opportunity_id: null })], queue: [] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
 
@@ -623,7 +630,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
       // sees the operator's requeue that landed during the GitHub lookup
       queueFirst: { id: 'opp-1', status: 'pending', skip_reason: null },
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
 
     const res = await poller.pollPending();
 
@@ -651,13 +658,34 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
   });
 
+  test('requeue→re-park cycle: a NEWER run for the same opportunity supersedes this one even though the queue state matches', async () => {
+    // operator requeued, a new run re-parked the same opportunity at the
+    // exact same pending_review/skip_reason — status+skip_reason alone
+    // can't tell the stale run from the live one
+    const updates = setupDb({
+      pending: [makeRun()],
+      newerRun: { id: 'run-2-newer' },
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    expect(updates.find((u) => u.updates && u.updates.outcome === 'completed_published')).toBeUndefined();
+    const annotate = runUpdates(updates)[0];
+    expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
+    expect(indexNow.submit).not.toHaveBeenCalled();
+    // the queue row now belongs to the newer run — never touched here
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+  });
+
   test('queue row parked under a DIFFERENT pending reason does not validate this run', async () => {
     // e.g. the opportunity was re-claimed and re-parked by a different lane
     setupDb({
       pending: [makeRun()],
       queue: [{ id: 'opp-1', status: 'pending_review', skip_reason: 'metadata_pr_pending_merge' }],
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
 
     const res = await poller.pollPending();
 
@@ -692,30 +720,57 @@ describe('metadata_pr_pending_merge lane', () => {
     expect(queueUpdate.updates).toMatchObject({ status: 'done' });
   });
 
-  test('existing-page lane parks until a production deploy matching the merge exists (200 on the old page is not evidence)', async () => {
+  test('parks when no successful production deploy exists (200 on the old page is not evidence)', async () => {
     const updates = setupDb({ pending: [makeMetadataRun()] });
     gh.getPr.mockResolvedValue({
       number: 42, state: 'closed', merged: true,
       merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
     });
-    pagesPoll.latestProductionDeploymentForPost.mockResolvedValue(null); // merge not deployed yet
+    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue(null);
 
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_production_deploy' });
-    // matched against the MERGE commit/time, not the PR head
-    expect(pagesPoll.latestProductionDeploymentForPost).toHaveBeenCalledWith({
-      astro_commit_sha: 'mergesha1',
-      astro_merged_at: '2026-06-11T05:00:00Z',
-    });
     expect(runUpdates(updates)).toHaveLength(0);
     expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
+  test('parks when the latest production success PREDATES the merge (merge not deployed yet)', async () => {
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true,
+      merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
+    });
+    // latest success is the PREVIOUS merge's deploy, an hour earlier
+    pagesPoll.deploymentTimestampMs.mockReturnValue(Date.parse('2026-06-11T04:00:00Z'));
+    pagesPoll.deploymentCommitSha.mockReturnValue('someoldsha');
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_production_deploy' });
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('exact merge-sha match on the production deploy passes regardless of timestamps', async () => {
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true,
+      merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'MergeSha1',
+    });
+    pagesPoll.deploymentTimestampMs.mockReturnValue(null); // no usable timestamp
+    pagesPoll.deploymentCommitSha.mockReturnValue('mergesha1'); // case-insensitive match
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published' });
   });
 
   test('production-deploy lookup outage parks the run (fail closed), never finalizes', async () => {
     const updates = setupDb({ pending: [makeMetadataRun()] });
     gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
-    pagesPoll.latestProductionDeploymentForPost.mockRejectedValue(new Error('cf 502'));
+    pagesPoll.latestSuccessfulProductionDeployment.mockRejectedValue(new Error('cf 502'));
 
     const res = await poller.pollPending();
 
@@ -723,16 +778,15 @@ describe('metadata_pr_pending_merge lane', () => {
     expect(runUpdates(updates)).toHaveLength(0);
   });
 
-  test('new_supporting_blog lane does NOT consult the production-deploy matcher (404→200 flip is its gate)', async () => {
-    setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+  test('new_supporting_blog is gated too (publishOrUpdatePage can update an EXISTING slug)', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue(null);
 
     const res = await poller.pollPending();
 
-    expect(res.results[0].merged).toBe(true);
-    expect(pagesPoll.latestProductionDeploymentForPost).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_production_deploy' });
+    expect(runUpdates(updates)).toHaveLength(0);
   });
 
   test('real emit_metadata_only drafts (title/meta only) resolve the URL from content_briefs', async () => {
@@ -743,7 +797,7 @@ describe('metadata_pr_pending_merge lane', () => {
       })],
       briefs: [{ id: 'brief-meta-1', target_url: METADATA_PAGE_URL, target_keyword: 'pest control venice', city: 'Venice' }],
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
 
     const res = await poller.pollPending();

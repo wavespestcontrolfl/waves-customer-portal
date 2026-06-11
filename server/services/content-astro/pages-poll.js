@@ -53,6 +53,22 @@ async function latestDeploymentForBranch(branch) {
   return list.find((d) => d?.deployment_trigger?.metadata?.branch === branch) || null;
 }
 
+// Newest successful production deployment, regardless of which commit it
+// was for. Used by the autonomous PR poller: main is linear (squash
+// merges), so ANY successful production deploy at/after a merge contains
+// that merge — checking "latest success is newer than merged_at" is both
+// sufficient and immune to the 25-deploy pagination window that a
+// commit-exact match can fall out of on busy days.
+async function latestSuccessfulProductionDeployment() {
+  const { project } = cfEnv();
+  const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=production&per_page=25`);
+  const list = Array.isArray(res?.result) ? res.result : [];
+  return list.find((d) => {
+    if (d?.environment && d.environment !== 'production') return false;
+    return extractStatus(d).status === 'success';
+  }) || null;
+}
+
 async function latestProductionDeploymentForPost(post) {
   const { project } = cfEnv();
   const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=production&per_page=25`);
@@ -319,9 +335,10 @@ module.exports = {
   latestDeploymentForBranch,
   extractStatus,
   deploymentCommitSha,
-  // Also reused by the poller: existing-page targets (rewrite/refresh/
-  // metadata) return 200 before the merge deploys, so their finalization is
-  // gated on a green PRODUCTION deployment matching the merge commit
-  // (exact sha, else bounded merge-time window).
-  latestProductionDeploymentForPost,
+  // Also reused by the poller: PR-backed publishes (including
+  // new_supporting_blog, which can UPDATE an existing slug) must not
+  // finalize until a successful production deploy contains the merge —
+  // exact merge-sha match, or latest success at/after merged_at.
+  latestSuccessfulProductionDeployment,
+  deploymentTimestampMs,
 };
