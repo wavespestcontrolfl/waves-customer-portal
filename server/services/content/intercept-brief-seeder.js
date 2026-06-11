@@ -28,14 +28,16 @@
  *    city/service anchor) instead of parking them for facts gaps. Local
  *    color comes from the operator outline (which the LLM fact-check gate
  *    still verifies at publish).
- *  - service = 'pest' / 'lawn' coarse categories only. The termite-cluster
- *    briefs (C1/C2/F1) are deliberately seeded service='pest': they are
- *    consumer-protection posts about CONTRACTS (bonds, claims, monitoring
- *    subscriptions), not termite service pages, and the operator manifest
- *    requires an FAQPage on every post. Seeding them 'termite' would both
- *    strip the FAQ requirement at compose time and P0 the visible FAQ at
- *    the publish-time FAQ_BLOCKED_SERVICE guard. The guard itself is
- *    untouched and still applies to every mined opportunity.
+ *  - service = truthful coarse category ('pest' / 'lawn' / 'termite').
+ *    The termite-cluster briefs (C1/C2/F1) are labeled 'termite' even
+ *    though 'termite' is on FAQ_BLOCKED_SERVICES: the operator manifest
+ *    explicitly mandates an FAQPage on every intercept post (owner
+ *    directive 2026-06-11), so instead of mislabeling the service to dodge
+ *    the guard, the FAQ policy carries a NARROW, explicit operator
+ *    exception — operator_brief.faq_required=true (derived from the
+ *    manifest payload) is honored by content-guardrails (via the runner's
+ *    operatorFaqException flag) and content-quality-gate. Every mined
+ *    opportunity still gets the full FAQ_BLOCKED_SERVICE enforcement.
  *  - dedupe_key `intercept:v1:<id>` + ON CONFLICT DO UPDATE → idempotent
  *    re-runs (same status-preserving CASE as gsc-opportunity-miner: a
  *    claimed/done/pending_review row is never reset by a re-seed).
@@ -68,12 +70,14 @@ function scoreForBrief(brief) {
   return 82; // C / D / F
 }
 
-// Coarse engine service category. Lawn posts → 'lawn' (lawn hub links +
-// lawn category guidance); everything else 'pest' — see the header note on
-// why the termite-cluster briefs are deliberately NOT 'termite'.
+// Coarse engine service category, labeled TRUTHFULLY from the slug prefix —
+// termite-cluster briefs are 'termite' even though that id is FAQ-blocked;
+// the operator FAQ mandate flows through the explicit faq_required override
+// instead of a service mislabel (see header).
 function serviceForBrief(brief) {
   const slug = String(brief.slug || brief.page_url || '');
   if (slug.includes('/lawn-care/')) return 'lawn';
+  if (slug.includes('/termite/')) return 'termite';
   return 'pest';
 }
 
@@ -281,6 +285,12 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
     verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
     internal_links_required: Array.isArray(payload.internal_links) ? payload.internal_links : [],
     schema_types: Array.isArray(payload.schema_types) ? payload.schema_types : [],
+    // Explicit operator FAQ mandate (owner directive 2026-06-11: FAQPage on
+    // every intercept post). content-guardrails / content-quality-gate honor
+    // this as a NARROW exception to the FAQ_BLOCKED_SERVICE policy — derived
+    // from the manifest payload, never from generated content.
+    faq_required: (Array.isArray(payload.schema_types) && payload.schema_types.includes('FAQPage'))
+      || outlineHasFaq,
     cta_directives: ctaDirectives,
     byline: {
       key: payload.byline || 'adam',
@@ -318,7 +328,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules 
     byline.emphasis || null,
     ctaDirectives.length ? `CTAs: ${ctaDirectives.join(' || ')}` : null,
     payload.schema_types?.length
-      ? `SCHEMA: emit ${payload.schema_types.join(' + ')} structured data with matching VISIBLE content (FAQPage requires the visible FAQ section; HowTo requires visible steps). This brief's service is NOT FAQ-blocked — the FAQ section is required by the operator.`
+      ? `SCHEMA: emit ${payload.schema_types.join(' + ')} structured data with matching VISIBLE content (FAQPage requires the visible FAQ section; HowTo requires visible steps). The operator manifest explicitly REQUIRES the FAQ section for this post (owner directive 2026-06-11) — this operator mandate overrides the default no-FAQ rule for blocked topics for THIS brief only; include the FAQ section as outlined.`
       : null,
     globalRules ? `GLOBAL RULES (apply to every intercept post): ${globalRules}` : null,
     'COMPARISON DISCLAIMER: end the post with a short footer noting competitor pricing/terms are as of the publish date and readers should verify current terms directly.',

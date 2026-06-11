@@ -183,8 +183,11 @@ function keywordStuffingFinding(body, primaryKeyword) {
  *   For NEW pages this is the draft's own frontmatter.domains; for REFRESH the
  *   caller MUST pass the LIVE page's domains, because the refresh draft carries
  *   only editable meta and publishRefresh freezes domains from the live page.
+ * operatorFaqException: narrow opt-in skip of the FAQ-blocked-service P0 for
+ *   operator-authored intercept briefs whose manifest mandates an FAQ (see
+ *   the inline note at the call below). Default false — full enforcement.
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -206,7 +209,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     priceFinding(publishableText),
     brandTokenFinding(publishableText, effectiveDomains),
     // FAQ + keyword density are body-section concerns only.
-    faqBlockedFinding(body, service),
+    // operatorFaqException is a NARROW, opt-in override of the FAQ-blocked
+    // policy: only the autonomous runner sets it, and only for an
+    // operator_intercept opportunity whose seeded manifest explicitly
+    // requires an FAQ (operator_brief.faq_required — owner directive
+    // 2026-06-11: FAQPage on every intercept post). Every other caller
+    // (publishAstro, mined opportunities) keeps full enforcement.
+    operatorFaqException ? null : faqBlockedFinding(body, service),
     keywordStuffingFinding(body, kw),
   ].filter(Boolean);
 

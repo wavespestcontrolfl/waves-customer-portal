@@ -116,12 +116,17 @@ describe('content-brief-builder operator-intercept injection', () => {
     expect(brief.city).toBeNull();
   });
 
-  test('FAQ requirement is NOT stripped for the termite-cluster consumer-protection briefs', async () => {
+  test('FAQ requirement survives for termite-cluster briefs via the explicit operator mandate', async () => {
     queue.getById.mockResolvedValue(opportunityFor('C1'));
     const brief = await briefBuilder.compose('opp-C1', { persist: false, skipSerp: true });
+    // Truthful service label — NOT mislabeled to dodge the FAQ-blocked guard.
+    expect(brief.service).toBe('termite');
+    // The operator outline (incl. its FAQ block) is the content plan, and
+    // the explicit faq_required mandate rides on the brief for the
+    // guardrail / quality-gate / SEO-gate exceptions.
     expect(brief.required_sections.some((s) => /faq/i.test(s))).toBe(true);
     expect(brief.schema_types).toContain('FAQPage');
-    expect(brief.service).toBe('pest'); // deliberately coarse — see seeder header
+    expect(brief.voice_constraints.operator_brief.faq_required).toBe(true);
   });
 
   test('A0 refresh: target page + operator outline, refresh template preserved', async () => {

@@ -502,10 +502,20 @@ class AutonomousRunner {
           liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
         }
       }
+      // Narrow operator-FAQ exception: an operator_intercept brief whose
+      // seeded manifest explicitly requires an FAQ (operator_brief.
+      // faq_required, derived from the manifest payload — owner directive
+      // 2026-06-11: FAQPage on every intercept post) may keep its FAQ even
+      // on a FAQ-blocked service id (the termite-cluster consumer-protection
+      // posts). Bucket AND the composed brief flag must both agree; mined
+      // opportunities can never set this.
+      const operatorFaqException = opp.bucket === OPERATOR_INTERCEPT_BUCKET
+        && brief?.voice_constraints?.operator_brief?.faq_required === true;
       const guardResult = contentGuardrails.evaluate(draft, {
         service: opp.service || brief.service || null,
         primaryKeyword: brief.target_keyword || null,
         domains: liveDomains,
+        operatorFaqException,
       });
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {

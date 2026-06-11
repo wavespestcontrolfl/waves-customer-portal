@@ -352,7 +352,26 @@ function faqPolicyTopicFields(draft, brief) {
 // = the check passes at full weight when the FAQ is (correctly) absent;
 // an FAQ that IS present on a blocked topic fails here too (the guardrail
 // P0s it at publish anyway). Returns null when the policy doesn't apply.
+// Narrow operator override of the FAQ-blocked policy: an operator-authored
+// intercept brief whose seeded manifest mandates an FAQ carries
+// voice_constraints.operator_brief.faq_required=true (set by
+// intercept-brief-seeder from the manifest payload, never from generated
+// content — owner directive 2026-06-11: FAQPage on every intercept post).
+// Mirrors content-guardrails' operatorFaqException flag so the gate and the
+// publish-time guard can't disagree about the same draft.
+function operatorFaqMandate(brief) {
+  const voice = typeof brief?.voice_constraints === 'string'
+    ? safeParseObject(brief.voice_constraints)
+    : brief?.voice_constraints;
+  return !!(voice && typeof voice === 'object' && voice.operator_brief?.faq_required === true);
+}
+
+function safeParseObject(value) {
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function faqBlockedTopicResult(hasFaqSection, draft, brief) {
+  if (operatorFaqMandate(brief)) return null; // operator mandate — the normal FAQ checks apply
   if (!isFaqBlockedService(faqPolicyTopicFields(draft, brief))) return null;
   if (hasFaqSection) return { ok: false, reason: 'faq_present_on_faq_blocked_service' };
   return { ok: true, reason: 'faq_blocked_service_omission_is_correct' };

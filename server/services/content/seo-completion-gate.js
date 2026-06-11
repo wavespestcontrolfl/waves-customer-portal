@@ -212,7 +212,15 @@ function faqRequired(brief = {}) {
   // live AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 canary config — gets routed out
   // of publish as a failure. Belt-and-braces with content-brief-builder, which
   // now omits the FAQ required_section for blocked topics at compose time.
-  if (isFaqBlockedService([
+  //
+  // EXCEPTION (narrow): an operator-authored intercept brief whose seeded
+  // manifest mandates an FAQ (voice_constraints.operator_brief.faq_required
+  // — set by intercept-brief-seeder from the manifest payload; owner
+  // directive 2026-06-11) keeps the FAQ requirement even on a blocked
+  // service id, so a draft that omits the operator's FAQ still P1s. Mirrors
+  // content-guardrails' operatorFaqException + content-quality-gate's
+  // operatorFaqMandate.
+  if (!operatorFaqMandate(brief) && isFaqBlockedService([
     brief.service,
     brief.tag,
     brief.customer_signal?.service,
@@ -220,6 +228,14 @@ function faqRequired(brief = {}) {
   ])) return false;
   const required = Array.isArray(brief.required_sections) ? brief.required_sections : safeParseArray(brief.required_sections);
   return required.some((section) => /\bfaq|frequently asked|common questions\b/i.test(String(section || '')));
+}
+
+function operatorFaqMandate(brief = {}) {
+  let voice = brief.voice_constraints;
+  if (typeof voice === 'string') {
+    try { voice = JSON.parse(voice); } catch { voice = null; }
+  }
+  return !!(voice && typeof voice === 'object' && voice.operator_brief?.faq_required === true);
 }
 
 function requiredInternalLinkCount(brief = {}) {

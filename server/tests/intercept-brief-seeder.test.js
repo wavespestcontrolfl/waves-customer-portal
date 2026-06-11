@@ -63,13 +63,13 @@ describe('intercept manifest → opportunity rows', () => {
     expect(() => availableAtFor({ id: 'X', window: 'someday' })).toThrow(/unrecognized window/);
   });
 
-  test('rows: pinned bucket, NULL city, coarse non-FAQ-blocked service, payload in signal_metadata', () => {
+  test('rows: pinned bucket, NULL city, truthful coarse service, payload in signal_metadata', () => {
     const now = new Date('2026-06-11T12:00:00Z');
     for (const brief of manifest.briefs) {
       const row = rowForBrief(brief, manifest, { now });
       expect(row.bucket).toBe('operator_intercept');
       expect(row.city).toBeNull(); // keeps the facts-sufficiency gate "not applicable"
-      expect(['pest', 'lawn']).toContain(row.service); // never a FAQ-blocked service id
+      expect(['pest', 'lawn', 'termite']).toContain(row.service); // truthful slug-derived category
       expect(row.action_type).toBe(brief.action);
       expect(row.signal_metadata.operator_pinned).toBe(true);
       expect(row.signal_metadata.intercept_brief.id).toBe(brief.id);
@@ -85,7 +85,12 @@ describe('intercept manifest → opportunity rows', () => {
     const byId = Object.fromEntries(manifest.briefs.map((b) => [b.id, b]));
     expect(serviceForBrief(byId.B2)).toBe('lawn');
     expect(serviceForBrief(byId.D1)).toBe('lawn');
-    expect(serviceForBrief(byId.C1)).toBe('pest'); // termite-cluster: deliberate, see module header
+    // Termite-cluster posts are labeled truthfully — the operator FAQ
+    // mandate flows through the explicit faq_required override, not a
+    // service mislabel.
+    expect(serviceForBrief(byId.C1)).toBe('termite');
+    expect(serviceForBrief(byId.C2)).toBe('termite');
+    expect(serviceForBrief(byId.F1)).toBe('termite');
     const a0 = rowForBrief(byId.A0, manifest, { now: new Date() });
     expect(a0.action_type).toBe('refresh_existing_page');
     expect(a0.page_url).toBe('https://www.wavespestcontrol.com/pest-control/in-wall-pest-control/');
@@ -237,6 +242,55 @@ describe('content-quality-gate operator-brief evidence exemptions', () => {
     const mined = { target_keyword: 'kw', serp_signal: {}, gsc_signal: { bucket: 'striking_distance', impressions: null } };
     expect(checkSerpBriefAttached({}, mined).ok).toBe(false);
     expect(checkGscSignalAttached({}, mined).ok).toBe(false);
+  });
+});
+
+// ── operator FAQ mandate — narrow exception, full enforcement elsewhere ─
+
+describe('operator FAQ mandate (termite-cluster intercept briefs)', () => {
+  const contentGuardrails = require('../services/content/content-guardrails');
+  const faqDraft = { body: '## Frequently Asked Questions\n### Does a bond cover old damage?\nIt depends on the bond.' };
+
+  test('guardrails: operatorFaqException skips the FAQ_BLOCKED_SERVICE P0 (and nothing else)', () => {
+    const blocked = contentGuardrails.evaluate(faqDraft, { service: 'termite' });
+    expect(blocked.pass).toBe(false);
+    expect(blocked.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(true);
+
+    const excepted = contentGuardrails.evaluate(faqDraft, { service: 'termite', operatorFaqException: true });
+    expect(excepted.pass).toBe(true);
+    expect(excepted.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
+
+    // The exception is FAQ-scoped only: a hardcoded price still P0s.
+    // (No calculator/estimate/depends framing near the price.)
+    const priced = contentGuardrails.evaluate(
+      { body: '## Frequently Asked Questions\n### Does a bond cover old damage?\nRead the bond terms first.\nOnly $89 per month for protection.' },
+      { service: 'termite', operatorFaqException: true },
+    );
+    expect(priced.pass).toBe(false);
+    expect(priced.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(true);
+  });
+
+  test('quality gate: FAQ presence on a mandated intercept brief is scored normally, not failed', () => {
+    const { checkFaqSectionPresent } = qualityInternals;
+    const mandatedBrief = {
+      service: 'termite',
+      gsc_signal: { bucket: 'operator_intercept' },
+      voice_constraints: { operator_brief: { faq_required: true } },
+    };
+    expect(checkFaqSectionPresent(faqDraft, mandatedBrief)).toEqual({ ok: true });
+    // Without the mandate, the blocked-topic policy still fails a present FAQ.
+    const minedBrief = { service: 'termite', gsc_signal: { bucket: 'decay_refresh' }, voice_constraints: {} };
+    expect(checkFaqSectionPresent(faqDraft, minedBrief).ok).toBe(false);
+  });
+
+  test('seo-completion gate: faqRequired stays TRUE for mandated intercept briefs (missing FAQ still P1s)', () => {
+    const { faqRequired } = require('../services/content/seo-completion-gate')._internals;
+    const base = {
+      service: 'termite',
+      required_sections: ['FAQ block (5–7 Qs)'],
+    };
+    expect(faqRequired({ ...base, voice_constraints: { operator_brief: { faq_required: true } } })).toBe(true);
+    expect(faqRequired(base)).toBe(false); // blocked topic without the mandate
   });
 });
 
