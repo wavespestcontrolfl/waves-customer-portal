@@ -3162,6 +3162,21 @@ router.put('/:id/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // Day-of lifecycle guard — same as admin-dispatch PUT /:serviceId/status.
+    // en_route / on_site / completed only happen on (or after) the
+    // scheduled day; a future-dated job here is a stale tab racing a
+    // live reschedule (rebooker allowLive). Committing the status flip
+    // would diverge from track_state, which the guarded track-side
+    // helper below refuses to advance. Cancel/confirm stay allowed.
+    const DAY_OF_LIFECYCLE_STATUSES = new Set(['en_route', 'on_site', 'completed']);
+    if (DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
+      && trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: `This job is scheduled for ${dateOnly(svc.scheduled_date)} — it may have been rescheduled while this page was open. Refresh, or move it to today to run it early.`,
+        code: 'future_scheduled_date',
+      });
+    }
+
     const fromStatus = svc.status;
     if (toStatus === 'en_route') {
       const preEnRouteStatuses = new Set(['pending', 'confirmed', 'rescheduled']);

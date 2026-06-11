@@ -2,6 +2,8 @@ const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
+const { clearTechCurrentJob } = require('./tech-status');
+const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth,
@@ -13,6 +15,28 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
+
+// Live lifecycle states a staff-initiated reschedule may override via
+// options.allowLive (rain starts while en route, customer calls to push
+// the visit while the tech is on site). Terminal states (completed /
+// cancelled / skipped) stay non-reschedulable on every path.
+const LIVE_OVERRIDE_STATUSES = new Set(['en_route', 'on_site']);
+
+// Tracker-lifecycle rewind applied when a live job is force-rescheduled.
+// track_state returns to 'scheduled' so En Route can fire again on the
+// new day, track_sms_sent_at clears so the en-route SMS re-sends, and
+// the arrival/start timestamps clear so duration capture on the new
+// visit doesn't measure from the abandoned attempt (a stale arrived_at
+// would make buildCompletionLifecycleUpdates compute a days-long
+// service time).
+const LIVE_LIFECYCLE_RESET = {
+  track_state: 'scheduled',
+  en_route_at: null,
+  arrived_at: null,
+  actual_start_time: null,
+  check_in_time: null,
+  track_sms_sent_at: null,
+};
 
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
   const safe = baseDateStr ? String(baseDateStr).split('T')[0] : null;
@@ -63,6 +87,30 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
   return etDateString(addETDays(base, gap * i));
+}
+
+// Tell an open TrackPage (or customer portal) that a live job was
+// rewound. The public tracker refetches on customer:job_update but only
+// polls while en_route — an on_property viewer would otherwise sit on
+// the stale "tech on site" screen until a manual refresh. Payload
+// follows the strict customer-facing allowlist in job-status.js
+// (job_id / status / eta / tech_id / tech_first_name / updated_at) —
+// see the PII BOUNDARY block there before adding fields.
+function emitCustomerJobRefresh(service, toStatus) {
+  if (!service?.customer_id) return;
+  const io = getIo();
+  if (!io) {
+    logger.warn('[rebooker] io not initialized; skipping customer refresh broadcast');
+    return;
+  }
+  io.to(`customer:${service.customer_id}`).emit('customer:job_update', {
+    job_id: service.id,
+    status: toStatus,
+    eta: null,
+    tech_id: service.technician_id || null,
+    tech_first_name: null,
+    updated_at: new Date(),
+  });
 }
 
 // Convert "08:00-09:00" → { start: '08:00', end: '09:00' }. Tolerates objects.
@@ -147,11 +195,15 @@ class SmartRebooker {
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
-    if (!RESCHEDULABLE_STATUSES.has(service.status)) {
+    const allowedStatuses = options.allowLive === true
+      ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
+      : RESCHEDULABLE_STATUSES;
+    if (!allowedStatuses.has(service.status)) {
       throw Object.assign(new Error(`Cannot reschedule a ${service.status} job`), {
         statusCode: 409,
       });
     }
+    const wasLive = LIVE_OVERRIDE_STATUSES.has(service.status);
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
@@ -161,6 +213,7 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: 'confirmed',
+      ...(wasLive ? LIVE_LIFECYCLE_RESET : {}),
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
@@ -169,7 +222,7 @@ class SmartRebooker {
     await db.transaction(async (trx) => {
       const updated = await trx('scheduled_services')
         .where({ id: serviceId, status: service.status })
-        .whereIn('status', Array.from(RESCHEDULABLE_STATUSES))
+        .whereIn('status', Array.from(allowedStatuses))
         .update({
           ...updates,
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
@@ -200,6 +253,29 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
     });
+
+    // Live override post-commit cleanup:
+    //   1. The tech's tech_status row still points at this job
+    //      (en_route / on_site). Release it so the tech shows idle and
+    //      the next job can claim them. Best-effort outside the trx —
+    //      same pattern as track-transitions.markComplete; a failure
+    //      here leaves a stale pointer, not inconsistent job state.
+    //   2. A customer watching the public tracker would otherwise stay
+    //      on the stale en-route / on-site screen — push the refresh.
+    if (wasLive) {
+      if (service.technician_id) {
+        try {
+          await clearTechCurrentJob({
+            tech_id: service.technician_id,
+            current_job_id: serviceId,
+            status: 'idle',
+          });
+        } catch (err) {
+          logger.error(`[rebooker] tech_status clear after live reschedule failed for ${serviceId}: ${err.message}`);
+        }
+      }
+      emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, 'confirmed');
+    }
 
     // Check escalation
     const count = await db('reschedule_log')
@@ -236,7 +312,13 @@ class SmartRebooker {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
     if (!RESCHEDULABLE_STATUSES.has(service.status)) {
-      throw Object.assign(new Error(`Cannot reschedule a ${service.status} job`), {
+      // No allowLive override here — a series shift recomputes every
+      // future sibling and must not anchor off a job mid-visit. Point
+      // staff at the single-occurrence path, which does allow it.
+      const hint = LIVE_OVERRIDE_STATUSES.has(service.status)
+        ? ' as a series — reschedule this appointment only, then adjust the series from the new date if needed'
+        : '';
+      throw Object.assign(new Error(`Cannot reschedule a ${service.status} job${hint}`), {
         statusCode: 409,
       });
     }

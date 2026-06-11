@@ -1083,6 +1083,25 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // Day-of lifecycle guard: en_route / on_site / completed are field
+    // actions that only happen on (or after) the scheduled day. A
+    // future-dated job here means a stale dispatch tab racing a live
+    // reschedule (rebooker allowLive) or a flip on the wrong day's
+    // board — and proceeding would commit the operational status while
+    // the track-side helper below refuses (future_scheduled_date),
+    // leaving status and track_state divergent with the tech never
+    // freed. Reject before the transition; cancelling or confirming a
+    // future job stays allowed. To genuinely run a job early,
+    // reschedule it to today first.
+    const DAY_OF_LIFECYCLE_STATUSES = new Set(['en_route', 'on_site', 'completed']);
+    if (DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
+      && trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: `This job is scheduled for ${serviceDateOnly(svc.scheduled_date)} — it may have been rescheduled while this board was open. Refresh, or move it to today to run it early.`,
+        code: 'future_scheduled_date',
+      });
+    }
+
     if (toStatus === 'cancelled' && ['following', 'series'].includes(scope)) {
       const parentId = svc.recurring_parent_id || svc.id;
       const parent = await db('scheduled_services').where({ id: parentId }).first();
@@ -1537,6 +1556,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Stale-recap guard: a live job force-rescheduled to a future day
+    // (rebooker allowLive) is rewound to a fresh confirmed appointment —
+    // a recap submit from a CompletionPanel opened before the reschedule
+    // must not complete the future visit. Lifecycle actions only ever
+    // run day-of or late (overdue completion), so a future ET date
+    // marks the attempt stale. The durable-completion resume path is
+    // unaffected: a committed completion can't be rescheduled, so its
+    // date is never future. See track-transitions.isFutureScheduledDate.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: `This job is now scheduled for ${serviceDateOnly(svc.scheduled_date)} — it was rescheduled while this page was open. Refresh and try again.`,
+        code: 'future_scheduled_date',
+      });
+    }
+
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
       waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
     }
@@ -3408,8 +3443,10 @@ async function assertRecapOwnership(req, res) {
 
 function recapStatusForReason(reason) {
   if (reason === 'not_found') return 404;
-  // Conflict: pest-control gate, or a cancelled/skipped visit that can't be recapped.
-  if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped') return 409;
+  // Conflict: pest-control gate, a cancelled/skipped visit that can't be
+  // recapped, or a stale recap against a job rescheduled to a future day.
+  if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped'
+    || reason === 'future_scheduled_date') return 409;
   return 400;
 }
 
@@ -3589,7 +3626,13 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       return res.json({ ...response, notificationSent, notificationError });
     }
 
-    const rescheduleOptions = {};
+    // Staff-initiated reschedules may override live lifecycle states
+    // (en_route / on_site) — rain starts mid-route, or the customer calls
+    // to push the visit while the tech is already there. The rebooker
+    // rewinds the tracker lifecycle and frees the tech. Terminal states
+    // (completed / cancelled / skipped) still 409. The customer-SMS
+    // self-serve path (reschedule-sms.js) does NOT get this override.
+    const rescheduleOptions = { allowLive: true };
     const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
     if (hasTechnicianId) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });

@@ -732,6 +732,11 @@ async function completeProjectBackedService({
       await trackTransitions.markComplete(postCommitTrackServiceId, {
         actorType: 'admin',
         actorId,
+        // Deliberate closeout: the project completion already committed
+        // the operational status flip, and a project can legitimately
+        // close before the linked visit's scheduled date — bypass the
+        // stale-attempt future-date guard so track_state stays in sync.
+        allowFutureDate: true,
       });
     } catch (err) {
       logger.warn(`[project-completion] track completion refresh failed for ${postCommitTrackServiceId}: ${err.message}`);

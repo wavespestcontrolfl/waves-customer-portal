@@ -66,7 +66,7 @@ router.post('/:id/en-route', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'status');
+      .first('id', 'technician_id', 'status', 'scheduled_date');
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
@@ -74,6 +74,17 @@ router.post('/:id/en-route', async (req, res, next) => {
     // requireTechOrAdmin go through admin-dispatch; don't bypass here.
     if (svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    // Stale-tap guard: a live job force-rescheduled to a future day
+    // (rebooker allowLive) looks confirmed again — a tap from a tech
+    // page opened before the reschedule must not advance the future
+    // visit. See track-transitions.isFutureScheduledDate.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: 'This job has been rescheduled to a future date. Refresh your route.',
+        code: 'future_scheduled_date',
+      });
     }
 
     // Source-status gate: transitionJobStatus is permissive (it
@@ -175,6 +186,14 @@ router.post('/:id/on-site', async (req, res, next) => {
 
     if (svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    // Stale-tap guard — same as /en-route above.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: 'This job has been rescheduled to a future date. Refresh your route.',
+        code: 'future_scheduled_date',
+      });
     }
 
     const fromStatus = svc.status;

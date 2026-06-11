@@ -28,12 +28,32 @@ const {
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { etDateString } = require('../utils/datetime-et');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
 
 function portalOrigin() {
   return publicPortalUrl();
+}
+
+// Stale-attempt guard. A live job force-rescheduled out of en_route /
+// on_site (rebooker allowLive) is rewound to a fresh confirmed
+// appointment on a later day — but a tech page, geofence dwell, or
+// recap form opened before the rewind still holds the same job id and
+// would otherwise advance or complete the FUTURE visit. Lifecycle
+// transitions only ever act day-of (or late, for overdue completions),
+// so "scheduled for a future ET day" is the stale-attempt
+// discriminator. A same-day push is indistinguishable and deliberately
+// allowed — the tech genuinely is still at the property that day.
+// Deliberate early completions (project closeout) pass
+// opts.allowFutureDate to bypass.
+function isFutureScheduledDate(scheduledDate) {
+  if (!scheduledDate) return false;
+  const dateOnly = String(
+    scheduledDate instanceof Date ? scheduledDate.toISOString() : scheduledDate
+  ).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(dateOnly) && dateOnly > etDateString();
 }
 
 async function loadService(serviceId) {
@@ -176,6 +196,9 @@ async function markEnRoute(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
+    return { ok: false, reason: 'future_scheduled_date' };
+  }
 
   // Idempotent: if already en_route (or beyond), treat as success but don't
   // re-fire anything.
@@ -314,10 +337,13 @@ async function markEnRoute(serviceId, opts = {}) {
  * Phase 1 stub. Phase 2 wires this into geofence dwell detection.
  * Safe to call manually; just flips state when called from en_route.
  */
-async function markOnProperty(serviceId) {
+async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
+    return { ok: false, reason: 'future_scheduled_date' };
+  }
   if (svc.track_state === 'on_property') {
     const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, svc.arrived_at || new Date());
     if (Object.keys(lifecycleUpdates).length > 0) {
@@ -404,6 +430,9 @@ async function markOnProperty(serviceId) {
 async function markComplete(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
+    return { ok: false, reason: 'future_scheduled_date' };
+  }
   if (svc.track_state === 'complete') {
     emitCustomerTrackRefresh(svc, 'complete', svc.completed_at || new Date());
     return { ok: true, state: 'complete', completedAt: svc.completed_at };
@@ -504,6 +533,7 @@ module.exports = {
   markComplete,
   cancel,
   portalOrigin,
+  isFutureScheduledDate,
   _test: {
     operationalStatusForTrackState,
   },

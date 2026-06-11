@@ -192,3 +192,93 @@ describe('track-transitions lifecycle side effects', () => {
     }));
   });
 });
+
+describe('future-scheduled-date stale-attempt guard', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    getIo.mockReturnValue(socketStub());
+    jest.useRealTimers();
+  });
+
+  // Fixed far-future / far-past dates keep these deterministic against
+  // the real ET clock.
+  const FUTURE = '2099-01-01';
+  const PAST = '2000-01-01';
+
+  function futureSvc(extra = {}) {
+    return {
+      id: 'job-9',
+      customer_id: 'cust-9',
+      technician_id: 'tech-9',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      scheduled_date: FUTURE,
+      track_view_token: 'a'.repeat(64),
+      cancelled_at: null,
+      ...extra,
+    };
+  }
+
+  test('isFutureScheduledDate discriminates future ET days only', () => {
+    expect(trackTransitions.isFutureScheduledDate(FUTURE)).toBe(true);
+    expect(trackTransitions.isFutureScheduledDate(new Date(`${FUTURE}T12:00:00Z`))).toBe(true);
+    expect(trackTransitions.isFutureScheduledDate(PAST)).toBe(false);
+    expect(trackTransitions.isFutureScheduledDate(null)).toBe(false);
+    expect(trackTransitions.isFutureScheduledDate(undefined)).toBe(false);
+  });
+
+  test('markEnRoute refuses a future-dated job (stale tap / geofence)', async () => {
+    db.mockReturnValueOnce(query(futureSvc()));
+
+    const result = await trackTransitions.markEnRoute('job-9');
+
+    expect(result).toEqual({ ok: false, reason: 'future_scheduled_date' });
+    expect(setTechJobStatus).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty refuses a future-dated job', async () => {
+    db.mockReturnValueOnce(query(futureSvc()));
+
+    const result = await trackTransitions.markOnProperty('job-9');
+
+    expect(result).toEqual({ ok: false, reason: 'future_scheduled_date' });
+    expect(setTechJobStatus).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('markComplete refuses a future-dated job', async () => {
+    db.mockReturnValueOnce(query(futureSvc({ track_state: 'on_property' })));
+
+    const result = await trackTransitions.markComplete('job-9');
+
+    expect(result).toEqual({ ok: false, reason: 'future_scheduled_date' });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
+  test('markComplete allows a future-dated job with allowFutureDate (project closeout)', async () => {
+    db
+      .mockReturnValueOnce(query(futureSvc({ track_state: 'on_property' })))
+      .mockReturnValueOnce(query(1));
+
+    const result = await trackTransitions.markComplete('job-9', { allowFutureDate: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('complete');
+    expect(clearTechCurrentJob).toHaveBeenCalledWith(expect.objectContaining({
+      tech_id: 'tech-9',
+      current_job_id: 'job-9',
+    }));
+  });
+
+  test('past-dated (overdue) jobs are not blocked', async () => {
+    db
+      .mockReturnValueOnce(query(futureSvc({ scheduled_date: PAST, track_state: 'on_property' })))
+      .mockReturnValueOnce(query(1));
+
+    const result = await trackTransitions.markComplete('job-9');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('complete');
+  });
+});

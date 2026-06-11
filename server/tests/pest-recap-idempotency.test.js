@@ -17,7 +17,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue() }));
-jest.mock('../services/track-transitions', () => ({ markComplete: jest.fn().mockResolvedValue({ ok: true }) }));
+jest.mock('../services/track-transitions', () => ({
+  markComplete: jest.fn().mockResolvedValue({ ok: true }),
+  isFutureScheduledDate: jest.fn(() => false),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
 }));
@@ -109,7 +112,13 @@ function makeKnex(store) {
       base.first = jest.fn(async () => CUSTOMER);
       // The in-transaction FOR UPDATE lock re-reads live status.
       base.forUpdate = jest.fn(() => ({
-        first: jest.fn(async () => ({ id: SERVICE_ID, status: store.serviceStatus })),
+        first: jest.fn(async () => ({
+          id: SERVICE_ID,
+          status: store.serviceStatus,
+          // Lock-time scheduled_date — lets a test simulate a reschedule
+          // committing while this submit waited on the lock.
+          scheduled_date: store.lockedScheduledDate || CUSTOMER.scheduled_date,
+        })),
       }));
       return base;
     }
@@ -208,6 +217,35 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(store.records).toHaveLength(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a reschedule committing while the submit waits on the row lock rejects the recap (TOCTOU)', async () => {
+    // Pre-lock read sees today's date; by the time the FOR UPDATE lock is
+    // acquired, a staff live-reschedule has moved the visit to a future
+    // day. The under-lock re-check must reject before any artifact.
+    const trackTransitions = require('../services/track-transitions');
+    trackTransitions.isFutureScheduledDate.mockImplementation((d) => d === '2099-01-01');
+    const store = { serviceStatus: 'scheduled', records: [], lockedScheduledDate: '2099-01-01' };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Should not be written.',
+      products: [{ product_name: 'Termidor' }],
+      customerRecap: 'Service complete.',
+      sendSms: true,
+      knex,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('future_scheduled_date');
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(store.records).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    trackTransitions.isFutureScheduledDate.mockImplementation(() => false);
   });
 
   test('re-sending a recap with no products selected preserves recorded chemicals', async () => {
