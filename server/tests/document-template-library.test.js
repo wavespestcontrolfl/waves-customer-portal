@@ -5,11 +5,17 @@ const {
   normalizeTemplateKey,
   renderDocumentTemplate,
   renderDocumentText,
+  serializeTemplate,
   validateTemplatePayload,
   validateVersionPayload,
 } = require('../services/document-template-library');
 const DocumentContractDelivery = require('../services/document-contract-delivery');
-const { contractExpiresAt } = require('../services/contracts');
+const BulkDocumentSend = require('../services/document-template-bulk-send');
+const {
+  contractExpiresAt,
+  documentContractExpiresAt,
+  documentRequiresSignature,
+} = require('../services/contracts');
 
 describe('document template library', () => {
   test('renders merge fields and reports unresolved variables', () => {
@@ -102,10 +108,42 @@ describe('document template library', () => {
       requires_signature: true,
     });
     expect(() => validateTemplatePayload({
-      templateKey: 'prep.no_signature',
-      name: 'Prep No Signature',
+      templateKey: 'prep.view_only',
+      name: 'Bed Bug Prep',
+      category: 'Prep Form',
+      documentType: 'Prep Form',
       requiresSignature: false,
-    })).toThrow(/require e-signature/);
+    })).toThrow(/marketing customer-guide/);
+    expect(validateTemplatePayload({
+      requiresSignature: false,
+    }, { partial: true })).toMatchObject({
+      requires_signature: false,
+    });
+    expect(validateTemplatePayload({
+      templateKey: 'marketing.product_safety',
+      name: 'Products & Safety',
+      category: 'marketing',
+      documentType: 'customer_guide',
+      requiresSignature: false,
+      reminderScheduleDays: [],
+    })).toMatchObject({
+      category: 'marketing',
+      document_type: 'customer_guide',
+      requires_signature: false,
+      reminder_schedule_days: [],
+    });
+    expect(serializeTemplate({
+      template_key: 'marketing.product_safety',
+      name: 'Products & Safety',
+      category: 'marketing',
+      document_type: 'customer_guide',
+      requires_signature: false,
+      reminder_schedule_days: [],
+      expire_after_days: 14,
+    })).toMatchObject({
+      requiresSignature: false,
+      reminderScheduleDays: [],
+    });
     expect(validateVersionPayload({
       title: 'Title',
       body: 'Body',
@@ -131,8 +169,21 @@ describe('document template library', () => {
       path.join(__dirname, '..', 'models', 'migrations', '20260601000011_document_reminder_claims.js'),
       'utf8',
     );
+    const marketingMigration = fs.readFileSync(
+      path.join(__dirname, '..', 'models', 'migrations', '20260611000001_seed_products_solutions_document.js'),
+      'utf8',
+    );
+    const bulkGuideMigration = fs.readFileSync(
+      path.join(__dirname, '..', 'models', 'migrations', '20260611000002_seed_product_safety_bulk_templates.js'),
+      'utf8',
+    );
+    const signatureSnapshotMigration = fs.readFileSync(
+      path.join(__dirname, '..', 'models', 'migrations', '20260611000003_customer_contract_signature_snapshot.js'),
+      'utf8',
+    );
     const publicContracts = fs.readFileSync(path.join(__dirname, '..', 'routes', 'contracts-public.js'), 'utf8');
     const adminContracts = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-contracts.js'), 'utf8');
+    const adminDocumentTemplates = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-document-templates.js'), 'utf8');
     const contractService = fs.readFileSync(path.join(__dirname, '..', 'services', 'contracts.js'), 'utf8');
     const documentDelivery = fs.readFileSync(path.join(__dirname, '..', 'services', 'document-contract-delivery.js'), 'utf8');
     const legacyEmail = fs.readFileSync(path.join(__dirname, '..', 'services', 'email.js'), 'utf8');
@@ -147,7 +198,16 @@ describe('document template library', () => {
     expect(workflowMigration).toContain('expire_after_days');
     expect(reminderClaimMigration).toContain('uniq_document_reminder_claim_offset');
     expect(reminderClaimMigration).toContain("event_type = 'reminder_claimed'");
+    expect(marketingMigration).toContain('marketing.products_solutions');
+    expect(marketingMigration).toContain("requires_signature: false");
+    expect(marketingMigration).toContain('Waves Products & Solutions Guide');
+    expect(bulkGuideMigration).toContain('marketing.pest_products_safety');
+    expect(bulkGuideMigration).toContain('marketing.lawn_products_safety');
+    expect(bulkGuideMigration).toContain("requires_signature: false");
+    expect(signatureSnapshotMigration).toContain('requires_signature_snapshot');
     expect(adminIndex).toContain("app.use('/api/admin/document-templates'");
+    expect(adminDocumentTemplates).toContain("router.post('/:key/bulk-preview'");
+    expect(adminDocumentTemplates).toContain("router.post('/:key/bulk-send'");
     expect(adminContracts).toContain("router.get('/:id/events'");
     expect(adminContracts).toContain('serializeContractEvent');
     expect(adminContracts).toContain("router.get('/requests'");
@@ -165,6 +225,7 @@ describe('document template library', () => {
     expect(publicContracts).toContain("agreementType: isAutopayAuthorization ? 'autopay_authorization' : 'document_terms'");
     expect(documentDelivery).toContain('activateCommittedDelivery');
     expect(documentDelivery).toContain('claimReminderOffset');
+    expect(documentDelivery).toContain('documentContractExpiresAt');
     expect(legacyEmail).toContain('logger.error(`[email] send failed: ${err.message}`)');
   });
 
@@ -197,6 +258,7 @@ describe('document template library', () => {
     expect(sms).toContain('Hi Alice');
     expect(sms).toContain('Residential Pest Service Agreement');
     expect(sms).toContain('https://portal.example/contract/token');
+    expect(sms).not.toContain('STOP');
     const email = DocumentContractDelivery._internals.emailPayload({
       contract,
       customer,
@@ -207,6 +269,181 @@ describe('document template library', () => {
     expect(email.text).toContain('Review and sign');
     expect(DocumentContractDelivery._internals.parseReminderSchedule('[3,1,-1]')).toEqual([1, 3, -1]);
     const now = new Date('2026-06-01T12:00:00Z');
+    expect(contractExpiresAt(now).toISOString()).toBe('2026-06-15T12:00:00.000Z');
     expect(contractExpiresAt(now, 365).toISOString()).toBe('2026-06-15T12:00:00.000Z');
+    expect(documentContractExpiresAt(now, 365, { requires_signature_snapshot: true }).toISOString()).toBe('2026-06-15T12:00:00.000Z');
+    expect(documentContractExpiresAt(now, 365, { requires_signature_snapshot: false }).toISOString()).toBe('2026-06-15T12:00:00.000Z');
+  });
+
+  test('view-only document request delivery copy does not ask for a signature', () => {
+    const contract = {
+      title: 'Waves Products & Solutions Guide',
+      status: 'sent',
+      requires_signature_snapshot: false,
+      document_template_requires_signature: true,
+      share_token_expires_at: new Date(Date.now() + 60_000),
+    };
+    const customer = { first_name: 'Alice', last_name: 'Customer' };
+    const signingUrl = 'https://portal.example/contract/token';
+
+    expect(DocumentContractDelivery._internals.requiresSignature(contract)).toBe(false);
+    expect(documentRequiresSignature(contract)).toBe(false);
+    const sms = DocumentContractDelivery._internals.smsBody({
+      contract,
+      customer,
+      signingUrl,
+      action: 'send',
+    });
+    expect(sms).toContain('ready for your review');
+    expect(sms).not.toContain('signature');
+
+    const email = DocumentContractDelivery._internals.emailPayload({
+      contract,
+      customer,
+      signingUrl,
+      action: 'send',
+    });
+    expect(email.text).toContain('View document');
+    expect(email.text).not.toContain('Review and sign');
+    expect(email.text).not.toContain('signature');
+  });
+
+  test('bulk document send helpers keep guide sends bounded and customer-facing', async () => {
+    expect(BulkDocumentSend.MAX_BULK_LIMIT).toBe(250);
+    expect(BulkDocumentSend._internals.normalizeBulkOptions({
+      audience: 'active_lawn',
+      guideType: 'all',
+      channel: 'both',
+      limit: 999,
+      skipRecentDays: 14,
+    })).toMatchObject({
+      audience: 'active_lawn',
+      guideType: 'lawn',
+      channel: 'sms',
+      limit: 250,
+      skipRecentDays: 14,
+    });
+    expect(() => BulkDocumentSend._internals.validateBulkSendSelectors({
+      guideType: 'all',
+      channel: 'sms',
+    })).toThrow(/audience/);
+    expect(() => BulkDocumentSend._internals.validateBulkSendSelectors({
+      audience: 'bogus',
+      guideType: 'all',
+      channel: 'sms',
+    })).toThrow(/Invalid bulk product guide audience/);
+    expect(() => BulkDocumentSend._internals.validateBulkSendSelectors({
+      audience: 'active_customers',
+      guideType: 'all',
+      channel: 'email',
+    })).toThrow(/delivery channel/);
+    expect(() => BulkDocumentSend._internals.validateBulkSendSelectors({
+      audience: 'active_customers',
+      guideType: 'all',
+      channel: 'sms',
+    })).not.toThrow();
+
+    expect(BulkDocumentSend._internals.channelsFor('both')).toEqual(['sms']);
+    expect(BulkDocumentSend._internals.channelsForCustomer({
+      email: 'customer@example.com',
+      phone: '',
+      email_enabled: true,
+      sms_enabled: true,
+    }, ['email', 'sms'])).toEqual(['email']);
+    expect(BulkDocumentSend._internals.channelsForCustomer({
+      phone: '(941) 555-0101',
+      sms_enabled: true,
+      seasonal_tips: false,
+    }, ['sms'], { smsPurpose: 'marketing' })).toEqual([]);
+    expect(BulkDocumentSend._internals.channelsForCustomer({
+      phone: '(941) 555-0101',
+      sms_enabled: true,
+      seasonal_tips: true,
+    }, ['sms'], { smsPurpose: 'marketing' })).toEqual(['sms']);
+    expect(BulkDocumentSend._internals.marketingSmsConsentBasis({
+      phone: '(941) 555-0101',
+      sms_enabled: true,
+      seasonal_tips: true,
+      notification_prefs_updated_at: '2026-06-11T10:00:00.000Z',
+    })).toMatchObject({
+      status: 'opted_in',
+      source: 'notification_prefs.seasonal_tips',
+      capturedAt: '2026-06-11T10:00:00.000Z',
+    });
+    expect(BulkDocumentSend._internals.isBulkGuideTemplate({
+      category: 'marketing',
+      document_type: 'customer_guide',
+      requires_signature: false,
+    })).toBe(true);
+    expect(BulkDocumentSend._internals.isBulkGuideTemplate({
+      category: 'marketing',
+      document_type: 'customer_guide',
+      requires_signature: true,
+    })).toBe(false);
+
+    const bulkSendService = fs.readFileSync(path.join(__dirname, '..', 'services', 'document-template-bulk-send.js'), 'utf8');
+    const deliveryService = fs.readFileSync(path.join(__dirname, '..', 'services', 'document-contract-delivery.js'), 'utf8');
+    const bulkMarketingContract = {
+      contract_type: 'document_template',
+      document_template_category: 'marketing',
+      document_template_document_type: 'customer_guide',
+      requires_signature_snapshot: false,
+    };
+    expect(DocumentContractDelivery._internals.isMarketingCustomerGuide(bulkMarketingContract)).toBe(true);
+    expect(DocumentContractDelivery._internals.smsBody({
+      contract: {
+        ...bulkMarketingContract,
+        title: 'Pest Products & Safety Guide',
+      },
+      customer: { first_name: 'Alice' },
+      signingUrl: 'https://portal.example/contract/token',
+      action: 'send',
+      smsPurpose: 'marketing',
+    })).toContain('Reply STOP to opt out. Msg & data rates may apply.');
+    await expect(DocumentContractDelivery._internals.deliveryOptionsForContract(bulkMarketingContract, {
+      channel: 'email',
+      action: 'send',
+    })).rejects.toMatchObject({ code: 'MARKETING_GUIDE_EMAIL_DISABLED' });
+    const duplicateExclusionIndex = bulkSendService.indexOf('candidateQuery = applyRecentDuplicateExclusion');
+    const audienceLimitIndex = bulkSendService.indexOf('.limit(options.limit)', duplicateExclusionIndex);
+    expect(duplicateExclusionIndex).toBeGreaterThan(-1);
+    expect(audienceLimitIndex).toBeGreaterThan(duplicateExclusionIndex);
+    expect(bulkSendService).toContain(".whereNotNull('recent_cc.shared_at')");
+    expect(bulkSendService).toContain("draft.whereNull('shared_at')");
+    expect(bulkSendService).toContain('etDateString');
+    expect(bulkSendService).toContain("const LIVE_SCHEDULED_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site']");
+    expect(bulkSendService).toContain('status IN (?, ?, ?, ?)');
+    expect(bulkSendService).toContain('assertBulkGuideTemplate(loaded.template)');
+    expect(bulkSendService).toContain('assertNoRecentBulkContract');
+    expect(bulkSendService).toContain('duplicateContract');
+    expect(bulkSendService).toContain("const CHANNELS = new Set(['sms'])");
+    expect(bulkSendService).toContain("status: 'draft'");
+    expect(bulkSendService).toContain('bulk_send_cancelled');
+    expect(bulkSendService).toContain('requires_signature_snapshot');
+    expect(bulkSendService).toContain("smsPurpose: 'marketing'");
+    expect(deliveryService).toContain('MARKETING_GUIDE_EMAIL_DISABLED');
+    expect(deliveryService).toContain('MARKETING_SMS_OPT_IN_REQUIRED');
+    expect(deliveryService).toContain('deliveryOptionsForContract');
+    expect(deliveryService).toContain('purpose: smsPurpose');
+    expect(deliveryService).toContain('consentBasis: smsConsentBasis || undefined');
+
+    const appendix = BulkDocumentSend._internals.formatProductGuideAppendix({
+      guideType: 'pest',
+      products: [{
+        id: 'product-1',
+        name: 'Demand CS',
+        common_name: 'Demand CS',
+        active_ingredient: 'Lambda-cyhalothrin',
+        epa_reg_number: '100-1066',
+        public_summary: 'Used for targeted exterior perimeter pest pressure.',
+        customer_safety_summary: 'Keep people and pets away from treated surfaces until dry.',
+        service_type: 'Quarterly Pest Control',
+      }],
+    });
+    expect(appendix).toContain('Customer-facing pest control product notes');
+    expect(appendix).toContain('active, public, and approved');
+    expect(appendix).toContain('Demand CS');
+    expect(appendix).toContain('EPA Reg. #100-1066');
+    expect(appendix).not.toContain('best_price');
   });
 });

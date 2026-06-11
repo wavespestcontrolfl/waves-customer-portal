@@ -3,7 +3,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { logAutopay } = require('../services/autopay-log');
-const { hashContractToken, serializeContract } = require('../services/contracts');
+const { documentRequiresSignature, hashContractToken, serializeContract } = require('../services/contracts');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
@@ -21,6 +21,7 @@ function contractQuery(conn = db) {
     .leftJoin('payment_methods as pm', function joinContractPaymentMethod() {
       this.on('cc.payment_method_id', 'pm.id').andOn('cc.customer_id', 'pm.customer_id');
     })
+    .leftJoin('document_templates as dt', 'cc.document_template_id', 'dt.id')
     .select(
       'cc.*',
       'pm.method_type',
@@ -29,6 +30,9 @@ function contractQuery(conn = db) {
       'pm.bank_name',
       'pm.bank_last_four',
       'pm.stripe_payment_method_id',
+      'dt.requires_signature as document_template_requires_signature',
+      'dt.category as document_template_category',
+      'dt.document_type as document_template_document_type',
       conn.raw(`CASE
         WHEN pm.method_type IN ('ach', 'us_bank_account') THEN CONCAT(COALESCE(pm.bank_name, 'Bank account'), ' ending ', COALESCE(pm.bank_last_four, '----'))
         WHEN pm.id IS NOT NULL THEN CONCAT(COALESCE(pm.card_brand, 'Card'), ' ending ', COALESCE(pm.last_four, '----'))
@@ -144,6 +148,10 @@ router.post('/:token/sign', async (req, res, next) => {
       }
       if (!isAutopayAuthorization && !agreeDocumentTerms) {
         response = { status: 400, body: { error: 'Document agreement is required.' } };
+        return;
+      }
+      if (!isAutopayAuthorization && !documentRequiresSignature(contract)) {
+        response = { status: 400, body: { error: 'This document does not require a signature.' } };
         return;
       }
       if (isAutopayAuthorization && (!contract.payment_method_id || !contract.stripe_payment_method_id)) {
