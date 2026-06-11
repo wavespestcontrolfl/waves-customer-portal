@@ -7,6 +7,7 @@
 const {
   buildCurationPrompt,
   parseCurationResponse,
+  missingDecisionFallbacks,
   curationEnabled,
 } = require('../services/event-curation');
 
@@ -100,6 +101,21 @@ describe('event-curation parseCurationResponse', () => {
     const wrapped = `Here you go:\n${JSON.stringify({ decisions: [{ id: IDS[0], approve: true }] })}`;
     expect(parseCurationResponse(wrapped, IDS)).toHaveLength(1);
     expect(() => parseCurationResponse('no json here', IDS)).toThrow(/JSON/);
+  });
+});
+
+describe('event-curation missingDecisionFallbacks', () => {
+  test('omitted batch members become fail-closed examined decisions', () => {
+    const batch = [{ id: IDS[0] }, { id: IDS[1] }];
+    const fallbacks = missingDecisionFallbacks(batch, [{ id: IDS[0], approve: true, note: 'x' }]);
+    expect(fallbacks).toEqual([
+      { id: IDS[1], approve: false, note: 'No decision returned by model' },
+    ]);
+  });
+
+  test('full coverage yields no fallbacks', () => {
+    const batch = [{ id: IDS[0] }];
+    expect(missingDecisionFallbacks(batch, [{ id: IDS[0], approve: false, note: null }])).toEqual([]);
   });
 });
 

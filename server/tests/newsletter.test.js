@@ -216,8 +216,20 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     // freshness_status is NOT NULL in the DB, so the revival must not touch it
     // in the upsert (the normalizer recomputes it instead). It signals revival
     // via normalized_at (re-queue) + freshness_revival_pending (explicit marker
-    // the normalizer consumes), both safe to set in the ON CONFLICT update.
-    expect(Object.keys(f).sort()).toEqual(['freshness_revival_pending', 'normalized_at']);
+    // the normalizer consumes), plus the curation re-open pair (curated_at /
+    // curation_note) — all safe to set in the ON CONFLICT update.
+    expect(Object.keys(f).sort()).toEqual(['curated_at', 'curation_note', 'freshness_revival_pending', 'normalized_at']);
+  });
+
+  test('revival re-opens auto-curation: curated_at/curation_note clear on the SAME past→future gate', () => {
+    for (const col of ['curated_at', 'curation_note']) {
+      const { sql } = revivalResetFields()[col].toSQL();
+      const lower = sql.toLowerCase();
+      expect(lower).toMatch(/case when/);
+      expect(lower).toContain('then null');
+      // preserves the existing value outside a genuine revival
+      expect(lower).toContain(`else events_raw.${col} end`);
+    }
   });
 
   test('revival marker is gated on the SAME past→future ET-midnight condition, defaulting to the existing value', () => {

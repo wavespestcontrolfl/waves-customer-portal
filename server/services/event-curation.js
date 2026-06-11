@@ -151,6 +151,22 @@ async function classifyBatch(events, todayIso) {
 }
 
 /**
+ * Fallback decisions for batch members the model's response omitted
+ * (or the parser dropped as unknown/duplicate ids). Without these the
+ * omitted rows keep curated_at NULL, re-enter the candidate pool, and
+ * get sent to the model — and billed — again on every run; a
+ * consistently partial response could pin the run limit forever.
+ * Fail-closed: omitted = left pending for human review, marked
+ * examined.
+ */
+function missingDecisionFallbacks(batch, decisions) {
+  const decided = new Set(decisions.map((d) => String(d.id)));
+  return batch
+    .filter((e) => !decided.has(String(e.id)))
+    .map((e) => ({ id: String(e.id), approve: false, note: 'No decision returned by model' }));
+}
+
+/**
  * Apply one decision. Approval is guarded on admin_status='pending'
  * (a concurrent operator decision wins); the examined-marker update is
  * unguarded so the row never re-enters the candidate pool either way.
@@ -209,7 +225,7 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
       logger.error(`[event-curation] batch classify failed: ${err.message}`);
       continue;
     }
-    for (const decision of decisions) {
+    for (const decision of [...decisions, ...missingDecisionFallbacks(batch, decisions)]) {
       const outcome = await applyDecision(decision);
       examined += 1;
       if (outcome === 'approved') approved += 1;
@@ -225,5 +241,6 @@ module.exports = {
   // Exported for unit tests — pure pieces.
   buildCurationPrompt,
   parseCurationResponse,
+  missingDecisionFallbacks,
   curationEnabled,
 };
