@@ -944,6 +944,9 @@ class AutonomousRunner {
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
     });
+    await this._sendBlogDroughtSms(runs).catch((err) => {
+      logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
+    });
     return {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
@@ -990,6 +993,46 @@ class AutonomousRunner {
     const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
     await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
     logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
+  }
+
+  /**
+   * The operator's target is a blog post EVERY day, but the engine's
+   * designed response to thin demand is silence (skipped_no_opportunity
+   * days send no digest) — which is how a 9-day supply drought went
+   * unnoticed in June 2026. This texts the moment a daily batch ends with
+   * no blog post started, with the dominant reason, so a quiet day is a
+   * deliberate signal instead of dead air. Default ON (it exists to catch
+   * silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false. Routed as
+   * internal_alert so OWNER_SMS_DISABLED still silences everything.
+   */
+  async _sendBlogDroughtSms(runs) {
+    if (!envBool('AUTONOMOUS_BLOG_DROUGHT_ALERT', true)) return;
+    const real = (runs || []).filter(Boolean);
+    // "Started" = published directly, or parked awaiting its PR merge
+    // (the poller completes those) — either way a post is on its way.
+    const blogStarted = real.some((r) => r.action_type === 'new_supporting_blog'
+      && (r.outcome === 'completed_published'
+        || (r.outcome === 'completed_pending_review' && r.skip_reason === 'astro_pr_pending_merge')));
+    if (blogStarted) return;
+
+    const blogAttempts = real.filter((r) => r.action_type === 'new_supporting_blog');
+    let why;
+    if (!blogAttempts.length) {
+      why = 'no blog opportunity cleared the score floor (miner found nothing actionable)';
+    } else {
+      const reasons = {};
+      for (const r of blogAttempts) {
+        const key = r.skip_reason || r.failure_message || r.outcome;
+        if (key) reasons[key] = (reasons[key] || 0) + 1;
+      }
+      why = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 2)
+        .map(([k, v]) => `${k}×${v}`).join(', ') || 'blog runs ended without a publish';
+    }
+    const body = `Waves content engine: NO blog post today — ${why}.`;
+    const twilio = require('../twilio');
+    const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    logger.info(`[autonomous-runner] blog drought SMS sent: ${body}`);
   }
 
   // ── internals ────────────────────────────────────────────────────

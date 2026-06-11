@@ -788,6 +788,11 @@ function initScheduledJobs() {
       await runExclusive('post-publish-visibility-sweep', async () => {
         const VisibilityWorker = require('./content/post-publish-visibility-worker');
         await VisibilityWorker.sweepRecentlyPublished();
+        // Same daily cadence doubles as the alert dedupe: one summary text
+        // for autonomous PRs parked unmerged past the threshold (Codex
+        // block / red build / missing deploy — the 2-min poller retries
+        // those forever and silently).
+        await VisibilityWorker.alertStuckAutonomousPrs();
       });
     } catch (err) {
       logger.error(`Post-publish visibility sweep failed: ${err.message}`);

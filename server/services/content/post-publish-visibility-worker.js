@@ -196,6 +196,55 @@ async function sweepRecentlyPublished({
 }
 
 /**
+ * Stuck-PR alert: the 2-minute lifecycle poller retries a parked PR forever
+ * and silently — a Codex block, a permanently red build, or a missing
+ * production deploy keeps the run parked with no human signal. Once a day
+ * (called from the same 5:40am cron as the sweep, which is also the natural
+ * dedupe — no per-run alert bookkeeping needed), text ONE summary listing
+ * autonomous PRs parked unmerged past the threshold. Default ON; kill via
+ * AUTONOMOUS_PR_STUCK_ALERT=false; threshold hours via
+ * AUTONOMOUS_PR_STUCK_ALERT_HOURS (default 12). internal_alert routing
+ * honors OWNER_SMS_DISABLED.
+ */
+async function alertStuckAutonomousPrs({ hours = null } = {}) {
+  if (String(process.env.AUTONOMOUS_PR_STUCK_ALERT || '').toLowerCase() === 'false') {
+    return { alerted: 0, skipped: true };
+  }
+  const rawHours = Number.parseInt(hours ?? process.env.AUTONOMOUS_PR_STUCK_ALERT_HOURS, 10);
+  const thresholdHours = Number.isFinite(rawHours) && rawHours > 0 ? rawHours : 12;
+  const cutoff = new Date(Date.now() - thresholdHours * 3600000);
+
+  let stuck = [];
+  try {
+    stuck = await db('autonomous_runs')
+      .where('outcome', 'completed_pending_review')
+      .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
+      .whereNotNull('astro_pr_url')
+      .where('updated_at', '<', cutoff)
+      .orderBy('updated_at', 'asc')
+      .limit(20)
+      .select('id', 'astro_pr_url', 'updated_at');
+  } catch (err) {
+    logger.warn(`[post-publish-visibility] stuck-PR query failed: ${err.message}`);
+    return { alerted: 0, error: err.message };
+  }
+  if (!stuck.length) return { alerted: 0 };
+
+  const urls = [...new Set(stuck.map((r) => r.astro_pr_url))];
+  const body = `Waves content engine: ${urls.length} autonomous PR(s) stuck unmerged >${thresholdHours}h — check Codex review / build status. ${urls.slice(0, 3).join(' ')}`;
+  try {
+    const twilio = require('../twilio');
+    const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    logger.info(`[post-publish-visibility] stuck-PR alert sent: ${body}`);
+  } catch (err) {
+    logger.warn(`[post-publish-visibility] stuck-PR alert send failed: ${err.message}`);
+    return { alerted: 0, stuck: urls.length, error: err.message };
+  }
+  return { alerted: 1, stuck: urls.length };
+}
+
+/**
  * GATE-002: the AI-visibility gate can only run on the LIVE page, so it
  * stays post-publish — but a freshly auto-published blog that lands with a
  * P0 (noindex, robots block, canonical-elsewhere, content not rendered) was
@@ -414,6 +463,7 @@ module.exports = {
   runForPost,
   runForUrl,
   sweepRecentlyPublished,
+  alertStuckAutonomousPrs,
   _internals: {
     fetchHtml,
     fetchRobotsTxt,

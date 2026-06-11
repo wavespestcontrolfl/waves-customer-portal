@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/seo/sitemap-manager', () => ({}));
 jest.mock('../services/seo/indexnow-submit', () => ({}));
 jest.mock('../services/content/ai-visibility-gate', () => ({ evaluate: jest.fn(), _internals: {} }));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 
 let mockState;
 
@@ -15,6 +16,7 @@ jest.mock('../models/db', () => {
   const dbFn = jest.fn((table) => {
     const q = {
       where: jest.fn(() => q),
+      whereIn: jest.fn(() => q),
       whereNotNull: jest.fn(() => q),
       orderBy: jest.fn(() => q),
       limit: jest.fn((n) => { mockState.limits[table] = n; return q; }),
@@ -95,5 +97,70 @@ describe('sweepRecentlyPublished', () => {
     expect(runUrl).toHaveBeenCalledTimes(1);
     expect(res.checked).toBe(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('query failed: blog_posts'));
+  });
+});
+
+describe('alertStuckAutonomousPrs', () => {
+  const twilio = require('../services/twilio');
+
+  afterEach(() => {
+    delete process.env.AUTONOMOUS_PR_STUCK_ALERT;
+    delete process.env.AUTONOMOUS_PR_STUCK_ALERT_HOURS;
+  });
+
+  test('parked PRs past the threshold trigger ONE summary SMS with deduped URLs', async () => {
+    mockState.rows.autonomous_runs = [
+      { id: 'r1', astro_pr_url: 'https://github.com/o/r/pull/10', updated_at: new Date(0) },
+      { id: 'r2', astro_pr_url: 'https://github.com/o/r/pull/10', updated_at: new Date(0) }, // same PR
+      { id: 'r3', astro_pr_url: 'https://github.com/o/r/pull/11', updated_at: new Date(0) },
+    ];
+
+    const res = await worker.alertStuckAutonomousPrs();
+
+    expect(res).toMatchObject({ alerted: 1, stuck: 2 });
+    expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
+    const [, body, opts] = twilio.sendSMS.mock.calls[0];
+    expect(body).toMatch(/2 autonomous PR\(s\) stuck unmerged >12h/);
+    expect(body).toContain('pull/10');
+    expect(body).toContain('pull/11');
+    expect(opts).toMatchObject({ messageType: 'internal_alert' });
+  });
+
+  test('nothing stuck → no SMS', async () => {
+    mockState.rows.autonomous_runs = [];
+    const res = await worker.alertStuckAutonomousPrs();
+    expect(res).toMatchObject({ alerted: 0 });
+    expect(twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('threshold hours are env-tunable and appear in the message', async () => {
+    process.env.AUTONOMOUS_PR_STUCK_ALERT_HOURS = '6';
+    mockState.rows.autonomous_runs = [
+      { id: 'r1', astro_pr_url: 'https://github.com/o/r/pull/12', updated_at: new Date(0) },
+    ];
+
+    await worker.alertStuckAutonomousPrs();
+
+    expect(twilio.sendSMS.mock.calls[0][1]).toMatch(/>6h/);
+  });
+
+  test('kill switch AUTONOMOUS_PR_STUCK_ALERT=false skips entirely', async () => {
+    process.env.AUTONOMOUS_PR_STUCK_ALERT = 'false';
+    mockState.rows.autonomous_runs = [
+      { id: 'r1', astro_pr_url: 'https://github.com/o/r/pull/13', updated_at: new Date(0) },
+    ];
+
+    const res = await worker.alertStuckAutonomousPrs();
+
+    expect(res).toMatchObject({ alerted: 0, skipped: true });
+    expect(twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('query failure logs and resolves without throwing or texting', async () => {
+    mockState.rejects.autonomous_runs = true;
+    const res = await worker.alertStuckAutonomousPrs();
+    expect(res.alerted).toBe(0);
+    expect(res.error).toBeTruthy();
+    expect(twilio.sendSMS).not.toHaveBeenCalled();
   });
 });
