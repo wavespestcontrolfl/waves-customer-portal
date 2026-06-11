@@ -99,21 +99,21 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('$6.98/mo off');
   });
 
-  test('cross-sell skips services the customer already has — termite bait first', () => {
+  test('cross-sell skips services the customer already has — seasonal mosquito first', () => {
     const html = renderPage('existing-token-3', lawnEstimate(), lawnEstimateData(), donMembership());
 
     expect(html).not.toContain('Add Pest Control for bundled pricing');
-    expect(html).toContain('Add Termite Bait Stations and save more');
+    expect(html).toContain('Add Seasonal Mosquito and save more');
     // Combined services pest + lawn → next tier is Gold (15%).
     expect(html).toContain('Gold tier pricing (15% off qualifying services)');
   });
 
-  test('cross-sell falls back to seasonal mosquito when termite bait is on the account', () => {
-    const membership = donMembership({ existingServiceKeys: ['pest_control', 'termite_bait'] });
+  test('cross-sell falls back to termite bait stations when mosquito is on the account', () => {
+    const membership = donMembership({ existingServiceKeys: ['pest_control', 'mosquito'] });
     const html = renderPage('existing-token-4', lawnEstimate(), lawnEstimateData(), membership);
 
-    expect(html).toContain('Add Seasonal Mosquito and save more');
-    expect(html).not.toContain('Add Termite Bait Stations and save more');
+    expect(html).toContain('Add Termite Bait Stations and save more');
+    expect(html).not.toContain('Add Seasonal Mosquito and save more');
   });
 
   test('leads keep the original page: $99 setup, annual prepay, pest-control cross-sell', () => {

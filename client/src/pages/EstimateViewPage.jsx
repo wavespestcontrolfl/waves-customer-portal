@@ -196,7 +196,7 @@ export function estimateAddServiceOffer(services = [], serviceMode = 'recurring'
     });
 
   // Existing customers: never offer a service already on the account.
-  // Cross-sell ladder is termite bait stations → seasonal mosquito,
+  // Cross-sell ladder is seasonal mosquito → termite bait stations,
   // whichever they don't have yet (mirrors the server-rendered page).
   if (membership && membership.isExistingCustomer) {
     const combinedKeys = new Set([
@@ -205,15 +205,6 @@ export function estimateAddServiceOffer(services = [], serviceMode = 'recurring'
       ...((membership.existingServices || []).map((s) => s.key)),
       ...((membership.newServices || []).map((s) => s.key)),
     ]);
-    if (!combinedKeys.has('termite_bait')) {
-      return {
-        serviceKey: 'termite_bait',
-        label: 'Termite Bait Stations',
-        icon: 'shield',
-        title: 'Add Termite Bait Stations and save more',
-        body: 'Year-round termite monitoring around your home perimeter — and bundling can unlock the next WaveGuard pricing tier.',
-      };
-    }
     if (!combinedKeys.has('mosquito')) {
       return {
         serviceKey: 'mosquito',
@@ -221,6 +212,15 @@ export function estimateAddServiceOffer(services = [], serviceMode = 'recurring'
         icon: 'sparkles',
         title: 'Add Seasonal Mosquito and save more',
         body: 'Seasonal barrier treatments for your lanai and yard — and bundling can unlock the next WaveGuard pricing tier.',
+      };
+    }
+    if (!combinedKeys.has('termite_bait')) {
+      return {
+        serviceKey: 'termite_bait',
+        label: 'Termite Bait Stations',
+        icon: 'shield',
+        title: 'Add Termite Bait Stations and save more',
+        body: 'Year-round termite monitoring around your home perimeter — and bundling can unlock the next WaveGuard pricing tier.',
       };
     }
     return null;
