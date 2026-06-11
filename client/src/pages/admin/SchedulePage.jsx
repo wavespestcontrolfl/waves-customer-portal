@@ -496,6 +496,23 @@ function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
 }
 
+// Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
+function timeToMinutes(value) {
+  if (typeof value !== "string") return null;
+  const m = value.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+function minutesToTime(total) {
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
 function elapsedSince(isoTime) {
   if (!isoTime) return "0:00";
   const diff = Math.max(
@@ -937,6 +954,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  // Moving the start time drags the end time with it, preserving the window
+  // length (end stays independently editable to resize the window). Clamp at
+  // 23:59 — windowEnd is a time-of-day on the same date, so wrapping past
+  // midnight would invert the window.
+  const updateWindowStart = (newStart) =>
+    setForm((f) => {
+      const next = { ...f, windowStart: newStart };
+      const prevStart = timeToMinutes(f.windowStart);
+      const prevEnd = timeToMinutes(f.windowEnd);
+      const start = timeToMinutes(newStart);
+      if (prevStart != null && prevEnd != null && start != null) {
+        const windowLen = prevEnd - prevStart;
+        if (windowLen > 0) {
+          next.windowEnd = minutesToTime(
+            Math.min(start + windowLen, 23 * 60 + 59),
+          );
+        }
+      }
+      return next;
+    });
   const updateLine = (key, k, v) =>
     setServiceLines((lines) =>
       lines.map((l) => (l._key === key ? { ...l, [k]: v } : l)),
@@ -2224,7 +2261,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <input
                     type="time"
                     value={form.windowStart}
-                    onChange={(e) => update("windowStart", e.target.value)}
+                    onChange={(e) => updateWindowStart(e.target.value)}
                     className="font-bold"
                     style={inputStyle}
                   />{" "}
