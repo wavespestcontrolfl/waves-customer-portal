@@ -329,10 +329,22 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
 
     try {
       await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, 'tech', { allowLive: true });
+    } catch (err) {
+      // One job racing to completed/cancelled must not strand the rest
+      // of a bulk rain-out — record and continue.
+      logger.warn(`[rain-out] reschedule failed for ${job.id}: ${err.message}`);
+      results.push({ id: job.id, ok: false, error: err.message, statusCode: err.statusCode || 500 });
+      continue;
+    }
 
-      const chosen = { date: target.date, window: newWindow };
-      let sms = { sent: false, reason: 'not_requested' };
-      if (notifyCustomer) {
+    // The move is COMMITTED past this point. Notification problems —
+    // a throwing provider/audit wrapper, a reply-option write failure —
+    // must never mark the job failed, or the tech retries and
+    // double-reschedules / double-texts an already-moved appointment.
+    const chosen = { date: target.date, window: newWindow };
+    let sms = { sent: false, reason: 'not_requested' };
+    if (notifyCustomer) {
+      try {
         const customer = job.id === serviceId
           ? { id: service.cust_id || service.customer_id, phone: service.phone, first_name: service.first_name, zip: service.zip }
           : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip');
@@ -340,15 +352,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
         if (sms.sent && job.id === serviceId && alt) {
           await attachReplyOptions(job.id, chosen, alt);
         }
+      } catch (err) {
+        logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
+        sms = { sent: false, reason: err.message };
       }
-
-      results.push({ id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason });
-    } catch (err) {
-      // One job racing to completed/cancelled must not strand the rest
-      // of a bulk rain-out — record and continue.
-      logger.warn(`[rain-out] reschedule failed for ${job.id}: ${err.message}`);
-      results.push({ id: job.id, ok: false, error: err.message, statusCode: err.statusCode || 500 });
     }
+
+    results.push({ id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason });
   }
 
   const moved = results.filter((r) => r.ok);

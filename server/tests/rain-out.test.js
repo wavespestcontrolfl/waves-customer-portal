@@ -196,6 +196,35 @@ describe('rain-out service', () => {
       expect(renderSmsTemplate).not.toHaveBeenCalled();
     });
 
+    test('an SMS exception after the move reports moved-but-not-notified, not failure', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        reschedule_log: [],
+      });
+      sendCustomerMessage.mockRejectedValueOnce(new Error('provider exploded'));
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-12', window: { start: '08:00', end: '10:00' } },
+        notifyCustomer: true,
+      });
+
+      // The move committed — the job is OK; only the notification failed.
+      expect(result.ok).toBe(true);
+      expect(result.movedCount).toBe(1);
+      expect(result.failedCount).toBe(0);
+      expect(result.results[0]).toMatchObject({
+        id: 'svc-1',
+        ok: true,
+        smsSent: false,
+        smsReason: 'provider exploded',
+      });
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    });
+
     test('unknown reason code is rejected before any reschedule', async () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
