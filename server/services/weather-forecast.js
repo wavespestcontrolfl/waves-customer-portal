@@ -102,6 +102,52 @@ async function getDailyRainOutlook(lat, lng) {
   return byDate;
 }
 
+// Hourly cache — shorter TTL than the daily one because storm-watch
+// polls on a 15-minute cadence and hourly precip values move faster.
+const _hourlyCache = new Map();
+const HOURLY_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Hourly rain outlook for a coordinate (storm-watch nudges).
+ *
+ * @returns {Promise<Array<{startTime: string, rainChance: number|null, shortForecast: string|null}>|null>}
+ *          NWS hourly periods (~next 156h, ISO startTime with local
+ *          offset), or null when NWS is unreachable. Fail-open like
+ *          the daily lookup — callers must tolerate null.
+ */
+async function getHourlyRainOutlook(lat, lng) {
+  if (lat == null || lng == null || lat === '' || lng === '') return null;
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+
+  const key = cacheKey(latNum, lngNum);
+  const cached = _hourlyCache.get(key);
+  if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS) return cached.value;
+
+  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
+  const hourlyUrl = points?.properties?.forecastHourly;
+  if (!hourlyUrl) return null;
+
+  const forecast = await fetchJson(hourlyUrl, 'hourly forecast');
+  const periods = forecast?.properties?.periods;
+  if (!Array.isArray(periods)) return null;
+
+  const hours = periods
+    .filter((p) => p?.startTime)
+    .map((p) => ({
+      startTime: p.startTime,
+      rainChance: Number.isFinite(p?.probabilityOfPrecipitation?.value)
+        ? p.probabilityOfPrecipitation.value
+        : null,
+      shortForecast: p.shortForecast || null,
+    }));
+
+  if (hours.length === 0) return null;
+  _hourlyCache.set(key, { at: Date.now(), value: hours });
+  return hours;
+}
+
 /**
  * Customer-facing forecast link for their own area. NWS zipcity page —
  * official, ad-free, loads fine on mobile.
@@ -113,6 +159,7 @@ function forecastLinkForZip(zip) {
 
 module.exports = {
   getDailyRainOutlook,
+  getHourlyRainOutlook,
   forecastLinkForZip,
-  _test: { cacheKey, _cache },
+  _test: { cacheKey, _cache, _hourlyCache },
 };
