@@ -346,6 +346,7 @@ async function performPropertyLookup(address) {
 
     if (analyses.length) {
       result.aiAnalysis = mergeAiAnalyses(analyses);
+      applyParcelTurfBound(result.aiAnalysis, result.propertyRecord);
       logger.info('[property-lookup] Trio AI analysis complete', {
         sources: result.aiAnalysis._sources,
         confidence: result.aiAnalysis.confidenceScore,
@@ -898,8 +899,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     imperviousSurfacePercent,
     imperviosSurfacePercent: imperviousSurfacePercent,
     estimatedTurfSf: ai?.estimatedTurfSf || 0,
+    turfCappedToParcel: ai?.turfCappedToParcel === true,
+    _turfPreCapSf: ai?._turfPreCapSf,
     turfCondition: ai?.turfCondition || 'UNKNOWN',
     possibleGrassType: ai?.possibleGrassType || 'UNKNOWN',
+
+    // ── PARCEL (GIS match, when available) ──
+    parcel: rc?._parcel ? {
+      parcelId: rc._parcel.parcelId,
+      county: rc._parcel.county,
+      areaSqft: rc._parcel.polygonAreaSqft || rc._parcel.lotSqft || null,
+      source: 'fdor_cadastral',
+    } : null,
 
     // ── BED MATERIAL ──
     bedMaterial: ai?.bedMaterial || 'UNKNOWN',
@@ -1125,10 +1136,71 @@ function selectedTurfPricedServices(selectedServices = []) {
     .filter((service) => TURF_PRICED_SERVICES.has(service));
 }
 
+// The parcel-derived hard ceiling for treatable turf: GIS polygon area when
+// the parcel matched, else the merged lot size when it came from
+// county-grade evidence (a listing's lot guess is not a bound).
+function parcelTurfBoundSqft(propertyRecord) {
+  if (!propertyRecord) return null;
+  const polygonArea = firstNonNegativeNumber(propertyRecord._parcel?.polygonAreaSqft, propertyRecord._parcel?.lotSqft);
+  if (polygonArea) return { areaSqft: polygonArea, source: 'parcel_polygon' };
+  const lotEvidence = propertyRecord._fieldEvidence?.lotSize;
+  const lotSize = firstNonNegativeNumber(propertyRecord.lotSize);
+  if (lotSize && ['county', 'cadastral'].includes(lotEvidence?.sourceType)) {
+    return { areaSqft: lotSize, source: lotEvidence.sourceType };
+  }
+  return null;
+}
+
+// Deterministic turf bound: treatable turf can never exceed the parcel.
+// Residential non-condo only — condo/HOA service legitimately treats shared
+// turf beyond the unit's own parcel. Mutates the merged aiAnalysis in place
+// (pre-cap value kept for provenance; turfRiskReasons surfaces the clamp so
+// the field-verify flag still fires even though the value is now bounded).
+function applyParcelTurfBound(aiAnalysis, propertyRecord) {
+  if (!aiAnalysis || !propertyRecord) return aiAnalysis;
+
+  const propertyUse = String(aiAnalysis.propertyUse || '').toUpperCase();
+  if (propertyUse && !['RESIDENTIAL', 'UNKNOWN'].includes(propertyUse)) return aiAnalysis;
+  // A structured commercial subtype (HOA_COMMON_AREA etc.) marks the profile
+  // commercial downstream even when propertyUse stayed RESIDENTIAL/UNKNOWN —
+  // mirror that signal here so shared turf is never pre-clamped to one
+  // parcel before the commercial path takes over.
+  const commercialUseType = String(aiAnalysis.commercialUseType || '').toUpperCase();
+  if (commercialUseType
+      && !['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'].includes(commercialUseType)) {
+    return aiAnalysis;
+  }
+  const propertyType = String(propertyRecord.propertyType || '').toUpperCase();
+  if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
+
+  const bound = parcelTurfBoundSqft(propertyRecord);
+  if (!bound) return aiAnalysis;
+
+  const estimatedTurfSf = firstNonNegativeNumber(aiAnalysis.estimatedTurfSf);
+  if (estimatedTurfSf === undefined || estimatedTurfSf <= bound.areaSqft) return aiAnalysis;
+
+  aiAnalysis._turfPreCapSf = estimatedTurfSf;
+  aiAnalysis.estimatedTurfSf = Math.round(bound.areaSqft);
+  aiAnalysis.turfCappedToParcel = true;
+  aiAnalysis.turfCapSource = bound.source;
+  const note = `AI turf estimate ${Math.round(estimatedTurfSf).toLocaleString()} sq ft exceeded the ${Math.round(bound.areaSqft).toLocaleString()} sq ft parcel area — clamped to the parcel.`;
+  aiAnalysis.analysisNotes = [aiAnalysis.analysisNotes, note].filter(Boolean).join(' ');
+  logger.info('[property-lookup] turf estimate clamped to parcel area', {
+    preCapSf: estimatedTurfSf,
+    parcelAreaSqft: Math.round(bound.areaSqft),
+    source: bound.source,
+  });
+  return aiAnalysis;
+}
+
 function turfRiskReasons(source = {}) {
   const reasons = [];
   const lotSqFt = firstNonNegativeNumber(source.lotSqFt, source.lotSize);
   const estimatedTurfSf = firstNonNegativeNumber(source.estimatedTurfSf, source.estimatedTurfSqFt);
+  if (source.turfCappedToParcel === true) {
+    const preCap = firstNonNegativeNumber(source._turfPreCapSf);
+    reasons.push(`AI turf exceeded parcel area — clamped to ${estimatedTurfSf !== undefined ? Math.round(estimatedTurfSf).toLocaleString() : 'parcel'} sq ft${preCap !== undefined ? ` (AI estimated ${Math.round(preCap).toLocaleString()})` : ''}`);
+  }
   const aiConfidence = firstNonNegativeNumber(source.aiConfidence, source.confidenceScore);
   const treeDensity = String(source.treeDensity || '').toUpperCase();
   const nearWater = String(source.nearWater || source.waterProximity || '').toUpperCase();
@@ -2491,10 +2563,13 @@ module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports._private = {
+  applyParcelTurfBound,
   buildParcelOverlayParam,
   buildSatelliteVisionPrompt,
   buildVisionContext,
   imageWidthFt,
+  parcelTurfBoundSqft,
   parseGeocodeResult,
+  turfRiskReasons,
   visionContextPromptBlock,
 };
