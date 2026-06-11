@@ -265,6 +265,18 @@ function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
   return next;
 }
 
+// The exact field values applyCustomerToWdoFindings derives from a customer.
+// Recorded when a customer is applied so a later customer switch can tell
+// auto-filled values apart from hand-typed ones and clear only the former.
+function customerWdoAutoFillValues(customer) {
+  return {
+    property_address: formatCustomerAddress(customer),
+    requested_by: formatCustomerContact(customer),
+    report_sent_to: formatCustomerContact(customer),
+    structures_inspected: formatStructuresInspected(customer),
+  };
+}
+
 function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
   const allowed = [
     'property_address',
@@ -329,6 +341,11 @@ export default function CreateProjectModal({
   // Tracks the most recently requested prefill client so a slow, stale
   // latest-scheduled-service response can't clobber a newer selection.
   const prefillCustomerRef = useRef(null);
+  // What was last auto-filled into the WDO findings from the selected
+  // customer — on a customer change, values still matching this map are
+  // cleared so the previous customer's address/contacts never carry over
+  // onto the new customer's FDACS-13645 form.
+  const wdoAutoFillRef = useRef(null);
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -525,6 +542,7 @@ export default function CreateProjectModal({
     // Seamlessly fill address + requested-by + report-sent-to from the picked
     // customer, without clobbering anything the tech already typed.
     setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, false));
+    wdoAutoFillRef.current = customerWdoAutoFillValues(selectedCustomer);
   }, [projectType, selectedCustomer]);
 
   function handleFindingChange(key, value) {
@@ -562,6 +580,23 @@ export default function CreateProjectModal({
     if (!selectedCustomer) return;
     // Explicit action — overwrite address + contact fields from the customer.
     setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, true));
+  }
+
+  // Called when the tech un-picks the customer ("Change"): drop the WDO fields
+  // that still hold the previous customer's auto-filled values, keeping
+  // anything hand-typed that differs, so re-selecting blank-fills from the new
+  // customer instead of keeping the old property's address/contacts.
+  function clearWdoFindingsFromCustomer() {
+    const lastApplied = wdoAutoFillRef.current;
+    wdoAutoFillRef.current = null;
+    if (!lastApplied) return;
+    setFindings(prev => {
+      const next = { ...prev };
+      for (const [key, value] of Object.entries(lastApplied)) {
+        if (hasMeaningfulValue(value) && next[key] === value) next[key] = '';
+      }
+      return next;
+    });
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
@@ -875,7 +910,7 @@ export default function CreateProjectModal({
                 <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
                 <button
                   type="button"
-                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; }}
+                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; clearWdoFindingsFromCustomer(); }}
                   style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
                 >Change</button>
               </div>
@@ -987,7 +1022,11 @@ export default function CreateProjectModal({
               </div>
 
               {projectType === 'wdo_inspection' && (
+                /* Keyed by customer so switching customers remounts the bar —
+                   a finished lookup for the previous customer's property can
+                   never be applied to the new one (legal FDACS filing). */
                 <WdoIntelligenceBar
+                  key={customerId || 'none'}
                   customerId={customerId}
                   serviceRecordId={defaultServiceRecordId}
                   scheduledServiceId={defaultScheduledServiceId}

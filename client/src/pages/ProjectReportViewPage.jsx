@@ -180,6 +180,8 @@ const FIELD_LABELS = {
   previous_treatment_evidence: 'Evidence of previous treatment',
   previous_treatment_notes: 'Previous treatment observations',
   notice_location: 'Notice of Inspection location',
+  structure_sqft: 'Structure footprint (approx. sq ft)',
+  inspection_fee: 'Inspection fee',
   treated_at_inspection: 'Treated at time of inspection',
   organism_treated: 'Organism treated',
   pesticide_used: 'Pesticide used',
@@ -234,6 +236,11 @@ const FIELD_LABELS = {
 function humanizeKey(k) {
   return FIELD_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
+
+// Internal/office-only finding keys that must never print on the
+// customer-facing report (inspection_fee is a fee-tier helper for invoicing,
+// not an inspection finding — the invoice carries the actual price).
+const INTERNAL_FINDING_KEYS = new Set(['inspection_fee']);
 
 function formatFindingValue(key, value) {
   const raw = String(value);
@@ -481,7 +488,8 @@ export default function ProjectReportViewPage() {
   const typeLabel = TYPE_LABELS[data.projectType] || 'Project';
   const reportTitle = String(data.title || '').trim() || typeLabel;
   const findings = data.findings || {};
-  const findingsEntries = Object.entries(findings).filter(([, v]) => v !== null && v !== undefined && v !== '');
+  const findingsEntries = Object.entries(findings)
+    .filter(([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && v !== null && v !== undefined && v !== '');
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);

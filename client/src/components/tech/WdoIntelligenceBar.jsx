@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 
 const DEFAULT_COLORS = {
@@ -65,6 +65,35 @@ export default function WdoIntelligenceBar({
   const [historyApplied, setHistoryApplied] = useState(false);
   const [historyMsg, setHistoryMsg] = useState('');
 
+  // The property/customer context this bar is looking at. Captured when a
+  // lookup starts so a slow response for one customer/property can never be
+  // applied after the tech switches to another — the WDO report is a legal
+  // FDACS-13645 filing, so cross-property data is the harm to prevent.
+  const contextKey = `${projectId || ''}|${customerId || ''}|${propertyAddress || ''}`;
+  const contextRef = useRef(contextKey);
+  contextRef.current = contextKey;
+
+  // When the customer/project context changes, wipe any completed lookup so
+  // its panels (with their Apply / Replace-fields buttons) can't push the
+  // previous property's data into the new context's findings. The property
+  // address is intentionally NOT a reset trigger here — applying suggestions
+  // can itself rewrite findings.property_address — but in-flight requests are
+  // still guarded on the full context (address included) above.
+  const resetKey = `${projectId || ''}|${customerId || ''}`;
+  useEffect(() => {
+    setPhoto(null);
+    setAnalyzing(false);
+    setResult(null);
+    setError('');
+    setApplied(false);
+    setSpecsApplied(false);
+    setHistory(initialHistory);
+    setHistoryLoading(false);
+    setHistoryApplied(false);
+    setHistoryMsg('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey]);
+
   // Profile comes from the latest analyze result, or the cached project profile.
   const profile = result?.propertyProfile || initialProfile || null;
   const specRows = profile
@@ -90,6 +119,7 @@ export default function WdoIntelligenceBar({
       setError('Pick a customer or enter the property address first.');
       return;
     }
+    const startedFor = contextRef.current;
     setHistoryLoading(true);
     setError('');
     setHistoryApplied(false);
@@ -107,13 +137,17 @@ export default function WdoIntelligenceBar({
         },
       });
       const data = await res.json();
+      // Stale response: the tech has switched customer/property since this
+      // lookup started — drop it instead of showing another property's history.
+      if (contextRef.current !== startedFor) return;
       if (!res.ok) throw new Error(data?.error || 'WDO history lookup failed');
       setHistory(data.history || null);
       if (!data.history) setHistoryMsg(data.message || 'No prior treatment or permit history found — verify on site.');
     } catch (e) {
+      if (contextRef.current !== startedFor) return;
       setError(e.message || 'WDO history lookup failed');
     } finally {
-      setHistoryLoading(false);
+      if (contextRef.current === startedFor) setHistoryLoading(false);
     }
   }
 
@@ -151,6 +185,7 @@ export default function WdoIntelligenceBar({
       return;
     }
 
+    const startedFor = contextRef.current;
     setAnalyzing(true);
     setError('');
     setApplied(false);
@@ -170,13 +205,17 @@ export default function WdoIntelligenceBar({
         headers: {},
       });
       const data = await res.json();
+      // Stale response: the tech has switched customer/property since this
+      // analysis started — never auto-apply another property's suggestions.
+      if (contextRef.current !== startedFor) return;
       if (!res.ok) throw new Error(data?.error || 'WDO intelligence failed');
       setResult(data);
       if (data?.suggestedFindings) applySuggestions(false, data);
     } catch (e) {
+      if (contextRef.current !== startedFor) return;
       setError(e.message || 'WDO intelligence failed');
     } finally {
-      setAnalyzing(false);
+      if (contextRef.current === startedFor) setAnalyzing(false);
     }
   }
 

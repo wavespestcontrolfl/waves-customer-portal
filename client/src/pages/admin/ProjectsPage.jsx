@@ -1095,9 +1095,12 @@ export default function ProjectsPage() {
             />
           )}
         </div>
-        {/* Detail */}
+        {/* Detail — keyed by project id so switching projects remounts the
+            panel: stale edit state or an in-flight load for project A can
+            never render onto (or save over) project B. */}
         {selected && (
           <ProjectDetail
+            key={selected.id}
             projectId={selected.id}
             typesRegistry={typesRegistry}
             onClose={() => setSelectedId(null)}
