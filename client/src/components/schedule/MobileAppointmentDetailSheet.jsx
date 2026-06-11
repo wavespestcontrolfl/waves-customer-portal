@@ -165,10 +165,11 @@ export default function MobileAppointmentDetailSheet({
   const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
-  // Only true special projects (or jobs already linked to a project) route
-  // to the Projects flow — typed/service_report jobs use the standard
-  // completion sheet.
-  const projectBackedCompletion = !!(completionProfile.specialProject || linkedProject?.id);
+  // projectBacked covers both special projects and still-project_required
+  // one-time types (server 409s those out of /complete); typed
+  // service_report profiles serialize projectBacked:false and use the
+  // standard completion sheet.
+  const projectBackedCompletion = !!(completionProfile.projectBacked || completionProfile.requiresProject || linkedProject?.id);
   const projectCompletionClosed = projectBackedCompletion
     && (linkedProject?.status === 'closed' || service.status === 'completed');
   const projectCompletionLabel = projectCompletionClosed

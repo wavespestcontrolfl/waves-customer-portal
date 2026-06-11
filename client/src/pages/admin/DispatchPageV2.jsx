@@ -103,13 +103,13 @@ function shouldOpenMobileCompletion(service) {
 }
 
 function isProjectBackedCompletion(service) {
-  // Only true special projects (or jobs already linked to a project) route
-  // to the Projects flow — typed/service_report jobs complete through
-  // CompletionPanel. serializeProfile nulls projectType for service_report
-  // rows, but key off specialProject explicitly so stale truthiness checks
-  // can't reroute a typed completion.
+  // projectBacked covers BOTH special projects (WDO/pre-treat) and the
+  // still-project_required one-time types — those must keep routing to the
+  // Projects flow or the server 409s them out of /complete. Typed
+  // service_report profiles serialize projectBacked:false, so cut-over
+  // jobs fall through to CompletionPanel.
   const profile = service?.completionProfile;
-  return !!(profile?.specialProject || service?.linkedProject?.id);
+  return !!(profile?.projectBacked || profile?.requiresProject || service?.linkedProject?.id);
 }
 
 function projectCompletionActionLabel(service) {

@@ -4003,8 +4003,19 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     const schema = ActivityIndicators.findingsSchemaForType(findingsType);
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'customer_id', 'service_type');
+      .first('id', 'customer_id', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // The appointment's PROFILE is authoritative for which findings type
+    // (if any) this service uses — never the client payload. Without this,
+    // any assigned tech could pull customer comms into an AI call for an
+    // arbitrary type on a non-typed job (pre-push Codex P1).
+    const draftProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+    if (draftProfile?.findingsType !== findingsType) {
+      return res.status(409).json({
+        error: 'This service does not use that findings form.',
+        code: 'findings_type_mismatch',
+      });
+    }
     // Chips are advisory inputs here — drop invalid ones instead of failing
     // the draft (the complete endpoint enforces them strictly).
     const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips);
