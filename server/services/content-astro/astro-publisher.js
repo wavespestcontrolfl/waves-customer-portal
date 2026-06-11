@@ -396,6 +396,24 @@ async function cleanupStaleAstroPr(post) {
   }
 }
 
+// Run the LLM fact-check and throw BLOG_FACTCHECK_FAILED on a P0/P1 finding;
+// advisory P2s are logged. Shared by every blog-content publish path (new
+// admin draft, autonomous draft, refresh) so they all gate identically. The
+// gate itself fails open, so this only throws on a real factual block.
+async function assertFactCheckClear({ title, body, city, keyword, tag }, label) {
+  const factCheck = await factCheckGate.evaluate({ title, body, city, keyword, tag });
+  if (!factCheck.pass) {
+    const blocking = factCheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    const err = new Error(`fact-check failed: ${blocking.map((f) => `${f.severity} ${f.message}`).join(' | ')}`);
+    err.code = 'BLOG_FACTCHECK_FAILED';
+    err.details = blocking;
+    throw err;
+  }
+  if (factCheck.findings.length) {
+    logger.info(`[astro-publisher] fact-check advisory for ${label}: ${factCheck.findings.map((f) => f.message).join(' | ')}`);
+  }
+}
+
 async function publishAstro(postId) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
@@ -512,25 +530,11 @@ async function publishAstro(postId) {
     // 2c. LLM fact-check — the rule-based guardrails can't catch a wrong
     // species/pathogen name, a mislabeled active ingredient, or a bad Florida
     // ordinance date. This gate does, before the post ships under the licensed
-    // reviewer byline. Fail-open (a model hiccup never blocks publishing — the
-    // Astro PR Codex review remains a backstop); blocks only on P0/P1 findings.
-    const factCheck = await factCheckGate.evaluate({
-      title: post.title,
-      body,
-      city: post.city,
-      keyword: post.keyword,
-      tag: post.tag,
-    });
-    if (!factCheck.pass) {
-      const blocking = factCheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
-      const fErr = new Error(`fact-check failed: ${blocking.map((f) => `${f.severity} ${f.message}`).join(' | ')}`);
-      fErr.code = 'BLOG_FACTCHECK_FAILED';
-      fErr.details = blocking;
-      throw fErr;
-    }
-    if (factCheck.findings.length) {
-      logger.info(`[astro-publisher] fact-check advisory for ${slug}: ${factCheck.findings.map((f) => f.message).join(' | ')}`);
-    }
+    // reviewer byline. Fail-open; blocks only on P0/P1 findings.
+    await assertFactCheckClear(
+      { title: post.title, body, city: post.city, keyword: post.keyword, tag: post.tag },
+      slug,
+    );
 
     const markdown = fm.stringify(data, body + '\n');
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
@@ -740,23 +744,13 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // cut, so a factual error never opens an orphan PR. The autonomous runner's
   // upstream gates are rule-based (quality, uniqueness) — none catch a wrong
   // species/ingredient/ordinance fact. Fail-open; blocks only on P0/P1.
-  const factCheck = await factCheckGate.evaluate({
+  await assertFactCheckClear({
     title: frontmatter.title,
     body,
     city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
     keyword: frontmatter.primary_keyword,
     tag: frontmatter.category,
-  });
-  if (!factCheck.pass) {
-    const blocking = factCheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
-    const fErr = new Error(`fact-check failed: ${blocking.map((f) => `${f.severity} ${f.message}`).join(' | ')}`);
-    fErr.code = 'BLOG_FACTCHECK_FAILED';
-    fErr.details = blocking;
-    throw fErr;
-  }
-  if (factCheck.findings.length) {
-    logger.info(`[astro-publisher] fact-check advisory for ${slug}: ${factCheck.findings.map((f) => f.message).join(' | ')}`);
-  }
+  }, slug);
 
   await gh.createBranch(branch);
   const fileCommit = await gh.putFile({
@@ -959,6 +953,20 @@ async function publishRefresh(draft, brief = {}) {
   // agent produced an out-of-bounds title/meta — which this gate now blocks
   // before a PR is ever opened. Non-blog pages use a different contract.
   if (isBlogTarget(filePath)) assertValidBlogFrontmatter(nextFrontmatter);
+
+  // Fact-check a refreshed blog body too — a refresh can introduce a wrong
+  // pesticide/pathogen/ordinance fact just like a new draft. Only when the body
+  // actually changed and the target is a blog post (the gate is blog-content
+  // tuned; service/location pages use a different contract).
+  if (isBlogTarget(filePath) && bodyChanged) {
+    await assertFactCheckClear({
+      title: nextFrontmatter.title,
+      body: newBody,
+      city: brief.city || (Array.isArray(nextFrontmatter.service_areas_tag) ? nextFrontmatter.service_areas_tag[0] : ''),
+      keyword: nextFrontmatter.primary_keyword,
+      tag: nextFrontmatter.category,
+    }, filePath);
+  }
 
   const markdown = fm.stringify(nextFrontmatter, `${newBody}\n`);
 

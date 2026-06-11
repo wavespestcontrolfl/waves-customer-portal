@@ -1263,3 +1263,45 @@ describe('applyMergeEffect hero persistence (curated vs generated)', () => {
     }
   });
 });
+
+describe('publishRefresh fact-check (refreshed blog bodies)', () => {
+  const fm = require('../services/content-astro/frontmatter');
+  const BLOG_PATH = 'src/content/blog/dollar-spot-venice.mdx';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+    gh.createBranch.mockResolvedValue({});
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 50, html_url: 'https://github.example/pr/50' });
+    gh.createIssueComment.mockResolvedValue({});
+    const existing = fm.stringify(
+      validFrontmatter({ slug: '/dollar-spot-venice/', canonical: 'https://www.wavespestcontrol.com/dollar-spot-venice/' }),
+      'Old body about dollar spot in Venice.',
+    );
+    gh.getFile.mockImplementation(async (p) => (p === BLOG_PATH ? { sha: 'existing-sha', content: existing, path: p } : null));
+  });
+
+  const refreshDraft = (body) => ([
+    { type: 'draft', file_path: BLOG_PATH, page_url: 'https://www.wavespestcontrol.com/dollar-spot-venice/', body, frontmatter: {} },
+    { action_type: 'refresh_existing_page' },
+  ]);
+
+  test('blocks a refresh whose changed body fails the fact-check (no branch/PR opened)', async () => {
+    factCheckGate.evaluate.mockResolvedValueOnce({
+      pass: false, checked: true,
+      findings: [{ severity: 'P1', code: 'FACTUAL_ERROR', message: 'wrong pathogen for warm-season turf' }],
+    });
+    await expect(AstroPublisher.publishRefresh(...refreshDraft('A NEW refreshed body naming the wrong pathogen.')))
+      .rejects.toMatchObject({ code: 'BLOG_FACTCHECK_FAILED' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
+  test('a clean refresh runs the fact-check and proceeds to open a PR', async () => {
+    const result = await AstroPublisher.publishRefresh(...refreshDraft('A NEW, factually-clean refreshed body about dollar spot.'));
+    expect(factCheckGate.evaluate).toHaveBeenCalledTimes(1);
+    expect(gh.createBranch).toHaveBeenCalled();
+    expect(result.pr_number).toBe(50);
+  });
+});
