@@ -2815,12 +2815,12 @@ function renderPage(token, estimate, estData, membership) {
 
   let upsellService = null;
   if (isExistingMember) {
-    // Already-a-customer ladder: termite bait stations or seasonal mosquito,
-    // whichever they don't have yet.
-    if (!combinedQualifyingKeys.has('termite_bait')) {
-      upsellService = 'Termite Bait Stations';
-    } else if (!combinedQualifyingKeys.has('mosquito')) {
+    // Already-a-customer ladder: seasonal mosquito first (easier yes), then
+    // termite bait stations — whichever they don't have yet.
+    if (!combinedQualifyingKeys.has('mosquito')) {
       upsellService = 'Seasonal Mosquito';
+    } else if (!combinedQualifyingKeys.has('termite_bait')) {
+      upsellService = 'Termite Bait Stations';
     }
   } else if (qualifyingRecurring.length === 1) {
     upsellService = recurringServiceKey(qualifyingRecurring[0]) === 'pest_control' ? 'Lawn Care' : 'Pest Control';
