@@ -17,6 +17,8 @@ const DEFAULT_SERVICE_REPORT_PROFILE = {
   projectBacked: false,
   specialProject: false,
   requiresProject: false,
+  findingsType: null,
+  deliveryMode: 'auto_send',
 };
 
 function serializeProfile(row = null) {
@@ -29,7 +31,13 @@ function serializeProfile(row = null) {
     category: row.category || null,
     billingType: row.billing_type || null,
     completionMode,
-    projectType: row.project_type || null,
+    // projectType is the PROJECT-flow pointer — null for service_report
+    // profiles so stale `if (profile.projectType)` client logic can never
+    // route a typed completion back into the Projects flow. The same column
+    // value is exposed as findingsType when the mode is service_report:
+    // that's the typed-findings schema pointer for specialty completions.
+    projectType: projectBacked ? (row.project_type || null) : null,
+    findingsType: completionMode === 'service_report' ? (row.project_type || null) : null,
     createsServiceRecord: row.creates_service_record !== false,
     portalVisibility: row.portal_visibility || 'customer_portal',
     portalAttachPolicy: row.portal_attach_policy || 'active_portal_customer',
@@ -40,6 +48,7 @@ function serializeProfile(row = null) {
     projectBacked,
     specialProject: completionMode === 'special_project',
     requiresProject: projectBacked,
+    deliveryMode: row.delivery_mode || 'auto_send',
   };
 }
 

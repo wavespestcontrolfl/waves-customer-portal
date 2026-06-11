@@ -78,7 +78,7 @@ const PROJECT_TYPES = {
     findingsFields: [
       { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea' },
       { key: 'pests_identified', label: 'Pests identified', type: 'textarea', placeholder: 'e.g. German roaches (kitchen), ghost ants (bath #2)' },
-      { key: 'severity', label: 'Severity', type: 'select', options: ['Low', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'severity', label: 'Severity', type: 'select', options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
       { key: 'conducive_conditions', label: 'Conducive conditions', type: 'textarea' },
       { key: 'recommendation', label: 'Recommendation', type: 'textarea' },
     ],
@@ -92,7 +92,7 @@ const PROJECT_TYPES = {
     photoCategories: ['exterior', 'living_area', 'bedroom', 'pet_area', 'yard', 'evidence', 'treatment_area', 'other'],
     findingsFields: [
       { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea', placeholder: 'Pet resting areas, rugs, furniture edges, bedrooms, yard, shaded exterior areas…' },
-      { key: 'evidence_level', label: 'Evidence level', type: 'select', options: ['Low', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'evidence_level', label: 'Evidence level', type: 'select', options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
       { key: 'host_activity', label: 'Host / activity notes', type: 'textarea', placeholder: 'Pets in home, recent bites, wildlife pressure, shaded yard activity…' },
       { key: 'treatment_areas', label: 'Treatment areas', type: 'textarea', placeholder: 'Interior rooms, pet resting zones, exterior shaded areas, crawlspace, lanai…' },
       { key: 'products_used', label: 'Products used', type: 'textarea' },
@@ -110,7 +110,7 @@ const PROJECT_TYPES = {
     findingsFields: [
       { key: 'species', label: 'Species', type: 'select', options: ['German', 'American', 'Smoky brown', 'Mixed', 'Unknown'] },
       { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea', placeholder: 'Kitchen, bathrooms, under appliances, cabinets, drains, garage…' },
-      { key: 'activity_level', label: 'Activity level', type: 'select', options: ['Low', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'activity_level', label: 'Activity level', type: 'select', options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
       { key: 'harborage_locations', label: 'Harborage locations', type: 'textarea', placeholder: 'Under/behind fridge, dishwasher, sink cabinet, pantry, wall voids…' },
       { key: 'conducive_conditions', label: 'Conducive conditions', type: 'textarea', placeholder: 'Moisture, food debris, clutter, cardboard, plumbing leaks…' },
       { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea', placeholder: 'Gel bait, crack & crevice, IGR, dusting, vacuuming…' },
@@ -178,7 +178,7 @@ const PROJECT_TYPES = {
     findingsFields: [
       { key: 'target_pest', label: 'Target pest', type: 'text', placeholder: 'German roaches, wasps, fire ants, fleas/ticks…' },
       { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea' },
-      { key: 'activity_level', label: 'Activity level', type: 'select', options: ['Low', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'activity_level', label: 'Activity level', type: 'select', options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
       { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea' },
       { key: 'products_used', label: 'Products used', type: 'textarea' },
       { key: 'customer_instructions', label: 'Customer instructions', type: 'textarea' },
@@ -260,7 +260,7 @@ const PROJECT_TYPES = {
     photoCategories: ['bedroom', 'evidence', 'equipment', 'room_treated', 'furniture', 'other'],
     findingsFields: [
       { key: 'rooms_treated', label: 'Rooms treated', type: 'textarea', placeholder: 'Master bedroom, guest bedroom, living room couch' },
-      { key: 'evidence_level', label: 'Evidence level', type: 'select', options: ['Low (few bugs)', 'Moderate', 'Heavy', 'Severe infestation'] },
+      { key: 'evidence_level', label: 'Evidence level', type: 'select', options: ['No active signs observed', 'Low (few bugs)', 'Moderate', 'Heavy', 'Severe infestation'] },
       { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical'] },
       { key: 'products_used', label: 'Products used', type: 'textarea' },
       { key: 'prep_for_customer', label: 'Customer prep for follow-up', type: 'textarea', placeholder: 'Instructions for the customer before the 14-day return visit.' },
