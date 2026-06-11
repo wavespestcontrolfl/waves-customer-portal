@@ -3,6 +3,7 @@ let mockDbHandler = () => { throw new Error('db handler not configured'); };
 jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
+  mock.raw = jest.fn((sql) => ({ __raw: sql }));
   return mock;
 });
 jest.mock('../services/logger', () => ({
@@ -153,6 +154,28 @@ describe('getCachedLookup', () => {
     expect(await getCachedLookup('100 Main St')).toBeNull();
   });
 
+  it('a verified override newer than the cached data invalidates the hit', async () => {
+    const dataSavedAt = '2026-06-11T10:00:00Z';
+    const olderVerify = { lotSize: { value: 12000, verifiedAt: '2026-06-11T09:00:00Z' } };
+    const newerVerify = { lotSize: { value: 12000, verifiedAt: '2026-06-11T11:00:00Z' } };
+
+    mockDbHandler = () => fakeTable({
+      row: { ...freshRow, data_saved_at: dataSavedAt, verified_overrides: olderVerify },
+    });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+
+    mockDbHandler = () => fakeTable({
+      row: { ...freshRow, data_saved_at: dataSavedAt, verified_overrides: newerVerify },
+    });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+
+    // Rows that cannot prove data freshness fail toward the live lookup.
+    mockDbHandler = () => fakeTable({
+      row: { ...freshRow, data_saved_at: null, verified_overrides: newerVerify },
+    });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+  });
+
   it('kill switch disables reads but not override reads', async () => {
     process.env.PROPERTY_LOOKUP_CACHE_DISABLED = '1';
     mockDbHandler = () => fakeTable({
@@ -194,6 +217,7 @@ describe('saveLookup', () => {
     expect(payload.lat).toBe(26.9897);
     expect(payload.lookup_ms).toBe(1234);
     expect(payload.expires_at).toBeInstanceOf(Date);
+    expect(payload.data_saved_at).toBeInstanceOf(Date);
     expect(payload).not.toHaveProperty('verified_overrides');
     expect(JSON.parse(payload.property_record).county).toBe('Charlotte');
   });
@@ -217,6 +241,13 @@ describe('saveLookup', () => {
     expect(writes.length).toBe(0);
   });
 
+  it('never caches a lookup whose vision pass failed (no aiAnalysis)', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await saveLookup('100 Main St', { ...result, aiAnalysis: null });
+    expect(writes.length).toBe(0);
+  });
+
   it('fails open on db errors', async () => {
     mockDbHandler = () => { throw new Error('db down'); };
     await expect(saveLookup('100 Main St', result)).resolves.toBeUndefined();
@@ -224,38 +255,58 @@ describe('saveLookup', () => {
 });
 
 describe('saveVerifiedOverride', () => {
-  it('whitelists fields and merges with existing overrides', async () => {
+  it('upserts atomically via JSONB merge and returns the stored map', async () => {
     const writes = [];
-    mockDbHandler = () => ({
-      ...fakeTable({ writes }),
-      where() { return this; },
-      first: async () => ({ id: 'row-1', verified_overrides: { stories: { value: 2 } } }),
-      update: async (payload) => { writes.push(['update', payload]); },
-    });
+    const storedRow = {
+      verified_overrides: {
+        stories: { value: 2 },
+        lotSize: { value: 12000, verifiedBy: 'Adam' },
+      },
+    };
+    mockDbHandler = () => fakeTable({ row: storedRow, writes });
+
     const merged = await saveVerifiedOverride('100 Main St', {
       lotSize: 12000,
       bogusField: 1,
       stories: '',
     }, 'Adam');
-    expect(Object.keys(merged).sort()).toEqual(['lotSize', 'stories']);
-    expect(merged.lotSize.value).toBe(12000);
-    expect(merged.stories.value).toBe(2);
-    expect(writes[0][0]).toBe('update');
-    expect(JSON.parse(writes[0][1].verified_overrides).lotSize.value).toBe(12000);
+
+    // One atomic upsert — no read-modify-write that could drop a concurrent
+    // request's fields.
+    expect(writes.length).toBe(1);
+    const [kind, insertPayload, mergePayload] = writes[0];
+    expect(kind).toBe('upsert');
+    expect(insertPayload.expires_at).toBeNull();
+    expect(JSON.parse(insertPayload.verified_overrides).lotSize.value).toBe(12000);
+    // The merge folds via Postgres JSONB || (existing || excluded).
+    expect(mergePayload.verified_overrides.__raw).toContain('||');
+    // Returned map comes from the post-upsert re-read (the true DB state).
+    expect(merged).toBe(storedRow.verified_overrides);
   });
 
-  it('creates an override-only stub row when the address was never cached', async () => {
+  it('sanity-bounds values before persisting (overrides never expire)', async () => {
     const writes = [];
     mockDbHandler = () => fakeTable({ row: null, writes });
-    const merged = await saveVerifiedOverride('100 Main St', { stories: 2 }, 'Adam');
-    expect(merged.stories.value).toBe(2);
-    const insert = writes.find(([kind]) => kind === 'insert');
-    expect(insert).toBeTruthy();
-    expect(insert[1].expires_at).toBeNull();
+
+    const merged = await saveVerifiedOverride('100 Main St', {
+      squareFootage: -5,
+      lotSize: 9999999,
+      stories: 9,
+      yearBuilt: 'next year',
+      hasPool: 'yes',
+      propertyType: 'Single Family',
+    }, 'Adam');
+
+    const stored = JSON.parse(writes[0][1].verified_overrides);
+    expect(Object.keys(stored).sort()).toEqual(['hasPool', 'propertyType']);
+    expect(stored.hasPool.value).toBe(true);
+    expect(stored.propertyType.value).toBe('Single Family');
+    expect(merged.hasPool.value).toBe(true);
   });
 
-  it('returns null when nothing verifiable was sent', async () => {
+  it('returns null when nothing verifiable (or nothing valid) was sent', async () => {
     mockDbHandler = () => fakeTable({});
     expect(await saveVerifiedOverride('100 Main St', { junk: 1 }, 'Adam')).toBeNull();
+    expect(await saveVerifiedOverride('100 Main St', { stories: 0 }, 'Adam')).toBeNull();
   });
 });

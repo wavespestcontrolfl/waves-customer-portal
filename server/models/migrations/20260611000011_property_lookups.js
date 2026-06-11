@@ -23,6 +23,10 @@ exports.up = async function up(knex) {
     t.string('verified_by', 120);
     t.timestamp('verified_at', { useTz: true });
     t.integer('lookup_ms');
+    // When the cached DATA was written — distinct from updated_at, which
+    // also moves on override saves. getCachedLookup compares override
+    // verifiedAt timestamps against this to invalidate stale analysis.
+    t.timestamp('data_saved_at', { useTz: true });
     t.timestamp('expires_at', { useTz: true });
     t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
     t.timestamp('updated_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());

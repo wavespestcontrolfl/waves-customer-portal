@@ -2410,6 +2410,12 @@ export default function EstimateToolViewV2({
   // overrides so future lookups of this address stop re-flagging them).
   const [verifySaveState, setVerifySaveState] = useState("");
 
+  // A "saved" badge only describes the values it was clicked for — moving to
+  // another address or editing sqft/lot/stories re-arms the action.
+  useEffect(() => {
+    setVerifySaveState("");
+  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
+
   const saveVerifiedValues = useCallback(async () => {
     const fields = {};
     if (String(form.homeSqFt || "").trim() !== "") fields.squareFootage = Number(form.homeSqFt);

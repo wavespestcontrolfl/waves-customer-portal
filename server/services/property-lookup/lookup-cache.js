@@ -43,6 +43,40 @@ const VERIFIABLE_FIELDS = new Set([
 // person who stood on the property beats every remote source.
 const VERIFIED_SOURCE_WEIGHT = 110;
 
+// Overrides never expire and out-rank county data, so one bad save would
+// poison every future estimate for the address — values are sanity-bounded
+// before persisting and anything out of range is dropped.
+function intInRange(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return undefined;
+  const rounded = Math.round(n);
+  return rounded >= min && rounded <= max ? rounded : undefined;
+}
+
+function sanitizeVerifiedValue(field, value) {
+  switch (field) {
+    case 'squareFootage': return intInRange(value, 100, 50000);
+    case 'lotSize': return intInRange(value, 100, 200000);
+    case 'stories': return intInRange(value, 1, 4);
+    case 'yearBuilt': return intInRange(value, 1880, new Date().getFullYear() + 2);
+    case 'hasPool': {
+      if (typeof value === 'boolean') return value;
+      const text = String(value).trim().toUpperCase();
+      if (['TRUE', 'YES', 'Y', '1'].includes(text)) return true;
+      if (['FALSE', 'NO', 'N', '0'].includes(text)) return false;
+      return undefined;
+    }
+    case 'propertyType':
+    case 'constructionMaterial':
+    case 'roofType':
+    case 'foundationType': {
+      const text = String(value ?? '').trim();
+      return text && text.length <= 60 ? text : undefined;
+    }
+    default: return undefined;
+  }
+}
+
 function cacheTtlDays() {
   const n = Number(process.env.PROPERTY_LOOKUP_CACHE_TTL_DAYS);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TTL_DAYS;
@@ -62,6 +96,20 @@ function addressKey(address) {
   };
 }
 
+function overridesNewerThanData(row) {
+  const overrides = row?.verified_overrides || {};
+  const entries = Object.values(overrides);
+  if (!entries.length) return false;
+  // Rows written before data_saved_at existed (or stubs) cannot prove the
+  // data is newer than the correction — fail toward the live lookup.
+  const dataSavedAt = row?.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
+  if (!dataSavedAt) return true;
+  return entries.some((entry) => {
+    const verifiedAt = entry?.verifiedAt ? new Date(entry.verifiedAt).getTime() : 0;
+    return verifiedAt > dataSavedAt;
+  });
+}
+
 // Cached lookup data — null when the cache is disabled, the row is missing,
 // the data slot is empty (override-only stub row), or the row expired.
 async function getCachedLookup(address) {
@@ -74,6 +122,14 @@ async function getCachedLookup(address) {
     // Defense in depth vs. partial rows (saveLookup refuses to write them):
     // no stored coordinates = no satellite regeneration = treat as a miss.
     if (row.lat == null || row.lng == null) return null;
+    // A field verified AFTER the data was cached invalidates the hit: the
+    // stored aiAnalysis (turf, pool cage, pest pressure) was derived from the
+    // pre-correction facts. The live re-run folds the corrections into the
+    // vision pass and re-saves with a fresh data_saved_at, so hits resume.
+    if (overridesNewerThanData(row)) {
+      logger.info('[lookup-cache] cached data predates a verified override — treating as miss');
+      return null;
+    }
     return row;
   } catch (err) {
     logger.warn('[lookup-cache] read failed', { error: err.message });
@@ -106,10 +162,15 @@ async function saveLookup(address, result) {
   // no vision pass — a cached no-geometry row would skip both for the whole
   // TTL (neither the estimator UI nor the public route sends refresh).
   if (!Number.isFinite(result.satellite?.lat) || !Number.isFinite(result.satellite?.lng)) return;
+  // And for vision: a lookup where all three vision models failed has no
+  // turf/pool/pest-pressure analysis — caching it would serve defaulted
+  // pricing inputs for the whole TTL. Let the next lookup retry instead.
+  if (!result.aiAnalysis) return;
   try {
     const { hash, normalizedAddress } = addressKey(address);
     const record = result.propertyRecord;
-    const expiresAt = new Date(Date.now() + cacheTtlDays() * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + cacheTtlDays() * 24 * 60 * 60 * 1000);
     const payload = {
       address_hash: hash,
       normalized_address: normalizedAddress,
@@ -118,11 +179,14 @@ async function saveLookup(address, result) {
       lat: Number.isFinite(result.satellite?.lat) ? result.satellite.lat : null,
       lng: Number.isFinite(result.satellite?.lng) ? result.satellite.lng : null,
       property_record: JSON.stringify(record),
-      ai_analysis: result.aiAnalysis ? JSON.stringify(result.aiAnalysis) : null,
+      ai_analysis: JSON.stringify(result.aiAnalysis),
       parcel: record._parcel ? JSON.stringify(record._parcel) : null,
       providers: JSON.stringify(record._aiProviders || []),
       enriched_snapshot: result.enriched ? JSON.stringify(result.enriched) : null,
       lookup_ms: Number.isFinite(result.meta?.lookupMs) ? result.meta.lookupMs : null,
+      // Freshness anchor for the override-vs-data comparison in
+      // getCachedLookup (updated_at also moves on override saves).
+      data_saved_at: now,
       expires_at: expiresAt,
       updated_at: db.fn.now(),
     };
@@ -140,48 +204,48 @@ async function saveLookup(address, result) {
 }
 
 // Merge one or more verified field values into the row (creating an
-// override-only stub row when the address was never cached). Returns the
-// stored overrides map.
+// override-only stub row when the address was never cached). The merge is a
+// single atomic JSONB `||` upsert — concurrent /verify requests for the same
+// address each fold in their own fields without clobbering the other's.
+// Returns the stored overrides map.
 async function saveVerifiedOverride(address, fields, verifiedBy) {
-  const entries = Object.entries(fields || {})
-    .filter(([field, value]) => VERIFIABLE_FIELDS.has(field) && value !== undefined && value !== null && value !== '');
-  if (!entries.length) return null;
-
-  const { hash, normalizedAddress } = addressKey(address);
   const now = new Date().toISOString();
   const additions = {};
-  for (const [field, value] of entries) {
-    additions[field] = { value, verifiedBy: verifiedBy || null, verifiedAt: now };
+  for (const [field, value] of Object.entries(fields || {})) {
+    if (!VERIFIABLE_FIELDS.has(field)) continue;
+    const sanitized = sanitizeVerifiedValue(field, value);
+    if (sanitized === undefined) continue;
+    additions[field] = { value: sanitized, verifiedBy: verifiedBy || null, verifiedAt: now };
   }
+  if (!Object.keys(additions).length) return null;
 
-  const existing = await db('property_lookups')
-    .where({ address_hash: hash })
-    .first('id', 'verified_overrides');
-  const merged = { ...(existing?.verified_overrides || {}), ...additions };
-
-  if (existing) {
-    await db('property_lookups').where({ id: existing.id }).update({
-      verified_overrides: JSON.stringify(merged),
+  const { hash, normalizedAddress } = addressKey(address);
+  await db('property_lookups')
+    .insert({
+      address_hash: hash,
+      normalized_address: normalizedAddress,
+      verified_overrides: JSON.stringify(additions),
+      verified_by: verifiedBy || null,
+      verified_at: db.fn.now(),
+      // No cached data and nothing to expire — an override-only stub carries
+      // the corrections until the next live lookup fills the row.
+      expires_at: null,
+    })
+    .onConflict('address_hash')
+    .merge({
+      verified_overrides: db.raw('property_lookups.verified_overrides || excluded.verified_overrides'),
       verified_by: verifiedBy || null,
       verified_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
-  } else {
-    await db('property_lookups').insert({
-      address_hash: hash,
-      normalized_address: normalizedAddress,
-      verified_overrides: JSON.stringify(merged),
-      verified_by: verifiedBy || null,
-      verified_at: db.fn.now(),
-      // No cached data and nothing to expire — the stub exists purely to
-      // carry the overrides until the next live lookup fills the row.
-      expires_at: null,
-    });
-  }
+
+  const row = await db('property_lookups')
+    .where({ address_hash: hash })
+    .first('verified_overrides');
   logger.info('[lookup-cache] verified override saved', {
-    fields: entries.map(([field]) => field),
+    fields: Object.keys(additions),
   });
-  return merged;
+  return row?.verified_overrides || additions;
 }
 
 // Surgically apply overrides to a merged property record: overwrite the

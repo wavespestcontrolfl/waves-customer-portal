@@ -58,21 +58,6 @@ function fakeTable({ row = null, writes = [] } = {}) {
   return builder;
 }
 
-function rowFromUpsert(payload, extra = {}) {
-  return {
-    ...payload,
-    property_record: JSON.parse(payload.property_record),
-    ai_analysis: payload.ai_analysis ? JSON.parse(payload.ai_analysis) : null,
-    parcel: payload.parcel ? JSON.parse(payload.parcel) : null,
-    // pg numeric columns come back as strings.
-    lat: payload.lat == null ? null : String(payload.lat),
-    lng: payload.lng == null ? null : String(payload.lng),
-    verified_overrides: {},
-    updated_at: '2026-06-11T12:00:00Z',
-    ...extra,
-  };
-}
-
 const savedEnv = {};
 const KEYS = ['GOOGLE_MAPS_API_KEY', 'GOOGLE_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY'];
 const originalFetch = global.fetch;
@@ -115,31 +100,66 @@ afterEach(() => {
   }
 });
 
+// Cached-row fixture matching what saveLookup writes for the trio mock above
+// (the live path in this test env has no vision keys, so a full row is built
+// by hand — saveLookup correctly refuses to cache vision-less lookups).
+function cachedRow(extra = {}) {
+  return {
+    property_record: {
+      formattedAddress: ADDRESS,
+      county: 'Charlotte',
+      squareFootage: 1348,
+      lotSize: 10043,
+      stories: 1,
+      propertyType: 'Single Family',
+      hasPool: false,
+      _provider: 'charlotte_pao',
+      _source: 'county',
+      _aiProviders: ['charlotte_pao'],
+      _fieldEvidence: {
+        lotSize: { value: 10043, sourceType: 'county', fieldVerify: false, evidence: [] },
+      },
+      _parcel: { parcelId: '402217351013', county: 'Charlotte', polygon: null, polygonAreaSqft: 10085 },
+    },
+    ai_analysis: { estimatedTurfSf: 6000, confidenceScore: 80 },
+    lat: '26.9897',
+    lng: '-82.1390',
+    verified_overrides: {},
+    data_saved_at: '2026-06-11T12:00:00Z',
+    expires_at: new Date(Date.now() + 86400000).toISOString(),
+    updated_at: '2026-06-11T12:00:00Z',
+    ...extra,
+  };
+}
+
 describe('performPropertyLookup cache integration', () => {
-  it('miss → save → hit, with key-by-key response shape parity', async () => {
+  it('a vision-less live lookup is a miss and is NOT cached', async () => {
     const writes = [];
     mockDbHandler = () => fakeTable({ row: null, writes });
 
     const live = await performPropertyLookup(ADDRESS);
     expect(live.meta.cache).toBe('miss');
+    expect(live.aiAnalysis).toBeNull();
     expect(lookupPropertyFromAITrio).toHaveBeenCalledTimes(1);
-    const upsert = writes.find(([kind]) => kind === 'upsert');
-    expect(upsert).toBeTruthy();
+    // No vision keys in test env → aiAnalysis null → never cached.
+    expect(writes.some(([kind]) => kind === 'upsert')).toBe(false);
+  });
 
-    const row = rowFromUpsert(upsert[1]);
-    mockDbHandler = () => fakeTable({ row });
+  it('hit serves the cached row with key-by-key response shape parity', async () => {
+    mockDbHandler = () => fakeTable({ row: null });
+    const live = await performPropertyLookup(ADDRESS);
 
+    mockDbHandler = () => fakeTable({ row: cachedRow() });
     const hit = await performPropertyLookup(ADDRESS);
     expect(hit.meta.cache).toBe('hit');
     expect(hit.meta.cachedAt).toBeTruthy();
-    // No second live lookup.
+    // Only the first (live) call ran the trio.
     expect(lookupPropertyFromAITrio).toHaveBeenCalledTimes(1);
 
-    // Shape parity: every top-level key of the live response exists on the
-    // hit (meta gains cachedAt; that is additive).
+    // Shape parity: same top-level keys as a live response.
     expect(Object.keys(hit).sort()).toEqual(Object.keys(live).sort());
     expect(hit.propertyRecord.squareFootage).toBe(live.propertyRecord.squareFootage);
-    expect(hit.enriched.lotSqFt).toBe(live.enriched.lotSqFt);
+    expect(hit.aiAnalysis.estimatedTurfSf).toBe(6000);
     expect(hit.rentcast).toBe(hit.propertyRecord);
 
     // Satellite URLs regenerated with the CURRENT key, never stored ones.
@@ -149,40 +169,18 @@ describe('performPropertyLookup cache integration', () => {
   });
 
   it('refresh forces a live lookup even with a fresh row', async () => {
-    const writes = [];
-    const row = {
-      property_record: { squareFootage: 1348, county: 'Charlotte' },
-      ai_analysis: null,
-      lat: '26.9897',
-      lng: '-82.1390',
-      verified_overrides: {},
-      expires_at: new Date(Date.now() + 86400000).toISOString(),
-      updated_at: '2026-06-11T12:00:00Z',
-    };
-    mockDbHandler = () => fakeTable({ row, writes });
+    mockDbHandler = () => fakeTable({ row: cachedRow() });
 
     const result = await performPropertyLookup(ADDRESS, { refresh: true });
     expect(result.meta.cache).toBe('refresh');
     expect(lookupPropertyFromAITrio).toHaveBeenCalledTimes(1);
-    expect(writes.some(([kind]) => kind === 'upsert')).toBe(true);
   });
 
   it('verified overrides apply on cache hits and on refresh lookups', async () => {
+    // Override is OLDER than data_saved_at — the hit stays valid.
     const overrides = { lotSize: { value: 12000, verifiedBy: 'Adam', verifiedAt: '2026-06-11T00:00:00Z' } };
-    const row = {
-      property_record: {
-        squareFootage: 1348,
-        lotSize: 10043,
-        county: 'Charlotte',
-        _fieldEvidence: { lotSize: { value: 10043, sourceType: 'county', fieldVerify: true, evidence: [] } },
-      },
-      ai_analysis: null,
-      lat: '26.9897',
-      lng: '-82.1390',
-      verified_overrides: overrides,
-      expires_at: new Date(Date.now() + 86400000).toISOString(),
-      updated_at: '2026-06-11T12:00:00Z',
-    };
+    const row = cachedRow({ verified_overrides: overrides });
+    row.property_record._fieldEvidence.lotSize.fieldVerify = true;
     mockDbHandler = () => fakeTable({ row });
 
     const hit = await performPropertyLookup(ADDRESS);
@@ -198,13 +196,22 @@ describe('performPropertyLookup cache integration', () => {
     expect(refreshed.propertyRecord._fieldEvidence.lotSize.sourceType).toBe('verified');
   });
 
+  it('an override saved AFTER the cached data forces a live re-run', async () => {
+    const overrides = { lotSize: { value: 12000, verifiedAt: '2026-06-11T13:00:00Z' } };
+    mockDbHandler = () => fakeTable({ row: cachedRow({ verified_overrides: overrides }) });
+
+    const result = await performPropertyLookup(ADDRESS);
+    // data_saved_at (12:00Z) predates the correction (13:00Z) — the stored
+    // aiAnalysis was derived from pre-correction facts, so it's a miss.
+    expect(result.meta.cache).toBe('miss');
+    expect(lookupPropertyFromAITrio).toHaveBeenCalledTimes(1);
+    expect(result.propertyRecord.lotSize).toBe(12000);
+  });
+
   it('expired rows are misses', async () => {
-    const row = {
-      property_record: { squareFootage: 1348 },
-      verified_overrides: {},
-      expires_at: new Date(Date.now() - 1000).toISOString(),
-    };
-    mockDbHandler = () => fakeTable({ row });
+    mockDbHandler = () => fakeTable({
+      row: cachedRow({ expires_at: new Date(Date.now() - 1000).toISOString() }),
+    });
 
     const result = await performPropertyLookup(ADDRESS);
     expect(result.meta.cache).toBe('miss');
