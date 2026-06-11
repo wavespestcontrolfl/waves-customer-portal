@@ -4146,6 +4146,23 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       throw err;
     }
     logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
+    // Without this the visit never enters appointment_reminders, so the
+    // 72h/24h reminder cron can't see it (the cron reads only that table).
+    // sendConfirmation:false — no immediate SMS; the customer was told about
+    // the follow-up in person at completion. Best-effort: never fails the booking.
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        appointment.id,
+        svc.customer_id,
+        `${date}T${String(insertData.window_start || '08:00').slice(0, 5)}`,
+        svc.service_type,
+        'booking_followup',
+        { sendConfirmation: false },
+      );
+    } catch (e) {
+      logger.error(`[dispatch] Reminder registration failed for follow-up ${appointment.id}: ${e.message}`);
+    }
     res.json({
       success: true,
       alreadyScheduled: false,
