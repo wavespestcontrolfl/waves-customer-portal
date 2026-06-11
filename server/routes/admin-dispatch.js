@@ -1779,13 +1779,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // internal_only renders + stores the report (token/PDF) without customer
     // SMS/email — the Phase-1b shadow mode. Recurring completions
     // (findingsType null) are never affected.
-    const typedDeliveryMode = typedFindingsType
+    // let, not const: re-derived from the record's FROZEN delivery posture
+    // once the record is final, so a crash-resumed completion can't pick up
+    // a later profile graduation (see the re-derivation before token mint).
+    let typedDeliveryMode = typedFindingsType
       ? (process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true'
         ? 'disabled'
         : (completionProfile?.deliveryMode || 'auto_send'))
       : 'auto_send';
-    const suppressTypedCustomerComms = !!typedFindingsType && typedDeliveryMode !== 'auto_send';
-    const effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+    let suppressTypedCustomerComms = !!typedFindingsType && typedDeliveryMode !== 'auto_send';
+    let effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
@@ -3064,6 +3067,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
     // prod for app-internal redirects). publicPortalUrl() reads
     // PUBLIC_PORTAL_URL first which is the canonical public origin.
+    // Resume safety: a crash-resumed completion re-enters here with the
+    // record already committed — and the profile may have graduated since
+    // (e.g. Phase-1b internal_only → auto_send). The record's FROZEN
+    // typedReportDelivery is the truth for this completion's delivery
+    // gates; the live profile only decides for brand-new records (the
+    // freeze itself is written from the profile at insert time).
+    if (typedFindingsType && record?.structured_notes) {
+      const frozenDelivery = parseJsonObject(record.structured_notes)?.typedReportDelivery;
+      if (frozenDelivery && frozenDelivery !== typedDeliveryMode) {
+        typedDeliveryMode = frozenDelivery;
+        suppressTypedCustomerComms = typedDeliveryMode !== 'auto_send';
+        effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+      }
+    }
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
     let reportToken = null;

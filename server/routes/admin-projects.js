@@ -1172,13 +1172,24 @@ router.post('/', async (req, res, next) => {
     // blocks. When both links are present they must refer to the same visit,
     // or a crafted create could pair a project_required appointment with a
     // typed record and never have the record's profile checked.
+    // FAIL CLOSED on resolver errors: a linked create whose profile can't be
+    // verified must not slip through as a dual-entry project (the type-level
+    // guard no longer covers partially-cutover types). 503, not silent null.
     let linkedProfile = null;
     let recordScheduledServiceId = null;
     if (service_record_id) {
-      const linkedRecord = await db('service_records')
-        .where({ id: service_record_id })
-        .first('scheduled_service_id')
-        .catch(() => null);
+      let linkedRecord;
+      try {
+        linkedRecord = await db('service_records')
+          .where({ id: service_record_id })
+          .first('scheduled_service_id');
+      } catch (err) {
+        logger.error(`[projects] linked record lookup failed for ${service_record_id}: ${err.message}`);
+        return res.status(503).json({
+          error: 'Could not verify the linked service record — try again shortly.',
+          code: 'project_link_unverifiable',
+        });
+      }
       recordScheduledServiceId = linkedRecord?.scheduled_service_id || null;
     }
     if (scheduled_service_id && recordScheduledServiceId
@@ -1190,8 +1201,15 @@ router.post('/', async (req, res, next) => {
     }
     const linkedScheduledServiceId = scheduled_service_id || recordScheduledServiceId;
     if (linkedScheduledServiceId) {
-      linkedProfile = await resolveCompletionProfileForServiceId(linkedScheduledServiceId)
-        .catch(() => null);
+      try {
+        linkedProfile = await resolveCompletionProfileForServiceId(linkedScheduledServiceId);
+      } catch (err) {
+        logger.error(`[projects] linked profile resolution failed for ${linkedScheduledServiceId}: ${err.message}`);
+        return res.status(503).json({
+          error: 'Could not verify the linked appointment — try again shortly.',
+          code: 'project_link_unverifiable',
+        });
+      }
       if (linkedProfile?.findingsType) {
         return res.status(422).json({
           error: 'This appointment completes through its service-specific findings form — finish the visit from Dispatch instead of creating a project.',
