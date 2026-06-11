@@ -147,6 +147,13 @@ function polygonContainsPoint(rings, lng, lat) {
   return Array.isArray(rings) && rings.some((ring) => pointInRing(ring, lng, lat));
 }
 
+// The ring with the largest absolute area is the parcel's outer boundary;
+// the rest are holes (overlays only draw the boundary).
+function outerRing(rings) {
+  if (!Array.isArray(rings) || !rings.length) return null;
+  return [...rings].sort((a, b) => Math.abs(ringSignedAreaSqft(b)) - Math.abs(ringSignedAreaSqft(a)))[0] || null;
+}
+
 // Decimate a ring to at most maxPoints vertices, always keeping the first
 // and last (Static Maps path overlays cap out on URL length — PR3).
 function simplifyRing(ring, maxPoints) {
@@ -300,6 +307,7 @@ module.exports = {
   lookupParcelByPoint,
   countyFromCoNo,
   normalizeParcelIdForPao,
+  outerRing,
   polygonAreaSqft,
   simplifyRing,
   isParcelGisDisabled,
