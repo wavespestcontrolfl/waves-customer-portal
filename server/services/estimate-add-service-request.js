@@ -222,6 +222,14 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
     };
   }
 
+  // Existing-customer estimates persist the account's qualifying services at
+  // save time (estData.priorQualifyingServices) OUTSIDE engineInputs. Replay
+  // them so the draft prices at the COMBINED WaveGuard tier the public page
+  // advertised, not as if the requested service were standalone.
+  if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
+    updatedInputs.priorQualifyingServices = estData.priorQualifyingServices;
+  }
+
   try {
     const v1Result = generateEstimate(updatedInputs);
     const legacyResult = mapV1ToLegacyShape(v1Result);

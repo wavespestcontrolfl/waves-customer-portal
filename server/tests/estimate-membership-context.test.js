@@ -167,6 +167,30 @@ describe('computeMembershipContext', () => {
     expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 11.70 });
   });
 
+  test('discount line items reduce the last-paid per-visit basis', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      // $120 visit with a -$12 member discount row — the customer actually
+      // paid $108, so savings must be based on $108, not $120.
+      paidInvoices: [{
+        service_type: 'pest_control',
+        total: '108.00',
+        paid_at: '2026-05-20',
+        line_items: JSON.stringify([
+          { description: 'Quarterly pest control visit', quantity: 1, unit_price: 120 },
+          { description: 'WaveGuard Silver — 10% off', quantity: 1, amount: -12 },
+        ]),
+      }],
+    });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 10.80 });
+  });
+
   test('an all-setup invoice is skipped in favor of an older service invoice', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),

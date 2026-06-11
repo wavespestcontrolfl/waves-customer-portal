@@ -156,6 +156,19 @@ describe('estimate add-service request workflow', () => {
     }));
   });
 
+  test('replays prior qualifying services so cross-sell drafts price at the combined tier', () => {
+    const estimate = baseEstimate();
+    estimate.estimate_data.priorQualifyingServices = ['lawn_care', 'mosquito'];
+
+    const revision = buildEstimateServiceRevisionDraft(estimate, 'termite_bait');
+
+    expect(revision.status).toBe('priced');
+    expect(revision.draftEstimateData.inputs.priorQualifyingServices).toEqual(['lawn_care', 'mosquito']);
+    // pest (this estimate) + lawn + mosquito (prior) + termite bait = 4
+    // qualifying services — Platinum, not a standalone-termite Bronze.
+    expect(revision.updated.tier).toBe('Platinum');
+  });
+
   test('builds a draft revision without mutating the live estimate', () => {
     const estimate = baseEstimate();
     const originalMonthly = estimate.monthly_total;

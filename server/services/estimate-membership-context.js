@@ -174,8 +174,11 @@ function estimatePerApplicationFor(estData, key) {
 // basis — the FIRST standard accept invoice can carry the $99 WaveGuard setup
 // AND the first application on the same service-linked invoice, and reading
 // its raw total would inflate the advertised per-visit savings.
+// Match the membership/setup wording specifically — a bare /waveguard/ would
+// also swallow tier-discount rows like "WaveGuard Silver — 10% off", which
+// must stay in the net (they're part of what the customer actually paid).
 function isSetupLineItem(line = {}) {
-  return /waveguard|membership|setup fee/i.test(String(line.description || ''));
+  return /membership|setup fee|waveguard setup/i.test(String(line.description || ''));
 }
 
 function invoiceLineItems(row = {}) {
@@ -190,12 +193,14 @@ function invoiceLineItems(row = {}) {
   return [];
 }
 
+// Signed — discount/adjustment rows carry negative amounts and must reduce
+// what counts as "last paid", not be dropped.
 function lineItemAmount(line = {}) {
   const explicit = Number(line.amount);
-  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  if (Number.isFinite(explicit) && explicit !== 0) return explicit;
   const qty = Number(line.quantity) || 1;
   const unit = Number(line.unit_price);
-  return Number.isFinite(unit) && unit > 0 ? unit * qty : 0;
+  return Number.isFinite(unit) ? unit * qty : 0;
 }
 
 // What the invoice charged for the SERVICE itself: the sum of its
@@ -208,7 +213,8 @@ function invoiceServiceAmount(row = {}) {
       .filter((line) => !isSetupLineItem(line))
       .reduce((sum, line) => sum + lineItemAmount(line), 0);
     if (serviceTotal > 0) return round2(serviceTotal);
-    // All lines were setup/membership — not a per-visit price.
+    // All lines were setup/membership (or discounts netted to zero) — not a
+    // usable per-visit price.
     return null;
   }
   const total = Number(row.total);
