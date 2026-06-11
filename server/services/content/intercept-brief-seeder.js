@@ -147,8 +147,42 @@ function loadManifest(file = DEFAULT_MANIFEST_PATH) {
       // Owner directive 2026-06-11: no door-to-door content, ever.
       throw new Error(`intercept manifest contains an E-cluster brief (${brief.id}) — door-to-door content is excluded by owner directive`);
     }
+    // Validate the sources/source_notes contract at seed time: `sources` must
+    // be http(s) URLs only (they feed the must-link citation list AND the
+    // archive.org snapshot step); instruction strings belong in
+    // `source_notes`. splitBriefSources warns + demotes defensively rather
+    // than throwing — a manifest typo must not strand the whole seed run.
+    splitBriefSources(brief);
   }
   return manifest;
+}
+
+/**
+ * Manifest source contract: `sources` = http(s) URLs only (must-link in-post
+ * citations + archive.org snapshot targets); `source_notes` = operator
+ * sourcing directives that aren't resolvable URLs ("Orkin published
+ * terms/plan pages (pull + snapshot at draft)", "UF/IFAS for agronomic
+ * claims"). Defensive: a non-URL string that slips into `sources` is demoted
+ * to a note (warned, never silently dropped) so the snapshot step only ever
+ * consumes real URLs and no operator instruction is lost.
+ */
+function splitBriefSources(payload = {}) {
+  const urls = [];
+  const stray = [];
+  for (const entry of (Array.isArray(payload.sources) ? payload.sources : [])) {
+    const value = String(entry || '').trim();
+    if (!value) continue;
+    if (/^https?:\/\//i.test(value)) urls.push(value);
+    else stray.push(value);
+  }
+  if (stray.length) {
+    logger.warn(`[intercept-brief-seeder] brief ${payload.id || '?'}: ${stray.length} non-URL "sources" entr${stray.length === 1 ? 'y' : 'ies'} demoted to source_notes — sources must be http(s) URLs`);
+  }
+  const notes = [
+    ...(Array.isArray(payload.source_notes) ? payload.source_notes : []).map((n) => String(n || '').trim()).filter(Boolean),
+    ...stray,
+  ];
+  return { urls, notes };
 }
 
 function rowForBrief(brief, manifest, { now = new Date() } = {}) {
@@ -260,6 +294,7 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
   if (!payload) return null;
 
   const outline = Array.isArray(payload.outline) ? [...payload.outline] : [];
+  const { urls: requiredSources, notes: sourceNotes } = splitBriefSources(payload);
   const outlineHasFaq = outline.some((s) => FAQ_SECTION_RE.test(String(s || '')));
   const structural = requiredSections.filter((s) => {
     if (outlineHasFaq && FAQ_SECTION_RE.test(String(s || ''))) return false; // operator FAQ spec wins
@@ -302,7 +337,13 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
     outline,
     primary_kw: payload.primary_kw || null,
     secondary_kws: Array.isArray(payload.secondary_kws) ? payload.secondary_kws : [],
-    required_sources: Array.isArray(payload.sources) ? payload.sources : [],
+    required_sources: requiredSources,
+    // Operator sourcing directives that are not resolvable URLs ("Orkin
+    // published terms/plan pages (pull + snapshot at draft)", "UF/IFAS for
+    // agronomic claims") — binding writer instructions, kept separate from
+    // `sources` so the archive.org snapshot step only ever consumes real
+    // http(s) URLs and the directives still reach the writer verbatim.
+    source_notes: sourceNotes,
     verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
     internal_links_required: Array.isArray(payload.internal_links) ? payload.internal_links : [],
     schema_types: Array.isArray(payload.schema_types) ? payload.schema_types : [],
@@ -325,7 +366,7 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
     refresh_schema_note: isRefresh && Array.isArray(payload.schema_types) && payload.schema_types.length
       ? `Operator requests ${payload.schema_types.join(' + ')} schema on this page, but the refresh publisher freezes live schema/frontmatter — apply the schema change manually (or via a follow-up page edit) when reviewing this parked refresh.`
       : null,
-    binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, globalRules: meta.manifest_notes, isRefresh }),
+    binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, globalRules: meta.manifest_notes, isRefresh, requiredSources, sourceNotes }),
   };
 
   return {
@@ -336,15 +377,23 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
   };
 }
 
-function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules, isRefresh = false }) {
+function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules, isRefresh = false, requiredSources = [], sourceNotes = [] }) {
   const lines = [
     'This is an OPERATOR-AUTHORED intercept brief. Everything below is BINDING — do not re-derive the topic, angle, slug, or sources.',
     payload.working_title ? `TITLE DIRECTION: "${payload.working_title}" — refine for length/SEO but keep the meaning and promise intact.` : null,
     payload.slug ? `SLUG (exact, binding): ${payload.slug} — set frontmatter slug and canonical to match exactly.` : null,
     payload.thesis ? `THESIS (the post must argue exactly this): ${payload.thesis}` : null,
     'OUTLINE: cover every outline item in the brief\'s required_sections, in order — they are the content plan, not suggestions.',
-    payload.sources?.length
-      ? `REQUIRED SOURCES (cite IN-POST): every source below must be linked in the body with explicit attribution (name the source where you cite it). Quote exactly where the brief calls for verbatim quotes. Sources: ${payload.sources.join(' | ')}`
+    requiredSources.length
+      ? `REQUIRED SOURCES (cite IN-POST): every source below must be linked in the body with explicit attribution (name the source where you cite it). Quote exactly where the brief calls for verbatim quotes. Sources: ${requiredSources.join(' | ')}`
+      : null,
+    // Non-URL sourcing directives (manifest `source_notes`) are instructions
+    // for sources the writer must locate ("Orkin published terms/plan pages",
+    // "UF/IFAS for agronomic claims") — binding, and distinct from the
+    // must-link URL list above so the snapshot step never tries to archive a
+    // sentence.
+    sourceNotes.length
+      ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post as real linked URLs with explicit attribution, and OMIT any claim those pages do not support.`
       : null,
     ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified against the cited source, OMIT the claim entirely.`) : []),
     payload.internal_links?.length
@@ -489,6 +538,7 @@ module.exports = {
     availableAtFor,
     rowForBrief,
     buildBindingInstructions,
+    splitBriefSources,
     BYLINE_AUTHORS,
     EXPIRES_DAYS_AFTER_AVAILABLE,
     waybackTimestamp,

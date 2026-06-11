@@ -455,3 +455,62 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     expect(persisted.intercept_snapshots).toEqual(snapshots);
   });
 });
+
+// ── manifest source contract: URLs (snapshot targets) vs directives ─
+
+describe('splitBriefSources — sources are URLs, directives are source_notes', () => {
+  const { splitBriefSources } = seeder._internals;
+  const logger = require('../services/logger');
+
+  test('URLs stay in urls; existing source_notes ride through as notes, no warning', () => {
+    const { urls, notes } = splitBriefSources({
+      id: 'B4',
+      sources: ['https://example.com/a/', 'https://example.com/b/'],
+      source_notes: ['Orkin published terms/plan pages (pull + snapshot at draft)'],
+    });
+    expect(urls).toEqual(['https://example.com/a/', 'https://example.com/b/']);
+    expect(notes).toEqual(['Orkin published terms/plan pages (pull + snapshot at draft)']);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('a non-URL string in sources is demoted to notes with a warning — never silently dropped', () => {
+    const { urls, notes } = splitBriefSources({
+      id: 'D1',
+      sources: ['https://example.com/a/', 'county ordinance pages for blackout dates'],
+      source_notes: ['UF/IFAS for agronomic claims'],
+    });
+    expect(urls).toEqual(['https://example.com/a/']);
+    expect(notes).toEqual(['UF/IFAS for agronomic claims', 'county ordinance pages for blackout dates']);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('demoted to source_notes'));
+  });
+
+  test('manifest as shipped: every brief splits to URL-only sources (snapshot-safe)', () => {
+    const manifest = seeder.loadManifest();
+    for (const brief of manifest.briefs) {
+      const { urls } = splitBriefSources(brief);
+      for (const u of urls) expect(u).toMatch(/^https?:\/\//);
+    }
+  });
+});
+
+describe('sourcing directives reach the writer (the snapshot step never archives a sentence)', () => {
+  test('B4: source_notes flow into operator_brief + a binding SOURCING DIRECTIVES line', () => {
+    const manifest = seeder.loadManifest();
+    const byId = Object.fromEntries(manifest.briefs.map((b) => [b.id, b]));
+    const overlay = seeder.buildOperatorOverlay({
+      opportunity: { signal_metadata: { intercept_brief: byId.B4 } },
+      pageType: 'supporting-blog',
+    });
+    const op = overlay.operator_brief;
+
+    expect(op.source_notes.length).toBeGreaterThan(0);
+    expect(op.required_sources.every((u) => /^https?:\/\//.test(u))).toBe(true);
+
+    const joined = op.binding_instructions.join('\n');
+    expect(joined).toMatch(/SOURCING DIRECTIVES \(binding\):/);
+    expect(joined).toContain('Orkin published terms/plan pages');
+    // The must-link REQUIRED SOURCES list never contains a directive sentence.
+    const requiredLine = op.binding_instructions.find((l) => /REQUIRED SOURCES/.test(l)) || '';
+    expect(requiredLine).not.toContain('Orkin published terms');
+  });
+});
