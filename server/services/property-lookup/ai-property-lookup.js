@@ -688,9 +688,10 @@ async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
     }
     return record;
   } catch (err) {
+    // No parcel ID here — parcel IDs identify the exact customer property
+    // (same PII rule as the parcel-gis logs).
     logger.warn('[county-property] by-parcel lookup errored', {
       county: parcel.county,
-      parcelId: parcel.paoParcelId,
       elapsedMs: Date.now() - t0,
       error: summarizeProviderError(err),
     });
@@ -1060,8 +1061,11 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   if (parcel?.paoParcelId) {
     const remainingMs = remainingCountyLookupMs(t0, countyTimeoutMs);
     if (remainingMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
+      // Cap the by-parcel attempt at half the county budget: a stale parcel
+      // or stalled PAO detail fetch must leave the typed-address fallback
+      // below enough time to run (mirrors the geo starvation cap).
       countyRecord = await lookupPropertyFromCountyByParcel(parcel, searchAddress, {
-        timeoutMs: remainingMs,
+        timeoutMs: Math.min(remainingMs, Math.ceil(countyTimeoutMs / 2)),
         geoContext,
       }).catch(() => null);
     }

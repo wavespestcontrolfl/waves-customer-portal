@@ -92,6 +92,15 @@ describe('parcel-gis geometry helpers', () => {
     const picked = pickParcelFeature([master, unit, neighbor], px, py);
     expect(picked.attributes.PARCEL_ID).toBe('UNIT');
   });
+
+  it('pickParcelFeature returns null on identical-footprint ties (stacked units)', () => {
+    const px = -82.5 + 10 * LNG_FT;
+    const py = LAT0 + 10 * FT;
+    const ring = squareRing(LAT0, -82.5, 40);
+    const unitA = fdorFeature({ PARCEL_ID: 'UNIT-A' }, [ring]);
+    const unitB = fdorFeature({ PARCEL_ID: 'UNIT-B' }, [ring.map((p) => [...p])]);
+    expect(pickParcelFeature([unitA, unitB], px, py)).toBeNull();
+  });
 });
 
 describe('parcel-gis attribute mapping', () => {
@@ -399,6 +408,35 @@ describe('trio by-parcel routing', () => {
     // Address search attempted after the GIS miss.
     expect(fetchedUrls.some((u) => u.includes('parcel-search-results'))).toBe(true);
   });
+
+  it('a stalled by-parcel detail fetch still leaves the address search its turn', async () => {
+    // GIS hit, then the Manatee detail fetches hang until aborted — the
+    // half-budget cap must leave time for the address-search fallback.
+    process.env.COUNTY_PROPERTY_TIMEOUT_MS = '2000';
+    const fetchedUrls = [];
+    global.fetch = jest.fn((url, init) => new Promise((resolve, reject) => {
+      const urlText = String(url);
+      fetchedUrls.push(urlText);
+      if (urlText.includes('arcgis.com')) {
+        return resolve({ ok: true, json: async () => ({ features: [fdorFeature()] }) });
+      }
+      if (urlText.includes('pao-model-land.php') || urlText.includes('pao-model-buildings.php')) {
+        if (init?.signal?.aborted) return reject(new Error('aborted'));
+        if (init?.signal) init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+        return undefined; // hang until the capped timeout aborts
+      }
+      return reject(new Error('network disabled in test'));
+    }));
+
+    try {
+      await lookupPropertyFromAITrio('5510 Lakewood Ranch Blvd, Bradenton, FL 34211', geo);
+      // After the by-parcel attempt aborts at ~half budget, the typed-address
+      // search must still have run.
+      expect(fetchedUrls.some((u) => u.includes('parcel-search-results'))).toBe(true);
+    } finally {
+      delete process.env.COUNTY_PROPERTY_TIMEOUT_MS;
+    }
+  }, 15000);
 
   it('non-rooftop geocodes never touch the GIS layer', async () => {
     const fetchedUrls = [];

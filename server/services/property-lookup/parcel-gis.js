@@ -162,7 +162,10 @@ function simplifyRing(ring, maxPoints) {
 
 // Condo towers and other stacked parcels can intersect one point with several
 // features; the smallest polygon actually containing the point is the unit's
-// own parcel rather than a master/common-area parcel.
+// own parcel rather than a master/common-area parcel. Identical-footprint
+// candidates (stacked units sharing one outline) are indistinguishable by
+// area — return null so the caller falls back to the address search instead
+// of fetching an arbitrary unit's record.
 function pickParcelFeature(features, lng, lat) {
   const scored = features
     .map((feature) => ({
@@ -173,7 +176,11 @@ function pickParcelFeature(features, lng, lat) {
     .sort((a, b) => a.areaSqft - b.areaSqft);
 
   const containing = scored.filter((item) => item.rings && polygonContainsPoint(item.rings, lng, lat));
-  return (containing[0] || scored[0])?.feature || null;
+  const pool = containing.length ? containing : scored;
+  if (pool.length >= 2 && Math.abs(pool[0].areaSqft - pool[1].areaSqft) < 1) {
+    return null;
+  }
+  return pool[0]?.feature || null;
 }
 
 async function lookupParcelByPoint(lat, lng, options = {}) {
@@ -222,6 +229,13 @@ async function lookupParcelByPoint(lat, lng, options = {}) {
     }
 
     const feature = pickParcelFeature(features, lng, lat);
+    if (!feature) {
+      logger.info('[parcel-gis] ambiguous stacked parcels at point — deferring to address search', {
+        count: features.length,
+        elapsedMs: Date.now() - t0,
+      });
+      return null;
+    }
     const attrs = feature?.attributes || {};
     const county = countyFromCoNo(attrs.CO_NO);
     if (!county) {
