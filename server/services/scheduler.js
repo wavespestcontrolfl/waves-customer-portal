@@ -1248,6 +1248,7 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 3 * * *', async () => {
     logger.info('Running: customer intelligence pipeline');
+    let step = 'step 1 (signal detection)';
     try {
       const SignalDetector = require('./customer-intelligence/signal-detector');
       const HealthScorer = require('./customer-intelligence/health-scorer');
@@ -1258,10 +1259,12 @@ function initScheduledJobs() {
       logger.info(`Signals: ${signalResult.newSignals} new from ${signalResult.customersScanned} customers`);
 
       // Step 2: Score health
+      step = 'step 2 (health scoring)';
       const healthResult = await HealthScorer.calculateAllHealthScores();
       logger.info(`Health: ${healthResult.atRisk} at-risk, ${healthResult.critical} critical`);
 
       // Step 3: Generate retention outreach for at-risk customers
+      step = 'step 3 (retention outreach)';
       const today = etDateString();
       const atRisk = await db('customer_health_scores')
         .where('scored_at', today)
@@ -1276,7 +1279,7 @@ function initScheduledJobs() {
 
       logger.info(`Customer intelligence complete: ${outreachGenerated} outreach generated`);
     } catch (err) {
-      logger.error(`Customer intelligence pipeline failed: ${err.message}`);
+      logger.error(`Customer intelligence pipeline failed at ${step}: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

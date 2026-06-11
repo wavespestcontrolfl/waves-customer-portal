@@ -33,19 +33,32 @@ router.get('/', async (req, res, next) => {
         .select('h.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'c.phone', 'c.member_since');
     }
 
+    // The current row may carry either scoring engine's churn vocabulary:
+    // this pipeline writes healthy/watch/at_risk/critical, the v3 scorer
+    // (customer-health.js) writes low/moderate/high/critical onto the same
+    // row. Normalize v3 values into the intelligence buckets before
+    // filtering so v3-written rows don't vanish from the at-risk views.
+    const RISK_NORMALIZE = { low: 'healthy', moderate: 'watch', high: 'at_risk' };
+    const normalizeRisk = (r) => RISK_NORMALIZE[r] || r;
+
     // Distribution
     const dist = { healthy: 0, watch: 0, at_risk: 0, critical: 0 };
     let mrrAtRisk = 0;
     for (const s of scores) {
-      dist[s.churn_risk] = (dist[s.churn_risk] || 0) + 1;
-      if (['at_risk', 'critical'].includes(s.churn_risk)) {
-        mrrAtRisk += parseFloat(s.lifetime_value_estimate || 0) / 12;
+      const risk = normalizeRisk(s.churn_risk);
+      dist[risk] = (dist[risk] || 0) + 1;
+      if (['at_risk', 'critical'].includes(risk)) {
+        // lifetime_value_estimate is only written by the CI scorer; rows
+        // last stamped by the v3 scorer won't have it — fall back to the
+        // customer's monthly rate so they don't count as $0 at risk.
+        const ltvMonthly = parseFloat(s.lifetime_value_estimate || 0) / 12;
+        mrrAtRisk += ltvMonthly > 0 ? ltvMonthly : parseFloat(s.monthly_rate || 0);
       }
     }
 
     // At-risk and critical customers
     const atRisk = scores
-      .filter(s => ['at_risk', 'critical'].includes(s.churn_risk))
+      .filter(s => ['at_risk', 'critical'].includes(normalizeRisk(s.churn_risk)))
       .sort((a, b) => (a.overall_score || 100) - (b.overall_score || 100))
       .map(s => ({
         ...s,
@@ -87,10 +100,22 @@ router.get('/', async (req, res, next) => {
 // GET /api/admin/customers/intelligence/:id/health — single customer health
 router.get('/:id/health', async (req, res, next) => {
   try {
-    const history = await db('customer_health_scores')
+    // Current score lives in customer_health_scores (one row per customer,
+    // updated in place); per-day history lives in customer_health_history.
+    const current = await db('customer_health_scores')
       .where('customer_id', req.params.id)
-      .orderBy('scored_at', 'desc')
-      .limit(30);
+      .orderByRaw('scored_at DESC NULLS LAST')
+      .first();
+
+    let history = [];
+    try {
+      history = await db('customer_health_history')
+        .where('customer_id', req.params.id)
+        .orderBy('scored_at', 'desc')
+        .limit(30);
+    } catch (err) {
+      logger.warn(`[customer-intel:${req.params.id}] health history read failed: ${err.message}`);
+    }
 
     const signals = await db('customer_signals')
       .where('customer_id', req.params.id)
@@ -106,13 +131,12 @@ router.get('/:id/health', async (req, res, next) => {
       .where('customer_id', req.params.id)
       .orderBy('created_at', 'desc');
 
-    const latest = history[0];
-    if (latest) {
-      if (typeof latest.churn_signals === 'string') latest.churn_signals = JSON.parse(latest.churn_signals);
-      if (typeof latest.upsell_opportunities === 'string') latest.upsell_opportunities = JSON.parse(latest.upsell_opportunities);
+    if (current) {
+      if (typeof current.churn_signals === 'string') current.churn_signals = JSON.parse(current.churn_signals);
+      if (typeof current.upsell_opportunities === 'string') current.upsell_opportunities = JSON.parse(current.upsell_opportunities);
     }
 
-    res.json({ current: latest, history, signals, outreach, upsells });
+    res.json({ current: current || null, history, signals, outreach, upsells });
   } catch (err) { next(err); }
 });
 

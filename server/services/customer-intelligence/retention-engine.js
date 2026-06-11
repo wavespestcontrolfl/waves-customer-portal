@@ -17,7 +17,10 @@ class RetentionEngine {
       .orderBy('scored_at', 'desc')
       .first();
 
-    if (!health || !['at_risk', 'critical'].includes(health.churn_risk)) return null;
+    // Accept the at-risk band of both scoring engines' vocabularies:
+    // customer-intelligence health-scorer writes at_risk/critical, the v3
+    // scorer (customer-health.js) writes high/critical onto the same row.
+    if (!health || !['at_risk', 'critical', 'high'].includes(health.churn_risk)) return null;
 
     const customer = await db('customers').where('id', customerId).first();
     if (!customer) return null;

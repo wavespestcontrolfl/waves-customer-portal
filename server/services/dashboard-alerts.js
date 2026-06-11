@@ -177,14 +177,17 @@ async function computeDashboardAlerts() {
   //    Pulls only the most-recent score per customer so a stale
   //    'critical' score from months ago doesn't keep firing forever.
   try {
+    // scored_at is the freshness marker (current rows are updated in place,
+    // created_at never moves); 'high' covers the v3 scorer's vocabulary on
+    // the same row.
     const atRisk = await db.raw(
       `SELECT COUNT(*) AS c
        FROM (
          SELECT DISTINCT ON (customer_id) customer_id, churn_risk
          FROM customer_health_scores
-         ORDER BY customer_id, created_at DESC
+         ORDER BY customer_id, scored_at DESC NULLS LAST, created_at DESC
        ) latest
-       WHERE latest.churn_risk IN ('at_risk', 'critical')`,
+       WHERE latest.churn_risk IN ('at_risk', 'critical', 'high')`,
     );
     const count = parseInt(atRisk?.rows?.[0]?.c || 0);
     if (count > 0) {

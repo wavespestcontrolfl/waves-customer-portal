@@ -3,6 +3,17 @@ const logger = require('../logger');
 const { SIGNAL_TYPES } = require('./signal-detector');
 const { etDateString } = require('../../utils/datetime-et');
 
+// Same A–F thresholds as customer-health.js getGrade() and the admin-health
+// dashboard's derived-grade fallback — keeps score_grade consistent with
+// overall_score regardless of which scoring engine wrote the row last.
+function scoreGrade(score) {
+  if (score >= 80) return 'A';
+  if (score >= 65) return 'B';
+  if (score >= 50) return 'C';
+  if (score >= 35) return 'D';
+  return 'F';
+}
+
 class HealthScorer {
 
   async calculateAllHealthScores() {
@@ -91,15 +102,31 @@ class HealthScorer {
     // LTV
     const ltv = customer.monthly_rate ? parseFloat(customer.monthly_rate) * 12 * (1 - churnProbability) : 0;
 
-    // Save (upsert for today)
+    // Save — one row per customer (latest score), updated in place.
+    // Every reader of this table consumes only the latest score per customer
+    // (MAX(scored_at) joins / ORDER BY scored_at DESC LIMIT 1); per-day
+    // history lives in customer_health_history. Keying the upsert on
+    // customer_id alone (find latest row, update it, else insert) is
+    // idempotent per (customer, day) without relying on a unique constraint:
+    // it avoids the 23505 unique violation on tables created with
+    // UNIQUE(customer_id) (093 shape) and works identically when no unique
+    // constraint exists (un-reconciled 037 shape).
+    //
+    // Shared-row ownership: customer-health.js (v3, nightly 2:15AM ET)
+    // refreshes the full diagnostic record (sub-scores, details, trend);
+    // this pipeline (nightly 3AM ET) is the later writer and therefore the
+    // canonical daily owner of overall_score / churn_risk /
+    // churn_probability / churn_signals / scored_at plus the
+    // intelligence-only fields below. score_grade is re-derived here with
+    // the same thresholds v3 uses, so the grade always matches the score on
+    // the row. churn_risk vocabulary differs by engine (v3:
+    // low/moderate/high/critical, here: healthy/watch/at_risk/critical) —
+    // aggregate readers that gate on it accept both (see admin-health.js).
     const today = etDateString();
-    const existing = await db('customer_health_scores')
-      .where('customer_id', customerId)
-      .where('scored_at', today)
-      .first();
 
     const record = {
       overall_score: score,
+      score_grade: scoreGrade(score),
       churn_probability: churnProbability,
       churn_risk: riskLevel,
       churn_signals: JSON.stringify(riskFactors),
@@ -107,12 +134,51 @@ class HealthScorer {
       next_best_action: nextAction,
       engagement_trend: trend,
       lifetime_value_estimate: ltv,
+      scored_at: today,
     };
+
+    const existing = await db('customer_health_scores')
+      .where('customer_id', customerId)
+      .orderByRaw('scored_at DESC NULLS LAST')
+      .first();
 
     if (existing) {
       await db('customer_health_scores').where('id', existing.id).update({ ...record, updated_at: new Date() });
     } else {
-      await db('customer_health_scores').insert({ customer_id: customerId, scored_at: today, ...record });
+      try {
+        await db('customer_health_scores').insert({ customer_id: customerId, ...record });
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+        // Lost a first-insert race against the other scoring job on a table
+        // with UNIQUE(customer_id) — the row exists now, so update it.
+        const row = await db('customer_health_scores')
+          .where('customer_id', customerId)
+          .orderByRaw('scored_at DESC NULLS LAST')
+          .first();
+        if (row) {
+          await db('customer_health_scores').where('id', row.id).update({ ...record, updated_at: new Date() });
+        }
+      }
+    }
+
+    // Retain per-day history in customer_health_history (the scores table
+    // holds only the current row per customer). Idempotent per
+    // (customer, day): refresh today's snapshot if one exists (e.g. written
+    // by the 2:15AM v3 scorer), else insert. Snapshot failures must not
+    // abort scoring, but are logged loudly with context.
+    try {
+      const snapshot = { customer_id: customerId, overall_score: score, churn_risk: riskLevel, scored_at: today };
+      const todaysSnapshot = await db('customer_health_history')
+        .where('customer_id', customerId)
+        .where('scored_at', today)
+        .first();
+      if (todaysSnapshot) {
+        await db('customer_health_history').where('id', todaysSnapshot.id).update(snapshot);
+      } else {
+        await db('customer_health_history').insert(snapshot);
+      }
+    } catch (err) {
+      logger.error(`Health scoring: daily history snapshot failed for customer ${customerId}: ${err.message}`);
     }
 
     return { score, riskLevel, churnProbability, trend, riskFactors, upsellOpps, nextAction };
