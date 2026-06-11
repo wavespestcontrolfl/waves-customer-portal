@@ -26,6 +26,7 @@ jest.mock('../services/content-astro/pages-poll', () => ({
   extractStatus: jest.fn(),
   deploymentCommitSha: jest.fn(),
   liveUrlResponds: jest.fn(),
+  latestProductionDeploymentForPost: jest.fn(),
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
@@ -143,6 +144,10 @@ beforeEach(() => {
   // Default: merged targets respond live (production deploy already done).
   // Individual tests override to exercise the awaiting_live_deploy gate.
   pagesPoll.liveUrlResponds.mockResolvedValue(true);
+  // Default: a green production deployment matching the merge exists.
+  // Individual tests override to exercise the awaiting_production_deploy
+  // gate on existing-page lanes.
+  pagesPoll.latestProductionDeploymentForPost.mockResolvedValue({ id: 'prod-deploy-1' });
 });
 
 afterEach(() => {
@@ -685,6 +690,49 @@ describe('metadata_pr_pending_merge lane', () => {
       skip_reason: 'metadata_pr_pending_merge',
     });
     expect(queueUpdate.updates).toMatchObject({ status: 'done' });
+  });
+
+  test('existing-page lane parks until a production deploy matching the merge exists (200 on the old page is not evidence)', async () => {
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true,
+      merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
+    });
+    pagesPoll.latestProductionDeploymentForPost.mockResolvedValue(null); // merge not deployed yet
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_production_deploy' });
+    // matched against the MERGE commit/time, not the PR head
+    expect(pagesPoll.latestProductionDeploymentForPost).toHaveBeenCalledWith({
+      astro_commit_sha: 'mergesha1',
+      astro_merged_at: '2026-06-11T05:00:00Z',
+    });
+    expect(runUpdates(updates)).toHaveLength(0);
+    expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
+  test('production-deploy lookup outage parks the run (fail closed), never finalizes', async () => {
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    pagesPoll.latestProductionDeploymentForPost.mockRejectedValue(new Error('cf 502'));
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'production_deploy_check_failed' });
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('new_supporting_blog lane does NOT consult the production-deploy matcher (404→200 flip is its gate)', async () => {
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    expect(pagesPoll.latestProductionDeploymentForPost).not.toHaveBeenCalled();
   });
 
   test('real emit_metadata_only drafts (title/meta only) resolve the URL from content_briefs', async () => {

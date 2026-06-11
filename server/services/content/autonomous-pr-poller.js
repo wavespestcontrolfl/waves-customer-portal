@@ -280,7 +280,7 @@ async function supersedeRun(run, queueRow) {
  *     so a broken deploy is never counted as published/trust-building and
  *     IndexNow never pings a 404.
  */
-async function finalizeMerged(run, prNumber, { autoMerged = false } = {}) {
+async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = null, mergedAt = null } = {}) {
   // Fresh queue re-check at finalize time: the tick-start validation is
   // stale by now (GitHub lookup + live-URL gating take seconds), and an
   // operator requeue/dismiss landing in that window must win — never mark a
@@ -304,6 +304,31 @@ async function finalizeMerged(run, prNumber, { autoMerged = false } = {}) {
     // Network blip on the HEAD check — transient, retry next tick.
     logger.warn(`[autonomous-pr-poller] live check failed for ${target.url} (run ${run.id}): ${err.message}`);
     return { pending: true, reason: 'live_check_failed', url: target.url, autoMerged };
+  }
+
+  // Existing-page lanes (rewrite/refresh/metadata): the target URL returned
+  // 200 BEFORE the merge too, so liveUrlResponds proves nothing about the
+  // merged content. Require a green PRODUCTION deployment matching the merge
+  // commit (exact sha, else a bounded merged-at window — the same matcher
+  // pages-poll uses for scheduler posts) before claiming the run. mergeSha/
+  // mergedAt come from the PR object (human merges) or the merge response +
+  // merge time (auto-merges); when both are missing this fails closed and
+  // the next tick's PR re-fetch supplies merge_commit_sha/merged_at.
+  // New pages skip this: their 404→200 flip IS the production-deploy signal.
+  if (String(run.action_type || '') !== 'new_supporting_blog') {
+    try {
+      const { latestProductionDeploymentForPost } = require('../content-astro/pages-poll');
+      const prodDeploy = await latestProductionDeploymentForPost({
+        astro_commit_sha: mergeSha || null,
+        astro_merged_at: mergedAt || null,
+      });
+      if (!prodDeploy) {
+        return { pending: true, reason: 'awaiting_production_deploy', url: target.url, autoMerged };
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-pr-poller] production deploy check failed for run ${run.id}: ${err.message}`);
+      return { pending: true, reason: 'production_deploy_check_failed', url: target.url, autoMerged };
+    }
   }
 
   const now = new Date();
@@ -456,8 +481,9 @@ async function maybeAutoMerge(run, pr) {
   //    another push while the merge call was in flight, so an unbuilt/
   //    unreviewed commit can never ride through the gate. The fresh head
   //    re-runs the full gate next tick.
+  let mergeRes;
   try {
-    await gh.mergePr(pr.number, {
+    mergeRes = await gh.mergePr(pr.number, {
       method: 'squash',
       title: String(pr.title || '').slice(0, 72),
       sha: pr.head?.sha,
@@ -473,7 +499,11 @@ async function maybeAutoMerge(run, pr) {
   // finalizeMerged may legitimately stay pending here (production deploy of
   // the merge takes 30–45 min) — `autoMerged` must still be true on the
   // result so pollPending counts this tick's merge against the per-poll cap.
-  const finalized = await finalizeMerged(run, pr.number, { autoMerged: true });
+  const finalized = await finalizeMerged(run, pr.number, {
+    autoMerged: true,
+    mergeSha: mergeRes?.sha || null, // GitHub merge response carries the merge commit
+    mergedAt: new Date().toISOString(),
+  });
   return { ...finalized, autoMerged: true };
 }
 
@@ -494,7 +524,13 @@ async function pollRun(run, { allowMerge = true } = {}) {
       return { pending: true, reason: 'pr_not_found' };
     }
 
-    if (pr.merged || pr.merged_at) return await finalizeMerged(run, prNumber, { autoMerged: false });
+    if (pr.merged || pr.merged_at) {
+      return await finalizeMerged(run, prNumber, {
+        autoMerged: false,
+        mergeSha: pr.merge_commit_sha || null,
+        mergedAt: pr.merged_at || null,
+      });
+    }
     if (pr.state !== 'open') return await finalizeClosed(run, prNumber);
 
     if (!autoMergeEnabled()) return { pending: true, reason: 'awaiting_human_merge' };

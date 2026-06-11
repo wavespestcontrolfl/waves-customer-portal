@@ -178,7 +178,12 @@ async function sweepRecentlyPublished({
   }
   for (const run of runs) {
     try {
-      const r = await runUrl(run.published_url);
+      // Post-like context (deliberately WITHOUT `id`): a truthy `post` makes
+      // maybeAlertVisibilityFailure treat this as engine-published content so
+      // live/canonical/noindex failures page the operator, while the absent
+      // `id` keeps updateContentRegistry on its URL-based match (run.id is an
+      // autonomous_runs UUID, not a db_blog_id).
+      const r = await runUrl(run.published_url, { post: { source: 'autonomous_run', run_id: run.id } });
       results.push({ source: 'autonomous_run', id: run.id, url: run.published_url, ok: r?.ok ?? false });
     } catch (err) {
       logger.warn(`[post-publish-visibility] sweep check failed for run ${run.id}: ${err.message}`);

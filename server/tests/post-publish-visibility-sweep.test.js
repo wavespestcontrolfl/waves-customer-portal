@@ -51,7 +51,13 @@ describe('sweepRecentlyPublished', () => {
     expect(runPost).toHaveBeenCalledTimes(1);
     expect(runPost).toHaveBeenCalledWith(mockState.rows.blog_posts[0]);
     expect(runUrl).toHaveBeenCalledTimes(1);
-    expect(runUrl).toHaveBeenCalledWith('https://www.wavespestcontrol.com/blog/auto/');
+    // post-like context (no `id`!) so visibility failures alert as
+    // engine-published content while content_registry keeps URL matching
+    expect(runUrl).toHaveBeenCalledWith(
+      'https://www.wavespestcontrol.com/blog/auto/',
+      { post: { source: 'autonomous_run', run_id: 'run-1' } },
+    );
+    expect(runUrl.mock.calls[0][1].post.id).toBeUndefined();
     expect(res.checked).toBe(2);
     expect(mockState.limits.blog_posts).toBe(5);
     expect(mockState.limits.autonomous_runs).toBe(5);

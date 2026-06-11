@@ -319,4 +319,9 @@ module.exports = {
   latestDeploymentForBranch,
   extractStatus,
   deploymentCommitSha,
+  // Also reused by the poller: existing-page targets (rewrite/refresh/
+  // metadata) return 200 before the merge deploys, so their finalization is
+  // gated on a green PRODUCTION deployment matching the merge commit
+  // (exact sha, else bounded merge-time window).
+  latestProductionDeploymentForPost,
 };
