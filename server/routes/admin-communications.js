@@ -257,6 +257,13 @@ router.post('/call', async (req, res, next) => {
     const metadata = relatedCallId ? { relatedCallId } : null;
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
+    const toLast10 = normalizePhoneLast10(to);
+    const adminPhoneKeys = new Set(
+      [...ADMIN_PHONES, adminPhone].map(normalizePhoneLast10).filter(Boolean),
+    );
+    if (toLast10 && adminPhoneKeys.has(toLast10)) {
+      return res.status(400).json({ error: 'to must be a customer phone, not the admin bridge phone' });
+    }
     attemptedTo = adminPhone;
 
     // Prefer the explicit customer picked in the UI. Phone-only lookup is

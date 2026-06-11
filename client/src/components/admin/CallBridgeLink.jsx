@@ -7,7 +7,7 @@
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const DEFAULT_FROM = "+19412975749";
 
-export async function callViaBridge(phone, customerName = "") {
+export async function callViaBridge(phone, customerName = "", fromNumber = DEFAULT_FROM) {
   if (!phone) return;
   const who = (customerName || "").trim() || "this number";
   const confirmMsg = `Call ${who} at ${phone}?\n\nWaves will call your phone first — press 1 to connect.`;
@@ -19,7 +19,7 @@ export async function callViaBridge(phone, customerName = "") {
         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ to: phone, fromNumber: DEFAULT_FROM }),
+      body: JSON.stringify({ to: phone, fromNumber: fromNumber || DEFAULT_FROM }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.success) {
@@ -47,6 +47,7 @@ const BASE_STYLE = {
 export default function CallBridgeLink({
   phone,
   customerName = "",
+  fromNumber = DEFAULT_FROM,
   className,
   style,
   children,
@@ -60,7 +61,7 @@ export default function CallBridgeLink({
       type="button"
       onClick={(e) => {
         if (stopPropagation) e.stopPropagation();
-        callViaBridge(phone, customerName);
+        callViaBridge(phone, customerName, fromNumber);
       }}
       className={className}
       style={{ ...BASE_STYLE, ...(style || {}) }}
