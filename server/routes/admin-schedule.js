@@ -3009,6 +3009,14 @@ router.post('/:id/invoice', async (req, res, next) => {
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['schedule.invoice.mint', String(svc.id)],
         );
+        // Race-proof backstop: a cancellation can land between the route's
+        // status gate and this lock — re-read under the lock so prepaid
+        // never pays toward a cancelled job (the void sweep holds this
+        // same lock, so orderings serialize).
+        const svcUnderLock = await trx('scheduled_services').where({ id: svc.id }).first('status');
+        if (!svcUnderLock || ['cancelled', 'rescheduled', 'skipped'].includes(svcUnderLock.status)) {
+          return { invoice, prepaidCredit: 0 };
+        }
         const lockedInvoice = await trx('invoices')
           .where({ id: invoice.id })
           .forUpdate()
@@ -3082,6 +3090,16 @@ router.post('/:id/invoice', async (req, res, next) => {
 
     // Reuse the existing invoice for this visit if one already exists and isn't
     // void — avoids dupes if the tech taps "Charge now" twice.
+    // Fresh status gate ahead of BOTH the reuse and mint paths — the svc
+    // row was loaded at request start, and a cancellation landing since
+    // then must not hand out a pay token or take prepaid credit for a
+    // cancelled job (applyPrepaidCredit re-checks under its lock as the
+    // race-proof backstop; this keeps the common case a clean 409).
+    const svcStatusNow = await db('scheduled_services').where({ id: svc.id }).first('status');
+    if (!svcStatusNow || ['cancelled', 'rescheduled', 'skipped'].includes(svcStatusNow.status)) {
+      return res.status(409).json({ error: `Cannot invoice — service is ${svcStatusNow?.status || 'missing'}` });
+    }
+
     let existing = await db('invoices')
       .where({ scheduled_service_id: svc.id })
       .whereNot('status', 'void')
