@@ -4,6 +4,7 @@ const logger = require('./logger');
 const timeTracking = require('./time-tracking');
 const TwilioService = require('./twilio');
 const { etDateString, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { runExclusive } = require('../utils/cron-lock');
 
 /**
  * Initialize all time-tracking cron jobs.
@@ -105,6 +106,7 @@ function initTimeTrackingCrons() {
   cron.schedule('0 21 * * *', async () => {
     logger.info('[time-tracking-cron] Running 9 PM clock-out reminder check');
     try {
+      await runExclusive('time-tracking-9pm-reminder', async () => {
       const activeShifts = await db('time_entries')
         .where({ entry_type: 'shift', status: 'active' })
         .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
@@ -124,6 +126,7 @@ function initTimeTrackingCrons() {
           }
         }
       }
+      });
     } catch (err) {
       logger.error('[time-tracking-cron] 9 PM reminder job failed', { error: err.message });
     }
@@ -135,6 +138,7 @@ function initTimeTrackingCrons() {
   cron.schedule('0 23 * * *', async () => {
     logger.info('[time-tracking-cron] Running 11 PM force auto-clock-out');
     try {
+      await runExclusive('time-tracking-11pm-autoclose', async () => {
       const activeShifts = await db('time_entries')
         .where({ entry_type: 'shift', status: 'active' })
         .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
@@ -188,6 +192,7 @@ function initTimeTrackingCrons() {
           logger.error(`[time-tracking-cron] Failed to force clock-out shift ${shift.id}`, { error: entryErr.message });
         }
       }
+      });
     } catch (err) {
       logger.error('[time-tracking-cron] 11 PM force clock-out job failed', { error: err.message });
     }

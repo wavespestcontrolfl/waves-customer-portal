@@ -5,6 +5,7 @@ const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
+const { runExclusive } = require('../utils/cron-lock');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -631,8 +632,13 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('* * * * *', async () => {
     try {
-      const AutomationRunner = require('./automation-runner');
-      await AutomationRunner.processDueSteps();
+      // Every-minute cadence + multi-second SendGrid sends = the next
+      // tick (or an overlapping deploy instance) re-selects enrollments
+      // whose cursor hasn't advanced yet — duplicate customer emails.
+      await runExclusive('automation-runner', async () => {
+        const AutomationRunner = require('./automation-runner');
+        await AutomationRunner.processDueSteps();
+      });
     } catch (err) {
       logger.error(`Automation runner tick failed: ${err.message}`);
     }
@@ -657,8 +663,10 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const reminders = require('./appointment-reminders');
-      await reminders.checkAndSendReminders();
+      await runExclusive('appointment-reminders', async () => {
+        const reminders = require('./appointment-reminders');
+        await reminders.checkAndSendReminders();
+      });
     } catch (err) {
       logger.error(`Reminder check failed: ${err.message}`);
     }
@@ -685,9 +693,11 @@ function initScheduledJobs() {
   cron.schedule('0 10 * * 1-5', async () => {
     logger.info('Running: late payment check');
     try {
-      const LatePaymentService = require('./late-payment-checker');
-      const result = await LatePaymentService.checkAndNotify();
-      logger.info(`Late payment check done: ${result.notified} reminder(s) sent, ${result.skipped} skipped`);
+      await runExclusive('late-payment-check', async () => {
+        const LatePaymentService = require('./late-payment-checker');
+        const result = await LatePaymentService.checkAndNotify();
+        logger.info(`Late payment check done: ${result.notified} reminder(s) sent, ${result.skipped} skipped`);
+      });
     } catch (err) {
       logger.error(`Late payment check failed: ${err.message}`);
     }
@@ -700,9 +710,11 @@ function initScheduledJobs() {
   cron.schedule('0 10 * * 2-5', async () => {
     logger.info('Running: invoice follow-up sequences');
     try {
-      const InvoiceFollowUps = require('./invoice-followups');
-      const result = await InvoiceFollowUps.runPending();
-      logger.info(`Invoice follow-ups done: ${result.sent} sent, ${result.skipped} skipped`);
+      await runExclusive('invoice-followups', async () => {
+        const InvoiceFollowUps = require('./invoice-followups');
+        const result = await InvoiceFollowUps.runPending();
+        logger.info(`Invoice follow-ups done: ${result.sent} sent, ${result.skipped} skipped`);
+      });
     } catch (err) {
       logger.error(`Invoice follow-ups failed: ${err.message}`);
     }
@@ -951,9 +963,11 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {
     try {
-      const EstimateFollowUp = require('./estimate-follow-up');
-      const result = await EstimateFollowUp.checkAll();
-      if (result.sent > 0) logger.info(`Estimate follow-ups: ${result.sent} sent`);
+      await runExclusive('estimate-follow-up', async () => {
+        const EstimateFollowUp = require('./estimate-follow-up');
+        const result = await EstimateFollowUp.checkAll();
+        if (result.sent > 0) logger.info(`Estimate follow-ups: ${result.sent} sent`);
+      });
     } catch (err) {
       logger.error(`Estimate follow-up job failed: ${err.message}`);
     }
@@ -964,9 +978,11 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('15 */2 * * *', async () => {
     try {
-      const OnboardingFollowUp = require('./onboarding-follow-up');
-      const result = await OnboardingFollowUp.checkAll();
-      if (result.sent > 0) logger.info(`Onboarding follow-ups: ${result.sent} sent`);
+      await runExclusive('onboarding-follow-up', async () => {
+        const OnboardingFollowUp = require('./onboarding-follow-up');
+        const result = await OnboardingFollowUp.checkAll();
+        if (result.sent > 0) logger.info(`Onboarding follow-ups: ${result.sent} sent`);
+      });
     } catch (err) {
       logger.error(`Onboarding follow-up job failed: ${err.message}`);
     }
@@ -1055,6 +1071,7 @@ function initScheduledJobs() {
   cron.schedule('0 8 * * *', async () => {
     logger.info('Running: tax deadline alert check');
     try {
+      await runExclusive('tax-deadline-alerts', async () => {
       const now = new Date();
       const today = etDateString(now);
       const futureDate = etDateString(addETDays(now, 14));
@@ -1096,7 +1113,7 @@ function initScheduledJobs() {
       await db('tax_filing_calendar')
         .whereIn('id', ids)
         .update({ reminder_sent: true, reminder_sent_at: new Date() });
-
+      });
     } catch (err) {
       logger.error(`Tax deadline alert failed: ${err.message}`);
     }
@@ -1135,6 +1152,7 @@ function initScheduledJobs() {
   cron.schedule('0 10 28 * *', async () => {
     logger.info('Running: billing reminder job');
     try {
+      await runExclusive('billing-reminders-28th', async () => {
       const customers = await db('customers')
         .join('notification_prefs', 'customers.id', 'notification_prefs.customer_id')
         .where({ 'customers.active': true, 'notification_prefs.billing_reminder': true })
@@ -1153,6 +1171,7 @@ function initScheduledJobs() {
           logger.error(`Billing reminder failed for ${cust.id}: ${err.message}`);
         }
       }
+      });
     } catch (err) {
       logger.error(`Billing reminder job failed: ${err.message}`);
     }
@@ -1578,9 +1597,11 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const ReviewService = require('./review-request');
-      const result = await ReviewService.processScheduled();
-      if (result.sent > 0) logger.info(`Review requests processed: ${result.sent} sent`);
+      await runExclusive('review-requests-scheduled', async () => {
+        const ReviewService = require('./review-request');
+        const result = await ReviewService.processScheduled();
+        if (result.sent > 0) logger.info(`Review requests processed: ${result.sent} sent`);
+      });
     } catch (err) {
       logger.error(`Review request processing failed: ${err.message}`);
     }
@@ -1594,9 +1615,11 @@ function initScheduledJobs() {
   cron.schedule('0 10 * * *', async () => {
     logger.info('Running: review follow-up reminders');
     try {
-      const ReviewService = require('./review-request');
-      const result = await ReviewService.processFollowups();
-      logger.info(`Review follow-ups done: ${result.sent} sent`);
+      await runExclusive('review-followups', async () => {
+        const ReviewService = require('./review-request');
+        const result = await ReviewService.processFollowups();
+        logger.info(`Review follow-ups done: ${result.sent} sent`);
+      });
     } catch (err) {
       logger.error(`Review follow-up failed: ${err.message}`);
     }
@@ -1681,9 +1704,14 @@ function initScheduledJobs() {
   cron.schedule('0 8 * * *', async () => {
     logger.info('Running: monthly billing (Stripe)');
     try {
-      const BillingCron = require('./billing-cron');
-      const result = await BillingCron.processMonthlyBilling();
-      logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
+      // Belt over the idempotency keys: serializes the whole sweep so
+      // overlapping deploy instances don't even race the per-customer
+      // existingCharge check.
+      await runExclusive('billing-monthly', async () => {
+        const BillingCron = require('./billing-cron');
+        const result = await BillingCron.processMonthlyBilling();
+        logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
+      });
     } catch (err) {
       logger.error(`Monthly billing failed: ${err.message}`);
     }
@@ -1691,9 +1719,11 @@ function initScheduledJobs() {
 
   cron.schedule('0 10 * * *', async () => {
     try {
-      const BillingCron = require('./billing-cron');
-      const result = await BillingCron.processPaymentRetries();
-      if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded`);
+      await runExclusive('billing-retries', async () => {
+        const BillingCron = require('./billing-cron');
+        const result = await BillingCron.processPaymentRetries();
+        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded`);
+      });
     } catch (err) {
       logger.error(`Payment retry failed: ${err.message}`);
     }
@@ -1702,9 +1732,11 @@ function initScheduledJobs() {
   // Autopay pre-charge reminders — daily 9 AM, 3 days before scheduled charge
   cron.schedule('0 9 * * *', async () => {
     try {
-      const { sendPreChargeReminders } = require('./autopay-notifications');
-      const r = await sendPreChargeReminders();
-      if (r.sent > 0) logger.info(`Autopay reminders: ${r.sent} sent`);
+      await runExclusive('autopay-pre-charge-reminders', async () => {
+        const { sendPreChargeReminders } = require('./autopay-notifications');
+        const r = await sendPreChargeReminders();
+        if (r.sent > 0) logger.info(`Autopay reminders: ${r.sent} sent`);
+      });
     } catch (err) {
       logger.error(`Autopay pre-charge reminder failed: ${err.message}`);
     }
@@ -1713,9 +1745,11 @@ function initScheduledJobs() {
   // Card-expiry warnings — Monday 9 AM, cards expiring within 60 days
   cron.schedule('0 9 * * 1', async () => {
     try {
-      const { sendCardExpiryWarnings } = require('./autopay-notifications');
-      const r = await sendCardExpiryWarnings();
-      if (r.sent > 0) logger.info(`Card-expiry warnings: ${r.sent} sent`);
+      await runExclusive('card-expiry-warnings', async () => {
+        const { sendCardExpiryWarnings } = require('./autopay-notifications');
+        const r = await sendCardExpiryWarnings();
+        if (r.sent > 0) logger.info(`Card-expiry warnings: ${r.sent} sent`);
+      });
     } catch (err) {
       logger.error(`Card-expiry warnings failed: ${err.message}`);
     }
@@ -1738,11 +1772,13 @@ function initScheduledJobs() {
   cron.schedule('0 9 * * *', async () => {
     logger.info('Running: payment expiry check');
     try {
-      const paymentExpiry = require('./workflows/payment-expiry');
-      if (paymentExpiry.checkExpiringCards) {
-        const result = await paymentExpiry.checkExpiringCards();
-        logger.info(`Payment expiry check done: ${result.notified} notified, ${result.totalExpiring} expiring`);
-      }
+      await runExclusive('payment-expiry-check', async () => {
+        const paymentExpiry = require('./workflows/payment-expiry');
+        if (paymentExpiry.checkExpiringCards) {
+          const result = await paymentExpiry.checkExpiringCards();
+          logger.info(`Payment expiry check done: ${result.notified} notified, ${result.totalExpiring} expiring`);
+        }
+      });
     } catch (err) {
       logger.error(`Payment expiry check failed: ${err.message}`);
     }
@@ -1782,11 +1818,13 @@ function initScheduledJobs() {
   cron.schedule('0 10 * * *', async () => {
     logger.info('Running: renewal reminders');
     try {
-      const renewalReminder = require('./workflows/renewal-reminder');
-      if (renewalReminder.checkAndSend) {
-        const result = await renewalReminder.checkAndSend();
-        logger.info(`Renewal reminders done: ${result.sent} sent`);
-      }
+      await runExclusive('renewal-reminders', async () => {
+        const renewalReminder = require('./workflows/renewal-reminder');
+        if (renewalReminder.checkAndSend) {
+          const result = await renewalReminder.checkAndSend();
+          logger.info(`Renewal reminders done: ${result.sent} sent`);
+        }
+      });
     } catch (err) {
       logger.error(`Renewal reminders failed: ${err.message}`);
     }
@@ -1798,11 +1836,13 @@ function initScheduledJobs() {
   cron.schedule('0 10 * * 1', async () => {
     logger.info('Running: seasonal reactivation campaign');
     try {
-      const seasonalReactivation = require('./workflows/seasonal-reactivation');
-      if (seasonalReactivation.run) {
-        const result = await seasonalReactivation.run();
-        logger.info(`Seasonal reactivation done: ${result.sent} sent (month ${result.month}, type: ${result.hookType})`);
-      }
+      await runExclusive('seasonal-reactivation', async () => {
+        const seasonalReactivation = require('./workflows/seasonal-reactivation');
+        if (seasonalReactivation.run) {
+          const result = await seasonalReactivation.run();
+          logger.info(`Seasonal reactivation done: ${result.sent} sent (month ${result.month}, type: ${result.hookType})`);
+        }
+      });
     } catch (err) {
       logger.error(`Seasonal reactivation failed: ${err.message}`);
     }
@@ -1814,13 +1854,15 @@ function initScheduledJobs() {
   cron.schedule('0 11 * * *', async () => {
     logger.info('Running: balance reminders');
     try {
-      const balanceReminder = require('./workflows/balance-reminder');
-      if (balanceReminder.dailyCheck) {
-        await balanceReminder.dailyCheck();
-      }
-      if (balanceReminder.latePaymentCheck) {
-        await balanceReminder.latePaymentCheck();
-      }
+      await runExclusive('balance-reminders', async () => {
+        const balanceReminder = require('./workflows/balance-reminder');
+        if (balanceReminder.dailyCheck) {
+          await balanceReminder.dailyCheck();
+        }
+        if (balanceReminder.latePaymentCheck) {
+          await balanceReminder.latePaymentCheck();
+        }
+      });
     } catch (err) {
       logger.error(`Balance reminders failed: ${err.message}`);
     }
