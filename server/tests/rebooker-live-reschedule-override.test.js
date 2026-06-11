@@ -7,6 +7,11 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
+const mockIoEmit = jest.fn();
+const mockIoTo = jest.fn(() => ({ emit: mockIoEmit }));
+jest.mock('../sockets', () => ({
+  getIo: jest.fn(() => ({ to: mockIoTo })),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
@@ -144,6 +149,15 @@ describe('live-status reschedule override (allowLive)', () => {
         current_job_id: 'svc-1',
         status: 'idle',
       });
+
+      // Open TrackPage / customer portal gets the post-commit refresh.
+      expect(mockIoTo).toHaveBeenCalledWith('customer:cust-1');
+      expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+        job_id: 'svc-1',
+        status: 'confirmed',
+        eta: null,
+        tech_first_name: null,
+      }));
     },
   );
 
@@ -159,6 +173,7 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(payload).not.toHaveProperty('track_state');
     expect(payload).not.toHaveProperty('track_sms_sent_at');
     expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
   test.each(['completed', 'cancelled', 'skipped'])(

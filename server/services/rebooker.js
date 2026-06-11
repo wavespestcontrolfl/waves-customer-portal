@@ -3,6 +3,7 @@ const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
+const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth,
@@ -86,6 +87,30 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
   return etDateString(addETDays(base, gap * i));
+}
+
+// Tell an open TrackPage (or customer portal) that a live job was
+// rewound. The public tracker refetches on customer:job_update but only
+// polls while en_route — an on_property viewer would otherwise sit on
+// the stale "tech on site" screen until a manual refresh. Payload
+// follows the strict customer-facing allowlist in job-status.js
+// (job_id / status / eta / tech_id / tech_first_name / updated_at) —
+// see the PII BOUNDARY block there before adding fields.
+function emitCustomerJobRefresh(service, toStatus) {
+  if (!service?.customer_id) return;
+  const io = getIo();
+  if (!io) {
+    logger.warn('[rebooker] io not initialized; skipping customer refresh broadcast');
+    return;
+  }
+  io.to(`customer:${service.customer_id}`).emit('customer:job_update', {
+    job_id: service.id,
+    status: toStatus,
+    eta: null,
+    tech_id: service.technician_id || null,
+    tech_first_name: null,
+    updated_at: new Date(),
+  });
 }
 
 // Convert "08:00-09:00" → { start: '08:00', end: '09:00' }. Tolerates objects.
@@ -229,21 +254,27 @@ class SmartRebooker {
       });
     });
 
-    // Live override: the tech's tech_status row still points at this job
-    // (en_route / on_site). Release it so the tech shows idle and the next
-    // job can claim them. Best-effort outside the trx — same pattern as
-    // track-transitions.markComplete; a failure here leaves a stale
-    // pointer, not inconsistent job state.
-    if (wasLive && service.technician_id) {
-      try {
-        await clearTechCurrentJob({
-          tech_id: service.technician_id,
-          current_job_id: serviceId,
-          status: 'idle',
-        });
-      } catch (err) {
-        logger.error(`[rebooker] tech_status clear after live reschedule failed for ${serviceId}: ${err.message}`);
+    // Live override post-commit cleanup:
+    //   1. The tech's tech_status row still points at this job
+    //      (en_route / on_site). Release it so the tech shows idle and
+    //      the next job can claim them. Best-effort outside the trx —
+    //      same pattern as track-transitions.markComplete; a failure
+    //      here leaves a stale pointer, not inconsistent job state.
+    //   2. A customer watching the public tracker would otherwise stay
+    //      on the stale en-route / on-site screen — push the refresh.
+    if (wasLive) {
+      if (service.technician_id) {
+        try {
+          await clearTechCurrentJob({
+            tech_id: service.technician_id,
+            current_job_id: serviceId,
+            status: 'idle',
+          });
+        } catch (err) {
+          logger.error(`[rebooker] tech_status clear after live reschedule failed for ${serviceId}: ${err.message}`);
+        }
       }
+      emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, 'confirmed');
     }
 
     // Check escalation
