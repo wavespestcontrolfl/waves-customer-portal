@@ -592,4 +592,6 @@ The tier price is the full customer total — there is **no separate setup charg
 
 **Graduation:** owner reviews stored shadow reports → one-line flip to `auto_send` (separate migration). Rollback = `knex down` (restores `project_required`/`auto_send`; policy columns untouched).
 
-**Verification:** scratch-DB replay at current main: up (1 row, siblings unchanged) / down (exact restore incl. followup alert/3) / re-up.
+**Verification:** scratch-DB replay at current main: flip / idempotent re-run (re-ensures internal_only) / down (exact restore incl. followup alert/3) / heal-from-deleted-profile — all verified by direct up()/down() calls.
+
+**Per-key resolution** follows the self-healed 20260611000012 pattern (flip / already / heal / absent / throw) — live catalogs are admin-mutable per environment, so cutover migrations never assert replay-derived counts.
