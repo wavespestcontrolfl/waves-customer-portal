@@ -3268,19 +3268,39 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .whereNotNull('recap_sms_sent_at')
           .first('id', 'recap_sms_sent_at');
         let recapTexted = await readRecapClaim();
-        // pest-recap claims recap_sms_sent_at BEFORE its send and releases
-        // the claim if the send fails, so a seconds-old claim may still be
-        // in flight. Suppressing on an in-flight claim whose send then
-        // fails would leave the customer with no text from either path —
-        // so for a fresh claim, wait briefly and re-read. A released claim
-        // means the recap failed and this completion SMS should proceed; a
-        // claim that survives the recheck is a delivered recap (success
-        // never releases it). Claims older than the window are durable.
+        // Durable delivered marker: sendCustomerMessage writes a
+        // messaging_audit_log row when the recap send settles, and a row
+        // with a provider_message_id means the text was handed to Twilio.
+        // Best-effort — the audit table may not exist in older deploys.
+        const recapSentAuditRow = async (recapRecordId) => {
+          try {
+            return await db('messaging_audit_log')
+              .where({ customer_id: svc.customer_id })
+              .whereRaw("metadata->>'original_message_type' = 'pest_recap'")
+              .whereRaw("metadata->>'service_record_id' = ?", [String(recapRecordId)])
+              .whereNotNull('provider_message_id')
+              .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+              .first('id');
+          } catch { return null; }
+        };
         const recapClaimAgeMs = recapTexted
           ? Date.now() - new Date(recapTexted.recap_sms_sent_at).getTime()
           : Infinity;
         if (recapTexted && recapClaimAgeMs < 60 * 1000) {
-          for (let attempt = 0; attempt < 2 && recapTexted; attempt++) {
+          // Fresh claim: the recap send may still be in flight (pest-recap
+          // claims BEFORE sending and releases the claim on failure). Poll
+          // until either signal settles: claim released -> recap failed,
+          // this completion SMS proceeds; sent audit row -> recap
+          // delivered, suppress. The horizon covers the Twilio client's
+          // default 30s HTTP timeout so a slow failure can't strand the
+          // customer with no text from either path. If the send is STILL
+          // unsettled at the horizon, prefer suppressing — a duplicate
+          // text was the original customer complaint, and a recap that
+          // eventually fails surfaces its smsError to the submitter for
+          // re-send.
+          const horizon = Date.now() + 35 * 1000;
+          while (recapTexted && Date.now() < horizon) {
+            if (await recapSentAuditRow(recapTexted.id)) break;
             await new Promise((resolve) => setTimeout(resolve, 3000));
             recapTexted = await readRecapClaim();
           }
