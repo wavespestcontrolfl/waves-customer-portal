@@ -470,6 +470,17 @@ const ContentScheduler = {
     let socialCount = 0;
     let errors = 0;
 
+    // Un-strand blogs whose 'publishing' claim never resolved (process died
+    // mid-publish). Without this the row is stuck forever AND — because
+    // pages-poll's auto-merge branch fires on pr_open + publishing — a
+    // stranded claim would keep that scheduler-only auto-merge path armed
+    // indefinitely. See the matching comment in pages-poll.pollPost().
+    try {
+      await this.resetStalePublishingBlogs();
+    } catch (err) {
+      logger.warn(`[content-scheduler] stale-publishing sweep failed: ${err.message}`);
+    }
+
     // ── Process blog posts ──────────────────────────────────────
     const pendingBlogs = await db('blog_posts')
       .where(function () {
@@ -488,8 +499,22 @@ const ContentScheduler = {
       .where('scheduled_publish_at', '<=', now);
 
     for (const blog of pendingBlogs) {
+      let claimed = false;
       try {
-        await db('blog_posts').where('id', blog.id).update({ publish_status: 'publishing' });
+        // Atomic compare-and-set claim: guard on the publish_status we
+        // selected so an overlapping instance (deploy overlap / slow prior
+        // tick) can't double-drive the same blog — whoever flips the row to
+        // 'publishing' first wins, the other sees 0 rows updated and skips.
+        // updated_at is stamped so the stale-publishing sweep above measures
+        // the claim's age, not some older edit.
+        claimed = (await db('blog_posts')
+          .where('id', blog.id)
+          .where('publish_status', blog.publish_status)
+          .update({ publish_status: 'publishing', updated_at: new Date() })) > 0;
+        if (!claimed) {
+          logger.info(`[content-scheduler] blog ${blog.id} already claimed by a concurrent tick — skipping`);
+          continue;
+        }
 
         if (!blog.content) {
           throw new Error('Scheduled blog has no content; cannot open Astro publish PR');
@@ -528,10 +553,15 @@ const ContentScheduler = {
       } catch (err) {
         errors++;
         const terminalFailure = err.message === 'Scheduled blog has no content; cannot open Astro publish PR';
-        await db('blog_posts').where('id', blog.id).update({
-          publish_status: terminalFailure ? 'failed' : 'pending_review',
-          updated_at: new Date(),
-        });
+        // Only release a claim WE hold — if the claim update itself failed
+        // (or another instance holds it), writing pending_review here would
+        // stomp the active attempt's 'publishing' state.
+        if (claimed) {
+          await db('blog_posts').where('id', blog.id).update({
+            publish_status: terminalFailure ? 'failed' : 'pending_review',
+            updated_at: new Date(),
+          }).catch(() => {});
+        }
         logger.error(`[content-scheduler] Failed to publish blog ${blog.id}: ${err.message}`);
       }
     }
@@ -588,6 +618,48 @@ const ContentScheduler = {
     }
 
     return { blogCount, socialCount, errors };
+  },
+
+  /**
+   * Reset blogs stranded at publish_status='publishing'.
+   *
+   * 'publishing' is a transient claim the scheduler holds while it drives a
+   * scheduled blog (open PR / share / mark published) — every path clears it
+   * within the same tick. A crash mid-publish strands the row: nothing ever
+   * re-selects it (the pending query excludes 'publishing'), and the strand
+   * leaves pages-poll's pr_open+publishing auto-merge branch armed forever.
+   *
+   * Where a stale row goes (>~30 min) depends on whether Astro state exists:
+   *   - astro_status NULL (crashed BEFORE publishAstro opened a PR): there is
+   *     no PR/live state for pages-poll or a human to drive, and the pending
+   *     query only re-selects 'pending_review' rows when astro_status='live'
+   *     — parking these at 'pending_review' would strand them permanently.
+   *     Reset to 'pending' so the scheduler retries the publish from scratch
+   *     (the claim is compare-and-set, so the retry is race-safe).
+   *   - astro_status set (PR opened / build failed / merged / live before
+   *     the crash): 'pending_review' — the same safe parking state the error
+   *     path uses — pages-poll drives pr_open/merged forward and the
+   *     live-flip path re-selects it.
+   */
+  async resetStalePublishingBlogs({ staleMinutes = 30 } = {}) {
+    const cutoff = new Date(Date.now() - staleMinutes * 60000);
+    const retried = await db('blog_posts')
+      .where('publish_status', 'publishing')
+      .where('updated_at', '<', cutoff)
+      .whereNull('astro_status')
+      .update({ publish_status: 'pending', updated_at: new Date() });
+    if (retried > 0) {
+      logger.warn(`[content-scheduler] reset ${retried} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m with no Astro state back to pending (crashed pre-PR; publish will retry)`);
+    }
+    const reset = await db('blog_posts')
+      .where('publish_status', 'publishing')
+      .where('updated_at', '<', cutoff)
+      .whereNotNull('astro_status')
+      .update({ publish_status: 'pending_review', updated_at: new Date() });
+    if (reset > 0) {
+      logger.warn(`[content-scheduler] reset ${reset} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m back to pending_review (crashed mid-publish with Astro state)`);
+    }
+    return retried + reset;
   },
 
   /**

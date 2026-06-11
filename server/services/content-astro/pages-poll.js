@@ -53,6 +53,22 @@ async function latestDeploymentForBranch(branch) {
   return list.find((d) => d?.deployment_trigger?.metadata?.branch === branch) || null;
 }
 
+// Newest successful production deployment, regardless of which commit it
+// was for. Used by the autonomous PR poller: main is linear (squash
+// merges), so ANY successful production deploy at/after a merge contains
+// that merge — checking "latest success is newer than merged_at" is both
+// sufficient and immune to the 25-deploy pagination window that a
+// commit-exact match can fall out of on busy days.
+async function latestSuccessfulProductionDeployment() {
+  const { project } = cfEnv();
+  const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=production&per_page=25`);
+  const list = Array.isArray(res?.result) ? res.result : [];
+  return list.find((d) => {
+    if (d?.environment && d.environment !== 'production') return false;
+    return extractStatus(d).status === 'success';
+  }) || null;
+}
+
 async function latestProductionDeploymentForPost(post) {
   const { project } = cfEnv();
   const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=production&per_page=25`);
@@ -159,6 +175,16 @@ async function pollPost(post, { allowMerge = true } = {}) {
         updated_at: new Date(),
       });
 
+      // DELIBERATE auto-merge path for SCHEDULER-driven posts: publish_status
+      // 'publishing' is the content-scheduler's transient claim state while it
+      // drives a scheduled post live, and mergeAstro below is Codex-gated
+      // (assertCodexReviewClear) before any merge. Note the coupling: a row
+      // STRANDED at 'publishing' (process crashed mid-publish) would keep this
+      // branch armed indefinitely — the content-scheduler's stale-publishing
+      // sweep (resetStalePublishingBlogs, ~30 min) bounds that window by
+      // resetting crashed claims out of 'publishing' ('pending' when no Astro
+      // state exists yet, 'pending_review' otherwise). Keep that sweep in
+      // mind before changing this condition.
       if (post.astro_status === 'pr_open' && post.publish_status === 'publishing') {
         if (!allowMerge) {
           // Per-poll auto-merge cap reached — defer this merge to the next tick
@@ -302,4 +328,17 @@ module.exports = {
   liveUrlResponds,
   deploymentMatchesMergedPost,
   runPostPublishVisibility,
+  // Reused by the autonomous PR-lifecycle poller to verify a PR branch's
+  // Cloudflare preview build is green AND built from the PR's current head
+  // commit before auto-merging (deploymentCommitSha returns null when the
+  // deployment object carries no usable commit hash — callers fail closed).
+  latestDeploymentForBranch,
+  extractStatus,
+  deploymentCommitSha,
+  // Also reused by the poller: PR-backed publishes (including
+  // new_supporting_blog, which can UPDATE an existing slug) must not
+  // finalize until a successful production deploy contains the merge —
+  // exact merge-sha match, or latest success at/after merged_at.
+  latestSuccessfulProductionDeployment,
+  deploymentTimestampMs,
 };
