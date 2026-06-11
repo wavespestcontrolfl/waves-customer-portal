@@ -82,7 +82,7 @@ exports.up = async function up(knex) {
     } else {
       await knex('google_reviews').where({ id: row.id }).del();
       // eslint-disable-next-line no-console
-      console.log(`[review_dup_row_cleanup] deleted duplicate review ${row.id} (${row.reviewer_name} @ ${row.location_id})`);
+      console.log(`[review_dup_row_cleanup] deleted duplicate review ${row.id} @ ${row.location_id}`);
     }
   }
 
