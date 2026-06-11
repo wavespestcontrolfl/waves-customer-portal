@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ensurePushSubscription, isPushEnabled } from '../lib/push-subscribe.js';
+import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -51,6 +51,28 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     if (open) document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
+
+  // Self-heal the push link on load and on PWA resume (admin only). iOS
+  // Safari rotates/drops push endpoints, and the server deactivates a
+  // subscription after a 404/410 send — previously nothing re-registered
+  // the device until the user manually hit Enable again. The sync is a
+  // no-op unless permission is already granted, so it never prompts.
+  // Throttled because iOS fires visibilitychange on every app switch.
+  useEffect(() => {
+    if (type !== 'admin') return;
+    let lastSyncAt = 0;
+    const sync = () => {
+      if (Date.now() - lastSyncAt < 60 * 60 * 1000) return;
+      lastSyncAt = Date.now();
+      syncPushSubscription({ apiBase: API_BASE, token: localStorage.getItem(tokenKey) })
+        .then((r) => { if (r?.ok) setPushOn(true); })
+        .catch(() => {});
+    };
+    sync();
+    const onVisible = () => { if (document.visibilityState === 'visible') sync(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [type]);
 
   // Probe Web Push state when the panel opens (admin only). Re-runs on
   // each open so a user who enabled push elsewhere doesn't see a stale

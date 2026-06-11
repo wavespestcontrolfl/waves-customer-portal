@@ -75,7 +75,13 @@ function makeKnex(store) {
       if (table === 'scheduled_services') return { id: SERVICE_ID, status: store.serviceStatus };
       if (table === 'service_records') {
         const latest = store.records[store.records.length - 1];
-        return latest ? { id: latest.id, recap_sms_sent_at: latest.recap_sms_sent_at } : undefined;
+        return latest
+          ? {
+            id: latest.id,
+            recap_sms_sent_at: latest.recap_sms_sent_at,
+            structured_notes: latest.structured_notes || null,
+          }
+          : undefined;
       }
       return undefined;
     });
@@ -193,6 +199,42 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(result.smsSent).toBe(true);
     // No duplicate record created.
+    expect(store.records).toHaveLength(1);
+  });
+
+  test('a recap after a /complete that already texted is suppressed (cross-path double-text)', async () => {
+    // The heavy /complete flow already sent its templated completion SMS
+    // (structured_notes claim). A recap re-text on top would be the
+    // "two different wordings of the same message" customer complaint.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{
+        id: 'rec-complete',
+        recap_sms_sent_at: null,
+        structured_notes: JSON.stringify({
+          completionSmsStatus: 'sent',
+          sentSmsBody: 'Hi Pat! Your Quarterly Pest Control service is complete.',
+        }),
+      }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [],
+      customerRecap: 'Service complete.',
+      sendSms: true,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result.smsSent).toBe(false);
+    expect(result.smsError).toBe('completion_sms_already_sent');
+    // Still no duplicate record — the recap updates the /complete row.
     expect(store.records).toHaveLength(1);
   });
 

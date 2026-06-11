@@ -170,6 +170,37 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
   return { ok: true, endpoint: sub.endpoint };
 }
 
+/**
+ * Silent self-heal for an existing push opt-in. Safe to call on every app
+ * load/resume: it never prompts and never throws.
+ *
+ * Why this exists: iOS Safari rotates or drops push endpoints (PWA
+ * reinstall, OS housekeeping), and the server deactivates a subscription
+ * row after a 404/410 send failure — but nothing told the client, so the
+ * owner had to keep manually re-enabling push. When permission is already
+ * granted, re-running the subscribe flow re-creates a dropped browser
+ * subscription and re-POSTs it to the server, flipping a deactivated row
+ * back to active without any user action.
+ */
+export async function syncPushSubscription({ apiBase = '/api', token } = {}) {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return { ok: false, reason: 'unsupported' };
+    }
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+      return { ok: false, reason: 'permission_not_granted' };
+    }
+    if (isIOS() && !isStandalonePWA()) {
+      return { ok: false, reason: 'ios_not_standalone' };
+    }
+    // Permission is granted, so ensurePushSubscription will not prompt —
+    // requestPermission resolves 'granted' immediately.
+    return await ensurePushSubscription({ apiBase, token });
+  } catch (e) {
+    return { ok: false, reason: e?.message || 'sync_failed' };
+  }
+}
+
 export async function disablePush({ apiBase = '/api', token } = {}) {
   const authToken = token || localStorage.getItem('waves_admin_token');
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` };

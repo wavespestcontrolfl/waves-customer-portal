@@ -46,6 +46,44 @@ router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
   });
 });
 
+// Endpoint rotation from the service worker's pushsubscriptionchange
+// handler. The SW context has no admin JWT (tokens live in localStorage,
+// unreachable from a worker), so this route sits ABOVE the auth gate and
+// authenticates by possession of the OLD subscription endpoint — an
+// unguessable per-device URL minted by the push service. It can only
+// rotate an existing row in place; it can never create a subscription or
+// change whose device it belongs to.
+router.post('/resubscribe', async (req, res) => {
+  try {
+    const { oldEndpoint, subscription } = req.body || {};
+    if (
+      !subscription?.endpoint
+      || typeof oldEndpoint !== 'string'
+      || !oldEndpoint
+      || oldEndpoint === subscription.endpoint
+    ) {
+      return res.status(400).json({ error: 'oldEndpoint and a new subscription are required' });
+    }
+    // Exact-match on the stored JSON's endpoint. NOT a LIKE — an attacker
+    // could otherwise use % wildcards to match arbitrary rows.
+    const rows = await db('push_subscriptions')
+      .whereRaw("subscription_data::jsonb->>'endpoint' = ?", [oldEndpoint])
+      .select('id');
+    if (rows.length) {
+      await db('push_subscriptions')
+        .whereIn('id', rows.map((r) => r.id))
+        .update({ subscription_data: JSON.stringify(subscription), active: true });
+      logger.info(`[admin-push] rotated ${rows.length} push subscription(s) via pushsubscriptionchange`);
+    }
+    // Same response either way — don't give callers an oracle for probing
+    // which endpoints exist.
+    res.json({ ok: true });
+  } catch (err) {
+    logger.warn(`[admin-push] resubscribe failed: ${err.message}`);
+    res.status(500).json({ error: 'resubscribe failed' });
+  }
+});
+
 // Subscription and preference operations require a signed-in admin portal user.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -57,14 +95,24 @@ router.post('/subscribe', async (req, res, next) => {
     const adminUserId = req.technicianId;
     const subData = JSON.stringify(subscription);
 
+    // Match the existing row by ENDPOINT, not the full subscription JSON.
+    // The push service can rotate the encryption keys while keeping the
+    // endpoint — a full-JSON match would miss the row, insert a duplicate,
+    // and leave the stale row active (the server then keeps pushing to a
+    // subscription whose keys no longer decrypt). Endpoint identifies the
+    // device; refresh keys in place.
     const existing = await db('push_subscriptions')
       .where({ admin_user_id: adminUserId })
-      .whereRaw("subscription_data::text = ?", [subData])
+      .whereRaw("subscription_data::jsonb->>'endpoint' = ?", [subscription.endpoint])
       .first()
       .catch(() => null);
 
     if (existing) {
-      await db('push_subscriptions').where({ id: existing.id }).update({ active: true, device_info: deviceInfo || existing.device_info });
+      await db('push_subscriptions').where({ id: existing.id }).update({
+        subscription_data: subData,
+        active: true,
+        device_info: deviceInfo || existing.device_info,
+      });
       return res.json({ ok: true, id: existing.id, reactivated: true });
     }
 

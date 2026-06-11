@@ -143,6 +143,28 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
   return { ok: true, endpoint: sub.endpoint };
 }
 
+// Silent self-heal for an existing push opt-in — mirrors
+// client/src/lib/push-subscribe.js. Safe on every app load/resume: never
+// prompts, never throws. Re-creates a dropped browser subscription and
+// re-POSTs it so a server row deactivated after a 404/410 send failure
+// flips back to active without the user re-enabling manually.
+export async function syncPushSubscription({ apiBase = '/api', token } = {}) {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return { ok: false, reason: 'unsupported' };
+    }
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+      return { ok: false, reason: 'permission_not_granted' };
+    }
+    if (isIOS() && !isStandalonePWA()) {
+      return { ok: false, reason: 'ios_not_standalone' };
+    }
+    return await ensurePushSubscription({ apiBase, token });
+  } catch (e) {
+    return { ok: false, reason: e?.message || 'sync_failed' };
+  }
+}
+
 export async function disablePush({ apiBase = '/api', token } = {}) {
   const authToken = token || localStorage.getItem('waves_admin_token');
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` };
