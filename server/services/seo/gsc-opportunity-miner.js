@@ -33,7 +33,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
-const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES } =
+const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor } =
   require('../content/scoring-config');
 
 // ── normalization helpers (pure, test-friendly) ─────────────────────
@@ -999,11 +999,12 @@ class GscOpportunityMiner {
     }
 
     for (const o of winners.values()) {
-      // Gate at scoring-config threshold so the queue only holds rows
-      // worth acting on. mineAll's return still exposes every candidate
-      // (including the dropped ones) so calibration / tuning can see
-      // why the cut landed where it did.
-      if (o.score < THRESHOLDS.minScoreToAct) continue;
+      // Gate at the scoring-config threshold so the queue only holds rows
+      // worth acting on — action-aware: new_supporting_blog uses the lower
+      // blog floor, everything else the global one. mineAll's return still
+      // exposes every candidate (including the dropped ones) so calibration
+      // can see why the cut landed where it did.
+      if (o.score < minScoreToActFor(o.action_type)) continue;
       const row = {
         bucket: o.bucket,
         action_type: o.action_type,

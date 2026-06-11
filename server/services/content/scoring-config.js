@@ -48,6 +48,16 @@ const THRESHOLDS = {
   // Minimum total score to enter the action queue at all.
   minScoreToAct: 75,
 
+  // Per-action floor for new_supporting_blog. New-content demand signals
+  // (seasonal_rising, no_content_yet, aeo_gap with no page) score
+  // structurally lower than refresh/rewrite signals — there's no existing
+  // page contributing position/CTR/decay weight — so holding blogs to the
+  // global 75 floor starves the lane entirely (observed: zero opportunities
+  // persisted 2026-06-02 → 2026-06-11 while real 44-49-point blog gaps sat
+  // under the cut). Env-tunable via AUTONOMOUS_BLOG_MIN_SCORE; clamped to
+  // [20, minScoreToAct] in minScoreToActFor().
+  blogMinScoreToAct: 45,
+
   // GSC bucket cutoffs.
   minImpressionsToScore: 50,
   strikingDistancePositionMin: 4,
@@ -115,9 +125,24 @@ const WEEKLY_MIX = {
   rewrite_title_meta_or_link_or_gbp: 1,
 };
 
+/**
+ * Action-aware minimum score: new_supporting_blog uses the lower blog floor
+ * (env AUTONOMOUS_BLOG_MIN_SCORE, default THRESHOLDS.blogMinScoreToAct),
+ * everything else keeps the global minScoreToAct. The env value is read at
+ * call time and clamped to [20, minScoreToAct] so a typo can neither open
+ * the queue to junk nor silently raise the blog floor above the global one.
+ */
+function minScoreToActFor(actionType) {
+  if (String(actionType || '') !== 'new_supporting_blog') return THRESHOLDS.minScoreToAct;
+  const raw = Number.parseInt(process.env.AUTONOMOUS_BLOG_MIN_SCORE, 10);
+  const floor = Number.isFinite(raw) ? raw : THRESHOLDS.blogMinScoreToAct;
+  return Math.min(Math.max(floor, 20), THRESHOLDS.minScoreToAct);
+}
+
 module.exports = {
   WEIGHTS,
   THRESHOLDS,
+  minScoreToActFor,
   REVENUE_PRIORITY,
   CITIES,
   SERP_SAMPLE_CITIES,
