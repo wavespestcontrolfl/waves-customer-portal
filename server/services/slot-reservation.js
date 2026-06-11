@@ -249,6 +249,28 @@ async function reserveSlot({
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['slot-reserve', `${techId || 'unassigned'}:${date}`],
       );
+      // Also take the zone+day lock the self-booking writers
+      // (availability.confirmBooking, /api/booking/confirm) use — without
+      // it, a self-book confirm and an estimate hold for the same window
+      // each miss the other's uncommitted row. Fixed order everywhere:
+      // tech lock first, zone lock second.
+      let reserveZoneId = null;
+      if (estimate.customer_id) {
+        try {
+          const holder = await trx('customers').where({ id: estimate.customer_id }).first('city');
+          const holderCity = String(holder?.city || '').toLowerCase();
+          if (holderCity) {
+            const zones = await trx('service_zones').select('id', 'cities');
+            reserveZoneId = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity))?.id || null;
+          }
+        } catch (zoneErr) {
+          logger.warn(`[slot-reservation] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
+        }
+      }
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', `zone:${reserveZoneId || 'unknown'}:${date}`],
+      );
 
       const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
         ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {

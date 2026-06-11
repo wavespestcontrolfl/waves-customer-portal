@@ -540,7 +540,27 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
     const { date, startTime } = req.body;
     if (!date || !startTime) return res.status(400).json({ error: 'date and startTime required' });
 
-    const current = await db('scheduled_services')
+    // Serialize cancel+rebook per customer: two concurrent reschedules
+    // would both cancel the same original, the second's confirm would
+    // conflict with the first's replacement, and its restore would
+    // resurrect the original alongside it — two active appointments.
+    // The lock transaction brackets the whole sequence; the `current`
+    // fetch rides it so the second request sees the first's outcome.
+    const lockTrx = await db.transaction();
+    let lockDone = false;
+    const finishLock = async (commit = true) => {
+      if (lockDone) return;
+      lockDone = true;
+      try { await (commit ? lockTrx.commit() : lockTrx.rollback()); } catch {}
+    };
+
+    try {
+    await lockTrx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['onboarding-reschedule', String(req.customer.id)],
+    );
+
+    const current = await lockTrx('scheduled_services')
       .where({ customer_id: req.customer.id })
       .whereNotIn('status', ['cancelled', 'completed'])
       .orderBy('scheduled_date', 'asc')
@@ -598,6 +618,7 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
             { sendConfirmation: false },
           );
         } catch {}
+        await finishLock(true);
         return res.status(bookErr.statusCode || 409).json({ error: bookErr.message, originalRestored: true });
       }
       throw bookErr;
@@ -607,7 +628,11 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
       .where({ id: req.session.id })
       .update({ service_confirmed: true, status: 'service_confirmed' });
 
+    await finishLock(true);
     res.json({ success: true, booking });
+    } finally {
+      await finishLock(false);
+    }
   } catch (err) { next(err); }
 });
 
