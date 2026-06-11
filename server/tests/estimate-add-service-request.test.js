@@ -156,6 +156,21 @@ describe('estimate add-service request workflow', () => {
     }));
   });
 
+  test('seasonal mosquito offers price the seasonal program, not monthly12', () => {
+    const revision = buildEstimateServiceRevisionDraft(baseEstimate(), 'Seasonal Mosquito');
+
+    expect(revision.serviceKey).toBe('mosquito');
+    expect(revision.status).toBe('priced');
+    expect(revision.draftEstimateData.inputs.services.mosquito).toEqual({ tier: 'seasonal' });
+  });
+
+  test('legacy mosquito CTAs still price the monthly program', () => {
+    const revision = buildEstimateServiceRevisionDraft(baseEstimate(), 'WaveGuard Mosquito');
+
+    expect(revision.status).toBe('priced');
+    expect(revision.draftEstimateData.inputs.services.mosquito).toEqual({ tier: 'monthly' });
+  });
+
   test('replays prior qualifying services so cross-sell drafts price at the combined tier', () => {
     const estimate = baseEstimate();
     estimate.estimate_data.priorQualifyingServices = ['lawn_care', 'mosquito'];

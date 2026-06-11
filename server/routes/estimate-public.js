@@ -6334,7 +6334,10 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
   try {
     const result = await createEstimateAddServiceRequest({
       estimateToken: req.params.token,
-      requestedService: req.body?.requestedService || req.body?.suggestedService,
+      // Prefer the human-readable label (suggestedService) over the bare
+      // service key — both normalize to the same key, but only the label
+      // carries seasonal intent ("Seasonal Mosquito" → seasonal9 draft).
+      requestedService: req.body?.suggestedService || req.body?.requestedService,
     });
     res.status(result.deduped ? 200 : 201).json(result);
   } catch (err) {

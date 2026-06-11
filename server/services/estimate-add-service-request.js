@@ -140,7 +140,7 @@ function resolvePropertyNumber(updatedInputs, estData, key) {
   );
 }
 
-function addRequestedServiceToInputs(engineInputs, estData, serviceKey) {
+function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requestedServiceRaw = '') {
   const updatedInputs = JSON.parse(JSON.stringify(engineInputs || {}));
   updatedInputs.services = updatedInputs.services || {};
 
@@ -167,7 +167,11 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey) {
 
   if (serviceKey === 'mosquito') {
     if (updatedInputs.services.mosquito) return { added: false, updatedInputs, reason: 'already_included' };
-    updatedInputs.services.mosquito = { tier: 'monthly' };
+    // Honor the offer the customer actually clicked: "Seasonal Mosquito"
+    // (existing-customer ladder) prices the seasonal9 program; the legacy
+    // "Add Mosquito"/"WaveGuard Mosquito" CTAs keep monthly12.
+    const seasonal = /seasonal/i.test(String(requestedServiceRaw || ''));
+    updatedInputs.services.mosquito = { tier: seasonal ? 'seasonal' : 'monthly' };
     return { added: true, updatedInputs };
   }
 
@@ -211,7 +215,7 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
     };
   }
 
-  const { added, updatedInputs, reason } = addRequestedServiceToInputs(engineInputs, estData, serviceKey);
+  const { added, updatedInputs, reason } = addRequestedServiceToInputs(engineInputs, estData, serviceKey, requestedService);
   if (!added) {
     return {
       status: 'not_priced',
@@ -604,7 +608,9 @@ async function createEstimateAddServiceRequest({
     }
 
     const customer = await resolveEstimateCustomer(trx, estimate);
-    const pricingRevision = buildEstimateServiceRevisionDraft(estimate, serviceKey);
+    // Pass the RAW requested text, not the normalized key — seasonal intent
+    // ("Seasonal Mosquito") must survive into the draft's engine inputs.
+    const pricingRevision = buildEstimateServiceRevisionDraft(estimate, requestedService);
     const estimateNumber = estimate.estimate_number || estimate.id;
     const subject = `Add ${serviceLabel} to estimate #${estimateNumber}`;
     const description = `Customer requested ${serviceLabel} from public estimate ${estimateNumber}. Review property details and send a revised estimate option.`;
