@@ -47,7 +47,7 @@ const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -400,5 +400,24 @@ describe('endpoint-write classification matches the route guard', () => {
     expect(route.CONFIRMED_ACTION_TOOL_NAMES).toBeInstanceOf(Set);
     expect([...route.CONFIRMED_ACTION_TOOL_NAMES].sort())
       .toEqual([...CONFIRMED_ENDPOINT_WRITES].sort());
+  });
+});
+
+describe('operational write-gates module mirrors this policy snapshot', () => {
+  // services/intelligence-bar/write-gates.js drives the runtime interception
+  // for issue #1568 — it must never drift from the classifications here.
+  const gates = require('../services/intelligence-bar/write-gates');
+
+  test('WRITE_TWO_STEP_TOOL_NAMES matches', () => {
+    expect([...gates.WRITE_TWO_STEP_TOOL_NAMES].sort()).toEqual([...WRITE_TWO_STEP].sort());
+  });
+
+  test('LEGACY_BARE_WRITE_TOOL_NAMES matches the live legacy list', () => {
+    expect([...gates.LEGACY_BARE_WRITE_TOOL_NAMES].sort()).toEqual([...LEGACY_BARE_WRITES].sort());
+  });
+
+  test('UI_GATED_WRITE_TOOL_NAMES is exactly two-step + legacy', () => {
+    expect([...gates.UI_GATED_WRITE_TOOL_NAMES].sort())
+      .toEqual([...WRITE_TWO_STEP, ...LEGACY_BARE_WRITES].sort());
   });
 });
