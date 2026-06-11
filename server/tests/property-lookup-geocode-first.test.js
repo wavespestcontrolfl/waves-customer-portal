@@ -17,7 +17,7 @@ const {
 function geocodeFixture(overrides = {}) {
   return {
     formatted_address: '5510 Lakewood Ranch Blvd, Bradenton, FL 34211, USA',
-    geometry: { location: { lat: 27.4458, lng: -82.4012 } },
+    geometry: { location: { lat: 27.4458, lng: -82.4012 }, location_type: 'ROOFTOP' },
     address_components: [
       { long_name: '5510', short_name: '5510', types: ['street_number'] },
       { long_name: 'Lakewood Ranch Boulevard', short_name: 'Lakewood Ranch Blvd', types: ['route'] },
@@ -43,6 +43,7 @@ describe('parseGeocodeResult', () => {
       city: 'Bradenton',
       zip: '34211',
       partialMatch: false,
+      locationType: 'ROOFTOP',
     });
   });
 
@@ -67,6 +68,7 @@ describe('parseGeocodeResult', () => {
       city: null,
       zip: null,
       partialMatch: false,
+      locationType: null,
     });
   });
 });
