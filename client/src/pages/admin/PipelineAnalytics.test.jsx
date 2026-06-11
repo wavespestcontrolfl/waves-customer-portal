@@ -425,10 +425,11 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("50%")).toBeInTheDocument();
   });
 
-  it("counts archived-accepted estimates in MRR won and the Won funnel", () => {
+  it("counts archived wins in MRR won but keeps them out of every other metric", () => {
     renderAnalytics({
       estimates: [
         estimate({ id: "active-won", status: "accepted", monthlyTotal: 40 }),
+        estimate({ id: "no", status: "declined", monthlyTotal: 30 }),
         estimate({
           id: "archived-won",
           status: "accepted",
@@ -438,9 +439,15 @@ describe("PipelineAnalytics", () => {
       ],
     });
 
-    // $40 + $60 — archiving the second win must not erase its MRR.
+    // MRR won: $40 + $60 — archiving the second win must not erase its MRR.
     expect(screen.getAllByText("$100").length).toBeGreaterThan(0);
     expect(screen.getByText("2 new accounts")).toBeInTheDocument();
+    // Acceptance rate stays symmetric: archived losses are never fetched, so
+    // archived wins don't inflate it. 1 of 2 active-resolved → 50%, not 2/3.
+    expect(screen.getByText("50%")).toBeInTheDocument();
+    expect(screen.getByText("1 accepted of 2 resolved")).toBeInTheDocument();
+    // Avg ticket over active priced offers only: (40 + 30) / 2 → $35, not $43.
+    expect(screen.getAllByText("$35").length).toBeGreaterThan(0);
   });
 
   it("filters MRR won by acceptance date, not created date", () => {

@@ -357,7 +357,13 @@ export default function PipelineAnalytics({
   const selectedRange = dateRange || "all";
   const metrics = useMemo(() => {
     const nowMs = Date.now();
-    const inRange = estimates.filter((e) =>
+    // Archived rows ride along ONLY for the Won funnel and MRR-won KPI
+    // ("won = won forever"). Every other metric — acceptance rate, avg
+    // ticket and its trend, pipeline value, ROI table, attention counts —
+    // excludes them: archived LOSSES are never fetched, so counting
+    // archived wins there would skew the rates upward.
+    const activeRows = estimates.filter((e) => !e.archivedAt);
+    const inRange = activeRows.filter((e) =>
       withinDateRange(e.createdAt, selectedRange, nowMs),
     );
     const classified = estimates.map((e) => ({
@@ -389,7 +395,7 @@ export default function PipelineAnalytics({
     );
     const pipelineValue = pipelineEstimates.reduce((sum, e) => sum + amount(e), 0);
     const avgTicket = avgTicketFor(inRange);
-    const priorAvg = avgTicketFor(prior30Estimates(estimates, nowMs));
+    const priorAvg = avgTicketFor(prior30Estimates(activeRows, nowMs));
     const avgDelta = Math.round(avgTicket - priorAvg);
     const avgTrend =
       priorAvg === 0
@@ -410,23 +416,23 @@ export default function PipelineAnalytics({
     );
     const lost = classified.filter((e) => e._class === "lost");
     const wonMrr = won.reduce((sum, e) => sum + amount(e), 0);
-    const declinedCount = estimates.filter(
+    const declinedCount = activeRows.filter(
       (e) => e.status === "declined",
     ).length;
-    const expiredCount = estimates.filter((e) => e.status === "expired").length;
+    const expiredCount = activeRows.filter((e) => e.status === "expired").length;
 
-    const followUpOverdue = estimates.filter((e) =>
+    const followUpOverdue = activeRows.filter((e) =>
       isFollowUpOverdueEstimate(e, nowMs),
     );
     const atRiskMRR = followUpOverdue.reduce((sum, e) => sum + amount(e), 0);
-    const pricingRisk = estimates.filter((e) => e.pricingRisk?.hasRisk);
-    const missingCogs = estimates.filter(
+    const pricingRisk = activeRows.filter((e) => e.pricingRisk?.hasRisk);
+    const missingCogs = activeRows.filter(
       (e) => (e.pricingRisk?.missingCogsCount || 0) > 0,
     ).length;
-    const lowMargin = estimates.filter(
+    const lowMargin = activeRows.filter(
       (e) => (e.pricingRisk?.lowMarginCount || 0) > 0,
     ).length;
-    const goingCold = estimates.filter((e) =>
+    const goingCold = activeRows.filter((e) =>
       isGoingColdEstimate(e, nowMs),
     ).length;
 
