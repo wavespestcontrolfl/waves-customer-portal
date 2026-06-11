@@ -253,7 +253,7 @@ describe('appointment reminder reschedule windows', () => {
     return { reminder, updateReminder, finalReminderUpdate };
   }
 
-  test('silent reschedule inside the 24h window resets both reminder windows', async () => {
+  test('silent reschedule inside the 24h window marks both due windows covered', async () => {
     const { updateReminder } = mockRescheduleRecord();
 
     await AppointmentReminders.handleReschedule(
@@ -262,17 +262,20 @@ describe('appointment reminder reschedule windows', () => {
       { sendNotification: false },
     );
 
+    // Both windows are already due for the new time — leaving them unsent
+    // would make the next cron tick text the customer right after the admin
+    // chose "Don't send a notification".
     expect(updateReminder.where).toHaveBeenCalledWith({ id: 'reminder-reschedule' });
     expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
-      reminder_72h_sent: false,
-      reminder_72h_sent_at: null,
-      reminder_24h_sent: false,
-      reminder_24h_sent_at: null,
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: expect.any(Date),
+      reminder_24h_sent: true,
+      reminder_24h_sent_at: expect.any(Date),
     }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('silent reschedule about 48h out resets both reminder windows', async () => {
+  test('silent reschedule about 48h out covers only the due 72h window', async () => {
     const { updateReminder } = mockRescheduleRecord();
 
     await AppointmentReminders.handleReschedule(
@@ -281,16 +284,19 @@ describe('appointment reminder reschedule windows', () => {
       { sendNotification: false },
     );
 
+    // The 72h window is already due (would fire immediately); the 24h
+    // reminder stays pending so the customer is still reminded the day
+    // before the new appointment.
     expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
-      reminder_72h_sent: false,
-      reminder_72h_sent_at: null,
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: expect.any(Date),
       reminder_24h_sent: false,
       reminder_24h_sent_at: null,
     }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('reschedule outside 72h resets both reminder windows', async () => {
+  test('silent reschedule outside 72h resets both reminder windows', async () => {
     const { updateReminder } = mockRescheduleRecord();
 
     await AppointmentReminders.handleReschedule(
