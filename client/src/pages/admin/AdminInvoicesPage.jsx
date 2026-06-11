@@ -692,8 +692,16 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
       return { key: "refunded", label: "Refunded", color: D.muted };
     if (inv.status === "canceled" || inv.status === "cancelled")
       return { key: "canceled", label: "Canceled", color: D.muted };
-    if (inv.status === "scheduled")
+    if (inv.status === "scheduled") {
+      // The send cron stops retrying after 5 attempts — without this the
+      // invoice would sit as "Scheduled" forever with no visible signal.
+      if (
+        inv.scheduled_send_error &&
+        Number(inv.scheduled_send_attempts) >= 5
+      )
+        return { key: "send_failed", label: "Send failed", color: D.red };
       return { key: "scheduled", label: "Scheduled", color: D.amber };
+    }
     if (inv.status === "sending")
       return { key: "sending", label: "Sending", color: D.amber };
     if (inv.status === "draft")
@@ -1398,6 +1406,22 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
 // Newest event on top so the current state is the first thing you read.
 function buildInvoiceTimeline(inv) {
   const events = [];
+  if (inv.status === "scheduled" && inv.scheduled_send_at) {
+    const attempts = Number(inv.scheduled_send_attempts) || 0;
+    const exhausted = attempts >= 5 && inv.scheduled_send_error;
+    events.push({
+      kind: "scheduled",
+      at: inv.scheduled_send_at,
+      label: exhausted
+        ? "Scheduled send failed — out of retries"
+        : attempts > 0
+          ? `Scheduled to send (${attempts} failed attempt${attempts === 1 ? "" : "s"})`
+          : "Scheduled to send",
+      detail: inv.scheduled_send_error || null,
+      color: exhausted ? D.red : D.amber,
+      emphasis: Boolean(exhausted),
+    });
+  }
   if (inv.sent_at || inv.sms_sent_at) {
     events.push({
       kind: "sent",
