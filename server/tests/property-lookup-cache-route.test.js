@@ -217,4 +217,26 @@ describe('performPropertyLookup cache integration', () => {
     expect(result.meta.cache).toBe('miss');
     expect(lookupPropertyFromAITrio).toHaveBeenCalledTimes(1);
   });
+
+  it('a tech-verified no-pool answer beats satellite vision', () => {
+    const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+    const ai = { pool: 'YES', confidenceScore: 80 };
+
+    const unverified = buildEnrichedProfile({ hasPool: false }, ai, 26.99, -82.14);
+    expect(unverified.pool).toBe('POSSIBLE');
+    expect(unverified.fieldVerifyFlags.some((f) => f.field === 'pool')).toBe(true);
+
+    const verified = buildEnrichedProfile({
+      hasPool: false,
+      _fieldEvidence: { hasPool: { sourceType: 'verified', fieldVerify: false } },
+    }, ai, 26.99, -82.14);
+    expect(verified.pool).toBe('NO');
+    expect(verified.fieldVerifyFlags.some((f) => f.field === 'pool')).toBe(false);
+
+    const verifiedYes = buildEnrichedProfile({
+      hasPool: true,
+      _fieldEvidence: { hasPool: { sourceType: 'verified', fieldVerify: false } },
+    }, { pool: 'NO' }, 26.99, -82.14);
+    expect(verifiedYes.pool).toBe('YES');
+  });
 });

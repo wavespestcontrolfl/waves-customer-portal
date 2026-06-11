@@ -222,6 +222,19 @@ describe('saveLookup', () => {
     expect(JSON.parse(payload.property_record).county).toBe('Charlotte');
   });
 
+  it('anchors data_saved_at to the lookup start, not the save time', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    const lookupStart = '2026-06-11T15:00:00.000Z';
+    await saveLookup('100 Main St', {
+      ...result,
+      meta: { ...result.meta, timestamp: lookupStart },
+    });
+    // An override verified mid-lookup (after lookupStart) must compare as
+    // NEWER than this so the next cache hit invalidates.
+    expect(writes[0][1].data_saved_at.toISOString()).toBe(lookupStart);
+  });
+
   it('never caches a failed lookup and respects the kill switch', async () => {
     const writes = [];
     mockDbHandler = () => fakeTable({ writes });
@@ -302,6 +315,25 @@ describe('saveVerifiedOverride', () => {
     expect(stored.hasPool.value).toBe(true);
     expect(stored.propertyType.value).toBe('Single Family');
     expect(merged.hasPool.value).toBe(true);
+  });
+
+  it('normalizes enum fields to the canonical pricing values', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ row: null, writes });
+
+    await saveVerifiedOverride('100 Main St', {
+      constructionMaterial: 'wood frame',
+      roofType: 'tile',
+      foundationType: 'raised on pilings',
+    }, 'Adam');
+
+    const stored = JSON.parse(writes[0][1].verified_overrides);
+    expect(stored.constructionMaterial.value).toBe('WOOD_FRAME');
+    expect(stored.roofType.value).toBe('TILE');
+    expect(stored.foundationType.value).toBe('RAISED');
+
+    // Unrecognized enum values are dropped, never stored as junk.
+    expect(await saveVerifiedOverride('100 Main St', { roofType: 'thatched bamboo' }, 'Adam')).toBeNull();
   });
 
   it('returns null when nothing verifiable (or nothing valid) was sent', async () => {

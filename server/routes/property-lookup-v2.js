@@ -134,7 +134,11 @@ async function performPropertyLookup(address, options = {}) {
     enriched: null,
     errors: [],
     meta: {
-      timestamp: new Date().toISOString(),
+      // Anchored to t0 — BEFORE the overrides snapshot above. saveLookup
+      // stores this as data_saved_at, so an override verified mid-lookup
+      // (after the snapshot, thus not applied to this result) compares as
+      // NEWER than the data and invalidates the first subsequent cache hit.
+      timestamp: new Date(t0).toISOString(),
       lookupMs: 0,
       cache: options.refresh ? 'refresh' : 'miss',
     }
@@ -1461,6 +1465,9 @@ function mergeField(rcValue, aiValue, fallback) {
 }
 
 function mergePool(rc, ai) {
+  // A tech-verified pool answer beats records AND vision — a verified NO
+  // means the pool the satellite sees is the neighbor's.
+  if (rc?._fieldEvidence?.hasPool?.sourceType === 'verified') return rc.hasPool ? 'YES' : 'NO';
   // Property-record YES is authoritative. Satellite AI can upgrade but not downgrade.
   if (rc?.hasPool) return 'YES';
   if (ai?.pool === 'YES') return 'POSSIBLE'; // AI sees pool but RC doesn't — could be neighbor
@@ -1712,8 +1719,10 @@ function buildFieldVerifyFlags(rc, ai) {
     });
   }
 
-  // Satellite AI pool signal disagrees with property records.
-  if (rc?.hasPool === false && ai?.pool === 'YES') {
+  // Satellite AI pool signal disagrees with property records — unless a tech
+  // already verified the answer on site (the AI's pool is the neighbor's).
+  if (rc?.hasPool === false && ai?.pool === 'YES'
+      && rc?._fieldEvidence?.hasPool?.sourceType !== 'verified') {
     flags.push({
       field: 'pool',
       reason: 'AI detected possible pool not in property records — verify (may be neighbor)',

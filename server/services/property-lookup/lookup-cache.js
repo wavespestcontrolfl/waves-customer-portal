@@ -53,6 +53,38 @@ function intInRange(value, min, max) {
   return rounded >= min && rounded <= max ? rounded : undefined;
 }
 
+// Construction/roof/foundation overrides must land on the canonical enums
+// the pricing modifiers compare against (CBS / TILE / RAISED / …) — a stored
+// "tile" would clear the field-verify nudge while leaving the rodent/termite
+// modifiers at baseline. Mirrors the route's normalizers, but unrecognized
+// values are DROPPED rather than stored as UNKNOWN.
+function normalizeVerifiedConstruction(raw) {
+  const s = String(raw || '').toUpperCase();
+  if (/CONCRETE|CBS|BLOCK|MASONRY|STUCCO/.test(s)) return 'CBS';
+  if (/WOOD|FRAME|TIMBER/.test(s)) return 'WOOD_FRAME';
+  if (/METAL|STEEL|PREFAB/.test(s)) return 'METAL';
+  if (/BRICK/.test(s)) return 'BRICK';
+  return undefined;
+}
+
+function normalizeVerifiedFoundation(raw) {
+  const s = String(raw || '').toUpperCase();
+  if (/SLAB|CONCRETE/.test(s)) return 'SLAB';
+  if (/CRAWL/.test(s)) return 'CRAWLSPACE';
+  if (/RAISED|PIER|PILING|STILT/.test(s)) return 'RAISED';
+  if (/BASEMENT/.test(s)) return 'BASEMENT';
+  return undefined;
+}
+
+function normalizeVerifiedRoof(raw) {
+  const s = String(raw || '').toUpperCase();
+  if (/TILE|CLAY|BARREL/.test(s)) return 'TILE';
+  if (/SHINGLE|ASPHALT|COMP/.test(s)) return 'SHINGLE';
+  if (/METAL|STANDING SEAM|TIN/.test(s)) return 'METAL';
+  if (/FLAT|BUILT-UP|TPO|MEMBRANE/.test(s)) return 'FLAT';
+  return undefined;
+}
+
 function sanitizeVerifiedValue(field, value) {
   switch (field) {
     case 'squareFootage': return intInRange(value, 100, 50000);
@@ -66,10 +98,10 @@ function sanitizeVerifiedValue(field, value) {
       if (['FALSE', 'NO', 'N', '0'].includes(text)) return false;
       return undefined;
     }
-    case 'propertyType':
-    case 'constructionMaterial':
-    case 'roofType':
-    case 'foundationType': {
+    case 'constructionMaterial': return normalizeVerifiedConstruction(value);
+    case 'roofType': return normalizeVerifiedRoof(value);
+    case 'foundationType': return normalizeVerifiedFoundation(value);
+    case 'propertyType': {
       const text = String(value ?? '').trim();
       return text && text.length <= 60 ? text : undefined;
     }
@@ -169,8 +201,12 @@ async function saveLookup(address, result) {
   try {
     const { hash, normalizedAddress } = addressKey(address);
     const record = result.propertyRecord;
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + cacheTtlDays() * 24 * 60 * 60 * 1000);
+    // Anchor the data timestamp to the lookup START (meta.timestamp = t0,
+    // captured before the route's overrides snapshot): an override verified
+    // mid-lookup wasn't applied to this result, and anchoring here makes it
+    // compare as newer than the data so the next hit invalidates.
+    const dataAsOf = result.meta?.timestamp ? new Date(result.meta.timestamp) : new Date();
+    const expiresAt = new Date(Date.now() + cacheTtlDays() * 24 * 60 * 60 * 1000);
     const payload = {
       address_hash: hash,
       normalized_address: normalizedAddress,
@@ -186,7 +222,7 @@ async function saveLookup(address, result) {
       lookup_ms: Number.isFinite(result.meta?.lookupMs) ? result.meta.lookupMs : null,
       // Freshness anchor for the override-vs-data comparison in
       // getCachedLookup (updated_at also moves on override saves).
-      data_saved_at: now,
+      data_saved_at: dataAsOf,
       expires_at: expiresAt,
       updated_at: db.fn.now(),
     };
