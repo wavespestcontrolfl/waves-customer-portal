@@ -4,7 +4,8 @@
  * Flips ONE trend-type key — rodent_trapping — to the typed completion flow
  * at delivery_mode='internal_only': the typed CompletionPanel activates,
  * activity scores persist, follow-up CTA books $0 trap checks, and the V1
- * report renders + stores (token/PDF), but NO customer SMS/email goes out.
+ * report renders + stores by token (PDF render deferred until auto_send —
+ * the headless renderer cannot carry staff auth), and NO customer SMS/email.
  * This proves the trend machinery (gauge, visit sequence, trend words,
  * progress framing, included follow-ups) on a controlled surface before
  * Phase 2 flips the broad trend batch (contract §Phase-1b; plan rev 3.1).

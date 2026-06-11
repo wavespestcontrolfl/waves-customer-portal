@@ -41,6 +41,25 @@ async function staffCanViewSuppressed(req) {
     return false;
   }
 }
+
+// Centralized gate: runs for EVERY route in this router with a :token param
+// (data, PDF, preview, map.svg, ask, client-rating, …) so no content-bearing
+// or write subroute can be added and forgotten. Project-report tokens and
+// unknown tokens pass through — each route resolves/404s on its own; this
+// gate owns exactly one concern: suppressed service reports are staff-only.
+router.param('token', async (req, res, next, token) => {
+  try {
+    if (!FULL_TOKEN_RE.test(String(token || ''))) return next();
+    const record = await db('service_records')
+      .where({ report_view_token: token })
+      .first('id', 'structured_notes');
+    if (!record || !suppressedTypedReport(record)) return next();
+    if (await staffCanViewSuppressed(req)) return next();
+    return res.status(404).json({ error: 'Report not found' });
+  } catch (err) {
+    return next(err);
+  }
+});
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const {
   runAndSwallowErrors: runPestPressureForServiceRecord,
@@ -563,14 +582,9 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'report_template_version', 'structured_notes')
+      .select('id', 'report_template_version')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1') {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-    // Suppressed reports never serve the unauthenticated preview asset
-    // (it's report content for link unfurlers — no staff exception needed).
-    if (suppressedTypedReport(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
@@ -630,11 +644,9 @@ router.get('/:token', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
-    if (suppressedTypedReport(service) && !(await staffCanViewSuppressed(req))) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
-    // Track first view (staff shadow reviews aren't customer views)
+    // Suppressed-report access is enforced by the router.param('token')
+    // gate; reaching here with a suppressed record means a staff viewer —
+    // their shadow reviews aren't customer views.
     if (!suppressedTypedReport(service)) await trackServiceReportView(service);
 
     if (service.report_template_version === 'service_report_v1') {
@@ -794,10 +806,9 @@ router.get('/:token/data', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
-    if (suppressedTypedReport(service) && !(await staffCanViewSuppressed(req))) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
+    // Suppressed-report access is enforced by the router.param('token')
+    // gate; a suppressed record here means a staff viewer — don't count
+    // their shadow reviews as customer report views.
     if (mode === 'live' && !suppressedTypedReport(service)) {
       await trackServiceReportView(service);
     }
