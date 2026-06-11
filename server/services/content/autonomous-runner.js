@@ -36,7 +36,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, parseETDateTime, etWeekStart } = require('../../utils/datetime-et');
-const { WAVES_LOCATIONS } = require('../../config/locations');
+const { WAVES_LOCATIONS, CITY_TO_LOCATION } = require('../../config/locations');
 const { THRESHOLDS } = require('./scoring-config');
 
 // Database-wide advisory-lock key for the publishing run. Held for the whole
@@ -80,24 +80,16 @@ const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 
-// City → GBP location mapping for autonomous gbp_post distribution. A post
-// goes to the single profile whose service area covers the opportunity's
-// city — never blasted to all four profiles (per-location differentiated
-// content policy). Unmapped cities park for manual routing.
-const GBP_CITY_LOCATION_MAP = {
-  'bradenton': 'bradenton',
-  'lakewood-ranch': 'bradenton',
-  'parrish': 'parrish',
-  'palmetto': 'parrish',
-  'ellenton': 'parrish',
-  'sarasota': 'sarasota',
-  'siesta-key': 'sarasota',
-  'venice': 'venice',
-  'north-port': 'venice',
-};
+// City → GBP location for autonomous gbp_post distribution, backed by the
+// canonical CITY_TO_LOCATION map in config/locations.js. A post goes to the
+// single profile whose service area covers the opportunity's city — never
+// blasted to all four profiles (per-location differentiated content
+// policy). Deliberately NOT resolveLocation(): its bradenton fallback would
+// silently post unknown cities on the Bradenton profile; unmapped cities
+// must park for manual routing instead.
 function gbpLocationIdForCity(city) {
-  const key = String(city || '').trim().toLowerCase().replace(/\s+/g, '-');
-  return GBP_CITY_LOCATION_MAP[key] || null;
+  const key = String(city || '').trim().toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ');
+  return CITY_TO_LOCATION[key] || null;
 }
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
@@ -1536,6 +1528,20 @@ class AutonomousRunner {
           outcome: 'completed_pending_review',
           skip_reason: 'gbp_post_validation_failed',
           reviewer_notes: `Generated GBP copy failed validation (${validation.issues.join('; ')}): ${content}`,
+        },
+      };
+    }
+
+    // Router-flagged human review always parks before any posting decision —
+    // mirrors the generic brief.human_review_required gate on the page
+    // publish path, which this early gbp_post branch would otherwise bypass.
+    if (brief.human_review_required) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_post_human_review',
+          reviewer_notes: `Router flagged human review (${brief.human_review_reason || 'unspecified'}). Would post to ${location.name} GBP: "${content}"${link ? ` (CTA: ${link})` : ''}`,
         },
       };
     }

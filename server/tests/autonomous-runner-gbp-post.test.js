@@ -69,13 +69,16 @@ beforeEach(() => {
 afterAll(() => { process.env = ORIGINAL_ENV; });
 
 describe('gbpLocationIdForCity', () => {
-  test('maps cities to their covering GBP location', () => {
+  test('maps cities to their covering GBP location (canonical CITY_TO_LOCATION)', () => {
     expect(gbpLocationIdForCity('bradenton')).toBe('bradenton');
     expect(gbpLocationIdForCity('lakewood-ranch')).toBe('bradenton');
     expect(gbpLocationIdForCity('Lakewood Ranch')).toBe('bradenton');
     expect(gbpLocationIdForCity('palmetto')).toBe('parrish');
     expect(gbpLocationIdForCity('siesta-key')).toBe('sarasota');
     expect(gbpLocationIdForCity('north-port')).toBe('venice');
+    expect(gbpLocationIdForCity('port-charlotte')).toBe('venice');
+    expect(gbpLocationIdForCity('Port Charlotte')).toBe('venice');
+    expect(gbpLocationIdForCity('englewood')).toBe('venice');
   });
   test('unmapped or missing city → null', () => {
     expect(gbpLocationIdForCity('tampa')).toBeNull();
@@ -129,6 +132,20 @@ describe('_handleGbpPostAction', () => {
     expect(result.patch.reviewer_notes).toContain('Sarasota ghost ants');
     expect(social.postToGBP).not.toHaveBeenCalled();
     expect(run.trust_build_count_after).toBe(1);
+  });
+
+  test('router human_review_required parks before posting even with auto-publish on', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    const result = await runner._handleGbpPostAction(
+      baseBrief({ human_review_required: true, human_review_reason: 'repeated_brief_versions' }),
+      { shadow_mode: false }
+    );
+
+    expect(result.claim).toBe('pending');
+    expect(result.patch.skip_reason).toBe('gbp_post_human_review');
+    expect(result.patch.reviewer_notes).toContain('repeated_brief_versions');
+    expect(social.postToGBP).not.toHaveBeenCalled();
   });
 
   test('SOCIAL_DRY_RUN parks instead of posting even with auto-publish on', async () => {
