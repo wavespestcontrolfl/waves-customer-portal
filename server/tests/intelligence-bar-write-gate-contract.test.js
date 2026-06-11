@@ -3,10 +3,11 @@
  * "no new bare writes" (issue #1568).
  *
  * Every registered tool must be classified below. A newly added tool fails
- * this suite until its author classifies it — and the only acceptable
- * classifications for a NEW write are WRITE_TWO_STEP (structural
- * preview→confirmed gate) or, once issue #1568 lands, the UI-backed
- * pending-action mechanism. The legacy bare-write set is a frozen by-name
+ * this suite until its author classifies it. The UI-backed pending-action
+ * mechanism (#1568) is LIVE: a new write goes in WRITE_TWO_STEP (internal
+ * preview gate driven by /confirm-action) AND must be added to
+ * services/intelligence-bar/write-gates.js so the route intercepts it. No
+ * model-facing schema may declare a confirmed boolean. The legacy bare-write set is a frozen by-name
  * snapshot: entries may be REMOVED as tools migrate, but no name may ever be
  * added — a diff that touches FROZEN_LEGACY_BARE_WRITES_2026_06_11 to add a
  * name is a policy violation, not a fix for this test.
@@ -84,9 +85,10 @@ function discoverAllTools() {
   return all;
 }
 
-// Writes with a structural in-conversation gate: the un-`confirmed` call
-// returns a preview and never mutates. New writes go here (until #1568's
-// UI-backed mechanism exists, after which they use that instead).
+// Writes whose executor has an internal preview gate: called without
+// confirmed they return a preview and never mutate. Only /confirm-action
+// attaches confirmed server-side; the boolean is NOT in any model-facing
+// schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
   'create_customer',
   'optimize_all_routes',
@@ -249,20 +251,20 @@ describe('intelligence bar write-gate contract (issue #1568)', () => {
     expect(stale).toEqual([]);
   });
 
-  test('two-step writes expose a structural confirmed gate in their schema', () => {
-    for (const name of WRITE_TWO_STEP) {
-      const tool = byName.get(name);
-      expect(tool).toBeDefined();
-      expect(Object.keys(tool.input_schema?.properties || {})).toContain('confirmed');
-    }
+  test('NO model-facing schema declares confirmed — the boolean is not a write authority (#1568 PR 4)', () => {
+    // The confirmed gate still exists inside the two-step executors, but it
+    // is driven exclusively by /confirm-action server-side. Exposing it in a
+    // tool schema would re-invite the model to assert its own confirmation.
+    const declaring = allTools.filter(t =>
+      Object.keys(t.tool.input_schema?.properties || {}).includes('confirmed')
+    ).map(t => `${t.module}:${t.name}`);
+    expect(declaring).toEqual([]);
   });
 
-  test('read-only tools do not declare a confirmed param (a gated tool is a write — reclassify it)', () => {
-    const misfiled = READ_ONLY.filter(name => {
-      const tool = byName.get(name);
-      return tool && Object.keys(tool.input_schema?.properties || {}).includes('confirmed');
-    });
-    expect(misfiled).toEqual([]);
+  test('two-step writes are present and registered', () => {
+    for (const name of WRITE_TWO_STEP) {
+      expect(byName.get(name)).toBeDefined();
+    }
   });
 
   test('frozen snapshot is tamper-evident (hash pinned)', () => {
