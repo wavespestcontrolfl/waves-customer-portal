@@ -1740,13 +1740,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Billing pre-gate for typed one-time completions — ports the project
     // flow's enforcement (resolveProjectCompletionBilling) so a one-time
     // specialty job can't complete unbilled, and fires BEFORE any customer
-    // artifact. Bypasses: $0 visits resolve as not_billable inside the
-    // resolver, and included follow-up appointments (followup_included,
-    // set by the schedule-followup endpoint) skip the gate entirely.
+    // artifact. Gates on the PROFILE alone, not on whether the client
+    // submitted structuredFindings — a stale/offline client completing a
+    // cut-over type must still hit the billing policy (Codex P1).
+    // Bypasses: $0 visits resolve as not_billable inside the resolver, and
+    // included follow-up appointments (followup_included, set by the
+    // schedule-followup endpoint) skip the gate entirely.
     if (
       claim.action === 'proceed'
       && typedFindingsType
-      && typedFindings
       && !isIncompleteVisit
       && !recapReviewOnly
       && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
@@ -2854,12 +2856,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
     let reportToken = null;
-    try {
-      const { ensureReportToken } = require('./reports-public');
-      reportToken = await ensureReportToken(record.id);
-      if (reportToken) reportUrl = `${portalUrl}/report/${reportToken}`;
-    } catch (err) {
-      logger.error(`[dispatch] service report token mint failed: ${err.message}`);
+    // delivery_mode 'disabled' (typed kill switch) suppresses the customer
+    // report entirely — don't mint a public token at all (Codex P2). The
+    // record still exists; flipping the mode back later can mint on demand.
+    if (typedDeliveryMode !== 'disabled') {
+      try {
+        const { ensureReportToken } = require('./reports-public');
+        reportToken = await ensureReportToken(record.id);
+        if (reportToken) reportUrl = `${portalUrl}/report/${reportToken}`;
+      } catch (err) {
+        logger.error(`[dispatch] service report token mint failed: ${err.message}`);
+      }
     }
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
     // delivery_mode 'disabled' (typed kill switch): no PDF render either.
