@@ -749,12 +749,22 @@ const AppointmentReminders = {
       // Reset reminder flags. If we successfully send a reschedule notice
       // below, we mark any already-due reminder windows as sent so cron does
       // not immediately repeat the same appointment details.
+      //
+      // When the notice is suppressed (admin chose "Don't send a
+      // notification"), windows already due for the NEW time must be marked
+      // covered here instead — otherwise the next 15-min cron tick sees an
+      // "unsent" due reminder and texts the customer minutes after the admin
+      // explicitly opted for silence. Future windows stay unsent either way,
+      // so reminders still follow the new appointment time.
+      const covered = sendNotification
+        ? { alreadyInside72hWindow: false, alreadyInside24hWindow: false }
+        : reminderFlagsCoveredByNotice(newApptTime);
       const rescheduleUpdate = {
         appointment_time: newApptTime,
-        reminder_72h_sent: false,
-        reminder_72h_sent_at: null,
-        reminder_24h_sent: false,
-        reminder_24h_sent_at: null,
+        reminder_72h_sent: covered.alreadyInside72hWindow,
+        reminder_72h_sent_at: covered.alreadyInside72hWindow ? new Date() : null,
+        reminder_24h_sent: covered.alreadyInside24hWindow,
+        reminder_24h_sent_at: covered.alreadyInside24hWindow ? new Date() : null,
         updated_at: new Date(),
       };
       // A reschedule supersedes a still-pending creation confirmation — admin
