@@ -186,7 +186,7 @@ function serviceKeysForEstimateSection(section = {}) {
   return keys;
 }
 
-export function estimateAddServiceOffer(services = [], serviceMode = 'recurring') {
+export function estimateAddServiceOffer(services = [], serviceMode = 'recurring', membership = null) {
   if (serviceMode !== 'recurring') return null;
   const currentKeys = new Set();
   services
@@ -194,6 +194,37 @@ export function estimateAddServiceOffer(services = [], serviceMode = 'recurring'
     .forEach((section) => {
       serviceKeysForEstimateSection(section).forEach((key) => currentKeys.add(key));
     });
+
+  // Existing customers: never offer a service already on the account.
+  // Cross-sell ladder is termite bait stations → seasonal mosquito,
+  // whichever they don't have yet (mirrors the server-rendered page).
+  if (membership && membership.isExistingCustomer) {
+    const combinedKeys = new Set([
+      ...currentKeys,
+      ...(membership.existingServiceKeys || []),
+      ...((membership.existingServices || []).map((s) => s.key)),
+      ...((membership.newServices || []).map((s) => s.key)),
+    ]);
+    if (!combinedKeys.has('termite_bait')) {
+      return {
+        serviceKey: 'termite_bait',
+        label: 'Termite Bait Stations',
+        icon: 'shield',
+        title: 'Add Termite Bait Stations and save more',
+        body: 'Year-round termite monitoring around your home perimeter — and bundling can unlock the next WaveGuard pricing tier.',
+      };
+    }
+    if (!combinedKeys.has('mosquito')) {
+      return {
+        serviceKey: 'mosquito',
+        label: 'Seasonal Mosquito',
+        icon: 'sparkles',
+        title: 'Add Seasonal Mosquito and save more',
+        body: 'Seasonal barrier treatments for your lanai and yard — and bundling can unlock the next WaveGuard pricing tier.',
+      };
+    }
+    return null;
+  }
 
   if (currentKeys.has('pest_control') && !currentKeys.has('lawn_care')) {
     return {
@@ -585,7 +616,9 @@ function MembershipCard({ membership }) {
               <span style={labelStyle}>{s.label}</span>
               <span style={valStyle}>
                 {s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}
-                {s.monthlySavings != null ? ` · ${money(s.monthlySavings)}/mo off` : ''}
+                {s.perApplicationSavings != null
+                  ? ` · ${money(s.perApplicationSavings)}/application off`
+                  : (s.monthlySavings != null ? ` · ${money(s.monthlySavings)}/mo off` : '')}
               </span>
             </div>
           ))}
@@ -1659,8 +1692,8 @@ export default function EstimateViewPage() {
     return selectedFrequencyForSection(primarySection, selected);
   }, [services, selected]);
   const addServiceOffer = useMemo(
-    () => estimateAddServiceOffer(services, serviceMode),
-    [services, serviceMode]
+    () => estimateAddServiceOffer(services, serviceMode, data?.estimate?.membership),
+    [services, serviceMode, data?.estimate?.membership]
   );
 
   useEffect(() => {

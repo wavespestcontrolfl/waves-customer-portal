@@ -16,6 +16,7 @@ const SERVICE_LABELS = {
   pest_control: 'Pest Control',
   mosquito: 'Mosquito',
   tree_shrub: 'Tree & Shrub',
+  termite_bait: 'Termite Bait Stations',
 };
 
 function parseJson(value, fallback = null) {
@@ -101,6 +102,7 @@ function normalizeRequestedServiceKey(value) {
   if (Object.prototype.hasOwnProperty.call(SERVICE_LABELS, raw)) return raw;
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
+  if (raw.includes('termite')) return 'termite_bait';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
   return null;

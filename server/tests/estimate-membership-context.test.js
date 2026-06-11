@@ -1,0 +1,164 @@
+// computeMembershipContext — existing-customer membership snapshot math.
+// Covers the per-visit savings basis (last PAID invoice amount preferred,
+// scheduled estimated_price fallback) and the new-service per-application
+// savings figure shown on the public estimate.
+
+const { computeMembershipContext } = require('../services/estimate-membership-context');
+
+// Minimal chainable knex fake: every chain method returns the builder;
+// first()/select() resolve canned rows per table.
+function fakeDb({
+  customer = { id: 'cust-1', first_name: 'Don', active: true },
+  scheduledRows = [],
+  paidInvoices = [],
+  prepaidTerm = null,
+  invoiceQueryThrows = false,
+} = {}) {
+  const db = (table) => {
+    const builder = {
+      where: () => builder,
+      whereIn: () => builder,
+      whereNotIn: () => builder,
+      whereNotNull: () => builder,
+      andWhere: () => builder,
+      orderBy: () => builder,
+      limit: () => builder,
+      columnInfo: async () => ({ is_recurring: {}, estimated_price: {}, annual_prepay_term_id: {} }),
+      first: async () => {
+        if (table === 'customers') return customer;
+        if (table === 'annual_prepay_terms') return prepaidTerm;
+        return null;
+      },
+      select: async () => {
+        if (table === 'scheduled_services') return scheduledRows;
+        if (table === 'invoices') {
+          if (invoiceQueryThrows) throw new Error('relation does not exist');
+          return paidInvoices;
+        }
+        return [];
+      },
+    };
+    return builder;
+  };
+  db.fn = { now: () => new Date() };
+  return db;
+}
+
+function lawnEstimateData() {
+  return {
+    result: {
+      results: {
+        lawn: [{ v: 9, recommended: true }],
+      },
+      recurring: {
+        discount: 0.10,
+        annualBeforeDiscount: 837,
+        annualAfterDiscount: 753.30,
+        services: [{ name: 'Lawn Care', mo: 69.75 }],
+      },
+    },
+  };
+}
+
+function futurePestRows() {
+  return [
+    { id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+    { id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
+    { id: 's3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120 },
+  ];
+}
+
+describe('computeMembershipContext', () => {
+  test('existing-service per-visit savings use the last PAID invoice amount', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [
+        { service_type: 'Quarterly Pest Control', total: '117.00', paid_at: '2026-05-20' },
+        { service_type: 'Quarterly Pest Control', total: '95.00', paid_at: '2026-02-20' },
+      ],
+    });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx).toMatchObject({
+      isExistingCustomer: true,
+      tierLabel: 'Silver',
+      existingServiceKeys: ['pest_control'],
+    });
+    expect(ctx.existingServices).toEqual([
+      expect.objectContaining({
+        key: 'pest_control',
+        extraDiscountPct: 10,
+        perVisitSavings: 11.70, // 10% of the $117 they last paid — not the $120 estimated_price
+        remainingVisits: 3,
+      }),
+    ]);
+  });
+
+  test('falls back to scheduled estimated_price when there is no paid history', async () => {
+    const database = fakeDb({ scheduledRows: futurePestRows(), paidInvoices: [] });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 12.00 });
+  });
+
+  test('invoice lookup failure degrades to the estimated_price fallback, not an error', async () => {
+    const database = fakeDb({ scheduledRows: futurePestRows(), invoiceQueryThrows: true });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx).not.toBeNull();
+    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 12.00 });
+  });
+
+  test('new-service savings include a per-application dollar figure', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    // $69.75/mo over 9 applications = $93/application; 10% member discount.
+    expect(ctx.newServices).toEqual([
+      expect.objectContaining({
+        key: 'lawn_care',
+        discountPct: 10,
+        monthlySavings: 6.98,
+        perApplicationSavings: 9.30,
+      }),
+    ]);
+  });
+
+  test('setup/prepay invoices without service_type never feed the per-visit basis', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      // The whereNotNull('service_type') filter is in the query itself; rows
+      // that still arrive with a non-qualifying type are skipped too.
+      paidInvoices: [
+        { service_type: 'rodent_bait', total: 500, paid_at: '2026-06-01' },
+        { service_type: 'pest_control', total: 117, paid_at: '2026-05-20' },
+      ],
+    });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 11.70 });
+  });
+});

@@ -1285,6 +1285,9 @@ const PERKS = [
 
 const LAWN_CARE_PERKS = [
   'Locked-in pricing for 12 months',
+  'Seasonal product rotations matched to Southwest Florida turf cycles',
+  'Lawn health scored every visit — turf density, weeds, and color tracked over time',
+  'Re-service between visits at no charge',
   'Text your tech directly for quick questions',
   'Billing after completed lawn care visits',
   'Owner-operator accountability on every visit',
@@ -2523,9 +2526,9 @@ function renderMembershipBlockHtml(membership) {
         <div class="wg-row">
           <span class="wg-row-label">${escapeHtml(s.label)}</span>
           <span class="wg-row-val">
-            ${s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}${s.monthlySavings != null
-              ? ` &middot; ${money(s.monthlySavings)}/mo off`
-              : ''}
+            ${s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}${s.perApplicationSavings != null
+              ? ` &middot; ${money(s.perApplicationSavings)}/application off`
+              : (s.monthlySavings != null ? ` &middot; ${money(s.monthlySavings)}/mo off` : '')}
           </span>
         </div>`).join('')}
     </div>` : '';
@@ -2797,15 +2800,36 @@ function renderPage(token, estimate, estData, membership) {
   const qualifyingRecurring = recurring.filter(recurringServiceCountsTowardTier);
   const qualifyingKeys = new Set(qualifyingRecurring.map(recurringServiceKey));
 
+  // Existing customers must never be offered a service they already have —
+  // fold the account's qualifying services (membership snapshot) into the
+  // estimate's before picking the upsell. existingServiceKeys is the raw key
+  // list; older snapshots only carry existingServices (upgrade-only), so both
+  // are read.
+  const isExistingMember = !!(membership && membership.isExistingCustomer);
+  const combinedQualifyingKeys = new Set([
+    ...qualifyingKeys,
+    ...(isExistingMember ? (membership.existingServiceKeys || []) : []),
+    ...(isExistingMember ? (membership.existingServices || []).map((s) => s.key) : []),
+    ...(isExistingMember ? (membership.newServices || []).map((s) => s.key) : []),
+  ]);
+
   let upsellService = null;
-  if (qualifyingRecurring.length === 1) {
+  if (isExistingMember) {
+    // Already-a-customer ladder: termite bait stations or seasonal mosquito,
+    // whichever they don't have yet.
+    if (!combinedQualifyingKeys.has('termite_bait')) {
+      upsellService = 'Termite Bait Stations';
+    } else if (!combinedQualifyingKeys.has('mosquito')) {
+      upsellService = 'Seasonal Mosquito';
+    }
+  } else if (qualifyingRecurring.length === 1) {
     upsellService = recurringServiceKey(qualifyingRecurring[0]) === 'pest_control' ? 'Lawn Care' : 'Pest Control';
   } else if (qualifyingRecurring.length === 2 && !qualifyingKeys.has('mosquito')) {
     upsellService = 'WaveGuard Mosquito';
   }
   const showUpsell = !!upsellService && !canChooseOneTime && !isOneTimeOnly;
 
-  const nextTierCount = qualifyingRecurring.length + 1;
+  const nextTierCount = (isExistingMember ? combinedQualifyingKeys.size : qualifyingRecurring.length) + 1;
   const nextTierName = nextTierCount >= 4 ? 'Platinum' : nextTierCount === 3 ? 'Gold' : 'Silver';
   const nextTierPct = nextTierCount >= 4 ? 20 : nextTierCount === 3 ? 15 : 10;
 
@@ -2894,7 +2918,12 @@ function renderPage(token, estimate, estData, membership) {
   const membershipFee = hasWaveGuardMembership
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
-  const showMembershipFee = membershipFee > 0 && !locked;
+  // Existing customers never pay the setup again — the fee is waived outright
+  // (shown struck-through), and with no waivable fee the annual-prepay option
+  // drops too: existing customers are offered pay-per-application only.
+  // estimate-converter mirrors this so the accept invoice can't include it.
+  const membershipSetupWaivedForExistingCustomer = isExistingMember && membershipFee > 0;
+  const showMembershipFee = membershipFee > 0 && !locked && !membershipSetupWaivedForExistingCustomer;
 
   const tierDiscountPct = Math.round(estimateTierDiscount * 100);
   const servicePriority = (svc) => {
@@ -3015,9 +3044,11 @@ function renderPage(token, estimate, estData, membership) {
         <p class="payment-choice-body">${escapeHtml(standardInvoiceCopy.payAfterBody)}</p>
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
+          ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
           ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
+        ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="pay_at_visit">Choose pay per application</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -7020,6 +7051,10 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
 
 function annualPrepayEligibleForEstimateData(estData) {
   if (!estData || typeof estData !== 'object') return false;
+  // Existing customers get pay-per-application only — no annual prepay
+  // option and no waivable setup fee (the setup is waived outright; see
+  // estimate-converter's matching guard on the accept invoice).
+  if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
   return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
 }
