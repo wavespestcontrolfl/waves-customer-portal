@@ -88,11 +88,23 @@ describe('applyVerifiedOverrides', () => {
     expect(evidence.sourceLabel).toBe('tech verified');
     expect(evidence.score).toBe(110);
     expect(evidence.fieldVerify).toBe(false);
-    expect(evidence.winningProvider).toBe('Adam');
+    // Verifier identity stays in the DB row only — record-facing evidence
+    // carries a generic 'tech' provider, because enriched.fieldEvidence flows
+    // verbatim through the unauthenticated public estimator response.
+    expect(evidence.winningProvider).toBe('tech');
+    expect(JSON.stringify(rec._fieldEvidence)).not.toContain('Adam');
     // Prior county evidence preserved beneath the verified entry.
     expect(evidence.evidence[0].sourceType).toBe('verified');
     expect(evidence.evidence[1].sourceType).toBe('county');
     expect(rec._verifiedFields).toEqual(['lotSize']);
+  });
+
+  it('recomputes _dataQuality so the weak-data banner clears after verification', () => {
+    const rec = record();
+    rec._dataQuality = { level: 'low', fieldVerifyCount: 1 };
+    applyVerifiedOverrides(rec, { lotSize: { value: 12000 } });
+    expect(rec._dataQuality.fieldVerifyCount).toBe(0);
+    expect(rec._dataQuality.verifyCriticalFields).toEqual([]);
   });
 
   it('ignores non-whitelisted fields and missing values', () => {
@@ -114,6 +126,8 @@ describe('applyVerifiedOverrides', () => {
 describe('getCachedLookup', () => {
   const freshRow = {
     property_record: { squareFootage: 1348 },
+    lat: '26.9897000',
+    lng: '-82.1390000',
     expires_at: new Date(Date.now() + 86400000).toISOString(),
   };
 
@@ -132,6 +146,10 @@ describe('getCachedLookup', () => {
     expect(await getCachedLookup('100 Main St')).toBeNull();
 
     mockDbHandler = () => fakeTable({ row: null });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+
+    // No stored coordinates = no satellite regeneration = miss.
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, lat: null, lng: null } });
     expect(await getCachedLookup('100 Main St')).toBeNull();
   });
 
@@ -188,6 +206,14 @@ describe('saveLookup', () => {
 
     process.env.PROPERTY_LOOKUP_CACHE_DISABLED = '1';
     await saveLookup('100 Main St', result);
+    expect(writes.length).toBe(0);
+  });
+
+  it('never caches a partial lookup without geocoded coordinates', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await saveLookup('100 Main St', { ...result, satellite: null });
+    await saveLookup('100 Main St', { ...result, satellite: { lat: null, lng: null } });
     expect(writes.length).toBe(0);
   });
 

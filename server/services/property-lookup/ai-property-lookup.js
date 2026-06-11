@@ -2810,6 +2810,7 @@ function summarizeProviderError(err) {
 }
 
 module.exports = {
+  buildPropertyDataQuality,
   canonicalLookupAddress,
   lookupStoriesFromAI,
   lookupPropertyFromAI,

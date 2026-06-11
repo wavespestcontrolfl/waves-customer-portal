@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
+const { buildPropertyDataQuality } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
 
@@ -70,6 +71,9 @@ async function getCachedLookup(address) {
     const row = await db('property_lookups').where({ address_hash: hash }).first();
     if (!row || !row.property_record) return null;
     if (!row.expires_at || new Date(row.expires_at).getTime() <= Date.now()) return null;
+    // Defense in depth vs. partial rows (saveLookup refuses to write them):
+    // no stored coordinates = no satellite regeneration = treat as a miss.
+    if (row.lat == null || row.lng == null) return null;
     return row;
   } catch (err) {
     logger.warn('[lookup-cache] read failed', { error: err.message });
@@ -98,6 +102,10 @@ async function saveLookup(address, result) {
   // Never cache a failed lookup — a transient outage must not become a
   // 180-day "no data" answer.
   if (!result?.propertyRecord) return;
+  // Same rule for partial lookups: no geocode means no satellite imagery and
+  // no vision pass — a cached no-geometry row would skip both for the whole
+  // TTL (neither the estimator UI nor the public route sends refresh).
+  if (!Number.isFinite(result.satellite?.lat) || !Number.isFinite(result.satellite?.lng)) return;
   try {
     const { hash, normalizedAddress } = addressKey(address);
     const record = result.propertyRecord;
@@ -180,6 +188,9 @@ async function saveVerifiedOverride(address, fields, verifiedBy) {
 // field value and its _fieldEvidence entry so the UI shows "tech verified"
 // winning and the field-verify nudge clears. Leaves all other evidence
 // untouched (re-merging a merged record would flatten per-field provenance).
+// The evidence carries a generic 'tech' provider — verifier identity stays in
+// the DB row only, because enriched.fieldEvidence flows verbatim through the
+// UNAUTHENTICATED public estimator response.
 function applyVerifiedOverrides(record, overrides) {
   if (!record || !overrides) return record;
   const applied = [];
@@ -194,7 +205,7 @@ function applyVerifiedOverrides(record, overrides) {
       sourceType: 'verified',
       sourceLabel: 'tech verified',
       winningSource: null,
-      winningProvider: entry.verifiedBy || 'tech',
+      winningProvider: 'tech',
       score: VERIFIED_SOURCE_WEIGHT,
       disagreement: false,
       fieldVerify: false,
@@ -203,7 +214,7 @@ function applyVerifiedOverrides(record, overrides) {
         {
           field,
           value: entry.value,
-          provider: entry.verifiedBy || 'tech',
+          provider: 'tech',
           url: null,
           sourceType: 'verified',
           sourceQuality: VERIFIED_SOURCE_WEIGHT,
@@ -217,6 +228,11 @@ function applyVerifiedOverrides(record, overrides) {
   if (applied.length) {
     record._verifiedFields = applied;
     if (record._raw) record._raw._verifiedFields = applied;
+    // The aggregate quality summary drives the weak-data banner
+    // (buildFieldVerifyFlags reads _dataQuality.level / fieldVerifyCount) —
+    // recompute it so verifying the flagged fields actually clears it.
+    record._dataQuality = buildPropertyDataQuality(record._fieldEvidence, record._aiProviders || []);
+    if (record._raw) record._raw._dataQuality = record._dataQuality;
   }
   return record;
 }
