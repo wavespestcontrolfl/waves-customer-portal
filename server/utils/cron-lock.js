@@ -29,7 +29,29 @@ const logger = require('../services/logger');
  * NOT for jobs that already claim work atomically (FOR UPDATE SKIP LOCKED
  * queues, conditional-UPDATE claims) — those are fleet-safe without it.
  */
-async function runExclusive(jobName, fn) {
+async function runExclusive(jobName, fn, options = {}) {
+  // retryAttempts/retryDelayMs: for one-shot day-keyed sweeps with no
+  // natural catch-up (monthly billing — a customer's billing_day only
+  // matches once a month), a lost tick must not be silently dropped.
+  // On lease_held the loser waits and re-tries; if the holder died
+  // mid-sweep (deploy SIGKILL frees its lock with its connection), the
+  // retry re-runs the sweep and the job's own idempotency guards skip
+  // the work already done. The pool connection is re-acquired per
+  // attempt — nothing is pinned while waiting.
+  const { retryAttempts = 0, retryDelayMs = 60_000 } = options;
+  for (let attempt = 0; ; attempt++) {
+    const result = await tryRunExclusive(jobName, fn);
+    if (!(result && result.skipped && result.reason === 'lease_held') || attempt >= retryAttempts) {
+      if (result && result.skipped && result.reason === 'lease_held' && retryAttempts > 0) {
+        logger.error(`[cron-lock] ${jobName}: lease still held after ${retryAttempts} retries — giving up this tick`);
+      }
+      return result;
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+}
+
+async function tryRunExclusive(jobName, fn) {
   const lockKey = `cron:${jobName}`;
   let conn;
   try {

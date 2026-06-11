@@ -1706,12 +1706,16 @@ function initScheduledJobs() {
     try {
       // Belt over the idempotency keys: serializes the whole sweep so
       // overlapping deploy instances don't even race the per-customer
-      // existingCharge check.
+      // existingCharge check. Retry-on-lease-held (not skip): this sweep
+      // is day-keyed with no catch-up — a customer's billing_day only
+      // matches once a month — so if the holder dies mid-sweep during a
+      // deploy, the loser must re-run rather than drop the day. The
+      // per-customer guards make the re-run idempotent.
       await runExclusive('billing-monthly', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processMonthlyBilling();
         logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
-      });
+      }, { retryAttempts: 30, retryDelayMs: 60_000 });
     } catch (err) {
       logger.error(`Monthly billing failed: ${err.message}`);
     }

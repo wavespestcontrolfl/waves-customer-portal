@@ -89,6 +89,39 @@ describe('cron-lock runExclusive', () => {
     expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
   });
 
+  test('retries on lease_held and runs once the holder releases', async () => {
+    let granted = false;
+    db.client.acquireConnection.mockImplementation(async () => ({
+      query: jest.fn(async ({ text }) => {
+        if (text.includes('pg_try_advisory_lock')) {
+          const locked = granted;
+          granted = true; // second attempt acquires
+          return { rows: [{ locked }] };
+        }
+        return { rows: [] };
+      }),
+    }));
+
+    const body = jest.fn().mockResolvedValue('ran');
+    const result = await runExclusive('test-job', body, { retryAttempts: 2, retryDelayMs: 1 });
+
+    expect(body).toHaveBeenCalledTimes(1);
+    expect(result).toBe('ran');
+    // One failed attempt + one successful attempt = two pool acquisitions.
+    expect(db.client.acquireConnection).toHaveBeenCalledTimes(2);
+  });
+
+  test('gives up after retryAttempts when the lease never frees', async () => {
+    db.client.acquireConnection.mockImplementation(async () => mockConnection(false));
+
+    const body = jest.fn();
+    const result = await runExclusive('test-job', body, { retryAttempts: 2, retryDelayMs: 1 });
+
+    expect(body).not.toHaveBeenCalled();
+    expect(result).toEqual({ skipped: true, reason: 'lease_held' });
+    expect(db.client.acquireConnection).toHaveBeenCalledTimes(3); // initial + 2 retries
+  });
+
   test('skips (without throwing) when no DB connection is available', async () => {
     db.client.acquireConnection.mockRejectedValue(new Error('pool exhausted'));
 
