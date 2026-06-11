@@ -175,9 +175,16 @@ function canonicalLookupAddress(address, geoContext = null) {
 // when the raw typed string fails the ZIP/city heuristics below. Geo never
 // CLOSES a gate — on partial matches or geocode misses the raw-address logic
 // still decides, so a geocode outage degrades to exactly today's behavior.
+// County names only count inside Florida (Charlotte County, VA must not open
+// the FL Charlotte PAO). The ZIP branch is inherently FL-bounded — the sets
+// hold exact SWFL ZIPs — but a geocode that confidently places the address
+// out of state is contradictory evidence and opens nothing.
 function geoOpensCountyGate(geoContext, countyName, zipSet) {
   if (!geoContext || geoContext.partialMatch) return false;
-  if (typeof geoContext.county === 'string' && geoContext.county.trim().toUpperCase() === countyName) return true;
+  if (geoContext.state && geoContext.state !== 'FL') return false;
+  if (geoContext.state === 'FL'
+      && typeof geoContext.county === 'string'
+      && geoContext.county.trim().toUpperCase() === countyName) return true;
   const zip = typeof geoContext.zip === 'string' ? geoContext.zip.trim().slice(0, 5) : null;
   return Boolean(zip && zipSet.has(zip));
 }
@@ -560,26 +567,38 @@ async function lookupPropertyFromCountyRecords(address, options = {}) {
   const geoContext = options.geoContext || null;
   const t0 = Date.now();
   const providers = [
-    { county: 'MANATEE', lookup: lookupPropertyFromManateePAO },
-    { county: 'SARASOTA', lookup: lookupPropertyFromSarasotaPAO },
-    { county: 'CHARLOTTE', lookup: lookupPropertyFromCharlottePAO },
+    { county: 'MANATEE', lookup: lookupPropertyFromManateePAO, rawEligible: shouldQueryManateePAO(address) },
+    { county: 'SARASOTA', lookup: lookupPropertyFromSarasotaPAO, rawEligible: shouldQuerySarasotaPAO(address) },
+    { county: 'CHARLOTTE', lookup: lookupPropertyFromCharlottePAO, rawEligible: shouldQueryCharlottePAO(address) },
   ];
 
   // Try the geocoded county first so the shared time budget is spent on the
   // provider most likely to hit; the others still run as fallbacks (stable
-  // sort keeps their relative order).
-  const geoCounty = geoContext && !geoContext.partialMatch && typeof geoContext.county === 'string'
+  // sort keeps their relative order). County names only steer ordering inside
+  // Florida — mirrors geoOpensCountyGate.
+  const geoCounty = geoContext && !geoContext.partialMatch && geoContext.state === 'FL'
+      && typeof geoContext.county === 'string'
     ? geoContext.county.trim().toUpperCase()
     : null;
   if (geoCounty) {
     providers.sort((a, b) => Number(b.county === geoCounty) - Number(a.county === geoCounty));
   }
 
-  for (const provider of providers) {
+  for (let index = 0; index < providers.length; index += 1) {
+    const provider = providers[index];
     const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
     if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
 
-    const record = await provider.lookup(address, { timeoutMs: remainingMs, geoContext }).catch((err) => {
+    // Positive-only contract: a provider opened ONLY by geo must not starve a
+    // raw-address-matched fallback behind it. Cap it at half the budget so a
+    // wrong/slow geo county still leaves the raw-matching county its turn.
+    const rawFallbackWaiting = !provider.rawEligible
+      && providers.slice(index + 1).some((later) => later.rawEligible);
+    const providerTimeoutMs = rawFallbackWaiting
+      ? Math.min(remainingMs, Math.ceil(timeoutMs / 2))
+      : remainingMs;
+
+    const record = await provider.lookup(address, { timeoutMs: providerTimeoutMs, geoContext }).catch((err) => {
       logger.warn('[county-property] provider lookup failed before AI fallback', {
         provider: provider.lookup.name,
         error: summarizeProviderError(err),
@@ -840,19 +859,20 @@ async function lookupPropertyFromGemini(address) {
 }
 
 async function lookupPropertyFromAITrio(address, geoContext = null) {
-  const countyRecord = await lookupPropertyFromCountyRecords(address, { geoContext }).catch((err) => {
+  // County street-string matching and AI search prompts both get the
+  // geocoder's canonical address (typo/postal-city fixes); falls back to the
+  // typed address on geocode miss or partial match.
+  const searchAddress = canonicalLookupAddress(address, geoContext);
+  const countyRecord = await lookupPropertyFromCountyRecords(searchAddress, { geoContext }).catch((err) => {
     logger.warn('[county-property] lookup failed before AI fallback', {
       error: summarizeProviderError(err),
     });
     return null;
   });
   if (countyRecord && hasCountyPricingCore(countyRecord)) {
-    return mergePropertyRecords([countyRecord], address);
+    return mergePropertyRecords([countyRecord], searchAddress);
   }
 
-  // Search prompts get the geocoder's canonical address (typo/postal-city
-  // fixes); falls back to the typed address on geocode miss or partial match.
-  const searchAddress = canonicalLookupAddress(address, geoContext);
   const results = await Promise.allSettled([
     lookupPropertyFromAI(searchAddress),
     lookupPropertyFromOpenAI(searchAddress),

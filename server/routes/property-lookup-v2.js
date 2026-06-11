@@ -479,6 +479,7 @@ function parseGeocodeResult(result) {
   const components = Array.isArray(result.address_components) ? result.address_components : [];
   const findComponent = (type) => components.find((c) => Array.isArray(c.types) && c.types.includes(type)) || null;
   const county = findComponent('administrative_area_level_2');
+  const state = findComponent('administrative_area_level_1');
   const city = findComponent('locality') || findComponent('sublocality') || findComponent('postal_town');
   const zip = findComponent('postal_code');
   return {
@@ -486,6 +487,7 @@ function parseGeocodeResult(result) {
     lng: result.geometry.location.lng,
     formattedAddress: result.formatted_address || null,
     county: county ? county.long_name.replace(/\s+County$/i, '').trim() : null,
+    state: state ? state.short_name : null,
     city: city ? city.long_name : null,
     zip: zip ? zip.long_name : null,
     partialMatch: result.partial_match === true,
