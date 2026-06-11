@@ -501,8 +501,14 @@ export default function CreateProjectModal({
   }, [serviceSearch]);
 
   const typeCfg = typesRegistry && projectType ? typesRegistry[projectType] : null;
+  // appointmentManaged types complete through the standard appointment flow
+  // now — they're not creatable as projects (server 422s them too). An
+  // explicit allowedProjectTypes prop (the special-project dispatch path)
+  // still wins so WDO/pre-treat routing keeps working.
   const visibleTypes = typesRegistry
-    ? Object.entries(typesRegistry).filter(([key]) => !allowedProjectTypes || allowedProjectTypes.includes(key))
+    ? Object.entries(typesRegistry).filter(([key, cfg]) => (
+      allowedProjectTypes ? allowedProjectTypes.includes(key) : !cfg?.appointmentManaged
+    ))
     : [];
 
   useEffect(() => {

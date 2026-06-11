@@ -22,6 +22,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
+const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
 const serviceLibrary = require('../services/service-library');
@@ -903,8 +904,16 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
 // ---------------------------------------------------------------------------
 // GET /api/admin/projects/types — registry for form rendering
 // ---------------------------------------------------------------------------
-router.get('/types', (_req, res) => {
-  res.json({ types: PROJECT_TYPES, keys: PROJECT_TYPE_KEYS });
+router.get('/types', async (_req, res) => {
+  // appointmentManaged = the type's completion now runs through the typed
+  // service-report flow (live profile cutover state). Creation UIs filter
+  // these out of their type pickers; existing records stay fully usable.
+  const managed = await appointmentManagedProjectTypes();
+  const types = {};
+  for (const key of PROJECT_TYPE_KEYS) {
+    types[key] = { ...PROJECT_TYPES[key], appointmentManaged: managed.has(key) };
+  }
+  res.json({ types, keys: PROJECT_TYPE_KEYS, appointmentManaged: Array.from(managed) });
 });
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1142,30 @@ router.post('/', async (req, res, next) => {
 
     if (!customer_id) return res.status(400).json({ error: 'customer_id required' });
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
+    // Types cut over to the typed service-report completion flow no longer
+    // create project records — the appointment completion is the artifact.
+    // Server-side guard so stale clients can't recreate the dual-entry path.
+    const managedTypes = await appointmentManagedProjectTypes();
+    if (managedTypes.has(project_type)) {
+      return res.status(422).json({
+        error: 'This service type is completed through the appointment flow now — finish the visit from Dispatch instead of creating a project.',
+        code: 'project_type_appointment_managed',
+      });
+    }
+    // The type check alone isn't enough: a stale client can link a cut-over
+    // appointment while submitting any still-creatable project_type, which
+    // recreates the dual-entry artifact this guard exists to block. Reject by
+    // the LINKED service's own profile regardless of the payload's type.
+    if (scheduled_service_id) {
+      const linkedProfile = await resolveCompletionProfileForServiceId(scheduled_service_id)
+        .catch(() => null);
+      if (linkedProfile?.findingsType) {
+        return res.status(422).json({
+          error: 'This appointment completes through its service-specific findings form — finish the visit from Dispatch instead of creating a project.',
+          code: 'scheduled_service_appointment_managed',
+        });
+      }
+    }
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 

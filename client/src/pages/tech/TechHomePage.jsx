@@ -69,6 +69,18 @@ function isPestControlService(service) {
   return service?.completionProfile?.category === 'pest_control';
 }
 
+// Typed specialty jobs (profile cut over to the service-report flow with a
+// findings schema) complete through the Dispatch completion form — neither
+// the recap modal (no findings/billing gate) nor project creation (server
+// 422s appointment-managed types) is the right surface.
+function isTypedFindingsService(service) {
+  return !!service?.completionProfile?.findingsType;
+}
+
+function typedFindingsNotice() {
+  alert('This service completes through the Dispatch completion form (with its service-specific fields) — open Dispatch to finish the visit.');
+}
+
 // adminFetch-style helper for the tech portal: bearer-token fetch against
 // /api/* that returns parsed JSON and throws on non-2xx. Lets the shared
 // ServiceRecapModal use the same `request(path, options)` contract as the
@@ -305,7 +317,16 @@ export default function TechHomePage() {
   }, []);
   const handleProjectQuickAction = useCallback(() => {
     if (myServices.length === 1) {
-      openProjectForService(myServices[0]);
+      const only = myServices[0];
+      // Same routing as the row/picker handlers — a cut-over typed job must
+      // not open CreateProjectModal through the quick action either.
+      if (isTypedFindingsService(only)) {
+        typedFindingsNotice();
+      } else if (isPestControlService(only)) {
+        setRecapService(only);
+      } else {
+        openProjectForService(only);
+      }
       return;
     }
     setShowProjectPicker(true);
@@ -490,7 +511,11 @@ export default function TechHomePage() {
               <ServiceRow
                 key={s.id}
                 service={s}
-                onProject={() => (isPestControlService(s) ? setRecapService(s) : openProjectForService(s))}
+                onProject={() => (
+                  isTypedFindingsService(s)
+                    ? typedFindingsNotice()
+                    : isPestControlService(s) ? setRecapService(s) : openProjectForService(s)
+                )}
                 onPhotos={() => setPhotoTarget({
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
@@ -520,7 +545,8 @@ export default function TechHomePage() {
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (isPestControlService(service)) setRecapService(service);
+            if (isTypedFindingsService(service)) typedFindingsNotice();
+            else if (isPestControlService(service)) setRecapService(service);
             else openProjectForService(service);
           }}
         />

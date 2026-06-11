@@ -1112,7 +1112,11 @@ export default function ProjectsPage() {
           allowAiDraft
           defaultProjectType={createMode === "wdo" ? WDO_TYPE : ""}
           allowedProjectTypes={
-            createMode === "wdo" ? [WDO_TYPE] : GENERAL_PROJECT_TYPES
+            createMode === "wdo"
+              ? [WDO_TYPE]
+              : GENERAL_PROJECT_TYPES.filter(
+                  (key) => !typesRegistry?.[key]?.appointmentManaged,
+                )
           }
           onClose={() => setCreateMode(null)}
           onCreated={(p) => {
