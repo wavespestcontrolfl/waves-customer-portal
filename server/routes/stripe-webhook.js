@@ -1786,7 +1786,21 @@ async function findInvoiceForPayment(payment) {
   const metaInvoiceId = meta.dispute_invoice_id || meta.invoice_id || meta.waves_invoice_id || null;
   if (metaInvoiceId) {
     const invoice = await db('invoices').where({ id: metaInvoiceId }).first();
-    if (invoice) return invoice;
+    if (invoice) {
+      // Stale-binding guard: if the invoice is now settled by a DIFFERENT
+      // PaymentIntent (customer re-paid after a dispute reopened it),
+      // this payment's metadata link is historical — returning the
+      // invoice would let a delayed dispute event flip a re-collected
+      // invoice. Callers also gate on PI match, but the helper must not
+      // hand them a stale binding in the first place.
+      const invoicePi = invoice.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+      const paymentPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
+      if (invoicePi && paymentPi && invoicePi !== paymentPi) {
+        logger.warn(`[stripe-webhook] Invoice ${invoice.id} metadata-linked to payment ${payment.id} but bound to a different PI (${invoicePi}) — treating link as stale`);
+        return null;
+      }
+      return invoice;
+    }
   }
   if (payment.stripe_payment_intent_id) {
     return db('invoices')
