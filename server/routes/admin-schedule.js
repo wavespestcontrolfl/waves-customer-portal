@@ -460,108 +460,19 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
   }
 }
 
-// Invoice statuses that are safe to void when the underlying visit is
-// cancelled. Mirrors services/invoice-helpers.js#assertInvoiceVoidable:
-// paid / processing money-states are off-limits (refund is the right path);
-// 'scheduled' is included so a queued send for a cancelled job never goes out.
-const CANCEL_VOIDABLE_INVOICE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'overdue'];
-
 // Void any still-open invoices minted for a now-cancelled scheduled service
-// ("Charge now" pre-mints, completion mints) so dunning doesn't chase a
-// cancelled job. Money-state rules:
-//   - Only safely-voidable statuses are touched (never paid/processing —
-//     mirrors services/invoice-helpers.js#assertInvoiceVoidable).
-//   - Invoices with money already applied are skipped: a PARTIAL prepaid
-//     credit leaves the invoice in a voidable status (e.g. draft) while
-//     applyPrepaidCredit has already inserted a paid payments row and
-//     stamped payment_recorded_at — auto-voiding would strand that money
-//     with no refund/credit path. Those are flagged for manual review.
-//   - The status + applied-money re-check and the void run atomically under
-//     SELECT ... FOR UPDATE on the invoice row, so a payment landing
-//     concurrently (applyPrepaidCredit / Stripe webhook both lock the row)
-//     can't slip in between the check and the void.
-// voidInvoice itself isn't trx-aware, so the flip happens inline and its
-// side effects (follow-up stop, annual-prepay sync) run post-commit.
-// Best-effort: never fails the cancellation.
+// so dunning doesn't chase a cancelled job. The money-state rules (skip
+// applied payments / live PaymentIntents, atomic row-locked void) live in
+// InvoiceService.voidOpenInvoicesForCancelledService — shared with the
+// dispatch cancellation paths. Best-effort: never fails the cancellation.
 async function voidOpenInvoicesForCancelledService(scheduledServiceId) {
-  const voided = [];
   try {
-    const candidates = await db('invoices')
-      .where({ scheduled_service_id: scheduledServiceId })
-      .whereIn('status', CANCEL_VOIDABLE_INVOICE_STATUSES)
-      .select('id');
-    if (candidates.length === 0) return voided;
-    for (const candidate of candidates) {
-      try {
-        const result = await db.transaction(async (trx) => {
-          const locked = await trx('invoices')
-            .where({ id: candidate.id })
-            .forUpdate()
-            .first();
-          if (!locked) return { skipped: 'invoice no longer exists' };
-          if (!CANCEL_VOIDABLE_INVOICE_STATUSES.includes(locked.status)) {
-            return { skipped: `status moved to ${locked.status}`, invoice: locked };
-          }
-          // A live PaymentIntent can be attached BEFORE any payments ledger
-          // row exists (/pay setup stamps invoices.stripe_payment_intent_id;
-          // ACH / Express Checkout can charge Stripe before /confirm). Voiding
-          // in that window would leave a real Stripe charge unreconciled —
-          // skip and flag for manual review instead.
-          if (locked.stripe_payment_intent_id) {
-            return {
-              skipped: `live PaymentIntent ${locked.stripe_payment_intent_id} attached (payment may be in flight); needs manual review`,
-              invoice: locked,
-            };
-          }
-          // Payments reference invoices via metadata.invoice_id (prepaid
-          // credits, Stripe charges alike — there is no payments.invoice_id
-          // column). Either signal means applied money: skip the auto-void.
-          const appliedPayment = await trx('payments')
-            .whereIn('status', ['paid', 'processing'])
-            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [locked.id])
-            .first('id');
-          if (locked.payment_recorded_at || appliedPayment) {
-            return {
-              skipped: `money already applied (${appliedPayment ? `payment ${appliedPayment.id}` : 'payment_recorded_at set'}); needs manual refund/credit review`,
-              invoice: locked,
-            };
-          }
-          const [voidedInvoice] = await trx('invoices')
-            .where({ id: locked.id, status: locked.status })
-            .update({ status: 'void', updated_at: new Date() })
-            .returning('*');
-          if (!voidedInvoice) return { skipped: 'concurrent status change', invoice: locked };
-          return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
-        });
-
-        if (!result.voided) {
-          if (result.skipped && result.invoice) {
-            logger.warn(`[schedule] NOT auto-voiding invoice ${result.invoice.invoice_number} for cancelled service ${scheduledServiceId} — ${result.skipped}`);
-          }
-          continue;
-        }
-
-        voided.push(result.invoice.id);
-        logger.info(`[schedule] Voided invoice ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`);
-        // Post-commit side effects, matching InvoiceService.voidInvoice.
-        try {
-          await require('../services/invoice-followups').stopSequence(result.invoice.id, { reason: 'invoice_voided' });
-        } catch (e) {
-          logger.error(`[invoice-followups] stopSequence failed for invoice ${result.invoice.id}: ${e.message}`);
-        }
-        try {
-          await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(result.invoice);
-        } catch (e) {
-          logger.warn(`[schedule] annual prepay sync skipped after void ${result.invoice.invoice_number}: ${e.message}`);
-        }
-      } catch (e) {
-        logger.error(`[schedule] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${e.message}`);
-      }
-    }
+    const InvoiceService = require('../services/invoice');
+    return await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId);
   } catch (e) {
     logger.error(`[schedule] Invoice void sweep failed for cancelled service ${scheduledServiceId}: ${e.message}`);
+    return [];
   }
-  return voided;
 }
 
 // Apply a discount to a price. Returns the discounted price (>= 0).

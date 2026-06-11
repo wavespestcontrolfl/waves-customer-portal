@@ -20,6 +20,22 @@ const SEND_CLAIMABLE_STATUSES = [
 ];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
 
+// Invoice statuses that are safe to auto-void when the underlying scheduled
+// service is cancelled. Mirrors assertInvoiceVoidable: paid / processing
+// money-states are off-limits (refund is the right path); 'scheduled' is
+// included so a queued send for a cancelled job never goes out.
+const CANCELLED_SERVICE_VOIDABLE_STATUSES = [
+  "draft",
+  "scheduled",
+  "sent",
+  "viewed",
+  "overdue",
+];
+
+// Stripe PaymentIntent states where money is in flight or already captured /
+// authorized — an invoice attached to one of these must never be auto-voided.
+const PI_MONEY_IN_FLIGHT_STATUSES = ["processing", "succeeded", "requires_capture"];
+
 function appendPayUrlParams(url, params = null) {
   if (!params || typeof params !== "object") return url;
   try {
@@ -1874,6 +1890,169 @@ const InvoiceService = {
     }
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
     return invoice;
+  },
+
+  /**
+   * Void any still-open invoices minted for a now-cancelled scheduled
+   * service ("Charge now" pre-mints, completion mints) so dunning doesn't
+   * chase a cancelled job. Shared by every admin cancellation surface
+   * (schedule single + bulk, dispatch single + series).
+   *
+   * Money-state rules:
+   *   - Only safely-voidable statuses are touched (never paid/processing —
+   *     mirrors assertInvoiceVoidable).
+   *   - Invoices with money already applied are skipped: a PARTIAL prepaid
+   *     credit leaves the invoice in a voidable status (e.g. draft) while a
+   *     paid payments row + payment_recorded_at already exist — auto-voiding
+   *     would strand that money with no refund/credit path.
+   *   - A live attached PaymentIntent is cancelled at Stripe FIRST: /pay
+   *     setup stamps invoices.stripe_payment_intent_id before any payments
+   *     row exists, and ACH / Express Checkout can charge Stripe before
+   *     /confirm. Voiding without cancelling the PI would let a real charge
+   *     land against a void invoice, unreconciled. If the PI is
+   *     processing / succeeded / requires_capture — or the cancel attempt
+   *     races a confirmation and throws — the invoice is skipped and flagged
+   *     for manual review instead.
+   *   - The final re-check + void run atomically under SELECT ... FOR UPDATE
+   *     on the invoice row, so a payment landing concurrently
+   *     (applyPrepaidCredit / Stripe webhook paths also lock the row) can't
+   *     slip in between the check and the void. Stripe triage happens BEFORE
+   *     the lock (never hold a row lock across a network call); the trx
+   *     re-checks that no new PI was attached after triage.
+   *
+   * Best-effort: logs and continues, never throws. Returns voided invoice ids.
+   */
+  async voidOpenInvoicesForCancelledService(scheduledServiceId) {
+    const voided = [];
+    if (!scheduledServiceId) return voided;
+    try {
+      const candidates = await db("invoices")
+        .where({ scheduled_service_id: scheduledServiceId })
+        .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
+        .select("id", "invoice_number", "stripe_payment_intent_id");
+      if (candidates.length === 0) return voided;
+      const StripeService = require("./stripe");
+      for (const candidate of candidates) {
+        try {
+          // ── Stripe PI triage (pre-lock) ────────────────────────────────
+          const triagedPiId = candidate.stripe_payment_intent_id || null;
+          if (triagedPiId) {
+            let pi;
+            try {
+              pi = await StripeService.retrievePaymentIntent(triagedPiId);
+            } catch (e) {
+              logger.warn(
+                `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} lookup failed (${e.message}); needs manual review`,
+              );
+              continue;
+            }
+            if (!pi) {
+              // A PI id is stamped but Stripe isn't configured/reachable —
+              // can't verify the money state, so fail closed.
+              logger.warn(
+                `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} attached but unverifiable; needs manual review`,
+              );
+              continue;
+            }
+            if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
+              logger.warn(
+                `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — payment in flight (PI ${triagedPiId} is ${pi.status}); needs manual refund/credit review`,
+              );
+              continue;
+            }
+            if (pi.status !== "canceled") {
+              try {
+                await StripeService.cancelPaymentIntent(triagedPiId, {
+                  cancellation_reason: "abandoned",
+                });
+                logger.info(
+                  `[invoice] Cancelled PaymentIntent ${triagedPiId} (was ${pi.status}) before voiding ${candidate.invoice_number} — scheduled service ${scheduledServiceId} cancelled`,
+                );
+              } catch (e) {
+                // Cancel races a confirmation → the PI may now be charging.
+                logger.warn(
+                  `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} cancel failed (${e.message}); needs manual review`,
+                );
+                continue;
+              }
+            }
+          }
+
+          // ── Atomic re-check + void (row lock) ──────────────────────────
+          const result = await db.transaction(async (trx) => {
+            const locked = await trx("invoices")
+              .where({ id: candidate.id })
+              .forUpdate()
+              .first();
+            if (!locked) return { skipped: "invoice no longer exists" };
+            if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
+              return { skipped: `status moved to ${locked.status}`, invoice: locked };
+            }
+            // A different/new PI attached after triage means a customer is
+            // actively starting a payment — skip.
+            if ((locked.stripe_payment_intent_id || null) !== triagedPiId) {
+              return {
+                skipped: `PaymentIntent changed to ${locked.stripe_payment_intent_id || "none"} after triage (payment in progress); needs manual review`,
+                invoice: locked,
+              };
+            }
+            // Payments reference invoices via metadata.invoice_id (prepaid
+            // credits, Stripe charges alike — there is no payments.invoice_id
+            // column). Either signal means applied money: skip the auto-void.
+            const appliedPayment = await trx("payments")
+              .whereIn("status", ["paid", "processing"])
+              .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [locked.id])
+              .first("id");
+            if (locked.payment_recorded_at || appliedPayment) {
+              return {
+                skipped: `money already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment_recorded_at set"}); needs manual refund/credit review`,
+                invoice: locked,
+              };
+            }
+            const [voidedInvoice] = await trx("invoices")
+              .where({ id: locked.id, status: locked.status })
+              .update({ status: "void", updated_at: new Date() })
+              .returning("*");
+            if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
+            return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
+          });
+
+          if (!result.voided) {
+            if (result.skipped && result.invoice) {
+              logger.warn(
+                `[invoice] NOT auto-voiding ${result.invoice.invoice_number} for cancelled service ${scheduledServiceId} — ${result.skipped}`,
+              );
+            }
+            continue;
+          }
+
+          voided.push(result.invoice.id);
+          logger.info(
+            `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,
+          );
+          // Post-commit side effects, matching voidInvoice.
+          await stopInvoiceFollowupSequence(result.invoice.id, "invoice_voided");
+          try {
+            await require("./annual-prepay-renewals").syncTermForInvoicePayment(
+              result.invoice,
+            );
+          } catch (err) {
+            logger.warn(
+              `[invoice] annual prepay sync skipped after void ${result.invoice.invoice_number}: ${err.message}`,
+            );
+          }
+        } catch (e) {
+          logger.error(
+            `[invoice] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${e.message}`,
+          );
+        }
+      }
+    } catch (e) {
+      logger.error(
+        `[invoice] Void sweep failed for cancelled service ${scheduledServiceId}: ${e.message}`,
+      );
+    }
+    return voided;
   },
 
   async getStats() {
