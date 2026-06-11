@@ -59,6 +59,46 @@ on imidacloprid, propiconazole, paclobutrazol). The 43% target builds in
 an 8-point cushion above the 35% floor specifically to absorb material
 swings without re-pricing the whole bracket.
 
+> **Naming caution.** `directCostRatioTarget` (0.43) is a *direct-cost ratio*,
+> not a margin target: price = directCost / 0.43, i.e. direct costs are
+> targeted at 43% of price, leaving ~57% gross before the admin allocation.
+> The code (`constants.js` `TREE_SHRUB.directCostRatioTarget`) is authoritative;
+> see its comment block for the full semantics.
+
+### Tree & Shrub program cadence (tiers)
+**Where:** `constants.js` `TREE_SHRUB.tiers`, `recommendedTier`.
+
+| Tier | Visits/yr | Material rate ($/sqft/yr) | Monthly floor | Status |
+|---|---|---|---|---|
+| Light | 4 | 0.075 | $40 | downsell (manual only) |
+| **Standard** | **6** | **0.110** | **$50** | **mandated default** |
+| ~~Enhanced~~ | ~~9~~ | ~~0.190~~ | ~~$65~~ | retired (→ Standard) |
+| ~~Premium~~ | ~~12~~ | ~~0.220~~ | ~~$80~~ | retired (→ Standard) |
+
+**Meaning.** The 6-visit Standard program is the mandated default and the only
+auto-recommended tier — it matches the `six_x` cadence in the "10/10 SWFL Tree
+& Shrub Protocol" (`server/config/protocols.json`). Light (4x) maps to the
+protocol's `four_x` cadence ("best for cleaner properties with low pest
+history") and is offered only as a manual downsell. Material rate is an annual
+$/sqft; Light ≈ 4/6 of Standard because product spend scales with the number
+of applications.
+
+**Why Enhanced/Premium were retired (v4.5).** The documented protocol tops out
+at 6 visits, but the engine had sold a 9-visit Enhanced default (and a
+deprecated 12-visit Premium), charging labor + amortized material for visits
+that were never scheduled. The default also auto-escalated to Enhanced on any
+single signal — including the conservative unknown-bed-area fallback — which
+inflated quotes. Legacy `enhanced` / `premium` tier requests now map to
+Standard with a warning. The 0.43 multiplier was left unchanged; the fix was
+cadence, not markup.
+
+**How to change.** Visit cadence is a customer-facing program contract: a tier
+change needs a `pricing_changelog` entry and a baseline regen
+(`CAPTURE_BASELINE=1`). To lower list prices further without touching cadence,
+the lever is `directCostRatioTarget` (e.g. 0.43 → 0.50 trades ~7pp margin for
+~14% lower list); move it in a separate, deliberate step and re-run
+`/margin-check`.
+
 ---
 
 ## WaveGuard tiers

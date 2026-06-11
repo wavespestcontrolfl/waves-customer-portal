@@ -792,12 +792,14 @@ async function syncConstantsFromDB(dbInstance) {
     // ── Tree & Shrub ─────────────────────────────────────────
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
+      if (rates['4x_light'] && constants.TREE_SHRUB.tiers.light) {
+        constants.TREE_SHRUB.tiers.light.materialRate = rates['4x_light'];
+      }
       if (rates['6x_standard'] && constants.TREE_SHRUB.tiers.standard) {
         constants.TREE_SHRUB.tiers.standard.materialRate = rates['6x_standard'];
       }
-      if (rates['9x_enhanced'] && constants.TREE_SHRUB.tiers.enhanced) {
-        constants.TREE_SHRUB.tiers.enhanced.materialRate = rates['9x_enhanced'];
-      }
+      // 9x_enhanced / 12x_premium rates may persist in legacy seeds but the
+      // Enhanced (9x) and Premium (12x) tiers are retired — ignore them.
     }
     if (config.ts_monthly_floors) {
       for (const [tier, val] of Object.entries(config.ts_monthly_floors)) {

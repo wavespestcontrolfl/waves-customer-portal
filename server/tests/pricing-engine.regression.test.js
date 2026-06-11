@@ -115,7 +115,7 @@ const REGRESSION_CASES = [
       services: {
         pest: { frequency: 'bimonthly' },
         lawn: { track: 'zoysia', tier: 'standard' },
-        treeShrub: { tier: 'enhanced', access: 'moderate' },
+        treeShrub: { tier: 'standard', access: 'moderate' },
       },
       paymentMethod: 'card',
     },
@@ -149,7 +149,7 @@ const REGRESSION_CASES = [
       services: {
         pest: { frequency: 'monthly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
-        treeShrub: { tier: 'enhanced', access: 'easy' },
+        treeShrub: { tier: 'standard', access: 'easy' },
         mosquito: { tier: 'monthly12' },
       },
       paymentMethod: 'card',
@@ -185,7 +185,7 @@ const REGRESSION_CASES = [
       services: {
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
-        treeShrub: { tier: 'enhanced', access: 'easy' },
+        treeShrub: { tier: 'standard', access: 'easy' },
         mosquito: { tier: 'monthly12' },
       },
       paymentMethod: 'card',

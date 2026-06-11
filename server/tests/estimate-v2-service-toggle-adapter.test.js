@@ -302,8 +302,15 @@ describe('estimate v2 service toggle adapter', () => {
 
     const mapped = mapV1ToLegacyShape(generateEstimate(input));
 
-    expect(mapped.results.ts.map((row) => row.name)).toEqual(['Standard', 'Enhanced']);
+    expect(mapped.results.ts.map((row) => row.name)).toEqual(['Light', 'Standard']);
     expect(mapped.results.ts).toEqual([
+      expect.objectContaining({
+        name: 'Light',
+        tier: 'light',
+        selected: false,
+        isSelected: false,
+        v: 4,
+      }),
       expect.objectContaining({
         name: 'Standard',
         tier: 'standard',
@@ -311,14 +318,8 @@ describe('estimate v2 service toggle adapter', () => {
         isSelected: true,
         v: 6,
       }),
-      expect.objectContaining({
-        name: 'Enhanced',
-        tier: 'enhanced',
-        selected: false,
-        isSelected: false,
-        v: 9,
-      }),
     ]);
+    // Standard (6x, mandated default) outprices the Light 4x downsell.
     expect(mapped.results.ts[1].mo).toBeGreaterThan(mapped.results.ts[0].mo);
   });
 

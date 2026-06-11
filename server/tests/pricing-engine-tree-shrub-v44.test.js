@@ -13,18 +13,28 @@ describe('Tree & Shrub Pricing v4.4', () => {
     constants.WAVEGUARD.tiers.platinum.discount = originalPlatinumDiscount;
   });
 
-  test('active customer-facing tiers include only standard and enhanced', () => {
-    expect(Object.keys(constants.TREE_SHRUB.tiers)).toEqual(['standard', 'enhanced']);
+  test('active customer-facing tiers include only light and standard', () => {
+    expect(Object.keys(constants.TREE_SHRUB.tiers)).toEqual(['light', 'standard']);
+    expect(constants.TREE_SHRUB.tiers.enhanced).toBeUndefined();
     expect(constants.TREE_SHRUB.tiers.premium).toBeUndefined();
   });
 
-  test('legacy premium request maps to enhanced with warning', () => {
+  test('legacy premium request maps to the 6-visit standard plan with warning', () => {
     const quote = priceTreeShrub({ bedArea: 2000, treeCount: 0 }, { tier: 'premium' });
 
     expect(quote.legacyTierRequested).toBe('premium');
-    expect(quote.tier).toBe('enhanced');
-    expect(quote.frequency).toBe(9);
-    expect(quote.warnings).toContain('Premium Tree & Shrub has been deprecated; Enhanced 9-visit plan was used.');
+    expect(quote.tier).toBe('standard');
+    expect(quote.frequency).toBe(6);
+    expect(quote.warnings).toContain('Premium Tree & Shrub has been retired; the 6-visit Standard plan was used.');
+  });
+
+  test('legacy enhanced request maps to the 6-visit standard plan with warning', () => {
+    const quote = priceTreeShrub({ bedArea: 2000, treeCount: 0 }, { tier: 'enhanced' });
+
+    expect(quote.legacyTierRequested).toBe('enhanced');
+    expect(quote.tier).toBe('standard');
+    expect(quote.frequency).toBe(6);
+    expect(quote.warnings).toContain('Enhanced (9-visit) Tree & Shrub has been retired; the 6-visit Standard plan was used.');
   });
 
   test('standard 2,000 sqft worked example', () => {
@@ -42,19 +52,19 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.baseMargin).toBeCloseTo(0.506, 3);
   });
 
-  test('enhanced 2,000 sqft worked example', () => {
+  test('light 2,000 sqft worked example', () => {
     const quote = priceTreeShrub(
       { bedArea: 2000, treeCount: 0, access: 'easy' },
-      { tier: 'enhanced' }
+      { tier: 'light' }
     );
 
-    expect(quote.frequency).toBe(9);
+    expect(quote.frequency).toBe(4);
     expect(quote.onSiteMin).toBe(25);
-    expect(quote.costs.materialCost).toBeCloseTo(380, 2);
-    expect(quote.costs.laborCost).toBeCloseTo(183.75, 2);
-    expect(quote.monthly).toBeCloseTo(109.25, 2);
-    expect(quote.annual).toBeCloseTo(1311.00, 2);
-    expect(quote.baseMargin).toBeCloseTo(0.531, 3);
+    expect(quote.costs.materialCost).toBeCloseTo(150, 2);
+    expect(quote.costs.laborCost).toBeCloseTo(81.67, 2);
+    expect(quote.monthly).toBeCloseTo(44.90, 2);
+    expect(quote.annual).toBeCloseTo(538.80, 2);
+    expect(quote.baseMargin).toBeCloseTo(0.475, 3);
   });
 
   test('post-discount margin guard caps unsafe Tree & Shrub discount', () => {
@@ -117,7 +127,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.warnings).toContain('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
   });
 
-  test('tier recommendation keeps light small landscapes standard and escalates higher-risk properties', () => {
+  test('6-visit standard is the mandated default recommendation regardless of property signals', () => {
     expect(recommendTreeShrubTier({
       bedArea: 1000,
       shrubDensity: 'light',
@@ -126,17 +136,18 @@ describe('Tree & Shrub Pricing v4.4', () => {
       access: 'easy',
     })).toBe('standard');
 
-    expect(recommendTreeShrubTier({ bedArea: 2000, shrubDensity: 'light' })).toBe('enhanced');
-    expect(recommendTreeShrubTier({ bedArea: 1000, shrubDensity: 'heavy' })).toBe('enhanced');
-    expect(recommendTreeShrubTier({ bedArea: 1000, overallPestPressure: 'HIGH' })).toBe('enhanced');
+    // High-signal properties no longer auto-escalate to a 9x tier — 6x is the mandate.
+    expect(recommendTreeShrubTier({ bedArea: 2000, shrubDensity: 'light' })).toBe('standard');
+    expect(recommendTreeShrubTier({ bedArea: 1000, shrubDensity: 'heavy' })).toBe('standard');
+    expect(recommendTreeShrubTier({ bedArea: 1000, overallPestPressure: 'HIGH' })).toBe('standard');
   });
 
-  test('default tier recommendation uses option-level tree count and access', () => {
-    expect(priceTreeShrub({ bedArea: 1000 }, { treeCount: 10 }).tier).toBe('enhanced');
-    expect(priceTreeShrub({ bedArea: 1000 }, { access: 'difficult' }).tier).toBe('enhanced');
+  test('default tier resolution never auto-escalates on tree count or access', () => {
+    expect(priceTreeShrub({ bedArea: 1000 }, { treeCount: 10 }).tier).toBe('standard');
+    expect(priceTreeShrub({ bedArea: 1000 }, { access: 'difficult' }).tier).toBe('standard');
   });
 
-  test('default tier recommendation uses V2 overall pest pressure', () => {
+  test('default tier resolution stays on standard even under high V2 pest pressure', () => {
     const estimate = generateEstimate({
       homeSqFt: 1000,
       lotSqFt: 5000,
@@ -147,8 +158,15 @@ describe('Tree & Shrub Pricing v4.4', () => {
     });
 
     const treeShrub = estimate.lineItems.find(item => item.service === 'tree_shrub');
-    expect(treeShrub.tier).toBe('enhanced');
-    expect(treeShrub.recommendedTier).toBe('enhanced');
+    expect(treeShrub.tier).toBe('standard');
+    expect(treeShrub.recommendedTier).toBe('standard');
+  });
+
+  test('light tier is selectable as an explicit downsell', () => {
+    const quote = priceTreeShrub({ bedArea: 1000 }, { tier: 'light' });
+    expect(quote.tier).toBe('light');
+    expect(quote.frequency).toBe(4);
+    expect(quote.availableTiers).toEqual(['light', 'standard']);
   });
 
   test('estimatedBedArea alias is normalized before turf fallback math', () => {
@@ -200,6 +218,7 @@ describe('Tree & Shrub estimator hardening', () => {
     evaluateTreeShrubTierRecommendation,
     resolveTreeShrubBedArea,
     TS_PREMIUM_DEPRECATED_WARNING_CODE,
+    TS_ENHANCED_DEPRECATED_WARNING_CODE,
   } = require('../services/pricing-engine');
 
   describe('post-discount margin guard', () => {
@@ -439,19 +458,20 @@ describe('Tree & Shrub estimator hardening', () => {
       [{ bedArea: 1000, treeCount: 10 }, 'tree_count_at_or_above_8'],
       [{ bedArea: 1000, access: 'difficult' }, 'difficult_access'],
       [{ bedArea: 1000, overallPestPressure: 'HIGH' }, 'high_pest_pressure'],
-    ])('enhanced recommendation includes the matching reason code (%o)', (input, reasonCode) => {
+    ])('recommendation stays on standard but surfaces the full-program signal (%o)', (input, reasonCode) => {
       const result = evaluateTreeShrubTierRecommendation(input);
-      expect(result.recommendedTier).toBe('enhanced');
+      // 6x is the mandate — signals no longer flip the tier, only annotate it.
+      expect(result.recommendedTier).toBe('standard');
       expect(result.recommendationReasons).toContain(reasonCode);
     });
 
-    test('fallback bed area surfaces both the 2,000 trigger and fallback_bed_area_used', () => {
+    test('fallback bed area still surfaces the conservative-default signals', () => {
       // No bedArea, no estimatedBedArea, no lotSqFt ⇒ resolver/recommender
-      // both fall back to 2,000 sqft. That hits the 2,000 escalation, so
-      // enhanced is recommended — but admin/customer surfaces must see that
-      // the trigger was conservative defaults.
+      // both fall back to 2,000 sqft. The recommendation stays on the mandated
+      // 6x standard, but admin/customer surfaces must still see that the
+      // signal came from conservative defaults.
       const result = evaluateTreeShrubTierRecommendation({});
-      expect(result.recommendedTier).toBe('enhanced');
+      expect(result.recommendedTier).toBe('standard');
       expect(result.recommendationReasons).toContain('bed_area_at_or_above_2000');
       expect(result.recommendationReasons).toContain('fallback_bed_area_used');
     });
@@ -459,78 +479,102 @@ describe('Tree & Shrub estimator hardening', () => {
     test('priceTreeShrub surfaces selectedTier / recommendedTier / recommendationReasons', () => {
       const quote = priceTreeShrub({ bedArea: 2500 }, { tier: 'standard' });
       expect(quote.selectedTier).toBe('standard');
-      expect(quote.recommendedTier).toBe('enhanced');
+      expect(quote.recommendedTier).toBe('standard');
       expect(quote.recommendationReasons).toContain('bed_area_at_or_above_2000');
     });
   });
 
-  describe('premium tier deprecation', () => {
-    test('active tier list excludes premium', () => {
-      expect(Object.keys(constants.TREE_SHRUB.tiers).sort()).toEqual(['enhanced', 'standard']);
+  describe('retired tier deprecation (enhanced + premium → standard)', () => {
+    test('active tier list excludes enhanced and premium', () => {
+      expect(Object.keys(constants.TREE_SHRUB.tiers).sort()).toEqual(['light', 'standard']);
+      expect(constants.TREE_SHRUB.tiers.enhanced).toBeUndefined();
       expect(constants.TREE_SHRUB.tiers.premium).toBeUndefined();
     });
 
-    test('incoming premium tier maps to enhanced with a structured warning code', () => {
+    test('incoming premium tier maps to standard with a structured warning code', () => {
       const quote = priceTreeShrub({ bedArea: 2000 }, { tier: 'premium' });
-      expect(quote.tier).toBe('enhanced');
-      expect(quote.frequency).toBe(9);
+      expect(quote.tier).toBe('standard');
+      expect(quote.frequency).toBe(6);
       expect(quote.legacyTierRequested).toBe('premium');
       expect(quote.warningCodes).toBeDefined();
       expect(quote.warningCodes).toContain(TS_PREMIUM_DEPRECATED_WARNING_CODE);
-      expect(TS_PREMIUM_DEPRECATED_WARNING_CODE).toBe('tree_shrub_premium_deprecated_mapped_to_enhanced');
+      expect(TS_PREMIUM_DEPRECATED_WARNING_CODE).toBe('tree_shrub_premium_deprecated_mapped_to_standard');
     });
 
-    test('deprecated premium config (TS_MATERIAL_RATE_12X) is not used by the active pricer', () => {
-      // Premium request must NOT pick up the deprecated 0.220 material rate.
-      const quote = priceTreeShrub({ bedArea: 2000 }, { tier: 'premium' });
-      expect(quote.materialRate).toBe(constants.TREE_SHRUB.tiers.enhanced.materialRate);
-      expect(quote.materialRate).not.toBe(0.220);
+    test('incoming enhanced tier maps to standard with a structured warning code', () => {
+      const quote = priceTreeShrub({ bedArea: 2000 }, { tier: 'enhanced' });
+      expect(quote.tier).toBe('standard');
+      expect(quote.frequency).toBe(6);
+      expect(quote.legacyTierRequested).toBe('enhanced');
+      expect(quote.warningCodes).toContain(TS_ENHANCED_DEPRECATED_WARNING_CODE);
+      expect(TS_ENHANCED_DEPRECATED_WARNING_CODE).toBe('tree_shrub_enhanced_deprecated_mapped_to_standard');
+    });
+
+    test('retired 9x/12x material rates are not used by the active pricer', () => {
+      // Retired tier requests must price at the active 6x standard rate.
+      const premium = priceTreeShrub({ bedArea: 2000 }, { tier: 'premium' });
+      const enhanced = priceTreeShrub({ bedArea: 2000 }, { tier: 'enhanced' });
+      expect(premium.materialRate).toBe(constants.TREE_SHRUB.tiers.standard.materialRate);
+      expect(enhanced.materialRate).toBe(constants.TREE_SHRUB.tiers.standard.materialRate);
+      expect(premium.materialRate).not.toBe(0.220);
+      expect(enhanced.materialRate).not.toBe(0.190);
     });
   });
 
-  describe('config parity (constants vs DB seed defaults)', () => {
+  describe('config parity (constants vs active DB migration)', () => {
     // Code constants stay authoritative; this test catches drift if anyone
-    // edits one surface without the other.
+    // edits one surface without the other. The active runtime config is the
+    // JSONB pricing_config updated by the 6-visit-mandate migration.
     const fs = require('fs');
     const path = require('path');
-    const migrationPath = path.join(
-      __dirname, '..', 'models', 'migrations', '20260414000011_pricing_config.js'
+    const migrationSrc = fs.readFileSync(
+      path.join(__dirname, '..', 'models', 'migrations', '20260611000001_tree_shrub_six_visit_mandate.js'),
+      'utf8'
     );
-    const migrationSrc = fs.readFileSync(migrationPath, 'utf8');
+    const legacySrc = fs.readFileSync(
+      path.join(__dirname, '..', 'models', 'migrations', '20260414000011_pricing_config.js'),
+      'utf8'
+    );
 
-    function seedValue(key) {
-      const re = new RegExp(`config_key:\\s*'${key}',\\s*config_value:\\s*([0-9.]+)`);
+    function migrationNumber(key) {
+      const re = new RegExp(`'${key}':\\s*([0-9.]+)`);
       const m = migrationSrc.match(re);
+      if (!m) throw new Error(`pricing_config migration missing ${key}`);
+      return Number(m[1]);
+    }
+    function migrationFloor(tier) {
+      const re = new RegExp(`\\b${tier}:\\s*([0-9.]+)`);
+      const m = migrationSrc.match(re);
+      if (!m) throw new Error(`pricing_config migration missing floor ${tier}`);
+      return Number(m[1]);
+    }
+    function legacyValue(key) {
+      const re = new RegExp(`config_key:\\s*'${key}',\\s*config_value:\\s*([0-9.]+)`);
+      const m = legacySrc.match(re);
       if (!m) throw new Error(`pricing_config seed missing ${key}`);
       return Number(m[1]);
     }
 
-    test('standard material rate matches between code and seed', () => {
-      expect(seedValue('TS_MATERIAL_RATE_6X')).toBe(constants.TREE_SHRUB.tiers.standard.materialRate);
+    test('light material rate matches between code and migration', () => {
+      expect(migrationNumber('4x_light')).toBe(constants.TREE_SHRUB.tiers.light.materialRate);
     });
 
-    test('enhanced material rate matches between code and seed', () => {
-      expect(seedValue('TS_MATERIAL_RATE_9X')).toBe(constants.TREE_SHRUB.tiers.enhanced.materialRate);
+    test('standard material rate matches between code and migration', () => {
+      expect(migrationNumber('6x_standard')).toBe(constants.TREE_SHRUB.tiers.standard.materialRate);
     });
 
-    test('standard monthly floor matches between code and seed', () => {
-      expect(seedValue('TS_FLOOR_STANDARD')).toBe(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
+    test('monthly floors match between code and migration', () => {
+      expect(migrationFloor('light')).toBe(constants.TREE_SHRUB.tiers.light.monthlyFloor);
+      expect(migrationFloor('standard')).toBe(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
     });
 
-    test('enhanced monthly floor matches between code and seed', () => {
-      expect(seedValue('TS_FLOOR_ENHANCED')).toBe(constants.TREE_SHRUB.tiers.enhanced.monthlyFloor);
+    test('admin annual + margin floor match between code and legacy seed', () => {
+      expect(legacyValue('ADMIN_ANNUAL')).toBe(constants.GLOBAL.ADMIN_ANNUAL);
+      expect(legacyValue('MARGIN_FLOOR')).toBe(constants.GLOBAL.MARGIN_FLOOR);
     });
 
-    test('admin annual + margin floor match between code and seed', () => {
-      expect(seedValue('ADMIN_ANNUAL')).toBe(constants.GLOBAL.ADMIN_ANNUAL);
-      expect(seedValue('MARGIN_FLOOR')).toBe(constants.GLOBAL.MARGIN_FLOOR);
-    });
-
-    test('deprecated premium keys remain in seed but are not promoted into active tiers', () => {
-      // Presence is fine (legacy migrations are immutable). What matters is
-      // that the runtime engine never instantiates them as active.
-      expect(seedValue('TS_MATERIAL_RATE_12X')).toBe(0.220);
-      expect(seedValue('TS_FLOOR_PREMIUM')).toBe(80);
+    test('retired tiers are not instantiated as active', () => {
+      expect(constants.TREE_SHRUB.tiers.enhanced).toBeUndefined();
       expect(constants.TREE_SHRUB.tiers.premium).toBeUndefined();
     });
   });

@@ -2068,6 +2068,12 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
 // proposal). `recommendTreeShrubTier` is the back-compat string-returning
 // wrapper used by older callers and tests.
 function evaluateTreeShrubTierRecommendation(property = {}) {
+  // 6-visit Standard is the MANDATED default program (protocol six_x). We
+  // always recommend it — the 4-visit Light tier (protocol four_x) is an
+  // available downsell for clean / low-pest-history landscapes but is never
+  // auto-recommended. The reason codes below are retained for admin/customer
+  // surfaces as "signals the property warrants the full 6x program" (i.e.
+  // reasons NOT to downsell to Light); they no longer change the tier.
   let bedArea = 0;
   let bedAreaFromFallback = false;
   if (hasPositivePricingNumber(property.bedArea)) {
@@ -2081,10 +2087,6 @@ function evaluateTreeShrubTierRecommendation(property = {}) {
     if (lotEstimate && lotEstimate.bedArea > 0) {
       bedArea = lotEstimate.bedArea;
     } else {
-      // Mirrors resolveTreeShrubBedArea's 2,000 sqft fallback when nothing
-      // else is available. Flag it so the recommendation surface can call out
-      // that enhanced was selected on conservative defaults, not confirmed
-      // ornamental footprint.
       bedArea = 2000;
       bedAreaFromFallback = true;
     }
@@ -2104,9 +2106,8 @@ function evaluateTreeShrubTierRecommendation(property = {}) {
   if (knownPressure) reasons.push('high_pest_pressure');
   if (bedAreaFromFallback && bedArea >= 2000) reasons.push('fallback_bed_area_used');
 
-  const recommendedTier = reasons.length > 0
-    ? 'enhanced'
-    : (TREE_SHRUB.defaultTier || 'standard');
+  // Standard (6x) is the mandate — never auto-escalate or auto-downsell.
+  const recommendedTier = TREE_SHRUB.recommendedTier || TREE_SHRUB.defaultTier || 'standard';
 
   return { recommendedTier, recommendationReasons: reasons };
 }
@@ -2115,17 +2116,24 @@ function recommendTreeShrubTier(property = {}) {
   return evaluateTreeShrubTierRecommendation(property).recommendedTier;
 }
 
-// Structured warning code for the legacy `premium` request. Emitted alongside
-// the prose warning so downstream consumers (admin UI, log aggregation,
-// dashboards) can match on a stable identifier.
-const TS_PREMIUM_DEPRECATED_WARNING_CODE = 'tree_shrub_premium_deprecated_mapped_to_enhanced';
+// Structured warning codes for retired tiers. Emitted alongside the prose
+// warning so downstream consumers (admin UI, log aggregation, dashboards) can
+// match on a stable identifier. The legacy `premium` code is retained for
+// back-compat; both retired tiers now map to the mandated 6-visit Standard.
+const TS_PREMIUM_DEPRECATED_WARNING_CODE = 'tree_shrub_premium_deprecated_mapped_to_standard';
+const TS_ENHANCED_DEPRECATED_WARNING_CODE = 'tree_shrub_enhanced_deprecated_mapped_to_standard';
 
 function normalizeTreeShrubTier(requestedTier, warnings = [], warningCodes = []) {
   const normalized = normalizeTreeShrubEnum(requestedTier, TREE_SHRUB.defaultTier || 'standard');
   if (normalized === 'premium') {
-    warnings.push('Premium Tree & Shrub has been deprecated; Enhanced 9-visit plan was used.');
+    warnings.push('Premium Tree & Shrub has been retired; the 6-visit Standard plan was used.');
     warningCodes.push(TS_PREMIUM_DEPRECATED_WARNING_CODE);
-    return { tier: 'enhanced', legacyTierRequested: 'premium' };
+    return { tier: 'standard', legacyTierRequested: 'premium' };
+  }
+  if (normalized === 'enhanced') {
+    warnings.push('Enhanced (9-visit) Tree & Shrub has been retired; the 6-visit Standard plan was used.');
+    warningCodes.push(TS_ENHANCED_DEPRECATED_WARNING_CODE);
+    return { tier: 'standard', legacyTierRequested: 'enhanced' };
   }
   if (!TREE_SHRUB.tiers[normalized]) throw new Error(`Unknown T&S tier: ${requestedTier}`);
   return { tier: normalized, legacyTierRequested: null };
@@ -6593,4 +6601,5 @@ module.exports = {
   normalizePestComplexity,
   normalizePestPropertyType,
   TS_PREMIUM_DEPRECATED_WARNING_CODE,
+  TS_ENHANCED_DEPRECATED_WARNING_CODE,
 };
