@@ -4,9 +4,12 @@
  *
  * Covers: human-merge → completed_published + IndexNow + link planning;
  * closed-unmerged → failed (terminal); auto-merge happens ONLY with the env
- * flag + green preview build + Codex-clear head (each condition individually
- * blocking); transient GitHub errors leave the row untouched; per-poll
- * auto-merge cap.
+ * flag + green preview build OF THE PR HEAD COMMIT + Codex-clear head (each
+ * condition individually blocking; unknown deployment commit fails closed);
+ * transient GitHub errors leave the row untouched; per-poll auto-merge cap;
+ * runs whose opportunity_queue row was requeued/dismissed are superseded
+ * (annotated, never finalized); the metadata_pr_pending_merge lane is
+ * reconciled on merge/close but never auto-merged.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -18,6 +21,7 @@ jest.mock('../services/content-astro/github-client', () => ({
 jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
   extractStatus: jest.fn(),
+  deploymentCommitSha: jest.fn(),
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
@@ -42,6 +46,7 @@ function makeRun(overrides = {}) {
     id: 'run-1',
     opportunity_id: 'opp-1',
     action_type: 'new_supporting_blog',
+    skip_reason: 'astro_pr_pending_merge',
     astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
     draft_payload: JSON.stringify({
       type: 'draft',
@@ -57,10 +62,29 @@ function makeRun(overrides = {}) {
   };
 }
 
+const METADATA_PAGE_URL = 'https://www.wavespestcontrol.com/pest-control-venice-fl/';
+
+function makeMetadataRun(overrides = {}) {
+  return makeRun({
+    id: 'run-meta-1',
+    opportunity_id: 'opp-meta-1',
+    action_type: 'rewrite_title_meta',
+    skip_reason: 'metadata_pr_pending_merge',
+    draft_payload: JSON.stringify({ type: 'metadata', page_url: METADATA_PAGE_URL }),
+    reviewer_notes: 'Astro metadata PR opened: …',
+    ...overrides,
+  });
+}
+
 // Stateful knex-style fake: every chain method returns the builder, select
-// resolves the configured pending rows, update records its call and resolves
-// the configured result.
-function setupDb({ pending = [], updateResult = 1 } = {}) {
+// resolves the configured rows for its table, update records its call and
+// resolves the configured result. `queue` defaults to a row per pending run
+// in the exact parked state (status pending_review + the run's skip_reason);
+// pass an explicit array to simulate operator requeue/dismiss.
+function setupDb({ pending = [], queue, updateResult = 1 } = {}) {
+  const queueRows = queue !== undefined ? queue : pending
+    .filter((r) => r.opportunity_id)
+    .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
   const updates = [];
   db.mockImplementation((table) => {
     const q = {
@@ -70,10 +94,14 @@ function setupDb({ pending = [], updateResult = 1 } = {}) {
         else q._filters[a] = b;
         return q;
       }),
+      whereIn: jest.fn(function (col, vals) {
+        q._filters[col] = vals;
+        return q;
+      }),
       whereNotNull: jest.fn(() => q),
       orderBy: jest.fn(() => q),
       limit: jest.fn(() => q),
-      select: jest.fn(() => Promise.resolve(pending)),
+      select: jest.fn(() => Promise.resolve(table === 'opportunity_queue' ? queueRows : pending)),
       update: jest.fn((u) => {
         updates.push({ table, filters: { ...q._filters }, updates: u });
         return Promise.resolve(
@@ -260,12 +288,63 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runUpdates(updates)).toHaveLength(0);
   });
 
-  test('flag on + green build but Codex NOT clear: no merge', async () => {
+  test('green build of an OLDER commit (head-sha mismatch): no merge', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     const updates = setupDb({ pending: [makeRun()] });
     gh.getPr.mockResolvedValue(openPr());
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('olderbuildsha');
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'preview_build_stale_commit' });
+    expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('green build with NO usable commit hash: fails closed, no merge', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'preview_build_commit_unknown' });
+    expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: 'HEADSHA1' } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('flag on + green head build but Codex NOT clear: no merge', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
     const codexErr = new Error('Codex review is required before merging this Astro PR');
     codexErr.code = 'CODEX_REVIEW_REQUIRED';
     publisher.assertCodexReviewClear.mockRejectedValue(codexErr);
@@ -278,12 +357,13 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runUpdates(updates)).toHaveLength(0);
   });
 
-  test('flag on + green build + Codex clear: merges and runs the post-merge chain', async () => {
+  test('flag on + green head build + Codex clear: merges and runs the post-merge chain', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     const updates = setupDb({ pending: [makeRun()] });
     gh.getPr.mockResolvedValue(openPr());
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
     publisher.assertCodexReviewClear.mockResolvedValue(true);
     gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha' });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
@@ -311,6 +391,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     gh.getPr.mockResolvedValue(openPr());
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
     publisher.assertCodexReviewClear.mockResolvedValue(true);
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
@@ -321,6 +402,168 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
     expect(res.autoMerges).toBe(1);
     expect(res.results[1]).toMatchObject({ pending: true, mergeDeferred: true });
+  });
+});
+
+describe('review-queue supersession (requeue/dismiss)', () => {
+  test('requeued queue row: run is annotated out of the selection, never reconciled', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'pending', skip_reason: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    // the PR is never even looked up — the run is out of lifecycle tracking
+    expect(gh.getPr).not.toHaveBeenCalled();
+    expect(indexNow.submit).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    // annotation is compare-and-set guarded on the exact parked state and
+    // flips ONLY skip_reason (no outcome/published_url invention)
+    const annotate = runUpdates(updates)[0];
+    expect(annotate.filters).toMatchObject({
+      id: 'run-1',
+      outcome: 'completed_pending_review',
+      skip_reason: 'astro_pr_pending_merge',
+    });
+    expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
+    expect(annotate.updates.outcome).toBeUndefined();
+    expect(annotate.updates.reviewer_notes).toMatch(/no longer parked/);
+
+    // and the queue row a human re-routed is never touched
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+  });
+
+  test('dismissed queue row (status=skipped): run is skipped, not failed or published', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'skipped', skip_reason: 'manual_dismiss' }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    expect(gh.getPr).not.toHaveBeenCalled();
+    const annotate = runUpdates(updates)[0];
+    expect(annotate.updates).not.toMatchObject({ outcome: 'failed' });
+    expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
+  });
+
+  test('missing queue row for a non-null opportunity_id fails closed (skip)', async () => {
+    setupDb({ pending: [makeRun()], queue: [] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    expect(gh.getPr).not.toHaveBeenCalled();
+  });
+
+  test('run with no opportunity_id has nothing to cross-check and reconciles normally', async () => {
+    setupDb({ pending: [makeRun({ opportunity_id: null })], queue: [] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ merged: true });
+  });
+
+  test('queue row parked under a DIFFERENT pending reason does not validate this run', async () => {
+    // e.g. the opportunity was re-claimed and re-parked by a different lane
+    setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'pending_review', skip_reason: 'metadata_pr_pending_merge' }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    expect(gh.getPr).not.toHaveBeenCalled();
+  });
+});
+
+describe('metadata_pr_pending_merge lane', () => {
+  test('merged metadata PR completes the run with IndexNow but NO internal-link planning', async () => {
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    const claim = runUpdates(updates)[0];
+    expect(claim.filters).toMatchObject({ id: 'run-meta-1', outcome: 'completed_pending_review' });
+    expect(claim.updates).toMatchObject({ outcome: 'completed_published', published_url: METADATA_PAGE_URL });
+
+    // URL-updated ping yes; blog post-merge chain (link planning) no
+    expect(indexNow.submit).toHaveBeenCalledWith(METADATA_PAGE_URL);
+    expect(publisher.planInternalLinksForTarget).not.toHaveBeenCalled();
+
+    const queueUpdate = updates.find((u) => u.table === 'opportunity_queue');
+    expect(queueUpdate.filters).toMatchObject({
+      id: 'opp-meta-1',
+      status: 'pending_review',
+      skip_reason: 'metadata_pr_pending_merge',
+    });
+    expect(queueUpdate.updates).toMatchObject({ status: 'done' });
+  });
+
+  test('closed-unmerged metadata PR fails terminally with the metadata closed reason', async () => {
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false, merged_at: null });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].closed).toBe(true);
+    const claim = runUpdates(updates)[0];
+    expect(claim.updates).toMatchObject({ outcome: 'failed', skip_reason: 'metadata_pr_closed_unmerged' });
+    expect(claim.updates.failure_message).toMatch(/metadata PR #42 was closed without merging/);
+
+    const queueUpdate = updates.find((u) => u.table === 'opportunity_queue');
+    expect(queueUpdate.updates).toMatchObject({ status: 'skipped', skip_reason: 'metadata_pr_closed_unmerged' });
+  });
+
+  test('open metadata PR is NEVER auto-merged, even with AUTONOMOUS_BLOG_AUTO_MERGE on', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'open', merged: false, title: 'Metadata: Venice', head: { ref: 'content/meta-venice', sha: 'metasha' } });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_human_merge_metadata_lane' });
+    expect(pagesPoll.latestDeploymentForBranch).not.toHaveBeenCalled();
+    expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('metadata auto-merge deferral does not consume the blog lane per-poll cap', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeMetadataRun(), makeRun()] });
+    gh.getPr.mockImplementation((n) => Promise.resolve({
+      number: n, state: 'open', merged: false, title: 'PR', head: { ref: 'content/branch', sha: 'headsha1' },
+    }));
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    // metadata run waited; the blog run still got the tick's one merge
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_human_merge_metadata_lane' });
+    expect(res.results[1]).toMatchObject({ merged: true, autoMerged: true });
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -343,6 +586,7 @@ describe('transient errors', () => {
     gh.getPr.mockResolvedValue({ number: 42, state: 'open', merged: false, title: 't', head: { ref: 'b', sha: 's' } });
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('s');
     publisher.assertCodexReviewClear.mockRejectedValue(new Error('GitHub GET … → 500'));
 
     const res = await poller.pollPending();

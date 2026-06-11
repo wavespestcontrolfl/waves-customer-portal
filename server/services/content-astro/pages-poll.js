@@ -166,8 +166,9 @@ async function pollPost(post, { allowMerge = true } = {}) {
       // STRANDED at 'publishing' (process crashed mid-publish) would keep this
       // branch armed indefinitely — the content-scheduler's stale-publishing
       // sweep (resetStalePublishingBlogs, ~30 min) bounds that window by
-      // resetting crashed claims to 'pending_review'. Keep that sweep in mind
-      // before changing this condition.
+      // resetting crashed claims out of 'publishing' ('pending' when no Astro
+      // state exists yet, 'pending_review' otherwise). Keep that sweep in
+      // mind before changing this condition.
       if (post.astro_status === 'pr_open' && post.publish_status === 'publishing') {
         if (!allowMerge) {
           // Per-poll auto-merge cap reached — defer this merge to the next tick
@@ -312,7 +313,10 @@ module.exports = {
   deploymentMatchesMergedPost,
   runPostPublishVisibility,
   // Reused by the autonomous PR-lifecycle poller to verify a PR branch's
-  // Cloudflare preview build is green before auto-merging.
+  // Cloudflare preview build is green AND built from the PR's current head
+  // commit before auto-merging (deploymentCommitSha returns null when the
+  // deployment object carries no usable commit hash — callers fail closed).
   latestDeploymentForBranch,
   extractStatus,
+  deploymentCommitSha,
 };

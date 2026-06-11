@@ -628,20 +628,38 @@ const ContentScheduler = {
    * within the same tick. A crash mid-publish strands the row: nothing ever
    * re-selects it (the pending query excludes 'publishing'), and the strand
    * leaves pages-poll's pr_open+publishing auto-merge branch armed forever.
-   * Rows older than ~30 min go back to 'pending_review' — the same safe
-   * parking state the error path uses — so a human (or the live-flip path)
-   * can re-drive them.
+   *
+   * Where a stale row goes (>~30 min) depends on whether Astro state exists:
+   *   - astro_status NULL (crashed BEFORE publishAstro opened a PR): there is
+   *     no PR/live state for pages-poll or a human to drive, and the pending
+   *     query only re-selects 'pending_review' rows when astro_status='live'
+   *     — parking these at 'pending_review' would strand them permanently.
+   *     Reset to 'pending' so the scheduler retries the publish from scratch
+   *     (the claim is compare-and-set, so the retry is race-safe).
+   *   - astro_status set (PR opened / build failed / merged / live before
+   *     the crash): 'pending_review' — the same safe parking state the error
+   *     path uses — pages-poll drives pr_open/merged forward and the
+   *     live-flip path re-selects it.
    */
   async resetStalePublishingBlogs({ staleMinutes = 30 } = {}) {
     const cutoff = new Date(Date.now() - staleMinutes * 60000);
+    const retried = await db('blog_posts')
+      .where('publish_status', 'publishing')
+      .where('updated_at', '<', cutoff)
+      .whereNull('astro_status')
+      .update({ publish_status: 'pending', updated_at: new Date() });
+    if (retried > 0) {
+      logger.warn(`[content-scheduler] reset ${retried} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m with no Astro state back to pending (crashed pre-PR; publish will retry)`);
+    }
     const reset = await db('blog_posts')
       .where('publish_status', 'publishing')
       .where('updated_at', '<', cutoff)
+      .whereNotNull('astro_status')
       .update({ publish_status: 'pending_review', updated_at: new Date() });
     if (reset > 0) {
-      logger.warn(`[content-scheduler] reset ${reset} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m back to pending_review (crashed mid-publish)`);
+      logger.warn(`[content-scheduler] reset ${reset} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m back to pending_review (crashed mid-publish with Astro state)`);
     }
-    return reset;
+    return retried + reset;
   },
 
   /**

@@ -10,16 +10,25 @@
  * forever: it never completes, IndexNow never fires, and post-merge
  * internal-link planning never happens.
  *
- * Each tick, for every parked run with an astro_pr_url:
+ * Two parked lanes are reconciled (selected by skip_reason):
+ *   - astro_pr_pending_merge     — blog/page publishes (full lane).
+ *   - metadata_pr_pending_merge  — metadata rewrites (reconcile-only lane:
+ *     merged/closed lifecycle handling, NEVER auto-merged — see pollRun).
+ *
+ * Each tick, for every parked run with an astro_pr_url whose
+ * opportunity_queue row is still in the exact parked review state (a human
+ * requeue/dismiss in the review queue moves the queue row but not the run —
+ * such runs are annotated out of the selection, never finalized):
  *   - PR merged (by human or by us)  → finalize: flip the run to
  *     completed_published with the canonical URL, submit IndexNow, and
  *     queue post-merge internal-link planning (new_supporting_blog only —
- *     rewrite/refresh targets already exist in the link corpus). Also
- *     best-effort completes the parked opportunity_queue row.
+ *     rewrite/refresh/metadata targets already exist in the link corpus).
+ *     Also best-effort completes the parked opportunity_queue row.
  *   - PR closed unmerged             → flip the run to failed (no retry).
- *   - PR open + AUTONOMOUS_BLOG_AUTO_MERGE truthy → merge it OURSELVES,
- *     but only when the Cloudflare preview build for the PR branch is
- *     green AND assertCodexReviewClear passes for the PR head (fail
+ *   - PR open + AUTONOMOUS_BLOG_AUTO_MERGE truthy → merge it OURSELVES
+ *     (blog lane only), but only when the Cloudflare preview build for the
+ *     PR branch is green, the deployment was built from the PR's CURRENT
+ *     head commit, AND assertCodexReviewClear passes for the PR head (fail
  *     closed, same gate as mergeAstro). Auto-merges are capped per tick
  *     (default 1) because every merge rebuilds the Cloudflare Pages fleet.
  *   - Transient error (GitHub/Cloudflare blip) → log and leave the row
@@ -38,8 +47,17 @@ const db = require('../../models/db');
 const logger = require('../logger');
 
 const PENDING_OUTCOME = 'completed_pending_review';
-const PENDING_SKIP_REASON = 'astro_pr_pending_merge';
-const CLOSED_SKIP_REASON = 'astro_pr_closed_unmerged';
+const BLOG_PENDING_SKIP_REASON = 'astro_pr_pending_merge';
+const METADATA_PENDING_SKIP_REASON = 'metadata_pr_pending_merge';
+const PENDING_SKIP_REASONS = [BLOG_PENDING_SKIP_REASON, METADATA_PENDING_SKIP_REASON];
+const CLOSED_SKIP_REASONS = {
+  [BLOG_PENDING_SKIP_REASON]: 'astro_pr_closed_unmerged',
+  [METADATA_PENDING_SKIP_REASON]: 'metadata_pr_closed_unmerged',
+};
+// Stamped onto a parked run whose opportunity_queue row left the parked
+// review state (operator requeue/dismiss): takes the run out of the poller's
+// selection without inventing a terminal outcome the operator didn't choose.
+const SUPERSEDED_SKIP_REASON = 'superseded_by_review_queue_action';
 const PR_URL_NUMBER = /\/pull\/(\d+)(?:[/?#]|$)/;
 
 function autoMergeEnabled() {
@@ -54,6 +72,23 @@ function maxAutoMergesPerPoll() {
 function prNumberFromUrl(prUrl) {
   const match = PR_URL_NUMBER.exec(String(prUrl || ''));
   return match ? Number(match[1]) : null;
+}
+
+/** The exact parked skip_reason this run was selected on (lane marker). */
+function pendingSkipReasonForRun(run) {
+  return PENDING_SKIP_REASONS.includes(run?.skip_reason) ? run.skip_reason : BLOG_PENDING_SKIP_REASON;
+}
+
+function isMetadataLane(run) {
+  return pendingSkipReasonForRun(run) === METADATA_PENDING_SKIP_REASON;
+}
+
+function closedSkipReasonForRun(run) {
+  return CLOSED_SKIP_REASONS[pendingSkipReasonForRun(run)];
+}
+
+function normalizeSha(value) {
+  return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
 }
 
 function parseJsonObject(value) {
@@ -96,11 +131,12 @@ function targetForRun(run) {
 
 /**
  * Best-effort: the runner parked the opportunity_queue row at
- * status='pending_review' / skip_reason='astro_pr_pending_merge' alongside
- * the run. complete()/skip() require the original claimToken (the row is no
- * longer 'claimed'), so reconcile directly — guarded to the exact parked
- * state so we never touch a row a human re-routed. Failure logs only; queue
- * state must never block run finalization.
+ * status='pending_review' / skip_reason=<the run's parked reason> alongside
+ * the run (astro_pr_pending_merge or metadata_pr_pending_merge).
+ * complete()/skip() require the original claimToken (the row is no longer
+ * 'claimed'), so reconcile directly — guarded to the exact parked state so
+ * we never touch a row a human re-routed. Failure logs only; queue state
+ * must never block run finalization.
  */
 async function reconcileQueueRow(run, { merged }) {
   if (!run.opportunity_id) return;
@@ -108,19 +144,66 @@ async function reconcileQueueRow(run, { merged }) {
     await db('opportunity_queue')
       .where('id', run.opportunity_id)
       .where('status', 'pending_review')
-      .where('skip_reason', PENDING_SKIP_REASON)
+      .where('skip_reason', pendingSkipReasonForRun(run))
       .update(merged
         ? { status: 'done', completed_at: new Date(), updated_at: new Date() }
-        : { status: 'skipped', skip_reason: CLOSED_SKIP_REASON, completed_at: new Date(), updated_at: new Date() });
+        : { status: 'skipped', skip_reason: closedSkipReasonForRun(run), completed_at: new Date(), updated_at: new Date() });
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] opportunity_queue reconcile failed for run ${run.id}: ${err.message}`);
   }
 }
 
 /**
+ * The run's opportunity_queue row left the parked review state — an operator
+ * requeued or dismissed it in the review queue (which updates only
+ * opportunity_queue, not the run). Finalizing the run now would resurrect a
+ * decision a human already overrode (e.g. mark a dismissed draft
+ * completed_published when its PR is later merged for unrelated reasons), so
+ * NEVER reconcile it: annotate the run out of the poller's selection with a
+ * non-pending skip_reason instead. Compare-and-set guarded on the exact
+ * parked state so a concurrent finalize/operator write wins.
+ */
+async function supersedeRun(run, queueRow) {
+  const pendingReason = pendingSkipReasonForRun(run);
+  const queueState = queueRow
+    ? `status='${queueRow.status}'${queueRow.skip_reason ? ` skip_reason='${queueRow.skip_reason}'` : ''}`
+    : 'row missing';
+  try {
+    const claimed = await db('autonomous_runs')
+      .where('id', run.id)
+      .where('outcome', PENDING_OUTCOME)
+      .where('skip_reason', pendingReason)
+      .update({
+        skip_reason: SUPERSEDED_SKIP_REASON,
+        reviewer_notes: [
+          run.reviewer_notes,
+          `PR lifecycle reconciliation stopped by autonomous-pr-poller: opportunity_queue row ${queueState} is no longer parked at pending_review/${pendingReason} (operator requeue/dismiss or superseding claim).`,
+        ].filter(Boolean).join(' | '),
+        updated_at: new Date(),
+      });
+    if (!claimed) return { skipped: true, reason: 'already_finalized' };
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] supersede annotation failed for run ${run.id}: ${err.message}`);
+    return { skipped: true, reason: 'queue_row_moved_on', annotated: false };
+  }
+  logger.info(`[autonomous-pr-poller] run ${run.id} skipped: opportunity_queue row ${run.opportunity_id} moved on (${queueState}); marked ${SUPERSEDED_SKIP_REASON}`);
+  return { skipped: true, reason: 'queue_row_moved_on', annotated: true };
+}
+
+/**
  * PR is merged: claim the run row atomically (compare-and-set on the parked
  * outcome so overlapping ticks / a concurrent manual finalize can't run the
  * post-merge chain twice), then IndexNow + internal-link planning.
+ *
+ * Lane differences on merge:
+ *   - blog lane (astro_pr_pending_merge): full chain — IndexNow + post-merge
+ *     internal-link planning for NEW pages (target.planLinks).
+ *   - metadata lane (metadata_pr_pending_merge): the merged PR only rewrote
+ *     frontmatter on an EXISTING page, so the only post-merge effect is the
+ *     IndexNow URL-updated ping (mirrors the runner's direct-live metadata
+ *     path); internal-link planning never applies (targetForRun returns
+ *     planLinks=false for non-new actions) and there is no blog_posts row /
+ *     blog post-merge chain to drive.
  * Side effects run AFTER the claim on purpose — a crash between claim and
  * side effects loses only belt-and-suspenders work (IndexNow is throttled/
  * relayed by Cloudflare anyway, link tasks are deduped on conflict), whereas
@@ -193,7 +276,7 @@ async function finalizeMerged(run, prNumber, { autoMerged = false } = {}) {
   return { merged: true, autoMerged, url: target.url };
 }
 
-/** PR closed without merge: terminal failure, never retried. */
+/** PR closed without merge: terminal failure, never retried (both lanes). */
 async function finalizeClosed(run, prNumber) {
   const now = new Date();
   const claimed = await db('autonomous_runs')
@@ -201,8 +284,8 @@ async function finalizeClosed(run, prNumber) {
     .where('outcome', PENDING_OUTCOME)
     .update({
       outcome: 'failed',
-      skip_reason: CLOSED_SKIP_REASON,
-      failure_message: `Astro PR #${prNumber} was closed without merging; the draft was rejected and will not be retried.`,
+      skip_reason: closedSkipReasonForRun(run),
+      failure_message: `Astro ${isMetadataLane(run) ? 'metadata ' : ''}PR #${prNumber} was closed without merging; the draft was rejected and will not be retried.`,
       completed_at: now,
       updated_at: now,
     });
@@ -213,8 +296,9 @@ async function finalizeClosed(run, prNumber) {
 }
 
 /**
- * Open PR + auto-merge enabled: merge only when the preview build is green
- * AND Codex review is clear — each condition individually blocking.
+ * Open PR + auto-merge enabled: merge only when the preview build is green,
+ * was built from the PR's CURRENT head commit, AND Codex review is clear —
+ * each condition individually blocking.
  */
 async function maybeAutoMerge(run, pr) {
   const gh = require('../content-astro/github-client');
@@ -222,11 +306,24 @@ async function maybeAutoMerge(run, pr) {
   if (!branch) return { pending: true, reason: 'pr_head_branch_unknown' };
 
   // 1. Cloudflare preview build for the PR branch must be green.
-  const { latestDeploymentForBranch, extractStatus } = require('../content-astro/pages-poll');
+  const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
   const deploy = await latestDeploymentForBranch(branch);
   if (!deploy) return { pending: true, reason: 'preview_build_pending' };
   const { status } = extractStatus(deploy);
   if (status !== 'success') return { pending: true, reason: `preview_build_${status || 'pending'}` };
+
+  // 1b. The green deployment must be a build of the PR's CURRENT head.
+  //     latestDeploymentForBranch returns the newest deployment for the
+  //     branch, which can still be an OLDER commit's build when a new push
+  //     hasn't registered a deployment yet — merging on that signal would
+  //     ship an unverified head. Fail closed when the deployment object
+  //     carries no usable commit hash (skip the merge this tick; merged/
+  //     closed reconciliation is unaffected).
+  const headSha = normalizeSha(pr.head?.sha);
+  const deployedSha = normalizeSha(deploymentCommitSha(deploy));
+  if (!headSha) return { pending: true, reason: 'pr_head_sha_unknown' };
+  if (!deployedSha) return { pending: true, reason: 'preview_build_commit_unknown' };
+  if (deployedSha !== headSha) return { pending: true, reason: 'preview_build_stale_commit' };
 
   // 2. Codex review must be clear for the current head (fail closed —
   //    same gate mergeAstro applies on the scheduler path).
@@ -269,6 +366,15 @@ async function pollRun(run, { allowMerge = true } = {}) {
     if (pr.state !== 'open') return await finalizeClosed(run, prNumber);
 
     if (!autoMergeEnabled()) return { pending: true, reason: 'awaiting_human_merge' };
+    if (isMetadataLane(run)) {
+      // Conservative reading of AUTONOMOUS_BLOG_AUTO_MERGE: the flag is
+      // named for — and was trust-ramped on — the blog publish lane.
+      // Metadata-rewrite PRs get lifecycle reconciliation only (the merged/
+      // closed branches above) and ALWAYS wait for a human merge, even with
+      // the flag on. Widening auto-merge to this lane needs its own decision
+      // (and likely its own flag), not an implicit ride-along.
+      return { pending: true, reason: 'awaiting_human_merge_metadata_lane' };
+    }
     if (!allowMerge) {
       // Per-poll cap reached — each merge rebuilds the Cloudflare Pages
       // fleet, so drain the backlog one tick at a time (mirrors pages-poll).
@@ -289,21 +395,54 @@ async function pollPending() {
   try {
     rows = await db('autonomous_runs')
       .where('outcome', PENDING_OUTCOME)
-      .where('skip_reason', PENDING_SKIP_REASON)
+      .whereIn('skip_reason', PENDING_SKIP_REASONS)
       .whereNotNull('astro_pr_url')
       .orderBy('claimed_at', 'asc')
       .limit(25)
-      .select('id', 'opportunity_id', 'action_type', 'astro_pr_url', 'draft_payload', 'reviewer_notes');
+      .select('id', 'opportunity_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes');
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
     return { count: 0, skipped: true, reason: err.message };
   }
   if (!rows.length) return { count: 0, results: [] };
 
+  // Human review-queue actions (requeue/dismiss) update ONLY the
+  // opportunity_queue row and leave the run's parked outcome/skip_reason in
+  // place — so the run's own state is not enough to reconcile on. Load each
+  // run's queue row and only reconcile when it is still in the exact parked
+  // review state; runs whose row moved on are superseded (annotated out of
+  // the selection), never finalized. opportunity_id is nullable (FK is SET
+  // NULL), so a run with no opportunity_id has nothing to cross-check and
+  // reconciles normally. A failed lookup skips the whole tick (fail closed).
+  let queueById = new Map();
+  const oppIds = [...new Set(rows.map((r) => r.opportunity_id).filter(Boolean))];
+  if (oppIds.length) {
+    try {
+      const queueRows = await db('opportunity_queue')
+        .whereIn('id', oppIds)
+        .select('id', 'status', 'skip_reason');
+      queueById = new Map(queueRows.map((q) => [q.id, q]));
+    } catch (err) {
+      logger.warn(`[autonomous-pr-poller] opportunity_queue state query failed: ${err.message}`);
+      return { count: 0, skipped: true, reason: err.message };
+    }
+  }
+
   const maxAutoMerges = maxAutoMergesPerPoll();
   const results = [];
   let autoMerges = 0;
   for (const run of rows) {
+    if (run.opportunity_id) {
+      const queueRow = queueById.get(run.opportunity_id) || null;
+      const stillParked = !!queueRow
+        && queueRow.status === 'pending_review'
+        && queueRow.skip_reason === pendingSkipReasonForRun(run);
+      if (!stillParked) {
+        const r = await supersedeRun(run, queueRow);
+        results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
+        continue;
+      }
+    }
     const r = await pollRun(run, { allowMerge: autoMerges < maxAutoMerges });
     if (r.autoMerged) autoMerges += 1;
     results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
@@ -319,9 +458,13 @@ module.exports = {
     autoMergeEnabled,
     maxAutoMergesPerPoll,
     prNumberFromUrl,
+    pendingSkipReasonForRun,
+    isMetadataLane,
+    closedSkipReasonForRun,
     targetForRun,
     finalizeMerged,
     finalizeClosed,
     reconcileQueueRow,
+    supersedeRun,
   },
 };

@@ -3,8 +3,12 @@
  *   - the 'publishing' claim is an atomic compare-and-set (0 rows updated
  *     → another instance owns the blog → skip it, never double-publish),
  *   - rows stranded at publish_status='publishing' (process died
- *     mid-publish) are swept back to 'pending_review' after ~30 min, which
- *     also disarms pages-poll's pr_open+publishing auto-merge branch.
+ *     mid-publish) are swept after ~30 min — back to 'pending' (scheduler
+ *     retries the publish) when the crash happened BEFORE an Astro PR
+ *     existed (astro_status null; 'pending_review' is only re-selected when
+ *     astro_status='live', so it would strand those rows permanently), and
+ *     back to 'pending_review' when Astro state exists. Either way the sweep
+ *     disarms pages-poll's pr_open+publishing auto-merge branch.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -32,12 +36,18 @@ jest.mock('../models/db', () => {
         if (typeof args[0] === 'function') args[0].call(q);
         return q;
       }),
-      whereNull: jest.fn(() => q),
+      whereNull: jest.fn(function (col) {
+        q._filters.push(['whereNull', col]);
+        return q;
+      }),
       orWhereNull: jest.fn(() => q),
       whereIn: jest.fn(() => q),
       whereNotIn: jest.fn(() => q),
       orWhereNotIn: jest.fn(() => q),
-      whereNotNull: jest.fn(() => q),
+      whereNotNull: jest.fn(function (col) {
+        q._filters.push(['whereNotNull', col]);
+        return q;
+      }),
       orderBy: jest.fn(() => q),
       limit: jest.fn(() => Promise.resolve([])),
       update: jest.fn((updates) => {
@@ -62,7 +72,7 @@ function isClaimUpdate(u) {
 
 function isStaleSweepUpdate(u) {
   return u.table === 'blog_posts'
-    && u.updates.publish_status === 'pending_review'
+    && ['pending', 'pending_review'].includes(u.updates.publish_status)
     && u.filters.some(([col, val]) => col === 'publish_status' && val === 'publishing');
 }
 
@@ -76,23 +86,50 @@ beforeEach(() => {
 });
 
 describe('stale-publishing sweep', () => {
-  test('resets rows stranded in publishing for >30 min back to pending_review', async () => {
-    mockState.updateResult = () => 2;
+  test('early-crash rows (no Astro state) go back to scheduler-selectable pending', async () => {
+    mockState.updateResult = () => 1;
     const reset = await ContentScheduler.resetStalePublishingBlogs();
 
-    expect(reset).toBe(2);
-    const sweep = mockState.updates[0];
-    expect(sweep.table).toBe('blog_posts');
-    expect(sweep.updates.publish_status).toBe('pending_review');
-    // guarded to stranded rows only: publishing + updated_at older than cutoff
-    expect(sweep.filters).toEqual(expect.arrayContaining([
+    expect(reset).toBe(2); // 1 retried + 1 parked
+    const sweeps = mockState.updates.filter(isStaleSweepUpdate);
+    expect(sweeps).toHaveLength(2);
+
+    // crashed BEFORE publishAstro opened a PR (astro_status null): the
+    // pending query never re-selects pending_review without astro_status
+    // 'live', so these MUST return to 'pending' to be retried
+    const retry = sweeps.find((u) => u.updates.publish_status === 'pending');
+    expect(retry).toBeDefined();
+    expect(retry.filters).toEqual(expect.arrayContaining([
       ['publish_status', 'publishing'],
       ['updated_at', '<', expect.any(Date)],
+      ['whereNull', 'astro_status'],
     ]));
-    const cutoff = sweep.filters.find(([col]) => col === 'updated_at')[2];
-    const ageMinutes = (Date.now() - cutoff.getTime()) / 60000;
-    expect(ageMinutes).toBeGreaterThanOrEqual(29);
-    expect(ageMinutes).toBeLessThanOrEqual(31);
+
+    // crashed AFTER Astro state existed: pending_review is the safe park
+    const park = sweeps.find((u) => u.updates.publish_status === 'pending_review');
+    expect(park).toBeDefined();
+    expect(park.filters).toEqual(expect.arrayContaining([
+      ['publish_status', 'publishing'],
+      ['updated_at', '<', expect.any(Date)],
+      ['whereNotNull', 'astro_status'],
+    ]));
+
+    // both guarded to stranded rows only: updated_at older than ~30 min
+    for (const sweep of [retry, park]) {
+      const cutoff = sweep.filters.find(([col]) => col === 'updated_at')[2];
+      const ageMinutes = (Date.now() - cutoff.getTime()) / 60000;
+      expect(ageMinutes).toBeGreaterThanOrEqual(29);
+      expect(ageMinutes).toBeLessThanOrEqual(31);
+    }
+  });
+
+  test('the pending reset never touches rows that already have Astro state (and vice versa)', async () => {
+    await ContentScheduler.resetStalePublishingBlogs();
+    const sweeps = mockState.updates.filter(isStaleSweepUpdate);
+    const retry = sweeps.find((u) => u.updates.publish_status === 'pending');
+    const park = sweeps.find((u) => u.updates.publish_status === 'pending_review');
+    expect(retry.filters).not.toEqual(expect.arrayContaining([['whereNotNull', 'astro_status']]));
+    expect(park.filters).not.toEqual(expect.arrayContaining([['whereNull', 'astro_status']]));
   });
 
   test('processScheduledPosts runs the sweep every tick', async () => {
