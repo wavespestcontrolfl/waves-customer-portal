@@ -76,7 +76,10 @@ router.get('/', async (req, res, next) => {
       const projectReportUrl = structuredNotes.portalAttached && projectReport.url
         ? projectReport.url
         : null;
-      const internalOnlyReport = structuredNotes.typedReportDelivery === 'internal_only';
+      // Any typed delivery posture other than auto_send (internal_only
+      // shadow, disabled kill switch) keeps report links off customer surfaces.
+      const internalOnlyReport = Boolean(structuredNotes.typedReportDelivery)
+        && structuredNotes.typedReportDelivery !== 'auto_send';
       return {
         id: svc.id,
         date: svc.service_date,

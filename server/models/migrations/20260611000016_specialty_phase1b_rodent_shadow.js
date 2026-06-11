@@ -20,13 +20,24 @@
  * flip / already / heal (insert when the services row exists) / absent
  * (loud skip) / throw on unexpected mode or pointer.
  *
+ * ROLLBACK FIDELITY: up() stamps the action it took into the row's notes
+ * ([phase1b_action=...]), and down() restores ONLY what up() changed —
+ * flipped rows revert, healed rows are deleted, delivery-forced rows get
+ * their prior delivery_mode back. Rows up() never touched are untouched
+ * by down() too.
+ *
  * Graduation to customer sends = a later one-line flip to auto_send after
- * the shadow reports are owner-approved. Rollback = knex down (restores
- * project_required + auto_send exactly).
+ * the shadow reports are owner-approved.
  */
 
 const KEY = 'rodent_trapping';
 const PROJECT_TYPE = 'rodent_trapping';
+const MARKER_RE = / ?\[phase1b_action=[^\]]*\]/;
+
+function withMarker(notes, action) {
+  const base = String(notes || '').replace(MARKER_RE, '').trim();
+  return `${base}${base ? ' ' : ''}[phase1b_action=${action}]`;
+}
 
 exports.up = async function up(knex) {
   const hasTable = await knex.schema.hasTable('service_completion_profiles');
@@ -43,11 +54,18 @@ exports.up = async function up(knex) {
 
   if (row && row.completion_mode === 'service_report' && row.project_type === PROJECT_TYPE) {
     if (row.delivery_mode !== 'internal_only') {
+      // Record the prior delivery_mode so down() can restore exactly it.
       await knex('service_completion_profiles')
         .where({ service_key: KEY })
-        .update({ delivery_mode: 'internal_only', updated_at: knex.fn.now() });
+        .update({
+          delivery_mode: 'internal_only',
+          notes: withMarker(row.notes, `delivery_forced:${row.delivery_mode || 'auto_send'}`),
+          updated_at: knex.fn.now(),
+        });
+      console.log(`[phase1b-shadow] ${KEY}: already service_report — delivery_mode ${row.delivery_mode} → internal_only (prior recorded)`);
+    } else {
+      console.log(`[phase1b-shadow] ${KEY}: already service_report + internal_only — no-op`);
     }
-    console.log(`[phase1b-shadow] ${KEY}: already service_report — delivery_mode ensured internal_only`);
     return;
   }
 
@@ -57,6 +75,7 @@ exports.up = async function up(knex) {
       .update({
         completion_mode: 'service_report',
         delivery_mode: 'internal_only',
+        notes: withMarker(row.notes, 'flipped'),
         updated_at: knex.fn.now(),
       });
     console.log(`[phase1b-shadow] ${KEY} flipped to service_report + internal_only (no customer sends)`);
@@ -92,7 +111,10 @@ exports.up = async function up(knex) {
     followup_policy: service.requires_follow_up ? 'alert' : 'none',
     default_followup_days: service.follow_up_interval_days || null,
     active: true,
-    notes: 'Profile healed at Phase-1b shadow cutover (20260611000016): services row existed without a completion profile.',
+    notes: withMarker(
+      'Profile healed at Phase-1b shadow cutover (20260611000016): services row existed without a completion profile.',
+      'healed',
+    ),
   });
   console.log(`[phase1b-shadow] ${KEY}: profile healed directly into service_report + internal_only`);
 };
@@ -101,12 +123,46 @@ exports.down = async function down(knex) {
   const hasTable = await knex.schema.hasTable('service_completion_profiles');
   if (!hasTable) return;
 
-  await knex('service_completion_profiles')
-    .where({ service_key: KEY, project_type: PROJECT_TYPE, completion_mode: 'service_report' })
-    .update({
-      completion_mode: 'project_required',
-      delivery_mode: 'auto_send',
-      updated_at: knex.fn.now(),
-    });
-  console.log(`[phase1b-shadow] rolled back — ${KEY} restored to project_required/auto_send`);
+  const row = await knex('service_completion_profiles')
+    .where({ service_key: KEY })
+    .first();
+  if (!row) return;
+
+  const marker = /\[phase1b_action=([^\]]*)\]/.exec(String(row.notes || ''));
+  if (!marker) {
+    console.log(`[phase1b-shadow] down: ${KEY} carries no phase1b action marker — leaving untouched`);
+    return;
+  }
+  const action = marker[1];
+  const strippedNotes = String(row.notes || '').replace(MARKER_RE, '').trim() || null;
+
+  if (action === 'healed') {
+    await knex('service_completion_profiles').where({ service_key: KEY }).del();
+    console.log(`[phase1b-shadow] down: deleted healed ${KEY} row (did not exist pre-migration)`);
+    return;
+  }
+
+  if (action === 'flipped') {
+    await knex('service_completion_profiles')
+      .where({ service_key: KEY })
+      .update({
+        completion_mode: 'project_required',
+        delivery_mode: 'auto_send',
+        notes: strippedNotes,
+        updated_at: knex.fn.now(),
+      });
+    console.log(`[phase1b-shadow] down: ${KEY} restored to project_required/auto_send`);
+    return;
+  }
+
+  if (action.startsWith('delivery_forced:')) {
+    const prior = action.slice('delivery_forced:'.length) || 'auto_send';
+    await knex('service_completion_profiles')
+      .where({ service_key: KEY })
+      .update({ delivery_mode: prior, notes: strippedNotes, updated_at: knex.fn.now() });
+    console.log(`[phase1b-shadow] down: ${KEY} delivery_mode restored to ${prior} (mode untouched)`);
+    return;
+  }
+
+  console.warn(`[phase1b-shadow] down: unrecognized action marker "${action}" on ${KEY} — leaving untouched`);
 };

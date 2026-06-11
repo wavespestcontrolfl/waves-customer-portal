@@ -212,7 +212,7 @@ async function buildSummary(service) {
         ? JSON.parse(record.structured_notes)
         : (record?.structured_notes || {});
     } catch { trackNotes = {}; }
-    serviceReportToken = trackNotes.typedReportDelivery === 'internal_only'
+    serviceReportToken = trackNotes.typedReportDelivery && trackNotes.typedReportDelivery !== 'auto_send'
       ? null
       : (record?.report_view_token || null);
     if (record?.id) {

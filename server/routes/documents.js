@@ -621,7 +621,7 @@ router.get('/', authenticate, async (req, res, next) => {
           ? JSON.parse(svc.structured_notes)
           : (svc.structured_notes || {});
       } catch { svcNotes = {}; }
-      if (svcNotes && svcNotes.typedReportDelivery === 'internal_only') continue;
+      if (svcNotes.typedReportDelivery && svcNotes.typedReportDelivery !== 'auto_send') continue;
       // Service Report
       if (!linkedServiceIds.has(svc.id) || !docs.find(d => d.linked_service_record_id === svc.id && d.document_type === 'service_report')) {
         const viewUrl = svc.report_view_token ? `/report/${svc.report_view_token}` : null;
@@ -789,7 +789,7 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
         ? JSON.parse(service.structured_notes)
         : (service.structured_notes || {});
     } catch { reportNotes = {}; }
-    if (reportNotes.typedReportDelivery === 'internal_only') {
+    if (reportNotes.typedReportDelivery && reportNotes.typedReportDelivery !== 'auto_send') {
       return res.status(404).json({ error: 'Service record not found' });
     }
 
