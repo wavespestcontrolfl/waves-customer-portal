@@ -51,7 +51,14 @@ describe('internal-link review queue helpers', () => {
     });
   });
 
-  test('does not expose requeue or dismiss for post-PR verification failures', () => {
+  // Behavior change (terminal-verification fix): the executor now CLEARS
+  // astro_pr_url/pr_branch/pr_commit_sha when it terminally fails a task
+  // (closed-unmerged PR, PR 404, missing PR number), so those failures are
+  // requeue/dismissable instead of zero-action dead ends. Transient
+  // verification errors no longer set status='failed' at all. The
+  // hasPrLifecycle guard itself stays as defense in depth for legacy rows
+  // that still carry PR fields.
+  test('terminal verification failures (lifecycle cleared) are requeue/dismissable; legacy rows with PR fields stay blocked', () => {
     const prePrFailure = reviewQueue.buildTaskItem({
       id: 'task-pre-pr-failed',
       status: 'failed',
@@ -65,8 +72,29 @@ describe('internal-link review queue helpers', () => {
       can_verify_now: false,
     });
 
-    const postPrFailure = reviewQueue.buildTaskItem({
-      id: 'task-post-pr-failed',
+    // Terminal post-PR failure as the executor now writes it: failed with the
+    // PR lifecycle fields nulled (_failAbandonedPrTask path).
+    const terminalPostPrFailure = reviewQueue.buildTaskItem({
+      id: 'task-post-pr-failed-terminal',
+      status: 'failed',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+      astro_pr_url: null,
+      pr_branch: null,
+      pr_commit_sha: null,
+      failure_reason: 'internal_link_verify_pr_not_found',
+    });
+    expect(reviewQueue.hasPrLifecycle(terminalPostPrFailure)).toBe(false);
+    expect(terminalPostPrFailure.review_actions).toMatchObject({
+      can_requeue: true,
+      can_dismiss: true,
+      can_verify_now: false,
+    });
+
+    // Legacy/edge rows that still carry PR lifecycle fields remain blocked —
+    // the guard protects against requeueing a task whose PR really shipped.
+    const legacyStrandedFailure = reviewQueue.buildTaskItem({
+      id: 'task-post-pr-failed-legacy',
       status: 'failed',
       target_url: '/target/',
       anchor_text: 'target anchor',
@@ -74,8 +102,8 @@ describe('internal-link review queue helpers', () => {
       pr_branch: 'content/internal-link-target-abc123',
       failure_reason: 'internal_link_verify_link_missing',
     });
-    expect(reviewQueue.hasPrLifecycle(postPrFailure)).toBe(true);
-    expect(postPrFailure.review_actions).toMatchObject({
+    expect(reviewQueue.hasPrLifecycle(legacyStrandedFailure)).toBe(true);
+    expect(legacyStrandedFailure.review_actions).toMatchObject({
       can_requeue: false,
       can_dismiss: false,
       can_verify_now: false,

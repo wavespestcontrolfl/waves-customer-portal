@@ -18,6 +18,10 @@ const TABLE = 'content_internal_link_tasks';
 const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
 const PR_EXECUTOR_VERSION = 'internal-link-pr-executor-v1';
 const DEFAULT_LIMIT = 10;
+// A pr_reserved row normally flips to pr_open/failed within seconds; one
+// untouched for 2h with no PR URL is a crash orphan (see
+// _recoverStalePrReservedTasks).
+const STALE_PR_RESERVED_MS = 2 * 60 * 60 * 1000;
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
@@ -207,6 +211,13 @@ class InternalLinkPrExecutor {
   }
 
   async runPostMergeVerification({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_LIMIT', 10), taskIds = null } = {}) {
+    // Piggyback the stale-reservation sweep on the daily verify pass (the only
+    // recurring entry point). A sweep failure must never block verification.
+    try {
+      await this._recoverStalePrReservedTasks();
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] stale pr_reserved sweep failed: ${err.message}`);
+    }
     const tasks = await this._loadPrOpenTasks({ limit, taskIds });
     const results = [];
     for (const task of tasks) {
@@ -214,13 +225,20 @@ class InternalLinkPrExecutor {
       try {
         result = await this.verifyMergedTask(task);
       } catch (err) {
-        logger.warn(`[internal-link-pr-executor] verification failed for ${task.id}: ${err.message}`);
+        // A thrown error here is TRANSIENT (GitHub API/network from getPr or
+        // the live fetch). Leave the task status untouched so the next daily
+        // pass retries; only record the error. Marking it failed used to
+        // strand the task permanently: status='failed' with astro_pr_url /
+        // pr_branch intact is blocked from requeue, dismiss AND verify_now by
+        // the review queue's hasPrLifecycle guard.
+        logger.warn(`[internal-link-pr-executor] verification error for ${task.id} (transient, will retry next pass): ${err.message}`);
         result = {
           task_id: task.id,
-          status: 'failed',
+          status: task.status,
+          transient: true,
           failure_reason: `internal_link_verify_error:${err.message}`,
         };
-        await this._markTaskVerificationFailed(task.id, result.failure_reason);
+        await this._recordTransientVerificationError(task.id, result.failure_reason);
       }
       results.push(result);
     }
@@ -231,15 +249,22 @@ class InternalLinkPrExecutor {
     if (!task?.id) throw new Error('internal link task id required');
     const prNumber = task.astro_pr_number || parsePrNumber(task.astro_pr_url);
     if (!prNumber && !pr) {
+      // TERMINAL: no PR reference at all — re-verifying can never succeed.
+      // Fail it AND clear the PR lifecycle fields (like a closed-unmerged PR)
+      // so the review queue can requeue/dismiss instead of dead-ending.
       const reason = 'internal_link_verify_missing_pr_number';
-      await this._markTaskVerificationFailed(task.id, reason);
+      await this._failAbandonedPrTask(task.id, reason);
       return { task_id: task.id, status: 'failed', failure_reason: reason };
     }
 
     const prInfo = pr || await GitHubClient.getPr(prNumber);
     if (!prInfo) {
+      // TERMINAL: GitHub answered and the PR does not exist (getPr resolves
+      // null only on a definitive 404; API/network errors throw and are
+      // handled as transient by the caller). Clear lifecycle fields so the
+      // task stays actionable in the review queue.
       const reason = 'internal_link_verify_pr_not_found';
-      await this._markTaskVerificationFailed(task.id, reason);
+      await this._failAbandonedPrTask(task.id, reason);
       return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: prNumber };
     }
     const resolvedPrNumber = prNumber || prInfo.number || null;
@@ -460,6 +485,54 @@ class InternalLinkPrExecutor {
       .update({
         status: 'failed',
         failure_reason: `internal_link_pr_open_failed:${String(err?.message || err).slice(0, 500)}`,
+        // Clear the reservation branch: no PR exists, and a lingering
+        // pr_branch trips the review queue's hasPrLifecycle guard, blocking
+        // requeue/dismiss on an otherwise retryable failure.
+        pr_branch: null,
+        updated_at: new Date(),
+      });
+  }
+
+  // Crash-orphan recovery. _reserveTasksForPr commits status='pr_reserved'
+  // BEFORE branch/PR creation; if the process dies before _markTasksPrOpen /
+  // _markReservedTasksFailed run, the row is stranded forever — no loader
+  // selects pr_reserved and the review queue 409s requeue/dismiss/verify on
+  // it. A healthy run flips the status within seconds, so a reservation with
+  // no astro_pr_url that has sat untouched for >2h is a crash orphan: reset
+  // it to patch_candidate so the next PR batch can pick it up.
+  async _recoverStalePrReservedTasks({ staleMs = STALE_PR_RESERVED_MS } = {}) {
+    const cutoff = new Date(Date.now() - staleMs);
+    const rows = await db(TABLE)
+      .where('status', 'pr_reserved')
+      .whereNull('astro_pr_url')
+      .where('updated_at', '<', cutoff)
+      .select('id', 'pr_branch', 'reviewer_notes');
+    for (const row of rows) {
+      const note = `[${new Date().toISOString()}] system: recovered stale pr_reserved reservation`
+        + `${row.pr_branch ? ` (branch ${row.pr_branch})` : ''} back to patch_candidate.`;
+      await db(TABLE)
+        .where({ id: row.id, status: 'pr_reserved' })
+        .update({
+          status: 'patch_candidate',
+          pr_branch: null,
+          reviewer_notes: [String(row.reviewer_notes || '').trim(), note].filter(Boolean).join('\n').slice(-5000),
+          updated_at: new Date(),
+        });
+    }
+    if (rows.length) {
+      logger.info(`[internal-link-pr-executor] recovered ${rows.length} stale pr_reserved task(s) back to patch_candidate`);
+    }
+    return rows.length;
+  }
+
+  // Record a TRANSIENT verification error (GitHub API/network) without
+  // touching status, so the next daily verify pass retries the task.
+  async _recordTransientVerificationError(taskId, reason) {
+    await db(TABLE)
+      .where({ id: taskId })
+      .whereIn('status', ['pr_open', 'merged', 'deployed'])
+      .update({
+        failure_reason: String(reason || '').slice(0, 500),
         updated_at: new Date(),
       });
   }
@@ -493,15 +566,16 @@ class InternalLinkPrExecutor {
       });
   }
 
-  // Fail a task whose Astro PR was closed unmerged AND clear its PR lifecycle
-  // fields, so the review queue's hasPrLifecycle guard no longer blocks
-  // requeue/dismiss. (astro_pr_number is not a column — the PR number is parsed
-  // from astro_pr_url — so only astro_pr_url/pr_branch/pr_commit_sha are cleared.)
+  // Fail a task whose Astro PR is terminally gone (closed unmerged, PR number
+  // missing, or PR 404) AND clear its PR lifecycle fields, so the review
+  // queue's hasPrLifecycle guard no longer blocks requeue/dismiss.
+  // (astro_pr_number is not a column — the PR number is parsed from
+  // astro_pr_url — so only astro_pr_url/pr_branch/pr_commit_sha are cleared.)
   // The closed PR URL stays in reviewer_notes (from the pr_open note) for audit.
   async _failAbandonedPrTask(taskId, reason) {
     await db(TABLE)
       .where({ id: taskId })
-      .whereIn('status', ['pr_open', 'pr_reserved'])
+      .whereIn('status', ['pr_open', 'pr_reserved', 'merged', 'deployed'])
       .update({
         status: 'failed',
         failure_reason: reason,
@@ -650,9 +724,14 @@ function seoFieldsFromOpportunity(opportunity) {
 function pageFromAstroFile(file, body, { fallbackUrl = null } = {}) {
   const parsed = frontmatter.parse(body || '');
   const data = parsed.data || {};
+  // Frontmatter `slug` FIRST: the Astro glob loader honors a frontmatter slug
+  // as the entry id, so the live hub route IS the slug URL (the path-derived
+  // URL 301s to it). The planner derives URLs slug-first too — the executor
+  // must match, or legacy posts whose slug differs from their file basename
+  // skip with source_canonical_mismatch.
   const url = firstValidInternalUrl(
-    deriveUrlFromFile(file),
     slugToInternalUrl(data.slug),
+    deriveUrlFromFile(file),
     data.canonical,
     data.canonical_url,
     fallbackUrl
@@ -834,7 +913,8 @@ function paragraphHasLink(paragraph) {
 function countInternalLinks(body) {
   const text = String(body || '');
   let count = 0;
-  const mdLink = /\[[^\]\n]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
+  // (?<!!) excludes markdown image embeds — ![alt](/x.webp) is not a link.
+  const mdLink = /(?<!!)\[[^\]\n]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
   let match;
   while ((match = mdLink.exec(text)) !== null) {
     if (policy.normalizeInternalUrl(String(match[1] || '').replace(/^<|>$/g, ''))) count++;

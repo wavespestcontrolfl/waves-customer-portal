@@ -1123,8 +1123,15 @@ async function mergeAstro(postId) {
 // Spoke-published posts are excluded by construction: liveUrlForPost returns
 // a spoke-domain URL for them, which the planner's hub-only canonicalization
 // rejects.
+// Kill switch: enabled by default; any conventional falsy value disables it
+// (previously only the literal string 'false' was honored, so '0'/'no'/'off'
+// silently left planning on).
+function internalLinkPlanningDisabled() {
+  return /^(0|false|no|off)$/i.test(String(process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE || '').trim());
+}
+
 function queueInternalLinkPlanning(post) {
-  if (process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE === 'false') return;
+  if (internalLinkPlanningDisabled()) return;
   planInternalLinksForMergedPost(post)
     .then((result) => {
       if (result) {
@@ -1784,6 +1791,7 @@ module.exports = {
     compressToWebp,
     applyMergeEffect,
     queueInternalLinkPlanning,
+    internalLinkPlanningDisabled,
     planInternalLinksForMergedPost,
     isCommittedHeroUrl,
     absoluteHeroUrl,
