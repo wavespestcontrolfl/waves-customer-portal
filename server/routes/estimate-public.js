@@ -119,6 +119,48 @@ function clientIp(req) {
     .toString().split(',')[0].trim().slice(0, 64);
 }
 
+// estimates.customer_phone may be freeform (admin input) or E.164 (quote
+// wizard) while customers.phone is freeform — compare on the last 10 digits
+// like admin-customers/admin-communications do, never on the raw string.
+function phoneLast10(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+
+function normalizeAddressForMatch(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Multiple live profiles can legitimately share a phone (landlord + rental
+// property via quick-add). Only reuse one when the match is unambiguous: a
+// single phone hit, or — among several — a unique email or service-address
+// match. Otherwise return null so the accept creates a fresh profile;
+// attaching the tier/monthly_rate/schedules to a guessed profile splits the
+// real customer's history.
+function pickAcceptCustomerMatch(candidates, estimate) {
+  if (!candidates.length) return null;
+  if (candidates.length === 1) return candidates[0];
+  let pool = candidates;
+  const email = String(estimate.customer_email || '').trim().toLowerCase();
+  if (email) {
+    const byEmail = pool.filter((c) => String(c.email || '').trim().toLowerCase() === email);
+    if (byEmail.length === 1) return byEmail[0];
+    if (byEmail.length > 1) pool = byEmail;
+  }
+  const estAddr = normalizeAddressForMatch(estimate.address);
+  if (estAddr) {
+    const byAddress = pool.filter((c) => {
+      const line1 = normalizeAddressForMatch(c.address_line1);
+      // estimate.address is the full address; address_line1 is the street
+      // line. Require a meaningful street line so '' never matches, and a
+      // token boundary so '12 oak' can't match '12 oakridge dr'.
+      return line1.length >= 5 && (estAddr === line1 || estAddr.startsWith(line1 + ' '));
+    });
+    if (byAddress.length === 1) return byAddress[0];
+  }
+  return null;
+}
+
 // Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
 function readCookie(req, name) {
   const header = req.headers.cookie;
@@ -5447,7 +5489,30 @@ router.put('/:token/accept', async (req, res, next) => {
 
       let customerId = estimate.customer_id;
       if (!customerId && estimate.customer_phone) {
-        const existing = await trx('customers').where({ phone: estimate.customer_phone }).first();
+        // Match on last-10 digits (format-insensitive), skip soft-deleted
+        // rows, and order deterministically: exact raw match first, then the
+        // most recently updated profile. Reuse a profile only when the match
+        // is unambiguous (pickAcceptCustomerMatch).
+        const matchDigits = phoneLast10(estimate.customer_phone);
+        const candidates = await trx('customers')
+          .where((q) => {
+            q.where({ phone: estimate.customer_phone });
+            if (matchDigits) {
+              q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${matchDigits}`]);
+            }
+          })
+          .whereNull('deleted_at')
+          .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
+          .orderBy('updated_at', 'desc');
+        // No row cap: a property manager can hold many profiles on one
+        // phone, and truncating by recency could drop the one profile
+        // whose email/address uniquely matches — splitting the estimate
+        // off the existing account. pickAcceptCustomerMatch needs the
+        // full set to judge ambiguity.
+        const existing = pickAcceptCustomerMatch(candidates, estimate);
+        if (!existing && candidates.length > 1) {
+          logger.warn(`[estimate-accept] ${candidates.length} live customers share phone for estimate ${estimate.id}; no unique email/address match — creating a new profile`);
+        }
         if (existing) {
           customerId = existing.id;
         } else {
@@ -5460,8 +5525,13 @@ router.put('/:token/accept', async (req, res, next) => {
             email: estimate.customer_email || null,
             address_line1: estimate.address || '',
             city: '', state: 'FL', zip: '',
-            waveguard_tier: estimate.waveguard_tier || 'Bronze',
-            monthly_rate: effectiveMonthlyTotal,
+            // One-time accepts must not look like WaveGuard members: a
+            // monthly_rate > 0 with active+autopay defaults would put them
+            // in billing-cron's monthly charge sweep. 'One-Time' is an
+            // explicit non-membership tier (the column defaults to 'Bronze'
+            // if omitted, so it must be set).
+            waveguard_tier: treatAsOneTime ? 'One-Time' : (estimate.waveguard_tier || 'Bronze'),
+            monthly_rate: treatAsOneTime ? null : effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
           }).returning('*');

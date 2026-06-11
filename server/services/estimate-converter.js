@@ -458,13 +458,17 @@ const EstimateConverter = {
         })
       : null;
 
-    // 1. Update customer to active
+    // 1. Update customer to active. Clear deleted_at: admin screens filter
+    //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
+    //    without clearing it would create an actively-billed customer no
+    //    admin screen can display.
     await database('customers').where({ id: customerId }).update({
       pipeline_stage: 'active_customer',
       pipeline_stage_changed_at: new Date(),
       waveguard_tier: tier,
       monthly_rate: monthlyRate,
       active: true,
+      deleted_at: null,
     });
 
     // 2. Create scheduled_services for recurring services — but ONLY if

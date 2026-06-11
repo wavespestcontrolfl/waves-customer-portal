@@ -69,6 +69,11 @@ const LatePaymentService = {
 
       const customer = await db('customers').where({ id: inv.customer_id }).first();
       if (!customer?.phone) { skipped++; continue; }
+      if (customer.deleted_at) {
+        logger.info(`[late-payment] Skipping invoice ${inv.id} — customer ${customer.id} is soft-deleted`);
+        skipped++;
+        continue;
+      }
 
       const name = customer.first_name || 'there';
       const invoiceTitle = inv.title || 'your service';

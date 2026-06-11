@@ -218,16 +218,16 @@ class AppointmentTagger {
   }
 
   async getPrepSMS(pestType, service) {
-    // Knex returns DATE columns as Date objects; guard both shapes so the
-    // template never renders "Invalid Date" in a customer-facing SMS.
-    // Mirrors the pattern in server/services/invoice.js (sendViaSMS).
+    // Knex returns DATE columns as Date objects at UTC midnight — formatting
+    // that directly in ET names the previous day. Recover the calendar date
+    // string and anchor at noon (same as the string branch), guarding both
+    // shapes so the template never renders "Invalid Date" in a customer SMS.
     let date = '';
     try {
-      const d = service.scheduled_date instanceof Date
-        ? service.scheduled_date
-        : service.scheduled_date
-          ? new Date(service.scheduled_date + 'T12:00:00')
-          : null;
+      const raw = service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString().split('T')[0]
+        : service.scheduled_date;
+      const d = raw ? new Date(String(raw).split('T')[0] + 'T12:00:00') : null;
       if (d && !isNaN(d.getTime())) {
         date = d.toLocaleDateString('en-US', {
           weekday: 'long', month: 'short', day: 'numeric',

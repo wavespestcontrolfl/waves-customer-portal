@@ -289,6 +289,10 @@ async function runPending() {
     return { sent: 0, skipped: 0 };
   }
 
+  // No deleted-customer filter here: fireStep() pauses those sequences
+  // (status='paused', next_touch_at=null) so they're handled terminally
+  // rather than staying armed and past-due until a restore fires a
+  // stale collection touch.
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'active')
@@ -330,6 +334,19 @@ async function fireStep(row) {
   }
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
+  // Guard every send path (cron runPending filters too, but sendNextTouchNow
+  // reaches here directly) — soft-deleted customers get no follow-up touches.
+  // Pause rather than bare-return: sendNextTouchNow re-arms the sequence
+  // (active + past-due next_touch_at) before calling here, so leaving it
+  // active would fire a stale touch if the customer is later restored.
+  if (customer?.deleted_at) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      status: 'paused',
+      next_touch_at: null,
+    });
+    logger.info(`[invoice-followups] paused sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
+    return;
+  }
   const amount = parseFloat(row.total || 0).toFixed(2);
   const serviceDate = row.service_date
     ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })

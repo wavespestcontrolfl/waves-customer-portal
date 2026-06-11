@@ -232,8 +232,8 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 function etDateDiffDays(fromDateStr, toDateStr) {
-  const from = parseETDateTime(`${String(fromDateStr || '').split('T')[0]}T12:00`);
-  const to = parseETDateTime(`${String(toDateStr || '').split('T')[0]}T12:00`);
+  const from = parseETDateTime(`${dateOnly(fromDateStr) || ''}T12:00`);
+  const to = parseETDateTime(`${dateOnly(toDateStr) || ''}T12:00`);
   if (isNaN(from.getTime()) || isNaN(to.getTime())) return null;
   return Math.round((to.getTime() - from.getTime()) / 86400000);
 }
@@ -251,7 +251,7 @@ function recurringCandidateTooCloseToAnchor(baseDateStr, pattern, candidateDateS
 }
 
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
-  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
+  const safe = dateOnly(baseDateStr) || etDateString();
   const base = parseETDateTime(safe + 'T12:00');
   if (isNaN(base.getTime())) return opts;
   const et = etParts(base);
@@ -273,7 +273,7 @@ function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
 // Returns a YYYY-MM-DD string.
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
-  const safeBaseStr = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
+  const safeBaseStr = dateOnly(baseDateStr) || etDateString();
   const base = parseETDateTime(safeBaseStr + 'T12:00');
   if (isNaN(base.getTime())) return etDateString();
   const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
@@ -305,7 +305,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
 // pulls to Friday. No-op for weekdays or when skip is false.
 function shiftPastWeekend(dateStr, skip, direction) {
   if (!skip || !dateStr) return dateStr;
-  const safe = String(dateStr).split('T')[0];
+  const safe = dateOnly(dateStr);
   const d = new Date(safe + 'T12:00:00');
   if (isNaN(d.getTime())) return dateStr;
   const day = d.getDay(); // 0=Sun, 6=Sat
@@ -326,7 +326,7 @@ function shiftPastWeekend(dateStr, skip, direction) {
 // month as initial (clamped to each month's length).
 function computeBoosterDates(initialDateStr, boosterMonths, monthsAhead = 12) {
   if (!Array.isArray(boosterMonths) || boosterMonths.length === 0) return [];
-  const safe = String(initialDateStr || '').split('T')[0];
+  const safe = dateOnly(initialDateStr) || '';
   const initial = new Date(safe + 'T12:00:00');
   if (isNaN(initial.getTime())) return [];
   const initialDay = initial.getDate();
@@ -369,7 +369,7 @@ function normalizeHHMM(value) {
 }
 
 function normalizeDateOnly(value) {
-  return value ? String(value).split('T')[0] : null;
+  return dateOnly(value);
 }
 
 function normalizeNullableInt(value) {
@@ -417,7 +417,7 @@ function shouldRewritePendingRecurringRows(before, after) {
 }
 
 function appointmentReminderTime(dateStr, windowStart) {
-  const safeDate = String(dateStr || '').split('T')[0];
+  const safeDate = dateOnly(dateStr);
   if (!safeDate) return null;
   const apptTime = parseETDateTime(`${safeDate}T${normalizeHHMM(windowStart) || '08:00'}`);
   return isNaN(apptTime.getTime()) ? null : apptTime;
@@ -1672,7 +1672,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // certain cadence/month combos (e.g. monthly Jan 15 + April booster
       // → Apr 15 already on the calendar) would otherwise double-book.
       const seriesDates = new Set();
-      seriesDates.add(String(scheduledDate || '').split('T')[0]);
+      seriesDates.add(dateOnly(scheduledDate) || '');
 
       // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
       const parsedRecurringCount = Number.parseInt(recurringCount, 10);
@@ -2086,6 +2086,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           }
           case 'reschedule': {
             if (!payload?.scheduledDate) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
+            let reminderSyncTime = null;
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
@@ -2093,7 +2094,37 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (payload?.windowStart) updates.window_start = payload.windowStart;
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
               await trx('scheduled_services').where({ id }).update(updates);
+              const prevDate = svc.scheduled_date instanceof Date
+                ? svc.scheduled_date.toISOString().split('T')[0]
+                : normalizeDateOnly(svc.scheduled_date);
+              const nextDate = normalizeDateOnly(payload.scheduledDate);
+              const nextStart = payload?.windowStart || svc.window_start;
+              if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
+                reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
+              }
             });
+            // Resync the reminder row so the 72h/24h cron texts the new date —
+            // mirrors the cancel branch's handleCancellation call below.
+            if (reminderSyncTime) {
+              try {
+                const AppointmentReminders = require('../services/appointment-reminders');
+                // handleReschedule claims a still-pending creation
+                // confirmation (its reschedule notice normally replaces
+                // it), but with sendNotification:false no notice goes
+                // out — the customer would get neither message. Re-arm
+                // the deferred confirmation afterwards; it renders the
+                // NEW date/window from the resynced reminder row.
+                const reminderBefore = await db('appointment_reminders')
+                  .where({ scheduled_service_id: id })
+                  .first('id', 'confirmation_sent');
+                await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: false });
+                if (reminderBefore && !reminderBefore.confirmation_sent) {
+                  await db('appointment_reminders')
+                    .where({ id: reminderBefore.id })
+                    .update({ confirmation_sent: false, confirmation_sent_at: null });
+                }
+              } catch {}
+            }
             break;
           }
           case 'cancel': {
@@ -2200,9 +2231,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       const existingService = await db('scheduled_services')
         .where({ id: req.params.id })
         .first('scheduled_date');
-      editAnchorDate = existingService?.scheduled_date
-        ? String(existingService.scheduled_date).split('T')[0]
-        : undefined;
+      editAnchorDate = dateOnly(existingService?.scheduled_date) || undefined;
     }
     const editMonthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
       ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
@@ -2428,7 +2457,35 @@ router.put('/:id/update-details', async (req, res, next) => {
       }
 
       if (detailsChanged) {
+        // When the appointment's own date or arrival window changes, resync its
+        // reminder row in the same transaction — otherwise the 72h/24h cron
+        // texts the customer the old date/time. (Recurring children get the
+        // same treatment via resetAppointmentReminderForScheduleRewrite below.)
+        const reminderFieldsTouched = updates.scheduled_date !== undefined || updates.window_start !== undefined;
+        const reminderBefore = reminderFieldsTouched
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
+          : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        if (reminderBefore) {
+          const prevDate = reminderBefore.scheduled_date instanceof Date
+            ? reminderBefore.scheduled_date.toISOString().split('T')[0]
+            : normalizeDateOnly(reminderBefore.scheduled_date);
+          const nextDate = updates.scheduled_date !== undefined
+            ? normalizeDateOnly(updates.scheduled_date)
+            : prevDate;
+          const prevStart = normalizeHHMM(reminderBefore.window_start);
+          const nextStart = updates.window_start !== undefined
+            ? normalizeHHMM(updates.window_start)
+            : prevStart;
+          if (nextDate && (nextDate !== prevDate || nextStart !== prevStart)) {
+            await resetAppointmentReminderForScheduleRewrite(
+              trx,
+              req.params.id,
+              nextDate,
+              updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
+            );
+          }
+        }
       }
       // Replace the appointment's additional service lines with the submitted
       // set (add / edit / remove handled uniformly by delete + re-insert).
@@ -2461,9 +2518,7 @@ router.put('/:id/update-details', async (req, res, next) => {
           && !recurringParentBefore.recurring_parent_id
           && shouldRewritePendingRecurringRows(recurringParentBefore, parent)
         ) {
-          const baseDateStr = parent.scheduled_date
-            ? String(parent.scheduled_date).split('T')[0]
-            : etDateString();
+          const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
           const rOpts = {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
@@ -2500,7 +2555,7 @@ router.put('/:id/update-details', async (req, res, next) => {
             const reservedRows = await reservedQuery.select('scheduled_date');
             const seenDates = new Set(
               reservedRows
-                .map((row) => String(row.scheduled_date || '').split('T')[0])
+                .map((row) => dateOnly(row.scheduled_date) || '')
                 .filter(Boolean),
             );
             const maxAttempts = pendingChildren.length * 4 + 30;
@@ -2558,7 +2613,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               }
               for (const booster of pendingBoosters) {
                 if (boosterTargets.has(booster.id)) continue;
-                const rawDate = String(booster.scheduled_date || '').split('T')[0];
+                const rawDate = dateOnly(booster.scheduled_date) || '';
                 if (!rawDate) continue;
                 const candidate = shiftPastWeekend(rawDate, skipChild, dirChild);
                 const currentDate = normalizeDateOnly(booster.scheduled_date);
@@ -2595,9 +2650,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       if (isRecurring && recurringPattern && spawnCount > 1) {
         const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
         if (parent) {
-          const baseDateStr = parent.scheduled_date
-            ? String(parent.scheduled_date).split('T')[0]
-            : etDateString();
+          const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
           const rOpts = {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
@@ -2617,7 +2670,7 @@ router.put('/:id/update-details', async (req, res, next) => {
           // skip-weekends can collapse consecutive recurrences onto the
           // same weekday.
           const seenChildDates = new Set();
-          seenChildDates.add(String(baseDateStr || '').split('T')[0]);
+          seenChildDates.add(dateOnly(baseDateStr) || '');
           // Iterate by inserts (matches POST spawn): skip-weekends can
           // collapse multiple raw recurrences onto the same shifted weekday,
           // and a fixed-count plan still owes spawnCount-1 children.
@@ -3371,7 +3424,7 @@ router.put('/:id/status', async (req, res, next) => {
               .where('is_recurring', true)
               .orderBy('scheduled_date', 'desc').first();
             if (latest) {
-              const latestStr = String(latest.scheduled_date).split('T')[0];
+              const latestStr = dateOnly(latest.scheduled_date);
               const rOpts = {
                 ...recurrenceOrdinalOptions(parent.scheduled_date, {
                   nth: parent.recurring_nth,
@@ -3394,7 +3447,7 @@ router.put('/:id/status', async (req, res, next) => {
                 .whereNotIn('status', ['cancelled', 'rescheduled'])
                 .select('scheduled_date');
               const existingDates = new Set(existingRows
-                .map((r) => String(r.scheduled_date || '').split('T')[0])
+                .map((r) => dateOnly(r.scheduled_date) || '')
                 .filter(Boolean));
               // Advance until we find an open date or give up. Each step
               // moves one cadence interval forward from latestStr; capped to
@@ -3478,7 +3531,7 @@ router.put('/:id/status', async (req, res, next) => {
                   recurring_parent_id: parentId,
                   customer_id: parent.customer_id,
                   alert_type: 'plan_ending',
-                  last_visit_date: String(svc.scheduled_date).split('T')[0],
+                  last_visit_date: dateOnly(svc.scheduled_date),
                   recurring_pattern: parent.recurring_pattern,
                   remaining_visits: 0,
                 });
@@ -4345,7 +4398,7 @@ router.get('/recurring-alerts', async (req, res, next) => {
             .orderBy('scheduled_date', 'desc').limit(1);
           const latestPending = pending[0];
           if (!latestPending) continue;
-          if (latestPending.scheduled_date && String(latestPending.scheduled_date).split('T')[0] > soonStr) continue;
+          if (latestPending.scheduled_date && dateOnly(latestPending.scheduled_date) > soonStr) continue;
 
           const pendingCount = parseInt((await db('scheduled_services')
             .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
@@ -4368,7 +4421,7 @@ router.get('/recurring-alerts', async (req, res, next) => {
             phone: plan.phone, email: plan.email,
             serviceType: plan.service_type,
             alertType: 'plan_ending_soon',
-            lastVisitDate: String(latestPending.scheduled_date).split('T')[0],
+            lastVisitDate: dateOnly(latestPending.scheduled_date),
             pattern: plan.recurring_pattern,
             remainingVisits: pendingCount,
             createdAt: null,
@@ -4491,9 +4544,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
       .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
       .where('is_recurring', true)
       .orderBy('scheduled_date', 'desc').first();
-    const baseDateStr = latest?.scheduled_date
-      ? String(latest.scheduled_date).split('T')[0]
-      : etDateString();
+    const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
 
     // Mirror parent's addon rows onto a freshly-inserted child. Non-blocking
     // — if it fails the child still exists and dispatch can re-add.
@@ -4538,7 +4589,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         .whereNotIn('status', ['cancelled', 'rescheduled'])
         .select('scheduled_date');
       seriesDateSeed = new Set(allRows
-        .map((r) => String(r.scheduled_date || '').split('T')[0])
+        .map((r) => dateOnly(r.scheduled_date) || '')
         .filter(Boolean));
     } catch {
       seriesDateSeed = new Set([baseDateStr]);

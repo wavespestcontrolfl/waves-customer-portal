@@ -39,6 +39,7 @@ function chain({ result = [], first, returning } = {}) {
     'whereNotIn',
     'whereNull',
     'whereNotNull',
+    'whereNotExists',
     'select',
     'orderBy',
   ].forEach((method) => {

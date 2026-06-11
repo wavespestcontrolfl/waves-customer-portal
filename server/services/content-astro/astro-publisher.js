@@ -43,6 +43,29 @@ function isBlogTarget(filePath) {
   return typeof filePath === 'string' && filePath.startsWith(`${ASTRO_BLOG_DIR}/`);
 }
 const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
+const HUB_ORIGIN = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+
+// A hero already committed to the Astro repo — either the relative /images/blog
+// path or its absolute hub URL. These are NOT re-fetched on republish (the
+// asset already lives in the repo / on the live site).
+function isCommittedHeroUrl(url) {
+  return !!url && (
+    url.startsWith(`${ASTRO_HERO_PUBLIC_BASE}/`)
+    || url.startsWith(`${HUB_ORIGIN}${ASTRO_HERO_PUBLIC_BASE}/`)
+  );
+}
+
+// Absolute public URL for DB/admin consumers. The portal admin editor renders
+// blog_posts.featured_image_url directly, served from the PORTAL origin — which
+// does not host the Astro repo's /images/blog assets — so a bare relative path
+// would show a broken hero preview. Frontmatter keeps relative paths; the DB
+// stores absolute.
+function absoluteHeroUrl(ref) {
+  if (!ref) return null;
+  if (/^https?:\/\//i.test(ref)) return ref;
+  if (ref.startsWith('/')) return `${HUB_ORIGIN}${ref}`;
+  return null;
+}
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
@@ -106,7 +129,18 @@ async function buildFrontmatter(post) {
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
   const targetSites = normalizeTargetSites(post.target_sites);
   const relatedServices = normalizeArray(post.related_services);
-  const domains = targetSites.length > 0 ? targetSites : undefined;
+  // Automated blog posts (idea generator / demand miner / content calendar)
+  // target the hub only — they're general SWFL educational content, not
+  // spoke-domain material. Without an explicit target the empty-list default
+  // would fan them across every spoke domain, so pin automated, untargeted
+  // posts to wavespestcontrol.com. Manually-authored posts keep the existing
+  // empty-means-astro-default behavior (so the "publish to all domains" option
+  // still works for hand-curated content).
+  const AUTOMATED_BLOG_SOURCES = new Set(['ai_generated', 'demand_mined', 'calendar']);
+  const effectiveTargets = targetSites.length > 0
+    ? targetSites
+    : (AUTOMATED_BLOG_SOURCES.has(post.source) ? ['wavespestcontrol.com'] : []);
+  const domains = effectiveTargets.length > 0 ? effectiveTargets : undefined;
 
   const data = {
     title: post.title,
@@ -293,6 +327,47 @@ async function fetchImageBuffer(url) {
   }
 }
 
+// ── Hero image processing (publish-time) ───────────────────────────
+
+// Resize + convert a hero image buffer to WebP. Generated heroes arrive as
+// multi-MB PNGs and the hero renders eager + fetchpriority=high (LCP path),
+// so the raw bytes must not ship. Forcing WebP also fixes the committed
+// filename (hero.webp) so the merge step can persist the path deterministically.
+// Mandatory (throws on failure → publish fails loudly) so the merge-time
+// /images/blog/<slug>/hero.webp assumption always holds.
+async function compressToWebp(buffer) {
+  const sharp = require('sharp');
+  return sharp(buffer)
+    // Bake EXIF orientation into pixels before stripping metadata — a curated
+    // phone/camera JPEG with an Orientation tag would otherwise serve sideways.
+    .rotate()
+    .resize({ width: 1600, withoutEnlargement: true })
+    .webp({ quality: 80 })
+    .toBuffer();
+}
+
+// ── Hero generation (publish-time) ─────────────────────────────────
+
+// Generate a unique AI hero image for a post that has no curated
+// featured_image_url, and return its bytes. The image-generator returns a
+// `data:` URL (~5MB); we decode it to a Buffer in memory and the caller
+// commits it into the PR branch as /images/blog/<slug>/hero.<ext>. The data
+// URL is never written to the DB — featured_image_url is varchar(255) and the
+// blog list does SELECT *, so persisting it would break/bloat both.
+async function generateHeroBuffer(post) {
+  const imageGenerator = require('../content/image-generator');
+  const gen = await imageGenerator.generate({
+    title: post.title,
+    topic: post.meta_description,
+    keyword: post.keyword,
+    mode: 'blog-hero',
+  });
+  const img = await fetchImageBuffer(gen.dataUrl);
+  if (!img?.buffer) throw new Error('hero image generation produced no usable image');
+  logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${gen.model}`);
+  return img;
+}
+
 // ── Main publish ───────────────────────────────────────────────────
 
 // Close + delete a post's still-open PR/branch before a build_failed retry so
@@ -354,16 +429,44 @@ async function publishAstro(postId) {
   try {
     // 1. Hero image (required by the Astro schema). Fetch before branch
     // creation so validation/fetch failures do not leave orphan branches.
-    let heroImageExt = imageExtFromSource(post.featured_image_url);
+    //
+    // Three cases:
+    //   - featured_image_url is a curated/hosted URL → fetch its bytes and
+    //     commit them as the hero (a real photo always wins).
+    //   - featured_image_url is empty → generate a unique AI hero at publish
+    //     time and commit it. The bytes stay in memory; we never persist the
+    //     ~5MB data: URL to the DB (featured_image_url is varchar(255) and the
+    //     blog list does SELECT *, so storing it there would bloat every load).
+    //   - featured_image_url already references a committed hero (relative
+    //     /images/blog/ path or its absolute hub URL) → it's in the repo from a
+    //     prior merged publish; reference it as-is, don't re-fetch.
     let heroImage = null;
-    if (post.featured_image_url && !post.featured_image_url.startsWith('/images/blog/')) {
+    if (post.featured_image_url && !isCommittedHeroUrl(post.featured_image_url)) {
       heroImage = await fetchImageBuffer(post.featured_image_url);
       if (!heroImage?.buffer) throw new Error('featured image could not be fetched for Astro publish');
-      heroImageExt = heroImage.ext || heroImageExt;
+    } else if (!post.featured_image_url) {
+      heroImage = await generateHeroBuffer(post);
     }
+    // Normalize any committed hero to a resized WebP. Generated heroes are
+    // ~3-5MB PNGs and the layout renders the hero eager + fetchpriority=high
+    // (it's on the LCP path), so shipping the raw PNG would tank first-paint.
+    // Converting also makes the committed filename deterministic (hero.webp),
+    // which lets the merge step persist the public path without tracking the
+    // source extension.
+    if (heroImage?.buffer) {
+      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp' };
+    }
+    const heroImageExt = heroImage?.buffer ? 'webp' : imageExtFromSource(post.featured_image_url);
+
+    // Public path the frontmatter references. Whenever we have bytes to commit
+    // they land at /images/blog/<slug>/hero.webp; a /images/blog/ value is
+    // already committed from a prior (merged) publish.
+    const heroPublicRef = heroImage?.buffer
+      ? `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`
+      : (post.featured_image_url || null);
 
     // 2. Markdown frontmatter/body validation
-    const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt });
+    const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt, featured_image_url: heroPublicRef });
     assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
 
@@ -951,6 +1054,21 @@ async function mergeAstro(postId) {
   }
 }
 
+// Read the hero_image.src that the just-merged post's frontmatter actually
+// references on main. Authoritative across publish-path versions (hero.webp
+// from the new path, hero.png/.jpg from older in-flight PRs). Returns null if
+// the file/field can't be read so the caller can fall back.
+async function mergedHeroRef(slug) {
+  try {
+    const found = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+    const src = found?.file?.content ? fm.parse(found.file.content)?.data?.hero_image?.src : null;
+    return (typeof src === 'string' && src.startsWith('/images/blog/')) ? src : null;
+  } catch (err) {
+    logger.warn(`[astro-publisher] could not read merged hero ref for ${slug}: ${err.message}`);
+    return null;
+  }
+}
+
 async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
   if (isUnpublish) {
     await db('blog_posts').where({ id: postId }).update({
@@ -964,11 +1082,18 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
       astro_publish_error: null,
       astro_commit_sha: sha || post.astro_commit_sha,
       status: 'draft',
+      // The revert PR deleted the committed hero asset, so drop a stale
+      // committed ref — a future republish regenerates/recommits. A CURATED
+      // source URL is preserved: it's the only reference to the original
+      // image, and clearing it would make a republish silently swap the
+      // curated photo for a generated AI hero.
+      ...(isCommittedHeroUrl(post.featured_image_url) ? { featured_image_url: null } : {}),
       updated_at: new Date(),
     });
     return;
   }
-  await db('blog_posts').where({ id: postId }).update({
+  const slug = post.slug || slugify(post.title);
+  const updates = {
     astro_status: 'merged',
     astro_merged_at: mergedAt,
     astro_commit_sha: sha || post.astro_commit_sha,
@@ -976,7 +1101,34 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
     astro_live_url: liveUrlForPost(post),
     astro_published_at: null,
     updated_at: new Date(),
-  });
+  };
+  // Persist the now-live hero path ONLY at merge — the asset exists on main
+  // exactly now. Persisting earlier (at PR open) would point downstream
+  // consumers (auto social-share, republish) at a file that lives only on a
+  // PR branch and vanishes if the build fails and the branch is deleted.
+  //
+  // And ONLY for generated/already-committed heroes. A curated
+  // featured_image_url is the sole reference to the original source image —
+  // overwriting it with the Astro copy means unpublish (which deletes that
+  // copy) leaves the draft with nothing to refetch, and a republish would
+  // silently replace the curated photo with a generated AI hero. Curated
+  // URLs are already absolute and renderable for admin/social, so they need
+  // no rewrite.
+  if (!post.featured_image_url || isCommittedHeroUrl(post.featured_image_url)) {
+    // Read the authoritative path straight from the merged frontmatter rather
+    // than assuming an extension: a PR opened by the new code committed
+    // hero.webp, but one opened by the OLD path (still in flight when this
+    // deploys) committed hero.png/.jpg, and guessing webp would record a
+    // broken path. Fall back to the existing committed path, then hero.webp.
+    const rawHeroRef =
+      (await mergedHeroRef(slug))
+      || (isCommittedHeroUrl(post.featured_image_url) ? post.featured_image_url : null)
+      || `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
+    // Store an ABSOLUTE hub URL for DB/admin/social consumers; the relative
+    // /images/blog path only resolves on the Astro site, not the portal origin.
+    updates.featured_image_url = absoluteHeroUrl(rawHeroRef);
+  }
+  await db('blog_posts').where({ id: postId }).update(updates);
 }
 
 // ── Unpublish (soft, via revert PR) ────────────────────────────────
@@ -1506,6 +1658,11 @@ module.exports = {
   buildFrontmatter,
   liveUrlForPost,
   _internals: {
+    generateHeroBuffer,
+    compressToWebp,
+    applyMergeEffect,
+    isCommittedHeroUrl,
+    absoluteHeroUrl,
     slugPathFromFrontmatter,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,

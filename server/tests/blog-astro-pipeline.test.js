@@ -22,6 +22,9 @@ jest.mock('../services/content-astro/github-client', () => ({
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
 }));
+jest.mock('../services/content/image-generator', () => ({
+  generate: jest.fn(),
+}));
 
 const db = require('../models/db');
 const gh = require('../services/content-astro/github-client');
@@ -800,7 +803,7 @@ describe('Astro publisher hero image republish', () => {
     }));
     gh.createBranch.mockResolvedValue({});
     gh.getFile.mockImplementation(async (path) => (
-      path.endsWith('/hero.png') ? { sha: 'existing-hero-sha' } : null
+      path.endsWith('/hero.webp') ? { sha: 'existing-hero-sha' } : null
     ));
     gh.putBinary.mockResolvedValue({});
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-commit-sha' } });
@@ -825,7 +828,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nAnt trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
     };
@@ -837,7 +840,7 @@ describe('Astro publisher hero image republish', () => {
     await AstroPublisher.publishAstro('post-1');
 
     expect(gh.putBinary).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'public/images/blog/ant-trails-bradenton/hero.png',
+      path: 'public/images/blog/ant-trails-bradenton/hero.webp',
       sha: 'existing-hero-sha',
     }));
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -863,7 +866,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       // Hardcoded monthly price with no calculator/quote framing — a P0 the
       // legacy publish path previously shipped (only schema validation ran).
@@ -899,7 +902,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments and exterior sealing.',
     };
@@ -933,7 +936,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Rodent exclusion around a Bradenton home',
       content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
     };
@@ -964,7 +967,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,eA==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       // Literal brand would leak across every spoke domain — must use {{brandName}}.
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
@@ -1102,5 +1105,137 @@ describe('Pages poll auto-merge per-tick cap', () => {
     expect(result.deferred).toBe(1);
     const deferred = result.results.filter((r) => r.mergeDeferred);
     expect(deferred).toHaveLength(1);
+  });
+});
+
+describe('generateHeroBuffer (publish-time AI hero)', () => {
+  const imageGenerator = require('../services/content/image-generator');
+  // 1x1 transparent PNG
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('decodes a generated data: URL into image bytes + ext, with blog-hero mode', async () => {
+    imageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${PNG_B64}`, model: 'test-model' });
+    const img = await AstroPublisher._internals.generateHeroBuffer({
+      title: 'Dollar Spot', meta_description: 'm', keyword: 'k', slug: 's',
+    });
+    expect(Buffer.isBuffer(img.buffer)).toBe(true);
+    expect(img.buffer.length).toBeGreaterThan(0);
+    expect(img.ext).toBe('png');
+    expect(imageGenerator.generate).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'blog-hero', title: 'Dollar Spot', keyword: 'k' })
+    );
+  });
+
+  test('throws when generation yields no usable image (so publish fails loudly, not hero-less)', async () => {
+    imageGenerator.generate.mockResolvedValue({ dataUrl: 'not-a-data-url', model: 'x' });
+    await expect(
+      AstroPublisher._internals.generateHeroBuffer({ title: 'T' })
+    ).rejects.toThrow(/no usable image/);
+  });
+});
+
+describe('compressToWebp (hero LCP optimization)', () => {
+  test('converts an image buffer to a smaller WebP (RIFF/WEBP magic)', async () => {
+    const sharp = require('sharp');
+    // a 2000x2000 red PNG — larger than the 1600px hero cap
+    const png = await sharp({ create: { width: 2000, height: 2000, channels: 3, background: { r: 200, g: 30, b: 30 } } })
+      .png().toBuffer();
+    const webp = await AstroPublisher._internals.compressToWebp(png);
+    // WebP container: "RIFF"...."WEBP"
+    expect(webp.slice(0, 4).toString('ascii')).toBe('RIFF');
+    expect(webp.slice(8, 12).toString('ascii')).toBe('WEBP');
+    expect(webp.length).toBeLessThan(png.length);
+    const meta = await sharp(webp).metadata();
+    expect(meta.format).toBe('webp');
+    expect(meta.width).toBeLessThanOrEqual(1600);
+  });
+});
+
+describe('automated blog posts target the hub only', () => {
+  const base = {
+    title: 'Dollar Spot in Venice', slug: 'dollar-spot-venice',
+    meta_description: 'A short guide to dollar spot on Venice lawns and how to actually treat it.',
+    keyword: 'dollar spot Venice', tag: 'Lawn Disease',
+    featured_image_url: '/images/blog/dollar-spot-venice/hero.webp',
+    content: 'Dollar spot shows up as small bleached patches on warm-season turf.',
+  };
+
+  test('an automated (ai_generated) post with no target_sites pins to wavespestcontrol.com', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, source: 'ai_generated' });
+    expect(data.domains).toEqual(['wavespestcontrol.com']);
+    expect(data.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
+  });
+
+  test('demand_mined and calendar sources also pin to the hub', async () => {
+    for (const source of ['demand_mined', 'calendar']) {
+      const data = await AstroPublisher.buildFrontmatter({ ...base, source });
+      expect(data.domains).toEqual(['wavespestcontrol.com']);
+    }
+  });
+
+  test('a manual post with no target_sites keeps the empty/astro-default (undefined domains)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, source: 'manual' });
+    expect(data.domains).toBeUndefined();
+  });
+
+  test('an explicit target_sites is always respected, even for automated posts', async () => {
+    const data = await AstroPublisher.buildFrontmatter({
+      ...base, source: 'ai_generated', target_sites: ['wavespestcontrol.com', 'example-spoke.com'],
+    });
+    expect(data.domains).toContain('wavespestcontrol.com');
+  });
+});
+
+describe('applyMergeEffect hero persistence (curated vs generated)', () => {
+  const { applyMergeEffect } = AstroPublisher._internals;
+
+  function mergePost(overrides = {}) {
+    return {
+      id: 'post-1',
+      title: 'Dollar Spot in Venice',
+      slug: 'dollar-spot-venice',
+      target_sites: ['wavespestcontrol.com'],
+      astro_commit_sha: 'sha-1',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gh.getFile.mockResolvedValue(null); // mergedHeroRef falls back
+  });
+
+  test('generated hero (no featured_image_url) persists the absolute hub hero.webp URL', async () => {
+    const update = chain();
+    db.mockImplementation(() => update);
+    await applyMergeEffect('post-1', mergePost({ featured_image_url: null }), new Date(), false, 'sha-2');
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      featured_image_url: 'https://www.wavespestcontrol.com/images/blog/dollar-spot-venice/hero.webp',
+    }));
+  });
+
+  test('curated hero source is PRESERVED (not overwritten with the Astro copy)', async () => {
+    const update = chain();
+    db.mockImplementation(() => update);
+    await applyMergeEffect('post-1', mergePost({ featured_image_url: 'https://www.wavespestcontrol.com/images/2025/10/curated.webp' }), new Date(), false, 'sha-2');
+    const args = update.update.mock.calls[0][0];
+    expect('featured_image_url' in args).toBe(false);
+  });
+
+  test('unpublish clears a committed hero ref but preserves a curated source URL', async () => {
+    for (const [value, shouldClear] of [
+      ['https://www.wavespestcontrol.com/images/blog/dollar-spot-venice/hero.webp', true],
+      ['/images/blog/dollar-spot-venice/hero.webp', true],
+      ['https://www.wavespestcontrol.com/images/2025/10/curated.webp', false],
+    ]) {
+      const update = chain();
+      db.mockImplementation(() => update);
+      await applyMergeEffect('post-1', mergePost({ featured_image_url: value, astro_status: 'unpublish_pending' }), new Date(), true, 'sha-2');
+      const args = update.update.mock.calls[0][0];
+      if (shouldClear) expect(args.featured_image_url).toBeNull();
+      else expect('featured_image_url' in args).toBe(false);
+    }
   });
 });

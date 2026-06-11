@@ -556,6 +556,13 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
       if (current.self_booking_id) {
         await db('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'cancelled' });
       }
+      // Kill the live reminder row too — otherwise the 72h/24h cron keeps
+      // texting the customer about the cancelled appointment. The replacement
+      // booking below registers its own reminder, so suppress the notice.
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleCancellation(current.id, { sendNotification: false });
+      } catch {}
     }
 
     // Book the customer-picked slot through the same engine the portal uses,

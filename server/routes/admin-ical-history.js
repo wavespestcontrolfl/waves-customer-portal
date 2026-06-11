@@ -5,6 +5,9 @@
  */
 const express = require('express');
 const router = express.Router();
+const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+
+router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /admin/ical-history — paginated appointment history
 router.get('/', async (req, res) => {

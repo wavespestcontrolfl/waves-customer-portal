@@ -30,6 +30,8 @@ function chain(overrides = {}) {
     whereIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
     whereNotNull: jest.fn(function () { return this; }),
+    whereNotExists: jest.fn(function () { return this; }),
+    whereExists: jest.fn(function () { return this; }),
     leftJoin: jest.fn(function () { return this; }),
     select: jest.fn(function () { return this; }),
     orderBy: jest.fn(function () { return this; }),
@@ -77,6 +79,7 @@ describe('review request follow-up flow', () => {
   test('renders customer follow-up template with the current request id', async () => {
     const updateQuery = chain();
     const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
       collection([]),
       collection([
         {
@@ -135,6 +138,7 @@ describe('review request follow-up flow', () => {
   test('marks terminal follow-up policy blocks as handled', async () => {
     const updateQuery = chain();
     const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
       collection([]),
       collection([
         {
@@ -186,6 +190,7 @@ describe('review request follow-up flow', () => {
   test('leaves transient follow-up consent lookup failures retryable', async () => {
     const updateQuery = chain();
     const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
       collection([]),
       collection([
         {
