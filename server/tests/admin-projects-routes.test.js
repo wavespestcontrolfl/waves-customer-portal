@@ -430,6 +430,45 @@ describe('admin projects routes', () => {
     }
   });
 
+  test('service_record_id link to a typed completion is rejected too', async () => {
+    // The route accepts service_record_id without scheduled_service_id —
+    // that path must resolve the same profile guard (Codex P1 side door).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return chain({
+        first: jest.fn().mockResolvedValue({ scheduled_service_id: 'svc-7' }),
+      });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({ id: 'svc-7', service_id: 'service-9', service_type: 'Rodent Trapping' }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue({ service_key: 'rodent_trapping', name: 'Rodent Trapping', category: 'specialty', billing_type: 'one_time' }) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [{ project_type: 'rodent_trapping' }],
+        backed: [],
+        first: {
+          service_key: 'rodent_trapping', completion_mode: 'service_report',
+          project_type: 'rodent_trapping', active: true,
+        },
+      });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'rodent_trapping', service_record_id: 'rec-12' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(422);
+        expect(body.code).toBe('scheduled_service_appointment_managed');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('managed project type is rejected for unlinked creations', async () => {
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
     db.mockImplementation((table) => {

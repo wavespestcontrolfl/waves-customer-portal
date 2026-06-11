@@ -1165,9 +1165,21 @@ router.post('/', async (req, res, next) => {
     // their Projects flow — otherwise they need a project they can't create.
     // The type-level check governs unlinked/ad hoc creations only.
     const managedTypes = await appointmentManagedProjectTypes();
+    // The profile resolves from EITHER link field: the route also accepts
+    // service_record_id without scheduled_service_id, and that path must not
+    // become a side door for typed completions (Codex P1) — especially for
+    // partially-cutover types the type-level guard no longer blocks.
     let linkedProfile = null;
-    if (scheduled_service_id) {
-      linkedProfile = await resolveCompletionProfileForServiceId(scheduled_service_id)
+    let linkedScheduledServiceId = scheduled_service_id || null;
+    if (!linkedScheduledServiceId && service_record_id) {
+      const linkedRecord = await db('service_records')
+        .where({ id: service_record_id })
+        .first('scheduled_service_id')
+        .catch(() => null);
+      linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+    }
+    if (linkedScheduledServiceId) {
+      linkedProfile = await resolveCompletionProfileForServiceId(linkedScheduledServiceId)
         .catch(() => null);
       if (linkedProfile?.findingsType) {
         return res.status(422).json({
