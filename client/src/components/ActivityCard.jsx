@@ -47,16 +47,18 @@ export default function ActivityCard({ data }) {
     >
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 600 }}>
+          <div style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 600 }}>
             {data.label}
           </div>
           <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
             {data.levelWord}
           </div>
-          <div style={{ fontSize: 13, color: '#475569', marginTop: 4 }}>
+          <div style={{ fontSize: 14, color: '#475569', marginTop: 4 }}>
             {data.isBaseline
               ? 'Baseline recorded today.'
-              : (data.trendWord ? `Activity has ${data.trendWord}.` : null)}
+              : (data.trend === 'stable'
+                ? 'Activity is about the same as the last visit.'
+                : (data.trendWord ? `Activity has ${data.trendWord}.` : null))}
           </div>
         </div>
         <TrendChip trend={trendKey} delta={null} />

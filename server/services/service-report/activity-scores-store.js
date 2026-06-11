@@ -13,6 +13,16 @@ const { scoreLevelWord } = require('./activity-indicators');
 
 const HISTORY_LIMIT = 8;
 
+// pg DATE columns hydrate as Date objects, which JSON-serialize as full ISO
+// timestamps — the client chart parses `${serviceDate}T12:00:00` and would
+// drop every point. Always hand the client a bare YYYY-MM-DD string.
+function toDateOnly(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const str = String(value);
+  return /^\d{4}-\d{2}-\d{2}/.test(str) ? str.slice(0, 10) : str;
+}
+
 async function loadActivityCustomerView(knex = db, { snapshot = null, service = {} } = {}) {
   const activity = snapshot?.activity;
   if (!activity || activity.score == null || !activity.indicatorKey) return null;
@@ -29,13 +39,19 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
       })
       .orderBy('service_date', 'desc')
       .orderBy('created_at', 'desc')
-      .limit(HISTORY_LIMIT)
+      .limit(HISTORY_LIMIT + 8)
       .select('service_record_id', 'service_date', 'score');
-    history = rows
+    // The date bound alone leaks same-day sibling visits: viewing the earlier
+    // report after a later same-day visit completes would chart the later
+    // score. Trim at this report's own row whenever it's stored (every typed
+    // completion stores one); the legacy no-row fallback keeps the date bound.
+    const currentIdx = rows.findIndex((row) => row.service_record_id === service.id);
+    const bounded = (currentIdx >= 0 ? rows.slice(currentIdx) : rows).slice(0, HISTORY_LIMIT);
+    history = bounded
       .reverse()
       .map((row) => ({
         serviceRecordId: row.service_record_id,
-        serviceDate: row.service_date,
+        serviceDate: toDateOnly(row.service_date),
         score: Number(row.score),
         levelWord: scoreLevelWord(Number(row.score)),
         isCurrent: row.service_record_id === service.id,
@@ -49,7 +65,7 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
   if (!history.some((point) => point.isCurrent)) {
     history.push({
       serviceRecordId: service.id,
-      serviceDate: service.service_date || null,
+      serviceDate: toDateOnly(service.service_date),
       score: activity.score,
       levelWord: activity.levelWord || scoreLevelWord(activity.score),
       isCurrent: true,
