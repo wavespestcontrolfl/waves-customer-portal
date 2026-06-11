@@ -35,7 +35,13 @@ class RescheduleSMS {
     const opt1 = options[0];
     const opt2 = options[1] || options[0];
 
-    const originalDate = new Date(typeof service.scheduled_date === 'string' ? service.scheduled_date + 'T12:00:00' : service.scheduled_date)
+    // scheduled_date is a Postgres DATE — node-postgres returns it as a JS Date
+    // at UTC midnight, and formatting that in ET names the previous day.
+    // Recover the calendar date string and anchor at noon instead.
+    const originalDateStr = service.scheduled_date instanceof Date
+      ? service.scheduled_date.toISOString().split('T')[0]
+      : String(service.scheduled_date).split('T')[0];
+    const originalDate = new Date(originalDateStr + 'T12:00:00')
       .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
     const serviceType = (service.service_type || 'service').toLowerCase();
     const option1 = `${opt1.displayDate}, ${opt1.suggestedWindow.display}`;
