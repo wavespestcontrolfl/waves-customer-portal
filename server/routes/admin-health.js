@@ -93,11 +93,15 @@ router.get('/dashboard', async (req, res) => {
       .first().catch(() => null);
     const fleetHealthAvg = Math.round(parseFloat(avgResult?.avg || 50));
 
-    // At-risk count (high + critical) — churn_risk column may not exist
+    // At-risk count — churn_risk column may not exist, and the current row
+    // may carry either engine's vocabulary: customer-health.js (v3, 2:15AM)
+    // writes low/moderate/high/critical, the customer-intelligence pipeline
+    // (3AM, the later/canonical nightly writer) writes
+    // healthy/watch/at_risk/critical. Accept the at-risk band of both.
     let atRiskCount = 0;
     try {
       const atRiskResult = await db('customer_health_scores')
-        .whereIn('churn_risk', ['high', 'critical'])
+        .whereIn('churn_risk', ['high', 'critical', 'at_risk'])
         .count('* as count').first();
       atRiskCount = parseInt(atRiskResult?.count || 0);
     } catch {

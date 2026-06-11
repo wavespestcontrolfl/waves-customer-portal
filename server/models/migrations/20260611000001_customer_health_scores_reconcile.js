@@ -121,6 +121,66 @@ exports.up = async function (knex) {
     `);
   }
 
+  // ── Collapse to one current row per customer ───────────────────────
+  // On the 037 shape there is no UNIQUE(customer_id), so day-keyed inserts
+  // may have accumulated multiple rows per customer. Both writers
+  // (customer-health.js and customer-intelligence/health-scorer.js) and all
+  // readers treat this table as current-row data (latest per customer);
+  // per-day history belongs in customer_health_history. Archive the
+  // non-latest rows there, then delete them.
+  const dedupeRanking = `
+    SELECT id, ROW_NUMBER() OVER (
+      PARTITION BY customer_id
+      ORDER BY scored_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+    ) AS rn
+    FROM customer_health_scores
+    WHERE customer_id IS NOT NULL
+  `;
+
+  if (await knex.schema.hasTable('customer_health_history')) {
+    await knex.raw(`
+      WITH ranked AS (${dedupeRanking})
+      INSERT INTO customer_health_history
+        (customer_id, overall_score, payment_score, service_score,
+         engagement_score, satisfaction_score, loyalty_score, growth_score,
+         churn_risk, scored_at, created_at)
+      SELECT s.customer_id,
+             COALESCE(s.overall_score, 0),
+             s.payment_score, s.service_score, s.engagement_score,
+             s.satisfaction_score, s.loyalty_score, s.growth_score,
+             LEFT(s.churn_risk, 10),
+             COALESCE(s.scored_at::date, s.created_at::date, CURRENT_DATE),
+             COALESCE(s.created_at, NOW())
+      FROM customer_health_scores s
+      JOIN ranked r ON r.id = s.id
+      WHERE r.rn > 1
+    `);
+  }
+
+  await knex.raw(`
+    WITH ranked AS (${dedupeRanking})
+    DELETE FROM customer_health_scores s
+    USING ranked r
+    WHERE s.id = r.id AND r.rn > 1
+  `);
+
+  // ── Enforce the current-row invariant going forward ────────────────
+  // 093-shaped tables already have UNIQUE(customer_id); add an equivalent
+  // unique index on 037-shaped tables (safe now that duplicates are gone).
+  const existingUnique = await knex.raw(`
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = current_schema()
+      AND tablename = 'customer_health_scores'
+      AND indexdef ILIKE '%unique%'
+      AND indexdef ~* '\\(customer_id\\)'
+  `);
+  if (!existingUnique.rows.length) {
+    await knex.raw(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_health_scores_customer_id_uniq
+      ON customer_health_scores (customer_id)
+    `);
+  }
+
   // ── Index for latest-per-customer lookups (MAX(scored_at) / ORDER BY
   //    scored_at DESC) used by the pipeline and intel readers ─────────
   await knex.raw(`
@@ -130,10 +190,12 @@ exports.up = async function (knex) {
 };
 
 exports.down = async function (knex) {
-  // Intentionally a no-op. This migration is an additive, idempotent
-  // reconcile over an unknown live shape — dropping columns here could
-  // destroy data that 093 (or runtime ensures) legitimately created.
+  // Columns are intentionally NOT dropped. This migration is an additive,
+  // idempotent reconcile over an unknown live shape — dropping columns here
+  // could destroy data that 093 (or runtime ensures) legitimately created.
+  // Only the indexes this migration may have created are removed.
   if (await knex.schema.hasTable('customer_health_scores')) {
     await knex.raw('DROP INDEX IF EXISTS idx_customer_health_scores_customer_scored_at');
+    await knex.raw('DROP INDEX IF EXISTS idx_customer_health_scores_customer_id_uniq');
   }
 };

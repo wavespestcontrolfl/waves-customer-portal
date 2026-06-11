@@ -3,6 +3,17 @@ const logger = require('../logger');
 const { SIGNAL_TYPES } = require('./signal-detector');
 const { etDateString } = require('../../utils/datetime-et');
 
+// Same A–F thresholds as customer-health.js getGrade() and the admin-health
+// dashboard's derived-grade fallback — keeps score_grade consistent with
+// overall_score regardless of which scoring engine wrote the row last.
+function scoreGrade(score) {
+  if (score >= 80) return 'A';
+  if (score >= 65) return 'B';
+  if (score >= 50) return 'C';
+  if (score >= 35) return 'D';
+  return 'F';
+}
+
 class HealthScorer {
 
   async calculateAllHealthScores() {
@@ -99,11 +110,23 @@ class HealthScorer {
     // idempotent per (customer, day) without relying on a unique constraint:
     // it avoids the 23505 unique violation on tables created with
     // UNIQUE(customer_id) (093 shape) and works identically when no unique
-    // constraint exists (037 shape).
+    // constraint exists (un-reconciled 037 shape).
+    //
+    // Shared-row ownership: customer-health.js (v3, nightly 2:15AM ET)
+    // refreshes the full diagnostic record (sub-scores, details, trend);
+    // this pipeline (nightly 3AM ET) is the later writer and therefore the
+    // canonical daily owner of overall_score / churn_risk /
+    // churn_probability / churn_signals / scored_at plus the
+    // intelligence-only fields below. score_grade is re-derived here with
+    // the same thresholds v3 uses, so the grade always matches the score on
+    // the row. churn_risk vocabulary differs by engine (v3:
+    // low/moderate/high/critical, here: healthy/watch/at_risk/critical) —
+    // aggregate readers that gate on it accept both (see admin-health.js).
     const today = etDateString();
 
     const record = {
       overall_score: score,
+      score_grade: scoreGrade(score),
       churn_probability: churnProbability,
       churn_risk: riskLevel,
       churn_signals: JSON.stringify(riskFactors),
@@ -122,7 +145,20 @@ class HealthScorer {
     if (existing) {
       await db('customer_health_scores').where('id', existing.id).update({ ...record, updated_at: new Date() });
     } else {
-      await db('customer_health_scores').insert({ customer_id: customerId, ...record });
+      try {
+        await db('customer_health_scores').insert({ customer_id: customerId, ...record });
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+        // Lost a first-insert race against the other scoring job on a table
+        // with UNIQUE(customer_id) — the row exists now, so update it.
+        const row = await db('customer_health_scores')
+          .where('customer_id', customerId)
+          .orderByRaw('scored_at DESC NULLS LAST')
+          .first();
+        if (row) {
+          await db('customer_health_scores').where('id', row.id).update({ ...record, updated_at: new Date() });
+        }
+      }
     }
 
     return { score, riskLevel, churnProbability, trend, riskFactors, upsellOpps, nextAction };
