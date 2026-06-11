@@ -611,6 +611,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:15AM ET — Event auto-curation. Classifies never-examined pending
+  // events with Claude and approves real consumer events for the digest, so
+  // the Thursday 7AM autopilot has an approved pool without a human working
+  // the Event Inbox every week (the lane starved at 0 eligible for two weeks
+  // when approval was manual-only). Runs after the 4AM ingest → 5AM
+  // normalize → 5:30 expiry → 5:45 dedup chain so it judges clean, classified
+  // rows. Rejections stay pending for human review — nothing is auto-rejected.
+  // runExclusive: examined-marker writes are idempotent but the Claude calls
+  // are not free; don't double-classify on deploy-overlap ticks.
+  // Kill switch: EVENT_AUTO_CURATION=false.
+  // =========================================================================
+  cron.schedule('15 6 * * *', async () => {
+    try {
+      await runExclusive('event-auto-curation', async () => {
+        const { runAutoCuration } = require('./event-curation');
+        const result = await runAutoCuration();
+        if (result.examined > 0 || result.approved > 0) {
+          logger.info(`[event-curation] examined ${result.examined}, approved ${result.approved}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[event-curation] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5:30AM ET — Expire past events. classifyFreshness never emits an
   // 'expired' status and nothing else transitions an event out of its fresh
   // state once its date passes, so a one_time/annual event would keep its high
