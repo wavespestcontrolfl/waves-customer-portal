@@ -3589,7 +3589,13 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       return res.json({ ...response, notificationSent, notificationError });
     }
 
-    const rescheduleOptions = {};
+    // Staff-initiated reschedules may override live lifecycle states
+    // (en_route / on_site) — rain starts mid-route, or the customer calls
+    // to push the visit while the tech is already there. The rebooker
+    // rewinds the tracker lifecycle and frees the tech. Terminal states
+    // (completed / cancelled / skipped) still 409. The customer-SMS
+    // self-serve path (reschedule-sms.js) does NOT get this override.
+    const rescheduleOptions = { allowLive: true };
     const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
     if (hasTechnicianId) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
