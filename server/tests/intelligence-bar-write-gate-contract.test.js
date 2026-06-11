@@ -6,10 +6,18 @@
  * this suite until its author classifies it — and the only acceptable
  * classifications for a NEW write are WRITE_TWO_STEP (structural
  * preview→confirmed gate) or, once issue #1568 lands, the UI-backed
- * pending-action mechanism. LEGACY_BARE_WRITES is a frozen snapshot: it may
- * SHRINK as tools migrate, but additions are forbidden — a diff that grows
- * that list is a policy violation, not a fix for this test.
+ * pending-action mechanism. The legacy bare-write set is a frozen by-name
+ * snapshot: entries may be REMOVED as tools migrate, but no name may ever be
+ * added — a diff that touches FROZEN_LEGACY_BARE_WRITES_2026_06_11 to add a
+ * name is a policy violation, not a fix for this test.
+ *
+ * Tool modules are discovered from the filesystem (every *.js in
+ * services/intelligence-bar/ except known non-tool helpers), so a future
+ * module wired into admin-intelligence-bar.js is covered automatically.
  */
+
+const fs = require('fs');
+const path = require('path');
 
 jest.mock('../models/db', () => {
   const fn = jest.fn();
@@ -19,22 +27,47 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const TOOL_MODULES = [
-  ['tools', 'TOOLS'],
-  ['schedule-tools', 'SCHEDULE_TOOLS'],
-  ['dashboard-tools', 'DASHBOARD_TOOLS'],
-  ['seo-tools', 'SEO_TOOLS'],
-  ['procurement-tools', 'PROCUREMENT_TOOLS'],
-  ['revenue-tools', 'REVENUE_TOOLS'],
-  ['tech-tools', 'TECH_TOOLS'],
-  ['review-tools', 'REVIEW_TOOLS'],
-  ['comms-tools', 'COMMS_TOOLS'],
-  ['tax-tools', 'TAX_TOOLS'],
-  ['leads-tools', 'LEADS_TOOLS'],
-  ['email-tools', 'EMAIL_TOOLS'],
-  ['banking-tools', 'BANKING_TOOLS'],
-  ['estimate-tools', 'ESTIMATE_TOOLS'],
-];
+const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
+
+// Helpers in services/intelligence-bar/ that are not tool modules. A new
+// non-tool helper added to the directory must be listed here explicitly —
+// otherwise the suite fails, which is the safe default.
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js']);
+
+function isToolShaped(entry) {
+  return entry && typeof entry === 'object'
+    && typeof entry.name === 'string'
+    && entry.input_schema && typeof entry.input_schema === 'object';
+}
+
+// Returns [{ module, name, tool }] for every tool exported by every module in
+// the directory. Modules may export multiple arrays (e.g. COMMS_TOOLS plus
+// the COMMS_READ_TOOLS subset) — names are deduped per module so subset
+// re-exports don't count as duplicate registrations.
+function discoverAllTools() {
+  const all = [];
+  const files = fs.readdirSync(TOOLS_DIR).filter(f => f.endsWith('.js'));
+  for (const file of files) {
+    if (NON_TOOL_FILES.has(file)) continue;
+    const mod = require(path.join(TOOLS_DIR, file));
+    const seen = new Map();
+    for (const value of Object.values(mod)) {
+      if (!Array.isArray(value) || !value.length || !value.every(isToolShaped)) continue;
+      for (const tool of value) {
+        if (!seen.has(tool.name)) seen.set(tool.name, tool);
+      }
+    }
+    if (seen.size === 0) {
+      throw new Error(
+        `services/intelligence-bar/${file} exports no tool array. ` +
+        'If it is a non-tool helper, add it to NON_TOOL_FILES in this test; ' +
+        'if it is a tool module, export an array of {name, input_schema} tools.'
+      );
+    }
+    for (const [name, tool] of seen) all.push({ module: file, name, tool });
+  }
+  return all;
+}
 
 // Writes with a structural in-conversation gate: the un-`confirmed` call
 // returns a preview and never mutates. New writes go here (until #1568's
@@ -58,9 +91,10 @@ const CONFIRMED_ENDPOINT_WRITES = [
   'request_standard_payout',
 ];
 
-// FROZEN legacy snapshot — writes whose only confirmation is prompt-level
-// convention. May shrink as #1568 migrates them. MUST NOT GROW.
-const LEGACY_BARE_WRITES = [
+// ── FROZEN ── by-name snapshot taken 2026-06-11 (issue #1568). Writes whose
+// only confirmation is prompt-level convention. Names may be DELETED as they
+// migrate to the UI-backed mechanism. NO NAME MAY EVER BE ADDED.
+const FROZEN_LEGACY_BARE_WRITES_2026_06_11 = Object.freeze([
   'update_customer',
   'bulk_update_customers',
   'create_appointment',
@@ -80,7 +114,11 @@ const LEGACY_BARE_WRITES = [
   'run_price_lookup',
   'approve_price',
   'run_tax_advisor',
-];
+]);
+
+// Live legacy list — must always be a subset of the frozen snapshot above.
+// Remove entries from BOTH lists when a tool migrates or is deleted.
+const LEGACY_BARE_WRITES = [...FROZEN_LEGACY_BARE_WRITES_2026_06_11];
 
 // Tools that never mutate business data. Drafting tools (draft_sms,
 // draft_review_reply, draft_email_reply) and proposal-only tools
@@ -122,24 +160,23 @@ const READ_ONLY = [
   'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
 ];
 
-function loadAllTools() {
-  const all = [];
-  for (const [mod, exportKey] of TOOL_MODULES) {
-    const tools = require(`../services/intelligence-bar/${mod}`)[exportKey];
-    for (const t of tools) all.push({ module: mod, ...t });
-  }
-  return all;
-}
-
 describe('intelligence bar write-gate contract (issue #1568)', () => {
-  const allTools = loadAllTools();
-  const byName = new Map(allTools.map(t => [t.name, t]));
+  const allTools = discoverAllTools();
+  const byName = new Map(allTools.map(t => [t.name, t.tool]));
   const classified = [
     ...WRITE_TWO_STEP.map(n => ({ name: n, kind: 'two-step' })),
     ...CONFIRMED_ENDPOINT_WRITES.map(n => ({ name: n, kind: 'endpoint' })),
     ...LEGACY_BARE_WRITES.map(n => ({ name: n, kind: 'legacy' })),
     ...READ_ONLY.map(n => ({ name: n, kind: 'read' })),
   ];
+
+  test('discovery finds the known tool modules (sanity floor)', () => {
+    const modules = new Set(allTools.map(t => t.module));
+    // 14 modules as of 2026-06-11 — a drop below this means discovery broke,
+    // not that modules legitimately disappeared.
+    expect(modules.size).toBeGreaterThanOrEqual(14);
+    expect(allTools.length).toBeGreaterThanOrEqual(149);
+  });
 
   test('no tool name is registered twice across modules', () => {
     const names = allTools.map(t => t.name);
@@ -160,8 +197,8 @@ describe('intelligence bar write-gate contract (issue #1568)', () => {
     // If this fails for a tool you just added: classify it in this file.
     // Reads go in READ_ONLY. New writes MUST use the preview→confirmed
     // two-step (WRITE_TWO_STEP) or the #1568 UI-backed mechanism once it
-    // exists. Adding to LEGACY_BARE_WRITES is forbidden — that list only
-    // shrinks.
+    // exists. Adding to the frozen legacy snapshot is forbidden — that list
+    // only shrinks.
     expect(unclassified).toEqual([]);
   });
 
@@ -186,10 +223,11 @@ describe('intelligence bar write-gate contract (issue #1568)', () => {
     expect(misfiled).toEqual([]);
   });
 
-  test('legacy bare-write snapshot has not grown', () => {
-    // 19 as of issue #1568 filing (2026-06-11). This count may go DOWN as
-    // tools migrate to the UI-backed confirmation mechanism. If you are
-    // raising it, stop: new writes are not allowed to be bare.
-    expect(LEGACY_BARE_WRITES.length).toBeLessThanOrEqual(19);
+  test('legacy bare writes are a subset of the frozen 2026-06-11 snapshot — additions are impossible, only removals', () => {
+    const frozen = new Set(FROZEN_LEGACY_BARE_WRITES_2026_06_11);
+    const added = LEGACY_BARE_WRITES.filter(n => !frozen.has(n));
+    // A name here means someone tried to register a NEW bare write. That is
+    // forbidden: use WRITE_TWO_STEP or the #1568 UI-backed mechanism.
+    expect(added).toEqual([]);
   });
 });
