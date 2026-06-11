@@ -597,6 +597,46 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
       // above — without a replacement the customer would be left with
       // nothing on the board, so restore it before answering.
       if (current && (bookErr.code === 'SLOT_TAKEN' || bookErr.code === 'INVALID_DATE')) {
+        // The original slot may itself have been taken while we held it
+        // cancelled — restoring blindly would double-book it. Re-check
+        // before flipping it back; if it's gone, leave it cancelled and
+        // flag the office to call.
+        const originalDateStr = current.scheduled_date instanceof Date
+          ? current.scheduled_date.toISOString().split('T')[0]
+          : String(current.scheduled_date).split('T')[0];
+        const slotRetaken = current.window_start ? await db('scheduled_services')
+          .where('scheduled_date', originalDateStr)
+          .whereNot('id', current.id)
+          .whereNotIn('status', ['cancelled', 'completed'])
+          .where((q) => {
+            q.whereNull('reservation_expires_at')
+              .orWhereRaw('reservation_expires_at > NOW()');
+          })
+          .where('window_start', '<', current.window_end || current.window_start)
+          .whereRaw('COALESCE(window_end, window_start) >= ?', [current.window_start])
+          .where((scope) => {
+            if (current.technician_id) scope.orWhere('technician_id', current.technician_id);
+            if (current.zone) scope.orWhere('zone', current.zone);
+            scope.orWhereNull('customer_id');
+          })
+          .first('id') : null;
+        if (slotRetaken) {
+          try {
+            await db('notifications').insert({
+              recipient_type: 'admin',
+              category: 'booking',
+              title: '⚠️ Onboarding reschedule needs a call-back',
+              body: `Customer ${req.customer.id} tried to reschedule during onboarding; the new slot was taken AND their original ${originalDateStr} slot was rebooked meanwhile. They currently have no appointment — call to schedule.`,
+              icon: '⚠️',
+              link: '/admin/dispatch',
+            });
+          } catch {}
+          await finishLock(true);
+          return res.status(409).json({
+            error: 'That time was just taken, and your original time is no longer available either — our office will call you to find a new time.',
+            originalRestored: false,
+          });
+        }
         await db('scheduled_services').where({ id: current.id }).update({
           status: current.status,
           notes: current.notes || null,

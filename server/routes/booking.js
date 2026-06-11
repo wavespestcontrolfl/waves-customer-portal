@@ -881,28 +881,22 @@ router.post('/confirm', async (req, res, next) => {
         })
         .where('scheduled_services.window_start', '<', endTime)
         .where('scheduled_services.window_end', '>', slot_start);
-      if (technician_id) {
-        conflictQuery.where('scheduled_services.technician_id', technician_id);
-      } else {
-        // Availability builds slots from ALL jobs in the zone — assigned
-        // or not — so a stale confirm must conflict against the same set,
-        // not just unassigned rows (mirrors getAvailableSlots' occupied
-        // predicate: zone slug OR customer city in the zone). Live
-        // estimate-slot holds have customer_id NULL and no zone, so they
-        // get their own branch — a 15-minute county-wide hold briefly
-        // blocking a zone slot beats double-booking over a held slot.
-        conflictQuery.where((q) => {
-          if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
-          if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
-          q.orWhere((hold) => {
-            hold.whereNull('scheduled_services.customer_id')
-              .whereRaw('scheduled_services.reservation_expires_at > NOW()');
-          });
+      // One capacity predicate for both branches: the tech's own route,
+      // PLUS all zone jobs (assigned or not — availability builds slots
+      // from the whole zone, so an unassigned zone booking occupies the
+      // slot even for a tech-backed confirm), PLUS live estimate-slot
+      // holds (customer_id NULL, no zone — a 15-minute county-wide hold
+      // briefly blocking a slot beats double-booking over it).
+      conflictQuery.where((q) => {
+        if (technician_id) q.orWhere('scheduled_services.technician_id', technician_id);
+        if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
+        if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+        q.orWhere((hold) => {
+          hold.whereNull('scheduled_services.customer_id')
+            .whereRaw('scheduled_services.reservation_expires_at > NOW()');
         });
-      }
-      const conflict = (technician_id || zoneSlug || zoneCities.length)
-        ? await conflictQuery.first('scheduled_services.id')
-        : null;
+      });
+      const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
