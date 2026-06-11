@@ -196,9 +196,12 @@ router.get('/', dashboardCache, async (req, res, next) => {
             }
           }
           if (totalFromPlaces > 0) {
+            // Dismissed reviews are deliberately left unreplied — keep them
+            // out of the actionable count (matches /admin/reviews stats).
             const unresponded = await db('google_reviews')
               .where('reviewer_name', '!=', '_stats')
               .whereNotNull('review_text')
+              .where(function () { this.where('dismissed', false).orWhereNull('dismissed'); })
               .modify(whereNeedsRealReviewReply)
               .count('* as c')
               .first();
@@ -208,7 +211,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
           return await db('google_reviews').where('reviewer_name', '!=', '_stats').select(
             db.raw('COUNT(*) as total'),
             db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
-            db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%')) as unresponded")
+            db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%') AND COALESCE(dismissed, false) = false) as unresponded")
           ).first();
         } catch (err) {
           logger.error(`[admin-dashboard] google_reviews query failed: ${err.message}`);

@@ -31,6 +31,7 @@ function createDbMock(initialRows = {}) {
       _where: {},
       _whereNull: null,
       _limit: null,
+      _rawFilters: [],
       where(arg, value) {
         if (arg && typeof arg === 'object') {
           Object.assign(this._where, arg);
@@ -44,8 +45,17 @@ function createDbMock(initialRows = {}) {
         }
         return this;
       },
-      whereRaw() { return this; },
+      whereRaw(sql, bindings = []) {
+        // Implemented only for the reviewer-name dedup match; other raw
+        // clauses keep the historical pass-through behavior.
+        if (typeof sql === 'string' && sql.includes('LOWER(reviewer_name) = LOWER(?)')) {
+          const name = String(bindings[0] || '').toLowerCase();
+          this._rawFilters.push(row => String(row.reviewer_name || '').toLowerCase() === name);
+        }
+        return this;
+      },
       whereNull(column) { this._whereNull = column; return this; },
+      whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
       whereNot() { return this; },
       select() { return this; },
       limit(n) { this._limit = n; return this; },
@@ -53,6 +63,7 @@ function createDbMock(initialRows = {}) {
         const rows = state.rows[this._table] || [];
         return rows
           .filter(row => matchesWhere(row, this._where))
+          .filter(row => this._rawFilters.every(fn => fn(row)))
           .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value)) || null;
       },
       insert(record) {
@@ -82,6 +93,7 @@ function createDbMock(initialRows = {}) {
       then(resolve, reject) {
         const rows = (state.rows[this._table] || [])
           .filter(row => matchesWhere(row, this._where))
+          .filter(row => this._rawFilters.every(fn => fn(row)))
           .filter(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value))
           .filter(row => !this._whereNull || row[this._whereNull] == null);
         return Promise.resolve(this._limit ? rows.slice(0, this._limit) : rows).then(resolve, reject);
@@ -260,5 +272,161 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(db.__state.rows.google_reviews.find(r => r.id === 'review-1').review_reply).toBe('[DRAFT] We are sorry.');
+  });
+
+  test('Places fallback dedupes an edited review against the GBP row once content converges (no duplicate)', async () => {
+    // The synthetic places_* id embeds the Places `time` field, which moves
+    // on edit — when the GBP-linked row already carries the edited content
+    // (the GBP feed updated it), the sample must match it, not re-insert.
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Jackie Lopez',
+      star_rating: 5,
+      review_text: 'Edited text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Jackie! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+    });
+    service._getClient = jest.fn(async () => null); // force Places fallback
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Jackie Lopez',
+          rating: 5,
+          text: 'Edited text',
+          time: 1779307832, // edit moved the timestamp → brand-new places_* id
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      review_text: 'Edited text',
+      review_reply: 'Hello Jackie! Thanks!', // Places carries no reply data — never downgrade
+    });
+  });
+
+  test('Places fallback skips a same-name review with different content (no overwrite, no insert)', async () => {
+    // Ambiguous: a different account sharing the display name, or an edit
+    // the GBP feed has not caught up with — either way, defer to GBP.
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Jackie Lopez',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Jackie! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Jackie Lopez',
+          rating: 1,
+          text: 'Completely different text',
+          time: 1779307832,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      star_rating: 5,
+      review_text: 'Original text', // untouched
+      review_reply: 'Hello Jackie! Thanks!',
+    });
+  });
+
+  test('Places fallback still inserts a row for a genuinely new reviewer', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Jackie Lopez',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Jackie! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'New Person',
+          rating: 4,
+          text: 'First visit',
+          time: 1779307900,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 31 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(2);
+    expect(reviewRows.find(r => r.reviewer_name === 'New Person')).toMatchObject({
+      google_review_id: 'places_place-1_1779307900',
+      star_rating: 4,
+    });
+  });
+
+  test('Places fallback never name-merges into an un-linked Places row (same display name = new row)', async () => {
+    // Display names are not unique across Google accounts. A row without a
+    // GBP linkage has no authoritative feed to self-heal from, so a same-name
+    // reviewer must insert a distinct row rather than overwrite it.
+    db.__state.rows.google_reviews.push({
+      id: 'places-row-1',
+      google_review_id: 'places_place-1_1700000000',
+      gbp_review_name: null,
+      location_id: 'bradenton',
+      reviewer_name: 'John Smith',
+      star_rating: 5,
+      review_text: 'First John Smith',
+      review_created_at: '2026-01-01T00:00:00Z',
+      review_reply: null,
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'John Smith',
+          rating: 1,
+          text: 'A different John Smith',
+          time: 1779308000,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 4.8, user_ratings_total: 32 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(2);
+    expect(reviewRows.find(r => r.id === 'places-row-1').review_text).toBe('First John Smith');
+    expect(reviewRows.find(r => r.google_review_id === 'places_place-1_1779308000')).toMatchObject({
+      star_rating: 1,
+      review_text: 'A different John Smith',
+    });
   });
 });

@@ -29,6 +29,16 @@ function whereHasRealReply(qb) {
     .where('google_reviews.review_reply', 'not like', `${DRAFT_REPLY_PREFIX}%`);
 }
 
+// Dismissing a review means "we are deliberately not replying to this one"
+// (e.g. a hostile 1-star). The review list already hides dismissed rows, so
+// the unresponded stat must skip them too — otherwise the "No Portal Reply"
+// counter stays stuck on reviews that were explicitly dismissed.
+function whereNotDismissed(qb) {
+  qb.where(function () {
+    this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed');
+  });
+}
+
 async function getReviewLocationStatuses() {
   const statuses = {};
   await Promise.all(WAVES_LOCATIONS.map(async (loc) => {
@@ -137,7 +147,7 @@ router.get('/', async (req, res, next) => {
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
-      reviewsOnly.clone().modify(whereNeedsRealReply).count('* as count').first(),
+      reviewsOnly.clone().modify(whereNeedsRealReply).modify(whereNotDismissed).count('* as count').first(),
       reviewsOnly.clone().modify(whereHasRealReply).count('* as count').first(),
       reviewsOnly.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
@@ -175,7 +185,7 @@ router.get('/', async (req, res, next) => {
     // without contributing to the total, breaking `total - unresponded`.
     const ratedLocationIds = Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0);
     const unrespondedInRatedRow = ratedLocationIds.length > 0
-      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).count('* as count').first()
+      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).modify(whereNotDismissed).count('* as count').first()
       : { count: 0 };
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)

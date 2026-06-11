@@ -424,9 +424,44 @@ class GoogleBusinessService {
     let synced = 0, newCount = 0;
     for (const review of reviews) {
       const googleId = `places_${loc.googlePlaceId}_${review.time}`;
-      const existing = await db('google_reviews').where({ google_review_id: googleId }).first();
+      let existing = await db('google_reviews').where({ google_review_id: googleId }).first();
+      // The synthetic id embeds the Places `time` field, which moves when a
+      // reviewer EDITS their review — so an edited review comes back with a
+      // brand-new id and used to be re-inserted as a duplicate row (a
+      // GBP-replied review then sat in the "No Portal Reply" queue twice).
+      // Google allows one review per account per listing, but display names
+      // are NOT unique across accounts, so a name match alone never merges.
+      // The dedup requires the name-matched row to be GBP-linked AND carry
+      // identical content (text + rating): then the "merge" is a content
+      // no-op that only prevents the duplicate insert. A name match with
+      // DIFFERENT content is ambiguous — the same review edited while GBP is
+      // down, or a different account sharing the name — and is skipped
+      // entirely: no overwrite, no insert. The authoritative GBP feed
+      // resolves it on recovery (updates the linked row in place for an
+      // edit; inserts under its own resource name for a new account).
+      // Un-linked Places rows are never name-matched; a same-name reviewer
+      // there always inserts a new row.
+      const reviewerName = review.author_name || 'Anonymous';
+      if (!existing && reviewerName !== 'Anonymous') {
+        const sameReviewer = await db('google_reviews')
+          .where({ location_id: loc.id })
+          .where('reviewer_name', '!=', '_stats')
+          .whereNotNull('gbp_review_name')
+          .whereRaw('LOWER(reviewer_name) = LOWER(?)', [reviewerName]);
+        if (sameReviewer.length === 1) {
+          const candidate = sameReviewer[0];
+          const sameContent = (candidate.review_text || null) === (review.text || null)
+            && Number(candidate.star_rating) === Number(review.rating || 0);
+          if (sameContent) {
+            existing = candidate;
+          } else {
+            logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
+            continue;
+          }
+        }
+      }
       const ownerReply = review.owner_response?.text || null;
-      const customerId = await this._findCustomerIdByReviewerName(review.author_name || 'Anonymous');
+      const customerId = await this._findCustomerIdByReviewerName(reviewerName);
       if (existing) {
         const upd = {
           star_rating: review.rating || 0,
@@ -444,7 +479,7 @@ class GoogleBusinessService {
         await db('google_reviews').insert({
           google_review_id: googleId,
           location_id: loc.id,
-          reviewer_name: review.author_name || 'Anonymous',
+          reviewer_name: reviewerName,
           reviewer_photo_url: review.profile_photo_url || null,
           star_rating: review.rating || 0,
           review_text: review.text || null,
