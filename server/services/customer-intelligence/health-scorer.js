@@ -91,12 +91,16 @@ class HealthScorer {
     // LTV
     const ltv = customer.monthly_rate ? parseFloat(customer.monthly_rate) * 12 * (1 - churnProbability) : 0;
 
-    // Save (upsert for today)
+    // Save — one row per customer (latest score), updated in place.
+    // Every reader of this table consumes only the latest score per customer
+    // (MAX(scored_at) joins / ORDER BY scored_at DESC LIMIT 1); per-day
+    // history lives in customer_health_history. Keying the upsert on
+    // customer_id alone (find latest row, update it, else insert) is
+    // idempotent per (customer, day) without relying on a unique constraint:
+    // it avoids the 23505 unique violation on tables created with
+    // UNIQUE(customer_id) (093 shape) and works identically when no unique
+    // constraint exists (037 shape).
     const today = etDateString();
-    const existing = await db('customer_health_scores')
-      .where('customer_id', customerId)
-      .where('scored_at', today)
-      .first();
 
     const record = {
       overall_score: score,
@@ -107,12 +111,18 @@ class HealthScorer {
       next_best_action: nextAction,
       engagement_trend: trend,
       lifetime_value_estimate: ltv,
+      scored_at: today,
     };
+
+    const existing = await db('customer_health_scores')
+      .where('customer_id', customerId)
+      .orderByRaw('scored_at DESC NULLS LAST')
+      .first();
 
     if (existing) {
       await db('customer_health_scores').where('id', existing.id).update({ ...record, updated_at: new Date() });
     } else {
-      await db('customer_health_scores').insert({ customer_id: customerId, scored_at: today, ...record });
+      await db('customer_health_scores').insert({ customer_id: customerId, ...record });
     }
 
     return { score, riskLevel, churnProbability, trend, riskFactors, upsellOpps, nextAction };
