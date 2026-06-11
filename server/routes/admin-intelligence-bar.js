@@ -79,6 +79,20 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // not just the Communications page.
 const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS];
 
+// Tool calls whose inputs/outputs carry customer PII (names, phones, emails,
+// addresses, SMS bodies). Their params and the surrounding prompt/response
+// are redacted from logs and query telemetry per the PII-in-logs rule.
+const PII_TOOL_NAMES = new Set([
+  'create_customer',
+  'get_unanswered_threads',
+  'get_conversation_thread',
+  'search_messages',
+  'get_call_log',
+  'send_sms',
+  'draft_sms_reply',
+  'draft_sms',
+]);
+
 function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
 }
@@ -745,8 +759,8 @@ router.post('/query', async (req, res, next) => {
       // Execute all tool calls using context-aware router
       const results = [];
       for (const toolUse of toolUses) {
-        // create_customer inputs carry PII (name/phone/email/address) — log keys only
-        const loggableInput = toolUse.name === 'create_customer'
+        // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
+        const loggableInput = PII_TOOL_NAMES.has(toolUse.name)
           ? { fields: Object.keys(toolUse.input || {}), confirm: toolUse.input?.confirm === true }
           : toolUse.input;
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
@@ -821,11 +835,14 @@ router.post('/query', async (req, res, next) => {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
 
-    // Log the query for analytics
+    // Log the query for analytics. Queries that ran PII-bearing tools get
+    // their prompt/response redacted — prompts carry typed customer contact
+    // details and responses echo SMS bodies.
+    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
     try {
       await db('intelligence_bar_queries').insert({
-        prompt,
-        response: finalResponse.substring(0, 5000),
+        prompt: usedPiiTool ? '[redacted — PII-bearing tools used]' : prompt,
+        response: usedPiiTool ? '[redacted — PII-bearing tools used]' : finalResponse.substring(0, 5000),
         tool_calls: JSON.stringify(toolCalls),
         created_at: new Date(),
       });
@@ -895,10 +912,12 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, null, actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, {
-      ...executionParams,
-      ...(executionParams.idempotencyKey ? { idempotencyKey: '[redacted]' } : {}),
-    });
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action)
+      ? { fields: Object.keys(executionParams) }
+      : {
+        ...executionParams,
+        ...(executionParams.idempotencyKey ? { idempotencyKey: '[redacted]' } : {}),
+      });
 
     res.json({
       success: !result.error,
