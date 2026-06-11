@@ -139,13 +139,11 @@ const ADMIN_INTEGRATIONS = [
     platform: 'Google',
     description: '4 locations: LWR, Parrish, Sarasota, Venice',
     env: {
+      // OAuth refresh tokens are NOT env config: they are stored in
+      // system_settings by the admin connect flow and verified per-location
+      // by token-health checkGBP. Only the OAuth client credentials are
+      // required in the environment.
       required: [
-        'GBP_REFRESH_TOKEN_LWR',
-        'GBP_REFRESH_TOKEN_PARRISH',
-        'GBP_REFRESH_TOKEN_SARASOTA',
-        'GBP_REFRESH_TOKEN_VENICE',
-      ],
-      supporting: [
         'GBP_CLIENT_ID_LWR',
         'GBP_CLIENT_SECRET_LWR',
         'GBP_CLIENT_ID_PARRISH',
@@ -155,6 +153,7 @@ const ADMIN_INTEGRATIONS = [
         'GBP_CLIENT_ID_VENICE',
         'GBP_CLIENT_SECRET_VENICE',
       ],
+      supporting: [],
     },
     health: {
       type: 'grouped',
