@@ -67,6 +67,46 @@ async function getRegistration() {
   return reg;
 }
 
+// Per-admin push opt-in registry for THIS browser profile. The browser
+// subscription and Notification.permission are shared across every admin
+// who signs in here, so the silent self-heal must know WHICH admins
+// explicitly enabled push on this browser — otherwise a second admin
+// logging in on a shared machine would be silently enrolled (and start
+// receiving operational notifications on a device they never opted into).
+// Values: true = explicitly enabled, false = explicitly disabled,
+// absent = never opted in here (the self-heal does nothing).
+const PUSH_OPT_IN_KEY = 'waves_push_admin_opt_ins';
+
+// Local hint only — the payload is read without signature verification,
+// which is fine because it gates nothing security-sensitive: the actual
+// subscribe call is still authenticated server-side with the same token.
+function adminIdFromToken(token) {
+  try {
+    const raw = token || localStorage.getItem('waves_admin_token');
+    if (!raw) return null;
+    const payload = JSON.parse(atob(raw.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload.technicianId || null;
+  } catch { return null; }
+}
+function readPushOptIns() {
+  try { return JSON.parse(localStorage.getItem(PUSH_OPT_IN_KEY)) || {}; } catch { return {}; }
+}
+function setPushOptIn(token, optedIn) {
+  const adminId = adminIdFromToken(token);
+  if (!adminId) return;
+  try {
+    const optIns = readPushOptIns();
+    optIns[adminId] = !!optedIn;
+    localStorage.setItem(PUSH_OPT_IN_KEY, JSON.stringify(optIns));
+  } catch { /* private mode — the self-heal then simply never runs */ }
+}
+function pushOptInState(token) {
+  const adminId = adminIdFromToken(token);
+  if (!adminId) return null;
+  const v = readPushOptIns()[adminId];
+  return v === undefined ? null : !!v;
+}
+
 export async function isPushEnabled({ apiBase = '/api', token, verifyServer = false } = {}) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
   if (Notification.permission !== 'granted') return false;
@@ -167,13 +207,58 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
     throw new Error(`Server rejected subscription (HTTP ${subRes.status}). ${detail}`);
   }
 
+  // Record this admin's opt-in for this browser so the silent self-heal
+  // is allowed to maintain the subscription from now on.
+  setPushOptIn(authToken, true);
+
   return { ok: true, endpoint: sub.endpoint };
+}
+
+/**
+ * Silent self-heal for an existing push opt-in. Safe to call on every app
+ * load/resume: it never prompts and never throws.
+ *
+ * Why this exists: iOS Safari rotates or drops push endpoints (PWA
+ * reinstall, OS housekeeping), and the server deactivates a subscription
+ * row after a 404/410 send failure — but nothing told the client, so the
+ * owner had to keep manually re-enabling push. When permission is already
+ * granted, re-running the subscribe flow re-creates a dropped browser
+ * subscription and re-POSTs it to the server, flipping a deactivated row
+ * back to active without any user action.
+ */
+export async function syncPushSubscription({ apiBase = '/api', token } = {}) {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return { ok: false, reason: 'unsupported' };
+    }
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+      return { ok: false, reason: 'permission_not_granted' };
+    }
+    if (isIOS() && !isStandalonePWA()) {
+      return { ok: false, reason: 'ios_not_standalone' };
+    }
+    // Only maintain a subscription THIS admin explicitly enabled on THIS
+    // browser. Absent = never opted in here (e.g. a different admin on a
+    // shared machine granted permission) — never silently enroll them.
+    // false = explicit Disable; the self-heal must not undo it.
+    if (pushOptInState(token) !== true) {
+      return { ok: false, reason: 'not_opted_in_on_this_browser' };
+    }
+    // Permission is granted, so ensurePushSubscription will not prompt —
+    // requestPermission resolves 'granted' immediately.
+    return await ensurePushSubscription({ apiBase, token });
+  } catch (e) {
+    return { ok: false, reason: e?.message || 'sync_failed' };
+  }
 }
 
 export async function disablePush({ apiBase = '/api', token } = {}) {
   const authToken = token || localStorage.getItem('waves_admin_token');
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` };
 
+  // Record the opt-out before any network/SW work so the self-heal can't
+  // race a partially-completed disable back to enabled.
+  setPushOptIn(authToken, false);
   try {
     const reg = await navigator.serviceWorker.getRegistration();
     if (reg) {

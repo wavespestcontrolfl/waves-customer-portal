@@ -128,3 +128,9 @@ self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil(clients.openWindow(event.notification.data.url || '/'));
 });
+
+// Deliberately NO pushsubscriptionchange handler: rotating the server row
+// from the SW would need an unauthenticated mutating route (the SW can't
+// reach the admin JWT in localStorage), which AGENTS.md classifies as P0.
+// An endpoint rotation while the app is closed is instead healed by
+// syncPushSubscription (push-subscribe.js) on the next app open/resume.
