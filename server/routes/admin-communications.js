@@ -84,6 +84,29 @@ async function findSingleCustomerForPhone(phone) {
   return null;
 }
 
+function customerDisplayName(customer) {
+  if (!customer) return null;
+  return [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || null;
+}
+
+async function resolveSmsLogCustomerFallbacks(rows) {
+  const phones = new Map();
+  for (const row of rows || []) {
+    if (row.customer_id || row.first_name) continue;
+    const contactPhone = row.contact_phone || row.customer_phone;
+    const key = normalizePhoneLast10(normalizePhone(contactPhone) || contactPhone);
+    if (key && !phones.has(key)) phones.set(key, contactPhone);
+  }
+  if (!phones.size) return new Map();
+
+  const resolved = new Map();
+  await Promise.all([...phones.entries()].map(async ([key, phone]) => {
+    const customer = await findSingleCustomerForPhone(phone);
+    if (customer) resolved.set(key, customer);
+  }));
+  return resolved;
+}
+
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   try {
@@ -415,16 +438,24 @@ router.get('/log', async (req, res, next) => {
     const hasMore = rowsPlusOne.length > effectiveLimit;
     const rows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
 
+    const fallbackCustomers = await resolveSmsLogCustomerFallbacks(rows);
+
     const messages = await Promise.all(rows.map(async (m) => {
-      const customerName = m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null;
+      const initialContact = m.contact_phone || m.customer_phone;
+      const fallbackCustomer = !m.customer_id && initialContact
+        ? fallbackCustomers.get(normalizePhoneLast10(normalizePhone(initialContact) || initialContact))
+        : null;
+      const customerName = m.first_name
+        ? `${m.first_name} ${m.last_name || ''}`.trim()
+        : customerDisplayName(fallbackCustomer);
       const ours = m.our_endpoint_id;
-      const contact = m.contact_phone || m.customer_phone;
+      const contact = m.contact_phone || m.customer_phone || fallbackCustomer?.phone;
       const from = m.direction === 'inbound' ? contact : ours;
       const to = m.direction === 'inbound' ? ours : contact;
       return {
         id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
-        customerId: m.customer_id, customerName,
+        customerId: m.customer_id || fallbackCustomer?.id || null, customerName,
         createdAt: m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,

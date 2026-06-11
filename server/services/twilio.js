@@ -489,7 +489,7 @@ const TwilioService = {
           customerId: options.customerId || null,
           channel: "sms",
           ourEndpointId: fromNumber,
-          contactPhone: options.customerId ? null : to,
+          contactPhone: to,
           direction: "outbound",
           body,
           authorType: options.adminUserId ? "admin" : "system",

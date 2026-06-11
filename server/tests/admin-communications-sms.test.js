@@ -46,6 +46,8 @@ function makeQueryBuilder(rows = []) {
   const builder = {
     calls,
     leftJoin: jest.fn(() => builder),
+    whereNull: jest.fn(() => builder),
+    whereRaw: jest.fn(() => builder),
     where: jest.fn((arg) => {
       if (typeof arg === 'function') arg.call(builder, builder);
       return builder;
@@ -389,6 +391,46 @@ describe('admin communications SMS route', () => {
       });
       expect(builder.calls.limit).toEqual([3]);
       expect(builder.calls.offset).toEqual([4]);
+    });
+  });
+
+  test('resolves unknown SMS log rows from a unique matching customer phone', async () => {
+    const messagesBuilder = makeQueryBuilder([
+      smsMessageRow({
+        customer_id: null,
+        first_name: null,
+        last_name: null,
+        customer_phone: null,
+        contact_phone: '+15551234567',
+      }),
+    ]);
+    const customersBuilder = makeQueryBuilder([
+      {
+        id: 'customer-1',
+        first_name: 'Ada',
+        last_name: 'Lovelace',
+        phone: '(555) 123-4567',
+      },
+    ]);
+
+    db.mockImplementation((table) => {
+      if (table === 'messages') return messagesBuilder;
+      if (table === 'customers') return customersBuilder;
+      return makeQueryBuilder([]);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.messages[0]).toMatchObject({
+        customerId: 'customer-1',
+        customerName: 'Ada Lovelace',
+        from: '+15551234567',
+      });
     });
   });
 
