@@ -28,6 +28,7 @@
 import { useRef } from "react";
 import { cn } from "../ui";
 import { useIntelligenceBar } from "../../hooks/useIntelligenceBar";
+import PendingActionsCard from "./PendingActionsCard";
 
 export function renderInline(text) {
   const parts = text.split(/(\*\*[^*]+\*\*)/g);
@@ -178,6 +179,7 @@ export default function IntelligenceBarShell({
     loading,
     response,
     structuredData,
+    pendingActions,
     conversationHistory,
     quickActions,
     expanded,
@@ -397,6 +399,7 @@ export default function IntelligenceBarShell({
           >
             {renderMarkdown(response)}
           </div>
+          <PendingActionsCard actions={pendingActions} variant="light" />
           {responseSlot && responseSlot(structuredData)}
           {/* Follow-up */}
           <div className="mt-3 flex gap-2">

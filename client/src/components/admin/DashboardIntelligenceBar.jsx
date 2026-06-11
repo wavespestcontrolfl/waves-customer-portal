@@ -11,6 +11,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import PendingActionsCard from "./PendingActionsCard";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const D = {
@@ -176,6 +177,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
+  const [pendingActions, setPendingActions] = useState([]);
   const [structuredData, setStructuredData] = useState(null);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
@@ -266,6 +268,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
       setLoading(true);
       setExpanded(true);
       setResponse(null);
+      setPendingActions([]);
       setStructuredData(null);
 
       try {
@@ -280,6 +283,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
         });
 
         setResponse(data.response);
+        setPendingActions(data.pendingActions || []);
         setStructuredData(data.structuredData);
         setConversationHistory(data.conversationHistory || []);
       } catch (err) {
@@ -306,6 +310,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
   const clear = () => {
     setConversationHistory([]);
     setResponse(null);
+    setPendingActions([]);
     setStructuredData(null);
     setExpanded(false);
   };
@@ -493,6 +498,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
           >
             {renderMarkdown(response)}
           </div>
+          <PendingActionsCard actions={pendingActions} variant="dark" />
           {/* Follow-up */}
           <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
             {" "}

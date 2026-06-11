@@ -7,6 +7,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import PendingActionsCard from "./PendingActionsCard";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const D = {
@@ -177,6 +178,7 @@ export default function SEOIntelligenceBar({
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
+  const [pendingActions, setPendingActions] = useState([]);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
@@ -360,6 +362,7 @@ export default function SEOIntelligenceBar({
       setLoading(true);
       setExpanded(true);
       setResponse(null);
+      setPendingActions([]);
 
       try {
         const data = await adminFetch("/admin/intelligence-bar/query", {
@@ -372,6 +375,7 @@ export default function SEOIntelligenceBar({
           }),
         });
         setResponse(data.response);
+        setPendingActions(data.pendingActions || []);
         setConversationHistory(data.conversationHistory || []);
       } catch (err) {
         setResponse(` Error: ${err.message}`);
@@ -396,6 +400,7 @@ export default function SEOIntelligenceBar({
   const clear = () => {
     setConversationHistory([]);
     setResponse(null);
+    setPendingActions([]);
     setExpanded(false);
   };
 
@@ -595,7 +600,8 @@ export default function SEOIntelligenceBar({
             }}
           >
             {renderMarkdown(response)}
-          </div>{" "}
+          </div>
+          <PendingActionsCard actions={pendingActions} variant="dark" />{" "}
           <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
             {" "}
             <input

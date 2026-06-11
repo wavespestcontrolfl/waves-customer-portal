@@ -41,6 +41,9 @@ export function useIntelligenceBar({
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
   const [structuredData, setStructuredData] = useState(null);
+  // Pending write proposals (issue #1568). The ids inside are confirmation
+  // credentials — keep them here only; never copy into conversationHistory.
+  const [pendingActions, setPendingActions] = useState([]);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
@@ -96,6 +99,7 @@ export function useIntelligenceBar({
 
       setResponse(data.response);
       setStructuredData(data.structuredData);
+      setPendingActions(data.pendingActions || []);
       setConversationHistory(data.conversationHistory || []);
 
       if (onAfterSubmitRef.current) onAfterSubmitRef.current(data);
@@ -111,6 +115,7 @@ export function useIntelligenceBar({
     setConversationHistory([]);
     setResponse(null);
     setStructuredData(null);
+    setPendingActions([]);
     setExpanded(false);
   }, []);
 
@@ -124,6 +129,7 @@ export function useIntelligenceBar({
     loading,
     response,
     structuredData,
+    pendingActions,
     conversationHistory,
     quickActions,
     expanded, setExpanded,

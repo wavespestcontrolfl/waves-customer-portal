@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import PendingActionsCard from "./PendingActionsCard";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const D = {
@@ -325,6 +326,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
+  const [pendingActions, setPendingActions] = useState([]);
   const [structuredData, setStructuredData] = useState(null);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
@@ -402,6 +404,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
       setExpanded(true);
       setResponse(null);
       setStructuredData(null);
+      setPendingActions([]);
 
       // Save to recent prompts
       setRecentPrompts((prev) => {
@@ -417,6 +420,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
 
         setResponse(data.response);
         setStructuredData(data.structuredData);
+        setPendingActions(data.pendingActions || []);
         setConversationHistory(data.conversationHistory || []);
       } catch (err) {
         setResponse(
@@ -450,6 +454,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
     setConversationHistory([]);
     setResponse(null);
     setStructuredData(null);
+    setPendingActions([]);
     setExpanded(false);
   };
 
@@ -703,6 +708,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
           >
             {renderMarkdown(response)}
           </div>
+          <PendingActionsCard actions={pendingActions} variant="light" />
           {/* Structured customer list if available */}
           {customerList && customerList.length > 0 && (
             <div
