@@ -236,6 +236,115 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
   });
 });
 
+describe('event ingestion buildArticleBundle — news-RSS article bundling', () => {
+  const { buildArticleBundle } = require('../services/event-ingestion');
+
+  test('labels each article with title/URL/published/content and counts them', () => {
+    const { text, bundled } = buildArticleBundle([
+      { title: 'Weekend roundup', link: 'https://news.example/a', isoDate: '2026-06-10T12:00:00Z', contentSnippet: 'Concert Saturday at the park.' },
+      { title: 'Things to do', link: 'https://news.example/b', pubDate: 'Wed, 10 Jun 2026 08:00:00 GMT', content: 'Art walk Friday night.' },
+    ]);
+    expect(bundled).toBe(2);
+    expect(text).toContain('### Article 1');
+    expect(text).toContain('### Article 2');
+    expect(text).toContain('Title: Weekend roundup');
+    expect(text).toContain('URL: https://news.example/a');
+    expect(text).toContain('Published: 2026-06-10T12:00:00Z');
+    expect(text).toContain('Content: Art walk Friday night.');
+  });
+
+  test('includes an Image line only for items with a safe enclosure URL', () => {
+    const withImg = buildArticleBundle([
+      { title: 'A', link: 'https://x.co/a', enclosure: { url: 'https://img.example/pic.jpg' }, contentSnippet: 'x' },
+    ]);
+    expect(withImg.text).toContain('Image: https://img.example/pic.jpg');
+    const badImg = buildArticleBundle([
+      { title: 'A', link: 'https://x.co/a', enclosure: { url: 'javascript:alert(1)' }, contentSnippet: 'x' },
+    ]);
+    expect(badImg.text).not.toContain('Image:');
+  });
+
+  test('stops adding articles once the bundle budget is spent', () => {
+    const big = 'y'.repeat(2500);
+    const items = Array.from({ length: 30 }, (_, i) => ({
+      title: `Post ${i}`, link: `https://x.co/${i}`, contentSnippet: big,
+    }));
+    const { text, bundled } = buildArticleBundle(items);
+    expect(bundled).toBeLessThan(30);
+    expect(text.length).toBeLessThanOrEqual(26000);
+  });
+});
+
+describe('event ingestion buildExtractionSystemPrompt — shared extraction prompt', () => {
+  const { buildExtractionSystemPrompt } = require('../services/event-ingestion');
+  const source = { name: 'Bay News 9 — On The Town', url: 'https://baynews9.com' };
+
+  test('articles mode: publish date is not the event date, undated events skipped, article-URL fallback', () => {
+    const p = buildExtractionSystemPrompt(source, 15, 'articles', '2026-06-11');
+    expect(p).toContain('local-news RSS feed');
+    expect(p).toContain("Published date is NOT the event date");
+    expect(p).toContain('If no specific event date is stated, skip that event');
+    expect(p).toContain("otherwise use the article's URL");
+  });
+
+  test('page mode: keeps the scrape intro and omits the article rules', () => {
+    const p = buildExtractionSystemPrompt(source, 15, 'page', '2026-06-11');
+    expect(p).toContain('raw HTML scraped');
+    expect(p).not.toContain('Published date is NOT the event date');
+  });
+
+  test('both modes skip government/administrative items and carry the imageUrl field', () => {
+    for (const mode of ['articles', 'page']) {
+      const p = buildExtractionSystemPrompt(source, 10, mode, '2026-06-11');
+      expect(p).toContain('government/administrative items');
+      expect(p).toContain('"imageUrl"');
+      expect(p).toContain('Cap output at 10 events');
+    }
+  });
+});
+
+describe('event ingestion normalizeExtractedEvent — validation + auto-approve gate', () => {
+  const { normalizeExtractedEvent } = require('../services/event-ingestion');
+  const NOW = Date.parse('2026-06-11T12:00:00Z');
+  const tier1 = { id: 'src-1', priority_tier: 1, coverage_geo: ['tampa'] };
+  const tier2 = { id: 'src-2', priority_tier: 2, coverage_geo: ['sarasota'] };
+
+  test('drops events with no title, too far out, or already past', () => {
+    expect(normalizeExtractedEvent(tier1, { title: '  ' }, NOW)).toBeNull();
+    expect(normalizeExtractedEvent(tier1, { title: 'Way out', startAt: '2026-12-15T10:00:00-04:00' }, NOW)).toBeNull();
+    expect(normalizeExtractedEvent(tier1, { title: 'Old news', startAt: '2026-06-01T10:00:00-04:00' }, NOW)).toBeNull();
+  });
+
+  test('tier-1 auto-approves ONLY when a real start date was extracted', () => {
+    const dated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
+    expect(dated.autoApprove).toBe(true);
+    const undated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: null }, NOW);
+    expect(undated).not.toBeNull();
+    expect(undated.autoApprove).toBe(false);
+    const tier2Dated = normalizeExtractedEvent(tier2, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
+    expect(tier2Dated.autoApprove).toBe(false);
+  });
+
+  test('canonicalizes the dedup key and validates URLs', () => {
+    const { row } = normalizeExtractedEvent(tier1, {
+      title: 'BOAT Parade',
+      startAt: '2026-06-14T10:00:00-04:00',
+      eventUrl: 'https://x.co/parade',
+      imageUrl: 'javascript:alert(1)',
+    }, NOW);
+    expect(row.external_id).toBe(`boat parade|${new Date('2026-06-14T10:00:00-04:00').toISOString()}|https://x.co/parade`);
+    expect(row.image_url).toBeNull();
+    expect(row.event_url).toBe('https://x.co/parade');
+  });
+
+  test('falls back to source coverage_geo for city and clamps to 128 chars', () => {
+    const noCity = normalizeExtractedEvent(tier2, { title: 'A', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
+    expect(noCity.row.city).toBe('sarasota');
+    const longCity = normalizeExtractedEvent(tier2, { title: 'A', startAt: '2026-06-14T10:00:00-04:00', city: 'x'.repeat(300) }, NOW);
+    expect(longCity.row.city).toHaveLength(128);
+  });
+});
+
 describe('newsletter EMAIL_RE', () => {
   const ok = ['a@b.co', 'first.last@example.com', 'with+tag@gmail.com', 'h@host.io'];
   const bad = [
