@@ -82,7 +82,7 @@ import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
 import NotificationEventsTabV2 from "./NotificationEventsTabV2";
 import PushSettingsV2 from "../../components/admin/PushSettingsV2";
-import CallBridgeLink from "../../components/admin/CallBridgeLink";
+import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Card, cn } from "../../components/ui";
@@ -184,6 +184,13 @@ function getCustomerOptionName(customer) {
     customer.phone ||
     "Customer"
   );
+}
+
+function findKnownWavesNumber(value) {
+  if (!value) return "";
+  return ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => n.number)).find(
+    (number) => phoneKey(number) === phoneKey(value),
+  ) || "";
 }
 
 const TABS = [
@@ -342,6 +349,9 @@ function SmsLogItemV2({ msg: m, onReply }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = m.body && m.body.length > 80;
   const hasMedia = Array.isArray(m.media) && m.media.length > 0;
+  const contactPhone = m.direction === "outbound" ? m.to : m.from;
+  const ourNumber = m.direction === "outbound" ? m.from : m.to;
+  const contactLabel = m.customerName || contactPhone;
   return (
     <div
       className="py-2.5 border-b border-hairline border-zinc-200 cursor-pointer"
@@ -403,29 +413,31 @@ function SmsLogItemV2({ msg: m, onReply }) {
         </div>{" "}
       </div>
       {expanded && (
-        <div className="mt-2 ml-7 flex gap-2">
-          {m.direction === "inbound" && (
+        <div className="mt-2 ml-7 flex flex-wrap gap-2">
+          {contactPhone && (
             <Button
               size="sm"
-              variant="primary"
+              variant="secondary"
               onClick={(e) => {
                 e.stopPropagation();
-                onReply(m.from, m.to, m.customerId);
+                callViaBridge(contactPhone, contactLabel, ourNumber);
               }}
             >
-              Reply
+              <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Call back
             </Button>
           )}
-          {m.direction === "outbound" && (
+          {contactPhone && (
             <Button
               size="sm"
               variant="primary"
               onClick={(e) => {
                 e.stopPropagation();
-                onReply(m.to, m.from, m.customerId);
+                onReply(contactPhone, ourNumber, m.customerId);
               }}
             >
-              Send Again
+              <MessageSquare size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Text back
             </Button>
           )}
           <Button
@@ -457,7 +469,7 @@ function ConversationViewV2({
   return (
     <div className="flex flex-col h-full">
       {" "}
-      <div className="flex items-center gap-3 mb-4 pb-3 border-b border-hairline border-zinc-200">
+      <div className="flex flex-wrap items-center gap-2 md:gap-3 mb-4 pb-3 border-b border-hairline border-zinc-200">
         {" "}
         <Button size="sm" variant="secondary" onClick={onBack}>
           Back
@@ -477,12 +489,18 @@ function ConversationViewV2({
               {contactName}
             </div>
           )}
-          <CallBridgeLink
-            phone={contactPhone}
-            customerName={thread.customerName || ""}
-            className="font-mono text-12 text-ink-secondary underline"
-          />{" "}
+          <div className="font-mono text-12 text-ink-secondary truncate">
+            {contactPhone}
+          </div>{" "}
         </div>{" "}
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber)}
+        >
+          <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+          Call back
+        </Button>{" "}
         <Button
           size="sm"
           variant="primary"
@@ -490,7 +508,8 @@ function ConversationViewV2({
             onReply(contactPhone, thread.ourNumber, thread.customerId)
           }
         >
-          Reply
+          <MessageSquare size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+          Text back
         </Button>{" "}
       </div>{" "}
       <div className="flex-1 md:max-h-[500px] md:overflow-y-auto flex flex-col gap-2">
@@ -794,10 +813,19 @@ function SmsTab() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const phone = params.get("phone");
+    const queryFromNumber = findKnownWavesNumber(params.get("fromNumber"));
     if (phone) {
       setToNumber(phone);
       setToSearch("");
       setSelectedCustomerId(null);
+      if (queryFromNumber) {
+        setFromNumber(queryFromNumber);
+        setThreadLock({
+          contactPhone: phone,
+          ourNumber: queryFromNumber,
+          label: NUMBER_LABEL_MAP[queryFromNumber] || queryFromNumber,
+        });
+      }
     }
     const draftId = params.get("draftId");
     if (draftId) {

@@ -22,7 +22,7 @@
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
 import { useState, useEffect, useRef } from "react";
-import { CheckCircle2, PhoneCall, Voicemail, XCircle } from "lucide-react";
+import { CheckCircle2, MessageSquare, PhoneCall, Voicemail, XCircle } from "lucide-react";
 import {
   Badge,
   Button,
@@ -35,18 +35,42 @@ import {
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+const ADMIN_BRIDGE_PHONE_KEYS = new Set(["9415993489"]);
 
-function adminFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
+function phoneKey(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+}
+
+function samePhone(a, b) {
+  const aKey = phoneKey(a);
+  const bKey = phoneKey(b);
+  return !!aKey && aKey === bKey;
+}
+
+const WAVES_PHONE_KEYS = new Set(
+  ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => phoneKey(n.number))),
+);
+
+async function adminFetch(path, options = {}) {
+  const response = await fetch(`${API_BASE}${path}`, {
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
   });
+
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      message = body?.error || body?.message || message;
+    } catch {}
+    throw new Error(message);
+  }
+
+  return response.json();
 }
 
 function timeAgo(dateStr) {
@@ -63,11 +87,15 @@ function timeAgo(dateStr) {
 }
 
 function parseAiExtraction(call) {
-  if (!call?.ai_extraction) return null;
+  return parseJsonObject(call?.ai_extraction);
+}
+
+function parseJsonObject(value) {
+  if (!value) return null;
+  if (typeof value === "object") return value;
   try {
-    return typeof call.ai_extraction === "string"
-      ? JSON.parse(call.ai_extraction)
-      : call.ai_extraction;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
     return null;
   }
@@ -91,18 +119,63 @@ function getCallDisplayName(call) {
 
 function getCallBackTarget(call) {
   if (!call) return "";
-  return call.direction === "outbound"
-    ? call.to_phone || call.from_phone || ""
-    : call.from_phone || call.to_phone || "";
+  const metadataPhones = getMetadataPhoneCandidates(call);
+  if (call.direction === "outbound") {
+    return firstCallableCustomerPhone([
+      call.to_phone,
+      call.customer_phone,
+      ...metadataPhones,
+      call.from_phone,
+    ]);
+  }
+  return firstCallableCustomerPhone([
+    call.from_phone,
+    call.customer_phone,
+    ...metadataPhones,
+    call.to_phone,
+  ]);
+}
+
+function getMetadataPhoneCandidates(call) {
+  const metadata = parseJsonObject(call?.metadata);
+  if (!metadata) return [];
+  return [
+    metadata.customerPhone,
+    metadata.leadPhone,
+    metadata.lead_phone,
+    metadata.customerNumber,
+    metadata.customer_number,
+    metadata.phone,
+  ];
+}
+
+function firstCallableCustomerPhone(values) {
+  const seen = new Set();
+  for (const value of values) {
+    const key = phoneKey(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    if (WAVES_PHONE_KEYS.has(key) || ADMIN_BRIDGE_PHONE_KEYS.has(key)) continue;
+    return value;
+  }
+  return "";
+}
+
+function getCallbackCustomerId(call, target) {
+  if (!call?.customer_id || !samePhone(target, call.customer_phone)) return undefined;
+  return call.customer_id;
 }
 
 function getCallBackFromNumber(call, fallbackFrom) {
+  const metadata = parseJsonObject(call?.metadata);
   const preferred =
-    call?.direction === "outbound" ? call.from_phone : call?.to_phone;
+    call?.direction === "outbound"
+      ? metadata?.bridgeCallerId || call.from_phone
+      : call?.to_phone;
   const knownNumbers = ALL_NUMBERS.flatMap((group) =>
     group.numbers.map((n) => n.number),
   );
-  return knownNumbers.includes(preferred) ? preferred : fallbackFrom;
+  return knownNumbers.find((number) => samePhone(number, preferred)) || fallbackFrom;
 }
 
 function getCallRouteLabel(call) {
@@ -307,7 +380,7 @@ export default function CallLogTabV2() {
         body: JSON.stringify({
           to,
           fromNumber: getCallBackFromNumber(call, callFrom),
-          customerId: call.customer_id || undefined,
+          customerId: getCallbackCustomerId(call, to),
           source: "call-log-callback",
           relatedCallId: call.id,
         }),
@@ -334,6 +407,15 @@ export default function CallLogTabV2() {
     if (city) params.set("city", city);
     if (state) params.set("state", state);
     window.open(`/admin/customers/new?${params.toString()}`, "_blank");
+  };
+
+  const handleTextBack = (call) => {
+    const to = getCallBackTarget(call);
+    if (!to) return;
+    const params = new URLSearchParams({ phone: to });
+    const fromNumber = getCallBackFromNumber(call, callFrom);
+    if (fromNumber) params.set("fromNumber", fromNumber);
+    window.location.assign(`/admin/communications?${params.toString()}#tab=sms`);
   };
 
   const handleProcessCall = async (callSid, alreadyProcessed) => {
@@ -483,7 +565,7 @@ export default function CallLogTabV2() {
   });
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 max-w-full flex-col gap-4 overflow-x-hidden">
       {/* Stats filter bar — desktop only */}
       <div className="hidden md:flex gap-2 flex-wrap">
         {" "}
@@ -576,16 +658,27 @@ export default function CallLogTabV2() {
                         </div>
                       </div>
                       {target && (
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          onClick={() => handleCallBack(c)}
-                          disabled={!!callbackCallingId}
-                          title="Call via Waves — rings your phone first, press 1 to connect"
-                        >
-                          <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
-                          {callbackCallingId === c.id ? "Calling…" : "Call back"}
-                        </Button>
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            onClick={() => handleCallBack(c)}
+                            disabled={!!callbackCallingId}
+                            title="Call via Waves — rings your phone first, press 1 to connect"
+                          >
+                            <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+                            {callbackCallingId === c.id ? "Calling…" : "Call back"}
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleTextBack(c)}
+                            title="Open SMS composer for this caller"
+                          >
+                            <MessageSquare size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+                            Text back
+                          </Button>
+                        </div>
                       )}
                     </div>
                     {c.recording_url && (
@@ -855,11 +948,11 @@ export default function CallLogTabV2() {
         </CardBody>{" "}
       </Card>
       {/* Call history */}
-      <Card>
+      <Card className="min-w-0 overflow-hidden">
         {" "}
-        <CardBody>
+        <CardBody className="p-3 sm:p-4">
           {" "}
-          <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+          <div className="mb-3 flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
             {" "}
             <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary">
               Call History
@@ -869,7 +962,7 @@ export default function CallLogTabV2() {
               placeholder="Search calls by name or phone…"
               value={callLogSearch}
               onChange={(e) => setCallLogSearch(e.target.value)}
-              className="max-w-[360px] min-w-[200px] h-11 md:h-9 text-16 md:text-13 min-h-[44px] md:min-h-0"
+              className="h-11 min-h-[44px] w-full max-w-none text-16 md:h-9 md:min-h-0 md:max-w-[360px] md:min-w-[200px] md:text-13"
             />{" "}
           </div>
           {calls.length === 0 ? (
@@ -913,27 +1006,29 @@ export default function CallLogTabV2() {
                   <div
                     key={c.id}
                     className={cn(
-                      "py-3 pl-3 border-b border-zinc-200",
+                      "min-w-0 border-b border-zinc-200 py-3 pl-2 pr-2 md:pl-3",
                       isMissed
                         ? "bg-alert-bg/40 border-l-[3px] border-l-alert-fg"
                         : "border-l-[3px] border-l-transparent",
                     )}
                   >
                     {" "}
-                    <div className="flex items-center gap-3">
+                    <div className="flex min-w-0 items-start gap-2 md:items-center md:gap-3">
                       {" "}
-                      <span className="w-5 text-center text-14 text-ink-secondary">
+                      <span className="w-5 flex-shrink-0 text-center text-14 text-ink-secondary">
                         {c.direction === "inbound" ? "↓" : "↑"}
                       </span>{" "}
                       <div className="flex-1 min-w-0">
                         {" "}
-                        <div className="text-15 md:text-13 text-ink-primary font-medium">
-                          {getCallDisplayName(c)}
-                          <span className="ml-2 text-12 md:text-11 text-ink-tertiary font-normal">
+                        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-15 font-medium text-ink-primary md:text-13">
+                          <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                            {getCallDisplayName(c)}
+                          </span>
+                          <span className="text-12 font-normal text-ink-tertiary md:text-11">
                             {c.direction === "inbound" ? "Inbound" : "Outbound"}
                           </span>{" "}
                         </div>{" "}
-                        <div className="text-13 md:text-11 text-ink-tertiary">
+                        <div className="break-words text-13 text-ink-tertiary [overflow-wrap:anywhere] md:text-11">
                           {c.from_phone}
                           {c.to_phone ? ` → ${c.to_phone}` : ""} · {dur}
                           {c.caller_city
@@ -941,7 +1036,7 @@ export default function CallLogTabV2() {
                             : ""}
                         </div>{" "}
                       </div>{" "}
-                      <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                      <div className="flex flex-shrink-0 flex-col items-end gap-1">
                         {" "}
                         <Badge tone={badgeTone}>{answeredLabel}</Badge>{" "}
                         <span className="text-12 md:text-10 text-ink-tertiary">
@@ -960,23 +1055,39 @@ export default function CallLogTabV2() {
                       getCallBackTarget(c)) && (
                       <div className="mt-2 ml-8 flex gap-2 flex-wrap items-center">
                         {getCallBackTarget(c) && (
-                          <Button
-                            variant={isMissed ? "primary" : "secondary"}
-                            size="sm"
-                            onClick={() => handleCallBack(c)}
-                            disabled={!!callbackCallingId}
-                            title="Call via Waves — rings your phone first, press 1 to connect"
-                          >
-                            <PhoneCall
-                              size={13}
-                              strokeWidth={1.75}
-                              className="mr-1.5"
-                              aria-hidden
-                            />
-                            {callbackCallingId === c.id
-                              ? "Calling…"
-                              : "Call back"}
-                          </Button>
+                          <>
+                            <Button
+                              variant={isMissed ? "primary" : "secondary"}
+                              size="sm"
+                              onClick={() => handleCallBack(c)}
+                              disabled={!!callbackCallingId}
+                              title="Call via Waves — rings your phone first, press 1 to connect"
+                            >
+                              <PhoneCall
+                                size={13}
+                                strokeWidth={1.75}
+                                className="mr-1.5"
+                                aria-hidden
+                              />
+                              {callbackCallingId === c.id
+                                ? "Calling…"
+                                : "Call back"}
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => handleTextBack(c)}
+                              title="Open SMS composer for this caller"
+                            >
+                              <MessageSquare
+                                size={13}
+                                strokeWidth={1.75}
+                                className="mr-1.5"
+                                aria-hidden
+                              />
+                              Text back
+                            </Button>
+                          </>
                         )}
                         {isUnknown && c.from_phone && (
                           <Button

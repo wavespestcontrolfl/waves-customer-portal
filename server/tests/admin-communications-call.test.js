@@ -133,4 +133,27 @@ describe('admin communications voice route', () => {
       }));
     });
   });
+
+  test('rejects callback attempts that target the admin bridge phone', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/call`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to: '+1 (941) 599-3489',
+          fromNumber: '+19412972606',
+          source: 'call-log-callback',
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('to must be a customer phone, not the admin bridge phone');
+      expect(mockCallCreate).not.toHaveBeenCalled();
+      expect(alertTwilioFailure).not.toHaveBeenCalled();
+    });
+  });
 });
