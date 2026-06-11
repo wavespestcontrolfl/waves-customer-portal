@@ -46,44 +46,6 @@ router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
   });
 });
 
-// Endpoint rotation from the service worker's pushsubscriptionchange
-// handler. The SW context has no admin JWT (tokens live in localStorage,
-// unreachable from a worker), so this route sits ABOVE the auth gate and
-// authenticates by possession of the OLD subscription endpoint — an
-// unguessable per-device URL minted by the push service. It can only
-// rotate an existing row in place; it can never create a subscription or
-// change whose device it belongs to.
-router.post('/resubscribe', async (req, res) => {
-  try {
-    const { oldEndpoint, subscription } = req.body || {};
-    if (
-      !subscription?.endpoint
-      || typeof oldEndpoint !== 'string'
-      || !oldEndpoint
-      || oldEndpoint === subscription.endpoint
-    ) {
-      return res.status(400).json({ error: 'oldEndpoint and a new subscription are required' });
-    }
-    // Exact-match on the stored JSON's endpoint. NOT a LIKE — an attacker
-    // could otherwise use % wildcards to match arbitrary rows.
-    const rows = await db('push_subscriptions')
-      .whereRaw("subscription_data::jsonb->>'endpoint' = ?", [oldEndpoint])
-      .select('id');
-    if (rows.length) {
-      await db('push_subscriptions')
-        .whereIn('id', rows.map((r) => r.id))
-        .update({ subscription_data: JSON.stringify(subscription), active: true });
-      logger.info(`[admin-push] rotated ${rows.length} push subscription(s) via pushsubscriptionchange`);
-    }
-    // Same response either way — don't give callers an oracle for probing
-    // which endpoints exist.
-    res.json({ ok: true });
-  } catch (err) {
-    logger.warn(`[admin-push] resubscribe failed: ${err.message}`);
-    res.status(500).json({ error: 'resubscribe failed' });
-  }
-});
-
 // Subscription and preference operations require a signed-in admin portal user.
 router.use(adminAuthenticate, requireTechOrAdmin);
 

@@ -66,6 +66,21 @@ async function getRegistration() {
   return reg;
 }
 
+// Explicit per-device opt-out — mirrors client/src/lib/push-subscribe.js.
+// Without this flag the silent self-heal would re-subscribe a device whose
+// user deliberately hit Disable (browser permission stays granted).
+const PUSH_USER_DISABLED_KEY = 'waves_push_user_disabled';
+
+function isPushUserDisabled() {
+  try { return localStorage.getItem(PUSH_USER_DISABLED_KEY) === '1'; } catch { return false; }
+}
+function setPushUserDisabled(disabled) {
+  try {
+    if (disabled) localStorage.setItem(PUSH_USER_DISABLED_KEY, '1');
+    else localStorage.removeItem(PUSH_USER_DISABLED_KEY);
+  } catch { /* private mode — fall back to default-on sync */ }
+}
+
 export async function isPushEnabled({ apiBase = '/api', token, verifyServer = false } = {}) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
   if (Notification.permission !== 'granted') return false;
@@ -110,6 +125,10 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
 
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') throw new Error('Permission denied');
+
+  // Reaching here means an explicit enable (sync bails on the flag before
+  // calling this) — clear any per-device opt-out.
+  setPushUserDisabled(false);
 
   const reg = await getRegistration();
 
@@ -159,6 +178,11 @@ export async function syncPushSubscription({ apiBase = '/api', token } = {}) {
     if (isIOS() && !isStandalonePWA()) {
       return { ok: false, reason: 'ios_not_standalone' };
     }
+    // Respect an explicit per-device Disable: the self-heal must never
+    // undo a deliberate opt-out (permission stays granted after disable).
+    if (isPushUserDisabled()) {
+      return { ok: false, reason: 'user_disabled' };
+    }
     return await ensurePushSubscription({ apiBase, token });
   } catch (e) {
     return { ok: false, reason: e?.message || 'sync_failed' };
@@ -169,6 +193,9 @@ export async function disablePush({ apiBase = '/api', token } = {}) {
   const authToken = token || localStorage.getItem('waves_admin_token');
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` };
 
+  // Set the opt-out before any network/SW work so the self-heal can't race
+  // a partially-completed disable back to enabled.
+  setPushUserDisabled(true);
   try {
     const reg = await navigator.serviceWorker.getRegistration();
     if (reg) {

@@ -129,44 +129,8 @@ self.addEventListener('notificationclick', event => {
   event.waitUntil(clients.openWindow(event.notification.data.url || '/'));
 });
 
-// Mirrors push-subscribe.js — the SW can't import the helper module.
-function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(base64);
-  const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
-  return out;
-}
-
-// The push service (notably iOS/Safari) can rotate or expire a subscription
-// endpoint at any time, without the app open. Without this handler the old
-// endpoint just starts returning 404/410, the server deactivates the row,
-// and the device silently stops getting notifications until the user
-// manually re-enables push. Re-subscribe here and rotate the server row in
-// place. No admin JWT is reachable from SW context (tokens live in
-// localStorage), so /resubscribe authenticates by possession of the old
-// endpoint — an unguessable per-device URL. If anything fails, the
-// app-load sync in NotificationBell heals the link on next open.
-self.addEventListener('pushsubscriptionchange', event => {
-  event.waitUntil((async () => {
-    try {
-      const oldEndpoint = event.oldSubscription?.endpoint || null;
-      let applicationServerKey = event.oldSubscription?.options?.applicationServerKey || null;
-      if (!applicationServerKey) {
-        const res = await fetch('/api/admin/push/vapid-key');
-        const { publicKey } = await res.json();
-        if (!publicKey) return;
-        applicationServerKey = urlBase64ToUint8Array(publicKey);
-      }
-      const sub = event.newSubscription
-        || await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
-      if (!oldEndpoint || !sub) return;
-      await fetch('/api/admin/push/resubscribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oldEndpoint, subscription: sub.toJSON() }),
-      });
-    } catch { /* healed by syncPushSubscription on next app open */ }
-  })());
-});
+// Deliberately NO pushsubscriptionchange handler: rotating the server row
+// from the SW would need an unauthenticated mutating route (the SW can't
+// reach the admin JWT in localStorage), which AGENTS.md classifies as P0.
+// An endpoint rotation while the app is closed is instead healed by
+// syncPushSubscription (push-subscribe.js) on the next app open/resume.
