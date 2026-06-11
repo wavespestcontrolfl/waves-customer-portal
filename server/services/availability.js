@@ -213,8 +213,12 @@ class AvailabilityEngine {
     // milliseconds. Serialize confirms per zone+day with an advisory lock
     // and re-validate occupancy inside it; both inserts ride the same
     // transaction so a partial failure can't leave a booking without its
-    // dispatch row.
-    const { booking, scheduled } = await db.transaction(async (trx) => {
+    // dispatch row. options.trx lets a caller make the booking atomic with
+    // its own writes (onboarding reschedule books + cancels in one txn) —
+    // side effects are then deferred to the returned notify() so nothing
+    // customer-visible fires before the outer transaction commits.
+    const runBookingWork = async (work) => (options.trx ? work(options.trx) : db.transaction(work));
+    const { booking, scheduled } = await runBookingWork(async (trx) => {
       // slot-reserve namespace + zone-key shape match routes/booking.js
       // exactly, so confirms through onboarding/AI and the public
       // /api/booking/confirm serialize against each other for the same
@@ -230,6 +234,12 @@ class AvailabilityEngine {
           .where('service_zone_id', zone.id)
           .where('date', dateStr)
           .whereNot('status', 'cancelled')
+          // A same-day reschedule replaces its own booking — counting the
+          // row being moved against the daily cap would reject the move
+          // on a full day even though the final count is unchanged.
+          .modify((q) => {
+            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
+          })
           .count('* as count')
           .first();
         if (parseInt(existingBookings.count) >= maxPerDay) {
@@ -319,6 +329,7 @@ class AvailabilityEngine {
 
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
+    const notify = async () => {
     try {
       const AppointmentReminders = require('./appointment-reminders');
       await AppointmentReminders.registerAppointment(
@@ -381,7 +392,14 @@ class AvailabilityEngine {
     } catch (err) {
       logger.error(`Booking SMS failed: ${err.message}`);
     }
+    };
 
+    if (options.trx) {
+      // Caller commits the outer transaction first, then runs notify() —
+      // reminders/SMS must not fire for a booking that could roll back.
+      return { booking, confirmationCode: confCode, notify };
+    }
+    await notify();
     return { booking, confirmationCode: confCode };
   }
 
