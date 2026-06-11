@@ -139,7 +139,11 @@ describe('peek action-aware floor', () => {
 
     await queue.peek({});
 
-    expect(q.whereRaw).not.toHaveBeenCalled();
+    // peek always applies the availability-window filter (operator-seeded
+    // rows can carry a future available_at — see intercept-brief-seeder),
+    // but no score floor unless an explicit minScore is passed.
+    const rawClauses = q.whereRaw.mock.calls.map((c) => c[0]);
+    expect(rawClauses.some((c) => /CASE WHEN action_type/.test(c))).toBe(false);
   });
 });
 

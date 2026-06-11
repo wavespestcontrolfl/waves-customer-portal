@@ -79,6 +79,12 @@ const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
+const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
+
+// Bucket for operator-authored intercept briefs (intercept-brief-seeder).
+// Kept as a local constant (matching the seeder's export) so the runner's
+// claim path doesn't depend on the seeder module loading.
+const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
 
 // City → GBP location for autonomous gbp_post distribution, backed by the
 // canonical CITY_TO_LOCATION map in config/locations.js. A post goes to the
@@ -216,8 +222,14 @@ class AutonomousRunner {
     let brief;
     try {
       brief = await briefBuilder.compose(opp.id, {
+        // Operator-intercept rows skip SERP profiling: several intercept
+        // keywords are competitor-brand queries a profiler would mis-read as
+        // navigational, and the decision-router pins the action for this
+        // bucket anyway (profiler output would be ignored). The quality
+        // gate's serp/gsc evidence checks exempt this bucket to match.
         persist: !dryRun,
-        skipSerp: opp.action_type === 'add_internal_links',
+        skipSerp: opp.action_type === 'add_internal_links'
+          || opp.bucket === OPERATOR_INTERCEPT_BUCKET,
       });
     } catch (err) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
@@ -763,6 +775,17 @@ class AutonomousRunner {
       return finalized;
     }
 
+    // 7b. Operator-intercept evidence snapshots. Capture an archive.org
+    // snapshot of every cited competitor source at draft-commit time (the
+    // manifest's "snapshot on publish day" rule) — the post's competitor
+    // claims must stay verifiable even if the competitor edits the page.
+    // STRICTLY fail-soft: a Wayback outage can never block or delay the
+    // publish. Results persist on the opportunity row's signal_metadata and
+    // in autonomous_runs.draft_payload.source_snapshots (the blog
+    // frontmatter schema is additionalProperties:false, so frontmatter
+    // storage is off the table).
+    await this._snapshotInterceptSources(opp, draft, run);
+
     // 8. Publish + index + plan links.
     let publishOutcome;
     try {
@@ -1183,6 +1206,49 @@ class AutonomousRunner {
       logger.info(`[autonomous-runner] engine-error alert sent: ${code}`);
     } catch (err) {
       logger.warn(`[autonomous-runner] engine-error alert failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Archive.org snapshots for operator-intercept sources. Fail-soft by
+   * contract: every path (module missing, fetch failure, timeout, db write
+   * failure) logs and returns — publishing NEVER blocks on snapshots.
+   */
+  async _snapshotInterceptSources(opp, draft, run) {
+    if (!opp || opp.bucket !== OPERATOR_INTERCEPT_BUCKET) return;
+    try {
+      const seeder = getInterceptSeeder();
+      if (!seeder?.snapshotSources) return;
+      const sources = opp.signal_metadata?.intercept_brief?.sources || [];
+      if (!Array.isArray(sources) || sources.length === 0) return;
+
+      const totalTimeout = envInt('INTERCEPT_SNAPSHOT_TOTAL_TIMEOUT_MS', 90_000);
+      const result = await withTimeout(
+        seeder.snapshotSources(sources),
+        totalTimeout,
+        `intercept_snapshot_timeout_${totalTimeout}ms`
+      );
+
+      // Surface on the run record (draft_payload is a jsonb audit column).
+      if (draft && result?.snapshots) {
+        draft.source_snapshots = result.snapshots;
+        run.draft_payload = draft;
+      }
+      // Persist on the opportunity row so the snapshots survive even if the
+      // run insert later fails. Best-effort.
+      await db('opportunity_queue')
+        .where('id', opp.id)
+        .update({
+          signal_metadata: JSON.stringify({
+            ...(opp.signal_metadata || {}),
+            intercept_snapshots: result?.snapshots || [],
+            intercept_snapshot_at: new Date().toISOString(),
+          }),
+          updated_at: new Date(),
+        });
+      logger.info(`[autonomous-runner] intercept snapshots captured for ${opp.id}: ${result?.ok || 0}/${result?.attempted || 0}`);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] intercept source snapshot failed (non-blocking): ${err.message}`);
     }
   }
 
@@ -2232,6 +2298,7 @@ module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
   isShadow,
   autoPublishEnabled,
+  OPERATOR_INTERCEPT_BUCKET,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,

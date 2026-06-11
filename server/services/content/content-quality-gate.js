@@ -214,7 +214,23 @@ function isPageOnlyOpportunity(brief) {
   return !brief.target_keyword && Boolean(brief.target_url);
 }
 
+// Operator-authored intercept briefs (intercept-brief-seeder, bucket
+// 'operator_intercept') are composed WITHOUT SERP profiling or mined GSC
+// numbers — the operator manifest IS the provenance these two
+// evidence-attachment hard checks exist to verify. Without the exemption
+// every intercept brief would hard-fail no_serp_signal / no_gsc_signal and
+// the auto-publish lane would silently skip the row. Keyed on the
+// persisted gsc_signal.bucket so the exemption survives a content_briefs
+// round-trip and cannot be spoofed by a draft.
+function isOperatorAuthoredBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'operator_intercept';
+}
+
 function checkSerpBriefAttached(_draft, brief) {
+  if (isOperatorAuthoredBrief(brief)) {
+    return { ok: true, reason: 'operator_authored_brief' };
+  }
   if (isPageOnlyOpportunity(brief)) {
     return { ok: true, reason: 'serp_skip_page_only' };
   }
@@ -224,6 +240,9 @@ function checkSerpBriefAttached(_draft, brief) {
 }
 
 function checkGscSignalAttached(_draft, brief) {
+  if (isOperatorAuthoredBrief(brief)) {
+    return { ok: true, reason: 'operator_authored_brief' };
+  }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
   return { ok: true };
@@ -523,6 +542,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORE,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
+  isOperatorAuthoredBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
