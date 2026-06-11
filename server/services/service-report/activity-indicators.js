@@ -688,8 +688,35 @@ function findingsSchemaForType(projectType) {
   };
 }
 
+// Customer-copy claims the business never makes (contract §6/§9): absence
+// wording must stay observational ("no active signs observed today"), never
+// absolute or promissory. Used to validate AI-drafted recommendations before
+// they can reach a customer-facing report. Bare "clear" is deliberately NOT
+// matched — "clear food debris" is legitimate sanitation advice.
+const BANNED_CUSTOMER_COPY = [
+  /\beliminated\b/i,
+  /\beradicated\b/i,
+  /\bexterminated\b/i,
+  /\bguarantee[ds]?\b/i,
+  /\bno infestation\b/i,
+  /\bpest[- ]free\b/i,
+  /\ball clear\b/i,
+  /\bcleared up\b/i,
+  /\b(?:fully|completely|permanently) (?:resolved|gone)\b/i,
+  /\bproblem (?:is )?gone\b/i,
+];
+
+function findBannedCustomerCopy(text) {
+  const str = String(text || '');
+  return BANNED_CUSTOMER_COPY
+    .map((rx) => str.match(rx)?.[0] || null)
+    .filter(Boolean);
+}
+
 module.exports = {
   SCHEMA_VERSION,
+  BANNED_CUSTOMER_COPY,
+  findBannedCustomerCopy,
   COPY_MAP_VERSION,
   SUMMARY_TEMPLATE_VERSION,
   ACTIVITY_INDICATORS,

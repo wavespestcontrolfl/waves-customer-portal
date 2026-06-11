@@ -4025,22 +4025,41 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
       : '';
     const Anthropic = require('@anthropic-ai/sdk');
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const msg = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 400,
-      messages: [{
-        role: 'user',
-        content: buildFindingsRecapPrompt({
-          schema,
-          values: structuredFindings?.values || {},
-          chips,
-          serviceType: svc.service_type,
-          commsContext,
-        }),
-      }],
+    const basePrompt = buildFindingsRecapPrompt({
+      schema,
+      values: structuredFindings?.values || {},
+      chips,
+      serviceType: svc.service_type,
+      commsContext,
     });
-    const draft = String(msg.content?.[0]?.text || '').trim();
+    // Prompt instructions are not enforcement: the draft lands on a
+    // customer-facing report, so validate it against the banned-claims list
+    // and retry once with the violations called out. Still dirty after the
+    // retry -> 502 and the tech writes the note manually (AI is never in
+    // the critical path).
+    let draft = '';
+    let violations = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const msg = await anthropic.messages.create({
+        model: MODELS.FLAGSHIP,
+        max_tokens: 400,
+        messages: [{
+          role: 'user',
+          content: attempt === 0
+            ? basePrompt
+            : `${basePrompt}\n\nYour previous draft used prohibited wording (${violations.join(', ')}). Rewrite it without any absolute or promissory claims — describe only what was observed and done today.`,
+        }],
+      });
+      draft = String(msg.content?.[0]?.text || '').trim();
+      if (!draft) break;
+      violations = ActivityIndicators.findBannedCustomerCopy(draft);
+      if (!violations.length) break;
+    }
     if (!draft) return res.status(502).json({ error: 'Draft generation returned no text' });
+    if (violations.length) {
+      logger.warn(`[dispatch] findings-recap draft failed banned-copy check for ${req.params.serviceId}: ${violations.join(', ')}`);
+      return res.status(502).json({ error: 'Draft failed the customer-copy quality check — please write the note manually.' });
+    }
     res.json({ draft });
   } catch (err) {
     logger.warn(`[dispatch] findings-recap draft failed for ${req.params.serviceId}: ${err.message}`);

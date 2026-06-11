@@ -6223,6 +6223,7 @@ export function CompletionPanel({
   const photoInputRef = useRef(null);
   const recapRequestRef = useRef(0);
   const recapAbortRef = useRef(null);
+  const draftSnapshotRef = useRef(null);
   const completionIdempotencyKeyRef = useRef(null);
   const draftReadyRef = useRef(false);
 
@@ -6843,8 +6844,7 @@ export function CompletionPanel({
       visitOutcome !== "completed";
     if (!hasDraftContent) return;
 
-    const timer = setTimeout(() => {
-      const draft = {
+    const draft = {
         serviceId: service.id,
         savedAt: new Date().toISOString(),
         notes,
@@ -6892,6 +6892,11 @@ export function CompletionPanel({
         typedNextStepChips,
         typedRecommendations,
       };
+    // Latest draft is always reachable synchronously — the billing-409
+    // detour unmounts this panel before the debounce timer fires, and the
+    // cleanup below would otherwise drop the newest edits.
+    draftSnapshotRef.current = draft;
+    const timer = setTimeout(() => {
       localStorage.setItem(
         completionDraftKey(service.id),
         JSON.stringify(draft),
@@ -7753,8 +7758,17 @@ export function CompletionPanel({
           /invoice or payment is required/i.test(e?.message || ""));
       if (billingRequired) {
         // Typed one-time billing gate — route to the existing checkout
-        // flow. The autosaved draft preserves the findings for the
-        // re-opened panel after payment.
+        // flow. Flush the draft synchronously first: the panel unmounts on
+        // detour, which cancels the debounced write and would lose edits
+        // made in the last 700ms.
+        if (draftSnapshotRef.current) {
+          try {
+            localStorage.setItem(
+              completionDraftKey(service.id),
+              JSON.stringify(draftSnapshotRef.current),
+            );
+          } catch { /* storage full — draft prompt simply won't restore */ }
+        }
         alert(
           "An invoice or payment is required before completing this one-time service." +
             (onBillingRequired ? " Opening checkout." : ""),

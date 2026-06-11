@@ -2411,6 +2411,7 @@ export default function DispatchPageV2({
           invoiceId={paymentData.invoiceId}
           invoiceToken={paymentData.invoiceToken}
           amount={paymentData.amount}
+          desktopVisible
           onClose={() => setPaymentData(null)}
           onInvoiceSent={() => {
             // Invoice SMS+email was just sent — the bill is now in the
@@ -2427,11 +2428,22 @@ export default function DispatchPageV2({
             setCompletingService(svc);
             fetchSchedule(date);
           }}
-          onChargeSuccess={() => {
+          onChargeSuccess={async () => {
+            // Card paths reopen completion like the invoice/cash/check
+            // paths do — otherwise a billing-409 detour that pays by card
+            // drops the tech back to the schedule with the visit still
+            // incomplete and the typed draft stranded.
+            const svc = {
+              ...paymentData.service,
+              checkoutInvoiceId: paymentData.invoiceId,
+              checkoutInvoiceStatus: "paid",
+            };
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            fetchSchedule(date);
+            const fresh = await fetchSchedule(date);
+            const updated = fresh?.services?.find((s) => s.id === svc.id);
+            setCompletingService(updated ? { ...updated, ...svc } : svc);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
             // Cash / Check tender marked the pre-minted invoice paid server-side;
