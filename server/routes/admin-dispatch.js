@@ -1608,10 +1608,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Typed specialty completion (dark until a type's profile is cut over to
     // completion_mode='service_report' with a project_type pointer).
-    // structuredFindings stays OPTIONAL at the endpoint — a stale client tab
-    // mid-deploy submits none and completes exactly like today. When the
-    // client DOES submit typed findings, they're validated fully (required
-    // fields, unknown keys, select values) against the registry.
+    // findingsType only exists POST-cutover, so typed findings are REQUIRED
+    // here for a completed visit: accepting a findings-less completion would
+    // let a stale or crafted client skip validation, the customer-copy
+    // snapshot, and the activity score entirely (pre-push Codex P0). A stale
+    // pre-deploy tab gets a clear 422 telling it to refresh — cutover
+    // migrations only run after the typed UI has shipped.
     const typedFindingsType = completionProfile?.findingsType || null;
     const typedIndicator = typedFindingsType
       ? ActivityIndicators.getActivityIndicator(typedFindingsType)
@@ -1620,6 +1622,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let typedChips = [];
     let typedActivityScore = null;
     let typedScoreSource = null;
+    if (typedFindingsType && !isIncompleteVisit && !oneTimeRecapOnly && structuredFindings == null) {
+      return res.status(422).json({
+        error: 'This service now completes with its service-specific findings form. Refresh the page and complete the visit again.',
+        code: 'typed_findings_required',
+        findingsType: typedFindingsType,
+      });
+    }
     if (typedFindingsType && structuredFindings != null && !isIncompleteVisit) {
       const findingsValidation = ActivityIndicators.validateTypedFindings({
         type: structuredFindings?.type,
