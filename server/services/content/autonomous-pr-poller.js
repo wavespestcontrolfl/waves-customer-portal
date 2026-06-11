@@ -19,11 +19,18 @@
  * opportunity_queue row is still in the exact parked review state (a human
  * requeue/dismiss in the review queue moves the queue row but not the run —
  * such runs are annotated out of the selection, never finalized):
- *   - PR merged (by human or by us)  → finalize: flip the run to
- *     completed_published with the canonical URL, submit IndexNow, and
- *     queue post-merge internal-link planning (new_supporting_blog only —
- *     rewrite/refresh/metadata targets already exist in the link corpus).
- *     Also best-effort completes the parked opportunity_queue row.
+ *   - PR merged (by human or by us)  → finalize ONLY once the target URL
+ *     can be resolved (draft_payload, falling back to the run's
+ *     content_briefs.target_url — metadata drafts carry title/meta only)
+ *     AND responds live (the hub's production build lags a merge by
+ *     30–45 min; completing earlier would count a broken/missing page as
+ *     published and trust-building): flip the run to completed_published
+ *     with that URL, submit IndexNow, and queue post-merge internal-link
+ *     planning (new_supporting_blog only — rewrite/refresh/metadata
+ *     targets already exist in the link corpus). Also best-effort
+ *     completes the parked opportunity_queue row. An unresolvable URL
+ *     fails closed: the run stays parked (logged each tick) rather than
+ *     completing without a URL.
  *   - PR closed unmerged             → flip the run to failed (no retry).
  *   - PR open + AUTONOMOUS_BLOG_AUTO_MERGE truthy → merge it OURSELVES
  *     (blog lane only), but only when the Cloudflare preview build for the
@@ -130,6 +137,53 @@ function targetForRun(run) {
 }
 
 /**
+ * targetForRun + a content_briefs fallback for the URL. Real
+ * rewrite_title_meta runs persist the raw emit_metadata_only draft (title +
+ * meta_description only — no page_url), so the target URL has to come from
+ * the brief the run was built from (content_briefs.target_url; the brief
+ * outlives the run via brief_id). Returns target.url === null when neither
+ * source resolves — callers fail closed on that.
+ */
+async function resolveTargetForRun(run) {
+  const target = targetForRun(run);
+  if (target.url || !run.brief_id) return target;
+  try {
+    const brief = await db('content_briefs')
+      .where('id', run.brief_id)
+      .first('target_url', 'target_keyword', 'city');
+    const briefUrl = String(brief?.target_url || '').trim();
+    if (briefUrl) {
+      target.url = briefUrl;
+      target.keyword = target.keyword || brief.target_keyword || null;
+      target.city = target.city || brief.city || null;
+    }
+  } catch (err) {
+    // Lookup blip → leave url null; finalizeMerged keeps the run parked and
+    // the next tick retries. Never guess a URL.
+    logger.warn(`[autonomous-pr-poller] content_briefs lookup failed for run ${run.id} (brief ${run.brief_id}): ${err.message}`);
+  }
+  return target;
+}
+
+/**
+ * Re-check (fresh read, not the tick-start snapshot) that the run's queue
+ * row is STILL parked. maybeAutoMerge calls this immediately before
+ * gh.mergePr: the Cloudflare/GitHub/Codex gates above it take seconds, and
+ * an operator requeue/dismiss landing in that window must win over the
+ * stale tick-start validation. Errors propagate (transient → caught by
+ * pollRun, retried next tick) so a lookup outage can never allow a merge.
+ */
+async function queueRowStillParked(run) {
+  if (!run.opportunity_id) return true;
+  const row = await db('opportunity_queue')
+    .where('id', run.opportunity_id)
+    .first('id', 'status', 'skip_reason');
+  return !!row
+    && row.status === 'pending_review'
+    && row.skip_reason === pendingSkipReasonForRun(run);
+}
+
+/**
  * Best-effort: the runner parked the opportunity_queue row at
  * status='pending_review' / skip_reason=<the run's parked reason> alongside
  * the run (astro_pr_pending_merge or metadata_pr_pending_merge).
@@ -208,9 +262,36 @@ async function supersedeRun(run, queueRow) {
  * side effects loses only belt-and-suspenders work (IndexNow is throttled/
  * relayed by Cloudflare anyway, link tasks are deduped on conflict), whereas
  * side effects before the claim could double-run them.
+ *
+ * Two fail-closed gates run BEFORE the claim:
+ *   - URL resolution: a run whose target URL cannot be resolved (draft +
+ *     brief both blank) stays parked and is logged every tick — never
+ *     completed_published with published_url=null (that would skip IndexNow
+ *     and hide the page from the post-publish visibility sweep).
+ *   - Live check: GitHub reporting "merged" only means the commit landed;
+ *     the hub's production build lags 30–45 min and can fail. The run stays
+ *     parked until the target URL actually responds (rewrite/refresh/
+ *     metadata targets are already-live pages, so they pass immediately),
+ *     so a broken deploy is never counted as published/trust-building and
+ *     IndexNow never pings a 404.
  */
 async function finalizeMerged(run, prNumber, { autoMerged = false } = {}) {
-  const target = targetForRun(run);
+  const target = await resolveTargetForRun(run);
+  if (!target.url) {
+    logger.warn(`[autonomous-pr-poller] run ${run.id} (PR #${prNumber} merged) has no resolvable target URL (draft + brief blank); leaving parked`);
+    return { pending: true, reason: 'target_url_unresolved', autoMerged };
+  }
+  try {
+    const { liveUrlResponds } = require('../content-astro/pages-poll');
+    if (!(await liveUrlResponds(target.url))) {
+      return { pending: true, reason: 'awaiting_live_deploy', url: target.url, autoMerged };
+    }
+  } catch (err) {
+    // Network blip on the HEAD check — transient, retry next tick.
+    logger.warn(`[autonomous-pr-poller] live check failed for ${target.url} (run ${run.id}): ${err.message}`);
+    return { pending: true, reason: 'live_check_failed', url: target.url, autoMerged };
+  }
+
   const now = new Date();
   const note = `${autoMerged ? 'Auto-merged' : 'PR merged'} (#${prNumber}); run completed by autonomous-pr-poller.`;
 
@@ -337,12 +418,25 @@ async function maybeAutoMerge(run, pr) {
     throw err; // lookup outage etc. — transient, retry next tick
   }
 
+  // 3. Last-instant queue re-check: the gates above take seconds of network
+  //    time, and the tick-start queue validation is stale by now. An
+  //    operator requeue/dismiss landing in that window must block the merge
+  //    (fresh read; a lookup error throws → transient, no merge).
+  if (!(await queueRowStillParked(run))) {
+    logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during gating (operator action)`);
+    return { pending: true, reason: 'queue_row_moved_during_gating' };
+  }
+
   await gh.mergePr(pr.number, {
     method: 'squash',
     title: String(pr.title || '').slice(0, 72),
   });
   logger.info(`[autonomous-pr-poller] auto-merged PR #${pr.number} for run ${run.id} (build green + Codex clear)`);
-  return finalizeMerged(run, pr.number, { autoMerged: true });
+  // finalizeMerged may legitimately stay pending here (production deploy of
+  // the merge takes 30–45 min) — `autoMerged` must still be true on the
+  // result so pollPending counts this tick's merge against the per-poll cap.
+  const finalized = await finalizeMerged(run, pr.number, { autoMerged: true });
+  return { ...finalized, autoMerged: true };
 }
 
 async function pollRun(run, { allowMerge = true } = {}) {
@@ -399,7 +493,7 @@ async function pollPending() {
       .whereNotNull('astro_pr_url')
       .orderBy('claimed_at', 'asc')
       .limit(25)
-      .select('id', 'opportunity_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes');
+      .select('id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes');
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
     return { count: 0, skipped: true, reason: err.message };
@@ -462,6 +556,8 @@ module.exports = {
     isMetadataLane,
     closedSkipReasonForRun,
     targetForRun,
+    resolveTargetForRun,
+    queueRowStillParked,
     finalizeMerged,
     finalizeClosed,
     reconcileQueueRow,

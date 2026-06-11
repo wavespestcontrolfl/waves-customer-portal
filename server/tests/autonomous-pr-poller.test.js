@@ -8,8 +8,11 @@
  * condition individually blocking; unknown deployment commit fails closed);
  * transient GitHub errors leave the row untouched; per-poll auto-merge cap;
  * runs whose opportunity_queue row was requeued/dismissed are superseded
- * (annotated, never finalized); the metadata_pr_pending_merge lane is
- * reconciled on merge/close but never auto-merged.
+ * (annotated, never finalized — re-checked immediately before any auto-
+ * merge); the metadata_pr_pending_merge lane is reconciled on merge/close
+ * but never auto-merged; merged runs only finalize once the target URL is
+ * resolvable (draft → content_briefs fallback, else fail closed) and
+ * responds live.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -22,6 +25,7 @@ jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
   extractStatus: jest.fn(),
   deploymentCommitSha: jest.fn(),
+  liveUrlResponds: jest.fn(),
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
@@ -80,8 +84,11 @@ function makeMetadataRun(overrides = {}) {
 // resolves the configured rows for its table, update records its call and
 // resolves the configured result. `queue` defaults to a row per pending run
 // in the exact parked state (status pending_review + the run's skip_reason);
-// pass an explicit array to simulate operator requeue/dismiss.
-function setupDb({ pending = [], queue, updateResult = 1 } = {}) {
+// pass an explicit array to simulate operator requeue/dismiss. `queueFirst`
+// overrides what the pre-merge .first() re-check sees (simulates an operator
+// action landing AFTER the tick-start snapshot). `briefs` backs the
+// content_briefs target_url fallback lookup.
+function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [] } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
@@ -102,6 +109,20 @@ function setupDb({ pending = [], queue, updateResult = 1 } = {}) {
       orderBy: jest.fn(() => q),
       limit: jest.fn(() => q),
       select: jest.fn(() => Promise.resolve(table === 'opportunity_queue' ? queueRows : pending)),
+      first: jest.fn(() => {
+        if (table === 'opportunity_queue') {
+          if (queueFirst !== undefined) {
+            return Promise.resolve(
+              Array.isArray(queueFirst) ? queueFirst.find((r) => r.id === q._filters.id) || null : queueFirst,
+            );
+          }
+          return Promise.resolve(queueRows.find((r) => r.id === q._filters.id) || null);
+        }
+        if (table === 'content_briefs') {
+          return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
+        }
+        return Promise.resolve(null);
+      }),
       update: jest.fn((u) => {
         updates.push({ table, filters: { ...q._filters }, updates: u });
         return Promise.resolve(
@@ -117,6 +138,12 @@ function setupDb({ pending = [], queue, updateResult = 1 } = {}) {
 function runUpdates(updates) {
   return updates.filter((u) => u.table === 'autonomous_runs');
 }
+
+beforeEach(() => {
+  // Default: merged targets respond live (production deploy already done).
+  // Individual tests override to exercise the awaiting_live_deploy gate.
+  pagesPoll.liveUrlResponds.mockResolvedValue(true);
+});
 
 afterEach(() => {
   jest.clearAllMocks();
@@ -217,6 +244,48 @@ describe('merged-by-human reconciliation', () => {
     expect(res.results[0].skipped).toBe(true);
     expect(indexNow.submit).not.toHaveBeenCalled();
     expect(publisher.planInternalLinksForTarget).not.toHaveBeenCalled();
+  });
+
+  test('merged but target URL not yet live: run stays parked, nothing finalized or indexed', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    pagesPoll.liveUrlResponds.mockResolvedValue(false);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_live_deploy', url: CANONICAL });
+    expect(pagesPoll.liveUrlResponds).toHaveBeenCalledWith(CANONICAL);
+    expect(runUpdates(updates)).toHaveLength(0);
+    expect(indexNow.submit).not.toHaveBeenCalled();
+    expect(publisher.planInternalLinksForTarget).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+  });
+
+  test('live check network blip: run stays parked, retried next tick (never failed)', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    pagesPoll.liveUrlResponds.mockRejectedValue(new Error('fetch timed out'));
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'live_check_failed' });
+    expect(runUpdates(updates)).toHaveLength(0);
+    expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
+  test('merged with NO resolvable target URL (draft + brief blank): fails closed, never completed_published with null URL', async () => {
+    const updates = setupDb({
+      pending: [makeRun({ brief_id: 'brief-1', draft_payload: JSON.stringify({ type: 'draft', frontmatter: {} }) })],
+      briefs: [{ id: 'brief-1', target_url: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'target_url_unresolved' });
+    expect(runUpdates(updates)).toHaveLength(0);
+    expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalled();
+    expect(indexNow.submit).not.toHaveBeenCalled();
   });
 });
 
@@ -403,6 +472,53 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(res.autoMerges).toBe(1);
     expect(res.results[1]).toMatchObject({ pending: true, mergeDeferred: true });
   });
+
+  test('operator action landing DURING gating (after tick-start snapshot) blocks the merge', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({
+      pending: [makeRun()],
+      // tick-start snapshot still parked; the fresh pre-merge re-check sees
+      // the operator's requeue
+      queueFirst: { id: 'opp-1', status: 'pending', skip_reason: null },
+    });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'queue_row_moved_during_gating' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('auto-merge with a lagging production deploy still consumes the per-poll cap', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [
+        makeRun(),
+        makeRun({ id: 'run-2', opportunity_id: 'opp-2', astro_pr_url: 'https://github.com/o/r/pull/43' }),
+      ],
+    });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    pagesPoll.liveUrlResponds.mockResolvedValue(false); // hub build lags 30-45m
+
+    const res = await poller.pollPending();
+
+    // the merge happened, finalization is pending until the URL is live —
+    // but the tick's merge budget is spent, so run-2 defers
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_live_deploy', autoMerged: true });
+    expect(res.autoMerges).toBe(1);
+    expect(res.results[1]).toMatchObject({ pending: true, mergeDeferred: true });
+  });
 });
 
 describe('review-queue supersession (requeue/dismiss)', () => {
@@ -513,6 +629,27 @@ describe('metadata_pr_pending_merge lane', () => {
       skip_reason: 'metadata_pr_pending_merge',
     });
     expect(queueUpdate.updates).toMatchObject({ status: 'done' });
+  });
+
+  test('real emit_metadata_only drafts (title/meta only) resolve the URL from content_briefs', async () => {
+    const updates = setupDb({
+      pending: [makeMetadataRun({
+        brief_id: 'brief-meta-1',
+        draft_payload: JSON.stringify({ type: 'metadata', title: 'New Title', meta_description: 'New meta.' }),
+      })],
+      briefs: [{ id: 'brief-meta-1', target_url: METADATA_PAGE_URL, target_keyword: 'pest control venice', city: 'Venice' }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    expect(runUpdates(updates)[0].updates).toMatchObject({
+      outcome: 'completed_published',
+      published_url: METADATA_PAGE_URL,
+    });
+    expect(indexNow.submit).toHaveBeenCalledWith(METADATA_PAGE_URL);
   });
 
   test('closed-unmerged metadata PR fails terminally with the metadata closed reason', async () => {
