@@ -67,8 +67,10 @@ describe('content-brief-builder operator-intercept injection', () => {
     expect(faqSections).toHaveLength(1);
     expect(faqSections[0]).toBe('FAQ block');
 
-    // Operator internal links are required verbatim.
-    expect(brief.internal_links_to_add).toEqual(payload.internal_links);
+    // Operator internal links lead the list verbatim, with the standard
+    // service-hub links merged after them (hub_link_present support).
+    expect(brief.internal_links_to_add.slice(0, payload.internal_links.length)).toEqual(payload.internal_links);
+    expect(brief.internal_links_to_add).toContain('/lawn-care/'); // lawn hub merged in
 
     // Schema: operator types + house Article/BreadcrumbList.
     for (const t of payload.schema_types) expect(brief.schema_types).toContain(t);

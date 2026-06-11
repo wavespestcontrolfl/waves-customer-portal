@@ -400,6 +400,25 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed_agent', failure_message: 'no draft from agent' });
     }
 
+    // 3a. Operator slug pin (machine-checked, not just prompt-binding). The
+    // intercept manifest declares the slug exact/binding; if the writer
+    // drifts, the fully-autonomous lane would otherwise publish a
+    // competitor-intercept post at the wrong URL (publishOrUpdatePage only
+    // validates canonical against the draft's OWN slug). Park for review —
+    // never auto-publish a mismatched URL.
+    if (opp.bucket === OPERATOR_INTERCEPT_BUCKET) {
+      const slugCheck = operatorSlugMismatch(brief, draft);
+      if (slugCheck) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'completed_pending_review',
+          skip_reason: 'operator_slug_mismatch',
+          reviewer_notes: `Writer slug "${slugCheck.draft_slug || '(none)'}" does not match the operator-pinned slug "${slugCheck.expected_slug}" — review/fix before publishing.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'operator_slug_mismatch', { claimToken });
+        return finalized;
+      }
+    }
+
     if (brief.action_type === 'rewrite_title_meta') {
       let result;
       try {
@@ -1229,8 +1248,21 @@ class AutonomousRunner {
     try {
       const seeder = getInterceptSeeder();
       if (!seeder?.snapshotSources) return;
-      const sources = opp.signal_metadata?.intercept_brief?.sources || [];
-      if (!Array.isArray(sources) || sources.length === 0) return;
+      // Capture BOTH the manifest's literal source URLs and the external
+      // links the writer actually cited in the body: several manifest
+      // sources are descriptive notes ("Orkin published terms/plan pages",
+      // "UF/IFAS for pre-treat longevity claims") whose live URLs only
+      // exist once the agent finds and links them — without the body sweep
+      // the publish-day archive audit is empty for exactly those claims.
+      const manifestSources = opp.signal_metadata?.intercept_brief?.sources || [];
+      const citedUrls = typeof seeder.externalUrlsFromMarkdown === 'function'
+        ? seeder.externalUrlsFromMarkdown(draft?.body || '')
+        : [];
+      const sources = Array.from(new Set([
+        ...(Array.isArray(manifestSources) ? manifestSources : []),
+        ...citedUrls,
+      ]));
+      if (sources.length === 0) return;
 
       const totalTimeout = envInt('INTERCEPT_SNAPSHOT_TOTAL_TIMEOUT_MS', 90_000);
       const result = await withTimeout(
@@ -2070,6 +2102,26 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
   return run;
 }
 
+/**
+ * operatorSlugMismatch(brief, draft) → null when OK, or
+ * { expected_slug, draft_slug } when an operator-pinned slug exists and the
+ * draft's frontmatter slug doesn't match it (or is missing). Refresh briefs
+ * carry no operator slug (payload.slug is null) so they skip the check.
+ * Pure — exported via _internals for unit tests.
+ */
+function operatorSlugMismatch(brief, draft) {
+  const expected = brief?.voice_constraints?.operator_brief?.slug || null;
+  if (!expected) return null;
+  const draftSlug = draft?.frontmatter?.slug || null;
+  if (draftSlug && normalizeSlugPath(draftSlug) === normalizeSlugPath(expected)) return null;
+  return { expected_slug: expected, draft_slug: draftSlug };
+}
+
+function normalizeSlugPath(slug) {
+  const trimmed = String(slug || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '');
+  return `/${trimmed}/`;
+}
+
 function countsTowardTrustBuild(row) {
   if (row?.outcome === 'completed_published') return true;
   return row?.outcome === 'completed_pending_review'
@@ -2309,6 +2361,7 @@ module.exports._internals = {
   isShadow,
   autoPublishEnabled,
   OPERATOR_INTERCEPT_BUCKET,
+  operatorSlugMismatch,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,

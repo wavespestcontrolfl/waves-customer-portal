@@ -544,8 +544,19 @@ class ContentBriefBuilder {
 
       required_sections: interceptOverlay ? interceptOverlay.required_sections : requiredSections,
       schema_types: interceptOverlay ? interceptOverlay.schema_types : schemaTypes,
+      // For intercept supporting blogs the operator links are REQUIRED and
+      // lead the list, but the standard service-hub links are merged in too —
+      // several manifest link maps carry no hub URL, and replacing the house
+      // links outright would leave the quality gate's hub_link_present check
+      // dependent on the writer inventing one. Refresh briefs keep the
+      // operator list verbatim (the editable surface is the existing page).
       internal_links_to_add: interceptOverlay
-        ? interceptOverlay.internal_links
+        ? (pageType === 'supporting-blog'
+          ? Array.from(new Set([
+            ...interceptOverlay.internal_links,
+            ...this._internalLinksFor(opportunity, pageType),
+          ]))
+          : interceptOverlay.internal_links)
         : this._internalLinksFor(opportunity, pageType),
       seo_requirements: buildSeoRequirements({
         page_type: pageType,

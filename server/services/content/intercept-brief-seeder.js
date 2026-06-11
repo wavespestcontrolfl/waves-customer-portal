@@ -210,6 +210,15 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
              expires_at = EXCLUDED.expires_at,
              available_at = EXCLUDED.available_at,
              action_type = EXCLUDED.action_type,
+             -- Target columns must follow the manifest too: the brief builder
+             -- reads opportunity.query/page_url/service for target_keyword /
+             -- target_url / guardrails, so a manifest edit (typo fix, slug or
+             -- service change) on an already-seeded id must not keep drafting
+             -- against the stale target.
+             query = EXCLUDED.query,
+             page_url = EXCLUDED.page_url,
+             service = EXCLUDED.service,
+             city = EXCLUDED.city,
              status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
                            THEN opportunity_queue.status
                            ELSE 'pending'
@@ -370,6 +379,37 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
 
 // ── archive.org snapshot-on-publish ──────────────────────────────────
 
+// Hosts that are never snapshot targets: our own pages and the archive
+// itself.
+const SNAPSHOT_EXCLUDED_HOST_RE = /(^|\.)wavespestcontrol\.com$|(^|\.)web\.archive\.org$/i;
+
+/**
+ * External evidence URLs the writer actually cited in the draft body.
+ * Several manifest sources are descriptive notes, not URLs ("Orkin published
+ * terms/plan pages (pull + snapshot at draft)", "UF/IFAS for pre-treat
+ * longevity claims") — the agent locates the live pages and links them
+ * in-post, so the publish-day archive audit must capture the body's external
+ * citations too, not only the manifest's literal URLs. Capped so a
+ * link-heavy draft can't stretch the fail-soft snapshot window.
+ */
+function externalUrlsFromMarkdown(markdown = '', { limit = 10 } = {}) {
+  const out = [];
+  const seen = new Set();
+  const re = /\]\((https?:\/\/[^)\s]+)\)/gi;
+  let match;
+  while ((match = re.exec(String(markdown || ''))) !== null) {
+    const url = match[1].replace(/[.,;]+$/, '');
+    let host;
+    try { host = new URL(url).hostname; } catch { continue; }
+    if (SNAPSHOT_EXCLUDED_HOST_RE.test(host)) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push(url);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 /**
  * snapshotSources(sources) — request a Wayback Machine capture of every
  * http(s) source URL via https://web.archive.org/save/<url>. STRICTLY
@@ -441,6 +481,7 @@ module.exports = {
   isOperatorIntercept,
   buildOperatorOverlay,
   snapshotSources,
+  externalUrlsFromMarkdown,
   _internals: {
     scoreForBrief,
     serviceForBrief,

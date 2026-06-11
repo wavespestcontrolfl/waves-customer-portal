@@ -117,6 +117,11 @@ describe('seedAll', () => {
     expect(sql).toMatch(/status IN \('claimed', 'done', 'pending_review'\)\s+THEN opportunity_queue\.status/);
     // available_at is written and refreshed on conflict.
     expect(sql).toMatch(/available_at/);
+    // Target columns follow manifest edits on re-seed too — the brief
+    // builder reads opportunity.query/page_url/service for targeting.
+    expect(sql).toMatch(/query = EXCLUDED\.query/);
+    expect(sql).toMatch(/page_url = EXCLUDED\.page_url/);
+    expect(sql).toMatch(/service = EXCLUDED\.service/);
     expect(bindings).toContain('intercept:v1:A0');
 
     // Same dedupe keys on both runs — idempotent by construction.
@@ -351,6 +356,56 @@ describe('snapshotSources', () => {
   });
 });
 
+// ── operator slug pin — machine-checked, not just prompt-binding ────
+
+describe('operatorSlugMismatch', () => {
+  const { operatorSlugMismatch } = require('../services/content/autonomous-runner')._internals;
+  const briefFor = (slug) => ({ voice_constraints: { operator_brief: { slug } } });
+
+  test('matching slugs (incl. slash/case normalization) pass', () => {
+    expect(operatorSlugMismatch(briefFor('/pest-control/can-another-company-service-taexx/'), {
+      frontmatter: { slug: '/pest-control/can-another-company-service-taexx/' },
+    })).toBeNull();
+    expect(operatorSlugMismatch(briefFor('/pest-control/x/'), {
+      frontmatter: { slug: 'pest-control/X' },
+    })).toBeNull();
+  });
+
+  test('a drifted or missing draft slug is reported for review parking', () => {
+    expect(operatorSlugMismatch(briefFor('/pest-control/a/'), { frontmatter: { slug: '/pest-control/b/' } }))
+      .toEqual({ expected_slug: '/pest-control/a/', draft_slug: '/pest-control/b/' });
+    expect(operatorSlugMismatch(briefFor('/pest-control/a/'), { frontmatter: {} }))
+      .toEqual({ expected_slug: '/pest-control/a/', draft_slug: null });
+  });
+
+  test('briefs without an operator slug (refresh / mined) skip the check', () => {
+    expect(operatorSlugMismatch(briefFor(null), { frontmatter: { slug: '/anything/' } })).toBeNull();
+    expect(operatorSlugMismatch({ voice_constraints: {} }, { frontmatter: { slug: '/anything/' } })).toBeNull();
+  });
+});
+
+// ── draft-cited external URLs feed the snapshotter ──────────────────
+
+describe('externalUrlsFromMarkdown', () => {
+  test('extracts external citation links, skipping own-domain/archive links and duplicates', () => {
+    const body = [
+      'Per [Orkin\'s terms](https://www.orkin.com/terms/), pricing is quote-based.',
+      'See our [termite page](/termite/termite-bond/) and [calculator](https://www.wavespestcontrol.com/pest-control-calculator/).',
+      'Snapshot: [archived](https://web.archive.org/web/2026/https://www.orkin.com/terms/).',
+      'Again [Orkin terms](https://www.orkin.com/terms/) and [IFAS](https://edis.ifas.ufl.edu/IG098).',
+    ].join('\n');
+    expect(seeder.externalUrlsFromMarkdown(body)).toEqual([
+      'https://www.orkin.com/terms/',
+      'https://edis.ifas.ufl.edu/IG098',
+    ]);
+  });
+
+  test('caps the number of extracted URLs', () => {
+    const body = Array.from({ length: 20 }, (_, i) => `[s${i}](https://example.com/p${i}/)`).join(' ');
+    expect(seeder.externalUrlsFromMarkdown(body, { limit: 5 })).toHaveLength(5);
+  });
+});
+
 // ── runner snapshot integration — fail-soft ─────────────────────────
 
 describe('autonomous-runner._snapshotInterceptSources', () => {
@@ -383,10 +438,16 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
       bucket: 'operator_intercept',
       signal_metadata: { intercept_brief: { sources: ['https://example.com/a/'] } },
     };
-    const draft = { body: 'x' };
+    // The draft cites a live URL the manifest only described — the runner
+    // must snapshot the union of manifest sources + body citations.
+    const draft = { body: 'Per [Orkin terms](https://www.orkin.com/terms/), pricing is quote-based.' };
     const run = {};
     await runner._snapshotInterceptSources(opp, draft, run);
 
+    expect(seeder.snapshotSources).toHaveBeenCalledWith([
+      'https://example.com/a/',
+      'https://www.orkin.com/terms/',
+    ]);
     expect(draft.source_snapshots).toEqual(snapshots);
     expect(run.draft_payload).toBe(draft);
     expect(where).toHaveBeenCalledWith('id', 'opp-1');

@@ -26,11 +26,11 @@
       "schema_types": ["Article", "FAQPage"],
       "thesis": "Promote the existing in-wall/Taexx post to cluster anchor.",
       "outline": [
-        "Add FAQPage schema",
         "Add internal links to A1/A2/A3 once live (this post becomes cluster anchor)",
         "Update title tag toward 'Taexx / in-wall pest control review' intent",
         "Add QUOTE CTA",
-        "Keep the existing voice"
+        "Keep the existing voice",
+        "NOTE: FAQPage schema addition is handled separately — the refresh lane deliberately freezes schema fields, so do not attempt schema changes in this refresh (the requested schema rides to the human reviewer via the reviewer note)"
       ],
       "sources": ["https://pestdefense.com/knowledgecenter/", "https://pestdefense.com/taexx/"],
       "internal_links": [],
@@ -114,7 +114,8 @@
         "When the builder warranty ends: WDO baseline inspection as the smart year-1 close-out (link WDO page)",
         "FAQ block"
       ],
-      "sources": ["UF/IFAS for pre-treat longevity claims (cite specific IFAS pages; do not assert unsourced)"],
+      "sources": [],
+      "source_notes": ["UF/IFAS for pre-treat longevity claims (cite specific IFAS pages; do not assert unsourced)"],
       "internal_links": ["/lawn-care/new-sod-care/", "/termite/termite-prevention-in-bradenton/", "/wdo-inspection-bradenton-fl/", "/termite-inspection/", "/pest-control/taexx-system-new-home-lakewood-ranch/", "/pest-control/can-another-company-service-taexx/"],
       "verify_notes": ["Pre-treat longevity numbers sourced to IFAS, not asserted."]
     },
@@ -218,7 +219,8 @@
         "Who should actually pick Orkin (honest segment — multi-state landlords, brand-requirement commercial) — honesty converts",
         "FAQ block"
       ],
-      "sources": ["Orkin published terms/plan pages (pull + snapshot at draft); cost aggregators only as secondary"],
+      "sources": [],
+      "source_notes": ["Orkin published terms/plan pages (pull + snapshot at draft); cost aggregators only as secondary"],
       "internal_links": ["/pest-control/cancel-pest-control-contract-florida/", "/pest-control-calculator/", "/pest-control/quarterly-pest-control/", "/pest-control/what-to-expect-pest-control-visit/"],
       "verify_notes": ["Zero unsourced claims about Orkin pricing — their pricing varies by franchise; frame as 'quote-based, varies by location,' cited."]
     },
@@ -323,7 +325,8 @@
         "What soil-test-gated, FAWN-timed, blackout-compliant service looks like month by month",
         "FAQ block"
       ],
-      "sources": ["https://www.nj.gov/oag/newsreleases06/pr20060808a.html", "https://www.bbb.org/us/tn/germantown/profile/lawn-maintenance/trugreen-0543-1000545/complaints", "UF/IFAS for agronomic claims", "county ordinance pages for blackout dates"],
+      "sources": ["https://www.nj.gov/oag/newsreleases06/pr20060808a.html", "https://www.bbb.org/us/tn/germantown/profile/lawn-maintenance/trugreen-0543-1000545/complaints"],
+      "source_notes": ["UF/IFAS for agronomic claims", "county ordinance pages for blackout dates"],
       "internal_links": ["/lawn-care/cancel-trugreen-swfl-alternative/", "/lawn-care-bradenton-fl/", "/lawn-care/fertilizer-blackout-manatee-county/", "/lawn-care/fertilizer-blackout-sarasota-county/", "/lawn-care/st-augustine-lawn-care-bradenton-fl/", "/lawn-care/soil-test-parrish-fl/", "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/"],
       "verify_notes": ["Agronomic mechanism claims cited to IFAS; 'worse after TruGreen' framed as mechanism explanation, never as a claim about any specific customer's lawn."]
     },
