@@ -9,6 +9,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
+const { WAVES_LOCATIONS } = require('../../config/locations');
 
 const WORKER = 'hermes';
 const SIGNUP_TYPES = ['directory', 'citation', 'social'];
@@ -117,6 +118,31 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   return { ok: true, status: patch.status || prospect.status, attempts };
 }
 
+/**
+ * Canonical NAP served with every /claim response so the worker never invents
+ * business details on a signup. Citations must match a GBP listing exactly —
+ * locations.js addresses/phones ARE the GBP-listed ones — so this maps only
+ * the public fields (no account ids, refresh-token env names, or resource names).
+ */
+function businessProfile() {
+  return {
+    brand: 'Waves Pest Control',
+    website: 'https://wavespestcontrol.com',
+    contact_email: process.env.HERMES_SIGNUP_EMAIL || 'contact@wavespestcontrol.com',
+    default_location_id: 'bradenton',
+    locations: WAVES_LOCATIONS.map((l) => ({
+      id: l.id,
+      name: l.name,
+      address: l.address,
+      phone: l.phone,
+      google_place_id: l.googlePlaceId,
+    })),
+    instructions: 'Use the default location for brand-wide directories. Only use another '
+      + 'listed location when the prospect targets that city. Never invent or reformat '
+      + 'an address, phone, or email — copy them exactly as given.',
+  };
+}
+
 /** Reclaim leases older than maxHours back to the pool (stuck-worker recovery). */
 async function sweepExpiredClaims(maxHours = 6) {
   const cutoff = new Date(Date.now() - maxHours * 3600 * 1000);
@@ -130,6 +156,6 @@ async function sweepExpiredClaims(maxHours = 6) {
 }
 
 module.exports = {
-  claim, report, sweepExpiredClaims, mapReportToPatch,
+  claim, report, sweepExpiredClaims, mapReportToPatch, businessProfile,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS,
 };
