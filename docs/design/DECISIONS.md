@@ -595,3 +595,13 @@ The tier price is the full customer total — there is **no separate setup charg
 **Verification:** scratch-DB replay at current main: flip / idempotent re-run (re-ensures internal_only) / down (exact restore incl. followup alert/3) / heal-from-deleted-profile — all verified by direct up()/down() calls.
 
 **Per-key resolution** follows the self-healed 20260611000012 pattern (flip / already / heal / absent / throw) — live catalogs are admin-mutable per environment, so cutover migrations never assert replay-derived counts.
+
+---
+
+## 2026-06-11 — Appointment-managed gating: full-cutover semantics (Phase-1b round 3)
+
+**Decision:** a project type is appointment-managed (unlinked/ad-hoc creation blocked, hidden from pickers) only when it has **fully** cut over — at least one active `service_report` profile AND no remaining active `project_required` profile of that type. Partially-cutover types (Phase 1's excluded `general_appointment`/`waveguard_initial_setup` keys, the Phase-1b single-key rodent shadow) stay creatable ad hoc, because legitimate project-backed services of that type still exist. The dual-entry risk lives on LINKED creation, which the per-service guard in `POST /admin/projects` already rejects independently (linked profile decides; bypass scoped to the profile's own type).
+
+**Disclosed behavior change:** unlinked `one_time_pest_treatment` project creation re-opens (the type is partially backed by the two excluded keys) — it had been blocked since the Phase-1 deploy. `pest_inspection`/`mosquito_event`/`palm_injection`/`one_time_lawn_treatment` remain fully cut over and blocked.
+
+**Also this round (Codex P1):** the auto-report **share** path (`POST /share/auto_report_<id>` + public `GET /shared/:token`) now 404s for suppressed typed reports (`typedReportDelivery !== 'auto_send'`) — ownership alone could previously mint a public PDF link for a hidden Phase-1b record, bypassing the four-surface suppression.

@@ -875,6 +875,19 @@ router.post('/share/:id', authenticate, async (req, res, next) => {
         .first()
         .catch(() => null);
       if (!svc) return res.status(404).json({ error: 'Document not found' });
+      // Suppressed typed reports (internal_only shadow / disabled kill
+      // switch) are not shareable either — ownership alone isn't enough,
+      // or a crafted share request mints a public PDF link for a record
+      // every other customer surface hides.
+      let shareNotes = {};
+      try {
+        shareNotes = typeof svc.structured_notes === 'string'
+          ? JSON.parse(svc.structured_notes)
+          : (svc.structured_notes || {});
+      } catch { shareNotes = {}; }
+      if (shareNotes.typedReportDelivery && shareNotes.typedReportDelivery !== 'auto_send') {
+        return res.status(404).json({ error: 'Document not found' });
+      }
     } else {
       const doc = await db('customer_documents')
         .where({ id: docId, customer_id: req.customerId })
@@ -949,6 +962,18 @@ router.get('/shared/:token', async (req, res, next) => {
         )
         .first();
       if (!service) return res.status(404).json({ error: 'Document not found' });
+
+      // Defense in depth: even a previously-minted share link must not
+      // render a suppressed typed report (internal_only / disabled).
+      let sharedNotes = {};
+      try {
+        sharedNotes = typeof service.structured_notes === 'string'
+          ? JSON.parse(service.structured_notes)
+          : (service.structured_notes || {});
+      } catch { sharedNotes = {}; }
+      if (sharedNotes.typedReportDelivery && sharedNotes.typedReportDelivery !== 'auto_send') {
+        return res.status(404).json({ error: 'Document not found' });
+      }
 
       const customer = await db('customers').where({ id: link.customer_id }).first();
       if (!customer) return res.status(404).json({ error: 'Document not found' });

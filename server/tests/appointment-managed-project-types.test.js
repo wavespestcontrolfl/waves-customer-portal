@@ -10,14 +10,22 @@ const {
   V1_EXCLUDED_PROJECT_TYPES,
 } = require('../services/service-completion-profiles');
 
-function makeKnex({ rows = [], hasTable = true, throwOnQuery = false } = {}) {
+function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = false } = {}) {
+  // The helper now runs two distinct() queries — project_required rows
+  // (still-backed types) first, then service_report rows. Discriminate on
+  // the captured where() mode so each query gets its own row set.
   const knex = jest.fn(() => {
+    let mode = null;
     const chain = {
-      where: jest.fn(() => chain),
+      where: jest.fn((args) => {
+        if (args && args.completion_mode) mode = args.completion_mode;
+        return chain;
+      }),
       whereNotNull: jest.fn(() => chain),
+      whereNotIn: jest.fn(() => chain),
       distinct: jest.fn(async () => {
         if (throwOnQuery) throw new Error('boom');
-        return rows;
+        return mode === 'project_required' ? backedRows : rows;
       }),
     };
     return chain;
@@ -43,6 +51,19 @@ describe('appointmentManagedProjectTypes', () => {
   test('fails open to empty set when the table is missing or the query errors', async () => {
     expect((await appointmentManagedProjectTypes(makeKnex({ hasTable: false }))).size).toBe(0);
     expect((await appointmentManagedProjectTypes(makeKnex({ throwOnQuery: true }))).size).toBe(0);
+  });
+
+  // Phase-1b shadow flips ONE rodent key while sibling rodent services stay
+  // project_required — the type is only partially cut over, so ad hoc rodent
+  // project creation must stay available (linked creation is independently
+  // guarded by the linked service's profile).
+  test('partially-cutover types (some keys still project_required) are not managed', async () => {
+    const knex = makeKnex({
+      rows: [{ project_type: 'rodent_trapping' }, { project_type: 'cockroach' }],
+      backedRows: [{ project_type: 'rodent_trapping' }],
+    });
+    const managed = await appointmentManagedProjectTypes(knex);
+    expect(managed).toEqual(new Set(['cockroach']));
   });
 
   // wdo_inspection completion is compliance machinery (licensee e-signature
