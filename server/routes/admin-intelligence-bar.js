@@ -79,6 +79,10 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // not just the Communications page.
 const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS];
 
+// Writes that the REST equivalents guard with requireAdmin — technician
+// tokens must not reach them through the intelligence bar either.
+const ADMIN_ONLY_TOOL_NAMES = new Set(['create_customer']);
+
 // Tool calls whose inputs/outputs carry customer PII (names, phones, emails,
 // addresses, SMS bodies). Their params and the surrounding prompt/response
 // are redacted from logs and query telemetry per the PII-in-logs rule.
@@ -774,6 +778,10 @@ router.post('/query', async (req, res, next) => {
           result = { error: 'Admin access required for dashboard intelligence' };
           failed = true;
           errorMessage = result.error;
+        } else if (ADMIN_ONLY_TOOL_NAMES.has(toolUse.name) && req.techRole !== 'admin') {
+          result = { error: 'Admin access required for this action' };
+          failed = true;
+          errorMessage = result.error;
         } else if (CONFIRMED_ACTION_TOOL_NAMES.has(toolUse.name)) {
           result = { error: 'Explicit confirmation is required for this action. Use the confirmed action endpoint.' };
           failed = true;
@@ -884,6 +892,9 @@ router.post('/execute', async (req, res, next) => {
     }
     if (BANKING_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for banking actions' });
+    }
+    if (ADMIN_ONLY_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required for this action' });
     }
     if (SEO_CONFIRMED_ACTION_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for SEO actions' });
