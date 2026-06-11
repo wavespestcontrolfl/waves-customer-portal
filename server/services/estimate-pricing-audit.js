@@ -370,7 +370,13 @@ function visitsFor(line, result) {
   if (line.serviceKey === 'lawn_care') return Number(result?.results?.lawn?.find((x) => x.recommended)?.v || 9);
   if (line.serviceKey === 'mosquito') return 12;
   if (line.serviceKey === 'pest_control') return Number(result?.results?.pest?.apps || 4);
-  if (line.serviceKey === 'tree_shrub') return Number(result?.results?.ts?.[0]?.v || 9);
+  if (line.serviceKey === 'tree_shrub') {
+    // Use the selected/recommended row, not ts[0] — Light (4 visits) now sorts
+    // ahead of Standard, so ts[0] would understate visits for a Standard plan.
+    const ts = Array.isArray(result?.results?.ts) ? result.results.ts : [];
+    const chosen = ts.find((x) => x?.selected) || ts.find((x) => x?.recommended) || ts[0];
+    return Number(chosen?.v || 6);
+  }
   if (line.serviceKey === 'rodent_bait') return 4;
   if (line.serviceKey === 'termite_bait') return 1;
   return 1;

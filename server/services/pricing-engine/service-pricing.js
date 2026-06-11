@@ -2230,6 +2230,10 @@ function priceTreeShrub(property, options = {}) {
     recommended: tier === recommendedTier,
     availableTiers: Object.keys(TREE_SHRUB.tiers),
     frequency,
+    // Expose visitsPerYear (mirrors `frequency`) so cost/audit consumers that
+    // key off visits — admin-pricing-config margin preview, estimate-pricing
+    // -audit visitsFor — read the real cadence instead of a stale fallback.
+    visitsPerYear: frequency,
     bedArea,
     bedAreaUsed: bedArea,
     bedAreaSource: bedAreaInfo.bedAreaSource,

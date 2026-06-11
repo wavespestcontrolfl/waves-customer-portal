@@ -7834,12 +7834,25 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
             includedAtThisFrequency: true,
           },
         ],
+        // Per-service treatment detail so a selected T&S cadence (Light 4x or
+        // Standard 6x) carries its real visit count into the slot profile /
+        // first-visit math, mirroring lawn — otherwise the slot path falls back
+        // to the stored Standard row and notes can say 6x at the Light price.
+        perServiceTreatments: perTreatment != null ? [{
+          service: 'tree_shrub',
+          label: 'Tree & Shrub',
+          perTreatment,
+          displayPrice: perTreatment,
+          visitsPerYear: visits,
+        }] : [],
         addOns: [],
       };
     })
     .filter(Boolean)
     .sort((a, b) => {
-      const order = { standard: 0, enhanced: 1 };
+      // Ascending cadence: Light (4) before Standard (6), matching the engine
+      // result order and the pest/lawn cadence-slider convention.
+      const order = { light: 0, standard: 1, enhanced: 2 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
 }
