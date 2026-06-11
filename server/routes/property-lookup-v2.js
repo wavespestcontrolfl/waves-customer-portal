@@ -17,6 +17,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 
@@ -175,14 +176,29 @@ async function performPropertyLookup(address) {
       const closeUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=19&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const wideUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
 
+      // Vision-only parcel overlay: the base64 images the models analyze get
+      // the parcel boundary drawn on them; the client-facing URLs above stay
+      // clean so the estimator shows the property 1:1. Oversized paths drop
+      // the overlay rather than break the image fetch.
+      const overlayParam = parcelOverlayEnabled()
+        ? buildParcelOverlayParam(result.propertyRecord?._parcel?.polygon)
+        : null;
+      const withOverlay = (url) => {
+        if (!overlayParam) return url;
+        const overlaid = `${url}&${overlayParam}`;
+        return overlaid.length <= STATIC_MAP_MAX_URL_LENGTH ? overlaid : url;
+      };
+      const overlayApplied = Boolean(overlayParam)
+        && `${microCloseUrl}&${overlayParam}`.length <= STATIC_MAP_MAX_URL_LENGTH;
+
       const [microCloseB64, ultraCloseB64, superCloseB64, closeB64, wideB64] = await Promise.all([
-        fetchImageAsBase64(microCloseUrl, timing.imageTimeoutMs).catch(() => null),
-        fetchImageAsBase64(ultraCloseUrl, timing.imageTimeoutMs).catch(() => null),
-        fetchImageAsBase64(superCloseUrl, timing.imageTimeoutMs).catch(() => null),
-        fetchImageAsBase64(closeUrlWithKey, timing.imageTimeoutMs).catch(() => null),
-        fetchImageAsBase64(wideUrlWithKey, timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(withOverlay(microCloseUrl), timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(withOverlay(ultraCloseUrl), timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(withOverlay(superCloseUrl), timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(withOverlay(closeUrlWithKey), timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(withOverlay(wideUrlWithKey), timing.imageTimeoutMs).catch(() => null),
       ]);
-      console.log(`[property-lookup] Satellite images: micro=${!!microCloseB64}, ultra=${!!ultraCloseB64}, super=${!!superCloseB64}, close=${!!closeB64}, wide=${!!wideB64}`);
+      console.log(`[property-lookup] Satellite images: micro=${!!microCloseB64}, ultra=${!!ultraCloseB64}, super=${!!superCloseB64}, close=${!!closeB64}, wide=${!!wideB64}, parcelOverlay=${overlayApplied}`);
 
       result.satellite = {
         lat, lng,
@@ -197,7 +213,8 @@ async function performPropertyLookup(address) {
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
         _closeB64: closeB64,
-        _wideB64: wideB64
+        _wideB64: wideB64,
+        _parcelOverlayApplied: overlayApplied
       };
     }
   } catch (err) {
@@ -208,6 +225,7 @@ async function performPropertyLookup(address) {
   const visionBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
   const visionTimeoutMs = Math.min(timing.visionProviderTimeoutMs, visionBudgetMs);
   if (result.satellite?._closeB64 && result.satellite?._wideB64 && visionBudgetMs >= timing.visionMinRemainingMs) {
+    const visionContext = buildVisionContext(result.satellite, result.propertyRecord?._parcel);
     const [claudeResult, openaiResult, geminiResult] = await Promise.allSettled([
       // Claude Vision
       (async () => {
@@ -229,7 +247,8 @@ async function performPropertyLookup(address) {
             result.satellite._superCloseB64,
             result.satellite._ultraCloseB64,
             result.satellite._microCloseB64,
-            visionTimeoutMs
+            visionTimeoutMs,
+            visionContext
           );
           console.log(`[CLAUDE DEBUG] Success! Confidence: ${claudeAnalysis?.confidenceScore || 'N/A'}%`);
           return claudeAnalysis;
@@ -258,7 +277,8 @@ async function performPropertyLookup(address) {
             ].filter(Boolean),
             result.propertyRecord,
             address,
-            visionTimeoutMs
+            visionTimeoutMs,
+            visionContext
           );
           console.log(`[OPENAI DEBUG] Success! Confidence: ${openaiAnalysis?.confidenceScore || 'N/A'}%`);
           return openaiAnalysis;
@@ -290,7 +310,8 @@ async function performPropertyLookup(address) {
             result.propertyRecord,
             address,
             geminiKey,
-            visionTimeoutMs
+            visionTimeoutMs,
+            visionContext
           );
           console.log(`[GEMINI DEBUG] Success! Confidence: ${geminiAnalysis?.confidenceScore || 'N/A'}%`);
           return geminiAnalysis;
@@ -325,6 +346,7 @@ async function performPropertyLookup(address) {
 
     if (analyses.length) {
       result.aiAnalysis = mergeAiAnalyses(analyses);
+      applyParcelTurfBound(result.aiAnalysis, result.propertyRecord);
       logger.info('[property-lookup] Trio AI analysis complete', {
         sources: result.aiAnalysis._sources,
         confidence: result.aiAnalysis.confidenceScore,
@@ -468,6 +490,89 @@ function normalizeRoof(raw) {
 
 
 // ─────────────────────────────────────────────
+// PARCEL OVERLAY + IMAGE SCALE (vision grounding)
+// ─────────────────────────────────────────────
+// Google Static Maps rejects URLs beyond 16384 chars; leave headroom for the
+// base URL + key.
+const STATIC_MAP_MAX_URL_LENGTH = 16000;
+const PARCEL_OVERLAY_MAX_POINTS = 100;
+
+function parcelOverlayEnabled() {
+  const flag = process.env.PROPERTY_LOOKUP_PARCEL_OVERLAY;
+  return !(flag === '0' || flag === 'false' || flag === 'off');
+}
+
+// Static Maps `path` param drawing the parcel's outer boundary in red.
+// Returns null when there is no usable polygon — callers fall back to clean
+// images and the no-outline prompt wording together.
+function buildParcelOverlayParam(polygon) {
+  const ring = outerRing(polygon);
+  if (!ring || ring.length < 4) return null;
+  const simplified = simplifyRing(ring, PARCEL_OVERLAY_MAX_POINTS)
+    .filter((point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+  if (simplified.length < 4) return null;
+
+  const points = [...simplified];
+  const [firstLng, firstLat] = points[0];
+  const [lastLng, lastLat] = points[points.length - 1];
+  if (firstLng !== lastLng || firstLat !== lastLat) points.push(points[0]);
+
+  // Static Maps wants lat,lng; GIS rings are [lng, lat].
+  const path = ['color:0xff0000ff', 'weight:3',
+    ...points.map(([pLng, pLat]) => `${pLat.toFixed(6)},${pLng.toFixed(6)}`),
+  ].join('|');
+  return `path=${encodeURIComponent(path)}`;
+}
+
+// 640px-image ground width in feet at a zoom level: Google's Web Mercator
+// scale is 156543.03392 m/px at zoom 0, halving per zoom, scaled by cos(lat).
+function imageWidthFt(zoom, lat) {
+  const metersPerPixel = (156543.03392 * Math.cos((lat * Math.PI) / 180)) / (2 ** zoom);
+  return metersPerPixel * 640 * 3.28084;
+}
+
+// Scale + parcel-outline context shared by all three vision prompts. The
+// scale lines turn absolute-sqft questions (estimatedTurfSf, bed area) from
+// unconstrained guesses into bounded measurement; the outline block only
+// appears when the overlay actually made it onto the images.
+function buildVisionContext(satellite, parcel) {
+  if (!satellite || !Number.isFinite(satellite.lat)) return null;
+  const slots = [
+    ['MICRO CLOSE (zoom 22)', 22, satellite._microCloseB64],
+    ['ULTRA CLOSE (zoom 21)', 21, satellite._ultraCloseB64],
+    ['SUPER CLOSE (zoom 20)', 20, satellite._superCloseB64],
+    ['CLOSE (zoom 19)', 19, satellite._closeB64],
+    ['WIDE (zoom 18)', 18, satellite._wideB64],
+  ];
+  const scaleLines = slots
+    .filter(([, , b64]) => Boolean(b64))
+    .map(([label, zoom]) => `- ${label}: ~${Math.round(imageWidthFt(zoom, satellite.lat))} ft across`);
+  if (!scaleLines.length) return null;
+  return {
+    scaleLines,
+    hasParcelOutline: satellite._parcelOverlayApplied === true,
+    parcelAreaSqft: parcel?.polygonAreaSqft || null,
+  };
+}
+
+function visionContextPromptBlock(visionContext) {
+  if (!visionContext) return '';
+  const lines = [
+    '',
+    'IMAGE SCALE (each image is 640px square):',
+    ...visionContext.scaleLines,
+  ];
+  if (visionContext.hasParcelOutline) {
+    lines.push('');
+    lines.push('PARCEL BOUNDARY: the subject parcel is outlined in RED on each image. Measure ONLY inside the red outline — neighboring yards, sidewalks, and streets outside it are NOT part of this property.');
+    if (visionContext.parcelAreaSqft) {
+      lines.push(`The outlined parcel is ~${visionContext.parcelAreaSqft} sq ft total, so estimatedTurfSf MUST be below that.`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// ─────────────────────────────────────────────
 // GEOCODE
 // ─────────────────────────────────────────────
 // Shapes one Google geocoder result into the geo context consumed by the
@@ -491,6 +596,9 @@ function parseGeocodeResult(result) {
     city: city ? city.long_name : null,
     zip: zip ? zip.long_name : null,
     partialMatch: result.partial_match === true,
+    // ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE — the GIS
+    // parcel match only trusts rooftop-grade points.
+    locationType: result.geometry.location_type || null,
   };
 }
 
@@ -539,7 +647,7 @@ async function fetchImageAsBase64(url, timeoutMs = DEFAULT_IMAGE_TIMEOUT_MS) {
 // ─────────────────────────────────────────────
 // CLAUDE VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithClaude(closeB64, wideB64, propertyRecord, address, superCloseB64, ultraCloseB64, microCloseB64, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS) {
+async function analyzeWithClaude(closeB64, wideB64, propertyRecord, address, superCloseB64, ultraCloseB64, microCloseB64, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS, visionContext = null) {
   const rcContext = propertyRecord ? `
 Property record for this address:
 - Address: ${propertyRecord.formattedAddress}
@@ -579,7 +687,7 @@ Respond ONLY with a JSON object. No markdown, no explanation, no backticks.`;
 
   const userPrompt = `Analyze these two satellite images of a property at: ${address}
 
-${rcContext}
+${rcContext}${visionContextPromptBlock(visionContext)}
 
 Return a JSON object with exactly these fields:
 
@@ -791,8 +899,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     imperviousSurfacePercent,
     imperviosSurfacePercent: imperviousSurfacePercent,
     estimatedTurfSf: ai?.estimatedTurfSf || 0,
+    turfCappedToParcel: ai?.turfCappedToParcel === true,
+    _turfPreCapSf: ai?._turfPreCapSf,
     turfCondition: ai?.turfCondition || 'UNKNOWN',
     possibleGrassType: ai?.possibleGrassType || 'UNKNOWN',
+
+    // ── PARCEL (GIS match, when available) ──
+    parcel: rc?._parcel ? {
+      parcelId: rc._parcel.parcelId,
+      county: rc._parcel.county,
+      areaSqft: rc._parcel.polygonAreaSqft || rc._parcel.lotSqft || null,
+      source: 'fdor_cadastral',
+    } : null,
 
     // ── BED MATERIAL ──
     bedMaterial: ai?.bedMaterial || 'UNKNOWN',
@@ -1018,10 +1136,71 @@ function selectedTurfPricedServices(selectedServices = []) {
     .filter((service) => TURF_PRICED_SERVICES.has(service));
 }
 
+// The parcel-derived hard ceiling for treatable turf: GIS polygon area when
+// the parcel matched, else the merged lot size when it came from
+// county-grade evidence (a listing's lot guess is not a bound).
+function parcelTurfBoundSqft(propertyRecord) {
+  if (!propertyRecord) return null;
+  const polygonArea = firstNonNegativeNumber(propertyRecord._parcel?.polygonAreaSqft, propertyRecord._parcel?.lotSqft);
+  if (polygonArea) return { areaSqft: polygonArea, source: 'parcel_polygon' };
+  const lotEvidence = propertyRecord._fieldEvidence?.lotSize;
+  const lotSize = firstNonNegativeNumber(propertyRecord.lotSize);
+  if (lotSize && ['county', 'cadastral'].includes(lotEvidence?.sourceType)) {
+    return { areaSqft: lotSize, source: lotEvidence.sourceType };
+  }
+  return null;
+}
+
+// Deterministic turf bound: treatable turf can never exceed the parcel.
+// Residential non-condo only — condo/HOA service legitimately treats shared
+// turf beyond the unit's own parcel. Mutates the merged aiAnalysis in place
+// (pre-cap value kept for provenance; turfRiskReasons surfaces the clamp so
+// the field-verify flag still fires even though the value is now bounded).
+function applyParcelTurfBound(aiAnalysis, propertyRecord) {
+  if (!aiAnalysis || !propertyRecord) return aiAnalysis;
+
+  const propertyUse = String(aiAnalysis.propertyUse || '').toUpperCase();
+  if (propertyUse && !['RESIDENTIAL', 'UNKNOWN'].includes(propertyUse)) return aiAnalysis;
+  // A structured commercial subtype (HOA_COMMON_AREA etc.) marks the profile
+  // commercial downstream even when propertyUse stayed RESIDENTIAL/UNKNOWN —
+  // mirror that signal here so shared turf is never pre-clamped to one
+  // parcel before the commercial path takes over.
+  const commercialUseType = String(aiAnalysis.commercialUseType || '').toUpperCase();
+  if (commercialUseType
+      && !['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'].includes(commercialUseType)) {
+    return aiAnalysis;
+  }
+  const propertyType = String(propertyRecord.propertyType || '').toUpperCase();
+  if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
+
+  const bound = parcelTurfBoundSqft(propertyRecord);
+  if (!bound) return aiAnalysis;
+
+  const estimatedTurfSf = firstNonNegativeNumber(aiAnalysis.estimatedTurfSf);
+  if (estimatedTurfSf === undefined || estimatedTurfSf <= bound.areaSqft) return aiAnalysis;
+
+  aiAnalysis._turfPreCapSf = estimatedTurfSf;
+  aiAnalysis.estimatedTurfSf = Math.round(bound.areaSqft);
+  aiAnalysis.turfCappedToParcel = true;
+  aiAnalysis.turfCapSource = bound.source;
+  const note = `AI turf estimate ${Math.round(estimatedTurfSf).toLocaleString()} sq ft exceeded the ${Math.round(bound.areaSqft).toLocaleString()} sq ft parcel area — clamped to the parcel.`;
+  aiAnalysis.analysisNotes = [aiAnalysis.analysisNotes, note].filter(Boolean).join(' ');
+  logger.info('[property-lookup] turf estimate clamped to parcel area', {
+    preCapSf: estimatedTurfSf,
+    parcelAreaSqft: Math.round(bound.areaSqft),
+    source: bound.source,
+  });
+  return aiAnalysis;
+}
+
 function turfRiskReasons(source = {}) {
   const reasons = [];
   const lotSqFt = firstNonNegativeNumber(source.lotSqFt, source.lotSize);
   const estimatedTurfSf = firstNonNegativeNumber(source.estimatedTurfSf, source.estimatedTurfSqFt);
+  if (source.turfCappedToParcel === true) {
+    const preCap = firstNonNegativeNumber(source._turfPreCapSf);
+    reasons.push(`AI turf exceeded parcel area — clamped to ${estimatedTurfSf !== undefined ? Math.round(estimatedTurfSf).toLocaleString() : 'parcel'} sq ft${preCap !== undefined ? ` (AI estimated ${Math.round(preCap).toLocaleString()})` : ''}`);
+  }
   const aiConfidence = firstNonNegativeNumber(source.aiConfidence, source.confidenceScore);
   const treeDensity = String(source.treeDensity || '').toUpperCase();
   const nearWater = String(source.nearWater || source.waterProximity || '').toUpperCase();
@@ -2132,9 +2311,9 @@ router.post('/calculate-estimate', async (req, res) => {
 // ─────────────────────────────────────────────
 // OPENAI VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithOpenAI(imageB64s, propertyRecord, address, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS) {
+async function analyzeWithOpenAI(imageB64s, propertyRecord, address, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS, visionContext = null) {
   const content = [
-    { type: 'input_text', text: buildSatelliteVisionPrompt(address, propertyRecord) },
+    { type: 'input_text', text: buildSatelliteVisionPrompt(address, propertyRecord, visionContext) },
     ...imageB64s.map((imageB64) => ({
       type: 'input_image',
       image_url: `data:image/png;base64,${imageB64}`,
@@ -2181,8 +2360,8 @@ async function analyzeWithOpenAI(imageB64s, propertyRecord, address, timeoutMs =
 // ─────────────────────────────────────────────
 // GEMINI VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithGemini(imageB64s, propertyRecord, address, apiKey, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS) {
-  const prompt = buildSatelliteVisionPrompt(address, propertyRecord);
+async function analyzeWithGemini(imageB64s, propertyRecord, address, apiKey, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS, visionContext = null) {
+  const prompt = buildSatelliteVisionPrompt(address, propertyRecord, visionContext);
 
   const timeout = createFetchTimeout(timeoutMs);
   let data;
@@ -2313,9 +2492,9 @@ function normalizeSatelliteAnalysis(analysis = {}) {
   return normalized;
 }
 
-function buildSatelliteVisionPrompt(address, propertyRecord) {
+function buildSatelliteVisionPrompt(address, propertyRecord, visionContext = null) {
   const rcContext = propertyRecord ? `Property record: ${propertyRecord.formattedAddress || address}, ${propertyRecord.squareFootage || 'unknown'} sf, ${propertyRecord.lotSize || 'unknown'} sf lot, built ${propertyRecord.yearBuilt || 'unknown'}, ${propertyRecord.stories || 'unknown'} story, pool record: ${propertyRecord.hasPool ? 'YES' : 'NO'}, construction: ${propertyRecord.constructionMaterial || 'UNKNOWN'}, foundation: ${propertyRecord.foundationType || 'UNKNOWN'}` : 'No public property record available.';
-  return `Analyze these satellite images of a Southwest Florida property at ${address}. Closest images come first and should carry the most weight. ${rcContext}
+  return `Analyze these satellite images of a Southwest Florida property at ${address}. Closest images come first and should carry the most weight. ${rcContext}${visionContextPromptBlock(visionContext)}
 
 For pool cages, classify the visible screen enclosure service burden. SMALL is a compact lanai/cage under roughly 300 sq ft, MEDIUM is a typical 300-600 sq ft enclosure, LARGE is roughly 600-900 sq ft or clearly larger than a standard cage, and OVERSIZED is a very large or multi-section enclosure. If poolCage is not YES, return poolCageSize as NONE.
 
@@ -2384,5 +2563,13 @@ module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports._private = {
+  applyParcelTurfBound,
+  buildParcelOverlayParam,
+  buildSatelliteVisionPrompt,
+  buildVisionContext,
+  imageWidthFt,
+  parcelTurfBoundSqft,
   parseGeocodeResult,
+  turfRiskReasons,
+  visionContextPromptBlock,
 };
