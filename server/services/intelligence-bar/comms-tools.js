@@ -147,6 +147,19 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
 ];
 
+// Read-only subset loaded into every admin context (not just the Communications
+// page) so any page can pull SMS/call history for a customer. Write tools
+// (send_sms) and comms-page-specific tools stay comms-only.
+const COMMS_READ_TOOL_NAMES = new Set([
+  'get_unanswered_threads',
+  'get_conversation_thread',
+  'search_messages',
+  'get_sms_stats',
+  'get_call_log',
+  'get_todays_activity',
+]);
+const COMMS_READ_TOOLS = COMMS_TOOLS.filter(t => COMMS_READ_TOOL_NAMES.has(t.name));
+
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
@@ -737,4 +750,4 @@ async function getTodaysActivity() {
 }
 
 
-module.exports = { COMMS_TOOLS, executeCommsTool };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool };

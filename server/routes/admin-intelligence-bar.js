@@ -24,7 +24,7 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
-const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
+const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
@@ -73,6 +73,11 @@ const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
 const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
+
+// Base toolset for every admin context: core customer/schedule/revenue tools
+// plus read-only comms tools, so SMS/call history is visible from any page —
+// not just the Communications page.
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS];
 
 function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
@@ -529,45 +534,46 @@ RESPONSE STYLE:
 
 function getToolsForContext(context) {
   if (context === 'schedule' || context === 'dispatch') {
-    return [...TOOLS, ...SCHEDULE_TOOLS];
+    return [...BASE_TOOLS, ...SCHEDULE_TOOLS];
   }
   if (context === 'dashboard') {
-    return [...TOOLS, ...DASHBOARD_TOOLS];
+    return [...BASE_TOOLS, ...DASHBOARD_TOOLS];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...TOOLS, ...SEO_QUERY_TOOLS];
+    return [...BASE_TOOLS, ...SEO_QUERY_TOOLS];
   }
   if (context === 'procurement' || context === 'inventory') {
-    return [...TOOLS, ...PROCUREMENT_TOOLS];
+    return [...BASE_TOOLS, ...PROCUREMENT_TOOLS];
   }
   if (context === 'revenue') {
-    return [...TOOLS, ...REVENUE_TOOLS];
+    return [...BASE_TOOLS, ...REVENUE_TOOLS];
   }
   if (context === 'reviews') {
-    return [...TOOLS, ...REVIEW_TOOLS];
+    return [...BASE_TOOLS, ...REVIEW_TOOLS];
   }
   if (context === 'comms') {
+    // Full comms set already includes the read tools — don't double-load
     return [...TOOLS, ...COMMS_TOOLS];
   }
   if (context === 'tax') {
-    return [...TOOLS, ...TAX_TOOLS];
+    return [...BASE_TOOLS, ...TAX_TOOLS];
   }
   if (context === 'leads') {
-    return [...TOOLS, ...LEADS_TOOLS];
+    return [...BASE_TOOLS, ...LEADS_TOOLS];
   }
   if (context === 'email') {
-    return [...TOOLS, ...EMAIL_TOOLS];
+    return [...BASE_TOOLS, ...EMAIL_TOOLS];
   }
   if (context === 'banking') {
-    return [...TOOLS, ...BANKING_QUERY_TOOLS];
+    return [...BASE_TOOLS, ...BANKING_QUERY_TOOLS];
   }
   if (context === 'estimates') {
-    return [...TOOLS, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
+    return [...BASE_TOOLS, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
   }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
-  return TOOLS;
+  return BASE_TOOLS;
 }
 
 // techContext is only set for tech portal calls
@@ -643,6 +649,11 @@ RULES:
 - Keep responses under 500 words unless the operator asks for a detailed report
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
+
+CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
+- You CAN create new customers with create_customer — confirm name/phone/address with the operator first
+- You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
+- Sending SMS from outside the Communications page: use draft_sms and let the operator send
 
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days
