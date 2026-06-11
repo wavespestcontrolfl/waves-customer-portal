@@ -1173,7 +1173,13 @@ router.post('/', async (req, res, next) => {
         });
       }
     }
-    if (managedTypes.has(project_type) && !linkedProfile?.projectBacked) {
+    // The bypass is scoped to the linked profile's OWN type — a linked
+    // project_required appointment must not become a side door for creating
+    // OTHER cut-over types (e.g. linking a general_appointment while
+    // submitting mosquito_event).
+    const linkedProjectTypeMatches = !!linkedProfile?.projectBacked
+      && linkedProfile?.projectType === project_type;
+    if (managedTypes.has(project_type) && !linkedProjectTypeMatches) {
       return res.status(422).json({
         error: 'This service type is completed through the appointment flow now — finish the visit from Dispatch instead of creating a project.',
         code: 'project_type_appointment_managed',
