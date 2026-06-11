@@ -1622,7 +1622,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let typedChips = [];
     let typedActivityScore = null;
     let typedScoreSource = null;
-    if (typedFindingsType && !isIncompleteVisit && !oneTimeRecapOnly && structuredFindings == null) {
+    // Recap-only mode (the lightweight pest recap) has no findings, no
+    // billing gate, and no snapshot — it must not be a side door around the
+    // typed flow (pre-push Codex P1). Typed services complete through the
+    // full typed form only.
+    if (typedFindingsType && oneTimeRecapOnly && !isIncompleteVisit) {
+      return res.status(409).json({
+        error: 'This service completes through its service-specific findings form, not the quick recap. Refresh and complete the visit from the completion form.',
+        code: 'typed_recap_not_allowed',
+        findingsType: typedFindingsType,
+      });
+    }
+    if (typedFindingsType && !isIncompleteVisit && structuredFindings == null) {
       return res.status(422).json({
         error: 'This service now completes with its service-specific findings form. Refresh the page and complete the visit again.',
         code: 'typed_findings_required',
@@ -1771,13 +1782,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         return { required: false, resolved: true, reason: 'billing_check_failed' };
       });
       if (typedBilling.required && !typedBilling.resolved) {
-        const billingErr = new Error('Completion billing required');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, billingErr);
-        return res.status(409).json({
-          error: 'An invoice or payment is required before completing this one-time service.',
-          code: 'completion_billing_required',
-          details: { amount: typedBilling.amount },
-        });
+        // The resolver only sees invoices linked to this scheduled service /
+        // service record. The completion path further down can also satisfy
+        // billing with an accepted-estimate first-application invoice —
+        // honor that here too or we'd 409 a legitimately-invoiced job
+        // (pre-push Codex P1).
+        const estimateInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db)
+          .catch(() => null);
+        if (!estimateInvoice) {
+          const billingErr = new Error('Completion billing required');
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, billingErr);
+          return res.status(409).json({
+            error: 'An invoice or payment is required before completing this one-time service.',
+            code: 'completion_billing_required',
+            details: { amount: typedBilling.amount },
+          });
+        }
       }
     }
 

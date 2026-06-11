@@ -479,8 +479,13 @@ function buildTodaysResult({
   if (indicator && activity && activity.score != null) {
     const noun = indicator.pestNoun;
     if (visitSequence > 1 && activity.trendWord) {
+      // Stable needs its own sentence shape — "has about the same as the
+      // last visit since our last visit" is not English (Codex P2).
+      const headline = activity.trend === 'stable'
+        ? `${noun} activity is about the same as our last visit.`
+        : `${noun} activity has ${activity.trend === 'worsening' ? 'increased' : 'decreased'} since our last visit.`;
       return {
-        headline: `${noun} activity has ${activity.trendWord.replace(' since the last visit', '')} since our last visit.`,
+        headline,
         body: `${whatWeDid} ${nextStep}`,
         nextStep,
       };

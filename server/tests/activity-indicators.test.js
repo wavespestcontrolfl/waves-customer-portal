@@ -224,6 +224,41 @@ describe('buildTypedReportSnapshot', () => {
     assertNoBannedWords(JSON.stringify(snapshot.todaysResult));
   });
 
+  test('stable progress visit gets grammatical headline (Codex P2)', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      values: { species: 'Roof rat', traps_set: 'Reset traps' },
+      nextStepChips: ['Trap check scheduled'],
+      serviceKey: 'rodent_trapping_setup',
+      serviceLabel: 'Rodent Trapping',
+      visitSequence: 2,
+      activity: {
+        indicatorKey: 'rodent_activity',
+        label: 'Rodent Activity',
+        score: 3,
+        source: 'technician',
+        derivedFrom: null,
+        trend: 'stable',
+        trendWord: 'about the same as the last visit',
+      },
+    });
+    expect(snapshot.todaysResult.headline).toBe('Rodent activity is about the same as our last visit.');
+    const worsening = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      values: { species: 'Roof rat' },
+      nextStepChips: [],
+      serviceKey: 'rodent_trapping_setup',
+      serviceLabel: 'Rodent Trapping',
+      visitSequence: 2,
+      activity: {
+        indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 4,
+        source: 'technician', derivedFrom: null,
+        trend: 'worsening', trendWord: 'increased since the last visit',
+      },
+    });
+    expect(worsening.todaysResult.headline).toBe('Rodent activity has increased since our last visit.');
+  });
+
   test('bed bug zero state uses the fixed approved copy', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'bed_bug',
