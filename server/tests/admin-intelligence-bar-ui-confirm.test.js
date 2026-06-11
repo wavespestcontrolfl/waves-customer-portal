@@ -324,6 +324,34 @@ describe('/confirm-action commit path', () => {
     });
   });
 
+  test('/execute cannot bypass the gate: gated writes are rejected while GATE_IB_UI_CONFIRM is on', async () => {
+    await withServer(async (baseUrl) => {
+      for (const action of ['create_customer', 'update_customer', 'send_sms']) {
+        const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, params: { any: 'thing' }, confirmed: true }),
+        });
+        expect(res.status).toBe(409);
+      }
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('/execute still works for gated writes when the gate is off (legacy behavior)', async () => {
+    process.env.GATE_IB_UI_CONFIRM = 'false';
+    mockExecuteTool.mockResolvedValue({ success: true });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'update_customer', params: { customer_id: 'c1', updates: { city: 'Venice' } } }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('missing pending_action_id is a 400', async () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {

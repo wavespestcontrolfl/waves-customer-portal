@@ -988,6 +988,12 @@ router.post('/execute', async (req, res, next) => {
     if (ADMIN_ONLY_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
+    if (uiConfirmEnabled() && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
+      // With the UI-confirm gate on, gated writes commit exclusively through
+      // /confirm-action — /execute would skip the claim, payload hash, and
+      // single-use replay protection.
+      return res.status(409).json({ error: 'This write requires a confirmed pending action. Use /confirm-action with a pending_action_id.' });
+    }
     if (SEO_CONFIRMED_ACTION_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for SEO actions' });
     }
