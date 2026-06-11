@@ -29,6 +29,11 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const FACTCHECK_MODEL = process.env.MODEL_FACTCHECK || MODELS.FLAGSHIP;
+// Bound how long a publish (or the autonomous publishing lock) can wait on this
+// advisory check. The SDK default is a 10-minute timeout WITH retries, so a
+// stalled model could hold the pipeline for many minutes before fail-open
+// triggers. Cap it and don't retry — a slow check should just fail open fast.
+const FACTCHECK_TIMEOUT_MS = Number.parseInt(process.env.FACTCHECK_TIMEOUT_MS, 10) || 30000;
 
 const SYSTEM_PROMPT = `You are a meticulous fact-checker for a Southwest Florida (Manatee/Sarasota/Charlotte county) pest-control and lawn-care blog. The post will publish under a licensed pest-control operator's byline, so factual accuracy is critical.
 
@@ -78,7 +83,11 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
     return { pass: true, findings: [], checked: false, skipped: 'empty_body' };
   }
 
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    maxRetries: 0,
+    timeout: FACTCHECK_TIMEOUT_MS,
+  });
   let raw;
   try {
     const response = await anthropic.messages.create({

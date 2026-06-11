@@ -9,6 +9,7 @@ jest.mock('@anthropic-ai/sdk', () => {
     messages: { create: mockCreate },
   }));
 });
+const AnthropicMock = require('@anthropic-ai/sdk');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const ORIGINAL_ENV = { ...process.env };
@@ -39,6 +40,18 @@ describe('fact-check gate', () => {
     expect(r.pass).toBe(true);
     expect(r.checked).toBe(true);
     expect(r.findings).toEqual([]);
+  });
+
+  test('bounds the client: no retries + a finite timeout (fail-open fast on a stall)', async () => {
+    reply([]);
+    await load().evaluate(DRAFT);
+    expect(AnthropicMock).toHaveBeenCalledWith(expect.objectContaining({
+      maxRetries: 0,
+      timeout: expect.any(Number),
+    }));
+    const opts = AnthropicMock.mock.calls.at(-1)[0];
+    expect(opts.timeout).toBeGreaterThan(0);
+    expect(opts.timeout).toBeLessThanOrEqual(60000);
   });
 
   test('BLOCKS on a P1 factual finding (wrong pathogen)', async () => {
