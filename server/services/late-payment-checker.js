@@ -13,12 +13,16 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { publicPortalUrl } = require('../utils/portal-url');
 
+function tierDaysForOverdue(daysSince) {
+  if (daysSince < 14) return 7;
+  if (daysSince < 30) return 14;
+  if (daysSince < 60) return 30;
+  if (daysSince < 90) return 60;
+  return 90;
+}
+
 function templateKeyForOverdue(daysSince) {
-  if (daysSince < 14) return 'late_payment_7d';
-  if (daysSince < 30) return 'late_payment_14d';
-  if (daysSince < 60) return 'late_payment_30d';
-  if (daysSince < 90) return 'late_payment_60d';
-  return 'late_payment_90d';
+  return `late_payment_${tierDaysForOverdue(daysSince)}d`;
 }
 
 const LatePaymentService = {
@@ -57,7 +61,12 @@ const LatePaymentService = {
         if (await InvoiceFollowUps.hasActiveSequence(inv.id)) { skipped++; continue; }
       } catch { /* fall through if module unavailable */ }
 
-      const invoiceKey = `${inv.invoice_number || inv.id}|${daysOverdue} DAYS`;
+      // Key the dedupe on the computed escalation tier (the same value that
+      // selects the template) so each tier (7/14/30/60/90) fires exactly once
+      // per invoice. Historical rows were written with the `|7 DAYS` key, so
+      // the tier-7 key stays byte-identical for backward compatibility.
+      const tierDays = tierDaysForOverdue(daysSince);
+      const invoiceKey = `${inv.invoice_number || inv.id}|${tierDays} DAYS`;
 
       try {
         const alreadySent = await db('activity_log')
@@ -150,7 +159,7 @@ const LatePaymentService = {
         await db('activity_log').insert({
           customer_id: customer.id,
           action: 'late_payment_reminder',
-          description: `${daysOverdue}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
+          description: `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
           metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince }),
         }).catch(() => {});
       } catch (smsErr) {
