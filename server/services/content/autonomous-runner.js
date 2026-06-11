@@ -1708,6 +1708,11 @@ function countsTowardTrustBuild(row) {
 
 function isDeterministicPublishError(err) {
   if (err?.code === 'BLOG_FRONTMATTER_INVALID') return true;
+  // Fact-check P0/P1 is edit-required: the content must change, so park it for
+  // review instead of releasing the claim and retrying the same unpublishable
+  // draft. (Guardrails don't run on the autonomous publish path, so the
+  // fact-check is the first edit-required gate to reach this publisher.)
+  if (err?.code === 'BLOG_FACTCHECK_FAILED') return true;
   const message = String(err?.message || '');
   return [
     /^unsupported autonomous draft for Astro publish:/,

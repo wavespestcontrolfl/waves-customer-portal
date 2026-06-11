@@ -25,8 +25,12 @@ jest.mock('../services/content-astro/author-service', () => ({
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
 }));
+jest.mock('../services/content/fact-check-gate', () => ({
+  evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
+}));
 
 const db = require('../models/db');
+const factCheckGate = require('../services/content/fact-check-gate');
 const gh = require('../services/content-astro/github-client');
 const authorService = require('../services/content-astro/author-service');
 const { validateBlogFrontmatter } = require('../services/content-astro/schema-validator');
@@ -462,6 +466,26 @@ describe('blog Astro frontmatter validation', () => {
 describe('Astro publisher autonomous draft adapter', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+  });
+
+  test('blocks an autonomous publish when the fact-check finds a P1 error (no branch/PR opened)', async () => {
+    factCheckGate.evaluate.mockResolvedValueOnce({
+      pass: false,
+      checked: true,
+      findings: [{ severity: 'P1', code: 'FACTUAL_ERROR', message: 'wrong pathogen: C. jacksonii is cool-season' }],
+    });
+    const frontmatter = validFrontmatter({
+      title: 'Autonomous Dollar Spot in Venice',
+      slug: '/autonomous-dollar-spot-venice/',
+      canonical: 'https://www.wavespestcontrol.com/autonomous-dollar-spot-venice/',
+    });
+    await expect(AstroPublisher.publishOrUpdatePage(
+      { type: 'draft', frontmatter, body: 'Dollar spot guidance for Venice lawns.' },
+      { action_type: 'new_supporting_blog' },
+    )).rejects.toMatchObject({ code: 'BLOG_FACTCHECK_FAILED' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
   });
 
   test('opens an Astro PR from a supported emitted blog draft', async () => {
@@ -1237,5 +1261,47 @@ describe('applyMergeEffect hero persistence (curated vs generated)', () => {
       if (shouldClear) expect(args.featured_image_url).toBeNull();
       else expect('featured_image_url' in args).toBe(false);
     }
+  });
+});
+
+describe('publishRefresh fact-check (refreshed blog bodies)', () => {
+  const fm = require('../services/content-astro/frontmatter');
+  const BLOG_PATH = 'src/content/blog/dollar-spot-venice.mdx';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+    gh.createBranch.mockResolvedValue({});
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 50, html_url: 'https://github.example/pr/50' });
+    gh.createIssueComment.mockResolvedValue({});
+    const existing = fm.stringify(
+      validFrontmatter({ slug: '/dollar-spot-venice/', canonical: 'https://www.wavespestcontrol.com/dollar-spot-venice/' }),
+      'Old body about dollar spot in Venice.',
+    );
+    gh.getFile.mockImplementation(async (p) => (p === BLOG_PATH ? { sha: 'existing-sha', content: existing, path: p } : null));
+  });
+
+  const refreshDraft = (body) => ([
+    { type: 'draft', file_path: BLOG_PATH, page_url: 'https://www.wavespestcontrol.com/dollar-spot-venice/', body, frontmatter: {} },
+    { action_type: 'refresh_existing_page' },
+  ]);
+
+  test('blocks a refresh whose changed body fails the fact-check (no branch/PR opened)', async () => {
+    factCheckGate.evaluate.mockResolvedValueOnce({
+      pass: false, checked: true,
+      findings: [{ severity: 'P1', code: 'FACTUAL_ERROR', message: 'wrong pathogen for warm-season turf' }],
+    });
+    await expect(AstroPublisher.publishRefresh(...refreshDraft('A NEW refreshed body naming the wrong pathogen.')))
+      .rejects.toMatchObject({ code: 'BLOG_FACTCHECK_FAILED' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
+  test('a clean refresh runs the fact-check and proceeds to open a PR', async () => {
+    const result = await AstroPublisher.publishRefresh(...refreshDraft('A NEW, factually-clean refreshed body about dollar spot.'));
+    expect(factCheckGate.evaluate).toHaveBeenCalledTimes(1);
+    expect(gh.createBranch).toHaveBeenCalled();
+    expect(result.pr_number).toBe(50);
   });
 });
