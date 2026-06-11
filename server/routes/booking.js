@@ -808,16 +808,20 @@ router.post('/confirm', async (req, res, next) => {
         ['self-booking-confirm', `${custId}:${slot_date}`],
       );
       // The customer-keyed lock above only serializes a double-submit —
-      // two DIFFERENT customers confirming the same tech/date can still
-      // both pass the overlap check under READ COMMITTED. Same
-      // slot-reserve namespace slot-reservation/rebooker use, so all
-      // three writers serialize against each other per tech+day.
-      if (technician_id) {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `${technician_id}:${slot_date}`],
-        );
-      }
+      // two DIFFERENT customers confirming the same slot can still both
+      // pass the overlap check under READ COMMITTED. Tech bookings lock
+      // per tech+day (same slot-reserve namespace slot-reservation and
+      // rebooker use, so all three writers serialize); the public
+      // BookingPage sends no technician_id, so those lock and
+      // conflict-check per zone+day instead.
+      const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
+      const slotScopeKey = technician_id
+        ? `${technician_id}:${slot_date}`
+        : `zone:${zone?.id || 'unknown'}:${slot_date}`;
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', slotScopeKey],
+      );
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate.
@@ -827,18 +831,28 @@ router.post('/confirm', async (req, res, next) => {
         .first();
       if (existing) return { existing };
 
-      // Re-verify the slot is still available (race condition guard)
-      const conflict = await trx('scheduled_services')
+      // Re-verify the slot is still available (race condition guard).
+      // Tech bookings conflict against the tech's route; no-tech bookings
+      // conflict against other unassigned jobs in the same zone (the
+      // capacity model the availability engine offers slots from).
+      // Expired estimate-slot holds don't count (same predicate as
+      // slot-reservation.js).
+      const conflictQuery = trx('scheduled_services')
         .where('scheduled_date', slot_date)
-        .where('technician_id', technician_id || null)
         .whereNotIn('status', ['cancelled'])
-        .where(function () {
-          this.where(function () {
-            this.where('window_start', '<', endTime).andWhere('window_end', '>', slot_start);
-          });
+        .where((q) => {
+          q.whereNull('reservation_expires_at')
+            .orWhereRaw('reservation_expires_at > NOW()');
         })
-        .first();
-      if (conflict && technician_id) {
+        .where('window_start', '<', endTime)
+        .where('window_end', '>', slot_start);
+      if (technician_id) {
+        conflictQuery.where('technician_id', technician_id);
+      } else if (zoneSlug) {
+        conflictQuery.whereNull('technician_id').where('zone', zoneSlug);
+      }
+      const conflict = (technician_id || zoneSlug) ? await conflictQuery.first() : null;
+      if (conflict) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
           isOperational: true,

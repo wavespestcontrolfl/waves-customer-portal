@@ -213,6 +213,14 @@ class SmartRebooker {
           .where('technician_id', keptTechId)
           .whereNot('id', serviceId)
           .whereNotIn('status', ['cancelled', 'completed'])
+          // Expired estimate-slot holds are dead weight until cleanup
+          // reclaims them — same active-reservation predicate
+          // slot-reservation.js uses, so a lapsed hold can't block a
+          // legitimate reschedule.
+          .where((q) => {
+            q.whereNull('reservation_expires_at')
+              .orWhereRaw('reservation_expires_at > NOW()');
+          })
           .where('window_start', '<', windowEnd)
           .where('window_end', '>', updates.window_start)
           .first('id');
