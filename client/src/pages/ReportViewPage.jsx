@@ -24,6 +24,7 @@ import {
 } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
 import PestPressureCard from '../components/PestPressureCard';
+import ActivityCard from '../components/ActivityCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -1760,7 +1761,7 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
   );
 }
 
-export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false } = {}) {
+export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false } = {}) {
   return [
     ['#visit-summary', 'Summary'],
     hasReentry ? ['#re-entry', 'Re-entry'] : null,
@@ -1768,11 +1769,12 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
     ['#service-coverage', 'Map'],
     hasProducts ? ['#products-applied', 'Products'] : null,
     hasPestPressure ? ['#pest-pressure', 'Pest Pressure'] : null,
+    hasActivity ? ['#activity', 'Activity'] : null,
   ].filter(Boolean);
 }
 
-function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false }) {
-  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry });
+function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false }) {
+  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity });
 
   return (
     <section className="sr-section quick-report-tools" id="quick-navigation">
@@ -1788,6 +1790,61 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
         ))}
       </nav>
       <ReportAskBox mode={mode} token={token} serviceLine={serviceLine} data={data} />
+    </section>
+  );
+}
+
+/**
+ * Today's Result — the opening card on typed specialty reports (rodent
+ * trapping, bed bug, cockroach, etc.). Renders the customer summary that was
+ * generated and persisted at completion time (typedReportSnapshot) — what was
+ * found, what we did, what happens next — never recomputed client-side.
+ */
+function TodaysResultCard({ typedReport }) {
+  const result = typedReport?.todaysResult;
+  if (!result?.headline) return null;
+  return (
+    <section className="report-card" data-section="todays-result" id="todays-result">
+      <div className="section-eyebrow">
+        {typedReport.isProgressVisit ? typedReport.reportTypeLabel : "Today's result"}
+      </div>
+      <h2>{result.headline}</h2>
+      {result.body && <p className="ai-summary-body">{result.body}</p>}
+      {result.nextStep && (
+        <div className="ai-summary-bullets">
+          <div className="ai-summary-bullet">{result.nextStep}</div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Findings on typed specialty reports — rendered from the snapshot's
+ * customer-labeled items (reportPriority order resolved at completion).
+ * Zero-state values ("No active signs observed today") are results and
+ * render like any other finding.
+ */
+function TypedFindingsCard({ typedReport }) {
+  const items = typedReport?.findings;
+  if (!Array.isArray(items) || !items.length) return null;
+  return (
+    <section className="sr-section" id="typed-findings" data-section="typed-findings">
+      <h2>What we found & did</h2>
+      <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
+        {items.map((item) => (
+          <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 10 }}>
+            <dt style={{ fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700, marginBottom: 2 }}>
+              {item.customerLabel}
+            </dt>
+            <dd style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
+              {item.customerValueLabel != null && item.customerValueLabel !== ''
+                ? String(item.customerValueLabel)
+                : String(item.value)}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </section>
   );
 }
@@ -7159,6 +7216,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} />
 
+        <TodaysResultCard typedReport={data.typedReport} />
+
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 
         <section className="sr-section visit-summary-section" id="visit-summary">
@@ -7173,6 +7232,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         </section>
+
+        <TypedFindingsCard typedReport={data.typedReport} />
 
         {data.serviceLine === 'lawn' && (
           <LawnProgramOverviewCard context={data.lawnProgramOverview} />
@@ -7189,10 +7250,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
-        {/* Only pass token in live mode so the interactive rating picker
+        {/* Typed specialty reports render the activity gauge in this slot;
+            recurring reports keep PestPressureCard (the server nulls
+            pestPressure whenever activity is present, and vice versa).
+            Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /
             'static') where the controls would be non-functional anyway. */}
-        <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />
+        {data.activity
+          ? <ActivityCard data={data.activity} />
+          : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />}
 
         <QuickNavigationAndAsk
           mode={mode}
@@ -7203,6 +7269,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           hasVisitTimeline={normalizedVisitTimeline.enabled}
           hasPestPressure={hasPestPressure}
           hasReentry={hasReentry}
+          hasActivity={Boolean(data.activity)}
         />
 
         <div id="map">

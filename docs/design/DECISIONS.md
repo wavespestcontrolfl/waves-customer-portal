@@ -487,3 +487,17 @@ The tier price is the full customer total — there is **no separate setup charg
 **Blast radius:** Zero behavioral for all current traffic — every new code path conditions on `profile.findingsType`, which no active profile row produces yet. Recurring/pest/lawn completions byte-identical (regression-tested). The two pointer-fix rows change which Projects form opens for flea/rodent-exclusion jobs (the correct one).
 
 **Revisit if:** a per-customer property/location entity is added (extend activity history key); multi-indicator visits become real (composite unique already permits).
+
+---
+
+## 2026-06-11 — Specialty services → Service Report V1 pipeline (PR 2: dark report support)
+
+**Decision:** Report-side rendering for typed specialty completions, still DARK (renders only when a service_record carries `service_data.typedReportSnapshot`, which only typed completions write — and no profile is cut over yet).
+
+**Implementation:** `buildReportV1Data` detects the snapshot and (1) **hard-suppresses Pest Pressure** (`pestPressure=null`, `pressureIndex=null` — explicit gate, since these types detect to the 'pest' line and would otherwise leak the pressure UI onto e.g. a cockroach report), (2) builds `data.activity` via new `activity-scores-store.js` (snapshot's own score/trend words — resolved at completion, never recomputed — plus cross-visit history from `service_activity_scores`, current visit marked, `isBaseline` when no priors), (3) exposes `data.typedReport` (todaysResult / customer-labeled findings / reportTypeLabel / isProgressVisit) straight from the snapshot, (4) remaps the metrics band's `pressure_index` slot to the activity level for gauge types (mirrors the lawn_health remap; non-gauge types drop it via the existing null-pressure filter). Client: gauge primitives (MeterSvg/PressureHistoryChart/TrendChip) extracted unchanged to `report/GaugePrimitives.jsx` (PestPressureCard re-imports; pure move, own commit); new `ActivityCard` (wording-first — level word leads, no numeric score headline, no customer rating picker, baseline visits say "Baseline recorded today" and never claim a trend); `TodaysResultCard` opens every typed report right after the status card; `TypedFindingsCard` renders snapshot items with customer labels (zero states render as results); PestPressureCard slot swaps to ActivityCard when `data.activity` present; QuickNav gains an Activity link. PDF/static modes inherit automatically (same page).
+
+**Tests:** `tests/typed-report-data.test.js` — golden-fixture-driven (all 10 fixtures from PR 0 asserted: Pest Pressure suppressed even with the engine fully enabled, snapshot copy passthrough, banned-words absent, zero states render, gauge/metrics behavior, first-visit no-trend) + history hydration + recurring-pest regression. Existing service-report-v1 suite untouched (70/70).
+
+**Deferred to the cutover PR:** short progress-visit SMS copy (DB template work — owner-reviewable alongside Phase-1 golden-report approval).
+
+**Blast radius:** zero for recurring reports (typedSnapshot absent → all new paths skip; regression-tested).
