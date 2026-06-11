@@ -327,6 +327,77 @@ describe('admin projects routes', () => {
     });
   });
 
+  test('managed project type stays creatable for a linked project_required appointment', async () => {
+    // Phase-1 cutover makes one_time_pest_treatment appointment-managed via
+    // OTHER keys, but general_appointment stays project_required — its linked
+    // appointments must keep the Projects flow (they need a project to complete).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const createdProject = { id: 'project-2', customer_id: 'customer-1', project_type: 'one_time_pest_treatment', status: 'draft' };
+    const scheduledRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'svc-9', service_id: 'service-3', service_type: 'General Appointment',
+        customer_id: 'customer-1', scheduled_date: '2026-06-11',
+      }),
+    });
+    const profilesChain = chain({
+      distinct: jest.fn().mockResolvedValue([{ project_type: 'one_time_pest_treatment' }]),
+      first: jest.fn().mockResolvedValue({
+        service_key: 'general_appointment', completion_mode: 'project_required',
+        project_type: 'one_time_pest_treatment', active: true,
+      }),
+    });
+    const projectInsert = chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return scheduledRead;
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue({ service_key: 'general_appointment', name: 'General Appointment', category: 'specialty', billing_type: 'one_time' }) });
+      if (table === 'service_completion_profiles') return profilesChain;
+      if (table === 'projects') return projectInsert;
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'one_time_pest_treatment', scheduled_service_id: 'svc-9' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.project.id).toBe('project-2');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
+  test('managed project type is rejected for unlinked creations', async () => {
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((table) => {
+      if (table === 'service_completion_profiles') return chain({
+        distinct: jest.fn().mockResolvedValue([{ project_type: 'one_time_pest_treatment' }]),
+      });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'one_time_pest_treatment' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(422);
+        expect(body.code).toBe('project_type_appointment_managed');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('wdo intelligence uses selected customer address and returns field suggestions', async () => {
     process.env.ANTHROPIC_API_KEY = 'test-key';
     lookupPropertyFromAITrio.mockResolvedValue({

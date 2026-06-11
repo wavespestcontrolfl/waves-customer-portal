@@ -53,7 +53,15 @@ function serializeProfile(row = null) {
 }
 
 async function tableAvailable(knex) {
-  return knex.schema.hasTable('service_completion_profiles').catch(() => false);
+  // try/catch, not just .catch(): if knex.schema itself is unavailable the
+  // property access throws before a promise exists, and the rejection would
+  // escape appointmentManagedProjectTypes' fail-open contract (500ing every
+  // project create instead of degrading to "no types managed").
+  try {
+    return await knex.schema.hasTable('service_completion_profiles');
+  } catch {
+    return false;
+  }
 }
 
 async function lookupServiceForScheduledService(scheduledService = {}, knex = db) {
