@@ -612,10 +612,13 @@ describe('Astro publisher autonomous draft adapter', () => {
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
       path: 'src/content/services/pest-control-lakewood-ranch-fl.md',
       sha: 'existing-sha',
-      content: expect.stringContaining('title: Pest Control in Lakewood Ranch, FL | Waves'),
     }));
     expect(gh.putFile.mock.calls[0][0].branch).toEqual(expect.stringMatching(/^content\/meta-services-pest-control-lakewood-ranch-fl-/));
-    expect(gh.putFile.mock.calls[0][0].content).toContain('meta_description: Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.');
+    // Assert on parsed frontmatter, not raw YAML quoting style (js-yaml v3
+    // quotes comma-containing scalars; v4 leaves them plain — both valid).
+    const writtenMeta = require('../services/content-astro/frontmatter').parse(gh.putFile.mock.calls[0][0].content);
+    expect(writtenMeta.data.title).toBe('Pest Control in Lakewood Ranch, FL | Waves');
+    expect(writtenMeta.data.meta_description).toBe('Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.');
     expect(gh.putFile.mock.calls[0][0].content).toContain('Do not change this body.');
     expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
       title: 'SEO metadata: Pest Control in Lakewood Ranch, FL | Waves',

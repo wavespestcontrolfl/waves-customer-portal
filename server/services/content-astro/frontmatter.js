@@ -1,21 +1,56 @@
 /**
- * frontmatter.js — minimal YAML frontmatter read/write.
+ * frontmatter.js — YAML frontmatter read/write on js-yaml.
  *
- * Scope: what the admin → Astro publish pipeline needs. No full YAML spec.
- *   - parse: scalars (string/number/bool), inline arrays, block arrays,
- *     nested objects, quoted + unquoted strings.
- *   - stringify: same shapes going back out, formatted to match the Astro
- *     content conventions already in the repo.
+ * Replaces the original hand-rolled subset parser, which silently corrupted
+ * pages on a parse→stringify round-trip (e.g. publishRefresh):
+ *   - inline flow arrays of objects (the `schema:` JSON-LD line on 300+
+ *     service/location pages) parsed as arrays of STRINGS and were re-emitted
+ *     as quoted JSON strings, destroying the rendered JSON-LD;
+ *   - unquoted scalars containing a mid-string ` #` were re-emitted unquoted,
+ *     so real YAML parsers truncated them at the comment marker.
  *
- * If we ever hit a shape this can't handle, install `yaml` and swap —
- * the function signatures are stable.
+ * Function signatures and return shapes are unchanged:
+ *   parse(source)            -> { data: object, content: string }
+ *   stringify(data, content) -> '---\n<yaml>---\n<content>'
+ *
+ * Parsing uses CORE_SCHEMA so date-like scalars stay strings (matching the
+ * old parser and every consumer — `published`/`modified`/`updated` are
+ * handled as strings throughout the publish pipeline). `json: true` keeps
+ * the old "last duplicate key wins" leniency instead of throwing.
+ *
+ * Stringify uses the library's default (timestamp-aware) schema so date-like
+ * strings are emitted QUOTED (plain `2026-06-11T12:00:00` would round-trip
+ * as a timestamp under YAML 1.1 parsers), matching the existing convention
+ * in the Astro content repo. JSON-LD values (objects/arrays of objects with
+ * `@`-prefixed keys, i.e. the `schema:` field) are emitted as a single-line
+ * JSON flow value — JSON is valid YAML — matching the repo convention for
+ * those fields. Everything else is block-style YAML, insertion order
+ * preserved.
+ *
+ * Options stick to the js-yaml v3/v4 common subset (the monorepo root pins
+ * ^4.1.1 but a v3 copy can win hoisting locally): no `quotingType`, no
+ * explicit dump schema (v3 names them DEFAULT_SAFE/FULL_SCHEMA).
  */
 
+const yaml = require('js-yaml');
+
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
+
+const DUMP_OPTIONS = {
+  indent: 2,
+  lineWidth: -1, // never fold long scalars (metaTitle/metaDescription run long)
+  noRefs: true, // no anchors/aliases for repeated objects
+  skipInvalid: true, // drop undefined/function values instead of throwing
+  sortKeys: false, // preserve key insertion order
+};
+
 function parse(source) {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(source);
+  const match = FRONTMATTER_RE.exec(source);
   if (!match) return { data: {}, content: source };
   const [, fm, content] = match;
-  return { data: parseYaml(fm), content };
+  const loaded = yaml.load(fm, { schema: yaml.CORE_SCHEMA, json: true });
+  const data = isPlainObject(loaded) ? loaded : {};
+  return { data, content };
 }
 
 function stringify(data, content = '') {
@@ -23,239 +58,39 @@ function stringify(data, content = '') {
   return `---\n${toYaml(data)}---${body}`;
 }
 
-// ── YAML parse (subset) ────────────────────────────────────────────
-
-function parseYaml(text) {
-  const lines = text.split(/\r?\n/).filter((l) => !/^\s*#/.test(l));
-  const { value } = parseBlock(lines, 0, 0);
-  return value || {};
-}
-
-function parseBlock(lines, startIdx, indent) {
-  const obj = {};
-  let i = startIdx;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (line.trim() === '') {
-      i++;
-      continue;
-    }
-    const leadingSpaces = line.match(/^ */)[0].length;
-    if (leadingSpaces < indent) break;
-    if (leadingSpaces > indent) {
-      i++;
-      continue;
-    }
-
-    const trimmed = line.slice(leadingSpaces);
-    const colon = trimmed.indexOf(':');
-    if (colon === -1) {
-      i++;
-      continue;
-    }
-    const key = trimmed.slice(0, colon).trim();
-    const rest = trimmed.slice(colon + 1).trim();
-
-    if (rest === '') {
-      // Value on following lines — either block array (`- item`) or nested object.
-      const next = lines[i + 1] || '';
-      const nextIndent = next.match(/^ */)[0].length;
-      if (/^\s*-\s/.test(next) && nextIndent > indent) {
-        const { value, nextIdx } = parseArray(lines, i + 1, nextIndent);
-        obj[key] = value;
-        i = nextIdx;
-      } else if (nextIndent > indent) {
-        const { value, nextIdx } = parseBlock(lines, i + 1, nextIndent);
-        obj[key] = value;
-        i = nextIdx;
-      } else {
-        obj[key] = null;
-        i++;
-      }
-    } else if (rest.startsWith('[')) {
-      obj[key] = parseInlineArray(rest);
-      i++;
-    } else if (rest.startsWith('{')) {
-      obj[key] = parseInlineObject(rest);
-      i++;
-    } else {
-      obj[key] = parseScalar(rest);
-      i++;
-    }
-  }
-  return { value: obj, nextIdx: i };
-}
-
-function parseArray(lines, startIdx, indent) {
-  const arr = [];
-  let i = startIdx;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (line.trim() === '') {
-      i++;
-      continue;
-    }
-    const leadingSpaces = line.match(/^ */)[0].length;
-    if (leadingSpaces < indent) break;
-    if (leadingSpaces > indent) {
-      i++;
-      continue;
-    }
-    const trimmed = line.slice(leadingSpaces);
-    if (!trimmed.startsWith('- ')) break;
-    const itemText = trimmed.slice(2).trim();
-    if (itemText === '' || itemText.endsWith(':')) {
-      // Object item — parse nested block.
-      const rebuilt = itemText ? [' '.repeat(indent + 2) + itemText] : [];
-      let j = i + 1;
-      while (j < lines.length) {
-        const lj = lines[j];
-        if (lj.trim() === '') { j++; continue; }
-        const lead = lj.match(/^ */)[0].length;
-        if (lead <= indent) break;
-        rebuilt.push(lj);
-        j++;
-      }
-      const { value } = parseBlock(rebuilt, 0, indent + 2);
-      arr.push(value);
-      i = j;
-    } else if (itemText.includes(': ')) {
-      // Inline object item
-      const obj = {};
-      const colon = itemText.indexOf(': ');
-      obj[itemText.slice(0, colon).trim()] = parseScalar(itemText.slice(colon + 2).trim());
-      // Continuation keys on subsequent indented lines
-      let j = i + 1;
-      while (j < lines.length) {
-        const lj = lines[j];
-        if (lj.trim() === '') { j++; continue; }
-        const lead = lj.match(/^ */)[0].length;
-        if (lead <= indent) break;
-        const tj = lj.slice(lead);
-        const cj = tj.indexOf(':');
-        if (cj !== -1) obj[tj.slice(0, cj).trim()] = parseScalar(tj.slice(cj + 1).trim());
-        j++;
-      }
-      arr.push(obj);
-      i = j;
-    } else {
-      arr.push(parseScalar(itemText));
-      i++;
-    }
-  }
-  return { value: arr, nextIdx: i };
-}
-
-function parseInlineArray(text) {
-  const inner = text.trim().replace(/^\[/, '').replace(/\]$/, '');
-  if (inner.trim() === '') return [];
-  return splitCsv(inner).map((s) => parseScalar(s.trim()));
-}
-
-function parseInlineObject(text) {
-  const inner = text.trim().replace(/^\{/, '').replace(/\}$/, '');
-  const obj = {};
-  for (const part of splitCsv(inner)) {
-    const colon = part.indexOf(':');
-    if (colon === -1) continue;
-    obj[part.slice(0, colon).trim()] = parseScalar(part.slice(colon + 1).trim());
-  }
-  return obj;
-}
-
-function splitCsv(text) {
-  const parts = [];
-  let buf = '';
-  let depth = 0;
-  let q = null;
-  for (const ch of text) {
-    if (q) {
-      buf += ch;
-      if (ch === q) q = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { q = ch; buf += ch; continue; }
-    if (ch === '[' || ch === '{') depth++;
-    if (ch === ']' || ch === '}') depth--;
-    if (ch === ',' && depth === 0) {
-      parts.push(buf);
-      buf = '';
-    } else {
-      buf += ch;
-    }
-  }
-  if (buf.trim()) parts.push(buf);
-  return parts;
-}
-
-function parseScalar(text) {
-  if (text === '' || text === '~' || text === 'null') return null;
-  if (text === 'true') return true;
-  if (text === 'false') return false;
-  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
-    return text.slice(1, -1).replace(/\\"/g, '"');
-  }
-  if (/^-?\d+(\.\d+)?$/.test(text)) return Number(text);
-  return text;
-}
-
-// ── YAML stringify (subset) ────────────────────────────────────────
-
-function toYaml(data, indent = 0) {
-  const pad = ' '.repeat(indent);
+function toYaml(data) {
   let out = '';
-  for (const [key, value] of Object.entries(data)) {
+  for (const [key, value] of Object.entries(data || {})) {
     if (value === undefined) continue;
-    if (value === null) {
-      out += `${pad}${key}:\n`;
-    } else if (Array.isArray(value)) {
-      if (value.length === 0) {
-        out += `${pad}${key}: []\n`;
-      } else if (value.every((v) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) {
-        out += `${pad}${key}:\n`;
-        for (const item of value) out += `${pad}  - ${scalar(item)}\n`;
-      } else {
-        out += `${pad}${key}:\n`;
-        for (const item of value) {
-          if (typeof item === 'object' && item !== null) {
-            const entries = Object.entries(item);
-            const [firstKey, firstVal] = entries[0];
-            out += `${pad}  - ${firstKey}: ${scalar(firstVal)}\n`;
-            for (let k = 1; k < entries.length; k++) {
-              const [kk, vv] = entries[k];
-              out += `${pad}    ${kk}: ${scalar(vv)}\n`;
-            }
-          } else {
-            out += `${pad}  - ${scalar(item)}\n`;
-          }
-        }
-      }
-    } else if (typeof value === 'object') {
-      out += `${pad}${key}:\n`;
-      out += toYaml(value, indent + 2);
+    if (isJsonLd(value)) {
+      out += `${key}: ${JSON.stringify(value)}\n`;
     } else {
-      out += `${pad}${key}: ${scalar(value)}\n`;
+      out += yaml.dump({ [key]: value }, DUMP_OPTIONS);
     }
   }
   return out;
 }
 
-function scalar(v) {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
-  const s = String(v);
-  // Quote when the string contains chars that would confuse the parser, or
-  // starts with a token that YAML would coerce (true/false/number/bracket).
-  if (
-    s === '' ||
-    /[:#\-?&*!|>'"%@`]/.test(s.charAt(0)) ||
-    /[:\n]/.test(s) ||
-    /^(true|false|null|~|-?\d)/.test(s) ||
-    /^[\[\{]/.test(s)
-  ) {
-    return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-  }
-  return s;
+// JSON-LD arrays (the `schema: [{...}]` field on service/location pages) keep
+// the repo's single-line JSON flow convention. Detected structurally — a
+// non-empty array of objects where some object carries an `@`-prefixed key
+// (@context/@type/...). Object-form schema (rare; block-style in the repo)
+// stays block-style YAML.
+function isJsonLd(value) {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(isPlainObject) &&
+    value.some(hasAtKey)
+  );
+}
+
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function hasAtKey(obj) {
+  return Object.keys(obj).some((k) => k.startsWith('@'));
 }
 
 module.exports = { parse, stringify };
