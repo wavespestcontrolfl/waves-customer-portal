@@ -138,6 +138,10 @@ function initTimeTrackingCrons() {
   cron.schedule('0 23 * * *', async () => {
     logger.info('[time-tracking-cron] Running 11 PM force auto-clock-out');
     try {
+      // Retry-on-lease-held: daily one-shot — a dropped tick leaves
+      // shifts open all night and corrupts durations/daily summaries.
+      // The sweep only selects status='active' rows, so a re-run after
+      // a mid-sweep holder death is naturally idempotent.
       await runExclusive('time-tracking-11pm-autoclose', async () => {
       const activeShifts = await db('time_entries')
         .where({ entry_type: 'shift', status: 'active' })
@@ -192,7 +196,7 @@ function initTimeTrackingCrons() {
           logger.error(`[time-tracking-cron] Failed to force clock-out shift ${shift.id}`, { error: entryErr.message });
         }
       }
-      });
+      }, { retryAttempts: 20, retryDelayMs: 60_000 });
     } catch (err) {
       logger.error('[time-tracking-cron] 11 PM force clock-out job failed', { error: err.message });
     }

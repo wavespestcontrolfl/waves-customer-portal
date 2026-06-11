@@ -1152,6 +1152,9 @@ function initScheduledJobs() {
   cron.schedule('0 10 28 * *', async () => {
     logger.info('Running: billing reminder job');
     try {
+      // Retry-on-lease-held: one-shot monthly schedule, no later tick to
+      // catch up. The per-customer sms_log dedupe below makes a re-run
+      // after a mid-sweep holder death idempotent.
       await runExclusive('billing-reminders-28th', async () => {
       const customers = await db('customers')
         .join('notification_prefs', 'customers.id', 'notification_prefs.customer_id')
@@ -1166,12 +1169,22 @@ function initScheduledJobs() {
         const chargeDate = `${nextMonth.toLocaleDateString('en-US', { month: 'long', timeZone: 'America/New_York' })} 1`;
 
         try {
+          // Durable sent-marker: sendBillingReminder logs to sms_log as
+          // message_type='billing_reminder'. A re-run (lease retry after
+          // a holder died mid-sweep) must not double-text customers the
+          // first pass already reached. 7-day window — the job only
+          // fires on the 28th, so next month's run is never suppressed.
+          const alreadySent = await db('sms_log')
+            .where({ customer_id: cust.id, message_type: 'billing_reminder' })
+            .where('created_at', '>', new Date(Date.now() - 7 * 86400000))
+            .first();
+          if (alreadySent) continue;
           await TwilioService.sendBillingReminder(cust.id, cust.monthly_rate, chargeDate);
         } catch (err) {
           logger.error(`Billing reminder failed for ${cust.id}: ${err.message}`);
         }
       }
-      });
+      }, { retryAttempts: 30, retryDelayMs: 60_000 });
     } catch (err) {
       logger.error(`Billing reminder job failed: ${err.message}`);
     }
