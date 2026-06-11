@@ -114,6 +114,22 @@ const TEMPLATES = [
 <p>Have a good one out there.</p>
 <p>— The Waves crew</p>`,
   },
+  {
+    key: "pest_insider",
+    label: "Pest Insider",
+    newsletterType: "pest-insider-monthly",
+    html: `<h1>[PSA-energy subject — e.g., "🦟 PSA: Mosquitoes Are Back and Hungrier Than Ever"]</h1>
+<p>[Seasonal hook — why THIS pest matters right now in SWFL. Biological urgency, never commercial.]</p>
+<h2>[🦟 Curiosity-gap facts heading — e.g., "Alright, Let's Talk About Mosquitoes"]</h2>
+<p>✔ <strong>[Fact title]</strong> – [Real biology + punchline. Jokes at the pest's expense.]</p>
+<p>✔ <strong>[Fact title]</strong> – [6-9 of these carry the issue.]</p>
+<h2>[Benefit-framed pitch heading — e.g., "Turn Your Yard Into a No-Fly Zone"]</h2>
+<p>[ONE sincere section: what Waves does about it. Plain feature-benefit, no jokes inside, no prices, no invented tech names.]</p>
+<p>🔹 <strong>[Capability]</strong> – [Honest benefit.]</p>
+<h2>[Voice-y close heading]</h2>
+<p>[Close + call CTA. The AI draft attaches the phone number automatically.]</p>
+<p>— The Waves Pest Control Team 🌊</p>`,
+  },
 ];
 
 // ── Compose ────────────────────────────────────────────────────────

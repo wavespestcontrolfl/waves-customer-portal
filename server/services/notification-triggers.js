@@ -355,6 +355,17 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=dashboard',
     }),
   },
+  pest_insider_draft: {
+    label: 'Pest Insider monthly draft ready',
+    category: 'newsletter',
+    priority: 'normal',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Pest Insider draft ready',
+      body: `Autopilot drafted the ${p.month || 'monthly'} Pest Insider: "${p.subject || 'Untitled'}". Review and send when ready.`,
+      link: '/admin/newsletter?tab=compose',
+    }),
+  },
   event_sources_unhealthy: {
     label: 'Event ingestion sources unhealthy',
     category: 'newsletter',

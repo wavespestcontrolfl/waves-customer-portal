@@ -858,6 +858,22 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
       return res.json({ success: true, draft, eventIds: lockedEventIds });
     }
 
+    // ── Pest Insider flow: structured humor-sandwich draft ────────────
+    // Same shared service as the monthly autopilot (persist:false preview)
+    // so manual Compose drafts get the identical prompt, sanitization, and
+    // assembler instead of the legacy free-form flow below.
+    if (newsletterType === 'pest-insider-monthly') {
+      const { draft } = await createNewsletterDraft({
+        prompt,
+        newsletterType,
+        audience,
+        tone,
+        includeCTA,
+        persist: false,
+      });
+      return res.json({ success: true, draft });
+    }
+
     // ── Legacy flow: template-guided or free-form ─────────────────────
     const TEMPLATE_GUIDANCE = {
       weekend: `

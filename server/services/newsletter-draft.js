@@ -170,6 +170,199 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
 }`;
 }
 
+// ── Pest Insider (monthly) ───────────────────────────────────────────
+//
+// The humor-sandwich format from the shipped Beehiiv "Pest Watch" issues
+// (docs/design/newsletter-fresh-this-week-style-guide.md): ~60% genuinely
+// fun pest edutainment → ONE sincere featured-service section → voice-y
+// close with a phone CTA. Sell stays ≤ ~3.5/10; urgency is biological
+// ("by March they're out in full force"), never commercial.
+
+// Month → featured service rotation (owner decision 2026-06-11:
+// auto-rotate by season; override any month via the Compose prompt).
+const PEST_INSIDER_ROTATION = {
+  January: 'rodent control & exclusion (cool weather drives rats/mice indoors)',
+  February: 'termite protection (pre-swarm season prep, inspections)',
+  March: 'subterranean termite treatment (swarm season is ON)',
+  April: 'fire ant control (mounds wake up with spring rain)',
+  May: 'mosquito treatment (salt-marsh mosquito ramp + no-see-um peak)',
+  June: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
+  July: 'German cockroach & palmetto bug defense (peak indoor pressure)',
+  August: 'lawn pest control (chinch bugs shredding St. Augustine)',
+  September: 'termite inspection (post-storm swarms)',
+  October: 'rodent exclusion (season begins as nights cool)',
+  November: 'rodent control (attics fill up as snowbirds return)',
+  December: 'general home pest defense (cooler weather pushes pests indoors)',
+};
+
+function buildPestInsiderSystemPrompt(voice, month) {
+  const featured = PEST_INSIDER_ROTATION[month] || 'general home pest defense';
+  return `You write "Pest Insider" — Waves Pest Control's monthly pest deep-dive for Southwest Florida homeowners.
+
+This is NOT a sales email. It is the humor-sandwich format: most of the email is genuinely fun, surprisingly educational pest content; ONE section sincerely describes a Waves service; the close brings the voice back. Readers should finish smarter and entertained whether or not they ever call.
+
+CURRENT MONTH: ${month}
+THIS MONTH'S FEATURED SERVICE: ${featured}
+
+VOICE (same narrator as the weekly events guide):
+- Irreverent but not mean. A hype-y group-chat friend who happens to know a disturbing amount about bugs.
+- Dense phrase-level interleave — **bold** the payoff facts, _italic_ the jokes and asides.
+- Anthropomorphize the pest ("that mosquito keeping you up at night? Probably a mom-to-be").
+- Jokes at the PEST's expense, never pressure on the reader.
+- Parenthetical asides as a second comedic voice: "(which, we assume you are)", "(no judgment)".
+
+SUBJECT LINES: max ${voice.subjectLineRules.maxLength} chars, one leading thematic emoji, PSA/curiosity-gap energy ("🦟 PSA: Mosquitoes Are Back and Hungrier Than Ever—But We've Got a Game-Changer!"). PREVIEW TEXT: short punchline, never a summary ("Bite Me? Nope. Not Anymore.").
+
+HARD RULES:
+- NO dollar amounts, prices, discounts, or "free" offers anywhere.
+- NO invented technology names, product brands, percentages, or study citations — describe the service in honest capability terms only.
+- NO safety/efficacy claims: never "pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved".
+- Facts must be true, mainstream pest biology — nothing obscure enough to be wrong.
+- Urgency is seasonal/biological only — never "limited time", never commercial pressure.
+- The pitch section is SINCERE: plain feature-benefit, no jokes inside the bullets. The humor lives in everything around it.
+
+STRUCTURE (the humor sandwich):
+1. Seasonal hook intro — why THIS pest matters in ${month}, in SWFL terms.
+2. Edutainment facts — 6-9 short ✔-style facts, each a real biology fact delivered with a punchline.
+3. Featured service — one earnest section: what Waves does about it and why the approach works.
+4. Close — voice returns, one-line CTA to call.
+
+GIF CAPTIONS (introGifCaption, factsGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive.
+
+SIGN-OFF: "${voice.signoff}" (the renderer appends the 🌊).
+
+Return STRICT JSON (no HTML, no prose outside the JSON):
+{
+  "subjectVariants": ["string", "string", "string"],
+  "selectedSubject": "string",
+  "previewText": "string, 30-90 chars (punchline)",
+  "introGifTerm": "string (Giphy search, pest/seasonal reaction meme)",
+  "introGifCaption": "string",
+  "greeting": "string (e.g. 'Hey there!')",
+  "introText": "string (2-3 short paragraphs, seasonal-urgency hook, **bold**/_italic_ interleave)",
+  "factsHeading": "string (emoji + curiosity-gap, e.g. '🦟 Alright, Let's Talk About Mosquitoes')",
+  "factsGifTerm": "string (Giphy search)",
+  "factsGifCaption": "string",
+  "factsIntro": "string (1-2 sentences teeing up the facts)",
+  "facts": [{ "title": "string (short bold lead, e.g. 'Only Females Bite')", "text": "string (the fact + punchline)" }],
+  "pitchHeading": "string (emoji + benefit-framed, e.g. '✈️ Turn Your Yard Into a No-Fly Zone')",
+  "pitchGifTerm": "string (Giphy search)",
+  "pitchGifCaption": "string",
+  "pitchIntro": "string (1 paragraph framing what Waves does about this — sincere)",
+  "pitchBullets": [{ "title": "string (e.g. 'Stops the Cycle')", "text": "string (plain feature-benefit, no jokes)" }],
+  "closingHeading": "string (e.g. '😎 Want to Take Back Your Outdoor Space?')",
+  "closingText": "string (1-2 short paragraphs, voice returns)",
+  "ctaLine": "string (one line ending in the call prompt — the renderer attaches the phone number)",
+  "signoff": "string",
+  "ps": "string or null"
+}`;
+}
+
+const PEST_INSIDER_PROSE_FIELDS = [
+  'greeting', 'introText', 'introGifCaption', 'factsHeading', 'factsGifCaption',
+  'factsIntro', 'pitchHeading', 'pitchGifCaption', 'pitchIntro',
+  'closingHeading', 'closingText', 'ctaLine', 'signoff', 'ps',
+];
+
+function sanitizePestInsiderDraft(draft) {
+  for (const k of PEST_INSIDER_PROSE_FIELDS) {
+    if (typeof draft[k] === 'string') draft[k] = stripCommentaryUrls(draft[k]);
+  }
+  for (const key of ['facts', 'pitchBullets']) {
+    draft[key] = (Array.isArray(draft[key]) ? draft[key] : [])
+      .map((item) => (item && typeof item === 'object' ? {
+        title: typeof item.title === 'string' ? stripCommentaryUrls(item.title) : null,
+        text: typeof item.text === 'string' ? stripCommentaryUrls(item.text) : null,
+      } : null))
+      .filter((item) => item && (item.title || item.text));
+  }
+  return draft;
+}
+
+async function assemblePestInsiderNewsletter(draft) {
+  const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
+  const parts = [];
+
+  // Parallel GIF prefetch — same rationale as the flagship assembler.
+  const [introGif, factsGif, pitchGif] = await Promise.all([
+    searchGiphy(draft.introGifTerm),
+    searchGiphy(draft.factsGifTerm),
+    searchGiphy(draft.pitchGifTerm),
+  ]);
+
+  // TOC
+  const tocItems = [
+    draft.factsHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-facts" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.factsHeading)}</a></li>`,
+    draft.pitchHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-pitch" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.pitchHeading)}</a></li>`,
+    draft.closingHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-close" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.closingHeading)}</a></li>`,
+  ].filter(Boolean);
+  if (tocItems.length) {
+    parts.push(`<div style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
+<p style="margin:0 0 10px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
+<ul style="list-style:none;padding:0;margin:0;font-size:14px;line-height:2;">${tocItems.join('\n')}</ul>
+</div>`);
+  }
+
+  // Cold open + intro
+  if (introGif) parts.push(gifBlock(introGif, draft.introGifCaption));
+  if (draft.greeting) {
+    parts.push(`<p style="margin:0 0 4px 0;font-size:16px;line-height:1.6;">👋 <strong><em>${markdownToHtml(draft.greeting)}</em></strong></p>`);
+  }
+  if (draft.introText) {
+    parts.push(`<p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.introText).replace(/\n+/g, '<br/><br/>')}</p>`);
+  }
+
+  // Facts (the edutainment ~60%)
+  if (draft.factsHeading) {
+    parts.push(dividerHtml());
+    parts.push(`<h2 id="pi-facts" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.factsHeading)}</em></strong></h2>`);
+    if (factsGif) parts.push(gifBlock(factsGif, draft.factsGifCaption));
+    if (draft.factsIntro) {
+      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.factsIntro)}</p>`);
+    }
+    const facts = (draft.facts || []).slice(0, 9).map((f) =>
+      `<li style="margin:0 0 10px 0;font-size:15px;line-height:1.6;">✔ <strong>${markdownToHtml(f.title || '')}</strong>${f.title && f.text ? ' – ' : ''}${markdownToHtml(f.text || '')}</li>`
+    ).join('\n');
+    if (facts) parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${facts}</ul>`);
+  }
+
+  // The pitch (sincere middle of the sandwich)
+  if (draft.pitchHeading) {
+    parts.push(dividerHtml());
+    parts.push(`<h2 id="pi-pitch" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
+    if (pitchGif) parts.push(gifBlock(pitchGif, draft.pitchGifCaption));
+    if (draft.pitchIntro) {
+      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.pitchIntro)}</p>`);
+    }
+    const bullets = (draft.pitchBullets || []).slice(0, 5).map((b) =>
+      `<li style="margin:0 0 10px 0;font-size:15px;line-height:1.6;">🔹 <strong>${markdownToHtml(b.title || '')}</strong>${b.title && b.text ? ' – ' : ''}${markdownToHtml(b.text || '')}</li>`
+    ).join('\n');
+    if (bullets) parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${bullets}</ul>`);
+  }
+
+  // Close + phone CTA
+  if (draft.closingHeading || draft.closingText || draft.ctaLine) {
+    parts.push(dividerHtml());
+    if (draft.closingHeading) {
+      parts.push(`<h2 id="pi-close" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+    }
+    if (draft.closingText) {
+      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText).replace(/\n+/g, '<br/><br/>')}</p>`);
+    }
+    const cta = draft.ctaLine ? markdownToHtml(draft.ctaLine) : 'Tired of sharing your yard? Give us a call';
+    parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">👉 ${cta} <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${escapeHtml(WAVES_SUPPORT_PHONE_DISPLAY)}</a></p>`);
+  }
+
+  // Sign-off
+  const signoffText = draft.signoff || '— The Waves Pest Control Team';
+  parts.push(`<p style="margin:20px 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
+  if (draft.ps) {
+    parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(draft.ps)}</em></p>`);
+  }
+
+  return parts.join('\n\n');
+}
+
 // ── Beehiiv-Quality Newsletter Assembly ──────────────────────────────
 //
 // Renders structured event JSON into styled email HTML matching the
@@ -753,8 +946,13 @@ async function createNewsletterDraft({
     }
   }
 
-  // 2. Build the flagship system prompt
-  const systemPrompt = buildFlagshipSystemPrompt(voice, month);
+  // 2. Build the system prompt — Pest Insider gets the humor-sandwich
+  //    prompt (no events, no anchoring); everything else gets the
+  //    flagship events prompt.
+  const isPestInsider = typeConfig?.key === 'pest-insider-monthly';
+  const systemPrompt = isPestInsider
+    ? buildPestInsiderSystemPrompt(voice, month)
+    : buildFlagshipSystemPrompt(voice, month);
 
   // Enrich the user prompt with homeowner minute topic if provided
   let enrichedPrompt = prompt;
@@ -815,7 +1013,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   //     copied from each [eventId: ...] tag in the prompt. Events the
   //     model failed to anchor to a real eventId are dropped here so they
   //     never reach the rendered HTML.
-  if (Array.isArray(draft.events) && draft.events.length > 0) {
+  if (!isPestInsider && Array.isArray(draft.events) && draft.events.length > 0) {
     if (approvedEvents.length === 0) {
       // No DB pool to anchor against — every event is unverifiable.
       throw new Error(
@@ -847,12 +1045,15 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   sanitizeProseFields(draft);
 
   // 4b. Generate hero image (runs in parallel with nothing — fire and await)
-  if (draft.events?.length && !draft.heroImageUrl) {
+  if ((draft.events?.length || isPestInsider) && !draft.heroImageUrl) {
     draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Fresh This Week');
   }
 
-  // 4c. Assemble Beehiiv-quality HTML from structured event data + Giphy GIFs
-  if (draft.events?.length) {
+  // 4c. Assemble Beehiiv-quality HTML from structured data + Giphy GIFs
+  if (isPestInsider) {
+    sanitizePestInsiderDraft(draft);
+    draft.htmlBody = await assemblePestInsiderNewsletter(draft);
+  } else if (draft.events?.length) {
     draft.htmlBody = await assembleBeehiivNewsletter(draft);
   } else if (typeConfig?.flagship) {
     // Flagship drafts must come through the locked structured-events path.
@@ -958,4 +1159,9 @@ module.exports = {
   displayCity,
   formatLockedLocation,
   linkifyFirst,
+  // Pest Insider (monthly humor-sandwich) pieces
+  buildPestInsiderSystemPrompt,
+  sanitizePestInsiderDraft,
+  assemblePestInsiderNewsletter,
+  PEST_INSIDER_ROTATION,
 };

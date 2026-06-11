@@ -65,6 +65,29 @@ const NEWSLETTER_TYPES = {
     },
   },
 
+  'pest-insider-monthly': {
+    key: 'pest-insider-monthly',
+    label: 'Pest Insider (Monthly)',
+    flagship: false,
+    cadence: 'monthly',
+    // Auto-drafts the first Tuesday of the month at 7am ET (scheduler.js)
+    // — Thursdays stay owned by the weekly events guide.
+    defaultSendDay: 'Tuesday',
+    voiceProfile: 'waves_phase_3_local',
+    coverage: null,
+    // The humor-sandwich structure from the shipped Beehiiv "Pest Watch"
+    // issues (see docs/design/newsletter-fresh-this-week-style-guide.md):
+    // ~60% edutainment facts → ONE sincere pitch section → voice-y close.
+    requiredSections: ['seasonal_hook', 'pest_facts', 'featured_service', 'cta_close'],
+    sourceRequirements: null,
+    autonomy: {
+      aiDraftAllowed: true,
+      autoScheduleAllowed: true,
+      autoSendAllowed: false,
+      humanApprovalRequired: true,
+    },
+  },
+
   'pest-education': {
     key: 'pest-education',
     label: 'Pest / Lawn Education',
@@ -145,6 +168,7 @@ const NEWSLETTER_TYPES = {
  */
 const TEMPLATE_TO_TYPE = {
   weekend: 'local-weekly-fresh-events',
+  pest_insider: 'pest-insider-monthly',
   pest_concern: 'pest-education',
   local_spotlight: 'local-spotlight',
   service_promo: 'service-promo',
