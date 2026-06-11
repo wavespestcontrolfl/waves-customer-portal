@@ -134,6 +134,31 @@ Only returns active customers with prior service history in that category.`,
 
   // ── WRITE TOOLS ─────────────────────────────────────────────
   {
+    name: 'create_customer',
+    description: `Create a new customer record (new lead or new account). Use when the operator asks to add a customer who is not in the database yet.
+Checks for an existing customer with the same phone number first — if one exists, returns that customer instead of creating a duplicate.
+Two-step pattern (same as route optimization): call WITHOUT \`confirmed\` first — it returns a PREVIEW and writes nothing. Show the preview to the operator, and only after they approve re-call WITH \`confirmed: true\`.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        confirmed: { type: 'boolean', description: 'Must be true to actually create the record. Omit on the first call to get a no-write preview.' },
+        first_name: { type: 'string' },
+        last_name: { type: 'string' },
+        phone: { type: 'string' },
+        email: { type: 'string' },
+        address_line1: { type: 'string' },
+        city: { type: 'string' },
+        state: { type: 'string', description: 'Two-letter state code (default FL)' },
+        zip: { type: 'string' },
+        lead_source: { type: 'string', description: 'Where the lead came from (e.g. phone_call, domain_website, referral). Default: intelligence_bar' },
+        pipeline_stage: { type: 'string', enum: ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'won', 'active_customer'], description: 'Default: new_lead' },
+        notes: { type: 'string' },
+        tags: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['first_name', 'phone'],
+    },
+  },
+  {
     name: 'update_customer',
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 IMPORTANT: Always confirm with the operator before updating. Return what you plan to change and ask for approval.`,
@@ -234,6 +259,7 @@ async function executeTool(toolName, input) {
       case 'query_revenue': return await queryRevenue(input);
       case 'compare_technicians': return await compareTechnicians(input);
       case 'find_duplicates': return await findDuplicates(input);
+      case 'create_customer': return await createCustomer(input);
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'create_appointment': return await createAppointment(input);
@@ -754,6 +780,118 @@ function sanitizeUpdates(updates) {
   clean.updated_at = new Date();
   return clean;
 }
+
+// Subset of CUSTOMER_STAGES in routes/admin-customers.js — creation never starts
+// a customer in a dead-end stage (lost, churned, dormant, at_risk).
+const CREATABLE_STAGES = new Set([
+  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up',
+  'negotiating', 'won', 'active_customer',
+]);
+
+async function createCustomer(input) {
+  const firstName = String(input.first_name || '').trim();
+  const lastName = String(input.last_name || '').trim() || null;
+  const phone = String(input.phone || '').trim();
+  if (!firstName || !phone) return { error: 'first_name and phone are required' };
+
+  const phoneDigits = phone.replace(/\D/g, '').slice(-10);
+  if (phoneDigits.length < 10) return { error: 'phone must include at least 10 digits' };
+
+  const stage = input.pipeline_stage || 'new_lead';
+  if (!CREATABLE_STAGES.has(stage)) return { error: `Invalid pipeline_stage: ${stage}` };
+
+  const email = input.email ? String(input.email).trim().toLowerCase() : null;
+
+  const existing = await db('customers')
+    .whereNull('deleted_at')
+    .where(function () {
+      this.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`]);
+      if (email) this.orWhereRaw('LOWER(email) = ?', [email]);
+    })
+    .orderBy('created_at', 'asc')
+    .first();
+
+  if (existing) {
+    return {
+      already_exists: true,
+      customer_id: existing.id,
+      customer_name: `${existing.first_name || ''} ${existing.last_name || ''}`.trim(),
+      phone: existing.phone,
+      email: existing.email,
+      stage: existing.pipeline_stage,
+      note: 'A customer with this phone or email already exists — no new record created. Use get_customer_detail or update_customer with this id. For a second property on the same account, use the New Customer form.',
+    };
+  }
+
+  const record = {
+    first_name: firstName,
+    last_name: lastName,
+    phone,
+    email,
+    address_line1: String(input.address_line1 || '').trim() || null,
+    city: String(input.city || '').trim() || null,
+    state: String(input.state || '').trim().toUpperCase().slice(0, 2) || 'FL',
+    zip: String(input.zip || '').trim() || null,
+    pipeline_stage: stage,
+    lead_source: String(input.lead_source || '').trim() || 'intelligence_bar',
+  };
+
+  if (input.confirmed !== true) {
+    return {
+      preview: true,
+      would_create: record,
+      note: 'PREVIEW ONLY — nothing was created. Show these details to the operator, and after they approve, call create_customer again with the same fields plus confirmed: true.',
+    };
+  }
+
+  const created = await db.transaction(async (trx) => {
+    const [account] = await trx('customer_accounts').insert({
+      first_name: firstName,
+      last_name: lastName,
+      phone,
+      email,
+    }).returning('*');
+
+    const [customer] = await trx('customers').insert({
+      ...record,
+      account_id: account.id,
+      is_primary_profile: true,
+      profile_label: 'Primary',
+      pipeline_stage_changed_at: new Date(),
+      crm_notes: input.notes ? String(input.notes).trim() : null,
+      active: true,
+    }).returning('*');
+
+    // Default child rows — same as the New Customer form's creation path
+    await trx('property_preferences').insert({ customer_id: customer.id }).onConflict('customer_id').ignore();
+    await trx('notification_prefs').insert({ customer_id: customer.id }).onConflict('customer_id').ignore();
+
+    if (Array.isArray(input.tags)) {
+      for (const tag of input.tags) {
+        const cleanTag = String(tag || '').trim();
+        if (cleanTag) {
+          await trx('customer_tags').insert({ customer_id: customer.id, tag: cleanTag }).onConflict(['customer_id', 'tag']).ignore();
+        }
+      }
+    }
+
+    return customer;
+  });
+
+  logger.info(`[intelligence-bar] Created customer ${created.id} (source: ${record.lead_source}, stage: ${record.pipeline_stage})`);
+
+  return {
+    success: true,
+    customer_id: created.id,
+    customer_name: `${created.first_name} ${created.last_name || ''}`.trim(),
+    phone: created.phone,
+    email: created.email,
+    city: created.city,
+    stage: created.pipeline_stage,
+    lead_source: created.lead_source,
+  };
+}
+
 
 async function updateCustomer(customerId, updates) {
   const clean = sanitizeUpdates(updates);

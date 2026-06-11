@@ -24,7 +24,7 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
-const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
+const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
@@ -73,6 +73,29 @@ const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
 const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
+
+// Base toolset for every admin context: core customer/schedule/revenue tools
+// plus read-only comms tools, so SMS/call history is visible from any page —
+// not just the Communications page.
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS];
+
+// Writes that the REST equivalents guard with requireAdmin — technician
+// tokens must not reach them through the intelligence bar either.
+const ADMIN_ONLY_TOOL_NAMES = new Set(['create_customer']);
+
+// Tool calls whose inputs/outputs carry customer PII (names, phones, emails,
+// addresses, SMS bodies). Their params and the surrounding prompt/response
+// are redacted from logs and query telemetry per the PII-in-logs rule.
+const PII_TOOL_NAMES = new Set([
+  'create_customer',
+  'get_unanswered_threads',
+  'get_conversation_thread',
+  'search_messages',
+  'get_call_log',
+  'send_sms',
+  'draft_sms_reply',
+  'draft_sms',
+]);
 
 function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
@@ -529,45 +552,46 @@ RESPONSE STYLE:
 
 function getToolsForContext(context) {
   if (context === 'schedule' || context === 'dispatch') {
-    return [...TOOLS, ...SCHEDULE_TOOLS];
+    return [...BASE_TOOLS, ...SCHEDULE_TOOLS];
   }
   if (context === 'dashboard') {
-    return [...TOOLS, ...DASHBOARD_TOOLS];
+    return [...BASE_TOOLS, ...DASHBOARD_TOOLS];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...TOOLS, ...SEO_QUERY_TOOLS];
+    return [...BASE_TOOLS, ...SEO_QUERY_TOOLS];
   }
   if (context === 'procurement' || context === 'inventory') {
-    return [...TOOLS, ...PROCUREMENT_TOOLS];
+    return [...BASE_TOOLS, ...PROCUREMENT_TOOLS];
   }
   if (context === 'revenue') {
-    return [...TOOLS, ...REVENUE_TOOLS];
+    return [...BASE_TOOLS, ...REVENUE_TOOLS];
   }
   if (context === 'reviews') {
-    return [...TOOLS, ...REVIEW_TOOLS];
+    return [...BASE_TOOLS, ...REVIEW_TOOLS];
   }
   if (context === 'comms') {
+    // Full comms set already includes the read tools — don't double-load
     return [...TOOLS, ...COMMS_TOOLS];
   }
   if (context === 'tax') {
-    return [...TOOLS, ...TAX_TOOLS];
+    return [...BASE_TOOLS, ...TAX_TOOLS];
   }
   if (context === 'leads') {
-    return [...TOOLS, ...LEADS_TOOLS];
+    return [...BASE_TOOLS, ...LEADS_TOOLS];
   }
   if (context === 'email') {
-    return [...TOOLS, ...EMAIL_TOOLS];
+    return [...BASE_TOOLS, ...EMAIL_TOOLS];
   }
   if (context === 'banking') {
-    return [...TOOLS, ...BANKING_QUERY_TOOLS];
+    return [...BASE_TOOLS, ...BANKING_QUERY_TOOLS];
   }
   if (context === 'estimates') {
-    return [...TOOLS, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
+    return [...BASE_TOOLS, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
   }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
-  return TOOLS;
+  return BASE_TOOLS;
 }
 
 // techContext is only set for tech portal calls
@@ -644,6 +668,11 @@ RULES:
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
+CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
+- You CAN create new customers with create_customer — first call returns a preview, show it to the operator, then re-call with confirmed: true after they approve
+- You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
+- Sending SMS from outside the Communications page: use draft_sms and let the operator send
+
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days
 - Monthly lawn = every ~30 days  
@@ -711,6 +740,7 @@ router.post('/query', async (req, res, next) => {
     let currentMessages = messages;
     let finalResponse = null;
     const toolCalls = [];
+    const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
 
     // Tool-use loop
@@ -734,7 +764,11 @@ router.post('/query', async (req, res, next) => {
       // Execute all tool calls using context-aware router
       const results = [];
       for (const toolUse of toolUses) {
-        logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, toolUse.input);
+        // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
+        const loggableInput = PII_TOOL_NAMES.has(toolUse.name)
+          ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
+          : toolUse.input;
+        logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
 
         let result;
         let failed = false;
@@ -743,6 +777,10 @@ router.post('/query', async (req, res, next) => {
         const toolStartedAt = Date.now();
         if (DASHBOARD_TOOL_NAMES.has(toolUse.name) && isNonAdminDashboardRequest(req)) {
           result = { error: 'Admin access required for dashboard intelligence' };
+          failed = true;
+          errorMessage = result.error;
+        } else if (ADMIN_ONLY_TOOL_NAMES.has(toolUse.name) && req.techRole !== 'admin') {
+          result = { error: 'Admin access required for this action' };
           failed = true;
           errorMessage = result.error;
         } else if (CONFIRMED_ACTION_TOOL_NAMES.has(toolUse.name)) {
@@ -789,7 +827,8 @@ router.post('/query', async (req, res, next) => {
           ...(failed ? { is_error: true } : {}),
         });
 
-        toolCalls.push({ name: toolUse.name, input: toolUse.input });
+        toolCalls.push({ name: toolUse.name, input: loggableInput });
+        persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
       }
 
@@ -804,12 +843,16 @@ router.post('/query', async (req, res, next) => {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
 
-    // Log the query for analytics
+    // Log the query for analytics. tool_calls stores names + field keys only;
+    // prompt/response are additionally redacted when a PII-bearing tool ran —
+    // those prompts carry typed customer contact details and the responses
+    // echo SMS bodies.
+    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
     try {
       await db('intelligence_bar_queries').insert({
-        prompt,
-        response: finalResponse.substring(0, 5000),
-        tool_calls: JSON.stringify(toolCalls),
+        prompt: usedPiiTool ? '[redacted — PII-bearing tools used]' : prompt,
+        response: usedPiiTool ? '[redacted — PII-bearing tools used]' : finalResponse.substring(0, 5000),
+        tool_calls: JSON.stringify(persistedToolCalls),
         created_at: new Date(),
       });
     } catch {
@@ -851,6 +894,9 @@ router.post('/execute', async (req, res, next) => {
     if (BANKING_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for banking actions' });
     }
+    if (ADMIN_ONLY_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required for this action' });
+    }
     if (SEO_CONFIRMED_ACTION_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for SEO actions' });
     }
@@ -878,10 +924,12 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, null, actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, {
-      ...executionParams,
-      ...(executionParams.idempotencyKey ? { idempotencyKey: '[redacted]' } : {}),
-    });
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action)
+      ? { fields: Object.keys(executionParams) }
+      : {
+        ...executionParams,
+        ...(executionParams.idempotencyKey ? { idempotencyKey: '[redacted]' } : {}),
+      });
 
     res.json({
       success: !result.error,

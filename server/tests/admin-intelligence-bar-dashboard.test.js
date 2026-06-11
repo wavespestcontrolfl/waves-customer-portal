@@ -2,6 +2,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockExecuteDashboardTool = jest.fn();
 const mockExecuteSeoTool = jest.fn();
+const mockExecuteTool = jest.fn();
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -16,7 +17,10 @@ jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
 jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: jest.fn() }));
 jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 
-jest.mock('../services/intelligence-bar/tools', () => ({ TOOLS: [], executeTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/tools', () => ({
+  TOOLS: [],
+  executeTool: (...args) => mockExecuteTool(...args),
+}));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({
   DASHBOARD_TOOLS: [
@@ -35,7 +39,7 @@ jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/review-tools', () => ({ REVIEW_TOOLS: [], executeReviewTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/comms-tools', () => ({ COMMS_TOOLS: [], executeCommsTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/comms-tools', () => ({ COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tax-tools', () => ({ TAX_TOOLS: [], executeTaxTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/leads-tools', () => ({ LEADS_TOOLS: [], executeLeadsTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/email-tools', () => ({ EMAIL_TOOLS: [], executeEmailTool: jest.fn() }));
@@ -228,6 +232,45 @@ describe('dashboard intelligence-bar guard', () => {
           technicianId: 'admin-1',
           confirmed: true,
         }),
+      );
+    });
+  });
+
+  test('technician cannot execute create_customer', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'create_customer',
+          params: { first_name: 'Jeff', phone: '9415550100', confirmed: true },
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(403);
+      expect(body.error).toBe('Admin access required for this action');
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('admin can execute create_customer', async () => {
+    mockExecuteTool.mockResolvedValue({ success: true, customer_id: 'cust-1' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'create_customer',
+          params: { first_name: 'Jeff', phone: '9415550100', confirmed: true },
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(mockExecuteTool).toHaveBeenCalledWith(
+        'create_customer',
+        expect.objectContaining({ first_name: 'Jeff', confirmed: true }),
       );
     });
   });

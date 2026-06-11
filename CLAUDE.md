@@ -131,7 +131,7 @@ One Express route serves everything: `server/routes/admin-intelligence-bar.js`. 
 | `estimate` | `/admin/estimates` | `estimate-tools` |
 | `tech` | `/tech/*` | `tech-tools` ONLY — no base tools, read-only, max_tokens 1024 |
 
-All admin contexts get base tools from `tools.js` (customers / revenue / scheduling / SMS). Tech portal is isolated — no base tools, strictly read-only, lower max_tokens for field speed.
+All admin contexts get base tools from `tools.js` (customers incl. `create_customer` / revenue / scheduling / SMS) plus the read-only comms subset (`COMMS_READ_TOOLS`: conversation threads, message search, SMS stats, call log) so message history is visible from any page. Tech portal is isolated — no base tools, strictly read-only, lower max_tokens for field speed.
 
 ## Key Design Decisions
 

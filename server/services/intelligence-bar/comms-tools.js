@@ -9,7 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -146,6 +146,19 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
     },
   },
 ];
+
+// Read-only subset loaded into every admin context (not just the Communications
+// page) so any page can pull SMS/call history for a customer. Write tools
+// (send_sms) and comms-page-specific tools stay comms-only.
+const COMMS_READ_TOOL_NAMES = new Set([
+  'get_unanswered_threads',
+  'get_conversation_thread',
+  'search_messages',
+  'get_sms_stats',
+  'get_call_log',
+  'get_todays_activity',
+]);
+const COMMS_READ_TOOLS = COMMS_TOOLS.filter(t => COMMS_READ_TOOL_NAMES.has(t.name));
 
 
 // ─── EXECUTION ──────────────────────────────────────────────────
@@ -702,7 +715,8 @@ async function getCsrOverview(days) {
 
 
 async function getTodaysActivity() {
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  // "Today" anchored to America/New_York — Railway runs UTC
+  const todayStart = parseETDateTime(`${etDateString()}T00:00:00`);
   const since = todayStart.toISOString();
 
   const [smsIn, smsOut, calls, unanswered] = await Promise.all([
@@ -737,4 +751,4 @@ async function getTodaysActivity() {
 }
 
 
-module.exports = { COMMS_TOOLS, executeCommsTool };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool };
