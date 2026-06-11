@@ -2063,10 +2063,11 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
   };
 }
 
-// Internal: full recommendation result with reason codes. Use this when the
-// caller needs to explain *why* enhanced was recommended (admin UI, customer
-// proposal). `recommendTreeShrubTier` is the back-compat string-returning
-// wrapper used by older callers and tests.
+// Internal: full recommendation result with reason codes. The recommended
+// tier is always the mandated 6-visit Standard; the reason codes are advisory
+// signals (admin UI, customer proposal) that the property warrants the full
+// program rather than the Light downsell. `recommendTreeShrubTier` is the
+// back-compat string-returning wrapper used by older callers and tests.
 function evaluateTreeShrubTierRecommendation(property = {}) {
   // 6-visit Standard is the MANDATED default program (protocol six_x). We
   // always recommend it — the 4-visit Light tier (protocol four_x) is an
