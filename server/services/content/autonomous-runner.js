@@ -1507,12 +1507,23 @@ class AutonomousRunner {
       brief.router_notes,
     ].filter(Boolean).join(' — ').slice(0, 1000);
 
+    // Copy is localized to the OPPORTUNITY's city, not the profile name —
+    // a North Port opportunity posting on the Venice profile must still
+    // lead with North Port (the GBP prompt mentions locationName in the
+    // first sentence).
+    const displayCity = String(brief.city || '')
+      .trim()
+      .split(/[-\s]+/)
+      .filter(Boolean)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ') || location.name;
+
     const t = Date.now();
     const content = await social.generateContent('gbp', {
       title,
       description,
       link,
-      locationName: location.name,
+      locationName: displayCity,
     });
     run.agent_ms = Date.now() - t;
     run.draft_payload = { gbp_post: { location_id: location.id, content, link } };

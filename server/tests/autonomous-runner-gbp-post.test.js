@@ -142,6 +142,17 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).not.toHaveBeenCalled();
   });
 
+  test('satellite city: copy localizes to the brief city, post goes to the covering profile', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    await runner._handleGbpPostAction(baseBrief({ city: 'north-port' }), { shadow_mode: false });
+
+    expect(social.generateContent).toHaveBeenCalledWith('gbp', expect.objectContaining({
+      locationName: 'North Port',
+    }));
+    expect(social.postToGBP).toHaveBeenCalledWith('venice', expect.any(String), expect.anything());
+  });
+
   test('unmapped city parks for manual routing without generating', async () => {
     mockDb();
     const result = await runner._handleGbpPostAction(baseBrief({ city: 'tampa' }), { shadow_mode: true });
