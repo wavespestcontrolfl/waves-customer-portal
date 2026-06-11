@@ -535,3 +535,19 @@ The tier price is the full customer total — there is **no separate setup charg
 **Blast radius:** dark — the CTA only renders on typed completions with `followupSuggestion.required` (no profile emits that pre-cutover); the endpoint 409s for non-typed services.
 
 **Revisit if:** trapping cadence needs multi-visit chains booked upfront (today each completion books the next check), or follow-ups should inherit a non-zero price for non-included programs.
+
+---
+
+## 2026-06-11 — Specialty services → Service Report V1 pipeline (PR 5: Phase-1 cutover)
+
+**Decision:** Phase-1 pilot cutover ships as one explicit-allowlist migration (`20260611000012`) flipping 16 profiles to `completion_mode='service_report'` — per-key `WHERE` (key + expected pointer + `project_required` + active) with `count===1` assertion per row inside a transaction, so any prod drift aborts loudly with nothing flipped. `delivery_mode` stays `auto_send` (staged pilot, pure auto-send; per-profile `delivery_mode` and `SPECIALTY_REPORT_DELIVERY_DISABLED` remain the kill switches). Rollback = `knex down` restores `project_required` + exact prior pointers.
+
+**Allowlist:** pest_inspection, new_customer_inspection (pest_inspection); mosquito_event + **mosquito_one_time repointed → mosquito_event** (it fell into the generic pest fallback at seeding, but its work content is the mosquito report family and the generic schema's required activity gauge doesn't fit); palm_injection; lawn_aeration/lawn_care_one_time/lawn_fungicide/lawn_insect_control/lawn_inspection (one_time_lawn_treatment — schema has no required fields, so inspection/aeration degrade gracefully); bee_wasp_removal/fire_ant/mud_dauber_removal/pest_initial_cleanout/pest_re_service/tick_control (one_time_pest_treatment). **Excluded deliberately:** `general_appointment` (generic catch-all; required activity gauge is wrong-frame) and `waveguard_initial_setup` (recurring-program onboarding, not a specialty one-time) stay `project_required`; trend types are Phase 1b/2; termite is Phase 3 after FS 482.226 / FAC 5E-14 signoff.
+
+**Progress SMS (deferred from PR 2):** `service_report_v1_progress` template (`20260611000013`) — short SMS whose lead sentence is the snapshot's generated Today's Result headline (immutable, versioned, banned-words-safe, identical to the linked report). delivery.js selects it via `typedProgressContext(record)` (snapshot `visitSequence > 1` + non-empty headline); invoice-link completions keep `service_report_v1_with_invoice`; no headline → plain template. Inert for Phase 1 (single-visit families) — live before Phase 1b flips the first trend key.
+
+**Verification:** full 641-migration replay on a scratch DB, then up (16 flipped, exclusions held, recurring NULL-pointer `service_report` rows untouched) / down (exact pointers restored incl. the repoint) / re-up.
+
+**Blast radius:** THIS IS THE CUTOVER — from deploy, the 16 keys complete through the typed CompletionPanel and auto-send Service Report V1; project creation for the five pilot project types shuts off (PR 4.5 gating keys off live profile state). Gated on the golden-fixture readability sign-off.
+
+**Revisit if:** pilot telemetry breaches the p90 ≤60s completion budget, or report-quality findings from the first auto-sent reports require copy-map revisions before Phase 1b.
