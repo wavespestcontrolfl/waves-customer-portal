@@ -837,21 +837,32 @@ router.post('/confirm', async (req, res, next) => {
       // capacity model the availability engine offers slots from).
       // Expired estimate-slot holds don't count (same predicate as
       // slot-reservation.js).
+      const zoneCities = zone?.cities || [];
       const conflictQuery = trx('scheduled_services')
-        .where('scheduled_date', slot_date)
-        .whereNotIn('status', ['cancelled'])
+        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+        .where('scheduled_services.scheduled_date', slot_date)
+        .whereNotIn('scheduled_services.status', ['cancelled'])
         .where((q) => {
-          q.whereNull('reservation_expires_at')
-            .orWhereRaw('reservation_expires_at > NOW()');
+          q.whereNull('scheduled_services.reservation_expires_at')
+            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
         })
-        .where('window_start', '<', endTime)
-        .where('window_end', '>', slot_start);
+        .where('scheduled_services.window_start', '<', endTime)
+        .where('scheduled_services.window_end', '>', slot_start);
       if (technician_id) {
-        conflictQuery.where('technician_id', technician_id);
-      } else if (zoneSlug) {
-        conflictQuery.whereNull('technician_id').where('zone', zoneSlug);
+        conflictQuery.where('scheduled_services.technician_id', technician_id);
+      } else {
+        // Availability builds slots from ALL jobs in the zone — assigned
+        // or not — so a stale confirm must conflict against the same set,
+        // not just unassigned rows (mirrors getAvailableSlots' occupied
+        // predicate: zone slug OR customer city in the zone).
+        conflictQuery.where((q) => {
+          if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
+          if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+        });
       }
-      const conflict = (technician_id || zoneSlug) ? await conflictQuery.first() : null;
+      const conflict = (technician_id || zoneSlug || zoneCities.length)
+        ? await conflictQuery.first('scheduled_services.id')
+        : null;
       if (conflict) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,

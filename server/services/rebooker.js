@@ -314,6 +314,33 @@ class SmartRebooker {
     }
 
     const win = parseWindow(newWindow);
+
+    // Same target validation as reschedule(): a past (or same-day elapsed)
+    // anchor would shift the whole chain into dates no "upcoming" query
+    // ever finds. Siblings shift forward of the anchor, so a valid anchor
+    // keeps them valid.
+    const seriesDateStr = String(newDate || '').split('T')[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(seriesDateStr) || seriesDateStr < etDateString()) {
+      throw Object.assign(new Error('Reschedule target date is invalid or in the past'), {
+        statusCode: 400,
+        isOperational: true,
+        code: 'INVALID_DATE',
+      });
+    }
+    if (seriesDateStr === etDateString()) {
+      const cutoff = win.end || service.window_end || win.start || service.window_start;
+      if (cutoff) {
+        const nowEt = etParts(new Date());
+        const [ch, cm] = String(cutoff).split(':').map(Number);
+        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
+          throw Object.assign(new Error('That window has already passed today'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
+    }
     const pattern = parent.recurring_pattern;
     const isMonthBasedPattern = pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
     const opts = {

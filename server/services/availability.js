@@ -210,9 +210,14 @@ class AvailabilityEngine {
     // transaction so a partial failure can't leave a booking without its
     // dispatch row.
     const { booking, scheduled } = await db.transaction(async (trx) => {
+      // slot-reserve namespace + zone-key shape match routes/booking.js
+      // exactly, so confirms through onboarding/AI and the public
+      // /api/booking/confirm serialize against each other for the same
+      // zone+day (different namespaces would let both pass their overlap
+      // checks under READ COMMITTED).
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['self-booking', `${zone?.id || (customer.city || '').toLowerCase()}:${dateStr}`],
+        ['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],
       );
 
       if (zone) {
