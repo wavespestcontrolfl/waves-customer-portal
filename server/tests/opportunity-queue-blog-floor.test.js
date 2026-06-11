@@ -71,7 +71,7 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({});
 
     const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' THEN \? ELSE \? END/);
+    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' THEN \?::numeric ELSE \?::numeric END/);
     // bindings: [claimed_at, blogFloor, minScore]
     expect(bindings[1]).toBe(THRESHOLDS.blogMinScoreToAct);
     expect(bindings[2]).toBe(THRESHOLDS.minScoreToAct);
@@ -119,7 +119,7 @@ describe('peek action-aware floor', () => {
     await queue.peek({ minScore: THRESHOLDS.minScoreToAct });
 
     expect(q.whereRaw).toHaveBeenCalledWith(
-      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' THEN \? ELSE \? END/),
+      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' THEN \?::numeric ELSE \?::numeric END/),
       [THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct],
     );
   });
