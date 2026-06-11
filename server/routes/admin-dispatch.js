@@ -4026,6 +4026,175 @@ ${commsContext || '[not provided]'}
 Return only the paragraph text.`;
 }
 
+// POST /:serviceId/schedule-followup — book the suggested follow-up visit
+// for a typed specialty completion as a PENDING appointment (the normal
+// pending → confirmed dispatch flow is the admin confirmation step, so the
+// full scheduling validation stack isn't duplicated here). Idempotent per
+// source visit via followup_source_service_id — a retried CTA tap returns
+// the existing booking. The appointment is $0 + followup_included, which the
+// typed completion billing pre-gate bypasses (included program visit).
+router.post('/:serviceId/schedule-followup', async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const { date, windowStart = null, windowEnd = null, technicianId = null } = req.body || {};
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
+      return res.status(400).json({ error: 'date (YYYY-MM-DD) is required', code: 'followup_date_invalid' });
+    }
+    if (String(date) < etDateString()) {
+      return res.status(400).json({ error: 'Follow-up date must be today or later', code: 'followup_date_past' });
+    }
+
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const profile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+    if (!profile?.findingsType) {
+      return res.status(409).json({
+        error: 'Follow-up booking from completion is only available for typed specialty services.',
+        code: 'followup_not_typed',
+      });
+    }
+
+    // This is the server-side gate for the completion CTA, not a generic
+    // booking API — the source visit must be completed and its persisted
+    // completion must actually call for a follow-up (mirrors the /complete
+    // followupSuggestion logic, incl. the cockroach German-only rule on the
+    // stored snapshot). A stale or crafted POST can't mint included $0
+    // appointments for visits that never owed one (Codex P2).
+    if (svc.status !== 'completed') {
+      return res.status(409).json({
+        error: 'Follow-ups can only be booked from a completed visit.',
+        code: 'followup_source_not_completed',
+      });
+    }
+    // The completion must have actually run the typed flow: after cutover a
+    // service's older completions have no typed snapshot — they never earned
+    // the CTA, so they can't mint an included $0 follow-up (Codex P2). The
+    // snapshot type must match the profile that owes the follow-up.
+    const sourceRecord = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first()
+      .catch(() => null);
+    const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
+    if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) {
+      return res.status(409).json({
+        error: 'This visit was not completed through the typed report flow.',
+        code: 'followup_no_typed_completion',
+      });
+    }
+    const suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
+    let followupRequired = !!suggestion?.required;
+    if (followupRequired && profile.findingsType === 'cockroach') {
+      if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
+    }
+    if (!followupRequired) {
+      return res.status(409).json({
+        error: 'This completed visit does not call for a follow-up appointment.',
+        code: 'followup_not_required',
+      });
+    }
+    // The CTA books exactly the program-interval date the completion computed;
+    // any other date is normal scheduling, not an included $0 follow-up
+    // (Codex P2 — this is not a generic booking API).
+    if (!suggestion.suggestedDate || String(date) !== String(suggestion.suggestedDate)) {
+      return res.status(409).json({
+        error: `Follow-up must be booked for the program-interval date${suggestion.suggestedDate ? ` (${suggestion.suggestedDate})` : ''}.`,
+        code: 'followup_date_mismatch',
+        suggestedDate: suggestion.suggestedDate || null,
+      });
+    }
+
+    const cols = await db('scheduled_services').columnInfo().catch(() => ({}));
+    if (!cols.followup_source_service_id || !cols.followup_included) {
+      return res.status(503).json({ error: 'Follow-up booking is not available yet (pending migration).', code: 'followup_columns_missing' });
+    }
+
+    const existing = await db('scheduled_services')
+      .where({ followup_source_service_id: svc.id })
+      .whereNotIn('status', ['cancelled', 'skipped'])
+      .orderBy('created_at', 'desc')
+      .first();
+    if (existing) {
+      return res.json({ success: true, alreadyScheduled: true, appointment: { id: existing.id, scheduledDate: serviceDateOnly(existing.scheduled_date), status: existing.status } });
+    }
+
+    // technicianId override is admin-only — a tech-authenticated caller
+    // could otherwise book the follow-up onto another technician's lane
+    // (Codex P2). Techs always inherit the source visit's technician.
+    const technicianOverride = req.techRole === 'admin' ? technicianId : null;
+    const insertData = {
+      customer_id: svc.customer_id,
+      technician_id: technicianOverride || svc.technician_id || null,
+      scheduled_date: date,
+      window_start: windowStart || svc.window_start || null,
+      window_end: windowEnd || svc.window_end || null,
+      service_type: svc.service_type,
+      status: 'pending',
+      notes: `Follow-up to ${serviceDateOnly(svc.scheduled_date)} visit (booked at completion)`,
+      is_recurring: false,
+      followup_included: true,
+      followup_source_service_id: svc.id,
+    };
+    if (cols.service_id && svc.service_id) insertData.service_id = svc.service_id;
+    if (cols.zone && svc.zone) insertData.zone = svc.zone;
+    if (cols.estimated_duration_minutes && svc.estimated_duration_minutes) insertData.estimated_duration_minutes = svc.estimated_duration_minutes;
+    if (cols.estimated_price) insertData.estimated_price = 0;
+    if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = false;
+    if (cols.time_window && svc.time_window) insertData.time_window = svc.time_window;
+
+    let appointment;
+    try {
+      [appointment] = await db('scheduled_services').insert(insertData).returning('*');
+    } catch (err) {
+      // Partial unique index on followup_source_service_id — a concurrent
+      // CTA tap lost the race; return the winner's booking idempotently.
+      if (err && err.code === '23505') {
+        const winner = await db('scheduled_services')
+          .where({ followup_source_service_id: svc.id })
+          .whereNotIn('status', ['cancelled', 'skipped'])
+          .orderBy('created_at', 'desc')
+          .first();
+        if (winner) {
+          return res.json({
+            success: true,
+            alreadyScheduled: true,
+            appointment: { id: winner.id, scheduledDate: serviceDateOnly(winner.scheduled_date), status: winner.status },
+          });
+        }
+      }
+      throw err;
+    }
+    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
+    // Without this the visit never enters appointment_reminders, so the
+    // 72h/24h reminder cron can't see it (the cron reads only that table).
+    // sendConfirmation:false — no immediate SMS; the customer was told about
+    // the follow-up in person at completion. Best-effort: never fails the booking.
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        appointment.id,
+        svc.customer_id,
+        `${date}T${String(insertData.window_start || '08:00').slice(0, 5)}`,
+        svc.service_type,
+        'booking_followup',
+        { sendConfirmation: false },
+      );
+    } catch (e) {
+      logger.error(`[dispatch] Reminder registration failed for follow-up ${appointment.id}: ${e.message}`);
+    }
+    res.json({
+      success: true,
+      alreadyScheduled: false,
+      appointment: {
+        id: appointment.id,
+        scheduledDate: serviceDateOnly(appointment.scheduled_date),
+        status: appointment.status,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 router.post('/:serviceId/findings-recap/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
