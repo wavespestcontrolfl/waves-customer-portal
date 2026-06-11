@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PipelineAnalytics, {
   aggregateServiceLineRows,
   classifyEstimateServiceLine,
+  isFollowUpOverdueEstimate,
+  isGoingColdEstimate,
   withinDateRange,
 } from "./PipelineAnalytics";
 
@@ -199,6 +201,87 @@ describe("aggregateServiceLineRows", () => {
     });
   });
 
+  it("keeps one-time amounts out of the recurring avg ticket", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        id: "monthly-1",
+        status: "accepted",
+        serviceInterest: "",
+        serviceLines: [{ key: "pest", amount: 30, amountBasis: "monthly" }],
+      }),
+      estimate({
+        id: "monthly-2",
+        status: "viewed",
+        serviceInterest: "",
+        serviceLines: [{ key: "pest", amount: 40, amountBasis: "monthly" }],
+      }),
+      estimate({
+        id: "one-time-job",
+        status: "accepted",
+        serviceInterest: "",
+        serviceLines: [{ key: "pest", amount: 350, amountBasis: "one_time" }],
+      }),
+    ]);
+
+    // Monthly basis dominates (2 vs 1): avg = (30+40)/2, not (30+40+350)/3.
+    expect(rows[0]).toMatchObject({
+      key: "pest",
+      sent: 3,
+      avgTicket: 35,
+      ticketSuffix: "/mo recurring",
+    });
+  });
+
+  it("labels a one-time-dominant line as one-time", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        id: "termite-job",
+        status: "accepted",
+        serviceInterest: "",
+        serviceLines: [{ key: "termite", amount: 996, amountBasis: "one_time" }],
+      }),
+    ]);
+
+    expect(rows[0]).toMatchObject({
+      key: "termite",
+      avgTicket: 996,
+      ticketSuffix: "one-time",
+    });
+  });
+
+  it("keeps palm injection lines instead of silently dropping them", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        id: "palms",
+        status: "sent",
+        serviceInterest: "",
+        serviceLines: [{ key: "palm_injection", amount: 55, amountBasis: "monthly" }],
+      }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      key: "palm_injection",
+      label: "Palm injection",
+      sent: 1,
+      avgTicket: 55,
+    });
+  });
+
+  it("buckets unrecognized line keys as unknown instead of dropping the offer", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        id: "novel",
+        status: "sent",
+        serviceInterest: "",
+        serviceLines: [{ key: "brand_new_service", amount: 10 }],
+      }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ key: "unknown", sent: 1 });
+  });
+
   it("keeps commercial manual quote service lines in pipeline analytics", () => {
     const rows = aggregateServiceLineRows([
       estimate({
@@ -229,6 +312,71 @@ describe("aggregateServiceLineRows", () => {
   });
 });
 
+describe("engagement-based idle checks", () => {
+  it("does not flag follow-up overdue when the customer re-engaged recently", () => {
+    const e = estimate({
+      id: "re-engaged",
+      status: "viewed",
+      viewedAt: hoursAgo(120),
+      lastViewedAt: hoursAgo(20),
+    });
+    expect(isFollowUpOverdueEstimate(e, NOW.getTime())).toBe(false);
+
+    const clicked = estimate({
+      id: "clicked",
+      status: "viewed",
+      viewedAt: hoursAgo(120),
+      lastClickedAt: hoursAgo(10),
+    });
+    expect(isFollowUpOverdueEstimate(clicked, NOW.getTime())).toBe(false);
+  });
+
+  it("still flags follow-up overdue when the latest engagement is stale", () => {
+    const e = estimate({
+      id: "stale",
+      status: "viewed",
+      viewedAt: hoursAgo(120),
+      lastViewedAt: hoursAgo(72),
+    });
+    expect(isFollowUpOverdueEstimate(e, NOW.getTime())).toBe(true);
+  });
+
+  it("counts sent-but-never-opened estimates past 72h as going cold (matches the row badge)", () => {
+    const e = estimate({
+      id: "unopened",
+      status: "sent",
+      sentAt: hoursAgo(96),
+      viewedAt: null,
+    });
+    expect(isGoingColdEstimate(e, NOW.getTime())).toBe(true);
+  });
+
+  it("uses last engagement for the going-cold window", () => {
+    const reEngaged = estimate({
+      id: "warm",
+      status: "viewed",
+      viewedAt: hoursAgo(120),
+      lastViewedAt: hoursAgo(20),
+    });
+    expect(isGoingColdEstimate(reEngaged, NOW.getTime())).toBe(false);
+
+    const cold = estimate({
+      id: "cold",
+      status: "viewed",
+      viewedAt: hoursAgo(120),
+      lastViewedAt: hoursAgo(60),
+    });
+    expect(isGoingColdEstimate(cold, NOW.getTime())).toBe(true);
+
+    const beyondWindow = estimate({
+      id: "final",
+      status: "viewed",
+      viewedAt: hoursAgo(200),
+    });
+    expect(isGoingColdEstimate(beyondWindow, NOW.getTime())).toBe(false);
+  });
+});
+
 describe("withinDateRange", () => {
   it("uses the ET calendar year for YTD boundaries", () => {
     const dec31EtNow = new Date("2026-01-01T04:30:00.000Z").getTime();
@@ -252,9 +400,39 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("Offer acceptance")).toBeInTheDocument();
     expect(screen.getByText("MRR won")).toBeInTheDocument();
     expect(screen.getByText("$600")).toBeInTheDocument();
-    expect(screen.getByText("$63")).toBeInTheDocument();
+    // Avg ticket over priced non-draft offers only: $1,250 / 17 → $74. The
+    // three $0 drafts no longer drag the average down.
+    expect(screen.getByText("$74")).toBeInTheDocument();
     expect(screen.getByText("24%")).toBeInTheDocument();
     expect(screen.getByText("$400")).toBeInTheDocument();
+  });
+
+  it("excludes unpriced drafts and one-time-only rows from avg ticket", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "a", status: "accepted", monthlyTotal: 40 }),
+        estimate({ id: "b", status: "viewed", monthlyTotal: 30, viewedAt: hoursAgo(2) }),
+        estimate({ id: "draft-zero", status: "draft", monthlyTotal: 0 }),
+        estimate({ id: "one-time", status: "accepted", monthlyTotal: 0, onetimeTotal: 996 }),
+      ],
+    });
+
+    // (40 + 30) / 2, not (40 + 30 + 0 + 0) / 4. ($35 also shows in the ROI
+    // table's pest row, so assert presence rather than uniqueness.)
+    expect(screen.getAllByText("$35").length).toBeGreaterThan(0);
+    expect(screen.queryByText("$18")).not.toBeInTheDocument();
+  });
+
+  it("splits the MRR-won subtitle when one-time jobs are among the wins", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "r1", status: "accepted", monthlyTotal: 40 }),
+        estimate({ id: "r2", status: "accepted", monthlyTotal: 30 }),
+        estimate({ id: "ot", status: "accepted", monthlyTotal: 0, onetimeTotal: 350 }),
+      ],
+    });
+
+    expect(screen.getByText("2 recurring · 1 one-time")).toBeInTheDocument();
   });
 
   it("fires the won filter from the Won funnel tile", () => {
