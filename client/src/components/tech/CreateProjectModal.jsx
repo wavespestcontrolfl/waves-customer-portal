@@ -265,6 +265,32 @@ function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
   return next;
 }
 
+// The exact field values applyCustomerToWdoFindings derives from a customer.
+// Recorded when a customer is applied so a later customer switch can tell
+// auto-filled values apart from hand-typed ones and clear only the former.
+function customerWdoAutoFillValues(customer) {
+  return {
+    property_address: formatCustomerAddress(customer),
+    requested_by: formatCustomerContact(customer),
+    report_sent_to: formatCustomerContact(customer),
+    structures_inspected: formatStructuresInspected(customer),
+  };
+}
+
+// Which customer-derived values did an apply ACTUALLY write? Only fields the
+// apply changed count as auto-filled — a hand-typed value the blank-only
+// apply preserved (even one that coincidentally matches the customer) must
+// stay owned by the tech, or "Change" would clear it. After an explicit
+// overwrite, any field holding the customer's value is customer-sourced.
+function recordAppliedAutoFill(prev, next, customer, { overwrite = false } = {}) {
+  const applied = {};
+  for (const [key, value] of Object.entries(customerWdoAutoFillValues(customer))) {
+    if (!hasMeaningfulValue(value) || next[key] !== value) continue;
+    if (overwrite || prev[key] !== next[key]) applied[key] = value;
+  }
+  return applied;
+}
+
 function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
   const allowed = [
     'property_address',
@@ -329,6 +355,11 @@ export default function CreateProjectModal({
   // Tracks the most recently requested prefill client so a slow, stale
   // latest-scheduled-service response can't clobber a newer selection.
   const prefillCustomerRef = useRef(null);
+  // What was last auto-filled into the WDO findings from the selected
+  // customer — on a customer change, values still matching this map are
+  // cleared so the previous customer's address/contacts never carry over
+  // onto the new customer's FDACS-13645 form.
+  const wdoAutoFillRef = useRef(null);
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -523,8 +554,15 @@ export default function CreateProjectModal({
     if (projectType !== 'wdo_inspection') return;
     if (!selectedCustomer) return;
     // Seamlessly fill address + requested-by + report-sent-to from the picked
-    // customer, without clobbering anything the tech already typed.
-    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, false));
+    // customer, without clobbering anything the tech already typed. Record
+    // only what the apply actually changed (recordAppliedAutoFill) so a
+    // preserved hand-typed value is never tagged auto-filled. The updater
+    // stays idempotent, so a StrictMode double invocation is harmless.
+    setFindings(prev => {
+      const next = applyCustomerToWdoFindings(prev, selectedCustomer, false);
+      wdoAutoFillRef.current = recordAppliedAutoFill(prev, next, selectedCustomer);
+      return next;
+    });
   }, [projectType, selectedCustomer]);
 
   function handleFindingChange(key, value) {
@@ -561,7 +599,35 @@ export default function CreateProjectModal({
   function fillWdoAddressFromCustomer() {
     if (!selectedCustomer) return;
     // Explicit action — overwrite address + contact fields from the customer.
-    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, true));
+    // After an explicit replace, every field holding the customer's value IS
+    // customer-sourced, so record them all for the Change-clears map.
+    setFindings(prev => {
+      const next = applyCustomerToWdoFindings(prev, selectedCustomer, true);
+      wdoAutoFillRef.current = recordAppliedAutoFill(prev, next, selectedCustomer, { overwrite: true });
+      return next;
+    });
+  }
+
+  // Called when the tech un-picks the customer ("Change"): drop the WDO fields
+  // that still hold the previous customer's auto-filled values, keeping
+  // anything hand-typed that differs, so re-selecting blank-fills from the new
+  // customer instead of keeping the old property's address/contacts.
+  function clearWdoFindingsFromCustomer() {
+    const lastApplied = wdoAutoFillRef.current;
+    wdoAutoFillRef.current = null;
+    // The intelligence bar remounts on customer change, hiding its
+    // selected-photo chip — but a queued prior-treatment evidence photo
+    // (category 'previous_treatment') would still upload on save. It shows
+    // the PREVIOUS customer's property; never carry it to the next one.
+    setPhotoQueue(prev => prev.filter(p => p.category !== 'previous_treatment'));
+    if (!lastApplied) return;
+    setFindings(prev => {
+      const next = { ...prev };
+      for (const [key, value] of Object.entries(lastApplied)) {
+        if (hasMeaningfulValue(value) && next[key] === value) next[key] = '';
+      }
+      return next;
+    });
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
@@ -875,7 +941,7 @@ export default function CreateProjectModal({
                 <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
                 <button
                   type="button"
-                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; }}
+                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; clearWdoFindingsFromCustomer(); }}
                   style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
                 >Change</button>
               </div>
@@ -903,9 +969,11 @@ export default function CreateProjectModal({
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
                           const phone = c.phone || '';
                           setCustomerLabel([name, phone].filter(Boolean).join(' · ') || c.id);
-                          if (projectType === 'wdo_inspection') {
-                            setFindings(prev => applyCustomerToWdoFindings(prev, c, false));
-                          }
+                          // WDO auto-fill happens ONLY in the
+                          // [projectType, selectedCustomer] effect — applying
+                          // here too would make the effect's prev/next diff
+                          // see no change, so recordAppliedAutoFill would
+                          // record nothing and "Change" couldn't clear it.
                           prefillFromScheduledService(c.id);
                         }}
                         style={{
@@ -987,7 +1055,11 @@ export default function CreateProjectModal({
               </div>
 
               {projectType === 'wdo_inspection' && (
+                /* Keyed by customer so switching customers remounts the bar —
+                   a finished lookup for the previous customer's property can
+                   never be applied to the new one (legal FDACS filing). */
                 <WdoIntelligenceBar
+                  key={customerId || 'none'}
                   customerId={customerId}
                   serviceRecordId={defaultServiceRecordId}
                   scheduledServiceId={defaultScheduledServiceId}

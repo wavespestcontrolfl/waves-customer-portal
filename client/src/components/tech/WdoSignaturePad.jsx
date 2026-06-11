@@ -92,7 +92,11 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
     setSaving(true);
     setError("");
     try {
-      await adminFetch(`/admin/projects/${projectId}/wdo-signature`, { method: "DELETE" });
+      const r = await adminFetch(`/admin/projects/${projectId}/wdo-signature`, { method: "DELETE" });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || "Could not clear signature");
+      }
       setEditing(true);
       onChanged?.();
     } catch (e) {
@@ -126,6 +130,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         <button type="button" style={btn} onClick={clearSaved} disabled={saving}>
           Clear &amp; re-sign
         </button>
+        {error ? <div style={{ color: "#dc2626", fontSize: 13, marginTop: 6 }}>{error}</div> : null}
       </div>
     );
   }

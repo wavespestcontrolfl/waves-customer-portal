@@ -7,6 +7,7 @@ import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
+import { INTERNAL_FINDING_KEYS } from "../../lib/wdoReportFields";
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
 import { COLORS, FONTS } from "../../theme-brand";
 
@@ -706,8 +707,10 @@ function CustomerProjectReportPreview({
 }) {
   const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
   const reportTitle = String(title || "").trim() || typeLabel;
-  const findingsEntries = Object.entries(findings || {}).filter(([, v]) =>
-    hasMeaningfulValue(formatProjectPreviewValue(v)),
+  // Same internal-key filter as the customer-facing report page — the preview
+  // staff approve must match what the customer actually sees.
+  const findingsEntries = Object.entries(findings || {}).filter(
+    ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
   const visiblePhotos = (photos || []).slice(0, 4);
   const address = customerAddressLine(project);
@@ -1095,9 +1098,12 @@ export default function ProjectsPage() {
             />
           )}
         </div>
-        {/* Detail */}
+        {/* Detail — keyed by project id so switching projects remounts the
+            panel: stale edit state or an in-flight load for project A can
+            never render onto (or save over) project B. */}
         {selected && (
           <ProjectDetail
+            key={selected.id}
             projectId={selected.id}
             typesRegistry={typesRegistry}
             onClose={() => setSelectedId(null)}

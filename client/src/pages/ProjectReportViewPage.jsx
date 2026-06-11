@@ -7,6 +7,7 @@ import {
 import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
+import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
 /**
  * Public project-report viewer (WDO, termite, pest, rodent, bed bug).
@@ -180,6 +181,8 @@ const FIELD_LABELS = {
   previous_treatment_evidence: 'Evidence of previous treatment',
   previous_treatment_notes: 'Previous treatment observations',
   notice_location: 'Notice of Inspection location',
+  structure_sqft: 'Structure footprint (approx. sq ft)',
+  inspection_fee: 'Inspection fee',
   treated_at_inspection: 'Treated at time of inspection',
   organism_treated: 'Organism treated',
   pesticide_used: 'Pesticide used',
@@ -481,7 +484,8 @@ export default function ProjectReportViewPage() {
   const typeLabel = TYPE_LABELS[data.projectType] || 'Project';
   const reportTitle = String(data.title || '').trim() || typeLabel;
   const findings = data.findings || {};
-  const findingsEntries = Object.entries(findings).filter(([, v]) => v !== null && v !== undefined && v !== '');
+  const findingsEntries = Object.entries(findings)
+    .filter(([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && v !== null && v !== undefined && v !== '');
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
