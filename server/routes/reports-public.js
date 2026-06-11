@@ -253,6 +253,22 @@ router.get('/project/:token/data', async (req, res, next) => {
         .first();
     }
 
+    // WDO: serve the as-sent findings snapshot archived at send time, so the
+    // public link always matches the emailed signed FDACS-13645 PDF even if
+    // findings are edited afterward (a re-signed resend refreshes the
+    // snapshot). Pre-archive sends have no snapshot and fall back to live.
+    let viewerFindings = project.findings;
+    let viewerProjectDate = project.project_date || project.created_at;
+    if (project.project_type === 'wdo_inspection') {
+      let filings = project.wdo_sent_filings;
+      if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
+      const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+      if (lastFiling?.findings) {
+        viewerFindings = lastFiling.findings;
+        if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
+      }
+    }
+
     res.json({
       projectType: project.project_type,
       status: project.status,
@@ -260,9 +276,9 @@ router.get('/project/:token/data', async (req, res, next) => {
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
       technicianName: project.technician_name,
-      projectDate: project.project_date || project.created_at,
+      projectDate: viewerProjectDate,
       sentAt: project.sent_at,
-      findings: project.findings,
+      findings: viewerFindings,
       recommendations: project.recommendations,
       followupDate: project.followup_date,
       followupFindings: project.followup_findings,

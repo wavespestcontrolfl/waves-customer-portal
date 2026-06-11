@@ -942,7 +942,7 @@ router.get('/', async (req, res, next) => {
     // never needs (signature data URL up to 2MB, property profile, history) —
     // pulling p.* would transfer/allocate hundreds of MB for up to 500 rows.
     const projectCols = await db('projects').columnInfo().catch(() => ({}));
-    const HEAVY_LIST_COLS = new Set(['wdo_signature', 'property_profile', 'wdo_history']);
+    const HEAVY_LIST_COLS = new Set(['wdo_signature', 'property_profile', 'wdo_history', 'wdo_sent_filings']);
     const colNames = Object.keys(projectCols);
     const lightSelect = colNames.length
       ? colNames.filter((c) => !HEAVY_LIST_COLS.has(c)).map((c) => `p.${c}`)
@@ -1058,12 +1058,18 @@ router.get('/:id', async (req, res, next) => {
     } : null;
 
     // Strip the heavy signature image from the detail payload — expose only
-    // the metadata the UI needs (signed state, who, when).
+    // the metadata the UI needs (signed state, who, when, and whether the
+    // findings were edited after signing so a re-sign is required).
     const wdoSignature = (() => {
       let s = project.wdo_signature;
       if (typeof s === 'string') { try { s = JSON.parse(s); } catch { s = null; } }
       if (!s || !s.image) return null;
-      return { signed: true, signer_name: s.signer_name || null, signed_at: s.signed_at || null };
+      return {
+        signed: true,
+        signer_name: s.signer_name || null,
+        signed_at: s.signed_at || null,
+        content_stale: !wdoSignatureFreshness(project).fresh,
+      };
     })();
 
     const parseJsonCol = (v) => {
@@ -1083,6 +1089,10 @@ router.get('/:id', async (req, res, next) => {
       project: {
         ...project,
         wdo_signature: wdoSignature,
+        // Heavy archive index (carries as-sent findings snapshots) — the UI
+        // lists filings via GET /:id/wdo-filings instead.
+        wdo_sent_filings: undefined,
+        wdo_sent_filings_count: loadWdoFilings(project).length,
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
         wdo_applicator: wdoApplicator,
@@ -1445,6 +1455,20 @@ router.put('/:id', async (req, res, next) => {
 
     await db('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
     const updated = await db('projects').where({ id: req.params.id }).first();
+
+    // If this edit changed the content a captured WDO signature attests to,
+    // flag the signature stale so the send gates force a re-sign. Best-effort:
+    // the send gates re-verify the content hash themselves, so a bookkeeping
+    // failure here can't let a hashed signature stamp edited content (only
+    // legacy pre-hash signatures rely on this flag — hence the loud warn).
+    let signatureStale = null;
+    if (updates.findings !== undefined || updates.project_date !== undefined) {
+      signatureStale = await refreshWdoSignatureStaleness(req, project, updated).catch((err) => {
+        logger.warn(`[projects] WDO signature staleness update failed for ${updated.id}: ${err.message}`);
+        return null;
+      });
+    }
+
     await logProjectActivity(
       req,
       updated,
@@ -1452,7 +1476,7 @@ router.put('/:id', async (req, res, next) => {
       `Project updated: ${getProjectType(updated.project_type)?.label || updated.project_type}`,
       { fields: Object.keys(updates) },
     );
-    res.json({ project: updated });
+    res.json({ project: updated, ...(signatureStale !== null ? { signature_stale: signatureStale } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -1503,7 +1527,85 @@ function loadWdoSignature(project) {
     signerName: sig.signer_name || '',
     signerIdCard: sig.signer_id_card || '',
     signedAt: sig.signed_at || null,
+    contentHash: sig.content_hash || null,
+    contentStale: Boolean(sig.content_stale),
   };
+}
+
+// Archive index of every FDACS PDF actually emailed (projects.wdo_sent_filings).
+function loadWdoFilings(project) {
+  let filings = project?.wdo_sent_filings;
+  if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = []; } }
+  return Array.isArray(filings) ? filings : [];
+}
+
+// Canonical hash of the content the licensee attests to: the findings JSON
+// (key-order independent) plus the inspection date. Captured onto the
+// signature at sign time and recomputed at every send/stamp, so a
+// signed-then-edited report can never be emitted as a signed FDACS-13645 —
+// the signature only authorizes the content it was drawn against.
+function wdoContentHash(project) {
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === 'object') {
+      return Object.keys(value).sort().reduce((acc, key) => {
+        acc[key] = stable(value[key]);
+        return acc;
+      }, {});
+    }
+    return value;
+  };
+  const payload = JSON.stringify({
+    findings: stable(parseFindings(project)),
+    project_date: normalizeDateOnly(project.project_date),
+  });
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+// Send-gate view of the signature: present, and does it still match the
+// content it was captured against? Legacy signatures (captured before content
+// hashing) carry no hash and are honored unless a findings edit has explicitly
+// flagged them stale (refreshWdoSignatureStaleness on PUT /:id).
+function wdoSignatureFreshness(project) {
+  const signature = loadWdoSignature(project);
+  if (!signature) return { signed: false, fresh: false, signature: null };
+  const fresh = !signature.contentStale
+    && (!signature.contentHash || signature.contentHash === wdoContentHash(project));
+  return { signed: true, fresh, signature };
+}
+
+// Called after PUT /:id persists a findings/project_date edit on a WDO
+// project. If the project is signed and the attested content changed, flag the
+// signature stale (and self-heal back to fresh if a hashed signature's content
+// is edited back to exactly what was signed). The send gates re-verify the
+// hash themselves, so this flag is the UX signal plus the only protection for
+// legacy un-hashed signatures.
+async function refreshWdoSignatureStaleness(req, before, after) {
+  if (after.project_type !== 'wdo_inspection') return null;
+  let sig = after.wdo_signature;
+  if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
+  if (!sig || !sig.image) return null;
+  const newHash = wdoContentHash(after);
+  const stale = sig.content_hash
+    ? sig.content_hash !== newHash
+    // Legacy signature: no hash to verify a revert against, so once stale it
+    // stays stale until the licensee re-signs.
+    : (Boolean(sig.content_stale) || wdoContentHash(before) !== newHash);
+  if (Boolean(sig.content_stale) === stale) return stale;
+  await db('projects').where({ id: after.id }).update({
+    wdo_signature: JSON.stringify({ ...sig, content_stale: stale }),
+    updated_at: db.fn.now(),
+  });
+  if (stale) {
+    await logProjectActivity(
+      req,
+      after,
+      'project_wdo_signature_stale',
+      `WDO findings edited after signing — ${sig.signer_name || 'licensee'} must re-sign before send`,
+      { signer_name: sig.signer_name || null },
+    );
+  }
+  return stale;
 }
 
 // The FDACS Print Name / ID Card No must match whoever actually signed, which
@@ -1587,10 +1689,18 @@ async function loadWdoAddendumPhotos(project) {
 // compliance backstop.
 async function buildWdoPdfAttachment(project, customer) {
   if (project?.project_type !== 'wdo_inspection') return null;
-  const signature = loadWdoSignature(project);
-  if (!signature) {
+  const { signed, fresh, signature } = wdoSignatureFreshness(project);
+  if (!signed) {
     const err = new Error('Licensee signature required before sending the WDO report');
     err.code = 'signature_required';
+    throw err;
+  }
+  // Refuse to stamp a signature onto content the licensee never saw — the
+  // route gates return the clean 422 first; this re-verifies at the choke
+  // point so no caller can stamp stale content.
+  if (!fresh) {
+    const err = new Error('Findings were edited after signing — the licensee must re-sign before sending');
+    err.code = 'signature_stale';
     throw err;
   }
   const [baseApplicator, photos] = await Promise.all([
@@ -1599,7 +1709,46 @@ async function buildWdoPdfAttachment(project, customer) {
   ]);
   const applicator = applicatorForReport(baseApplicator, signature);
   const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
-  return pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer);
+  // Callers need the raw buffer too (to archive the exact emailed bytes), not
+  // just the base64 email attachment.
+  return { attachment: pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer), buffer };
+}
+
+const FILING_PREFIX = 'project-filings/';
+
+// Upload the exact FDACS-13645 PDF that is about to be emailed. Sends
+// regenerate the PDF from live data, so this archive is the only durable
+// record of what was actually filed in the real-estate transaction — callers
+// run it BEFORE any channel send and treat failure as fatal (abort the send)
+// rather than emailing an unarchived legal document. Returns the filing entry
+// to append to projects.wdo_sent_filings once delivery succeeds; if the email
+// then fails, the S3 object is simply orphaned (harmless) and no entry is
+// recorded.
+async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sentByTechId = null }) {
+  if (!config.s3?.bucket) throw new Error('S3 not configured');
+  const key = `${FILING_PREFIX}${project.id}/${Date.now()}-FDACS-13645.pdf`;
+  await s3.send(new PutObjectCommand({
+    Bucket: config.s3.bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: 'application/pdf',
+  }));
+  const signature = loadWdoSignature(project);
+  return {
+    s3_key: key,
+    sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
+    sent_at: new Date().toISOString(),
+    source,
+    invoice_id: invoiceId,
+    sent_by_tech_id: sentByTechId,
+    signer_name: signature?.signerName || null,
+    signed_at: signature?.signedAt || null,
+    content_hash: wdoContentHash(project),
+    // As-sent snapshot — the public token viewer serves these for WDO so the
+    // web report can never silently diverge from the emailed signed PDF.
+    findings: parseFindings(project),
+    project_date: normalizeDateOnly(project.project_date),
+  };
 }
 
 // WDO inspection auto-invoice fee. The tech enters any fee on the form
@@ -1939,9 +2088,16 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
     // A WDO report is an official FDACS-13645 filing — it must carry the
-    // licensee signature, so block the send until one is captured.
-    if (project.project_type === 'wdo_inspection' && !loadWdoSignature(project)) {
-      return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+    // licensee signature, and the signature must still match the content it
+    // was captured against (findings edited after signing require a re-sign).
+    if (project.project_type === 'wdo_inspection') {
+      const sigState = wdoSignatureFreshness(project);
+      if (!sigState.signed) {
+        return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+      }
+      if (!sigState.fresh) {
+        return res.status(422).json({ error: 'Findings were edited after signing — the licensee must re-sign before sending', code: 'signature_stale' });
+      }
     }
 
     const customer = project.customer_id
@@ -1998,12 +2154,30 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // Build the FDACS report PDF up-front. For a WDO report this PDF *is* the
     // deliverable (and is gated as signed), so a build/stamp failure must abort
     // before any channel send rather than deliver a report-less message.
-    let wdoAttachment = null;
+    let wdoPdf = null;
     try {
-      wdoAttachment = await buildWdoPdfAttachment(updatedProject, customer);
+      wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
     } catch (e) {
       logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
+    }
+
+    // Archive the exact PDF being emailed BEFORE any channel send (fail-closed):
+    // sends regenerate the PDF from live data, so without this there would be
+    // no record of what was actually delivered as the legal filing.
+    let wdoFiling = null;
+    if (wdoPdf) {
+      try {
+        wdoFiling = await archiveWdoFiling({
+          project: updatedProject,
+          buffer: wdoPdf.buffer,
+          source: 'send',
+          sentByTechId: req.technicianId || null,
+        });
+      } catch (e) {
+        logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
+        return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
+      }
     }
 
     const channels = {};
@@ -2018,7 +2192,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           customer,
           reportUrl,
           isResend: Boolean(project.sent_at || project.status === 'sent'),
-          attachments: wdoAttachment ? [wdoAttachment] : [],
+          attachments: wdoPdf ? [wdoPdf.attachment] : [],
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -2095,8 +2269,18 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       updated_at: db.fn.now(),
     };
     if (delivered) {
-      deliveryUpdate.status = 'sent';
+      // Resending a closed project's report must not regress its lifecycle
+      // (closed_at stays set and closeout artifacts key on status='closed').
+      deliveryUpdate.status = project.status === 'closed' ? project.status : 'sent';
       deliveryUpdate.sent_at = project.sent_at || db.fn.now();
+      if (wdoFiling && projectCols.wdo_sent_filings) {
+        // Atomic jsonb append — /send has no send claim, so a concurrent send
+        // must not lose a filing record to read-modify-write.
+        deliveryUpdate.wdo_sent_filings = db.raw(
+          "coalesce(wdo_sent_filings, '[]'::jsonb) || ?::jsonb",
+          [JSON.stringify([wdoFiling])],
+        );
+      }
     }
 
     await db('projects').where({ id: req.params.id }).update(deliveryUpdate);
@@ -2166,12 +2350,56 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
       resolveProjectApplicator(project),
       loadWdoAddendumPhotos(project),
     ]);
-    const signature = loadWdoSignature(project);
-    const applicator = applicatorForReport(baseApplicator, signature);
-    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
+    // Never stamp a stale signature onto edited content — even in this admin
+    // preview, which can be downloaded and filed manually. Render unsigned
+    // instead, so the preview shows exactly what is currently sendable.
+    const { fresh, signature } = wdoSignatureFreshness(project);
+    const stampSignature = fresh ? signature : null;
+    const applicator = applicatorForReport(baseApplicator, stampSignature);
+    const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature: stampSignature, photos });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="FDACS-13645-${project.id}.pdf"`);
     res.send(buffer);
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// Archived FDACS filings. Every successful WDO send uploads the exact emailed
+// PDF to S3 before delivery (archiveWdoFiling), so even though sends
+// regenerate the PDF from live data there is always an immutable record of
+// what was actually filed in the real-estate transaction.
+//   GET /:id/wdo-filings           — metadata list (no findings snapshots)
+//   GET /:id/wdo-filings/:index/url — presigned download URL for one filing
+// ---------------------------------------------------------------------------
+router.get('/:id/wdo-filings', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const filings = loadWdoFilings(project).map((f, index) => ({
+      index,
+      sha256: f.sha256 || null,
+      sent_at: f.sent_at || null,
+      source: f.source || null,
+      invoice_id: f.invoice_id || null,
+      signer_name: f.signer_name || null,
+      signed_at: f.signed_at || null,
+    }));
+    res.json({ filings });
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/wdo-filings/:index/url', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const index = Number.parseInt(req.params.index, 10);
+    const filing = Number.isInteger(index) && index >= 0 ? loadWdoFilings(project)[index] : null;
+    if (!filing?.s3_key) return res.status(404).json({ error: 'Filing not found' });
+    if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
+    const url = await getSignedUrl(s3, new GetObjectCommand({
+      Bucket: config.s3.bucket, Key: filing.s3_key,
+    }), { expiresIn: 3600 });
+    res.json({ url, sha256: filing.sha256 || null, sent_at: filing.sent_at || null });
   } catch (err) { next(err); }
 });
 
@@ -2242,6 +2470,10 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       attestation: String(req.body?.attestation || 'I certify I performed this inspection and the findings are accurate.').trim().slice(0, 500),
       signed_at: new Date().toISOString(),
       signed_by_tech_id: req.technicianId || null,
+      // Binds the signature to the content it attests — the send gates
+      // recompute this hash and refuse to stamp if findings/project_date
+      // changed after signing (the licensee must re-sign).
+      content_hash: wdoContentHash(project),
     };
 
     // The FDACS-13645 requires the licensee's printed name AND ID-card number,
@@ -2265,9 +2497,24 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
     if (!(await requireProjectAccess(req, res, project))) return;
+    if (project.project_type !== 'wdo_inspection') {
+      return res.status(400).json({ error: 'Signatures are only captured for WDO inspections' });
+    }
     const cols = await db('projects').columnInfo().catch(() => ({}));
     if (cols.wdo_signature) {
+      const prior = loadWdoSignature(project);
       await db('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
+      // Clearing the licensee's e-signature on a legal filing must leave a
+      // trail — capture logs project_wdo_signed, so removal logs too.
+      if (prior) {
+        await logProjectActivity(
+          req,
+          project,
+          'project_wdo_signature_cleared',
+          `WDO signature cleared (was signed by ${prior.signerName || 'licensee'})`,
+          { signer_name: prior.signerName || null, signed_at: prior.signedAt || null },
+        );
+      }
     }
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -2293,9 +2540,17 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const isWdoProject = project.project_type === 'wdo_inspection';
     // WDO is an official FDACS-13645 filing — require the licensee signature
-    // before anything else. Other project types carry no signature requirement.
-    if (isWdoProject && !loadWdoSignature(project)) {
-      return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+    // before anything else, and require it to still match the content it was
+    // captured against (findings edited after signing force a re-sign). Other
+    // project types carry no signature requirement.
+    if (isWdoProject) {
+      const sigState = wdoSignatureFreshness(project);
+      if (!sigState.signed) {
+        return res.status(422).json({ error: 'Licensee signature required before sending the WDO report', code: 'signature_required' });
+      }
+      if (!sigState.fresh) {
+        return res.status(422).json({ error: 'Findings were edited after signing — the licensee must re-sign before sending', code: 'signature_stale' });
+      }
     }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
 
@@ -2405,13 +2660,26 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // be built (e.g. signature can't be stamped) abort and release the claim
     // rather than sending a report-less message.
     const attachments = [];
+    let wdoFiling = null;
     try {
-      const wdoAttachment = await buildWdoPdfAttachment(refreshed, customer);
-      if (wdoAttachment) attachments.push(wdoAttachment);
+      const wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
+      if (wdoPdf) {
+        attachments.push(wdoPdf.attachment);
+        // Archive the exact PDF being emailed BEFORE any channel send
+        // (fail-closed) — sends regenerate the PDF from live data, so this is
+        // the only durable record of the delivered legal filing.
+        wdoFiling = await archiveWdoFiling({
+          project: refreshed,
+          buffer: wdoPdf.buffer,
+          source: 'send_with_invoice',
+          invoiceId: invoice.id,
+          sentByTechId: req.technicianId || null,
+        });
+      }
     } catch (e) {
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
-      logger.error(`[projects] WDO PDF build failed for ${refreshed.id}: ${e.message}`);
+      logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
     try {
@@ -2529,12 +2797,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
 
     if (delivered) {
       await db('projects').where({ id: project.id }).update({
-        status: 'sent',
+        // Resending a closed project's report must not regress its lifecycle
+        // (closed_at stays set and closeout artifacts key on status='closed').
+        status: project.status === 'closed' ? project.status : 'sent',
         sent_at: project.sent_at || db.fn.now(),
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
         updated_at: db.fn.now(),
+        ...(wdoFiling && projectCols.wdo_sent_filings ? {
+          // Atomic jsonb append — never read-modify-write the filing index.
+          wdo_sent_filings: db.raw(
+            "coalesce(wdo_sent_filings, '[]'::jsonb) || ?::jsonb",
+            [JSON.stringify([wdoFiling])],
+          ),
+        } : {}),
       });
     }
 
