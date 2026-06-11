@@ -65,14 +65,33 @@ const LatePaymentService = {
       // selects the template) so each tier (7/14/30/60/90) fires exactly once
       // per invoice. Historical rows were written with the `|7 DAYS` key, so
       // the tier-7 key stays byte-identical for backward compatibility.
+      const invoiceRef = inv.invoice_number || inv.id;
       const tierDays = tierDaysForOverdue(daysSince);
-      const invoiceKey = `${inv.invoice_number || inv.id}|${tierDays} DAYS`;
+      const invoiceKey = `${invoiceRef}|${tierDays} DAYS`;
 
       try {
-        const alreadySent = await db('activity_log')
+        let alreadySent = await db('activity_log')
           .where({ action: 'late_payment_reminder' })
           .whereRaw("metadata::text LIKE ?", [`%${invoiceKey}%`])
           .first();
+        if (!alreadySent && tierDays !== 7) {
+          // Legacy rows were always keyed `|7 DAYS` regardless of which tier's
+          // template was actually sent; their metadata.daysOverdue recorded the
+          // computed days overdue at send time. Treat a legacy row as covering
+          // the current tier if its recorded overdue age maps to this tier.
+          const legacyRows = await db('activity_log')
+            .where({ action: 'late_payment_reminder' })
+            .whereRaw("metadata::text LIKE ?", [`%${invoiceRef}|7 DAYS%`]);
+          alreadySent = legacyRows.find((row) => {
+            try {
+              const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+              const sentAtDays = Number(meta?.daysOverdue);
+              return Number.isFinite(sentAtDays) && tierDaysForOverdue(sentAtDays) === tierDays;
+            } catch {
+              return false;
+            }
+          });
+        }
         if (alreadySent) { skipped++; continue; }
       } catch { /* proceed if activity_log check fails */ }
 
