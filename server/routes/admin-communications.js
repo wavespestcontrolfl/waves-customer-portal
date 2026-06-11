@@ -65,12 +65,15 @@ function normalizeReplyForComparison(value) {
 }
 
 async function findSingleCustomerForPhone(phone) {
-  const digits = phoneDigits(normalizePhone(phone) || phone);
-  if (!digits) return null;
+  // Compare on the last 10 digits so stored formats ('+19415551234',
+  // '9415551234', '(941) 555-1234') all match the same dialable number —
+  // full-digit equality misses customers stored without the country code.
+  const last10 = normalizePhoneLast10(normalizePhone(phone) || phone);
+  if (!last10) return null;
 
   const matches = await db('customers')
     .whereNull('deleted_at')
-    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [digits])
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
     .orderBy('updated_at', 'desc')
     .limit(2);
 

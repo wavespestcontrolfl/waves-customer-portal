@@ -138,7 +138,17 @@ router.post('/reconcile', async (req, res, next) => {
         || chargeDetails.payment_method_details?.card?.last4 || null;
       updates.receipt_url = chargeDetails.receipt_url || null;
     } else if (amount != null) {
-      // Manual reconciliation — record the amount collected for audit
+      // Manual reconciliation — record the amount collected for audit.
+      // Mirror the Stripe path's $1 tolerance: marking an invoice paid while
+      // recording a materially different collected amount would silently
+      // drift revenue reports from the invoice ledger (e.g. a $1 typo on a
+      // $500 invoice). Edit the invoice first if the total really changed.
+      const invoiceTotal = parseFloat(invoice.total || 0);
+      if (Math.abs(Number(amount) - invoiceTotal) > 1) {
+        return res.status(400).json({
+          error: `Amount mismatch — collected $${Number(amount).toFixed(2)} but invoice is $${invoiceTotal.toFixed(2)}. Edit the invoice total first if it changed.`,
+        });
+      }
       updates.payment_method = collectedVia;
     }
 

@@ -218,6 +218,9 @@ async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason)
   }
 }
 
+// NOTE: customer_health_alerts.alert_type is varchar(30) — keep alertType
+// values at 30 chars or fewer. The old '*_webhook'-suffixed names (34 and 40
+// chars) overflowed the column and every insert silently failed.
 async function alertSurchargeBypass(paymentIntent, invoice, alertType, severity, title, description, metadata = {}) {
   try {
     await db('customer_health_alerts').insert({
@@ -257,7 +260,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
     if (details.cardFunding === 'credit' && !details.isWallet) {
       return {
         reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
-        alertType: 'surcharge_under_collection_webhook',
+        alertType: 'wh_surcharge_under_collection',
         severity: 'high',
         title: `Surcharge under-collection (webhook) — invoice ${invoice?.invoice_number || 'unknown'}`,
         description: `Credit card payment confirmed via webhook without surcharge finalization. PI: ${paymentIntent.id}. Charged base-only and was not settled locally.`,
@@ -271,7 +274,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
   if (!stripe) {
     return {
       reason: `Could not verify card funding for unfinalized PI ${paymentIntent.id}: Stripe is not configured`,
-      alertType: 'surcharge_bypass_unknown_funding_webhook',
+      alertType: 'wh_surcharge_unknown_funding',
       severity: 'high',
       title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
       description: `Card payment succeeded without surcharge finalization and webhook funding verification could not run. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
@@ -291,7 +294,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
     if (funding === 'credit' && !isWallet) {
       return {
         reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
-        alertType: 'surcharge_under_collection_webhook',
+        alertType: 'wh_surcharge_under_collection',
         severity: 'high',
         title: `Surcharge under-collection (webhook) — invoice ${invoice?.invoice_number || 'unknown'}`,
         description: `Credit card payment confirmed via webhook without surcharge finalization. PI: ${paymentIntent.id}. Charged base-only and was not settled locally.`,
@@ -302,7 +305,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
     logger.error(`[stripe-webhook] Could not verify funding for unfinalized card PI ${paymentIntent.id}: ${pmErr.message}`);
     return {
       reason: `Could not verify card funding for unfinalized PI ${paymentIntent.id}: ${pmErr.message}`,
-      alertType: 'surcharge_bypass_unknown_funding_webhook',
+      alertType: 'wh_surcharge_unknown_funding',
       severity: 'high',
       title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
       description: `Card payment succeeded without surcharge finalization and funding lookup failed. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
