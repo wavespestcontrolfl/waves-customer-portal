@@ -1720,7 +1720,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // this closure's caller writes the response.
         const customerCopySources = [
           ...(Array.isArray(recommendations) ? recommendations : []),
+          ...(Array.isArray(observations) ? observations : []),
+          ...(customerRecap ? [customerRecap] : []),
           ...taggedCompletionNoteLines(technicianNotes, ['next']),
+          ...taggedCompletionNoteLines(technicianNotes, ['found']),
           ...Object.values(structuredFindings?.values || {}).filter((v) => typeof v === 'string'),
         ];
         const copyViolations = [...new Set(

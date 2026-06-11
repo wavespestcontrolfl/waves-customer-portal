@@ -369,10 +369,17 @@ function adminFetch(path, options = {}) {
       ...options.headers,
     },
     ...options,
-  }).then((r) => {
+  }).then(async (r) => {
     if (!r.ok) {
-      const err = new Error(`HTTP ${r.status}`);
+      // Surface the server's error body — completion handlers branch on
+      // err.code (completion_billing_required and friends), so a bare
+      // "HTTP 409" string breaks the billing-detour routing.
+      let body = null;
+      try { body = await r.json(); } catch { /* non-JSON error */ }
+      const err = new Error(body?.error || `HTTP ${r.status}`);
       err.status = r.status;
+      if (body?.code) err.code = body.code;
+      if (body?.violations) err.violations = body.violations;
       throw err;
     }
     return r.json();

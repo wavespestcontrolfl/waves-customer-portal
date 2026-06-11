@@ -388,5 +388,7 @@ describe('banned customer copy', () => {
     expect(findBannedCustomerCopy('No active signs observed in accessible areas today.')).toEqual([]);
     expect(findBannedCustomerCopy('Please clear food debris from under the fridge.')).toEqual([]);
     expect(findBannedCustomerCopy('Activity has decreased since our last visit.')).toEqual([]);
+    expect(findBannedCustomerCopy('Keep counters clear of food debris.')).toEqual([]);
+    expect(findBannedCustomerCopy('Keep vegetation clear of the foundation.')).toEqual([]);
   });
 });

@@ -703,7 +703,7 @@ const BANNED_CUSTOMER_COPY = [
   /\bno infestation\b/i,
   /\bpest[- ]free\b/i,
   /\b(?:is|are|was|were|now|all|looks?|stays?|remains?)\s+clear\b/i,
-  /\bclear of\b/i,
+  /\bclear of (?:pests?|insects?|roach(?:es)?|ants?|termites?|bed ?bugs?|rodents?|mice|rats?|wildlife|fleas?|mosquito(?:es)?|activity|infestations?|evidence|signs)\b/i,
   /\bcleared\b/i,
   /\bresolved\b/i,
   /\bgone\b/i,
