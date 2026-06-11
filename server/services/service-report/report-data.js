@@ -9,6 +9,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
+const { loadActivityCustomerView } = require('./activity-scores-store');
 const {
   loadServiceCoverageConfig,
   normalizeServiceCoverage,
@@ -1709,6 +1710,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
+  // Typed specialty completion snapshot (persisted at completion — the
+  // immutable source for Today's Result + customer-labeled findings). Its
+  // presence suppresses Pest Pressure for this report and swaps in the
+  // activity gauge for trend types.
+  const typedSnapshot = serviceData.typedReportSnapshot
+    && typeof serviceData.typedReportSnapshot === 'object'
+    && serviceData.typedReportSnapshot.type
+    ? serviceData.typedReportSnapshot
+    : null;
 
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
@@ -1760,7 +1770,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const lawnProgramOverview = await loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService);
   const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
 
-  if (!findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
+  // Typed reports carry their real findings in the snapshot (rendered by
+  // TypedFindingsCard) — the legacy no-activity fallback would contradict
+  // e.g. an active cockroach visit's snapshot.
+  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
     findings.push({
       id: `no-activity-${service.id}`,
       zoneId: null,
@@ -1793,12 +1806,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceCoverageConfigPromise,
     visitTimelineConfigPromise,
   ]);
-  const pestPressure = buildPestPressureCustomerView({
-    config: pestPressureConfig,
-    scoreRow: pestPressureRow,
-    serviceRecord: service,
-    historyRows: pestPressureHistory,
-  });
+  // Typed specialty reports never render Pest Pressure — these service
+  // types can detect to the 'pest' line and slip past the recurring-label
+  // gates, which would leak the pressure UI (or its insufficient-data
+  // placeholder) onto e.g. a cockroach cleanout report. Explicit gate.
+  const pestPressure = typedSnapshot
+    ? null
+    : buildPestPressureCustomerView({
+      config: pestPressureConfig,
+      scoreRow: pestPressureRow,
+      serviceRecord: service,
+      historyRows: pestPressureHistory,
+    });
+  const activity = typedSnapshot
+    ? await loadActivityCustomerView(knex, { snapshot: typedSnapshot, service }).catch(() => null)
+    : null;
 
   // buildPestPressureCustomerView returns null ONLY when Pest Pressure is
   // hidden from the customer (feature off, showOnCustomerReport off, scope
@@ -1962,18 +1984,31 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     pressureIndex,
     linearFt,
     serviceData,
-  }).map((metric) => (
-    lawnAssessment && metric.key === 'pressure_index'
-      ? {
+  }).map((metric) => {
+    if (lawnAssessment && metric.key === 'pressure_index') {
+      return {
         ...metric,
         key: 'lawn_health',
         label: 'Lawn health',
         value: lawnAssessment.scores?.overallScore ?? null,
         unit: '%',
         format: 'integer',
-      }
-      : metric
-  )).filter((metric) => {
+      };
+    }
+    // Typed gauge types replace the pressure metric with their activity
+    // level (worded, not numeric, in the client — value drives the band).
+    if (activity && metric.key === 'pressure_index') {
+      return {
+        ...metric,
+        key: 'activity_score',
+        label: activity.label,
+        value: activity.score,
+        unit: '',
+        format: 'integer',
+      };
+    }
+    return metric;
+  }).filter((metric) => {
     // Drop the pressure_index metric when Pest Pressure is hidden from
     // the customer (pestPressure === null). The lawn-health remap above
     // already replaced the entry's key when a lawn assessment is present,
@@ -2062,6 +2097,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     pressureIndex,
     pestPressure,
+    activity,
+    typedReport: typedSnapshot
+      ? {
+        type: typedSnapshot.type,
+        typeLabel: typedSnapshot.typeLabel || null,
+        reportTypeLabel: typedSnapshot.reportTypeLabel || null,
+        visitSequence: typedSnapshot.visitSequence || 1,
+        isProgressVisit: (typedSnapshot.visitSequence || 1) > 1,
+        todaysResult: typedSnapshot.todaysResult || null,
+        findings: Array.isArray(typedSnapshot.findings) ? typedSnapshot.findings : [],
+        nextStepChips: Array.isArray(typedSnapshot.nextStepChips) ? typedSnapshot.nextStepChips : [],
+        schemaVersion: typedSnapshot.schemaVersion || null,
+      }
+      : null,
     metrics,
     mapSvg,
     mapSvgUrl: `/api/reports/${token}/map.svg`,
