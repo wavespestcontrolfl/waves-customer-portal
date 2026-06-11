@@ -261,7 +261,17 @@ function setText(form, name, value) {
 // floor guarantees it renders at or above it — the old behavior crammed the
 // full value in and let auto-size shrink to ~3pt before clipping the rest.
 const FORM_FONT_FLOOR = 8;
-const CONTINUED_MARKER = '(continued on attached page)';
+// Progressively shorter continuation markers — narrow blanks (e.g. the 120pt
+// Terms-and-Conditions box) get a shorter one so the line still carries
+// meaningful content.
+const CONTINUATION_SUFFIXES = [
+  '... (continued on attached page)',
+  '... (see attached page)',
+  '... (cont.)',
+];
+// For unlabeled footer duplicates: plain truncation with no attached-page
+// promise (no continuation entry is recorded for them).
+const PLAIN_SUFFIXES = ['...'];
 
 function fieldLineWidth(field) {
   const widget = field.acroField.getWidgets()[0];
@@ -270,32 +280,34 @@ function fieldLineWidth(field) {
   return Math.max(20, rect.width - 6);
 }
 
-// Drop trailing words until `text + marker` fits the width at the floor size.
-// Narrow blanks (e.g. the 120pt Terms-and-Conditions box) get progressively
-// shorter markers so the line still carries meaningful content; a single
-// over-wide token falls back to a character cut.
-function cutToFitWithMarker(text, font, maxWidth) {
-  for (const marker of [CONTINUED_MARKER, '(see attached page)', '(cont.)']) {
+// Drop trailing words until `text + suffix` fits the width at the floor size,
+// trying each suffix candidate in order (longest first); a single over-wide
+// token falls back to a character cut with the shortest suffix.
+function cutToFit(text, font, maxWidth, suffixes) {
+  for (const suffix of suffixes) {
     let cut = text;
-    while (cut && font.widthOfTextAtSize(`${cut} ... ${marker}`, FORM_FONT_FLOOR) > maxWidth) {
+    while (cut && font.widthOfTextAtSize(`${cut} ${suffix}`, FORM_FONT_FLOOR) > maxWidth) {
       const shorter = cut.replace(/\s*\S+$/, '');
       if (shorter === cut) { cut = ''; break; }
       cut = shorter;
     }
-    if (cut) return `${cut} ... ${marker}`;
+    if (cut) return `${cut} ${suffix}`;
   }
-  const marker = '(cont.)';
+  const suffix = suffixes[suffixes.length - 1];
   let cut = text;
-  while (cut.length > 1 && font.widthOfTextAtSize(`${cut} ... ${marker}`, FORM_FONT_FLOOR) > maxWidth) {
+  while (cut.length > 1 && font.widthOfTextAtSize(`${cut} ${suffix}`, FORM_FONT_FLOOR) > maxWidth) {
     cut = cut.slice(0, -1);
   }
-  return `${cut} ... ${marker}`;
+  return cut ? `${cut} ${suffix}` : suffix;
 }
 
 // Fill a single blank, guaranteeing at-least-floor rendering: if the value
-// doesn't fit on the line at FORM_FONT_FLOOR, the line ends with the
+// doesn't fit on the line at FORM_FONT_FLOOR, the line ends with a
 // continuation marker and the full value is recorded for the continuation
-// page. `spec` null = truncate-only (footer duplicate, recorded elsewhere).
+// page. `spec` null = unlabeled footer duplicate: it truncates with a plain
+// ellipsis — never an attached-page promise, because no continuation entry is
+// recorded for it (the labeled main field records its own when IT overflows,
+// and the two have different widths, so one can overflow without the other).
 function fillFittedText(form, font, name, value, spec, overflows) {
   const text = formText(value).replace(/\s*\n+\s*/g, '; ');
   if (!text) return;
@@ -311,8 +323,12 @@ function fillFittedText(form, font, name, value, spec, overflows) {
     field.setText(text);
     return;
   }
-  field.setText(cutToFitWithMarker(text, font, maxWidth));
-  if (spec) overflows.push({ label: spec.label, order: spec.order, text });
+  if (!spec) {
+    field.setText(cutToFit(text, font, maxWidth, PLAIN_SUFFIXES));
+    return;
+  }
+  field.setText(cutToFit(text, font, maxWidth, CONTINUATION_SUFFIXES));
+  overflows.push({ label: spec.label, order: spec.order, text });
 }
 
 // Word-flow a findings value across a section's printed writing lines (each a
@@ -371,7 +387,7 @@ function fillLinePool(form, font, pool, value, overflows) {
 
   if (ti < tokens.length) {
     const last = lines.length - 1;
-    lines[last] = cutToFitWithMarker(lines[last], font, widths[last]);
+    lines[last] = cutToFit(lines[last], font, widths[last], CONTINUATION_SUFFIXES);
     overflows.push({ label: pool.label, order: pool.order, text });
   }
 
@@ -772,6 +788,7 @@ module.exports = {
     decodeImageInput,
     wrapText,
     sanitizeText,
+    cutToFit,
     LINE_POOLS,
     FITTED_FIELDS,
   },

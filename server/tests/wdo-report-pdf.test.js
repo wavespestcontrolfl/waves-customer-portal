@@ -144,6 +144,36 @@ describe('wdo-report-pdf', () => {
     expect(doc.getPageCount()).toBe(2);
   });
 
+  test('cutToFit with a plain suffix never promises an attached page', async () => {
+    const { PDFDocument, StandardFonts } = require('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const long = 'A very long property address line that cannot possibly fit in a narrow footer blank '.repeat(3);
+    const plain = _private.cutToFit(long, font, 150, ['...']);
+    expect(plain.endsWith('...')).toBe(true);
+    expect(plain).not.toMatch(/attached page|cont\./);
+    const marked = _private.cutToFit(long, font, 300, ['... (continued on attached page)', '... (see attached page)', '... (cont.)']);
+    expect(marked).toMatch(/attached page|cont\./);
+  });
+
+  // The footer address duplicate (addrofpropinspected, ~217pt) is much
+  // narrower than the main Section 1 address line (~420pt). An address that
+  // fits the main line but not the footer must NOT mint a continuation page
+  // (the footer truncates plainly; only labeled fields record entries).
+  test('address fitting the main line but not the footer duplicate adds no continuation page', async () => {
+    const { PDFDocument } = require('pdf-lib');
+    const project = {
+      ...baseProject,
+      findings: {
+        ...baseProject.findings,
+        property_address: '12345 Longwood Park Boulevard Apartment 221B, Lakewood Ranch, FL 34211',
+      },
+    };
+    const buf = await buildWdoReportPDFBuffer({ project, customer });
+    const doc = await PDFDocument.load(buf);
+    expect(doc.getPageCount()).toBe(2);
+  });
+
   test('flatten succeeds with minimal findings (no radios selected)', async () => {
     const project = {
       ...baseProject,
