@@ -382,6 +382,17 @@ class SmartRebooker {
       // Anchor cadence at the dropped service's position so siblings
       // before it (same-date ties) don't pull index 0 away from it.
       const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
+      // A live anchor missing from the non-terminal sibling set was
+      // completed/cancelled between the outer service read and this
+      // SELECT — the series must not shift (nor the tech be freed /
+      // customer notified) off a job that is no longer reschedulable.
+      // Throwing rolls back the whole trx and skips the wasLive
+      // post-commit cleanup.
+      if (wasLive && droppedIdx === -1) {
+        throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
+          statusCode: 409,
+        });
+      }
       const startIdx = droppedIdx === -1 ? 0 : droppedIdx;
 
       const touched = [];

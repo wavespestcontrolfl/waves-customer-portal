@@ -240,7 +240,7 @@ describe('live-status reschedule override (allowLive)', () => {
       throw new Error(`Unexpected db table ${table}`);
     });
 
-    return { updates, historyInsert };
+    return { updates, historyInsert, logInsert };
   }
 
   test('rescheduleSeries with allowLive moves the live anchor with a lifecycle rewind and shifts confirmed siblings', async () => {
@@ -340,6 +340,29 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(updates[0].where).toHaveBeenCalledWith({ status: 'on_site' });
     expect(updates[1].update).not.toHaveBeenCalled();
     expect(historyInsert.insert).not.toHaveBeenCalled();
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).not.toHaveBeenCalled();
+  });
+
+  test('rescheduleSeries aborts when the live anchor vanished from the sibling set (raced to terminal)', async () => {
+    // Anchor read as on_site, but completed/cancelled before the in-trx
+    // sibling SELECT — the non-terminal filter excludes it. The series
+    // must not shift off startIdx 0, and no cleanup may fire.
+    const { updates, historyInsert, logInsert } = wireSeriesMocks('on_site', [
+      { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
+    ]);
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      { allowLive: true },
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining('transitioned to a non-reschedulable state concurrently'),
+    });
+
+    expect(updates[0].update).not.toHaveBeenCalled();
+    expect(historyInsert.insert).not.toHaveBeenCalled();
+    expect(logInsert.insert).not.toHaveBeenCalled();
     expect(clearTechCurrentJob).not.toHaveBeenCalled();
     expect(mockIoEmit).not.toHaveBeenCalled();
   });
