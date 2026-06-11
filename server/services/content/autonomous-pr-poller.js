@@ -173,14 +173,19 @@ async function resolveTargetForRun(run) {
  * stale tick-start validation. Errors propagate (transient → caught by
  * pollRun, retried next tick) so a lookup outage can never allow a merge.
  */
-async function queueRowStillParked(run) {
-  if (!run.opportunity_id) return true;
+async function queueRowParkedState(run) {
+  if (!run.opportunity_id) return { parked: true, row: null };
   const row = await db('opportunity_queue')
     .where('id', run.opportunity_id)
     .first('id', 'status', 'skip_reason');
-  return !!row
+  const parked = !!row
     && row.status === 'pending_review'
     && row.skip_reason === pendingSkipReasonForRun(run);
+  return { parked, row };
+}
+
+async function queueRowStillParked(run) {
+  return (await queueRowParkedState(run)).parked;
 }
 
 /**
@@ -276,6 +281,15 @@ async function supersedeRun(run, queueRow) {
  *     IndexNow never pings a 404.
  */
 async function finalizeMerged(run, prNumber, { autoMerged = false } = {}) {
+  // Fresh queue re-check at finalize time: the tick-start validation is
+  // stale by now (GitHub lookup + live-URL gating take seconds), and an
+  // operator requeue/dismiss landing in that window must win — never mark a
+  // human-overridden run completed_published just because its PR merged.
+  // A lookup error throws → transient via pollRun's catch, no finalize.
+  // `autoMerged` is preserved so a just-merged PR still consumes the cap.
+  const { parked, row: queueRow } = await queueRowParkedState(run);
+  if (!parked) return { ...(await supersedeRun(run, queueRow)), autoMerged };
+
   const target = await resolveTargetForRun(run);
   if (!target.url) {
     logger.warn(`[autonomous-pr-poller] run ${run.id} (PR #${prNumber} merged) has no resolvable target URL (draft + brief blank); leaving parked`);
@@ -298,6 +312,9 @@ async function finalizeMerged(run, prNumber, { autoMerged = false } = {}) {
   const claimed = await db('autonomous_runs')
     .where('id', run.id)
     .where('outcome', PENDING_OUTCOME)
+    // skip_reason in the guard: a concurrent supersedeRun (overlapping tick)
+    // rewrites it, and a superseded run must never be resurrected here.
+    .where('skip_reason', pendingSkipReasonForRun(run))
     .update({
       outcome: 'completed_published',
       published_url: target.url,
@@ -359,10 +376,17 @@ async function finalizeMerged(run, prNumber, { autoMerged = false } = {}) {
 
 /** PR closed without merge: terminal failure, never retried (both lanes). */
 async function finalizeClosed(run, prNumber) {
+  // Same finalize-time queue re-check as finalizeMerged: an operator who
+  // requeued the opportunity mid-tick has already re-routed the work — the
+  // old run gets annotated out of selection, not marked failed.
+  const { parked, row: queueRow } = await queueRowParkedState(run);
+  if (!parked) return supersedeRun(run, queueRow);
+
   const now = new Date();
   const claimed = await db('autonomous_runs')
     .where('id', run.id)
     .where('outcome', PENDING_OUTCOME)
+    .where('skip_reason', pendingSkipReasonForRun(run))
     .update({
       outcome: 'failed',
       skip_reason: closedSkipReasonForRun(run),
@@ -427,10 +451,24 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'queue_row_moved_during_gating' };
   }
 
-  await gh.mergePr(pr.number, {
-    method: 'squash',
-    title: String(pr.title || '').slice(0, 72),
-  });
+  // 4. The merge itself is pinned to the head commit the gates above were
+  //    checked against: GitHub rejects with 409 if the branch received
+  //    another push while the merge call was in flight, so an unbuilt/
+  //    unreviewed commit can never ride through the gate. The fresh head
+  //    re-runs the full gate next tick.
+  try {
+    await gh.mergePr(pr.number, {
+      method: 'squash',
+      title: String(pr.title || '').slice(0, 72),
+      sha: pr.head?.sha,
+    });
+  } catch (err) {
+    if (err?.status === 409) {
+      logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: PR #${pr.number} head moved after gating (409)`);
+      return { pending: true, reason: 'head_moved_during_merge' };
+    }
+    throw err; // anything else → transient via pollRun's catch
+  }
   logger.info(`[autonomous-pr-poller] auto-merged PR #${pr.number} for run ${run.id} (build green + Codex clear)`);
   // finalizeMerged may legitimately stay pending here (production deploy of
   // the merge takes 30–45 min) — `autoMerged` must still be true on the

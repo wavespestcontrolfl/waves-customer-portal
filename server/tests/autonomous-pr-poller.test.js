@@ -441,7 +441,8 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(publisher.assertCodexReviewClear).toHaveBeenCalledWith(42, { headSha: 'headsha1' });
-    expect(gh.mergePr).toHaveBeenCalledWith(42, { method: 'squash', title: 'Blog: Test Post' });
+    // sha pins the merge to the exact head the build/Codex gates checked
+    expect(gh.mergePr).toHaveBeenCalledWith(42, { method: 'squash', title: 'Blog: Test Post', sha: 'headsha1' });
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
     expect(res.autoMerges).toBe(1);
     expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published', published_url: CANONICAL });
@@ -492,6 +493,26 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'queue_row_moved_during_gating' });
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('head push landing while the merge call is in flight (GitHub 409): abort, no finalize, no cap spend', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    const moved = new Error('GitHub PUT …/pulls/42/merge → 409: Head branch was modified');
+    moved.status = 409;
+    gh.mergePr.mockRejectedValue(moved);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'head_moved_during_merge' });
+    expect(res.autoMerges).toBe(0); // nothing merged → budget intact
+    expect(runUpdates(updates)).toHaveLength(0);
+    expect(indexNow.submit).not.toHaveBeenCalled();
   });
 
   test('auto-merge with a lagging production deploy still consumes the per-poll cap', async () => {
@@ -588,6 +609,41 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ merged: true });
+  });
+
+  test('operator action landing between tick-start and finalize (merged PR): superseded, never published', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      // tick-start snapshot still parked; the fresh finalize-time re-check
+      // sees the operator's requeue that landed during the GitHub lookup
+      queueFirst: { id: 'opp-1', status: 'pending', skip_reason: null },
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    const annotate = runUpdates(updates)[0];
+    expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
+    expect(annotate.updates.outcome).toBeUndefined();
+    expect(updates.find((u) => u.updates && u.updates.outcome === 'completed_published')).toBeUndefined();
+    expect(indexNow.submit).not.toHaveBeenCalled();
+    expect(publisher.planInternalLinksForTarget).not.toHaveBeenCalled();
+  });
+
+  test('operator action landing between tick-start and finalize (closed PR): superseded, never failed', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queueFirst: { id: 'opp-1', status: 'skipped', skip_reason: 'manual_dismiss' },
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    expect(updates.find((u) => u.updates && u.updates.outcome === 'failed')).toBeUndefined();
+    const annotate = runUpdates(updates)[0];
+    expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
   });
 
   test('queue row parked under a DIFFERENT pending reason does not validate this run', async () => {

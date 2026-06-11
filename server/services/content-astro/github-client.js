@@ -173,11 +173,16 @@ async function listPrReviews(number) {
   return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/reviews`);
 }
 
-async function mergePr(number, { method = 'squash', title, message } = {}) {
+async function mergePr(number, { method = 'squash', title, message, sha } = {}) {
   const { owner, repo } = env();
+  const body = { merge_method: method, commit_title: title, commit_message: message };
+  // GitHub rejects the merge with 409 when the head no longer matches `sha`,
+  // so gated checks (build/review) performed against a specific head commit
+  // can't be bypassed by a push that lands while the merge call is in flight.
+  if (sha) body.sha = sha;
   return ghFetch(`/repos/${owner}/${repo}/pulls/${number}/merge`, {
     method: 'PUT',
-    body: { merge_method: method, commit_title: title, commit_message: message },
+    body,
   });
 }
 
