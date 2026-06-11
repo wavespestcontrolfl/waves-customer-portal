@@ -6121,7 +6121,20 @@ router.put('/:token/select-tier', async (req, res, next) => {
     if (shouldPersistEstimateData) {
       writes.estimate_data = JSON.stringify(parsedData);
     }
-    await db('estimates').where({ id: estimate.id }).update(writes);
+    // TOCTOU guard: isEstimateAcceptActive() above ran on a pre-read. A
+    // concurrent accept commits status='accepted' + price_locked_at, and
+    // EstimateConverter re-reads the row AFTER that commit — an unconditional
+    // write here would clobber the locked price into customers.monthly_rate.
+    // Mirror the accept transaction's status guard on the UPDATE itself and
+    // bail if the row was accepted/locked in the meantime.
+    const tierUpdateCount = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNull('price_locked_at')
+      .update(writes);
+    if (!tierUpdateCount) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
 
     // Notify admin of tier selection
     try {
@@ -6218,13 +6231,24 @@ router.put('/:token/preferences', async (req, res, next) => {
     parsedData.preferences = nextPrefs;
     if (baseMonthly > 0) parsedData.baseMonthly = baseMonthly;
     invalidateSendSnapshotPricingBundle(parsedData);
-    await db('estimates').where({ id: estimate.id }).update({
-      estimate_data: JSON.stringify(parsedData),
-      monthly_total: monthlyTotal,
-      annual_total: annualTotal,
-      onetime_total: onetimeTotal,
-      updated_at: db.fn.now(),
-    });
+    // TOCTOU guard: same as select-tier above — the accept-active check ran
+    // on a pre-read, so the UPDATE itself must refuse rows that a concurrent
+    // accept has locked (status flip + price_locked_at), or the recomputed
+    // totals here would overwrite the frozen accepted price.
+    const prefUpdateCount = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNull('price_locked_at')
+      .update({
+        estimate_data: JSON.stringify(parsedData),
+        monthly_total: monthlyTotal,
+        annual_total: annualTotal,
+        onetime_total: onetimeTotal,
+        updated_at: db.fn.now(),
+      });
+    if (!prefUpdateCount) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
     clearEstimatePricingCache(estimate.id);
 
     // Per-row metadata for client re-render (off-desc + savings label)
