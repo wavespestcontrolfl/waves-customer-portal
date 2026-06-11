@@ -2216,15 +2216,20 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     // Third-party report copies — the FDACS "Report Sent to Requestor and
     // to:" line is a delivery claim; any emails the tech entered there get a
-    // report-only copy once the customer email has succeeded.
+    // report-only copy once the customer email has succeeded. Exclusions
+    // mirror the combined route: the resolved recipient, the primary email
+    // (distinct when a service contact is configured), and the billing
+    // contact, so no customer-side address gets an unintended duplicate.
     if (isWdo && channels.email?.ok) {
+      const copyPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+      const [copyBilling] = getInvoiceEmailRecipients(customer, copyPrefs || {});
       const copies = await sendWdoReportCopies({
         req,
         project: updatedProject,
         customer,
         reportUrl,
         attachment: wdoPdf ? wdoPdf.attachment : null,
-        excludeEmails: [emailRecipient.email],
+        excludeEmails: [emailRecipient.email, customer?.email, copyBilling?.email],
         isResend: Boolean(project.sent_at || project.status === 'sent'),
       });
       if (copies) channels.report_copies = copies;
@@ -2363,6 +2368,10 @@ async function sendWdoReportCopies({ req, project, customer, reportUrl, attachme
   const sent = [];
   const failed = [];
   for (const email of emails) {
+    // The email is hashed into the idempotency key, not embedded: a long
+    // (but valid) address could push the key past email_messages'
+    // varchar(260) and fail the insert instead of sending.
+    const emailKey = crypto.createHash('sha256').update(email).digest('hex').slice(0, 16);
     try {
       const result = await ProjectEmail.sendProjectReportReady({
         project,
@@ -2372,7 +2381,7 @@ async function sendWdoReportCopies({ req, project, customer, reportUrl, attachme
         // name 'there' keeps the template greeting generic — the customer's
         // first name on a title company's copy would read wrong.
         recipient: { email, name: 'there', role: 'report_copy' },
-        idempotencyKey: `project.report_copy:${project.id}:${email}:${isResend ? new Date().toISOString() : 'initial'}`,
+        idempotencyKey: `project.report_copy:${project.id}:${emailKey}:${isResend ? new Date().toISOString() : 'initial'}`,
       });
       if (result.ok) sent.push(email);
       else failed.push({ email, error: projectEmailFailureMessage(result) });
@@ -2390,9 +2399,21 @@ async function sendWdoReportCopies({ req, project, customer, reportUrl, attachme
     ).catch(() => {});
   }
   if (failed.length) {
-    logger.warn(`[projects] WDO report copies failed for ${project.id}: ${failed.map((f) => `${f.email} (${f.error})`).join('; ')}`);
+    // Counts + provider errors only — recipient email addresses are PII and
+    // must not land in log lines (the activity trail above is the durable
+    // record of who was and wasn't emailed).
+    logger.warn(`[projects] ${failed.length} of ${emails.length} WDO report cop${failed.length === 1 ? 'y' : 'ies'} failed for ${project.id}: ${failed.map((f) => f.error).join('; ')}`);
   }
-  return { sent, failed };
+  // Shaped like every other channel entry ({ ok, error }) so the admin
+  // delivery summary renders it correctly; sent/failed ride along for detail.
+  return {
+    ok: failed.length === 0,
+    sent,
+    failed,
+    ...(failed.length
+      ? { error: `${failed.length} of ${emails.length} report cop${failed.length === 1 ? 'y' : 'ies'} failed` }
+      : {}),
+  };
 }
 
 function normalizeUsPhone(phone) {
@@ -2687,8 +2708,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         email_routing: {
           recipient: previewRecipient.email || null,
           billing_copy: previewBillingEmail && previewBillingEmail !== previewRecipientEmail ? previewBillingEmail : null,
+          // Same exclusion set the send applies: recipient, primary, billing.
           report_copies: isWdoProject
-            ? wdoReportCopyEmails(parseFindings(project), [previewRecipientEmail, previewBillingEmail])
+            ? wdoReportCopyEmails(parseFindings(project), [previewRecipientEmail, customer?.email, previewBillingEmail])
             : [],
         },
       });
@@ -2851,7 +2873,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         customer,
         reportUrl,
         attachment: wdoPdf ? wdoPdf.attachment : null,
-        excludeEmails: [emailRecipient.email, billingCopyEmail],
+        excludeEmails: [emailRecipient.email, customer?.email, billingCopyEmail],
         isResend: Boolean(project.sent_at || project.status === 'sent'),
       });
       if (copies) channels.report_copies = copies;
