@@ -16,7 +16,7 @@
         {
           "visit": 1,
           "month": "Jan",
-          "primary": "Prodiamine 65 WDG split 1 ($3.51)\nCelsius WG + NIS broadleaf ($3.84)\nSoil sample ALL accounts yr 1 ($15)",
+          "primary": "Prodiamine 65 WDG split 1 ($3.51)\nCelsius WG + NIS broadleaf ($3.84)\nSoil sample OPTIONAL if requested — $15",
           "secondary": "Sedgehammer Plus if sedge ($1.33)\nHeadway G (FRAC 11+3) if large patch history ($26.13)",
           "material_cost": "5.95",
           "labor_cost": "26.96",
@@ -26,7 +26,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Pre-em split 1 — APPLY BY JAN 15. Celsius app 1/3 (MOA Group 2). N rate: 0 lb N. ★ Headway = FRAC 11+3 (winter slot). Soil sample all new accts."
+          "notes": "Pre-em split 1 — APPLY BY JAN 15. Celsius app 1/3 (MOA Group 2). N rate: 0 lb N. ★ Headway = FRAC 11+3 (winter slot). Soil sample optional on request."
         },
         {
           "visit": 2,
@@ -647,7 +647,7 @@
           "visit": 3,
           "month": "Mar",
           "primary": "Prodiamine 65 WDG split 2 ($3.51)\nLESCO 24-0-11 PolyPlus fert ($8.68)",
-          "secondary": "Celsius WG if broadleaf heavy ($3.84)\n★ Soil sample new accounts ($15)\n★ Mole cricket adult flight season — re-flush if Feb was borderline",
+          "secondary": "Celsius WG if broadleaf heavy ($3.84)\n★ Soil sample OPTIONAL if requested — $15\n★ Mole cricket adult flight season — re-flush if Feb was borderline",
           "material_cost": "24.28",
           "labor_cost": "26.96",
           "tiers": {
