@@ -1138,6 +1138,7 @@ function initScheduledJobs() {
       const customers = await db('customers')
         .join('notification_prefs', 'customers.id', 'notification_prefs.customer_id')
         .where({ 'customers.active': true, 'notification_prefs.billing_reminder': true })
+        .whereNull('customers.deleted_at')
         .whereNotNull('customers.monthly_rate')
         .select('customers.id', 'customers.monthly_rate', 'customers.first_name');
 

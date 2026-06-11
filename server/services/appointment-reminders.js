@@ -569,6 +569,12 @@ const AppointmentReminders = {
       const stranded = await db('appointment_reminders')
         .where({ cancelled: false, confirmation_sent: false })
         .where('created_at', '<', staleCutoff)
+        .whereNotExists(function () {
+          this.select(1)
+            .from('customers')
+            .whereRaw('customers.id = appointment_reminders.customer_id')
+            .whereNotNull('customers.deleted_at');
+        })
         .select('scheduled_service_id');
       for (const r of stranded) {
         try {
@@ -589,6 +595,12 @@ const AppointmentReminders = {
         .where({ cancelled: false, confirmation_sent: true })
         .where(function () {
           this.where({ reminder_72h_sent: false }).orWhere({ reminder_24h_sent: false });
+        })
+        .whereNotExists(function () {
+          this.select(1)
+            .from('customers')
+            .whereRaw('customers.id = appointment_reminders.customer_id')
+            .whereNotNull('customers.deleted_at');
         })
         .select('*');
 

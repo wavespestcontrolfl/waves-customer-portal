@@ -323,6 +323,17 @@ const ReviewService = {
     const customer = await db("customers")
       .where({ id: request.customer_id })
       .first();
+    // Soft-deleted customers get no outbound asks.
+    if (customer && customer.deleted_at) {
+      await db("review_requests").where({ id: requestId }).update({
+        status: "suppressed",
+      });
+      // PII: ID-only per AGENTS.md.
+      logger.info(
+        `[review] Suppressed request (customerId=${customer.id} requestId=${requestId} reason=customer-deleted)`,
+      );
+      return;
+    }
     // Skip customers a CSR has flagged as already-reviewed (Customer 360 toggle).
     if (customer && customer.has_left_google_review) {
       await db("review_requests").where({ id: requestId }).update({
@@ -834,11 +845,36 @@ const ReviewService = {
    * Runs every 15 minutes, picks up requests whose scheduled_for has passed.
    */
   async processScheduled() {
+    // Terminate (not just skip) due requests whose customer was
+    // soft-deleted: a row left 'pending' forever would become eligible
+    // again — and fire very late — if the customer is ever restored.
+    const terminated = await db("review_requests")
+      .where({ status: "pending" })
+      .whereNotNull("scheduled_for")
+      .where("scheduled_for", "<=", new Date())
+      .whereNull("sms_sent_at")
+      .whereExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
+      .update({ status: "suppressed" });
+    if (terminated > 0) {
+      logger.info(`[review] Suppressed ${terminated} scheduled requests (reason=customer-deleted)`);
+    }
+
     const pending = await db("review_requests")
       .where({ status: "pending" })
       .whereNotNull("scheduled_for")
       .where("scheduled_for", "<=", new Date())
       .whereNull("sms_sent_at")
+      .whereNotExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
       .limit(20);
 
     let sent = 0;
@@ -874,12 +910,37 @@ const ReviewService = {
     );
     const recentFollowupCutoff = new Date(Date.now() - 14 * 24 * 3600000); // 14 days
 
+    // Terminally mark due follow-ups for soft-deleted customers as
+    // handled (mirrors processScheduled): filtering alone leaves
+    // followup_sent=false rows eligible forever, so a restored customer
+    // would get a stale follow-up.
+    const followupsClosed = await db("review_requests")
+      .whereIn("status", ["sent", "opened"])
+      .where("sms_sent_at", "<", cutoff)
+      .where({ followup_sent: false })
+      .whereExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
+      .update({ followup_sent: true, followup_sent_at: new Date() });
+    if (followupsClosed > 0) {
+      logger.info(`[review] Closed ${followupsClosed} due follow-ups (reason=customer-deleted)`);
+    }
+
     const nonPromoterDrafts = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
       .where("sms_sent_at", "<", cutoff)
       .where({ followup_sent: false })
       .whereNull("rated_at")
       .where("score", "<", 8)
+      .whereNotExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
       .orderBy("sms_sent_at", "asc")
       .limit(20);
 
@@ -943,6 +1004,12 @@ const ReviewService = {
       // straight-to-Google reminder when the draft score already tells us the
       // customer was not a promoter.
       .where((builder) => builder.whereNull("score").orWhere("score", ">=", 8))
+      .whereNotExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      })
       .orderBy("sms_sent_at", "asc")
       .limit(20);
 

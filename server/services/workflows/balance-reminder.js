@@ -106,6 +106,7 @@ class BalanceReminder {
       .whereIn("scheduled_services.status", ["pending", "confirmed"])
       .leftJoin("customers", "scheduled_services.customer_id", "customers.id")
       .where("customers.active", true)
+      .whereNull("customers.deleted_at")
       .whereNotNull("customers.waveguard_tier")
       .select(
         "scheduled_services.*",
@@ -400,6 +401,7 @@ class BalanceReminder {
   async latePaymentCheck() {
     const customers = await db("customers")
       .where({ active: true })
+      .whereNull("deleted_at")
       .whereNotNull("waveguard_tier");
 
     let sent = 0;
