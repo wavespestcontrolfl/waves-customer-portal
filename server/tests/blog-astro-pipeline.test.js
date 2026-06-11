@@ -1305,3 +1305,108 @@ describe('publishRefresh fact-check (refreshed blog bodies)', () => {
     expect(result.pr_number).toBe(50);
   });
 });
+
+describe('post-merge internal-link planning', () => {
+  const planner = require('../services/content/internal-link-planner');
+  const linkExecutor = require('../services/content/internal-link-pr-executor');
+  const { planInternalLinksForMergedPost, queueInternalLinkPlanning } = AstroPublisher._internals;
+
+  const post = {
+    id: 'post-1',
+    slug: 'venice-dollar-spot-guide',
+    title: 'Dollar Spot in Venice',
+    keyword: 'venice dollar spot',
+    city: 'Venice',
+    target_sites: null,
+  };
+
+  beforeEach(() => jest.clearAllMocks());
+  afterEach(() => {
+    jest.restoreAllMocks();
+    delete process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE;
+  });
+
+  function mockTaskInsert(returnedIds) {
+    const returning = jest.fn().mockResolvedValue(returnedIds.map((id) => ({ id })));
+    const ignore = jest.fn().mockReturnValue({ returning });
+    const onConflict = jest.fn().mockReturnValue({ ignore });
+    const insert = jest.fn().mockReturnValue({ onConflict });
+    db.mockImplementation((table) => {
+      if (table === 'content_internal_link_tasks') return { insert };
+      return chain();
+    });
+    return { insert, onConflict };
+  }
+
+  test('plans, queues, and dry-runs internal links for the merged hub URL', async () => {
+    jest.spyOn(planner, 'loadAstroCorpusFromGitHub').mockResolvedValue([
+      { file: 'src/content/blog/post-a.md', body: 'corpus page', url: '/blog/post-a/' },
+    ]);
+    const planSpy = jest.spyOn(planner, 'planForTarget').mockReturnValue([
+      {
+        source_file: 'src/content/blog/post-a.md',
+        target_url: '/venice-dollar-spot-guide/',
+        target_file: 'src/content/blog/venice-dollar-spot-guide.md',
+        anchor_text: 'venice dollar spot',
+      },
+    ]);
+    const dryRunSpy = jest.spyOn(linkExecutor, 'runDryRun').mockResolvedValue({
+      results: [{ status: 'patch_candidate' }],
+    });
+    const { insert, onConflict } = mockTaskInsert(['task-1']);
+
+    const result = await planInternalLinksForMergedPost(post);
+
+    expect(planSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: expect.stringContaining('/venice-dollar-spot-guide/'),
+        keyword: 'venice dollar spot',
+        city: 'Venice',
+      }),
+      expect.objectContaining({ corpus: expect.any(Array) }),
+    );
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(onConflict).toHaveBeenCalledWith(['source_file', 'target_url', 'anchor_text']);
+    expect(dryRunSpy).toHaveBeenCalledWith({ taskIds: ['task-1'], limit: 1 });
+    expect(result).toEqual(expect.objectContaining({ queued: 1, candidates: 1 }));
+  });
+
+  test('spoke-published posts plan nothing (real planner rejects the spoke URL)', async () => {
+    jest.spyOn(planner, 'loadAstroCorpusFromGitHub').mockResolvedValue([
+      { file: 'src/content/blog/post-a.md', body: 'Lawns with venice dollar spot rings need fungicide.', url: '/blog/post-a/' },
+    ]);
+    const dryRunSpy = jest.spyOn(linkExecutor, 'runDryRun');
+    const { insert } = mockTaskInsert([]);
+
+    const result = await planInternalLinksForMergedPost({
+      ...post,
+      target_sites: ['veniceflpestcontrol.com'],
+    });
+
+    expect(insert).not.toHaveBeenCalled();
+    expect(dryRunSpy).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({ queued: 0, candidates: 0 }));
+  });
+
+  test('INTERNAL_LINK_PLAN_ON_BLOG_MERGE=false disables post-merge planning', async () => {
+    process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = 'false';
+    const corpusSpy = jest.spyOn(planner, 'loadAstroCorpusFromGitHub');
+    const planSpy = jest.spyOn(planner, 'planForTarget');
+
+    queueInternalLinkPlanning(post);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(corpusSpy).not.toHaveBeenCalled();
+    expect(planSpy).not.toHaveBeenCalled();
+  });
+
+  test('a planner failure is swallowed (never fails the merge)', async () => {
+    jest.spyOn(planner, 'loadAstroCorpusFromGitHub').mockRejectedValue(new Error('github down'));
+
+    queueInternalLinkPlanning(post);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const logger = require('../services/logger');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('internal-link planning failed'));
+  });
+});

@@ -23,6 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const GitHubClient = require('../content-astro/github-client');
+const fm = require('../content-astro/frontmatter');
 const { CITIES } = require('./scoring-config');
 
 const DEFAULT_LINK_CAP = 5; // per planning run
@@ -234,6 +235,45 @@ function pageAlreadyLinksTo(text, targetUrl) {
   return false;
 }
 
+/**
+ * Source pages are only safe to patch when they render exclusively on the
+ * hub. The Astro build's multi-domain filter renders an entry on a spoke
+ * domain when its frontmatter `domains` array names that spoke key; absent
+ * or hub-only `domains` means hub-only. A hub-relative link injected into a
+ * spoke-rendered page would ship on the spoke build too, pointing at a URL
+ * that 404s there (hub-only pages are excluded from spoke builds).
+ */
+function sourceRendersOffHub(frontmatterData = {}) {
+  const domains = Array.isArray(frontmatterData.domains) ? frontmatterData.domains : [];
+  return domains.some((entry) => {
+    const host = String(entry || '').trim().toLowerCase().replace(/^www\./, '');
+    return Boolean(host) && !ALLOWED_SITE_HOSTS.has(host);
+  });
+}
+
+/**
+ * Spoke-canonical pages (hub-rendered duplicates whose canonical points at
+ * a spoke domain) are not link sources either — a link there passes no
+ * equity to the target and the page is slated for dedup, not enrichment.
+ */
+function canonicalPointsOffHub(frontmatterData = {}) {
+  for (const value of [frontmatterData.canonical, frontmatterData.canonical_url]) {
+    const raw = String(value || '').trim();
+    if (!/^https?:\/\//i.test(raw)) continue;
+    try {
+      if (!ALLOWED_SITE_HOSTS.has(new URL(raw).hostname.toLowerCase())) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+function eligibleLinkSource(page) {
+  const data = fm.parse(String(page?.body || '')).data || {};
+  return !sourceRendersOffHub(data) && !canonicalPointsOffHub(data);
+}
+
 function unwrapAngleHref(href) {
   const s = String(href || '').trim();
   return s.startsWith('<') && s.endsWith('>') ? s.slice(1, -1) : s;
@@ -276,6 +316,12 @@ class InternalLinkPlanner {
 
     const targetPath = canonicalInternalPath(target.url);
     if (!targetPath) return [];
+    // Resolve the target's content file from the corpus while we have it —
+    // the executor can't reliably re-derive it from the URL alone (a
+    // root-slug blog post and a location page have identical URL shapes).
+    const targetFile = corpus.find(
+      (page) => sameUrl(page.url || deriveUrlFromSourceFile(page.file, page.body), targetPath)
+    )?.file || null;
     const tasks = [];
     const perFileCount = new Map();
 
@@ -283,6 +329,7 @@ class InternalLinkPlanner {
       if (tasks.length >= cap) break;
       const pageUrl = page.url || deriveUrlFromSourceFile(page.file, page.body);
       if (sameUrl(pageUrl, targetPath)) continue; // never link page to itself
+      if (!eligibleLinkSource(page)) continue; // never patch spoke-rendered or spoke-canonical pages
       if (pageAlreadyLinksTo(page.body, targetPath)) continue;
 
       for (const { phrase } of candidates) {
@@ -295,6 +342,7 @@ class InternalLinkPlanner {
         tasks.push({
           source_file: page.file,
           target_url: targetPath,
+          target_file: targetFile,
           anchor_text: actualAnchor,
           context_snippet: occ.snippet,
           source_offset: occ.index,
@@ -488,6 +536,9 @@ module.exports._internals = {
   isInsideLink,
   snippetAround,
   pageAlreadyLinksTo,
+  sourceRendersOffHub,
+  canonicalPointsOffHub,
+  eligibleLinkSource,
   unwrapAngleHref,
   normalizePath,
   canonicalInternalPath,
