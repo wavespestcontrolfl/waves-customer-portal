@@ -928,6 +928,24 @@ async function publishOrUpdatePage(draft, brief = {}) {
   };
 }
 
+// Resolve which frontmatter casing variant a metadata rewrite should write,
+// per field. Prefer the variant that exists on the live page (camelCase wins
+// when both exist — it's the one the service/location layout renders). When
+// neither variant of a field exists, follow the page's casing family
+// (camelCase if the OTHER meta field is camelCase, else the blog snake_case
+// contract) so we never introduce a dead duplicate field.
+function metaRewriteFieldTargets(currentFrontmatter = {}) {
+  const camelFamily = currentFrontmatter.metaTitle !== undefined
+    || currentFrontmatter.metaDescription !== undefined;
+  const titleField = currentFrontmatter.metaTitle !== undefined
+    ? 'metaTitle'
+    : (currentFrontmatter.title !== undefined ? 'title' : (camelFamily ? 'metaTitle' : 'title'));
+  const metaField = currentFrontmatter.metaDescription !== undefined
+    ? 'metaDescription'
+    : (currentFrontmatter.meta_description !== undefined ? 'meta_description' : (camelFamily ? 'metaDescription' : 'meta_description'));
+  return { titleField, metaField };
+}
+
 async function publishMetadataRewrite(draft, brief = {}) {
   if (!canPublishMetadataRewrite(draft, brief)) {
     throw new Error(`unsupported metadata rewrite for Astro publish: ${brief.action_type || 'unknown'}`);
@@ -948,18 +966,46 @@ async function publishMetadataRewrite(draft, brief = {}) {
   const currentFrontmatter = parsed.data || {};
   const newTitle = String(draft.title || '').trim();
   const newMeta = String(draft.meta_description || '').trim();
+
+  // Casing-aware field targeting — mirrors publishRefresh's
+  // REFRESH_EDITABLE_META_FIELDS handling. Service/location pages use
+  // metaTitle/metaDescription (the Astro layout renders fm.metaTitle ||
+  // fm.title and fm.metaDescription); blog pages use title/meta_description.
+  // Unconditionally writing the snake_case fields onto a camelCase page never
+  // rendered, but still diffed → bumped `modified` (fake sitemap freshness)
+  // and left dead duplicate fields behind. Write the variant that EXISTS on
+  // the live page; only when neither variant exists, follow the page's
+  // casing family so we never create a dead duplicate.
+  const { titleField, metaField } = metaRewriteFieldTargets(currentFrontmatter);
   const nextFrontmatter = {
     ...currentFrontmatter,
-    title: newTitle,
-    meta_description: newMeta,
+    [titleField]: newTitle,
+    [metaField]: newMeta,
   };
+
+  // Semantic no-op check on the RENDERED fields (a parse→stringify round-trip
+  // rarely reproduces the source byte-for-byte, so compare meaning, not text).
+  const titleChanged = newTitle !== String(currentFrontmatter[titleField] ?? '').trim();
+  const metaChanged = newMeta !== String(currentFrontmatter[metaField] ?? '').trim();
+  if (!titleChanged && !metaChanged) {
+    return {
+      url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
+      status: 'no_changes',
+      live: false,
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      preview_url: null,
+      commit_sha: null,
+    };
+  }
 
   // Bump the freshness field the live page already uses (services: `modified`;
   // blog v2: `updated`) so sitemap lastmod updates and Google recrawls the
-  // rewritten title/meta — these are high-SEO-value edits. Only when something
-  // actually changed; mirrors publishRefresh and avoids fake-freshness churn.
-  if (newTitle !== String(currentFrontmatter.title || '').trim()
-    || newMeta !== String(currentFrontmatter.meta_description || '').trim()) {
+  // rewritten title/meta — these are high-SEO-value edits. Only when a
+  // RENDERED field actually changed (checked above); mirrors publishRefresh
+  // and avoids fake-freshness churn.
+  {
     const today = dateOnly(new Date());
     if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
     else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
@@ -996,13 +1042,15 @@ async function publishMetadataRewrite(draft, brief = {}) {
 
   const pr = await gh.createPr({
     head: branch,
-    title: `SEO metadata: ${nextFrontmatter.title}`.slice(0, 72),
+    title: `SEO metadata: ${nextFrontmatter[titleField]}`.slice(0, 72),
     body: buildMetadataPrBody({
       filePath,
       targetUrl,
       branch,
       before: currentFrontmatter,
       after: nextFrontmatter,
+      titleField,
+      metaField,
       brief,
     }),
   });
@@ -1541,7 +1589,7 @@ function buildDraftPrBody({ frontmatter, slug, branch, content, brief }) {
   ].join('\n');
 }
 
-function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after = {}, brief = {} }) {
+function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after = {}, titleField = 'title', metaField = 'meta_description', brief = {} }) {
   return [
     `**Autonomous title/meta rewrite**`,
     ``,
@@ -1555,8 +1603,8 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
     ``,
     `| Field | Before | After |`,
     `| --- | --- | --- |`,
-    `| title | ${markdownTableCell(before.title)} | ${markdownTableCell(after.title)} |`,
-    `| meta_description | ${markdownTableCell(before.meta_description)} | ${markdownTableCell(after.meta_description)} |`,
+    `| ${titleField} | ${markdownTableCell(before[titleField])} | ${markdownTableCell(after[titleField])} |`,
+    `| ${metaField} | ${markdownTableCell(before[metaField])} | ${markdownTableCell(after[metaField])} |`,
     ``,
     `Body, slug, canonical, and schema are intentionally unchanged.`,
     ``,

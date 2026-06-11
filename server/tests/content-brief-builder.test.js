@@ -167,6 +167,79 @@ describe('SERVICE_HUB_LINKS', () => {
   });
 });
 
+// ── NO-FAQ policy at the brief level ─────────────────────────────────
+//
+// FAQ-blocked topics (content-guardrails.isFaqBlockedService — the same
+// single-sourced module the publish-time P0 enforces) must not get a brief
+// that requires an FAQ section or FAQPage schema: the generators correctly
+// omit the FAQ, so a leftover requirement would trip seo-completion-gate's
+// P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ and strand a compliant draft at
+// AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0.
+describe('_composeBrief NO-FAQ policy for FAQ-blocked topics', () => {
+  const builder = new ContentBriefBuilder();
+  const compose = ({ service = 'pest', bucket = 'no_content_yet', pageType = 'supporting-blog', actionType = 'new_supporting_blog', customerSignal = null } = {}) =>
+    builder._composeBrief({
+      opportunity: {
+        id: 'opp-faq',
+        page_url: null,
+        query: `${service} bradenton`,
+        city: 'Bradenton',
+        service,
+        bucket,
+        signal_metadata: {},
+      },
+      signals: { customer_signal: customerSignal, serp_profile: null, conversion_feedback: null },
+      decision: {
+        page_type: pageType,
+        action_type: actionType,
+        final_score: 80,
+        score_breakdown: {},
+        human_review_required: false,
+        human_review_reason: null,
+        router_notes: null,
+      },
+      existingBriefVersions: 0,
+    });
+
+  test('supporting-blog brief on a blocked service omits the FAQ required_section', () => {
+    const brief = compose({ service: 'rodent' });
+    expect(brief.required_sections.some((s) => /\bfaq\b|frequently asked/i.test(s))).toBe(false);
+    // The rest of the contract is intact.
+    expect(brief.required_sections.join(' | ')).toMatch(/pest-practices|early CTA/i);
+  });
+
+  test('city-service brief blocked via customer_signal.service omits "FAQ from customer calls"', () => {
+    const brief = compose({
+      service: 'pest',
+      pageType: 'city-service',
+      actionType: 'create_or_refresh_city_service_page',
+      customerSignal: { service: 'termite', topic: 'termite swarmers', normalized_question: 'are these flying ants or termites' },
+    });
+    expect(brief.required_sections.some((s) => /\bfaq\b/i.test(s))).toBe(false);
+    expect(brief.customer_signal.service).toBe('termite');
+  });
+
+  test('aeo_gap overlay FAQ + FAQPage additions are stripped for blocked topics', () => {
+    const brief = compose({ service: 'rodent', bucket: 'aeo_gap' });
+    expect(brief.required_sections.some((s) => /\bfaq\b|frequently asked/i.test(s))).toBe(false);
+    expect(brief.schema_types).not.toContain('FAQPage');
+    // Non-FAQ AEO treatment still applies.
+    expect(brief.required_sections[0]).toMatch(/direct-answer/i);
+  });
+
+  test('non-blocked topics keep their FAQ requirements', () => {
+    const blogBrief = compose({ service: 'pest' });
+    expect(blogBrief.required_sections.some((s) => /\bfaq\b/i.test(s))).toBe(true);
+    const aeoBrief = compose({ service: 'pest', bucket: 'aeo_gap' });
+    expect(aeoBrief.schema_types).toContain('FAQPage');
+  });
+
+  test('canonical blog tags resolve as blocked at the brief level too (Roaches)', () => {
+    const brief = compose({ service: 'Roaches' });
+    expect(brief.required_sections.some((s) => /\bfaq\b/i.test(s))).toBe(false);
+  });
+});
+
 describe('_composeBrief customer signal context', () => {
   test('carries city/service into customer_signal for uniqueness gate', () => {
     const builder = new ContentBriefBuilder();

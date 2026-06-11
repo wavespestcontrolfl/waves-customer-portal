@@ -18,6 +18,7 @@ const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { THRESHOLDS } = require('./scoring-config');
 const { buildSeoRequirements } = require('./blog-seo-contract');
+const { isFaqBlockedService } = require('./content-guardrails');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
@@ -191,6 +192,25 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
     ],
   };
   return { requiredSections: sections, schemaTypes: schema, voiceConstraints: voice };
+}
+
+// NO-FAQ policy at the BRIEF level. FAQ-blocked topics (content-guardrails.
+// isFaqBlockedService — the same single-sourced policy module the publish-time
+// P0 enforces and the generators condition on) must not receive a brief that
+// requires an FAQ section or FAQPage schema: the generators now correctly omit
+// the FAQ, so a leftover "FAQ section (…)" required_section would trip
+// seo-completion-gate's P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ (and at the
+// live AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 canary config route a compliant
+// no-FAQ draft out of publish), and a leftover FAQPage schema_type would P0
+// as FAQ_SCHEMA_WITHOUT_VISIBLE_FAQ. Applied AFTER the AEO overlay so the
+// aeo_gap FAQ/FAQPage additions are stripped too.
+const FAQ_SECTION_RE = /\bfaq\b|frequently asked|common questions/i;
+
+function stripFaqRequirements({ requiredSections, schemaTypes }) {
+  return {
+    requiredSections: requiredSections.filter((s) => !FAQ_SECTION_RE.test(String(s || ''))),
+    schemaTypes: schemaTypes.filter((t) => !/^faqpage$/i.test(String(t || '').trim())),
+  };
 }
 
 // Canonical URL slug component per service for city-service pages.
@@ -431,6 +451,19 @@ class ContentBriefBuilder {
       voiceConstraints: VOICE_CONSTRAINTS,
     });
 
+    // FAQ-blocked topic? Match on the same fields the downstream gates use:
+    // the opportunity's service plus the customer-signal service/topic (a
+    // city-service brief can carry broad service 'pest' with the real topic
+    // on customer_signal — e.g. 'rodent'/'termite').
+    const faqBlocked = isFaqBlockedService([
+      opportunity.service,
+      signals.customer_signal?.service,
+      signals.customer_signal?.topic,
+    ]);
+    const { requiredSections, schemaTypes } = faqBlocked
+      ? stripFaqRequirements({ requiredSections: aeo.requiredSections, schemaTypes: aeo.schemaTypes })
+      : { requiredSections: aeo.requiredSections, schemaTypes: aeo.schemaTypes };
+
     return {
       facts_pack: factsPack,
       opportunity_id: opportunity.id,
@@ -490,8 +523,8 @@ class ContentBriefBuilder {
           }
         : null,
 
-      required_sections: aeo.requiredSections,
-      schema_types: aeo.schemaTypes,
+      required_sections: requiredSections,
+      schema_types: schemaTypes,
       internal_links_to_add: this._internalLinksFor(opportunity, pageType),
       seo_requirements: buildSeoRequirements({
         page_type: pageType,
@@ -616,4 +649,5 @@ module.exports._internals = {
   buildSeoRequirements,
   nextWeekday9amET,
   applyAeoTreatment,
+  stripFaqRequirements,
 };

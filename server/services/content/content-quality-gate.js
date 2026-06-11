@@ -31,6 +31,7 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam } = require('./title-meta-spam-gate');
+const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score from the weight map so the
 // pass threshold is always a reachable fraction of it. The v3.1 plan
@@ -306,11 +307,46 @@ function checkServiceMenu(draft) {
   return { ok: true };
 }
 
+// Topic fields the FAQ-blocked policy is matched against — same idea as
+// publishAstro's guardrail call ([post.category, post.tag]) plus the brief's
+// service, which is what the autonomous runner feeds content-guardrails.
+// Also consult the brief's customer_signal: a city-service brief can carry
+// the broad service ('pest') while the real topic lives on
+// customer_signal.service/topic ('rodent'/'termite' — persisted by
+// content-brief-builder), and a compliant no-FAQ draft on those topics must
+// not be failed as no_faq_section_heading.
+function faqPolicyTopicFields(draft, brief) {
+  return [
+    brief?.service,
+    brief?.tag,
+    brief?.customer_signal?.service,
+    brief?.customer_signal?.topic,
+    draft?.frontmatter?.category,
+    draft?.frontmatter?.tag,
+  ];
+}
+
+// Shared FAQ-blocked-topic handling for the FAQ checks: a draft on a
+// FAQ-blocked service (content-guardrails.isFaqBlockedService — same module
+// the publish-time P0 enforces) must NOT be scored down for correctly
+// OMITTING the FAQ section the generator is now instructed to skip. Neutral
+// = the check passes at full weight when the FAQ is (correctly) absent;
+// an FAQ that IS present on a blocked topic fails here too (the guardrail
+// P0s it at publish anyway). Returns null when the policy doesn't apply.
+function faqBlockedTopicResult(hasFaqSection, draft, brief) {
+  if (!isFaqBlockedService(faqPolicyTopicFields(draft, brief))) return null;
+  if (hasFaqSection) return { ok: false, reason: 'faq_present_on_faq_blocked_service' };
+  return { ok: true, reason: 'faq_blocked_service_omission_is_correct' };
+}
+
 function checkFaqFromCustomer(draft, brief) {
   const body = String(draft.body || '');
+  const hasFaq = /\b(faq|frequently asked|common questions)\b/i.test(body);
+  const blockedResult = faqBlockedTopicResult(hasFaq, draft, brief);
+  if (blockedResult) return blockedResult;
   // Must include "FAQ" or "Frequently Asked" + at least one question
   // matching the brief's customer_signal topic.
-  if (!/\b(faq|frequently asked|common questions)\b/i.test(body)) {
+  if (!hasFaq) {
     return { ok: false, reason: 'no_faq_section_heading' };
   }
   const cs = brief.customer_signal;
@@ -421,9 +457,12 @@ function checkTwoPlusCityMentions(draft) {
   return { ok: false, reason: `only_${count}_city_mentions` };
 }
 
-function checkFaqSectionPresent(draft) {
+function checkFaqSectionPresent(draft, brief) {
   const body = String(draft.body || '');
-  if (!/\b(faq|frequently asked|common questions)\b/i.test(body)) {
+  const hasFaq = /\b(faq|frequently asked|common questions)\b/i.test(body);
+  const blockedResult = faqBlockedTopicResult(hasFaq, draft, brief);
+  if (blockedResult) return blockedResult;
+  if (!hasFaq) {
     return { ok: false, reason: 'no_faq_section' };
   }
   return { ok: true };

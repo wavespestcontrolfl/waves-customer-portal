@@ -187,4 +187,64 @@ describe('seo-completion-gate', () => {
       findings: [],
     });
   });
+
+  // ── NO-FAQ policy: FAQ-blocked topics can never "require" an FAQ ──
+  //
+  // content-brief-builder now omits the FAQ required_section for blocked
+  // topics, but legacy/stale briefs may still carry it. faqRequired must
+  // consult content-guardrails.isFaqBlockedService so a compliant no-FAQ
+  // draft is never P1'd (P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ) — at the
+  // live AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 config that P1 routes the
+  // draft out of publish.
+  describe('faqRequired vs FAQ-blocked topics', () => {
+    const { faqRequired } = SeoCompletionGate._internals;
+
+    test('false for a blocked brief.service even when required_sections lists an FAQ', () => {
+      expect(faqRequired({ service: 'rodent', required_sections: ['FAQ section (2–3 questions)'] })).toBe(false);
+    });
+
+    test('false when the blocked topic lives on customer_signal.service/topic', () => {
+      expect(faqRequired({ service: 'pest', customer_signal: { service: 'termite' }, required_sections: ['FAQ section (2–3 questions)'] })).toBe(false);
+      expect(faqRequired({ service: 'pest', customer_signal: { topic: 'rodents' }, required_sections: ['FAQ section (2–3 questions)'] })).toBe(false);
+    });
+
+    test('false for canonical blog tags via the guardrails alias map', () => {
+      expect(faqRequired({ service: 'pest', tag: 'Roaches', required_sections: ['FAQ section (2–3 questions)'] })).toBe(false);
+      expect(faqRequired({ service: 'pest', tag: 'Stinging Insects', required_sections: ['FAQ section (2–3 questions)'] })).toBe(false);
+    });
+
+    test('unchanged for non-blocked topics', () => {
+      expect(faqRequired({ service: 'pest', required_sections: ['FAQ section (2–3 questions)'] })).toBe(true);
+      expect(faqRequired({ service: 'pest', required_sections: ['pest-practices homeowner guidance'] })).toBe(false);
+    });
+
+    function noFaqDraft() {
+      const draft = baseDraft();
+      draft.body = draft.body.replace(/## Frequently Asked Questions[\s\S]*?(?=\[Lakewood Ranch pest control\])/, '');
+      draft.frontmatter = { ...draft.frontmatter, schema_types: ['Article', 'BreadcrumbList'] };
+      return draft;
+    }
+
+    test('evaluate() does not raise P1_MISSING_FAQ for a compliant no-FAQ draft on a blocked topic', () => {
+      const result = SeoCompletionGate.evaluate({
+        draft: noFaqDraft(),
+        brief: baseBrief({ service: 'rodent', required_sections: ['FAQ section (2–3 questions)', 'pest-practices homeowner guidance'] }),
+        shadowMode: true,
+      });
+      expect(result.findings).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ' }),
+      ]));
+    });
+
+    test('evaluate() still raises P1_MISSING_FAQ for non-blocked topics that omit a required FAQ', () => {
+      const result = SeoCompletionGate.evaluate({
+        draft: noFaqDraft(),
+        brief: baseBrief(), // service 'pest' — not blocked
+        shadowMode: true,
+      });
+      expect(result.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ severity: 'P1', code: 'P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ' }),
+      ]));
+    });
+  });
 });

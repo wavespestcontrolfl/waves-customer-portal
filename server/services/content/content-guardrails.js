@@ -95,6 +95,25 @@ function brandTokenFinding(body, domains) {
 // `category` is the broad Astro value ("pest-control") but whose real topic is
 // on `tag` ("Rodents") is still covered. Lowercase, hyphenate spaces, and try
 // de-pluralized forms so those match.
+
+// Canonical-tag → blocked-service aliases. blog-writer's normalizeTag()
+// collapses raw topics into a closed canonical tag set ("Roaches",
+// "Stinging Insects", …); two of those canonical forms do NOT reduce to a
+// blocklist id via lowercase/de-pluralize alone, so without these aliases a
+// cockroach or wasp post tagged with its canonical tag would get the
+// FAQ-required prompt AND bypass the publish-time FAQ_BLOCKED_SERVICE guard.
+// (Rodents/Termites/Spiders/Bed Bugs/Lawn Pests reduce to their blocked ids
+// already.) Data-driven here — the single-sourced module — so every consumer
+// of isFaqBlockedService/blockedServiceCandidates inherits the mapping.
+const BLOCKED_SERVICE_ALIASES = new Map([
+  ['roaches', 'cockroach'], // canonical blog tag "Roaches"
+  ['roach', 'cockroach'],
+  ['roache', 'cockroach'], // defensive: 'roaches' de-'s' form
+  ['palmetto-bug', 'cockroach'],
+  ['stinging-insects', 'wasp'], // canonical blog tag "Stinging Insects"
+  ['stinging-insect', 'wasp'],
+]);
+
 function blockedServiceCandidates(service) {
   const raw = Array.isArray(service) ? service : [service];
   const out = new Set();
@@ -105,12 +124,31 @@ function blockedServiceCandidates(service) {
     if (base.endsWith('es')) out.add(base.slice(0, -2)); // Cockroaches → cockroach
     if (base.endsWith('s')) out.add(base.slice(0, -1)); // Rodents → rodent, Bed Bugs → bed-bug
   }
+  // Map canonical-tag forms onto their blocked service id (Roaches→cockroach,
+  // Stinging Insects→wasp) AFTER normalization so any input casing/plurality
+  // that reduces to an alias key picks up the alias target too.
+  for (const candidate of [...out]) {
+    const alias = BLOCKED_SERVICE_ALIASES.get(candidate);
+    if (alias) out.add(alias);
+  }
   return [...out];
 }
 
+/**
+ * isFaqBlockedService(service) → bool — single source of truth for "this
+ * topic must NOT get an FAQ section". Accepts the same string-or-array input
+ * as the publish-time guard (e.g. [post.category, post.tag]) and applies the
+ * same normalization (lowercase, hyphenate, de-pluralize). Exported so the
+ * GENERATOR side (blog-writer prompt, writer-agent-config) and the quality
+ * gate condition on the exact blocklist this module enforces at publish —
+ * the two sides can never drift.
+ */
+function isFaqBlockedService(service) {
+  return blockedServiceCandidates(service).some((c) => FAQ_BLOCKED_SERVICES.has(c));
+}
+
 function faqBlockedFinding(body, service) {
-  const isBlocked = blockedServiceCandidates(service).some((c) => FAQ_BLOCKED_SERVICES.has(c));
-  if (!isBlocked) return null;
+  if (!isFaqBlockedService(service)) return null;
   if (/\b(faq|frequently asked|common questions)\b/i.test(String(body || ''))) {
     const label = Array.isArray(service) ? service.filter(Boolean).join('/') : service;
     return finding('P0', 'FAQ_BLOCKED_SERVICE', `Service "${label}" is on the FAQ-blocked list — remove the FAQ section.`);
@@ -178,8 +216,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 
 module.exports = {
   evaluate,
-  // exposed for tests
+  // single source of truth for the FAQ-section policy — consumed by
+  // blog-writer, writer-agent-config, and content-quality-gate so the
+  // generators/gates can never contradict the publish-time guard.
+  isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES },
 };

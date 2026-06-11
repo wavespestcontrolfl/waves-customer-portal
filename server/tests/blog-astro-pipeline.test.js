@@ -1600,3 +1600,155 @@ describe('post-merge internal-link planning', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('internal-link planning failed'));
   });
 });
+
+// ── publishMetadataRewrite casing-aware meta fields ──────────────────
+//
+// Bug: the rewrite unconditionally wrote `title` + `meta_description`.
+// Service/location pages render fm.metaTitle || fm.title and
+// fm.metaDescription, so on those pages the rewrite never rendered — yet the
+// diff still bumped `modified` (fake sitemap freshness) and left dead
+// snake_case duplicates behind. Fix mirrors publishRefresh's
+// REFRESH_EDITABLE_META_FIELDS approach: write the casing variant that
+// EXISTS on the live page, never create the dead duplicate, and only bump
+// the freshness field when a rendered field actually changed.
+describe('publishMetadataRewrite casing-aware meta fields', () => {
+  const fmModule = require('../services/content-astro/frontmatter');
+
+  const SERVICE_PAGE = [
+    '---',
+    'metaTitle: "Old Sarasota Service Meta Title"',
+    'metaDescription: "Old Sarasota service meta description."',
+    'slug: "pest-control-sarasota-fl"',
+    'canonical: "https://www.wavespestcontrol.com/pest-control-sarasota-fl/"',
+    'modified: "2026-01-01T12:00:00"',
+    '---',
+    'Service body that must not change.',
+  ].join('\n');
+
+  const SERVICE_BRIEF = {
+    action_type: 'rewrite_title_meta',
+    target_url: 'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
+    city: 'Sarasota',
+    service: 'pest',
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.putFile.mockResolvedValue({ commit: { sha: 'meta-commit-sha' } });
+    gh.createPr.mockResolvedValue({ number: 91, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/91', head: { sha: 'h' } });
+    gh.createIssueComment.mockResolvedValue({});
+  });
+
+  test('writes metaTitle/metaDescription on a camelCase service page and never adds title/meta_description duplicates', async () => {
+    gh.getFile.mockResolvedValue({ sha: 'svc-sha', content: SERVICE_PAGE });
+
+    const res = await AstroPublisher.publishMetadataRewrite({
+      type: 'metadata',
+      title: 'Pest Control Sarasota FL | Waves Pest Control',
+      meta_description: 'New Sarasota service meta description that will actually render.',
+    }, SERVICE_BRIEF);
+
+    expect(res.status).toBe('pr_open');
+    const { data, content } = fmModule.parse(gh.putFile.mock.calls[0][0].content);
+    // Rendered fields updated…
+    expect(data.metaTitle).toBe('Pest Control Sarasota FL | Waves Pest Control');
+    expect(data.metaDescription).toBe('New Sarasota service meta description that will actually render.');
+    // …and NO dead snake_case duplicates created.
+    expect(data.title).toBeUndefined();
+    expect(data.meta_description).toBeUndefined();
+    // Body untouched; rendered change → legitimate `modified` bump.
+    expect(content).toContain('Service body that must not change.');
+    expect(data.modified).not.toBe('2026-01-01T12:00:00');
+    expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
+    // PR title/body reflect the field that was actually written.
+    expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringContaining('SEO metadata: Pest Control Sarasota FL'),
+      body: expect.stringContaining('| metaTitle |'),
+    }));
+  });
+
+  test('no-op rewrite (values already match the rendered fields) returns no_changes and does not bump modified', async () => {
+    gh.getFile.mockResolvedValue({ sha: 'svc-sha', content: SERVICE_PAGE });
+
+    const res = await AstroPublisher.publishMetadataRewrite({
+      type: 'metadata',
+      title: 'Old Sarasota Service Meta Title',
+      meta_description: 'Old Sarasota service meta description.',
+    }, SERVICE_BRIEF);
+
+    expect(res.status).toBe('no_changes');
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
+  test('snake_case blog page still writes title/meta_description (and bumps `updated`, not metaTitle)', async () => {
+    const BLOG_PAGE = [
+      '---',
+      'title: "Drywood Termite Signs in Sarasota Homes"',
+      'slug: "/blog/drywood-termite-signs-sarasota/"',
+      'meta_description: "Spot drywood termite signs in your Sarasota home early: frass piles, blistered paint, and discarded wings. Here is what Waves techs look for."',
+      'primary_keyword: "drywood termite signs"',
+      'secondary_keywords:',
+      '  - "termite frass"',
+      'category: "termite"',
+      'post_type: "diagnostic"',
+      'service_areas_tag:',
+      '  - "Sarasota"',
+      'related_services: []',
+      'spoke_links: []',
+      'author:',
+      '  name: "Adam Benetti"',
+      '  role: "Lead Technician"',
+      '  bio_url: "/about/authors/adam-benetti"',
+      'technically_reviewed_by:',
+      '  name: "Adam Benetti"',
+      '  credential: "FDACS Certified Operator"',
+      '  bio_url: "/about/authors/adam-benetti"',
+      'fact_checked_by: "Waves Editorial"',
+      'published: "2026-05-01"',
+      'updated: "2026-05-01"',
+      'technically_reviewed: "2026-05-01"',
+      'fact_checked: "2026-05-01"',
+      'review_cadence: "quarterly"',
+      'reading_time_min: 5',
+      'hero_image:',
+      '  src: "/images/blog/drywood/hero.webp"',
+      '  alt: "Drywood termite frass on a windowsill"',
+      'og_image: "/images/blog/drywood/hero.webp"',
+      'canonical: "https://www.wavespestcontrol.com/blog/drywood-termite-signs-sarasota/"',
+      'schema_types:',
+      '  - "Article"',
+      'disclosure:',
+      '  type: "none"',
+      '---',
+      'Original drywood termite body content for the live blog post.',
+    ].join('\n');
+
+    gh.getFile.mockImplementation(async (path) => (
+      path === 'src/content/blog/drywood-termite-signs-sarasota.md'
+        ? { sha: 'blog-sha', content: BLOG_PAGE }
+        : null
+    ));
+
+    const res = await AstroPublisher.publishMetadataRewrite({
+      type: 'metadata',
+      title: 'Drywood Termite Signs Sarasota Homeowners Miss',
+      meta_description: 'Drywood termite signs Sarasota homeowners miss: frass piles, blistered paint, discarded wings. Here is what Waves techs check before quoting treatment.',
+    }, {
+      action_type: 'rewrite_title_meta',
+      target_url: '/blog/drywood-termite-signs-sarasota/',
+    });
+
+    expect(res.status).toBe('pr_open');
+    const { data } = fmModule.parse(gh.putFile.mock.calls[0][0].content);
+    expect(data.title).toBe('Drywood Termite Signs Sarasota Homeowners Miss');
+    expect(data.meta_description).toContain('Drywood termite signs Sarasota homeowners miss');
+    // No camelCase fields invented on a snake_case blog page.
+    expect(data.metaTitle).toBeUndefined();
+    expect(data.metaDescription).toBeUndefined();
+    // Blog freshness field is `updated` — bumped because rendered fields changed.
+    expect(data.updated).not.toBe('2026-05-01');
+    expect(String(data.updated)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});

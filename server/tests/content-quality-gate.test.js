@@ -278,3 +278,81 @@ describe('evaluate (full gate)', () => {
     expect(() => evaluate({ body: 'x' }, null)).toThrow();
   });
 });
+
+// ── FAQ-blocked-topic neutrality ─────────────────────────────────────
+//
+// Generators are instructed (via content-guardrails' exported blocklist) to
+// OMIT the FAQ section on FAQ-blocked services — the publish guard P0s any
+// FAQ there. The gate must not score those drafts down for correctly
+// omitting it (neutral = check passes at full weight), and must fail fast
+// when an FAQ slips in anyway.
+describe('FAQ checks are neutral on FAQ-blocked topics', () => {
+  const NO_FAQ_BODY = 'Rodents in your Bradenton attic chew wiring. Sarasota homes see the same after storms. Call a pro early.';
+  const FAQ_BODY = 'Rodents chew wiring in Bradenton and Sarasota.\n\n## Frequently Asked Questions\nQ: Do rats bite? A: Sometimes.';
+
+  test('faq_section_present passes when a blocked-topic blog correctly omits the FAQ (brief.service)', () => {
+    const r = checkFaqSectionPresent({ body: NO_FAQ_BODY }, { service: 'rodent' });
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBe('faq_blocked_service_omission_is_correct');
+  });
+
+  test('faq_section_present resolves blocked topics from frontmatter tag/category too', () => {
+    expect(checkFaqSectionPresent({ body: NO_FAQ_BODY, frontmatter: { tag: 'Rodents' } }, { service: 'pest' }).ok).toBe(true);
+    expect(checkFaqSectionPresent({ body: NO_FAQ_BODY, frontmatter: { category: 'termite' } }, {}).ok).toBe(true);
+  });
+
+  test('faq_section_present fails when an FAQ is present on a blocked topic', () => {
+    const r = checkFaqSectionPresent({ body: FAQ_BODY }, { service: 'rodent' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('faq_present_on_faq_blocked_service');
+  });
+
+  test('faq_section_present unchanged for non-blocked topics', () => {
+    expect(checkFaqSectionPresent({ body: NO_FAQ_BODY }, { service: 'pest' }).ok).toBe(false);
+    expect(checkFaqSectionPresent({ body: FAQ_BODY }, { service: 'pest' }).ok).toBe(true);
+  });
+
+  test('faq_from_customer_calls (city-service) is neutral on blocked topics and fails if FAQ present', () => {
+    const cs = { normalized_question: 'do rats come back after treatment' };
+    expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'rodent', customer_signal: cs }).ok).toBe(true);
+    expect(checkFaqFromCustomer({ body: FAQ_BODY }, { service: 'rodent', customer_signal: cs }).ok).toBe(false);
+    // Non-blocked service: original behavior intact.
+    expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: cs }).ok).toBe(false);
+  });
+
+  test('faq_from_customer_calls resolves blocked topics from customer_signal.service when brief.service is broad', () => {
+    // City-service briefs persist the broad service ('pest') while the real
+    // topic lives on customer_signal.service/topic (content-brief-builder).
+    const cs = { service: 'rodent', normalized_question: 'do rats come back after treatment' };
+    const r = checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: cs });
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBe('faq_blocked_service_omission_is_correct');
+    // FAQ present on the blocked customer_signal topic still fails.
+    expect(checkFaqFromCustomer({ body: FAQ_BODY }, { service: 'pest', customer_signal: cs }).ok).toBe(false);
+  });
+
+  test('faq_from_customer_calls resolves blocked topics from customer_signal.topic too', () => {
+    const cs = { topic: 'termites', normalized_question: 'are termites active in summer' };
+    expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: cs }).ok).toBe(true);
+    // Non-blocked customer_signal topic: original behavior intact.
+    const open = { topic: 'ants in kitchen', normalized_question: 'how do i stop ants' };
+    expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: open }).ok).toBe(false);
+  });
+
+  test('faq checks resolve canonical blog tags via the guardrails alias map (Roaches, Stinging Insects)', () => {
+    expect(checkFaqSectionPresent({ body: NO_FAQ_BODY, frontmatter: { tag: 'Roaches' } }, { service: 'pest' }).ok).toBe(true);
+    expect(checkFaqSectionPresent({ body: NO_FAQ_BODY, frontmatter: { tag: 'Stinging Insects' } }, { service: 'pest' }).ok).toBe(true);
+    expect(checkFaqSectionPresent({ body: FAQ_BODY, frontmatter: { tag: 'Roaches' } }, { service: 'pest' }).ok).toBe(false);
+  });
+
+  test('evaluate() awards faq_section_present weight to a blocked-topic supporting blog without an FAQ', () => {
+    const result = evaluate(
+      fullDraft({
+        body: 'Rodents in your Bradenton attic chew wiring — Sarasota homes see it too. Your sandy soil and afternoon storms drive them indoors. See /pest-control-services/ for help. You should act early; your wiring depends on it.',
+      }),
+      brief({ service: 'rodent', target_keyword: 'rodents in attic bradenton' }),
+    );
+    expect(result.checks.faq_section_present.ok).toBe(true);
+    expect(result.checks.faq_section_present.reason).toBe('faq_blocked_service_omission_is_correct');
+  });
+});

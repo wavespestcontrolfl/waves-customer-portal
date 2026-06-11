@@ -1356,10 +1356,18 @@ class AutonomousRunner {
       return titles;
     }
     const targetUrl = normalizeContentPath(brief.target_url || brief.page_url || draft.page_url || '');
+    // Mirror astro-publisher's metaRewriteFieldTargets: a metadata rewrite
+    // writes the proposed title to `metaTitle` on camelCase (service/location)
+    // pages and `title` on blog pages — and the rendered title is
+    // fm.metaTitle || fm.title. Collect BOTH fields per sibling so
+    // checkNoDuplicateTitle can't pass a rewrite that duplicates another
+    // page's rendered metaTitle.
     for (const page of corpus || []) {
       if (targetUrl && normalizeContentPath(page.url || '') === targetUrl) continue;
-      const title = extractFrontmatterScalar(page.body, 'title');
-      if (title) titles.add(title.toLowerCase());
+      for (const field of ['title', 'metaTitle']) {
+        const value = extractFrontmatterScalar(page.body, field);
+        if (value) titles.add(value.toLowerCase());
+      }
     }
     return titles;
   }

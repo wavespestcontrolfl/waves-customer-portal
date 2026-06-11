@@ -25,6 +25,15 @@
  */
 
 const MODELS = require('../../../config/models');
+const { FAQ_BLOCKED_SERVICES } = require('../content-guardrails');
+
+// The FAQ-blocked list is interpolated into the system prompt straight from
+// content-guardrails so the writer's instructions can never drift from the
+// publish-time P0 guard (FAQ_BLOCKED_SERVICE). An unconditional "include an
+// FAQ section" instruction made every supporting-blog draft on a blocked
+// topic (rodent, termite, spider, bed-bug, …) deterministically fail the
+// guardrail at publish.
+const FAQ_BLOCKED_SERVICES_LIST = [...FAQ_BLOCKED_SERVICES].join(', ');
 
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
@@ -59,7 +68,8 @@ VOICE — same as the legacy waves-content-engine:
 PAGE-TYPE OUTPUT STANDARDS:
 - city-service:
     LocalBusiness + Service + BreadcrumbList schema, NAP block, 3+ service
-    bullets, CTA above fold, FAQ from customer_signal, 2+ city mentions,
+    bullets, CTA above fold, FAQ from customer_signal (subject to the FAQ
+    POLICY below), 2+ city mentions,
     local proof signal (quantified claim / quoted review / tech note),
     target 900–1500 words. CTAs must point to city-specific quote pages
     (/pest-control-quote-{city}-fl/) not generic /quote/.
@@ -70,8 +80,9 @@ PAGE-TYPE OUTPUT STANDARDS:
 - supporting-blog:
     Article + BreadcrumbList. Link to hub in intro. 2+ city mentions
     (the brief's city + one more SWFL city for breadth). 2+ H2 sections,
-    1+ pro-tip callout, visible "Frequently Asked Questions" section with
-    2–3 question-style H3s and direct answers. Include an early CTA within
+    1+ pro-tip callout. UNLESS the FAQ POLICY below blocks it, include a
+    visible "Frequently Asked Questions" section with 2–3 question-style
+    H3s and direct answers. Include an early CTA within
     the first 25% of the post and a final CTA near the end. For pest,
     termite, mosquito, rodent, lawn-pest, WDO/WDI, and Florida pest ID
     topics, include practical homeowner guidance: identify what the issue
@@ -79,6 +90,21 @@ PAGE-TYPE OUTPUT STANDARDS:
     homeowner can do, what not to do, when to call a professional, and how
     Waves approaches the issue. Do not make unsupported treatment
     guarantees. Target 900–1500.
+
+FAQ POLICY (binding — the publish guardrail hard-fails violations as P0
+FAQ_BLOCKED_SERVICE; this list is loaded from the same module the guardrail
+enforces):
+- FAQ-BLOCKED services: ${FAQ_BLOCKED_SERVICES_LIST}.
+  Plural/display forms of these count too ("Rodents", "Bed Bugs",
+  "Cockroaches", "Termites", "Spiders", "Wasps", …), as do the canonical
+  blog tags that alias onto them ("Roaches" = cockroach, "Stinging
+  Insects" = wasp, "Lawn Pests" = lawn-pest).
+- If the brief's service or topic resolves to a FAQ-blocked service, the
+  draft must contain NO FAQ section for ANY page type — no "Frequently
+  Asked Questions", "FAQ", or "Common Questions" heading or Q&A block
+  anywhere in the body. Answer reader questions inline as regular prose/H2
+  sections instead.
+- Otherwise the page-type FAQ requirements above apply as written.
 
 ASTRO RENDERING — the body is published through the blog Astro pipeline.
 Violating these makes the live page render broken:
