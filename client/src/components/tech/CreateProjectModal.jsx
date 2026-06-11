@@ -277,6 +277,20 @@ function customerWdoAutoFillValues(customer) {
   };
 }
 
+// Which customer-derived values did an apply ACTUALLY write? Only fields the
+// apply changed count as auto-filled — a hand-typed value the blank-only
+// apply preserved (even one that coincidentally matches the customer) must
+// stay owned by the tech, or "Change" would clear it. After an explicit
+// overwrite, any field holding the customer's value is customer-sourced.
+function recordAppliedAutoFill(prev, next, customer, { overwrite = false } = {}) {
+  const applied = {};
+  for (const [key, value] of Object.entries(customerWdoAutoFillValues(customer))) {
+    if (!hasMeaningfulValue(value) || next[key] !== value) continue;
+    if (overwrite || prev[key] !== next[key]) applied[key] = value;
+  }
+  return applied;
+}
+
 function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
   const allowed = [
     'property_address',
@@ -540,9 +554,15 @@ export default function CreateProjectModal({
     if (projectType !== 'wdo_inspection') return;
     if (!selectedCustomer) return;
     // Seamlessly fill address + requested-by + report-sent-to from the picked
-    // customer, without clobbering anything the tech already typed.
-    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, false));
-    wdoAutoFillRef.current = customerWdoAutoFillValues(selectedCustomer);
+    // customer, without clobbering anything the tech already typed. Record
+    // only what the apply actually changed (recordAppliedAutoFill) so a
+    // preserved hand-typed value is never tagged auto-filled. The updater
+    // stays idempotent, so a StrictMode double invocation is harmless.
+    setFindings(prev => {
+      const next = applyCustomerToWdoFindings(prev, selectedCustomer, false);
+      wdoAutoFillRef.current = recordAppliedAutoFill(prev, next, selectedCustomer);
+      return next;
+    });
   }, [projectType, selectedCustomer]);
 
   function handleFindingChange(key, value) {
@@ -579,7 +599,13 @@ export default function CreateProjectModal({
   function fillWdoAddressFromCustomer() {
     if (!selectedCustomer) return;
     // Explicit action — overwrite address + contact fields from the customer.
-    setFindings(prev => applyCustomerToWdoFindings(prev, selectedCustomer, true));
+    // After an explicit replace, every field holding the customer's value IS
+    // customer-sourced, so record them all for the Change-clears map.
+    setFindings(prev => {
+      const next = applyCustomerToWdoFindings(prev, selectedCustomer, true);
+      wdoAutoFillRef.current = recordAppliedAutoFill(prev, next, selectedCustomer, { overwrite: true });
+      return next;
+    });
   }
 
   // Called when the tech un-picks the customer ("Change"): drop the WDO fields

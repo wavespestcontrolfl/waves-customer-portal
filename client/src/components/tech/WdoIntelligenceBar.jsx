@@ -82,6 +82,20 @@ export default function WdoIntelligenceBar({
   const analyzeSeqRef = useRef(0);
   const historySeqRef = useRef(0);
 
+  // The bar is keyed by customer/project in its parents, so a context switch
+  // REMOUNTS it — the old instance's contextRef is frozen at the old context
+  // and its stale checks pass vacuously. An unmounted instance must never
+  // apply results: applySuggestions/onApplyHistory write into the PARENT's
+  // findings (the parent does not remount), so without this guard an in-flight
+  // analyze for customer A could land in the modal after switching to B.
+  // (Setting `true` in the effect body, not just at init, keeps the ref
+  // correct through StrictMode's mount→cleanup→remount cycle.)
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   // When the customer/project context changes, wipe any completed lookup so
   // its panels (with their Apply / Replace-fields buttons) can't push the
   // previous property's data into the new context's findings. The property
@@ -147,19 +161,20 @@ export default function WdoIntelligenceBar({
         },
       });
       const data = await res.json();
-      // Stale response: the tech has switched customer/property since this
-      // lookup started — drop it instead of showing another property's history.
-      if (contextRef.current !== startedFor) return;
+      // Stale response: the bar was remounted (context switch) or the tech
+      // changed customer/property since this lookup started — drop it instead
+      // of showing another property's history.
+      if (!mountedRef.current || contextRef.current !== startedFor) return;
       if (!res.ok) throw new Error(data?.error || 'WDO history lookup failed');
       setHistory(data.history || null);
       if (!data.history) setHistoryMsg(data.message || 'No prior treatment or permit history found — verify on site.');
     } catch (e) {
-      if (contextRef.current !== startedFor) return;
+      if (!mountedRef.current || contextRef.current !== startedFor) return;
       setError(e.message || 'WDO history lookup failed');
     } finally {
       // Latest-request guard, NOT a context guard: a newer lookup owns the
       // spinner; a stale-context response still ends its own.
-      if (historySeqRef.current === seq) setHistoryLoading(false);
+      if (mountedRef.current && historySeqRef.current === seq) setHistoryLoading(false);
     }
   }
 
@@ -218,19 +233,21 @@ export default function WdoIntelligenceBar({
         headers: {},
       });
       const data = await res.json();
-      // Stale response: the tech has switched customer/property since this
-      // analysis started — never auto-apply another property's suggestions.
-      if (contextRef.current !== startedFor) return;
+      // Stale response: the bar was remounted (context switch) or the tech
+      // changed customer/property since this analysis started — never
+      // auto-apply another property's suggestions (applySuggestions writes
+      // into the PARENT's findings, which survive this instance).
+      if (!mountedRef.current || contextRef.current !== startedFor) return;
       if (!res.ok) throw new Error(data?.error || 'WDO intelligence failed');
       setResult(data);
       if (data?.suggestedFindings) applySuggestions(false, data);
     } catch (e) {
-      if (contextRef.current !== startedFor) return;
+      if (!mountedRef.current || contextRef.current !== startedFor) return;
       setError(e.message || 'WDO intelligence failed');
     } finally {
       // Latest-request guard, NOT a context guard: a newer analyze owns the
       // spinner; a stale-context response still ends its own.
-      if (analyzeSeqRef.current === seq) setAnalyzing(false);
+      if (mountedRef.current && analyzeSeqRef.current === seq) setAnalyzing(false);
     }
   }
 
