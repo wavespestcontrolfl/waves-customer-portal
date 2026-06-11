@@ -1770,7 +1770,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const lawnProgramOverview = await loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService);
   const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
 
-  if (!findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
+  // Typed reports carry their real findings in the snapshot (rendered by
+  // TypedFindingsCard) — the legacy no-activity fallback would contradict
+  // e.g. an active cockroach visit's snapshot.
+  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
     findings.push({
       id: `no-activity-${service.id}`,
       zoneId: null,
