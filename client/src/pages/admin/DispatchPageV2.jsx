@@ -2364,6 +2364,7 @@ export default function DispatchPageV2({
       {checkoutService && (
         <MobileCheckoutSheet
           service={checkoutService}
+          desktopVisible
           onClose={() => setCheckoutService(null)}
           onChargeSuccess={({
             service: svc,

@@ -4695,7 +4695,7 @@ function TypedFindingsSection({
               onChange={(e) => onIncludeCommsChange(e.target.checked)}
               style={{ width: 16, height: 16, accentColor: accent }}
             />
-            Include recent customer calls/texts
+            Include recent customer calls/texts/emails
           </label>
         </div>
         {aiError && (
