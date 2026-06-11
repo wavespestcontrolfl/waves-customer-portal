@@ -376,7 +376,9 @@ describe('banned customer copy', () => {
     expect(findBannedCustomerCopy('The roaches have been eliminated.')).toContain('eliminated');
     expect(findBannedCustomerCopy('We guarantee your home is pest-free!').length).toBeGreaterThanOrEqual(2);
     expect(findBannedCustomerCopy('All clear — no infestation remains.').length).toBeGreaterThanOrEqual(2);
-    expect(findBannedCustomerCopy('The problem is gone for good.')).toContain('problem is gone');
+    expect(findBannedCustomerCopy('The problem is gone for good.')).toContain('gone');
+    expect(findBannedCustomerCopy('The issue is resolved.')).toContain('resolved');
+    expect(findBannedCustomerCopy('Activity is gone.')).toContain('gone');
   });
 
   test('allows observational wording and legitimate sanitation advice', () => {

@@ -702,8 +702,8 @@ const BANNED_CUSTOMER_COPY = [
   /\bpest[- ]free\b/i,
   /\ball clear\b/i,
   /\bcleared up\b/i,
-  /\b(?:fully|completely|permanently) (?:resolved|gone)\b/i,
-  /\bproblem (?:is )?gone\b/i,
+  /\bresolved\b/i,
+  /\bgone\b/i,
 ];
 
 function findBannedCustomerCopy(text) {

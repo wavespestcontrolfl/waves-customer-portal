@@ -1760,7 +1760,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
-    const treeShrubCloseoutRequired = !isIncompleteVisit && ['tree_shrub', 'palm'].includes(reportServiceLine);
+    // Typed completions (e.g. palm_injection detects to the 'palm' line)
+    // capture their structured findings instead of the Tree/Shrub closeout —
+    // the client hides that UI in typed mode, so requiring the payload here
+    // would make those jobs impossible to complete (Codex P1).
+    const treeShrubCloseoutRequired = !isIncompleteVisit
+      && !typedFindingsType
+      && ['tree_shrub', 'palm'].includes(reportServiceLine);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -4017,8 +4023,10 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
       });
     }
     // Chips are advisory inputs here — drop invalid ones instead of failing
-    // the draft (the complete endpoint enforces them strictly).
-    const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips);
+    // the draft (the complete endpoint enforces them strictly). Validate
+    // against THIS type's allowed chips, not the global list, so an off-type
+    // chip can't steer the customer-facing draft (Codex P2).
+    const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, profile.findingsType);
     const chips = chipsValidation.ok ? chipsValidation.chips : [];
     const commsContext = includeCustomerComms === true
       ? await loadFindingsRecapCommsContext(svc.customer_id).catch(() => '')
