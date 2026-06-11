@@ -1697,12 +1697,15 @@ export function calculateEstimate(inputs) {
     const accessMin = accessDifficulty === 'DIFFICULT' ? 15 : accessDifficulty === 'MODERATE' ? 8 : 0;
     const osm = Math.max(25, 20 + Math.round(eb / 500) + Math.round(et * 1.5) + accessMin);
     const lpv = LABOR * ((osm + 10) / 60);
-    // v1.6: material rates updated from SiteOne pricing audit (2× higher than original)
-    const mps = { 6: 0.110, 9: 0.190, 12: 0.220 };
+    // Tiers mirror the server engine (constants.js TREE_SHRUB): 6-visit
+    // Standard is the mandated default (protocol six_x); 4-visit Light
+    // (protocol four_x) is the downsell for clean / low-pest-history beds.
+    // 9x Enhanced and 12x Premium are retired. Material rates are annual
+    // $/sqft; Light ≈ 4/6 of the Standard rate (scales with applications).
+    const mps = { 4: 0.075, 6: 0.110 };
     const tst = [
+      { n: 'Light', v: 4, f: 40 },
       { n: 'Standard', v: 6, f: 50 },
-      { n: 'Enhanced', v: 9, f: 65 },
-      { n: 'Premium', v: 12, f: 80 },
     ];
     R.ts = [];
     R.tsMeta = { eb, et, bedAreaIsEstimated };
@@ -1713,10 +1716,11 @@ export function calculateEstimate(inputs) {
       let mo = Math.round(ann / 12 * 100) / 100;
       if (mo < t.f) { mo = t.f; ann = t.f * 12; }
       const pa = Math.round(ann / t.v * 100) / 100;
+      // Standard (index 1) is the mandated default recommendation.
       const rec = i === 1, dim = i !== 1;
       R.ts.push({ pa, v: t.v, ann, mo, name: t.n, recommended: rec, dimmed: dim });
     });
-    wgServices.push({ name: 'Tree & Shrub (Enhanced)', service: 'tree_shrub', mo: R.ts[1].mo, perTreatment: R.ts[1].pa, visitsPerYear: R.ts[1].v });
+    wgServices.push({ name: 'Tree & Shrub', service: 'tree_shrub', mo: R.ts[1].mo, perTreatment: R.ts[1].pa, visitsPerYear: R.ts[1].v });
   }
 
   /* ── PALM INJECTION ──────────────────────────────────────── */

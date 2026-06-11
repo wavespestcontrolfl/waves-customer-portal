@@ -53,10 +53,10 @@ const effectiveOneTimePrice = (li = {}) => {
   );
 };
 
-const TREE_SHRUB_LEGACY_TIERS = ['standard', 'enhanced'];
+const TREE_SHRUB_LEGACY_TIERS = ['light', 'standard'];
 
 function treeShrubTierLabel(tier) {
-  return tier === 'enhanced' ? 'Enhanced' : 'Standard';
+  return tier === 'light' ? 'Light' : 'Standard';
 }
 
 function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {

@@ -45,9 +45,9 @@
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3310.07,
-      "recurringMonthlyAfterDiscount": 275.84,
-      "year1Total": 3310
+      "recurringAnnualAfterDiscount": 2420.12,
+      "recurringMonthlyAfterDiscount": 201.68,
+      "year1Total": 2420
     },
     "waveGuard": {
       "tier": "gold",
@@ -64,8 +64,8 @@
         "monthly": 55.5
       },
       "tree_shrub": {
-        "annual": 2606,
-        "monthly": 217.17
+        "annual": 1559,
+        "monthly": 129.92
       }
     }
   },
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 6659.2,
-      "recurringMonthlyAfterDiscount": 554.93,
-      "year1Total": 6659
+      "recurringAnnualAfterDiscount": 5318.4,
+      "recurringMonthlyAfterDiscount": 443.2,
+      "year1Total": 5318
     },
     "waveGuard": {
       "tier": "platinum",
@@ -130,8 +130,8 @@
         "monthly": 134.25
       },
       "tree_shrub": {
-        "annual": 4097,
-        "monthly": 341.42
+        "annual": 2421,
+        "monthly": 201.75
       },
       "mosquito": {
         "annual": 1356,
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2548,
-      "recurringMonthlyAfterDiscount": 212.33,
-      "year1Total": 2548
+      "recurringAnnualAfterDiscount": 2165.6,
+      "recurringMonthlyAfterDiscount": 180.47,
+      "year1Total": 2166
     },
     "waveGuard": {
       "tier": "platinum",
@@ -196,8 +196,8 @@
         "monthly": 61.5
       },
       "tree_shrub": {
-        "annual": 1223,
-        "monthly": 101.92
+        "annual": 745,
+        "monthly": 62.08
       },
       "mosquito": {
         "annual": 756,

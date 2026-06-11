@@ -7763,8 +7763,11 @@ function mergeAskChips(categories = []) {
 
 function treeShrubTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
-  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
+  if (raw.includes('light') || raw === '4' || raw === '4x') return 'light';
   if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
+  // 'enhanced' (9x) is retired but kept here so previously-saved estimates that
+  // still carry an Enhanced row render unchanged (legacy estimates aren't re-priced).
+  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
@@ -7776,7 +7779,8 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
   return rows
     .map((row) => {
       const tierKey = treeShrubTierKey(row);
-      if (!['standard', 'enhanced'].includes(tierKey) || seen.has(tierKey)) return null;
+      // 'enhanced' retained for backward-compat with saved pre-v4.5 estimates.
+      if (!['light', 'standard', 'enhanced'].includes(tierKey) || seen.has(tierKey)) return null;
       seen.add(tierKey);
       const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
       const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
@@ -7797,7 +7801,11 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
       const perTreatment = perTreatmentBase != null
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
-      const labelBase = tierKey === 'enhanced' ? 'Every 6 weeks' : 'Bi-monthly';
+      // House convention: T&S tiers display as cadences (4=Quarterly,
+      // 6=Bi-monthly, 9=Every 6 weeks). Light is the 4-visit Quarterly option.
+      const labelBase = tierKey === 'light' ? 'Quarterly'
+        : tierKey === 'enhanced' ? 'Every 6 weeks'
+        : 'Bi-monthly';
       return {
         key: tierKey,
         label: labelBase,
@@ -7826,12 +7834,25 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
             includedAtThisFrequency: true,
           },
         ],
+        // Per-service treatment detail so a selected T&S cadence (Light 4x or
+        // Standard 6x) carries its real visit count into the slot profile /
+        // first-visit math, mirroring lawn — otherwise the slot path falls back
+        // to the stored Standard row and notes can say 6x at the Light price.
+        perServiceTreatments: perTreatment != null ? [{
+          service: 'tree_shrub',
+          label: 'Tree & Shrub',
+          perTreatment,
+          displayPrice: perTreatment,
+          visitsPerYear: visits,
+        }] : [],
         addOns: [],
       };
     })
     .filter(Boolean)
     .sort((a, b) => {
-      const order = { standard: 0, enhanced: 1 };
+      // Ascending cadence: Light (4) before Standard (6), matching the engine
+      // result order and the pest/lawn cadence-slider convention.
+      const order = { light: 0, standard: 1, enhanced: 2 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
 }
@@ -8034,6 +8055,15 @@ function finiteNumberOrNull(value) {
 
 function treeShrubTierRuntimeMeta(tierKey) {
   switch (String(tierKey || '').trim().toLowerCase()) {
+    case 'light':
+      return {
+        tierKey: 'light',
+        serviceKey: 'tree_shrub_quarterly',
+        name: 'Quarterly Tree & Shrub Care Service',
+        frequencyKey: 'quarterly',
+        label: 'Quarterly',
+        visitsPerYear: 4,
+      };
     case 'standard':
       return {
         tierKey: 'standard',
@@ -8151,7 +8181,7 @@ function markSelectedTreeShrubTierRows(rows = [], selectedTierKey = '') {
   const normalizedSelected = String(selectedTierKey || '').trim().toLowerCase();
   return rows.map((row) => {
     const tierKey = treeShrubTierKey(row);
-    if (!['standard', 'enhanced'].includes(tierKey)) return row;
+    if (!['light', 'standard', 'enhanced'].includes(tierKey)) return row;
     return {
       ...row,
       selected: tierKey === normalizedSelected,

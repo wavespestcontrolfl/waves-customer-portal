@@ -331,22 +331,30 @@ const SHADE_RULES = {
 //     post-discount margin guard (discount-engine.js#applyMarginGuard) may
 //     take the collected price below this floor only as far as the 35%
 //     displayed-margin floor allows.
-//   - Premium (12x) is deprecated as of v4.4. Active tiers are standard
-//     and enhanced only; legacy `premium` requests map to enhanced with a
+//   - The 6-visit Standard program is the MANDATED default (matches the
+//     "10/10 SWFL Tree & Shrub Protocol" six_x cadence in
+//     server/config/protocols.json). Light (4x) maps to the protocol four_x
+//     cadence and is an available downsell for clean, low-pest-history
+//     landscapes — it is never auto-recommended. The 9x Enhanced and 12x
+//     Premium tiers are RETIRED (v4.5): the documented protocol tops out at
+//     6 visits, so pricing 9/12 visits charged for visits we don't run.
+//     Legacy `enhanced` / `premium` requests map to `standard` with a
 //     warning. See service-pricing.js#normalizeTreeShrubTier.
 //
-// Material rates increased after April 2026 vendor cost audit. Prior values
-// were 0.063 / 0.104 / 0.118 — under what wholesalers were actually invoicing
-// for the per-sqft chemistry. Current values: 0.110 / 0.190 (+ the legacy
-// 0.220 for the deprecated premium tier seeded in pricing_config).
+// Material rates are ANNUAL $/sqft per tier. Standard (0.110) is from the
+// April 2026 vendor cost audit (prior 0.063, under what wholesalers were
+// invoicing). Light (0.075) ≈ 4/6 of the Standard rate, since material
+// spend scales with the number of applications. The deprecated 9x/12x
+// rates (0.190 / 0.220) remain in legacy pricing_config seeds but are not
+// instantiated as active tiers.
 // ============================================================
 const TREE_SHRUB = {
   tiers: {
+    light:     { label: 'Light', frequency: 4, materialRate: 0.075, monthlyFloor: r(40) },
     standard:  { label: 'Standard', frequency: 6, materialRate: 0.110, monthlyFloor: r(50) },
-    enhanced:  { label: 'Enhanced', frequency: 9, materialRate: 0.190, monthlyFloor: r(65) },
   },
   defaultTier: 'standard',
-  recommendedTier: 'enhanced',
+  recommendedTier: 'standard',
   accessMinutes: { easy: 0, moderate: 8, difficult: 15 },
   directCostRatioTarget: 0.43,
   marginFloor: 0.35,

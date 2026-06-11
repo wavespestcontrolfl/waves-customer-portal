@@ -343,7 +343,9 @@ function serviceLine(row = {}) {
 function normalizeFrequencyKey(value) {
   const raw = cleanText(value).toLowerCase().replace(/[_\s-]+/g, '_');
   if (!raw) return null;
+  if (raw === 'light' || raw.includes('tree_shrub_light')) return 'light';
   if (raw === 'standard' || raw.includes('tree_shrub_standard')) return 'standard';
+  // 'enhanced' is still a live Lawn tier (and a retired T&S tier kept for old data).
   if (raw === 'enhanced' || raw.includes('tree_shrub_enhanced')) return 'enhanced';
   if (raw === '6' || raw.includes('bi_month') || raw.includes('bimonth')) return 'bi_monthly';
   if (raw === '12' || raw.includes('monthly') || raw === 'month') return 'monthly';
@@ -375,7 +377,7 @@ function selectedFrequencyKeyFromEstimateData(estData = {}) {
   ];
   for (const candidate of serviceTierCandidates) {
     const key = normalizeFrequencyKey(candidate);
-    if (key === 'standard' || key === 'enhanced') return key;
+    if (key === 'light' || key === 'standard' || key === 'enhanced') return key;
   }
   const directCandidates = [
     customerSelection.frequencyKey,

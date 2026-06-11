@@ -112,14 +112,14 @@
       ],
       "ts": [
         {
-          "mo": 55.75,
+          "mo": 40,
           "recommended": false,
-          "name": "Standard"
+          "name": "Light"
         },
         {
-          "mo": 90.83,
+          "mo": 55.75,
           "recommended": true,
-          "name": "Enhanced"
+          "name": "Standard"
         }
       ],
       "mq": [
@@ -530,14 +530,14 @@
       ],
       "ts": [
         {
-          "mo": 55.75,
+          "mo": 40,
           "recommended": false,
-          "name": "Standard"
+          "name": "Light"
         },
         {
-          "mo": 90.83,
+          "mo": 55.75,
           "recommended": true,
-          "name": "Enhanced"
+          "name": "Standard"
         }
       ],
       "mq": [],
