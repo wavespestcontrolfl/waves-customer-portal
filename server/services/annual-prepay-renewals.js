@@ -485,6 +485,8 @@ async function getOpenRenewalAlerts({ daysAhead = DEFAULT_ALERT_DAYS, today = et
     .leftJoin('customers as c', 't.customer_id', 'c.id')
     .whereIn('t.status', ACTIVE_STATUSES)
     .whereNull('t.renewal_decision')
+    // Soft-deleted customers get no renewal outreach.
+    .whereNull('c.deleted_at')
     .where(function () {
       this.whereBetween('t.term_end', [today, soon])
         .orWhereBetween('t.last_scheduled_service_date', [addDaysYmd(today, -LAST_SERVICE_GRACE_DAYS), soon]);

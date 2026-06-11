@@ -28,9 +28,12 @@ class SeasonalReactivation {
     const month = new Date().getMonth();
     const seasonal = SEASONAL_HOOKS[month];
 
-    // Find customers not contacted in 30+ days with inactive statuses
+    // Find customers not contacted in 30+ days with inactive statuses.
+    // Soft-deleted customers must never get reactivation SMS (same
+    // deleted_at guard the billing/reminder/dunning sweeps use).
     const customers = await db('customers')
       .whereIn('status', ['dormant', 'at_risk', 'churned', 'inactive'])
+      .whereNull('deleted_at')
       .whereNotNull('phone')
       .where(function () {
         this.where('last_contact_date', '<', db.raw("NOW() - INTERVAL '30 days'"))

@@ -38,6 +38,7 @@ class RenewalReminder {
         const customers = await db('customers')
           .whereNotNull(field.column)
           .whereRaw(`DATE(${field.column}) = ?`, [dateStr])
+          .whereNull('deleted_at') // soft-deleted customers get no renewal SMS
           .whereNotNull('phone')
           .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', field.column);
 
