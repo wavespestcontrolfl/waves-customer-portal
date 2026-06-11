@@ -1,3 +1,8 @@
+const { etDateString, addETDays } = require('../utils/datetime-et');
+// Always ~1 year out so the past-slot guards never reject these fixtures
+// for time rather than behavior.
+const FUTURE_DATE = etDateString(addETDays(new Date(), 365));
+
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -64,7 +69,7 @@ describe('slot reservation helpers', () => {
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{
         id: 'scheduled-123',
-        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        reservation_expires_at: `${FUTURE_DATE}T13:15:00.000Z`,
       }]),
     };
     const scheduledBuilders = [conflictBuilder, insertBuilder];
@@ -78,14 +83,14 @@ describe('slot reservation helpers', () => {
 
     await expect(slotReservation.reserveSlot({
       estimateId: 'estimate-456',
-      slotId: '2027-05-20_09-00_tech-1',
+      slotId: `${FUTURE_DATE}_09-00_tech-1`,
       selectedFrequency: 'quarterly',
     })).resolves.toEqual({
       scheduledServiceId: 'scheduled-123',
-      expiresAt: '2027-05-20T13:15:00.000Z',
+      expiresAt: `${FUTURE_DATE}T13:15:00.000Z`,
     });
 
-    expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: '2027-05-20' });
+    expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: FUTURE_DATE });
     expect(conflictBuilder.where).toHaveBeenCalledWith('technician_id', 'tech-1');
     expect(conflictBuilder.andWhereRaw).toHaveBeenCalledWith(
       expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
@@ -94,7 +99,7 @@ describe('slot reservation helpers', () => {
     expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
       service_type: 'Quarterly Pest Control',
       notes: 'Accepted service mix: 4x Pest Control + 9x Lawn Care.',
-      scheduled_date: '2027-05-20',
+      scheduled_date: FUTURE_DATE,
       window_start: '09:00:00',
       window_end: '10:30:00',
       estimated_duration_minutes: 90,
@@ -109,12 +114,12 @@ describe('slot reservation helpers', () => {
       first: jest.fn().mockResolvedValue({
         id: 'scheduled-123',
         source_estimate_id: 'estimate-456',
-        scheduled_date: '2027-05-20',
+        scheduled_date: FUTURE_DATE,
         window_start: '09:00:00',
         window_end: '10:00:00',
         technician_id: 'tech-1',
         notes: 'Gate code in customer profile.',
-        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        reservation_expires_at: `${FUTURE_DATE}T13:15:00.000Z`,
       }),
     };
     const conflictBuilder = {
@@ -161,7 +166,7 @@ describe('slot reservation helpers', () => {
       expect.objectContaining({ id: 'estimate-456' }),
       expect.objectContaining({ serviceMode: 'recurring', selectedFrequency: 'quarterly' }),
     );
-    expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: '2027-05-20' });
+    expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: FUTURE_DATE });
     expect(conflictBuilder.where).toHaveBeenCalledWith('technician_id', 'tech-1');
     expect(conflictBuilder.whereNot).toHaveBeenCalledWith('id', 'scheduled-123');
     expect(conflictBuilder.andWhereRaw).toHaveBeenCalledWith(
