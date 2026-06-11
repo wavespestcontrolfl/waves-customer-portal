@@ -50,7 +50,7 @@ Single source of truth for what this engine prices, how, and with what constants
 |---|---|---|---|
 | Pest Control | ✅ quarterly / bimonthly / monthly | ✅ | ✅ |
 | Lawn Care | ✅ basic/standard/enhanced/premium | ✅ per-treatment | ✅ |
-| Tree & Shrub | ✅ standard/enhanced | — | ✅ |
+| Tree & Shrub | ✅ light/standard | — | ✅ |
 | Palm Injection | ✅ (4 treatment types) | — | ❌ flat credit only |
 | Mosquito | ✅ Seasonal/Monthly | ✅ treatable area | ✅ |
 | Termite Bait | ✅ monthly subscription | install only | ✅ |
@@ -112,12 +112,12 @@ Tree & Shrub uses a 43% direct-cost ratio target, not a 43% margin target. This 
 
 | Tier | Freq | Material rate | Floor |
 |---|---|---|---|
+| Light | 4x | $0.075/sqft | $40 |
 | Standard | 6x | $0.110/sqft | $50 |
-| Enhanced | 9x | $0.190/sqft | $65 |
 
-Premium 12-visit Tree & Shrub pricing is removed from active/customer-facing tiers. Legacy `tier: "premium"` requests are normalized to Enhanced with a warning.
+The 6-visit Standard program is the mandated default (matches the protocol `six_x` cadence) and the only auto-recommended tier. Light (4x, protocol `four_x`) is a manual downsell for clean / low-pest-history landscapes. The 9-visit Enhanced and 12-visit Premium tiers are retired; legacy `tier: "enhanced"` / `tier: "premium"` requests are normalized to Standard with a warning.
 
-**Enhanced positioning:** six core seasonal applications plus three monitoring/targeted-treatment visits.
+**Standard positioning:** six core seasonal applications across the year.
 
 **Access minutes:** easy 0, moderate 8, difficult 15.
 
@@ -128,7 +128,7 @@ Premium 12-visit Tree & Shrub pricing is removed from active/customer-facing tie
 
 Estimated bed area is capped at 8,000 sqft. Manual review is required for fallback bed area, bed area at/above the cap, tree count 15+, or difficult access with bed area 4,000 sqft+.
 
-**Recommendation logic:** Standard is the core/default plan. Enhanced is recommended for bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, or known pest/disease pressure.
+**Recommendation logic:** The 6-visit Standard plan is the mandated default and is always the recommended tier. Light (4x) is never auto-recommended — it is offered only as an explicit downsell. `recommendationReasons` (bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, known pest/disease pressure) are advisory signals that the property warrants the full 6-visit program (i.e. reasons not to downsell to Light); they no longer change the recommended tier.
 
 **Post-discount guard:** after zone modifiers and WaveGuard discounts, Tree & Shrub final annual revenue is guarded so true margin after direct cost and admin cannot fall below the recurring 35% floor. If needed, the effective discount is capped and audit fields are returned (`finalAnnual`, `finalMonthly`, `requestedDiscountPct`, `actualDiscountPct`, `finalMargin`, `marginGuardApplied`, `discountCapped`).
 

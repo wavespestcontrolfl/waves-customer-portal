@@ -7763,8 +7763,11 @@ function mergeAskChips(categories = []) {
 
 function treeShrubTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
-  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
+  if (raw.includes('light') || raw === '4' || raw === '4x') return 'light';
   if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
+  // 'enhanced' (9x) is retired but kept here so previously-saved estimates that
+  // still carry an Enhanced row render unchanged (legacy estimates aren't re-priced).
+  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
@@ -7776,7 +7779,8 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
   return rows
     .map((row) => {
       const tierKey = treeShrubTierKey(row);
-      if (!['standard', 'enhanced'].includes(tierKey) || seen.has(tierKey)) return null;
+      // 'enhanced' retained for backward-compat with saved pre-v4.5 estimates.
+      if (!['light', 'standard', 'enhanced'].includes(tierKey) || seen.has(tierKey)) return null;
       seen.add(tierKey);
       const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
       const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);

@@ -566,4 +566,6 @@ The tier price is the full customer total — there is **no separate setup charg
 
 **Pre-existing (not from this change):** `waveguard-pricing-exposure`, `pricing-engine-manual-discount`, and `lawn-pricing-v2-db-sync` fail in a DB-less environment (they assert prod-DB-synced Lawn V2 values); they fail identically on a clean tree.
 
+**Review follow-up (consumers of the retired tier):** a code review caught several consumers still speaking the old `enhanced` vocabulary; the rename was propagated to all of them — `customer-pricing-ai.js` (portal AI now offers a Light 4x downsell instead of a phantom "Enhanced 9-visit" option that priced at Standard), `estimate-public.js` `treeShrubTierKey` (surfaces the Light row to customers; keeps the `enhanced` mapping so saved pre-v4.5 estimates still render), `estimate-assistant.js` `normalizeFrequencyKey` (adds `light`; keeps `enhanced`, still a live **Lawn** tier), the `admin-pricing-config.js` bootstrap seed (now seeds `4x_light`/`6x_standard`), and `server/services/pricing-engine/README.md`.
+
 **Revisit if:** the operator wants the engine to auto-recommend Light (4x) for clean/low-pest-history properties per the protocol note (today Light is manual-only), or wants the 0.43 multiplier lowered toward 0.50 (~14% lower list, ~7pp less margin) as a deliberate second step.

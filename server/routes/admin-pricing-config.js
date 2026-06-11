@@ -172,8 +172,8 @@ async function ensureTable() {
       { config_key: 'global_conditional_ceiling', name: 'Conditional Material Ceiling', category: 'global', sort_order: 6, data: JSON.stringify({ value: 60, unit: '$/property/yr', description: 'Max conditional material spend before reprice flag' }) },
 
       // Tree & Shrub
-      { config_key: 'ts_material_rates', name: 'T&S Material Rates per SqFt', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ '6x_standard': 0.110, '9x_enhanced': 0.190, note: 'Updated Apr 2026 vendor cost audit. Premium 12x deprecated.' }) },
-      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 50, enhanced: 65 }) },
+      { config_key: 'ts_material_rates', name: 'T&S Material Rates per SqFt', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ '4x_light': 0.075, '6x_standard': 0.110, note: '6-visit Standard is the mandated default; Light 4x is a downsell. Enhanced 9x / Premium 12x retired.' }) },
+      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ light: 40, standard: 50 }) },
 
       // Palm
       { config_key: 'palm_pricing', name: 'Palm Injection Protocol Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, insecticide_small: 45, insecticide_medium: 55, insecticide_large: 75, combo_small: 65, combo_medium: 75, combo_large: 95, fungal_floor: 50, lethal_bronzing_floor: 125, tree_age_floor: 65, min_per_visit: 75, nutrition_default_apps_per_year: 1, nutrition_allowed_apps_per_year: [1, 2], flat_credit_per_palm: 10, flat_credit_min_tier: 'gold', tier_qualifier: false, exclude_from_pct_discount: true }) },
