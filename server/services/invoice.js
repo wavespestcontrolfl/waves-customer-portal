@@ -1271,7 +1271,7 @@ const InvoiceService = {
   async sendViaSMSAndEmail(
     invoiceId,
     {
-      requestReview = false,
+      requestReview = null,
       reviewDelayMinutes = null,
       allowClaimed = false,
       emailRecipientOverride = null,
@@ -1284,6 +1284,20 @@ const InvoiceService = {
     const sms = { ok: false };
     const email = { ok: false };
     let payUrl = null;
+
+    // Callers that take no review decision (SendInvoiceModal posts {},
+    // /batch/send passes no options) inherit the review request configured
+    // at schedule time — the success path below clears
+    // scheduled_request_review unconditionally, so without this fallback an
+    // early manual send silently drops it. An explicit true/false still wins.
+    let effectiveRequestReview = requestReview;
+    let effectiveReviewDelayMinutes = reviewDelayMinutes;
+    if (effectiveRequestReview == null) {
+      effectiveRequestReview = Boolean(claim.invoice.scheduled_request_review);
+      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
+        effectiveReviewDelayMinutes = claim.invoice.scheduled_review_delay_minutes;
+      }
+    }
 
     try {
       const smsResult = await this.sendViaSMS(invoiceId, {
@@ -1316,7 +1330,7 @@ const InvoiceService = {
       email.error = err.message;
     }
 
-    if (requestReview && (sms.ok || email.ok)) {
+    if (effectiveRequestReview && (sms.ok || email.ok)) {
       try {
         const ReviewService = require("./review-request");
         const inv = await db("invoices")
@@ -1328,7 +1342,7 @@ const InvoiceService = {
             customerId: inv.customer_id,
             serviceRecordId: inv.service_record_id || null,
             triggeredBy: "auto",
-            delayMinutes: reviewDelayMinutes,
+            delayMinutes: effectiveReviewDelayMinutes,
           });
         }
       } catch (err) {
