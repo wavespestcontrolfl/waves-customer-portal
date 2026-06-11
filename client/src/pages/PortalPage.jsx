@@ -2967,7 +2967,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         style={{
                           border: `1px dashed ${B.wavesBlue}`, borderRadius: 8, padding: '8px 12px',
                           background: 'none', cursor: 'pointer', marginBottom: 10,
-                          fontSize: 13, fontWeight: 850, color: B.wavesBlue, fontFamily: FONTS.body,
+                          fontSize: 14, fontWeight: 850, color: B.wavesBlue, fontFamily: FONTS.body,
                         }}
                       >
                         + Add another contact
