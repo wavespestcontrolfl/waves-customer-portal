@@ -43,12 +43,18 @@ Flag ONLY verifiable factual errors a domain expert would catch:
 - Florida specifics: county fertilizer ordinances and summer nitrogen blackout dates, climate/seasonality, geography, warm- vs cool-season turf (St. Augustine, Bahia, Zoysia, Bermuda are warm-season).
 - Internal contradictions or unsupported quantitative claims.
 
-Do NOT flag: writing style, tone, opinion, marketing phrasing, calls to action, formatting, or anything that is not a checkable fact. Do NOT invent problems — if the content is factually sound, return an empty list.
+CRITICAL — flag a statement ONLY if it is actually FALSE as written. Do NOT flag a statement that is correct but could be more complete, more precise, more nuanced, or that omits a related fact. Adding caveats, exceptions, or extra detail is NOT a finding. Examples of what NOT to flag:
+- "the June 1–Sep 30 nitrogen blackout" when the ordinance also restricts phosphorus — the nitrogen claim is correct; omitting phosphorus is not an error.
+- a recommended mowing height that is right for common cultivars but not every dwarf cultivar — a correct generalization is not an error.
+- naming one effective active ingredient among several — listing a real, labeled option is not an error even if others exist.
+A claim is only a finding if a domain expert would say it is WRONG, not merely incomplete.
 
-Severity:
-- P0: clearly wrong fact that misleads or could cause harm (wrong active ingredient, illegal-timing advice, dangerous misidentification).
-- P1: likely wrong or misattributed fact (wrong species/pathogen, wrong ordinance date).
-- P2: imprecise or needs nuance, but not strictly wrong.
+Do NOT flag: writing style, tone, opinion, marketing phrasing, calls to action, formatting, or anything that is not a checkable fact. Do NOT invent problems — if every stated fact is true, return an empty list. When unsure whether something is actually wrong vs. just incomplete, do NOT flag it.
+
+Severity (only for statements that are actually wrong). NOTE: only P0 blocks publishing — reserve it for errors you are CERTAIN about, where any competent expert would agree the statement is objectively wrong:
+- P0: an OBJECTIVE, unambiguous factual error — a wrong/reversed species or pathogen name, a wrong ordinance date, an active ingredient that is genuinely NOT labeled for / does not control the named pest, illegal-timing advice, or a dangerous misidentification. The kind of thing with one correct answer that any expert would agree on.
+- P1: probably wrong, OR a debatable expert judgment. JUDGMENT CALLS ARE ALWAYS P1, NEVER P0 — this includes prevalence / how common a disease is on a given turf type, host-range emphasis, efficacy rankings of labeled products, and best-practice opinions. Even if you strongly disagree with such a claim, it is P1 at most. Surfaced for review but does NOT block.
+- P2: technically imprecise but not actually wrong. Do NOT use for "could add more detail."
 
 Return ONLY JSON, no prose:
 {"findings":[{"severity":"P0|P1|P2","claim":"<exact quoted text from the post>","issue":"<what's wrong and why>","fix":"<the correction>"}]}
@@ -114,7 +120,12 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   }
 
   const findings = (Array.isArray(parsed.findings) ? parsed.findings : []).map(normalizeFinding);
-  const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
+  // Block ONLY on P0 (objective, unambiguous errors). P1/P2 are debatable
+  // expert nuance — surfaced as advisory but never blocking, so the gate
+  // doesn't false-positive-block correct-but-arguable content. (A live sanity
+  // run showed an LLM reliably flags debatable agronomy at P1; blocking on that
+  // would stall accurate posts.)
+  const pass = !findings.some((f) => f.severity === 'P0');
   return { pass, findings, checked: true, model: FACTCHECK_MODEL };
 }
 

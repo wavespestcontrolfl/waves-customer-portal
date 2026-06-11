@@ -403,14 +403,16 @@ async function cleanupStaleAstroPr(post) {
 async function assertFactCheckClear({ title, body, city, keyword, tag }, label) {
   const factCheck = await factCheckGate.evaluate({ title, body, city, keyword, tag });
   if (!factCheck.pass) {
-    const blocking = factCheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    // Only P0 (objective, unambiguous) findings block; P1/P2 are advisory.
+    const blocking = factCheck.findings.filter((f) => f.severity === 'P0');
     const err = new Error(`fact-check failed: ${blocking.map((f) => `${f.severity} ${f.message}`).join(' | ')}`);
     err.code = 'BLOG_FACTCHECK_FAILED';
     err.details = blocking;
     throw err;
   }
+  // Non-blocking P1/P2 nuance — log for visibility but let the post publish.
   if (factCheck.findings.length) {
-    logger.info(`[astro-publisher] fact-check advisory for ${label}: ${factCheck.findings.map((f) => f.message).join(' | ')}`);
+    logger.info(`[astro-publisher] fact-check advisory for ${label}: ${factCheck.findings.map((f) => `${f.severity} ${f.message}`).join(' | ')}`);
   }
 }
 
