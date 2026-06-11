@@ -14,7 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { getAppointmentContacts } = require('./customer-contact');
+const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -247,7 +247,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   let sentAny = false;
   for (const contact of contacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
-    const identityTrustLevel = contact.role === 'service_contact'
+    const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'
       : 'phone_matches_customer';
     const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel);

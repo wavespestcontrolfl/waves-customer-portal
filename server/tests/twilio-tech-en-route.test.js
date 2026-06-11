@@ -20,6 +20,7 @@ jest.mock("../services/short-url", () => ({
 }));
 jest.mock("../services/customer-contact", () => ({
   getAppointmentContacts: jest.fn(),
+  isServiceContactRole: jest.requireActual("../services/customer-contact").isServiceContactRole,
 }));
 jest.mock("../services/messaging/send-customer-message", () => ({
   sendCustomerMessage: jest.fn(),

@@ -72,4 +72,77 @@ describe('customer contact recipient routing', () => {
         expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
       ]);
   });
+
+  const multiContactCustomer = {
+    ...customer,
+    service_contact2_name: 'Sam Spouse',
+    service_contact2_phone: '+15553330000',
+    service_contact2_email: 'sam@example.com',
+    service_contact3_name: 'Pat Manager',
+    service_contact3_phone: '+15554440000',
+    service_contact3_email: 'pat@example.com',
+  };
+
+  test('appointment contacts fan out across all distinct service contact slots', () => {
+    expect(getAppointmentContacts(multiContactCustomer, {})).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+      expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
+      expect.objectContaining({ phone: '+15554440000', role: 'service_contact_3' }),
+    ]);
+
+    expect(getAppointmentContacts(multiContactCustomer, { appointment_notify_primary: true }))
+      .toEqual([
+        expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+        expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
+        expect.objectContaining({ phone: '+15554440000', role: 'service_contact_3' }),
+        expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
+      ]);
+  });
+
+  test('appointment contacts skip slots that duplicate the primary or an earlier slot', () => {
+    const withDupes = {
+      ...customer,
+      service_contact2_name: 'Dup Of Owner',
+      service_contact2_phone: '+15551110000',
+      service_contact3_name: 'Dup Of Tenant',
+      service_contact3_phone: '+15552220000',
+    };
+    expect(getAppointmentContacts(withDupes, {})).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+    ]);
+  });
+
+  test('service reports fan out across all distinct service contact emails', () => {
+    expect(getServiceReportEmailRecipients(multiContactCustomer, {})).toEqual([
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+      expect.objectContaining({ email: 'sam@example.com', role: 'service_contact_2' }),
+      expect.objectContaining({ email: 'pat@example.com', role: 'service_contact_3' }),
+    ]);
+
+    expect(getServiceReportEmailRecipients(multiContactCustomer, { service_report_notify_primary: true }))
+      .toEqual([
+        expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+        expect.objectContaining({ email: 'sam@example.com', role: 'service_contact_2' }),
+        expect.objectContaining({ email: 'pat@example.com', role: 'service_contact_3' }),
+        expect.objectContaining({ email: 'lana@example.com', role: 'primary' }),
+      ]);
+  });
+
+  test('a slot-2 contact still routes when slot 1 is empty', () => {
+    const onlySlot2 = {
+      id: 'cust-2',
+      first_name: 'Lana',
+      phone: '+15551110000',
+      email: 'lana@example.com',
+      service_contact2_name: 'Sam Spouse',
+      service_contact2_phone: '+15553330000',
+      service_contact2_email: 'sam@example.com',
+    };
+    expect(getAppointmentContacts(onlySlot2, {})).toEqual([
+      expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
+    ]);
+    expect(getServiceReportEmailRecipients(onlySlot2, {})).toEqual([
+      expect.objectContaining({ email: 'sam@example.com', role: 'service_contact_2' }),
+    ]);
+  });
 });

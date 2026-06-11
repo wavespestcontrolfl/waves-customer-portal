@@ -612,7 +612,7 @@ const TwilioService = {
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
     const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
-    const { getAppointmentContacts } = require("./customer-contact");
+    const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
     if (!contacts.length) return;
 
@@ -661,7 +661,7 @@ const TwilioService = {
           purpose: "tech_en_route",
           customerId,
           identityTrustLevel:
-            contact.role === "service_contact"
+            isServiceContactRole(contact.role)
               ? "service_contact_authorized"
               : "phone_matches_customer",
           metadata: { original_message_type: "tech_en_route" },
@@ -686,7 +686,7 @@ const TwilioService = {
       .first();
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
-    const { getAppointmentContacts } = require("./customer-contact");
+    const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
     if (!contacts.length) return;
 
@@ -719,7 +719,7 @@ const TwilioService = {
           purpose: "tech_en_route",
           customerId,
           identityTrustLevel:
-            contact.role === "service_contact"
+            isServiceContactRole(contact.role)
               ? "service_contact_authorized"
               : "phone_matches_customer",
           metadata: {

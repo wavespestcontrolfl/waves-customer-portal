@@ -53,6 +53,28 @@ function getPrimaryContact(customer) {
   };
 }
 
+// Up to three on-location contacts per customer. Slot 1 keeps the original
+// column names so single-beneficiary consumers (getServiceContact) are
+// untouched; slots 2/3 only participate in the multi-recipient fan-outs.
+const SERVICE_CONTACT_SLOTS = [
+  { name: 'service_contact_name', phone: 'service_contact_phone', email: 'service_contact_email', role: 'service_contact' },
+  { name: 'service_contact2_name', phone: 'service_contact2_phone', email: 'service_contact2_email', role: 'service_contact_2' },
+  { name: 'service_contact3_name', phone: 'service_contact3_phone', email: 'service_contact3_email', role: 'service_contact_3' },
+];
+
+const SERVICE_CONTACT_COLUMNS = SERVICE_CONTACT_SLOTS.flatMap((slot) => [slot.name, slot.phone, slot.email]);
+
+// Raw cleaned slot values (no primary fallback) for the fan-out helpers.
+function getServiceContactSlots(customer) {
+  if (!customer) return [];
+  return SERVICE_CONTACT_SLOTS.map((slot) => ({
+    name: clean(customer[slot.name]),
+    phone: clean(customer[slot.phone]),
+    email: clean(customer[slot.email]),
+    role: slot.role,
+  }));
+}
+
 function getServiceContact(customer) {
   if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
   const svcPhone = clean(customer.service_contact_phone);
@@ -89,19 +111,25 @@ function samePhone(a, b) {
 
 function getAppointmentContacts(customer, prefs = {}) {
   if (!customer) return [];
-  const service = getServiceContact(customer);
-  const billing = getPrimaryContact(customer);
-  const servicePhone = clean(customer.service_contact_phone);
-  const hasDistinctServicePhone = !!servicePhone && !samePhone(servicePhone, billing.phone);
-  const notifyPrimary = !hasDistinctServicePhone || prefs.appointment_notify_primary === true;
+  const primary = getPrimaryContact(customer);
   const contacts = [];
 
-  if (hasDistinctServicePhone) {
-    contacts.push({ ...service, role: 'service_contact' });
+  for (const slot of getServiceContactSlots(customer)) {
+    const distinct = !!slot.phone
+      && !samePhone(slot.phone, primary.phone)
+      && !contacts.some(c => samePhone(c.phone, slot.phone));
+    if (!distinct) continue;
+    contacts.push({
+      phone: slot.phone,
+      email: slot.email || primary.email,
+      name: slot.name || primary.name,
+      role: slot.role,
+    });
   }
 
-  if (notifyPrimary && billing.phone && !contacts.some(c => samePhone(c.phone, billing.phone))) {
-    contacts.push({ ...billing, role: 'primary' });
+  const notifyPrimary = !contacts.length || prefs.appointment_notify_primary === true;
+  if (notifyPrimary && primary.phone && !contacts.some(c => samePhone(c.phone, primary.phone))) {
+    contacts.push({ ...primary, role: 'primary' });
   }
 
   return contacts;
@@ -128,13 +156,23 @@ function getReceiptEmailRecipients(customer, prefs = {}) {
 
 function getServiceReportEmailRecipients(customer, prefs = {}) {
   if (!customer) return [];
-  const service = getServiceContact(customer);
   const primary = getPrimaryContact(customer);
-  const hasDistinctServiceEmail = !!clean(customer.service_contact_email)
-    && !sameEmail(customer.service_contact_email, primary.email);
-  const notifyPrimary = !hasDistinctServiceEmail || prefs.service_report_notify_primary === true;
+  const recipients = [];
+
+  for (const slot of getServiceContactSlots(customer)) {
+    const distinct = !!slot.email && !sameEmail(slot.email, primary.email);
+    if (!distinct) continue;
+    recipients.push({
+      phone: slot.phone || primary.phone,
+      email: slot.email,
+      name: slot.name || primary.name,
+      role: slot.role,
+    });
+  }
+
+  const notifyPrimary = !recipients.length || prefs.service_report_notify_primary === true;
   return uniqueByEmail([
-    hasDistinctServiceEmail ? service : null,
+    ...recipients,
     notifyPrimary ? primary : null,
   ].filter(Boolean));
 }
@@ -156,16 +194,26 @@ function getRecipientsForPurpose(customer, prefs = {}, purpose, channel = 'sms')
   return [getPrimaryContact(customer)].filter((contact) => clean(contact.phone) || clean(contact.email));
 }
 
-// True if this customer has a distinct service contact configured. Used by
-// audit tools + the admin UI to surface a "Service contact: …" chip.
+// True if this customer has a distinct service contact configured (any slot).
+// Used by audit tools + the admin UI to surface a "Service contact: …" chip.
 function hasDistinctServiceContact(customer) {
   if (!customer) return false;
-  return !!(clean(customer.service_contact_phone) || clean(customer.service_contact_email));
+  return getServiceContactSlots(customer).some((slot) => slot.phone || slot.email);
+}
+
+// True for any service-contact role variant (service_contact,
+// service_contact_2, service_contact_3) — senders use this to pick the
+// `service_contact_authorized` identity trust level.
+function isServiceContactRole(role) {
+  return String(role || '').startsWith('service_contact');
 }
 
 module.exports = {
+  SERVICE_CONTACT_COLUMNS,
   getPrimaryContact,
   getServiceContact,
+  getServiceContactSlots,
+  isServiceContactRole,
   getBillingContact,
   getAppointmentContacts,
   getInvoiceEmailRecipients,
