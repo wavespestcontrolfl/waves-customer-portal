@@ -239,6 +239,12 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
 // reschedule_log row for this move; write option1 (the chosen slot —
 // reply 1 re-confirms) and option2 (the alternate) into its notes so
 // the existing handleRescheduleReply webhook flow can act on 1/2.
+// Windows carry `display` because the reply confirmation SMS renders
+// selectedOption.window.display for its {time} variable.
+function replyWindow(window) {
+  return { start: window.start, end: window.end, display: displayWindow(window) };
+}
+
 async function attachReplyOptions(serviceJobId, chosen, alt) {
   const latest = await db('reschedule_log')
     .where({ scheduled_service_id: serviceJobId })
@@ -247,8 +253,8 @@ async function attachReplyOptions(serviceJobId, chosen, alt) {
   if (!latest) return;
   await db('reschedule_log').where({ id: latest.id }).update({
     notes: JSON.stringify({
-      option1: { date: chosen.date, window: chosen.window },
-      option2: alt ? { date: alt.date, window: alt.window } : undefined,
+      option1: { date: chosen.date, window: replyWindow(chosen.window) },
+      option2: alt ? { date: alt.date, window: replyWindow(alt.window) } : undefined,
     }),
   });
 }
@@ -261,9 +267,10 @@ async function attachReplyOptions(serviceJobId, chosen, alt) {
  * @param {string} args.technicianId    acting tech (route scope filter)
  * @param {string} args.reasonCode      weather_rain | weather_wind | weather_lightning | weather_heat
  * @param {string} args.scope           'job' | 'route' (this job + the rest of today's route)
- * @param {object} args.target          { date, window: {start, end}, deltaMinutes? }
- *                                       deltaMinutes (same-day) shifts each job's OWN window;
- *                                       day moves keep each job's own window on the new date.
+ * @param {object} args.target          { date, window: {start, end} } — the ANCHOR books exactly
+ *                                       this window (what the tech saw). On a same-day route push
+ *                                       the siblings shift by the anchor's window delta so stop
+ *                                       order survives; day moves keep each sibling's own window.
  * @param {object} [args.alt]           alternate option offered in the SMS ({ date, window })
  * @param {boolean} [args.notifyCustomer=true]
  */
@@ -271,7 +278,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!WEATHER_PHRASES[reasonCode]) return { ok: false, reason: 'bad_reason' };
-  if (!target?.date || (!target.window && target.deltaMinutes == null)) {
+  if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
 
@@ -284,23 +291,40 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
     jobs = [service];
   }
 
-  const isSameDayShift = target.deltaMinutes != null;
+  // Same-day route push: the anchor books exactly target.window (what
+  // the tech saw in the sheet); siblings shift by the anchor's window
+  // delta so the route's running order survives. "Same day" compares
+  // against the ANCHOR's scheduled date (not the wall clock) — a push
+  // is same-day when the jobs stay on the date they were already on.
+  // Falls back to 0 (keep own windows) when the anchor has no
+  // parseable window.
+  const anchorDateStr = service.scheduled_date
+    ? String(service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString()
+        : service.scheduled_date).slice(0, 10)
+    : todayStr;
+  const isSameDay = String(target.date) === anchorDateStr;
+  const anchorStartMin = hhmmToMinutes(service.window_start);
+  const targetStartMin = hhmmToMinutes(target.window.start);
+  const siblingDelta = (isSameDay && anchorStartMin != null && targetStartMin != null)
+    ? targetStartMin - anchorStartMin
+    : 0;
+
   const results = [];
   for (const job of jobs) {
     let newWindow;
-    if (isSameDayShift) {
+    if (job.id === serviceId) {
+      newWindow = target.window;
+    } else if (isSameDay) {
       const startMin = hhmmToMinutes(job.window_start);
       const endMin = hhmmToMinutes(job.window_end);
-      newWindow = {
-        start: startMin != null ? minutesToHHMM(startMin + target.deltaMinutes) : target.window?.start,
-        end: endMin != null ? minutesToHHMM(endMin + target.deltaMinutes) : target.window?.end,
-      };
-    } else if (scope === 'route' && job.id !== serviceId) {
+      newWindow = (startMin != null && endMin != null)
+        ? { start: minutesToHHMM(startMin + siblingDelta), end: minutesToHHMM(endMin + siblingDelta) }
+        : target.window;
+    } else {
       // Day move for the rest of the route: same new date, keep each
       // job's own window so the route's running order survives.
       newWindow = { start: job.window_start, end: job.window_end };
-    } else {
-      newWindow = target.window;
     }
 
     try {

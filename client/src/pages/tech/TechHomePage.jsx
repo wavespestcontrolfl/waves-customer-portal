@@ -917,15 +917,10 @@ function RainOutSheet({ service, onClose, onDone }) {
     setError('');
     try {
       const token = getAdminAuthToken();
-      const target = selected.kind === 'same_day'
-        ? {
-            date: selected.date,
-            window: selected.window,
-            // Same-day shifts move each route job's OWN window by the
-            // same delta, preserving stop order on a route-wide push.
-            deltaMinutes: selected.label?.includes('+2h') ? 120 : 240,
-          }
-        : { date: selected.date, window: selected.window };
+      // The server books THIS stop into exactly this window (what's
+      // displayed); on a route-wide same-day push it shifts the other
+      // stops by this stop's window delta to preserve running order.
+      const target = { date: selected.date, window: selected.window };
       const res = await fetch(`${API}/api/tech/services/${service.id}/rain-out`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },

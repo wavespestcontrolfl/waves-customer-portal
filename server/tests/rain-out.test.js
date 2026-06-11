@@ -101,7 +101,7 @@ describe('rain-out service', () => {
       return { logUpdate };
     }
 
-    test('same-day delta shifts the window, passes allowLive, texts with alt + forecast link', async () => {
+    test('same-day move books exactly the displayed window, passes allowLive, texts with alt + forecast link', async () => {
       const { logUpdate } = wireSingle();
 
       const result = await RainOut.commit({
@@ -109,7 +109,7 @@ describe('rain-out service', () => {
         technicianId: 'tech-1',
         reasonCode: 'weather_rain',
         scope: 'job',
-        target: { date: '2026-06-11', window: { start: '13:00', end: '15:00' }, deltaMinutes: 120 },
+        target: { date: '2026-06-11', window: { start: '13:00', end: '15:00' } },
         alt: { date: '2026-06-12', window: { start: '08:00', end: '10:00' } },
         notifyCustomer: true,
       });
@@ -117,22 +117,63 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(result.movedCount).toBe(1);
 
-      // Window = job's own 09:00-11:00 + 2h, not the raw target window.
+      // The anchor books the window the tech saw in the sheet — verbatim.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
-        'svc-1', '2026-06-11', { start: '11:00', end: '13:00' }, 'weather_rain', 'tech',
+        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
         { allowLive: true },
       );
 
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.weather_phrase).toBe('heavy rain');
+      expect(vars.new_option).toContain('1:00 PM-3:00 PM');
       expect(vars.alt_clause).toContain('Reply 1 to confirm, or 2 to switch');
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 
-      // Reply options written into the rebooker's reschedule_log row.
+      // Reply options written into the rebooker's reschedule_log row —
+      // windows carry `display` because handleRescheduleReply renders
+      // selectedOption.window.display in the confirmation SMS.
       const notes = JSON.parse(logUpdate.update.mock.calls[0][0].notes);
-      expect(notes.option1.date).toBe('2026-06-11');
-      expect(notes.option2.date).toBe('2026-06-12');
+      expect(notes.option1).toEqual({
+        date: '2026-06-11',
+        window: { start: '13:00', end: '15:00', display: '1:00 PM-3:00 PM' },
+      });
+      expect(notes.option2).toEqual({
+        date: '2026-06-12',
+        window: { start: '08:00', end: '10:00', display: '8:00 AM-10:00 AM' },
+      });
+    });
+
+    test('same-day route push shifts siblings by the anchor window delta', async () => {
+      const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [
+            { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' },
+          ] }),
+        ],
+        customers: [
+          chain({ first: jest.fn().mockResolvedValue({ id: 'cust-2', phone: '+19415550002', first_name: 'Sam', zip: '34203' }) }),
+        ],
+        reschedule_log: [logRow, chain()],
+      });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '15:00' } },
+        alt: { date: '2026-06-12', window: { start: '08:00', end: '10:00' } },
+        notifyCustomer: true,
+      });
+
+      // Anchor 09:00→13:00 = +4h delta; sibling 11:30-13:30 → 15:30-17:30.
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
+        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', { allowLive: true });
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech', { allowLive: true });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
