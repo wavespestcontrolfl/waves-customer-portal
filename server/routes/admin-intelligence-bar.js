@@ -804,7 +804,9 @@ router.post('/query', async (req, res, next) => {
           ...(failed ? { is_error: true } : {}),
         });
 
-        toolCalls.push({ name: toolUse.name, input: toolUse.input });
+        // loggableInput keeps create_customer PII out of the persisted
+        // intelligence_bar_queries.tool_calls log and the API response
+        toolCalls.push({ name: toolUse.name, input: loggableInput });
         toolResults.push({ name: toolUse.name, result });
       }
 

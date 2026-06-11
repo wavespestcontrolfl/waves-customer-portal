@@ -9,7 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -715,7 +715,8 @@ async function getCsrOverview(days) {
 
 
 async function getTodaysActivity() {
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  // "Today" anchored to America/New_York — Railway runs UTC
+  const todayStart = parseETDateTime(`${etDateString()}T00:00:00`);
   const since = todayStart.toISOString();
 
   const [smsIn, smsOut, calls, unanswered] = await Promise.all([
