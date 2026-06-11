@@ -16,6 +16,13 @@
  * Field mapping is intentionally defensive: a missing/renamed field in a future
  * form revision is logged and skipped, never thrown, so one bad field can't
  * fail the whole report.
+ *
+ * Long values never silently shrink/clip: free-text findings word-flow across
+ * the form's printed lines at no smaller than FORM_FONT_FLOOR, and anything
+ * that doesn't fit ends with a "(continued on attached page)" marker and is
+ * printed in full on appended continuation page(s) — the mechanism the form
+ * itself prescribes. All field text is WinAnsi-sanitized (sanitizeText), so
+ * unicode/emoji typed on a phone can't make pdfDoc.save() throw.
  */
 
 const fs = require('fs');
@@ -109,23 +116,23 @@ function buildTextValues({ findings, customer, project, applicator }) {
     'Name and Contact Information': clean(findings.requested_by),
     'Name and Contact Information if different from above': clean(findings.report_sent_to),
 
-    // Section 2 — findings detail
-    'Common Name of Organism and Location  use additional page if needed': clean(findings.live_wdo),
-    'Common Name Description and Location  Describe evidence': clean(findings.wdo_evidence),
-    'Common Name Description and Location of all visible damage  Describe damage': clean(findings.wdo_damage),
-    'not visible andor accessible for inspection The descriptions and reasons for inaccessibility are stated below':
-      clean(findings.inaccessible_areas),
-    'SPECIFIC AREAS': clean(findings.inaccessible_areas),
-
-    // Section 3/4 — previous + current treatment
-    'treatment List what was observed': clean(findings.previous_treatment_notes),
+    // Section 4 — notice of inspection + treatment. The two "notice" blanks are
+    // distinct on the form (verified against a self-labeled render of the
+    // template's AcroForm):
+    //   - "A Notice of Inspection has been affixed to the structure at: ___"
+    //     is the field auto-named from the sentence that FOLLOWS the blank
+    //     ("should be contacted ..."). Rule 5E-14.142 requires this location.
+    //   - "Specify Treatment Notice Location: ___" is 'undefined_9'.
+    //   - 'locationtreatment' is the description blank after the "Spot
+    //     treatment" checkbox; the findings collect no spot-treatment
+    //     description, so it intentionally stays blank.
+    'should be contacted for information on treatment history and any warranty or service agreement which may be in place':
+      clean(findings.notice_location),
+    'undefined_9': clean(findings.treatment_notice_location),
     'comorgtreated': joinMulti(findings.organism_treated),
     'pesticideused': clean(findings.pesticide_used),
     'termscondtreat': clean(findings.treatment_terms),
-    'locationtreatment': clean(findings.treatment_notice_location || findings.notice_location),
 
-    // Section 5 — comments / financial disclosure
-    'Comments 1': clean(findings.comments),
     'Date': inspectionDate,
 
     // Signature intentionally left blank — licensee signs before filing.
@@ -133,8 +140,113 @@ function buildTextValues({ findings, customer, project, applicator }) {
   };
 }
 
+// Free-text findings that flow across the form's printed writing lines. Each
+// section's lines are separate single-line AcroForm fields (names verified
+// against a self-labeled render); text is word-flowed across them at no
+// smaller than FORM_FONT_FLOOR, and anything that doesn't fit continues on an
+// appended continuation page — the mechanism the form itself prescribes
+// ("use additional page, if needed") — instead of pdf-lib auto-shrinking the
+// whole value to an unreadable ~3pt and clipping the rest.
+const LINE_POOLS = {
+  live_wdo: {
+    label: 'Section 2.B.1 - Live WDO(s) (common name of organism and location)',
+    order: 20,
+    fields: [
+      'Common Name of Organism and Location  use additional page if needed',
+      'undefined',
+    ],
+  },
+  wdo_evidence: {
+    label: 'Section 2.B.2 - Evidence of WDO(s) (common name, description and location)',
+    order: 21,
+    fields: [
+      'Common Name Description and Location  Describe evidence',
+      'use additional page if needed 1',
+      'use additional page if needed 2',
+    ],
+  },
+  wdo_damage: {
+    label: 'Section 2.B.3 - Damage caused by WDO(s) (common name, description and location)',
+    order: 22,
+    fields: [
+      'Common Name Description and Location of all visible damage  Describe damage',
+      'use additional page if needed 1_2',
+      'use additional page if needed 2_2',
+      'use additional page if needed 3',
+      'use additional page if needed 4',
+      'use additional page if needed 5',
+      'use additional page if needed 6',
+      'use additional page if needed 7',
+    ],
+  },
+  // The first (Attic-row) triplet of Section 3. The findings collect one
+  // free-text blob for all inaccessible areas (the named checkboxes are
+  // keyword-detected from it), so it flows across the first row's three
+  // writing lines, exactly where it printed before — but now on the correct
+  // lines: the row's SPECIFIC AREAS line is the field auto-named from the
+  // lead-in sentence ("not visible andor accessible ..."), its REASON line is
+  // the field named 'SPECIFIC AREAS', and its continuation line is 'REASON'.
+  inaccessible_areas: {
+    label: 'Section 3 - Obstructions / inaccessible areas (specific areas and reasons)',
+    order: 30,
+    fields: [
+      'not visible andor accessible for inspection The descriptions and reasons for inaccessibility are stated below',
+      'SPECIFIC AREAS',
+      'REASON',
+    ],
+  },
+  // "List what was observed" line 1 is the field auto-named from the label
+  // text ('EVIDENCE of previous treatment observed'); the previously-mapped
+  // 'treatment List what was observed' is its continuation line 2.
+  previous_treatment_notes: {
+    label: 'Section 4 - Previous treatment: what was observed',
+    order: 40,
+    fields: [
+      'EVIDENCE of previous treatment observed',
+      'treatment List what was observed',
+    ],
+  },
+  // Comments line 1 is the field auto-named from the section header; the
+  // previously-mapped 'Comments 1' is line 2.
+  comments: {
+    label: 'Section 5 - Comments',
+    order: 50,
+    fields: [
+      'SECTION 5  COMMENTS AND FINANCIAL DISCLOSURE',
+      'Comments 1',
+      'Comments 2',
+      'Comments 3',
+      'Comments 4',
+    ],
+  },
+};
+
+// Findings-driven single-blank fields: fitted at FORM_FONT_FLOOR with overflow
+// onto the continuation page. Value `null` = fit/truncate but don't record a
+// continuation entry (footer duplicates of fields recorded once already).
+const FITTED_FIELDS = {
+  'Address of Property Inspected': { label: 'Section 1 - Address of property inspected', order: 10 },
+  'addrofpropinspected': null,
+  'Structures on Property Inspected': { label: 'Section 1 - Structure(s) on property inspected', order: 11 },
+  'Name and Contact Information': { label: 'Section 1 - Inspection and report requested by', order: 12 },
+  'Name and Contact Information if different from above': { label: 'Section 1 - Report sent to requestor and to', order: 13 },
+  'should be contacted for information on treatment history and any warranty or service agreement which may be in place':
+    { label: 'Section 4 - Notice of Inspection affixed to the structure at', order: 41 },
+  'comorgtreated': { label: 'Section 4 - Common name of organism treated', order: 42 },
+  'pesticideused': { label: 'Section 4 - Name of pesticide used', order: 43 },
+  'termscondtreat': { label: 'Section 4 - Terms and conditions of treatment', order: 44 },
+  'undefined_9': { label: 'Section 4 - Treatment notice location', order: 45 },
+};
+
+// Every FDACS field is a single-line text box, so newlines from the findings
+// textareas become "; " separators when a value lands in one blank (the line
+// pools convert them to real line breaks instead).
+function formText(value) {
+  return clean(sanitizeText(value));
+}
+
 function setText(form, name, value) {
-  const v = clean(value);
+  const v = formText(value).replace(/\s*\n+\s*/g, '; ');
   if (!v) return;
   try {
     const field = form.getTextField(name);
@@ -142,6 +254,146 @@ function setText(form, name, value) {
   } catch (err) {
     logger.warn(`[wdo-pdf] text field skipped "${name}": ${err.message}`);
   }
+}
+
+// Smallest acceptable rendered size on the official form. pdf-lib's auto-size
+// picks the largest size that fits, so guaranteeing the content FITS at the
+// floor guarantees it renders at or above it — the old behavior crammed the
+// full value in and let auto-size shrink to ~3pt before clipping the rest.
+const FORM_FONT_FLOOR = 8;
+// Progressively shorter continuation markers — narrow blanks (e.g. the 120pt
+// Terms-and-Conditions box) get a shorter one so the line still carries
+// meaningful content.
+const CONTINUATION_SUFFIXES = [
+  '... (continued on attached page)',
+  '... (see attached page)',
+  '... (cont.)',
+];
+// For unlabeled footer duplicates: plain truncation with no attached-page
+// promise (no continuation entry is recorded for them).
+const PLAIN_SUFFIXES = ['...'];
+
+function fieldLineWidth(field) {
+  const widget = field.acroField.getWidgets()[0];
+  const rect = widget ? widget.getRectangle() : { width: 0 };
+  // Leave a few points for the border + text padding pdf-lib applies.
+  return Math.max(20, rect.width - 6);
+}
+
+// Drop trailing words until `text + suffix` fits the width at the floor size,
+// trying each suffix candidate in order (longest first); a single over-wide
+// token falls back to a character cut with the shortest suffix.
+function cutToFit(text, font, maxWidth, suffixes) {
+  for (const suffix of suffixes) {
+    let cut = text;
+    while (cut && font.widthOfTextAtSize(`${cut} ${suffix}`, FORM_FONT_FLOOR) > maxWidth) {
+      const shorter = cut.replace(/\s*\S+$/, '');
+      if (shorter === cut) { cut = ''; break; }
+      cut = shorter;
+    }
+    if (cut) return `${cut} ${suffix}`;
+  }
+  const suffix = suffixes[suffixes.length - 1];
+  let cut = text;
+  while (cut.length > 1 && font.widthOfTextAtSize(`${cut} ${suffix}`, FORM_FONT_FLOOR) > maxWidth) {
+    cut = cut.slice(0, -1);
+  }
+  return cut ? `${cut} ${suffix}` : suffix;
+}
+
+// Fill a single blank, guaranteeing at-least-floor rendering: if the value
+// doesn't fit on the line at FORM_FONT_FLOOR, the line ends with a
+// continuation marker and the full value is recorded for the continuation
+// page. `spec` null = unlabeled footer duplicate: it truncates with a plain
+// ellipsis — never an attached-page promise, because no continuation entry is
+// recorded for it (the labeled main field records its own when IT overflows,
+// and the two have different widths, so one can overflow without the other).
+function fillFittedText(form, font, name, value, spec, overflows) {
+  const text = formText(value).replace(/\s*\n+\s*/g, '; ');
+  if (!text) return;
+  let field;
+  try {
+    field = form.getTextField(name);
+  } catch (err) {
+    logger.warn(`[wdo-pdf] text field skipped "${name}": ${err.message}`);
+    return;
+  }
+  const maxWidth = fieldLineWidth(field);
+  if (font.widthOfTextAtSize(text, FORM_FONT_FLOOR) <= maxWidth) {
+    field.setText(text);
+    return;
+  }
+  if (!spec) {
+    field.setText(cutToFit(text, font, maxWidth, PLAIN_SUFFIXES));
+    return;
+  }
+  field.setText(cutToFit(text, font, maxWidth, CONTINUATION_SUFFIXES));
+  overflows.push({ label: spec.label, order: spec.order, text });
+}
+
+// Word-flow a findings value across a section's printed writing lines (each a
+// separate AcroForm field with its own width). Newlines in the value force a
+// new line. If the pool runs out of lines, the last one ends with the
+// continuation marker and the FULL value is recorded for the continuation
+// page, so the attached page reads complete rather than starting mid-sentence.
+function fillLinePool(form, font, pool, value, overflows) {
+  const text = formText(value);
+  if (!text) return;
+  const fields = [];
+  for (const name of pool.fields) {
+    try {
+      fields.push(form.getTextField(name));
+    } catch (err) {
+      logger.warn(`[wdo-pdf] pool line skipped "${name}": ${err.message}`);
+    }
+  }
+  if (!fields.length) {
+    overflows.push({ label: pool.label, order: pool.order, text });
+    return;
+  }
+  const widths = fields.map(fieldLineWidth);
+
+  const tokens = [];
+  for (const para of text.split('\n')) {
+    const words = para.split(/\s+/).filter(Boolean);
+    if (tokens.length && words.length) tokens.push({ lineBreak: true });
+    for (const word of words) tokens.push({ word });
+  }
+
+  const lines = fields.map(() => '');
+  let ti = 0;
+  for (let li = 0; li < lines.length && ti < tokens.length;) {
+    const token = tokens[ti];
+    if (token.lineBreak) {
+      li += 1;
+      ti += 1;
+      continue;
+    }
+    const candidate = lines[li] ? `${lines[li]} ${token.word}` : token.word;
+    if (font.widthOfTextAtSize(candidate, FORM_FONT_FLOOR) <= widths[li]) {
+      lines[li] = candidate;
+      ti += 1;
+    } else if (!lines[li]) {
+      // Single token wider than the whole line — hard-split it.
+      let fit = token.word.length;
+      while (fit > 1 && font.widthOfTextAtSize(token.word.slice(0, fit), FORM_FONT_FLOOR) > widths[li]) fit -= 1;
+      lines[li] = token.word.slice(0, fit);
+      tokens[ti] = { word: token.word.slice(fit) };
+      li += 1;
+    } else {
+      li += 1;
+    }
+  }
+
+  if (ti < tokens.length) {
+    const last = lines.length - 1;
+    lines[last] = cutToFit(lines[last], font, widths[last], CONTINUATION_SUFFIXES);
+    overflows.push({ label: pool.label, order: pool.order, text });
+  }
+
+  lines.forEach((line, idx) => {
+    if (line) fields[idx].setText(line);
+  });
 }
 
 function checkBox(form, name) {
@@ -248,10 +500,21 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
 
   const pdfDoc = await PDFDocument.load(loadTemplateBytes());
   const form = pdfDoc.getForm();
+  // Helvetica is the template's appearance font, so measuring with it tells us
+  // exactly what pdf-lib's auto-size will be able to fit at render time.
+  const measureFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
+  const overflows = [];
   const textValues = buildTextValues({ findings, customer, project, applicator });
   for (const [name, value] of Object.entries(textValues)) {
-    setText(form, name, value);
+    if (name in FITTED_FIELDS) {
+      fillFittedText(form, measureFont, name, value, FITTED_FIELDS[name], overflows);
+    } else {
+      setText(form, name, value);
+    }
+  }
+  for (const [key, pool] of Object.entries(LINE_POOLS)) {
+    fillLinePool(form, measureFont, pool, findings[key], overflows);
   }
   applyCheckboxes(form, findings);
 
@@ -268,11 +531,27 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
     }
   }
 
-  // Flatten so the filed report is read-only.
+  // Flatten so the filed report is read-only. Fatal on failure: an editable
+  // AcroForm must never be emailed as the official filing (the send routes
+  // catch this and abort with "nothing was sent").
   try {
     form.flatten();
   } catch (err) {
-    logger.warn(`[wdo-pdf] flatten failed for project ${project.id}: ${err.message}`);
+    throw new Error(`WDO form could not be locked (flatten failed): ${err.message}`);
+  }
+
+  // Continuation page(s) for anything that didn't fit its printed lines at a
+  // readable size — the "additional page" the form itself prescribes. Added
+  // before the photo addendum so the filing reads form → text → photos.
+  // Fatal on failure: the form now carries "(continued on attached page)"
+  // markers, so emitting it WITHOUT the attached page would truncate findings
+  // on a legal filing.
+  if (overflows.length) {
+    await appendContinuationPages(pdfDoc, {
+      entries: overflows.sort((a, b) => (a.order || 0) - (b.order || 0)),
+      propertyAddress: clean(textValues['Address of Property Inspected']),
+      inspectionDate: clean(textValues['Date of Inspection']),
+    });
   }
 
   // Append the Supplemental Photo Addendum (2 captioned photos per page).
@@ -334,13 +613,22 @@ function findWidgetPage(pdfDoc, widget) {
 }
 
 function sanitizeText(value) {
-  // StandardFonts (WinAnsi) can't encode arbitrary unicode; replace common
-  // smart punctuation and drop anything outside the safe range.
+  // StandardFonts (WinAnsi) can't encode arbitrary unicode — one emoji typed
+  // into a findings field on a phone would make pdfDoc.save() throw and the
+  // whole report unsendable. Decompose accents, replace common smart
+  // punctuation, and drop anything else outside the safe range (newlines
+  // survive; callers decide whether they become line breaks or separators).
   return String(value || '')
-    .replace(/[‘’]/g, "'")
-    .replace(/[“”]/g, '"')
-    .replace(/[–—]/g, '-')
-    .replace(/[^\x20-\x7E]/g, '');
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '') // combining marks left by NFKD (é -> e)
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[“”„‟]/g, '"')
+    .replace(/[\u2010-\u2015]/g, '-')
+    .replace(/[•·∙●▪]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[^\x20-\x7E\n]/g, '');
 }
 
 function wrapText(text, font, size, maxWidth) {
@@ -358,6 +646,67 @@ function wrapText(text, font, size, maxWidth) {
   }
   if (line) lines.push(line);
   return lines;
+}
+
+/**
+ * Append continuation page(s) carrying the complete text of every entry that
+ * could not fit its printed form lines at a readable size. The FDACS-13645
+ * itself prescribes this ("use additional page, if needed"); the form lines
+ * end with "(continued on attached page)" wherever an entry overflows.
+ * @param {Array<{ label:string, order:number, text:string }>} entries
+ */
+async function appendContinuationPages(pdfDoc, { entries, propertyAddress, inspectionDate }) {
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const PAGE_W = 612;
+  const PAGE_H = 792;
+  const MARGIN = 54;
+  const contentW = PAGE_W - MARGIN * 2;
+  const gray = rgb(0.4, 0.4, 0.4);
+
+  let page = null;
+  let y = 0;
+  let pageNum = 0;
+  const newPage = () => {
+    pageNum += 1;
+    page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+    const title = 'WDO INSPECTION REPORT - CONTINUATION PAGE';
+    const titleW = bold.widthOfTextAtSize(title, 14);
+    page.drawText(title, { x: (PAGE_W - titleW) / 2, y: PAGE_H - 50, size: 14, font: bold });
+    const sub = sanitizeText(
+      `FDACS-13645 - ${propertyAddress || ''}${inspectionDate ? ` - Inspected ${inspectionDate}` : ''}`,
+    );
+    const subW = font.widthOfTextAtSize(sub, 10);
+    page.drawText(sub, { x: (PAGE_W - subW) / 2, y: PAGE_H - 66, size: 10, font, color: gray });
+    const pageLabel = `Page C-${pageNum}`;
+    page.drawText(pageLabel, { x: PAGE_W - MARGIN - font.widthOfTextAtSize(pageLabel, 10), y: PAGE_H - 66, size: 10, font, color: gray });
+    page.drawLine({ start: { x: MARGIN, y: PAGE_H - 76 }, end: { x: PAGE_W - MARGIN, y: PAGE_H - 76 }, thickness: 0.75, color: gray });
+    y = PAGE_H - 96;
+  };
+  newPage();
+
+  const note = 'Complete text of entries marked "(continued on attached page)" on the form:';
+  page.drawText(note, { x: MARGIN, y, size: 9, font, color: gray });
+  y -= 20;
+
+  const drawLines = (lines, useFont, size, color) => {
+    for (const ln of lines) {
+      if (y < MARGIN + size) newPage();
+      if (ln) page.drawText(ln, { x: MARGIN, y, size, font: useFont, color });
+      y -= size + 4;
+    }
+  };
+
+  for (const entry of entries) {
+    if (y < MARGIN + 40) newPage();
+    drawLines(wrapText(entry.label, bold, 11, contentW), bold, 11, rgb(0, 0, 0));
+    const paragraphs = sanitizeText(entry.text).split('\n');
+    for (const para of paragraphs) {
+      const lines = para.trim() ? wrapText(para, font, 10, contentW) : [''];
+      drawLines(lines, font, 10, rgb(0.1, 0.1, 0.1));
+    }
+    y -= 10;
+  }
 }
 
 /**
@@ -432,5 +781,15 @@ async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress }) {
 module.exports = {
   buildWdoReportPDFBuffer,
   // exported for tests
-  _private: { splitCompanyAddress, resolveApplicator, buildTextValues, decodeImageInput, wrapText, sanitizeText },
+  _private: {
+    splitCompanyAddress,
+    resolveApplicator,
+    buildTextValues,
+    decodeImageInput,
+    wrapText,
+    sanitizeText,
+    cutToFit,
+    LINE_POOLS,
+    FITTED_FIELDS,
+  },
 };
