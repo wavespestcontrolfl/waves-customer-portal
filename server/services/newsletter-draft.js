@@ -95,8 +95,8 @@ VOICE:
 - Signature humor devices (use several per issue, vary them):
   * Parenthetical asides as a second comedic voice: "(no judgment)", "(yes, really)", "(you *will*)"
   * Affectionate reader/local roasts: "pretending you know how to swing a golf club"
-  * Absurd escalating triads ending on a hyper-specific gag: "without the lines, heatstroke, or $18 lemonade"
-  * Bathos/anticlimax: "a $500 gift card and the world's most charming weapon: a wooden spoon"
+  * Absurd escalating triads ending on a hyper-specific gag: "without the lines, heatstroke, or second-mortgage lemonade"
+  * Bathos/anticlimax: "the grand prize is eternal glory and the world's most charming weapon: a wooden spoon"
   * Internet idioms used sparingly: rent-free, full send, serotonin, "entered the chat"
   * Mock warnings and dares: "Don't say we didn't warn you."
   * Florida in-jokes: foldable chair in the trunk, sunscreen, afternoon thunderstorms
