@@ -22,6 +22,10 @@ jest.mock('../services/invoice-email', () => ({
 jest.mock('../services/review-request', () => ({
   create: jest.fn(async () => ({ id: 'rr-1' })),
 }));
+jest.mock('../services/invoice-followups', () => ({
+  scheduleForInvoice: jest.fn(async () => {}),
+  stopSequence: jest.fn(async () => {}),
+}));
 
 const db = require('../models/db');
 const ReviewService = require('../services/review-request');
@@ -35,6 +39,7 @@ function chain({ first, returning } = {}) {
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(async () => returning || []);
+  q.insert = jest.fn(() => Promise.resolve());
   return q;
 }
 
@@ -134,5 +139,87 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     expect(ReviewService.create).toHaveBeenCalledWith(
       expect.objectContaining({ delayMinutes: 30 }),
     );
+  });
+});
+
+// markDeliverySent is the OTHER finalization path that clears
+// scheduled_request_review (combined project report+invoice send, completion
+// SMS with invoice link) — the #1604 fix covered sendViaSMSAndEmail only, so
+// a scheduled review-request invoice delivered through a combined send
+// silently dropped its review. Same inheritance contract applies.
+//
+// db() call sequence inside markDeliverySent:
+//   1. invoice read   2. finalize update→returning   3. activity_log insert
+function mockMarkDeliverySequence(invoice, { finalized = true } = {}) {
+  db
+    .mockReturnValueOnce(chain({ first: invoice }))
+    .mockReturnValueOnce(
+      chain({ returning: finalized ? [{ ...invoice, status: 'sent', scheduled_request_review: false }] : [] }),
+    )
+    .mockReturnValue(chain());
+}
+
+describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('no review options → inherits the scheduled review request', async () => {
+    mockMarkDeliverySequence(scheduledInvoice());
+
+    const result = await InvoiceService.markDeliverySent('inv-1', {
+      sms: true,
+      email: true,
+      source: 'project_report_with_invoice',
+    });
+
+    expect(result.status).toBe('sent');
+    expect(ReviewService.create).toHaveBeenCalledWith({
+      customerId: 'cust-1',
+      serviceRecordId: 'sr-1',
+      triggeredBy: 'auto',
+      delayMinutes: 120,
+    });
+  });
+
+  test('explicit requestReview: false overrides the stored flag', async () => {
+    mockMarkDeliverySequence(scheduledInvoice());
+
+    await InvoiceService.markDeliverySent('inv-1', {
+      email: true,
+      requestReview: false,
+    });
+
+    expect(ReviewService.create).not.toHaveBeenCalled();
+  });
+
+  test('no stored flag → no review request', async () => {
+    mockMarkDeliverySequence(
+      scheduledInvoice({
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+      }),
+    );
+
+    await InvoiceService.markDeliverySent('inv-1', { email: true });
+
+    expect(ReviewService.create).not.toHaveBeenCalled();
+  });
+
+  test('concurrent finalization won the race → no duplicate review request', async () => {
+    mockMarkDeliverySequence(scheduledInvoice(), { finalized: false });
+
+    await InvoiceService.markDeliverySent('inv-1', { email: true });
+
+    expect(ReviewService.create).not.toHaveBeenCalled();
+  });
+
+  test('non-finalizable status returns early without queueing', async () => {
+    db.mockReturnValueOnce(chain({ first: scheduledInvoice({ status: 'paid' }) }));
+
+    const result = await InvoiceService.markDeliverySent('inv-1', { email: true });
+
+    expect(result.status).toBe('paid');
+    expect(ReviewService.create).not.toHaveBeenCalled();
   });
 });

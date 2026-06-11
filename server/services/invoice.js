@@ -664,6 +664,8 @@ const InvoiceService = {
         }
       }
     }
+    // NOTE: the service_type resolved here keys the county-aware tax below.
+    // previewInvoiceTotals() mirrors this resolution — keep them in sync.
     if (!serviceRecordId && scheduledServiceId) {
       let scheduled = null;
       try {
@@ -885,6 +887,8 @@ const InvoiceService = {
     // policy, so we force rate + amount to zero regardless of what the
     // caller passed. This is the single source of truth; display surfaces
     // (pay page, receipt page, PDF) can rely on stored tax_amount == 0.
+    // NOTE: previewInvoiceTotals() mirrors this block (and the service-type
+    // resolution above) for the dry-run preview — keep them in sync.
     const isCommercial =
       customer.property_type === "commercial" ||
       customer.property_type === "business";
@@ -989,6 +993,96 @@ const InvoiceService = {
       `[invoice] Created ${invoiceNumber} for customer ${customerId}: $${total}`,
     );
     return invoice;
+  },
+
+  /**
+   * Preview the totals create() would store for a simple one-positive-line,
+   * no-discount invoice WITHOUT creating it (the WDO combined-send dry-run).
+   *
+   * This MUST mirror create()'s financial path exactly — preview/billed drift
+   * has shipped three times now (legacy fallback rate, service-record tax key,
+   * scheduled-service tax key from #1520), which is why the mirror lives here
+   * next to create() instead of in a route file. If you touch create()'s
+   * service-type resolution or tax block, update this and the parity test
+   * (tests/invoice-preview-parity.test.js).
+   *
+   * Same semantics as create(), including the throw when serviceRecordId
+   * doesn't belong to the customer — a preview that would fail to bill should
+   * fail the same way, not show a number the send can't produce.
+   */
+  async previewInvoiceTotals({
+    customerId,
+    customer = null,
+    amount,
+    serviceRecordId = null,
+    scheduledServiceId = null,
+    title = null,
+    database = db,
+  }) {
+    const cust =
+      customer ||
+      (await database("customers").where({ id: customerId }).first());
+    if (!cust) throw new Error("Customer not found");
+
+    const subtotal = Math.round((Number(amount) || 0) * 100) / 100;
+
+    // Mirrors create()'s service-type resolution: linked service record
+    // (customer-guarded, throws when missing) → scheduled service (lenient
+    // lookup, customer-guarded) → null, with the title as the final tax key.
+    let serviceType = null;
+    if (serviceRecordId) {
+      const sr = await database("service_records")
+        .where({
+          "service_records.id": serviceRecordId,
+          "service_records.customer_id": customerId,
+        })
+        .first();
+      if (!sr) throw new Error("Service record not found for customer");
+      serviceType = sr.service_type || null;
+    } else if (scheduledServiceId) {
+      let scheduled = null;
+      try {
+        scheduled = await database("scheduled_services")
+          .where({ id: scheduledServiceId })
+          .first();
+      } catch (err) {
+        logger.warn(
+          `[invoice] scheduled service context lookup skipped for ${scheduledServiceId}: ${err.message}`,
+        );
+      }
+      if (
+        scheduled &&
+        String(scheduled.customer_id || customerId) === String(customerId)
+      ) {
+        serviceType = scheduled.service_type || null;
+      }
+    }
+
+    const isCommercial =
+      cust.property_type === "commercial" || cust.property_type === "business";
+    let rate, taxAmount;
+    if (!isCommercial) {
+      rate = 0;
+      taxAmount = 0;
+    } else {
+      try {
+        const taxResult = await TaxCalculator.calculateTax(
+          customerId,
+          serviceType || title,
+          subtotal,
+        );
+        rate = taxResult.rate;
+        taxAmount = taxResult.amount;
+      } catch (err) {
+        logger.warn(
+          `[invoice] preview TaxCalculator failed, falling back to legacy logic: ${err.message}`,
+        );
+        rate = 0.07;
+        taxAmount = Math.round(subtotal * rate * 100) / 100;
+      }
+    }
+    const total = Math.round((subtotal + taxAmount) * 100) / 100;
+    return { subtotal, tax_rate: rate, tax_amount: taxAmount, total };
   },
 
   /**
@@ -1376,11 +1470,33 @@ const InvoiceService = {
 
   async markDeliverySent(
     invoiceId,
-    { sms = false, email = false, source = "invoice_delivery", payUrl = null } = {},
+    {
+      sms = false,
+      email = false,
+      source = "invoice_delivery",
+      payUrl = null,
+      requestReview = null,
+      reviewDelayMinutes = null,
+    } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice) return null;
     if (!SEND_FINALIZABLE_STATUSES.includes(invoice.status)) return invoice;
+
+    // Same contract as sendViaSMSAndEmail (the #1604 fix): callers that take
+    // no review decision inherit the review request configured at schedule
+    // time — the update below clears scheduled_request_review unconditionally,
+    // so a delivery finalized through this path (combined project send,
+    // completion SMS with invoice) must not silently drop it. An explicit
+    // true/false from the caller still wins.
+    let effectiveRequestReview = requestReview;
+    let effectiveReviewDelayMinutes = reviewDelayMinutes;
+    if (effectiveRequestReview == null) {
+      effectiveRequestReview = Boolean(invoice.scheduled_request_review);
+      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
+        effectiveReviewDelayMinutes = invoice.scheduled_review_delay_minutes;
+      }
+    }
 
     const now = new Date();
     const updates = {
@@ -1402,6 +1518,25 @@ const InvoiceService = {
       .update(updates)
       .returning("*");
     const finalInvoice = updated || invoice;
+
+    // Queue the review request only when THIS call performed the finalization
+    // (`updated` set) — a concurrent path that finalized first cleared the
+    // stored flags itself and already took the review decision.
+    if (updated && effectiveRequestReview) {
+      try {
+        const ReviewService = require("./review-request");
+        await ReviewService.create({
+          customerId: invoice.customer_id,
+          serviceRecordId: invoice.service_record_id || null,
+          triggeredBy: "auto",
+          delayMinutes: effectiveReviewDelayMinutes,
+        });
+      } catch (err) {
+        logger.error(
+          `[invoice] Review request schedule failed after ${source}: ${err.message}`,
+        );
+      }
+    }
 
     try {
       await require("./invoice-followups").scheduleForInvoice(invoiceId);
