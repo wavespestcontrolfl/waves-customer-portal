@@ -23,10 +23,15 @@ const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
 // Invoice statuses that are safe to auto-void when the underlying scheduled
 // service is cancelled. Mirrors assertInvoiceVoidable: paid / processing
 // money-states are off-limits (refund is the right path); 'scheduled' is
-// included so a queued send for a cancelled job never goes out.
+// included so a queued send for a cancelled job never goes out, and
+// 'sending' so a cancellation landing while the send is claimed in-flight
+// still voids the invoice (the send finalizer only flips rows still in
+// SEND_FINALIZABLE_STATUSES, so it can't resurrect a void; if it wins the
+// race the row becomes 'sent', which the locked re-check voids anyway).
 const CANCELLED_SERVICE_VOIDABLE_STATUSES = [
   "draft",
   "scheduled",
+  "sending",
   "sent",
   "viewed",
   "overdue",
