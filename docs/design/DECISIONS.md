@@ -581,3 +581,15 @@ The tier price is the full customer total — there is **no separate setup charg
 **Verification:** fresh 646-migration replay (flipped=16) + drift simulation: deleted profile w/ service present → healed with correct alert/14 follow-up policy; deleted profile+service → absent; idempotent re-run → already=15; injected wrong pointer → throws and aborts; down() reverts healed rows to valid `project_required`.
 
 **Durable lesson:** environment catalogs are admin-mutable — cutover migrations must resolve per-key against live state, never assert a replay-derived count.
+
+---
+
+## 2026-06-11 — Specialty services → Service Report V1 (Phase 1b: rodent shadow pilot)
+
+**Decision:** Phase 1b flips **one** trend-type key — `rodent_trapping` — to `completion_mode='service_report'` at **`delivery_mode='internal_only'`** (migration `20260611000016`). Typed CompletionPanel, activity scores, trend words, progress framing, and $0 follow-up CTA all go live for that key; reports render + store (token/PDF) but **no customer SMS/email** sends. Rodent over cockroach because the lead tech runs rodent jobs daily — fastest real-visit feedback loop on the trend machinery before Phase 2 flips the broad batch.
+
+**Scope:** the single core key only. CTA-booked trap checks clone the source visit's service, so the visit chain stays typed end-to-end on `rodent_trapping`. Siblings (`rodent_trapping_followup`, inspection/sanitation/exclusion variants) stay `project_required` until Phase 2 — a manually-booked `rodent_trapping_followup` visit still routes to Projects during the shadow.
+
+**Graduation:** owner reviews stored shadow reports → one-line flip to `auto_send` (separate migration). Rollback = `knex down` (restores `project_required`/`auto_send`; policy columns untouched).
+
+**Verification:** scratch-DB replay at current main: up (1 row, siblings unchanged) / down (exact restore incl. followup alert/3) / re-up.
