@@ -22,7 +22,10 @@ async function executeRetentionTool(toolName, input) {
     }
 
     case 'get_at_risk_customers': {
-      const levels = input.risk_levels || ['critical', 'at_risk', 'watch'];
+      // Default levels cover both engines' vocabularies (the CI scorer
+      // writes at_risk/watch, the v3 scorer writes high/moderate onto the
+      // same current row).
+      const levels = input.risk_levels || ['critical', 'at_risk', 'watch', 'high', 'moderate'];
       const limit = input.limit || 30;
 
       // Get the most recent health score for each customer

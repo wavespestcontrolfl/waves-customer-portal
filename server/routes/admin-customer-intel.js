@@ -33,19 +33,28 @@ router.get('/', async (req, res, next) => {
         .select('h.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'c.phone', 'c.member_since');
     }
 
+    // The current row may carry either scoring engine's churn vocabulary:
+    // this pipeline writes healthy/watch/at_risk/critical, the v3 scorer
+    // (customer-health.js) writes low/moderate/high/critical onto the same
+    // row. Normalize v3 values into the intelligence buckets before
+    // filtering so v3-written rows don't vanish from the at-risk views.
+    const RISK_NORMALIZE = { low: 'healthy', moderate: 'watch', high: 'at_risk' };
+    const normalizeRisk = (r) => RISK_NORMALIZE[r] || r;
+
     // Distribution
     const dist = { healthy: 0, watch: 0, at_risk: 0, critical: 0 };
     let mrrAtRisk = 0;
     for (const s of scores) {
-      dist[s.churn_risk] = (dist[s.churn_risk] || 0) + 1;
-      if (['at_risk', 'critical'].includes(s.churn_risk)) {
+      const risk = normalizeRisk(s.churn_risk);
+      dist[risk] = (dist[risk] || 0) + 1;
+      if (['at_risk', 'critical'].includes(risk)) {
         mrrAtRisk += parseFloat(s.lifetime_value_estimate || 0) / 12;
       }
     }
 
     // At-risk and critical customers
     const atRisk = scores
-      .filter(s => ['at_risk', 'critical'].includes(s.churn_risk))
+      .filter(s => ['at_risk', 'critical'].includes(normalizeRisk(s.churn_risk)))
       .sort((a, b) => (a.overall_score || 100) - (b.overall_score || 100))
       .map(s => ({
         ...s,

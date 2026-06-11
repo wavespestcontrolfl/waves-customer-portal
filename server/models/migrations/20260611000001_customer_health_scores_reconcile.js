@@ -126,8 +126,11 @@ exports.up = async function (knex) {
   // may have accumulated multiple rows per customer. Both writers
   // (customer-health.js and customer-intelligence/health-scorer.js) and all
   // readers treat this table as current-row data (latest per customer);
-  // per-day history belongs in customer_health_history. Archive the
-  // non-latest rows there, then delete them.
+  // per-day history belongs in customer_health_history. Before deleting the
+  // non-latest rows, preserve them losslessly: a full-fidelity JSONB copy of
+  // every column (whatever the live shape is) goes to
+  // customer_health_scores_archive, and a chart-friendly snapshot goes to
+  // customer_health_history.
   const dedupeRanking = `
     SELECT id, ROW_NUMBER() OVER (
       PARTITION BY customer_id
@@ -136,6 +139,33 @@ exports.up = async function (knex) {
     FROM customer_health_scores
     WHERE customer_id IS NOT NULL
   `;
+
+  await knex.raw(`
+    CREATE TABLE IF NOT EXISTS customer_health_scores_archive (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      source_row_id uuid,
+      customer_id uuid,
+      payload jsonb NOT NULL,
+      archived_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await knex.raw(`
+    CREATE INDEX IF NOT EXISTS idx_chs_archive_customer
+    ON customer_health_scores_archive (customer_id)
+  `);
+
+  // to_jsonb(s) captures every column of the row regardless of which schema
+  // variant the live table has — nothing is lost (risk_factors,
+  // churn_signals, upsell_opportunities, next_best_action, engagement_trend,
+  // lifetime_value_estimate, all legacy 037 fields, everything).
+  await knex.raw(`
+    WITH ranked AS (${dedupeRanking})
+    INSERT INTO customer_health_scores_archive (source_row_id, customer_id, payload)
+    SELECT s.id, s.customer_id, to_jsonb(s)
+    FROM customer_health_scores s
+    JOIN ranked r ON r.id = s.id
+    WHERE r.rn > 1
+  `);
 
   if (await knex.schema.hasTable('customer_health_history')) {
     await knex.raw(`
@@ -193,7 +223,9 @@ exports.down = async function (knex) {
   // Columns are intentionally NOT dropped. This migration is an additive,
   // idempotent reconcile over an unknown live shape — dropping columns here
   // could destroy data that 093 (or runtime ensures) legitimately created.
-  // Only the indexes this migration may have created are removed.
+  // Only the indexes this migration may have created are removed. The
+  // customer_health_scores_archive table is intentionally kept — it holds
+  // the only remaining copy of the collapsed historical rows.
   if (await knex.schema.hasTable('customer_health_scores')) {
     await knex.raw('DROP INDEX IF EXISTS idx_customer_health_scores_customer_scored_at');
     await knex.raw('DROP INDEX IF EXISTS idx_customer_health_scores_customer_id_uniq');

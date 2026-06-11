@@ -63,12 +63,14 @@ async function executeBITool(toolName, input) {
         db('customers').where({ active: true }).where('created_at', '>=', somDate).count('* as count').first(),
         db('customers').where('pipeline_stage', 'churned').where('pipeline_stage_changed_at', '>=', somDate).count('* as count').first(),
         db('leads').where('first_contact_at', '>=', somDate).select('status').count('* as count').groupBy('status'),
-        // Top 5 at-risk by value
+        // Top 5 at-risk by value — 'high' included because the v3 scorer
+        // (customer-health.js) writes low/moderate/high/critical onto the
+        // same current row the CI scorer stamps at_risk/critical.
         db('customer_health_scores as h')
           .innerJoin(db.raw(`(SELECT customer_id, MAX(scored_at) as max_date FROM customer_health_scores GROUP BY customer_id) as latest`),
             function () { this.on('h.customer_id', 'latest.customer_id').andOn('h.scored_at', 'latest.max_date'); })
           .innerJoin('customers as c', 'h.customer_id', 'c.id')
-          .whereIn('h.churn_risk', ['critical', 'at_risk'])
+          .whereIn('h.churn_risk', ['critical', 'at_risk', 'high'])
           .where('c.active', true)
           .select('c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'h.overall_score', 'h.churn_risk', 'h.churn_signals')
           .orderBy('c.monthly_rate', 'desc')
