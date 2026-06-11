@@ -15,66 +15,61 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const SCHEDULE_TOOLS = [
   {
     name: 'optimize_all_routes',
-    description: `Run full route optimization for a date using Google Routes API. Reorders all technician stops to minimize total drive time and distance. Two-step pattern: call WITHOUT \`confirmed\` first to preview the new ordering and miles saved, then re-call WITH \`confirmed: true\` after the operator approves to actually write the new route_order. Always preview first.`,
+    description: `Run full route optimization for a date using Google Routes API. Reorders all technician stops to minimize total drive time and distance. Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD to optimize' },
-        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the proposed reorder. Defaults to false (preview only).' },
       },
       required: ['date'],
     },
   },
   {
     name: 'optimize_tech_route',
-    description: `Optimize route for a single technician on a given date. Reorders just their stops. Two-step pattern: call WITHOUT \`confirmed\` first to preview, then re-call WITH \`confirmed: true\` after the operator approves.`,
+    description: `Optimize route for a single technician on a given date. Reorders just their stops. Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD' },
         technician_name: { type: 'string', description: 'Tech name (Adam, Jose, Jacob)' },
-        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the proposed reorder. Defaults to false (preview only).' },
       },
       required: ['date', 'technician_name'],
     },
   },
   {
     name: 'assign_technician',
-    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to Adam" or "assign the Parrish stops to Jose." Two-step pattern: call WITHOUT \`confirmed\` first to show which stops would be reassigned, then re-call WITH \`confirmed: true\` after the operator approves.`,
+    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to Adam" or "assign the Parrish stops to Jose." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
       type: 'object',
       properties: {
         service_ids: { type: 'array', items: { type: 'string' }, description: 'Scheduled service IDs to assign' },
         technician_name: { type: 'string' },
-        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the assignment. Defaults to false (preview only).' },
       },
       required: ['service_ids', 'technician_name'],
     },
   },
   {
     name: 'move_stops_to_day',
-    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week." Two-step pattern: call WITHOUT \`confirmed\` first to preview the moves, then re-call WITH \`confirmed: true\` after the operator approves.`,
+    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
       type: 'object',
       properties: {
         service_ids: { type: 'array', items: { type: 'string' }, description: 'Scheduled service IDs to move' },
         new_date: { type: 'string', description: 'YYYY-MM-DD target date' },
         reason: { type: 'string' },
-        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the moves. Defaults to false (preview only).' },
       },
       required: ['service_ids', 'new_date'],
     },
   },
   {
     name: 'swap_tech_assignments',
-    description: `Swap all stops between two technicians for a date. Use when "give Adam's route to Jose and Jose's to Adam." Two-step pattern: call WITHOUT \`confirmed\` first to preview the swap counts, then re-call WITH \`confirmed: true\` after the operator approves. This touches every stop for both techs on the date — preview is essential.`,
+    description: `Swap all stops between two technicians for a date. Use when "give Adam's route to Jose and Jose's to Adam." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion. This touches every stop for both techs on the date — preview is essential.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string' },
         tech_a_name: { type: 'string' },
         tech_b_name: { type: 'string' },
-        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the swap. Defaults to false (preview only).' },
       },
       required: ['date', 'tech_a_name', 'tech_b_name'],
     },
