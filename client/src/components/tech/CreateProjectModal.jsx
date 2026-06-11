@@ -615,6 +615,11 @@ export default function CreateProjectModal({
   function clearWdoFindingsFromCustomer() {
     const lastApplied = wdoAutoFillRef.current;
     wdoAutoFillRef.current = null;
+    // The intelligence bar remounts on customer change, hiding its
+    // selected-photo chip — but a queued prior-treatment evidence photo
+    // (category 'previous_treatment') would still upload on save. It shows
+    // the PREVIOUS customer's property; never carry it to the next one.
+    setPhotoQueue(prev => prev.filter(p => p.category !== 'previous_treatment'));
     if (!lastApplied) return;
     setFindings(prev => {
       const next = { ...prev };
@@ -964,9 +969,11 @@ export default function CreateProjectModal({
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
                           const phone = c.phone || '';
                           setCustomerLabel([name, phone].filter(Boolean).join(' · ') || c.id);
-                          if (projectType === 'wdo_inspection') {
-                            setFindings(prev => applyCustomerToWdoFindings(prev, c, false));
-                          }
+                          // WDO auto-fill happens ONLY in the
+                          // [projectType, selectedCustomer] effect — applying
+                          // here too would make the effect's prev/next diff
+                          // see no change, so recordAppliedAutoFill would
+                          // record nothing and "Change" couldn't clear it.
                           prefillFromScheduledService(c.id);
                         }}
                         style={{

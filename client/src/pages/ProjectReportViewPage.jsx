@@ -7,6 +7,7 @@ import {
 import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
+import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
 /**
  * Public project-report viewer (WDO, termite, pest, rodent, bed bug).
@@ -236,11 +237,6 @@ const FIELD_LABELS = {
 function humanizeKey(k) {
   return FIELD_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
-
-// Internal/office-only finding keys that must never print on the
-// customer-facing report (inspection_fee is a fee-tier helper for invoicing,
-// not an inspection finding — the invoice carries the actual price).
-const INTERNAL_FINDING_KEYS = new Set(['inspection_fee']);
 
 function formatFindingValue(key, value) {
   const raw = String(value);
