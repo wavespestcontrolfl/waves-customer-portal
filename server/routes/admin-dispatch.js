@@ -1594,10 +1594,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       waveguardCalibrationId = svc.assigned_calibration_id;
     }
 
-    const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch((err) => {
-      logger.warn(`[dispatch] completion profile lookup failed for ${svc.id}: ${err.message}`);
-      return null;
-    });
+    // The profile row is the typed-completion feature flag AND the project
+    // routing gate — failing open on a lookup error would let a cut-over
+    // typed job (or a project-required job) complete through the plain path
+    // with no validation, delivery suppression, or billing gate. Fail closed
+    // (pre-push Codex P1): the resolver already degrades gracefully to the
+    // default profile when the table simply doesn't exist; a throw here is a
+    // real DB error.
+    let completionProfile;
+    try {
+      completionProfile = await resolveCompletionProfileForScheduledService(svc);
+    } catch (err) {
+      logger.error(`[dispatch] completion profile lookup failed for ${svc.id}: ${err.message}`);
+      return res.status(503).json({
+        error: 'Could not verify the completion type for this service. Try again in a moment.',
+        code: 'completion_profile_lookup_failed',
+      });
+    }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
       return res.status(409).json({
         error: 'This service must be completed through a project.',
@@ -2239,9 +2252,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }));
           await trx('service_findings').insert(findingRows);
         }
+        // Typed completions carry their real findings in the snapshot —
+        // the legacy no-activity fallback would stamp "No activity observed"
+        // onto e.g. an active cockroach visit (pre-push Codex P1).
         if (
           useServiceReportV1
           && serviceFindingsAvailable
+          && !typedFindingsType
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
