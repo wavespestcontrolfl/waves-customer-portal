@@ -42,8 +42,12 @@ function serializeProfile(row = null) {
     );
     // The row has been flagged bad — don't half-trust it. Keep only its
     // identity (service key/name/category/billing), the project-flow pointer,
-    // and active state; every BEHAVIOR field resets to conservative defaults
-    // rather than whatever the corrupted service_report row carried.
+    // and active state; every BEHAVIOR field resets FAIL-CLOSED. Portal
+    // policy uses the excluded types' real special-project posture (the
+    // seeded wdo_inspection profile is token_only + recurring_customer —
+    // "keep out of routine service-report surfaces"), NOT the registry's
+    // customer_portal defaults, which would be BROADER sharing than the
+    // legitimate profile this guard is protecting.
     return {
       serviceKey: row.service_key || null,
       serviceName: row.service_name_snapshot || null,
@@ -53,8 +57,8 @@ function serializeProfile(row = null) {
       projectType: row.project_type,
       findingsType: null,
       createsServiceRecord: true,
-      portalVisibility: 'customer_portal',
-      portalAttachPolicy: 'active_portal_customer',
+      portalVisibility: 'token_only',
+      portalAttachPolicy: 'recurring_customer',
       followupPolicy: 'none',
       defaultFollowupDays: null,
       active: row.active !== false,

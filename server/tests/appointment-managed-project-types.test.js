@@ -89,11 +89,14 @@ describe('serializeProfile V1 exclusion coercion', () => {
       delivery_mode: 'review_first',
       active: true,
     });
-    // A flagged row is not half-trusted: identity survives, behavior resets.
+    // A flagged row is not half-trusted: identity survives, behavior resets
+    // FAIL-CLOSED — portal policy matches the seeded WDO special-project
+    // posture (token_only + recurring_customer), not the broader
+    // customer_portal registry defaults.
     expect(profile.completionMode).toBe('special_project');
     expect(profile.createsServiceRecord).toBe(true);
-    expect(profile.portalVisibility).toBe('customer_portal');
-    expect(profile.portalAttachPolicy).toBe('active_portal_customer');
+    expect(profile.portalVisibility).toBe('token_only');
+    expect(profile.portalAttachPolicy).toBe('recurring_customer');
     expect(profile.followupPolicy).toBe('none');
     expect(profile.defaultFollowupDays).toBe(null);
     expect(profile.deliveryMode).toBe('auto_send');
