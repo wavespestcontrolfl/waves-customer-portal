@@ -1144,7 +1144,25 @@ function EventInboxView({ onDraftFromEvent }) {
                     <FreshnessBadge status={ev.freshnessStatus} />
                   </td>
                   <td className="px-3 py-2">
-                    <AdminStatusBadge status={ev.adminStatus} />
+                    <div className="flex items-center gap-1.5">
+                      <AdminStatusBadge status={ev.adminStatus} />
+                      {ev.approvedVia === "auto_curation" && (
+                        <span
+                          title={ev.curationNote || "Approved by auto-curation"}
+                          className="text-10 uppercase tracking-label text-ink-tertiary border-hairline border-zinc-200 rounded px-1 py-0.5"
+                        >
+                          Auto
+                        </span>
+                      )}
+                      {!ev.approvedVia && ev.curatedAt && ev.adminStatus === "pending" && (
+                        <span
+                          title={ev.curationNote || "Examined by auto-curation, left for human review"}
+                          className="text-10 uppercase tracking-label text-ink-tertiary border-hairline border-zinc-200 rounded px-1 py-0.5"
+                        >
+                          Held
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-2 text-12 text-ink-secondary u-nums">
                     {ev.compositeScore ?? "—"}

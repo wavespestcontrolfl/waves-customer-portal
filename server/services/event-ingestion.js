@@ -74,6 +74,14 @@ function revivalResetFields() {
   return {
     normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
     freshness_revival_pending: db.raw(`CASE WHEN ${REVIVAL_COND} THEN true ELSE events_raw.freshness_revival_pending END`, { etMidnight }),
+    // A revival is a NEW occurrence editorially — re-open auto-curation
+    // (event-curation.js excludes rows with curated_at, so a previously
+    // examined-but-not-approved event would otherwise never be looked at
+    // again after its date moved back into the future). Safe for
+    // approved rows: the curation candidate query also requires
+    // admin_status='pending', so clearing the marker can't re-judge them.
+    curated_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curated_at END`, { etMidnight }),
+    curation_note: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curation_note END`, { etMidnight }),
   };
 }
 
