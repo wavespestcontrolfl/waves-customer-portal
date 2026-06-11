@@ -169,3 +169,44 @@ describe('content-guardrails', () => {
     expect(r.findings).toHaveLength(0);
   });
 });
+
+// isFaqBlockedService is the exported single source of truth the GENERATOR
+// side (blog-writer prompt, writer-agent-config) and content-quality-gate
+// condition on. It must match exactly what faqBlockedFinding enforces at
+// publish — same blocklist, same normalization.
+describe('isFaqBlockedService (exported policy helper)', () => {
+  test('is exported alongside FAQ_BLOCKED_SERVICES', () => {
+    expect(typeof guardrails.isFaqBlockedService).toBe('function');
+    expect(guardrails.FAQ_BLOCKED_SERVICES instanceof Set).toBe(true);
+  });
+
+  test('returns true for every id on the blocklist', () => {
+    for (const id of guardrails.FAQ_BLOCKED_SERVICES) {
+      expect(guardrails.isFaqBlockedService(id)).toBe(true);
+    }
+  });
+
+  test('matches display-cased plural blog tags (same normalization as the publish guard)', () => {
+    for (const tag of ['Rodents', 'Termites', 'Spiders', 'Bed Bugs', 'Cockroaches', 'Wasps']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+  });
+
+  test('returns false for non-blocked services/tags', () => {
+    for (const value of ['Mosquitoes', 'Ants', 'Roaches', 'Pest Control', 'pest', 'pest-control', 'Lawn Care', 'lawn-care', '', null, undefined]) {
+      expect(guardrails.isFaqBlockedService(value)).toBe(false);
+    }
+  });
+
+  test('accepts the [category, tag] array form publishAstro uses', () => {
+    expect(guardrails.isFaqBlockedService(['pest-control', 'Rodents'])).toBe(true);
+    expect(guardrails.isFaqBlockedService(['pest-control', 'Mosquitoes'])).toBe(false);
+  });
+
+  test('agrees with the publish-time FAQ_BLOCKED_SERVICE finding for every blocklist id', () => {
+    for (const id of guardrails.FAQ_BLOCKED_SERVICES) {
+      const r = guardrails.evaluate({ body: '## Frequently Asked Questions\nQ: ...' }, { service: id });
+      expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
+    }
+  });
+});

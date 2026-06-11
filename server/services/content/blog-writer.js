@@ -3,6 +3,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { CITIES } = require('./scoring-config');
 const { _internals: uniq } = require('./uniqueness-gate');
+const { isFaqBlockedService } = require('./content-guardrails');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -137,6 +138,23 @@ function conceptCapForCity(city) {
     : SERVICE_AREA_CONCEPT_CITY_CAP;
 }
 
+// ── FAQ-section policy (must mirror content-guardrails) ───────────────
+//
+// publishAstro runs content-guardrails with service: [post.category,
+// post.tag]; any FAQ section on a FAQ-blocked topic ("Rodents", "Termites",
+// "Spiders", "Bed Bugs", …) is a P0 → BLOG_GUARDRAILS_FAILED →
+// publish_failed. An unconditional "include an FAQ section" prompt therefore
+// made every generated post in those tags deterministically unpublishable.
+// The guardrail is the policy (those services must never get FAQ sections),
+// so the GENERATOR conditions on the same imported isFaqBlockedService —
+// single source of truth, the two can never drift.
+const FAQ_SECTION_INSTRUCTION = '- Include a final "Frequently Asked Questions" section with 2-3 question-style H3s and direct answers';
+const NO_FAQ_SECTION_INSTRUCTION = '- Do NOT include any FAQ section. No "Frequently Asked Questions", "FAQ", or "Common Questions" heading or Q&A block anywhere in the post — this topic is on the FAQ-blocked services list and the publish guardrail hard-fails any FAQ section on it. Cover reader questions inline as regular prose/H2 sections instead';
+
+function faqFormatInstruction(serviceFields) {
+  return isFaqBlockedService(serviceFields) ? NO_FAQ_SECTION_INSTRUCTION : FAQ_SECTION_INSTRUCTION;
+}
+
 class BlogWriter {
   async getVoiceConfig() {
     const config = await db('blog_voice_config').where('active', true).first();
@@ -211,7 +229,7 @@ FORMAT:
 - H2 subheadings every 200-300 words (casual, not keyword-stuffed)
 - Short paragraphs (2-4 sentences max)
 - Include 1-2 "pro tip" callouts
-- Include a final "Frequently Asked Questions" section with 2-3 question-style H3s and direct answers
+${faqFormatInstruction([post.category, post.tag])}
 - Include the target keyword naturally 3-5 times
 - End with a practical takeaway + soft Waves mention`;
 
@@ -549,6 +567,9 @@ const blogWriter = new BlogWriter();
 // Pure helpers exposed for unit testing the idea-generation gate.
 blogWriter._internals = {
   BLOG_TAGS,
+  faqFormatInstruction,
+  FAQ_SECTION_INSTRUCTION,
+  NO_FAQ_SECTION_INSTRUCTION,
   normalizeTag,
   conceptKey,
   slugify,

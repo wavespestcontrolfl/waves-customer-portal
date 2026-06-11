@@ -108,9 +108,21 @@ function blockedServiceCandidates(service) {
   return [...out];
 }
 
+/**
+ * isFaqBlockedService(service) → bool — single source of truth for "this
+ * topic must NOT get an FAQ section". Accepts the same string-or-array input
+ * as the publish-time guard (e.g. [post.category, post.tag]) and applies the
+ * same normalization (lowercase, hyphenate, de-pluralize). Exported so the
+ * GENERATOR side (blog-writer prompt, writer-agent-config) and the quality
+ * gate condition on the exact blocklist this module enforces at publish —
+ * the two sides can never drift.
+ */
+function isFaqBlockedService(service) {
+  return blockedServiceCandidates(service).some((c) => FAQ_BLOCKED_SERVICES.has(c));
+}
+
 function faqBlockedFinding(body, service) {
-  const isBlocked = blockedServiceCandidates(service).some((c) => FAQ_BLOCKED_SERVICES.has(c));
-  if (!isBlocked) return null;
+  if (!isFaqBlockedService(service)) return null;
   if (/\b(faq|frequently asked|common questions)\b/i.test(String(body || ''))) {
     const label = Array.isArray(service) ? service.filter(Boolean).join('/') : service;
     return finding('P0', 'FAQ_BLOCKED_SERVICE', `Service "${label}" is on the FAQ-blocked list — remove the FAQ section.`);
@@ -178,8 +190,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 
 module.exports = {
   evaluate,
-  // exposed for tests
+  // single source of truth for the FAQ-section policy — consumed by
+  // blog-writer, writer-agent-config, and content-quality-gate so the
+  // generators/gates can never contradict the publish-time guard.
+  isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates },
 };
