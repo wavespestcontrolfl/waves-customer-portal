@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 
@@ -121,13 +121,25 @@ async function performPropertyLookup(address) {
   const timing = getLookupTimingConfig();
   result.meta.budgetMs = timing.totalBudgetMs;
 
+  // ── STEP 0: Geocode ──
+  // The canonical Google address + county steer the county-record gates and
+  // AI prompts in Step 1; lat/lng feeds the satellite step. Fail-open: on
+  // geocode failure the search falls back to the raw typed address, and the
+  // satellite step is skipped exactly as it was when geocoding lived there.
+  let geo = null;
+  try {
+    geo = await geocodeAddress(address, timing.mapsTimeoutMs);
+  } catch (err) {
+    result.errors.push({ source: 'satellite', message: err.message });
+  }
+
   // ── STEP 1: AI property search ──
   // Pull pricing-relevant public facts (sqft, lot, year built, beds, baths,
   // stories, construction) from listing sites, county appraisers, builder
   // floorplans, and permit data through Claude/OpenAI/Gemini search. The shaped object
   // intentionally matches the old normalized property-record shape so the
   // pricing engine and field-verify logic do not need a provider branch.
-  const aiProperty = await lookupPropertyFromAITrio(address).catch((err) => {
+  const aiProperty = await lookupPropertyFromAITrio(address, geo).catch((err) => {
     result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
     return null;
   });
@@ -136,10 +148,9 @@ async function performPropertyLookup(address) {
     result.rentcast = aiProperty;
   }
 
-  // ── STEP 2: Geocode + Satellite Images ──
+  // ── STEP 2: Satellite Images ──
   let lat, lng;
-  try {
-    const geo = await geocodeAddress(address, timing.mapsTimeoutMs);
+  if (geo) try {
     lat = geo.lat;
     lng = geo.lng;
 
@@ -357,7 +368,7 @@ async function performPropertyLookup(address) {
       const storyBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
       let aiStories = null;
       if (storyBudgetMs >= timing.storiesMinRemainingMs) {
-        aiStories = await lookupStoriesFromAI(address, hints, {
+        aiStories = await lookupStoriesFromAI(canonicalLookupAddress(address, geo), hints, {
           timeoutMs: Math.min(storyBudgetMs, timing.storiesTimeoutMs),
         }).catch((err) => {
           result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
@@ -459,6 +470,30 @@ function normalizeRoof(raw) {
 // ─────────────────────────────────────────────
 // GEOCODE
 // ─────────────────────────────────────────────
+// Shapes one Google geocoder result into the geo context consumed by the
+// county-record gates and AI prompts. partialMatch flags low-trust results
+// (typo'd / ambiguous input) so gates can ignore the geo signal while the
+// satellite step still gets usable coordinates.
+function parseGeocodeResult(result) {
+  if (!result?.geometry?.location) return null;
+  const components = Array.isArray(result.address_components) ? result.address_components : [];
+  const findComponent = (type) => components.find((c) => Array.isArray(c.types) && c.types.includes(type)) || null;
+  const county = findComponent('administrative_area_level_2');
+  const state = findComponent('administrative_area_level_1');
+  const city = findComponent('locality') || findComponent('sublocality') || findComponent('postal_town');
+  const zip = findComponent('postal_code');
+  return {
+    lat: result.geometry.location.lat,
+    lng: result.geometry.location.lng,
+    formattedAddress: result.formatted_address || null,
+    county: county ? county.long_name.replace(/\s+County$/i, '').trim() : null,
+    state: state ? state.short_name : null,
+    city: city ? city.long_name : null,
+    zip: zip ? zip.long_name : null,
+    partialMatch: result.partial_match === true,
+  };
+}
+
 async function geocodeAddress(address, timeoutMs = DEFAULT_MAPS_TIMEOUT_MS) {
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   if (!mapsKey) throw new Error('No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured');
@@ -470,8 +505,9 @@ async function geocodeAddress(address, timeoutMs = DEFAULT_MAPS_TIMEOUT_MS) {
     if (data.status !== 'OK' || !data.results?.length) {
       throw new Error(`Geocode failed: ${data.status}`);
     }
-    const loc = data.results[0].geometry.location;
-    return { lat: loc.lat, lng: loc.lng };
+    const geo = parseGeocodeResult(data.results[0]);
+    if (!geo) throw new Error('Geocode failed: result missing geometry');
+    return geo;
   } catch (err) {
     if (isTimeoutFailure(err, timeout)) throw timeoutError('Google geocode', timeoutMs);
     throw err;
@@ -2347,3 +2383,6 @@ module.exports.performPropertyLookup = performPropertyLookup;
 module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
+module.exports._private = {
+  parseGeocodeResult,
+};
