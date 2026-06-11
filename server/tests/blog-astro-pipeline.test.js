@@ -25,8 +25,12 @@ jest.mock('../services/content-astro/author-service', () => ({
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
 }));
+jest.mock('../services/content/fact-check-gate', () => ({
+  evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
+}));
 
 const db = require('../models/db');
+const factCheckGate = require('../services/content/fact-check-gate');
 const gh = require('../services/content-astro/github-client');
 const authorService = require('../services/content-astro/author-service');
 const { validateBlogFrontmatter } = require('../services/content-astro/schema-validator');
@@ -462,6 +466,26 @@ describe('blog Astro frontmatter validation', () => {
 describe('Astro publisher autonomous draft adapter', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+  });
+
+  test('blocks an autonomous publish when the fact-check finds a P1 error (no branch/PR opened)', async () => {
+    factCheckGate.evaluate.mockResolvedValueOnce({
+      pass: false,
+      checked: true,
+      findings: [{ severity: 'P1', code: 'FACTUAL_ERROR', message: 'wrong pathogen: C. jacksonii is cool-season' }],
+    });
+    const frontmatter = validFrontmatter({
+      title: 'Autonomous Dollar Spot in Venice',
+      slug: '/autonomous-dollar-spot-venice/',
+      canonical: 'https://www.wavespestcontrol.com/autonomous-dollar-spot-venice/',
+    });
+    await expect(AstroPublisher.publishOrUpdatePage(
+      { type: 'draft', frontmatter, body: 'Dollar spot guidance for Venice lawns.' },
+      { action_type: 'new_supporting_blog' },
+    )).rejects.toMatchObject({ code: 'BLOG_FACTCHECK_FAILED' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
   });
 
   test('opens an Astro PR from a supported emitted blog draft', async () => {

@@ -736,6 +736,28 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
   const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 
+  // LLM fact-check (same gate as the admin publish path) before any branch is
+  // cut, so a factual error never opens an orphan PR. The autonomous runner's
+  // upstream gates are rule-based (quality, uniqueness) — none catch a wrong
+  // species/ingredient/ordinance fact. Fail-open; blocks only on P0/P1.
+  const factCheck = await factCheckGate.evaluate({
+    title: frontmatter.title,
+    body,
+    city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
+    keyword: frontmatter.primary_keyword,
+    tag: frontmatter.category,
+  });
+  if (!factCheck.pass) {
+    const blocking = factCheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    const fErr = new Error(`fact-check failed: ${blocking.map((f) => `${f.severity} ${f.message}`).join(' | ')}`);
+    fErr.code = 'BLOG_FACTCHECK_FAILED';
+    fErr.details = blocking;
+    throw fErr;
+  }
+  if (factCheck.findings.length) {
+    logger.info(`[astro-publisher] fact-check advisory for ${slug}: ${factCheck.findings.map((f) => f.message).join(' | ')}`);
+  }
+
   await gh.createBranch(branch);
   const fileCommit = await gh.putFile({
     path: filePath,
