@@ -18,6 +18,13 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const MODELS = require('../config/models');
 const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
+const {
+  applyVerifiedOverrides,
+  getCachedLookup,
+  getVerifiedOverrides,
+  saveLookup,
+  saveVerifiedOverride,
+} = require('../services/property-lookup/lookup-cache');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 
@@ -100,7 +107,21 @@ function isTimeoutFailure(err, timeout) {
 // public-property-lookup.js can run the same AI search + satellite + trio
 // AI vision pipeline without duplicating the logic.
 // ─────────────────────────────────────────────
-async function performPropertyLookup(address) {
+async function performPropertyLookup(address, options = {}) {
+  const t0 = Date.now();
+
+  // ── STEP -1: Cache ──
+  // A verified-fresh row answers without re-running geocode/search/vision —
+  // faster, free, and day-to-day consistent. options.refresh forces a live
+  // lookup (still re-applying verified overrides and re-saving at the end).
+  const verifiedOverrides = await getVerifiedOverrides(address);
+  if (!options.refresh) {
+    const cached = await getCachedLookup(address);
+    if (cached) {
+      return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
+    }
+  }
+
   const result = {
     address: String(address).trim(),
     propertyRecord: null,
@@ -113,12 +134,16 @@ async function performPropertyLookup(address) {
     enriched: null,
     errors: [],
     meta: {
-      timestamp: new Date().toISOString(),
+      // Anchored to t0 — BEFORE the overrides snapshot above. saveLookup
+      // stores this as data_saved_at, so an override verified mid-lookup
+      // (after the snapshot, thus not applied to this result) compares as
+      // NEWER than the data and invalidates the first subsequent cache hit.
+      timestamp: new Date(t0).toISOString(),
       lookupMs: 0,
+      cache: options.refresh ? 'refresh' : 'miss',
     }
   };
 
-  const t0 = Date.now();
   const timing = getLookupTimingConfig();
   result.meta.budgetMs = timing.totalBudgetMs;
 
@@ -147,6 +172,13 @@ async function performPropertyLookup(address) {
   if (aiProperty) {
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
+  }
+
+  // Tech-verified corrections beat every remote source — applied before the
+  // satellite/vision steps so prompts see the corrected facts, and the
+  // stories fallback skips entirely when a tech verified the story count.
+  if (verifiedOverrides && result.propertyRecord) {
+    applyVerifiedOverrides(result.propertyRecord, verifiedOverrides);
   }
 
   // ── STEP 2: Satellite Images ──
@@ -418,6 +450,11 @@ async function performPropertyLookup(address) {
   }
 
   // ── STEP 4: Enrich — merge all data sources ──
+  // A verified story count is a field correction, not an AI answer — restamp
+  // provenance after the stories fallback so the client nudge stays quiet.
+  if (verifiedOverrides?.stories && result.propertyRecord) {
+    result.propertyRecord._storiesSource = 'verified';
+  }
   result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm);
 
   // Clean up internal fields before sending to client
@@ -430,23 +467,105 @@ async function performPropertyLookup(address) {
   }
 
   result.meta.lookupMs = Date.now() - t0;
+
+  // ── STEP 5: Persist ── (fail-open; never caches a failed lookup)
+  await saveLookup(address, result);
+
   return result;
+}
+
+// Rebuilds a full lookup response from a cached row: satellite URLs are
+// regenerated from the stored lat/lng with the CURRENT maps key (keyed URLs
+// are never stored), enriched is recomputed live (modifier logic evolves —
+// enriched_snapshot is lead-history only), and verified overrides re-apply
+// on every hit because they never expire.
+function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) {
+  const record = applyVerifiedOverrides(row.property_record, verifiedOverrides);
+  const aiAnalysis = row.ai_analysis || null;
+  const lat = row.lat == null ? null : Number(row.lat);
+  const lng = row.lng == null ? null : Number(row.lng);
+  if (verifiedOverrides?.stories && record) record._storiesSource = 'verified';
+
+  const result = {
+    address: String(address).trim(),
+    propertyRecord: record,
+    rentcast: record,
+    avm: null,
+    satellite: buildSatelliteUrlSet(lat, lng),
+    aiAnalysis,
+    enriched: buildEnrichedProfile(record, aiAnalysis, lat, lng, null),
+    errors: [],
+    meta: {
+      timestamp: new Date().toISOString(),
+      lookupMs: Date.now() - t0,
+      cache: 'hit',
+      cachedAt: row.updated_at || null,
+    },
+  };
+  return result;
+}
+
+// Client-facing satellite URL set (no vision base64s — cache hits skip the
+// vision pipeline entirely; the stored aiAnalysis already covers it).
+function buildSatelliteUrlSet(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!mapsKey) return null;
+  const urlAtZoom = (zoom) => `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=${zoom}&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
+  return {
+    lat,
+    lng,
+    microCloseUrl: urlAtZoom(22),
+    ultraCloseUrl: urlAtZoom(21),
+    superCloseUrl: urlAtZoom(20),
+    closeUrl: urlAtZoom(19),
+    wideUrl: urlAtZoom(18),
+    inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
+                     lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
+  };
 }
 
 // ─────────────────────────────────────────────
 // MAIN ROUTE — admin/tech-gated thin wrapper over performPropertyLookup
 // ─────────────────────────────────────────────
 router.post('/property-lookup', async (req, res) => {
-  const { address } = req.body;
+  const { address, refresh } = req.body;
   if (!address || address.trim().length < 5) {
     return res.status(400).json({ error: 'Address required' });
   }
   try {
-    const result = await performPropertyLookup(address);
+    const result = await performPropertyLookup(address, { refresh: refresh === true });
     result.meta.providerStatus = buildProviderStatus();
     res.json(result);
   } catch (err) {
     logger.error(`[property-lookup] ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// FIELD-VERIFIED OVERRIDES — a tech standing on the property beats every
+// remote source. Whitelisted fields only; overrides never expire and
+// re-apply to cached AND fresh lookups of the same address.
+// (Router-level adminAuthenticate + requireTechOrAdmin already cover this.)
+// ─────────────────────────────────────────────
+router.post('/property-lookup/verify', async (req, res) => {
+  const { address, fields } = req.body || {};
+  if (!address || String(address).trim().length < 5) {
+    return res.status(400).json({ error: 'Address required' });
+  }
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    return res.status(400).json({ error: 'fields object required' });
+  }
+  try {
+    const verifiedBy = req.technician?.name || req.technician?.email || `tech:${req.technicianId}`;
+    const saved = await saveVerifiedOverride(address, fields, String(verifiedBy));
+    if (!saved) {
+      return res.status(400).json({ error: 'No verifiable fields in payload' });
+    }
+    res.json({ success: true, verifiedFields: Object.keys(saved) });
+  } catch (err) {
+    logger.error(`[property-lookup] verify failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1346,6 +1465,9 @@ function mergeField(rcValue, aiValue, fallback) {
 }
 
 function mergePool(rc, ai) {
+  // A tech-verified pool answer beats records AND vision — a verified NO
+  // means the pool the satellite sees is the neighbor's.
+  if (rc?._fieldEvidence?.hasPool?.sourceType === 'verified') return rc.hasPool ? 'YES' : 'NO';
   // Property-record YES is authoritative. Satellite AI can upgrade but not downgrade.
   if (rc?.hasPool) return 'YES';
   if (ai?.pool === 'YES') return 'POSSIBLE'; // AI sees pool but RC doesn't — could be neighbor
@@ -1597,8 +1719,10 @@ function buildFieldVerifyFlags(rc, ai) {
     });
   }
 
-  // Satellite AI pool signal disagrees with property records.
-  if (rc?.hasPool === false && ai?.pool === 'YES') {
+  // Satellite AI pool signal disagrees with property records — unless a tech
+  // already verified the answer on site (the AI's pool is the neighbor's).
+  if (rc?.hasPool === false && ai?.pool === 'YES'
+      && rc?._fieldEvidence?.hasPool?.sourceType !== 'verified') {
     flags.push({
       field: 'pool',
       reason: 'AI detected possible pool not in property records — verify (may be neighbor)',
