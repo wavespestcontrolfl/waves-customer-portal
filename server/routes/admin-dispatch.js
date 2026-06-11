@@ -4067,21 +4067,41 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
         code: 'followup_source_not_completed',
       });
     }
+    // The completion must have actually run the typed flow: after cutover a
+    // service's older completions have no typed snapshot — they never earned
+    // the CTA, so they can't mint an included $0 follow-up (Codex P2). The
+    // snapshot type must match the profile that owes the follow-up.
+    const sourceRecord = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first()
+      .catch(() => null);
+    const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
+    if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) {
+      return res.status(409).json({
+        error: 'This visit was not completed through the typed report flow.',
+        code: 'followup_no_typed_completion',
+      });
+    }
     const suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
     let followupRequired = !!suggestion?.required;
     if (followupRequired && profile.findingsType === 'cockroach') {
-      const sourceRecord = await db('service_records')
-        .where({ scheduled_service_id: svc.id })
-        .orderBy('created_at', 'desc')
-        .first()
-        .catch(() => null);
-      const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
       if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
     }
     if (!followupRequired) {
       return res.status(409).json({
         error: 'This completed visit does not call for a follow-up appointment.',
         code: 'followup_not_required',
+      });
+    }
+    // The CTA books exactly the program-interval date the completion computed;
+    // any other date is normal scheduling, not an included $0 follow-up
+    // (Codex P2 — this is not a generic booking API).
+    if (!suggestion.suggestedDate || String(date) !== String(suggestion.suggestedDate)) {
+      return res.status(409).json({
+        error: `Follow-up must be booked for the program-interval date${suggestion.suggestedDate ? ` (${suggestion.suggestedDate})` : ''}.`,
+        code: 'followup_date_mismatch',
+        suggestedDate: suggestion.suggestedDate || null,
       });
     }
 
