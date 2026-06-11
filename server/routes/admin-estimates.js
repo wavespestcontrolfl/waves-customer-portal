@@ -1284,6 +1284,54 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
   }
 });
 
+// Estimate status values backed by the estimates_status_check constraint
+// (models/migrations/20260518000003_estimate_scheduled_send_claims.js).
+const ESTIMATE_STATUSES = [
+  'draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed',
+  'accepted', 'declined', 'expired',
+];
+
+// The only status the admin UI writes through the generic PATCH is
+// 'declined' (decline modals in EstimatePage / EstimateModalsV2 /
+// OpportunityActions). Every other transition is owned by a deliberate
+// path that stamps timestamps, locks pricing, or fires side effects:
+//   accepted              → POST /:id/mark-accepted or the public accept
+//   scheduled/sending/
+//   send_failed/sent      → POST /:id/send + the scheduled-send cron claims
+//   expired               → expiry cron; revival via POST /:id/extend
+// Terminal statuses are not writable here: flipping accepted→sent would
+// re-arm the public accept link (its guard is whereNotIn accepted/declined/
+// expired) and re-run EstimateConverter — tier/monthly_rate rewritten and a
+// duplicate first-application invoice.
+const PATCHABLE_STATUS_TRANSITIONS = {
+  draft: ['declined'],
+  scheduled: ['declined'],
+  send_failed: ['declined'],
+  sent: ['declined'],
+  viewed: ['declined'],
+  // sending / accepted / declined / expired: no generic-PATCH transitions
+};
+
+function resolveEstimateStatusPatch(currentStatus, nextStatus) {
+  if (typeof nextStatus !== 'string' || !ESTIMATE_STATUSES.includes(nextStatus)) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      error: `Invalid status '${String(nextStatus)}'. Must be one of: ${ESTIMATE_STATUSES.join(', ')}.`,
+    };
+  }
+  if (nextStatus === currentStatus) return { ok: true, noop: true };
+  const allowed = PATCHABLE_STATUS_TRANSITIONS[currentStatus] || [];
+  if (!allowed.includes(nextStatus)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      error: `Cannot change status from '${currentStatus}' to '${nextStatus}' here. Use the dedicated flow instead (mark-accepted, send, or extend).`,
+    };
+  }
+  return { ok: true, noop: false };
+}
+
 // PATCH /api/admin/estimates/:id — update priority, decline reason, status
 router.patch('/:id', async (req, res, next) => {
   try {
@@ -1320,13 +1368,27 @@ router.patch('/:id', async (req, res, next) => {
       updates.bill_by_invoice = nextBillByInvoice;
     }
     if (req.body.status !== undefined) {
-      updates.status = req.body.status;
-      if (req.body.status === 'declined') updates.declined_at = db.fn.now();
+      const verdict = resolveEstimateStatusPatch(estimate.status, req.body.status);
+      if (!verdict.ok) return res.status(verdict.httpStatus).json({ error: verdict.error });
+      // Same-status writes are a no-op for the status column (no declined_at
+      // re-stamp); other fields in the same request still persist below.
+      if (!verdict.noop) {
+        updates.status = req.body.status;
+        if (req.body.status === 'declined') updates.declined_at = db.fn.now();
+      }
     }
 
     if (Object.keys(updates).length === 0) return res.json({ success: true });
 
-    await db('estimates').where({ id: req.params.id }).update(updates);
+    // Status flips are guarded optimistically: the UPDATE only lands while
+    // the row still holds the status we validated against, so a customer
+    // accept racing this PATCH can't be silently overwritten.
+    let updateQuery = db('estimates').where({ id: req.params.id });
+    if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status });
+    const updatedCount = await updateQuery.update(updates);
+    if (!updatedCount) {
+      return res.status(409).json({ error: 'Estimate changed while you were editing. Refresh and retry.' });
+    }
     logger.info(`[estimates] Updated estimate ${req.params.id}: ${JSON.stringify(Object.keys(updates))}`);
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -1376,6 +1438,7 @@ router._internals = {
   sendEstimateEmail,
   estimateEmailIdempotencyKey,
   smtpFallbackAllowed,
+  resolveEstimateStatusPatch,
 };
 
 module.exports = router;
