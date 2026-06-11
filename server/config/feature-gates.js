@@ -57,6 +57,16 @@ const gates = {
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 
+  // Hermes Worker — machine-to-machine claim/report contract for the Hermes
+  // (Docker) acquisition agent. Off in prod until the worker is deployed and
+  // HERMES_SERVICE_TOKEN is set; the auth middleware also fails closed without it.
+  hermesWorker: isProd ? process.env.GATE_HERMES_WORKER === 'true' : true,
+
+  // Link Prospect Outreach — auto-serve of outreach-lane prospects to the worker.
+  // Default OFF everywhere; outbound sends from the primary inbox stay
+  // human-approval-gated until volume/quality is proven (M3b).
+  linkProspectOutreach: process.env.GATE_LINK_OUTREACH === 'true',
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.

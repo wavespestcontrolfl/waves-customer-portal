@@ -230,15 +230,19 @@ GET  /api/admin/backlink-agent/prospects/claim?n=10&type=signup|outreach
          claimed_at/claimed_by='hermes' under a transaction + FOR UPDATE SKIP LOCKED
          so parallel Hermes subagents never grab the same row. Returns work packets.
 
-POST /api/admin/backlink-agent/prospects/report
-       body: { prospect_id, outcome: 'placed'|'failed'|'skipped',
+POST /api/integrations/backlink-worker/report
+       body: { prospect_id, lease_token, outcome: 'placed'|'failed'|'skipped',
                live_url, claimed_anchor, evidence_url, notes, cost }
        → records the CLAIM only: status 'prospect'→'placed' (never straight to 'live').
          The nightly verifier (§4.1) + GSC (§4.2) independently promote to live/indexed.
+       Guards: 'placed' REQUIRES live_url (else the row is verifier-invisible and
+       unclaimable → 400). lease_token (the claimed_at from /claim) is REQUIRED and the
+       update is conditional on it — a late report from a swept/reclaimed lease affects
+       0 rows and returns 409 (stale_lease), so it can't clobber another worker's claim.
 ```
 
-Lease expiry: a sweep returns `claimed_at` older than N hours back to `prospect`
-(stuck-worker recovery), mirroring the existing queue `retry` pattern.
+Lease expiry: an hourly sweep returns `claimed_at` older than N hours (default 6) back to
+`prospect` (stuck-worker recovery). The lease_token is that `claimed_at` timestamp.
 
 ---
 
@@ -339,7 +343,14 @@ Env: `HERMES_SERVICE_TOKEN` (claim/report auth), `HERMES_BASE_URL` (if portal ev
 - **M1 — Board (no Hermes):** migration + routes + UI + manual add + verifier + GSC indexer.
   Delivers the requested tracker immediately, fed by the strategist + manual entry.
 - **M2 — Strategist feed:** ✅ SHIPPED — `create_link_prospects` / `list_prospects` tools.
-- **M3 — Hermes hands:** claim/report contract + Hermes deployment + approval-gated outreach.
+- **M3 — Hermes hands:**
+  - **M3a — claim/report contract:** ✅ SHIPPED — `GET/POST /api/integrations/backlink-worker/{claim,report}`
+    (service-token auth `hermes-auth.js`, `hermesWorker` gate), `link-prospect-worker.js`
+    (FOR UPDATE SKIP LOCKED lease; `report` only moves prospects to `placed` — verifier promotes
+    to live), hourly lease-expiry sweep. Env: `HERMES_SERVICE_TOKEN`, `GATE_HERMES_WORKER`,
+    `GATE_LINK_OUTREACH`. Outreach lane stays unserved until `linkProspectOutreach` is on.
+  - **M3b — approval-gated outreach send** (Gmail OAuth, `contact@wavespestcontrol.com`, rate-limit) — TODO.
+  - **M3c — Hermes agent deployment** (Docker, skill that calls claim/report) — infra, not repo code — TODO.
 - **M4 — Cutover:** retire Playwright worker per §11.
 
 M1 alone satisfies "Backlink Manager with all the columns." Hermes is M3 — additive, gated,

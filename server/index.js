@@ -393,6 +393,7 @@ app.use('/api/admin/equipment-systems', require('./routes/admin-equipment-system
 app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/integrations', require('./routes/admin-integrations'));
+app.use('/api/integrations/backlink-worker', require('./routes/integrations-backlink-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
