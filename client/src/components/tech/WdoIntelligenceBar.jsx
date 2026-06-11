@@ -73,6 +73,15 @@ export default function WdoIntelligenceBar({
   const contextRef = useRef(contextKey);
   contextRef.current = contextKey;
 
+  // Loading flags are owned by the LATEST request of each kind, not by the
+  // context: a request whose context went stale (e.g. the tech edited the
+  // address mid-lookup) must still stop its own spinner — only its RESULT is
+  // dropped. Guarding the finally on context (like the result) left
+  // analyzing/historyLoading stuck true after an address edit, because the
+  // reset effect below deliberately ignores address changes.
+  const analyzeSeqRef = useRef(0);
+  const historySeqRef = useRef(0);
+
   // When the customer/project context changes, wipe any completed lookup so
   // its panels (with their Apply / Replace-fields buttons) can't push the
   // previous property's data into the new context's findings. The property
@@ -120,6 +129,7 @@ export default function WdoIntelligenceBar({
       return;
     }
     const startedFor = contextRef.current;
+    const seq = ++historySeqRef.current;
     setHistoryLoading(true);
     setError('');
     setHistoryApplied(false);
@@ -147,7 +157,9 @@ export default function WdoIntelligenceBar({
       if (contextRef.current !== startedFor) return;
       setError(e.message || 'WDO history lookup failed');
     } finally {
-      if (contextRef.current === startedFor) setHistoryLoading(false);
+      // Latest-request guard, NOT a context guard: a newer lookup owns the
+      // spinner; a stale-context response still ends its own.
+      if (historySeqRef.current === seq) setHistoryLoading(false);
     }
   }
 
@@ -186,6 +198,7 @@ export default function WdoIntelligenceBar({
     }
 
     const startedFor = contextRef.current;
+    const seq = ++analyzeSeqRef.current;
     setAnalyzing(true);
     setError('');
     setApplied(false);
@@ -215,7 +228,9 @@ export default function WdoIntelligenceBar({
       if (contextRef.current !== startedFor) return;
       setError(e.message || 'WDO intelligence failed');
     } finally {
-      if (contextRef.current === startedFor) setAnalyzing(false);
+      // Latest-request guard, NOT a context guard: a newer analyze owns the
+      // spinner; a stale-context response still ends its own.
+      if (analyzeSeqRef.current === seq) setAnalyzing(false);
     }
   }
 
