@@ -18,6 +18,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 jest.mock('../models/db', () => {
   const fn = jest.fn();
@@ -116,9 +117,36 @@ const FROZEN_LEGACY_BARE_WRITES_2026_06_11 = Object.freeze([
   'run_tax_advisor',
 ]);
 
-// Live legacy list — must always be a subset of the frozen snapshot above.
-// Remove entries from BOTH lists when a tool migrates or is deleted.
-const LEGACY_BARE_WRITES = [...FROZEN_LEGACY_BARE_WRITES_2026_06_11];
+// SHA-256 over the sorted frozen snapshot. The snapshot is a historical
+// record and never changes — not even for removals (removals happen in the
+// LIVE list below). Editing the snapshot therefore also requires editing
+// this constant: tampering is double-entry and unmistakably deliberate.
+const FROZEN_SNAPSHOT_SHA256 = '8abf4a31b0c0f6689dd5be9eb675041e4c25cd52bbc0eeae0dcb54d0a576509c';
+
+// LIVE legacy list — maintained separately from the frozen snapshot, and
+// must always be a subset of it. When a tool migrates to the #1568
+// mechanism or is deleted, remove it HERE (the snapshot above stays put).
+const LEGACY_BARE_WRITES = [
+  'update_customer',
+  'bulk_update_customers',
+  'create_appointment',
+  'reschedule_appointment',
+  'cancel_appointment',
+  'send_sms',
+  'update_lead_status',
+  'bulk_update_leads',
+  'submit_review_reply',
+  'trigger_review_request',
+  'send_email_reply',
+  'reply_via_sms',
+  'block_sender',
+  'create_pending_estimate',
+  'toggle_estimate_v2_view',
+  'toggle_show_one_time_option',
+  'run_price_lookup',
+  'approve_price',
+  'run_tax_advisor',
+];
 
 // Tools that never mutate business data. Drafting tools (draft_sms,
 // draft_review_reply, draft_email_reply) and proposal-only tools
@@ -223,11 +251,96 @@ describe('intelligence bar write-gate contract (issue #1568)', () => {
     expect(misfiled).toEqual([]);
   });
 
+  test('frozen snapshot is tamper-evident (hash pinned)', () => {
+    const digest = crypto.createHash('sha256')
+      .update([...FROZEN_LEGACY_BARE_WRITES_2026_06_11].sort().join('\n'))
+      .digest('hex');
+    // If this fails you edited the frozen snapshot. The snapshot never
+    // changes — removals belong in LEGACY_BARE_WRITES, additions are
+    // forbidden outright.
+    expect(digest).toBe(FROZEN_SNAPSHOT_SHA256);
+  });
+
   test('legacy bare writes are a subset of the frozen 2026-06-11 snapshot — additions are impossible, only removals', () => {
     const frozen = new Set(FROZEN_LEGACY_BARE_WRITES_2026_06_11);
     const added = LEGACY_BARE_WRITES.filter(n => !frozen.has(n));
     // A name here means someone tried to register a NEW bare write. That is
     // forbidden: use WRITE_TWO_STEP or the #1568 UI-backed mechanism.
     expect(added).toEqual([]);
+  });
+});
+
+// ─── BEHAVIORAL CONTRACT ────────────────────────────────────────
+// Schema declaration is not proof: a write could declare `confirmed` and
+// ignore it. Exercise every two-step executor WITHOUT confirmed against a
+// recording knex mock and assert zero mutations reach the database.
+
+function makeRecordingDb() {
+  const mutations = [];
+  const MUTATING_OPS = new Set(['insert', 'update', 'del', 'delete', 'increment', 'decrement', 'truncate', 'upsert']);
+
+  function makeBuilder(table) {
+    const state = { single: false };
+    const builder = new Proxy(function () {}, {
+      get(_target, prop) {
+        if (prop === 'then') {
+          // Awaiting the builder: .first() chains resolve undefined (no row),
+          // list queries resolve [] (no rows).
+          return (resolve) => resolve(state.single ? undefined : []);
+        }
+        if (prop === 'first') {
+          return () => { state.single = true; return builder; };
+        }
+        if (MUTATING_OPS.has(prop)) {
+          return (...args) => { mutations.push({ table, op: String(prop), args }); return builder; };
+        }
+        // Any other builder method chains.
+        return () => builder;
+      },
+    });
+    return builder;
+  }
+
+  const db = (table) => makeBuilder(table);
+  db.raw = (...args) => ({ __raw: args });
+  db.transaction = async (cb) => cb((table) => makeBuilder(table));
+  return { db, mutations };
+}
+
+describe('two-step writes do not mutate without confirmed (behavioral)', () => {
+  const dbMock = require('../models/db');
+
+  // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
+  const UNCONFIRMED_CALLS = [
+    ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
+    ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
+    ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
+    ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: ['00000000-0000-0000-0000-000000000001'], technician_name: 'Adam' }],
+    ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: ['00000000-0000-0000-0000-000000000001'], new_date: '2026-06-12' }],
+    ['schedule-tools', 'executeScheduleTool', 'swap_tech_assignments', { date: '2026-06-11', tech_a_name: 'Adam', tech_b_name: 'Jose' }],
+  ];
+
+  test('harness sanity: the recording db actually records mutations', async () => {
+    const { db, mutations } = makeRecordingDb();
+    await db('sanity_table').insert({ a: 1 });
+    expect(mutations).toEqual([expect.objectContaining({ table: 'sanity_table', op: 'insert' })]);
+  });
+
+  test('every WRITE_TWO_STEP tool is exercised by this behavioral contract', () => {
+    expect(UNCONFIRMED_CALLS.map(c => c[2]).sort()).toEqual([...WRITE_TWO_STEP].sort());
+  });
+
+  test.each(UNCONFIRMED_CALLS)('%s %s: unconfirmed %s performs zero DB mutations', async (mod, exec, toolName, input) => {
+    const { db, mutations } = makeRecordingDb();
+    dbMock.mockImplementation(db);
+    dbMock.raw.mockImplementation(db.raw);
+    dbMock.transaction.mockImplementation(db.transaction);
+
+    const executor = require(path.join(TOOLS_DIR, mod))[exec];
+    const result = await executor(toolName, input);
+
+    expect(mutations).toEqual([]);
+    // The unconfirmed call must never report a completed write.
+    expect(result?.success).not.toBe(true);
   });
 });
