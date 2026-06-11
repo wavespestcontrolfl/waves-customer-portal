@@ -226,7 +226,9 @@ async function alertSurchargeBypass(paymentIntent, invoice, alertType, severity,
       severity,
       title,
       description,
-      metadata: JSON.stringify({
+      // customer_health_alerts has trigger_data, not metadata — the old
+      // column name made every one of these alerts silently fail.
+      trigger_data: JSON.stringify({
         stripe_payment_intent_id: paymentIntent.id,
         invoice_number: invoice?.invoice_number,
         ...metadata,
@@ -616,7 +618,10 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         .forUpdate()
         .first();
       if (existingPayment) {
-        if (!['paid', 'refunded'].includes(existingPayment.status)) {
+        // 'disputed' is terminal here: a delayed/reclaimed succeeded
+        // event arriving after charge.dispute.created must not flip a
+        // chargeback back to paid (dispute resolution owns that row now).
+        if (!['paid', 'refunded', 'disputed'].includes(existingPayment.status)) {
           await trx('payments').where({ id: existingPayment.id }).update(paymentUpdates);
         }
         return;
@@ -710,6 +715,17 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       });
       logger.info(`[stripe-webhook] Inserted missing paid payment row for PI: ${piId}`);
     });
+  }
+
+  // A disputed chargeback owns this PI now — a late or reclaimed
+  // succeeded event must not flip the dispute-reverted invoice back to
+  // paid. (Dispute-won restores it via handleDisputeClosed.)
+  const disputedPayment = await db('payments')
+    .where({ stripe_payment_intent_id: piId, status: 'disputed' })
+    .first();
+  if (disputedPayment) {
+    logger.warn(`[stripe-webhook] PI ${piId} has a disputed payment (${disputedPayment.id}) — skipping invoice-paid update from succeeded event`);
+    return;
   }
 
   // Update invoices table
@@ -1024,8 +1040,13 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
 
   logger.warn(`[stripe-webhook] PaymentIntent failed: ${piId} — ${failureMessage}`);
 
+  // Terminal-status guard: Stripe doesn't guarantee event ordering, and
+  // pay-page PIs are reused across attempts — a late-delivered
+  // payment_failed from attempt 1 must not demote a row that attempt 2's
+  // succeeded event (or a refund/dispute) already settled.
   await db('payments')
     .where({ stripe_payment_intent_id: piId })
+    .whereNotIn('status', ['paid', 'refunded', 'disputed'])
     .update({
       status: 'failed',
       failure_reason: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
@@ -1525,7 +1546,10 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       .where({ stripe_payment_intent_id: piId })
       .forUpdate()
       .first();
-    if (['paid', 'refunded', 'canceled', 'cancelled'].includes(existingPayment?.status)) {
+    // 'disputed' is terminal too: a delayed/reclaimed processing event
+    // must not pull a chargeback back to processing (which would also
+    // flip the reopened invoice below, hiding it from dunning).
+    if (['paid', 'refunded', 'canceled', 'cancelled', 'disputed'].includes(existingPayment?.status)) {
       logger.info(`[stripe-webhook] Skipping processing downgrade for terminal payment row on PI: ${piId}`);
       return;
     }
@@ -1740,16 +1764,41 @@ async function handlePaymentIntentCanceled(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent canceled: ${piId}`);
 
+  // No .catch — a failed write must propagate so the event is retried.
   await db('payments')
     .where({ stripe_payment_intent_id: piId })
-    .whereNotIn('status', ['paid', 'refunded'])
-    .update({ status: 'canceled' })
-    .catch(() => {});
+    .whereNotIn('status', ['paid', 'refunded', 'disputed'])
+    .update({ status: 'canceled' });
+}
+
+/**
+ * Resolve the invoice a payments row collected against. payments has no
+ * invoice_id column — the linkage lives in metadata JSON (invoice_id /
+ * waves_invoice_id) and on invoices.stripe_payment_intent_id.
+ */
+async function findInvoiceForPayment(payment) {
+  let meta = {};
+  try {
+    meta = payment.metadata
+      ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+      : {};
+  } catch (e) { /* unparseable metadata — fall through to PI lookup */ }
+  const metaInvoiceId = meta.dispute_invoice_id || meta.invoice_id || meta.waves_invoice_id || null;
+  if (metaInvoiceId) {
+    const invoice = await db('invoices').where({ id: metaInvoiceId }).first();
+    if (invoice) return invoice;
+  }
+  if (payment.stripe_payment_intent_id) {
+    return db('invoices')
+      .where({ stripe_payment_intent_id: payment.stripe_payment_intent_id })
+      .first();
+  }
+  return null;
 }
 
 /**
  * charge.dispute.created — ACH return or chargeback. ~60 days to respond.
- * Flip invoice back to unpaid, log dispute, alert admin.
+ * Flip invoice back to overdue, log dispute, alert admin.
  */
 async function handleDisputeCreated(dispute) {
   const chargeId = dispute.charge;
@@ -1758,18 +1807,65 @@ async function handleDisputeCreated(dispute) {
   logger.warn(`[stripe-webhook] Dispute created: ${dispute.id} on charge ${chargeId} — $${amount} (${reason})`);
 
   // Revert payment + invoice
+  // These are critical ledger writes: no .catch — a failure must
+  // propagate so the event is NOT marked processed and Stripe retries.
   const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+  let createdPaymentMeta = {};
   if (payment) {
+    try {
+      createdPaymentMeta = payment.metadata
+        ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+        : {};
+    } catch (e) { /* unparseable legacy metadata */ }
+    // Ordering guard: if dispute.closed for THIS dispute was already
+    // processed (Stripe doesn't guarantee order — a retried created can
+    // land after won/lost), the final state owns the row. Flipping a
+    // won charge back to disputed/overdue would reopen collection for
+    // money already reinstated.
+    if (createdPaymentMeta.dispute_final && createdPaymentMeta.dispute_id === dispute.id) {
+      logger.warn(`[stripe-webhook] Dispute ${dispute.id} already closed (${createdPaymentMeta.dispute_final}) — created event is a late replay, skipping ledger writes`);
+    } else {
     await db('payments').where({ id: payment.id }).update({
       status: 'disputed',
       failure_reason: `Dispute: ${reason}`,
-    }).catch(() => {});
+    });
 
-    if (payment.invoice_id) {
-      await db('invoices').where({ id: payment.invoice_id }).update({
-        status: 'unpaid',
+    // payments has no invoice_id column — the linkage lives in the
+    // metadata JSON and on invoices.stripe_payment_intent_id. 'overdue'
+    // (not 'unpaid', which no open-invoice query matches) puts the
+    // clawed-back invoice back into dunning and balance sums.
+    // Reopen 'processing' as well as 'paid': an ACH return can arrive
+    // while the invoice is still processing (or before the succeeded
+    // event lands), and the disputed-PI guard in the succeeded handler
+    // would otherwise leave it stuck there.
+    const invoice = await findInvoiceForPayment(payment);
+    const invoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+    const disputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
+    // Only reopen when THIS disputed payment still settles the invoice —
+    // if a different PI (or a cash/check reconcile with no PI) owns it,
+    // the money in question isn't what's backing the invoice.
+    if (invoice && ['paid', 'processing'].includes(invoice.status)
+      && invoicePi && disputedPi && invoicePi === disputedPi) {
+      // Persist the binding on the payment row BEFORE clearing the
+      // invoice's PI: card-on-file payment rows don't carry invoice_id
+      // in metadata, and dispute-closed (won) must still find this
+      // invoice to restore it.
+      await db('payments').where({ id: payment.id }).update({
+        metadata: JSON.stringify({ ...createdPaymentMeta, dispute_invoice_id: invoice.id }),
+      });
+
+      await db('invoices').where({ id: invoice.id }).update({
+        status: 'overdue',
         paid_at: null,
-      }).catch(() => {});
+        // Clear the PI linkage: the pay page and card-on-file paths
+        // treat a lingering non-canceled intent as "payment already in
+        // progress" and would refuse re-collection on the reopened
+        // invoice. The disputed payments row keeps the original PI for
+        // the audit trail.
+        stripe_payment_intent_id: null,
+        stripe_charge_id: null,
+      });
+    }
     }
   }
 
@@ -1797,19 +1893,80 @@ async function handleDisputeClosed(dispute) {
   const amount = (dispute.amount / 100).toFixed(2);
   logger.info(`[stripe-webhook] Dispute closed: ${dispute.id} status=${status}`);
 
+  // Critical ledger writes: no .catch — failures must propagate so the
+  // event is NOT marked processed and Stripe retries.
   const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
   if (payment) {
+    // Record the final dispute state on the payment row so a late or
+    // retried dispute.created for the same dispute is a no-op instead
+    // of flipping a settled outcome back to disputed/overdue.
+    let closedPaymentMeta = {};
+    try {
+      closedPaymentMeta = payment.metadata
+        ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+        : {};
+    } catch (e) { /* unparseable legacy metadata */ }
+    const finalMeta = JSON.stringify({
+      ...closedPaymentMeta,
+      dispute_id: dispute.id,
+      dispute_final: status,
+    });
+
     if (status === 'won' || status === 'warning_closed') {
       // Funds reinstated — restore paid status
-      await db('payments').where({ id: payment.id }).update({ status: 'paid' }).catch(() => {});
-      if (payment.invoice_id) {
-        await db('invoices').where({ id: payment.invoice_id }).update({
+      await db('payments').where({ id: payment.id }).update({ status: 'paid', metadata: finalMeta });
+      const invoice = await findInvoiceForPayment(payment);
+      const wonInvoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+      const wonDisputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
+      // Only restore when no REPLACEMENT payment owns the invoice: after
+      // dispute.created reopened it, the customer may have re-paid with
+      // a new PI (now paid or processing). Marking that invoice paid
+      // here would double-settle it while the replacement still
+      // collects. The reopen path cleared the PI, so a null PI means
+      // the dispute still owns it.
+      if (invoice && invoice.status !== 'paid'
+        && (!wonInvoicePi || (wonDisputedPi && wonInvoicePi === wonDisputedPi))) {
+        await db('invoices').where({ id: invoice.id }).update({
           status: 'paid',
           paid_at: new Date().toISOString(),
-        }).catch(() => {});
+          // Restore the linkage the reopen cleared — the disputed PI's
+          // funds are what settle this invoice again.
+          stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
+          stripe_charge_id: payment.stripe_charge_id || null,
+        });
       }
     } else if (status === 'lost') {
-      await db('payments').where({ id: payment.id }).update({ status: 'failed' }).catch(() => {});
+      // Money is gone for good. Set status explicitly — Stripe does not
+      // guarantee dispute.created arrived first, so don't assume the
+      // row is already 'disputed'. It stays/becomes 'disputed' (terminal
+      // in every succeeded/failed/canceled handler guard — 'failed'
+      // would let a late payment_intent.succeeded resurrect the
+      // chargeback to paid), and the invoice is reopened idempotently
+      // so dunning chases it even when created/closed arrive reversed.
+      await db('payments').where({ id: payment.id }).update({
+        status: 'disputed',
+        failure_reason: `Dispute lost — $${amount} returned to customer`,
+        metadata: finalMeta,
+      });
+      const lostInvoice = await findInvoiceForPayment(payment);
+      const lostInvoicePi = lostInvoice?.stripe_payment_intent_id ? String(lostInvoice.stripe_payment_intent_id) : null;
+      const lostDisputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
+      // Only reopen when the disputed PI still settles the invoice.
+      // Normal flow: dispute.created already reopened it, the customer
+      // re-paid with a NEW PI, then closed(lost) lands days later —
+      // that newly paid invoice must not be flipped back to overdue.
+      if (lostInvoice && ['paid', 'processing'].includes(lostInvoice.status)
+        && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
+        await db('invoices').where({ id: lostInvoice.id }).update({
+          status: 'overdue',
+          paid_at: null,
+          // Same PI-linkage clear as dispute-created: a lingering
+          // non-canceled intent blocks the pay page / card-on-file
+          // re-collection paths with "payment already in progress".
+          stripe_payment_intent_id: null,
+          stripe_charge_id: null,
+        });
+      }
     }
   }
 
