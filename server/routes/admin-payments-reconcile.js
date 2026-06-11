@@ -6,6 +6,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { auditPaymentReconcile, ipFromReq, uaFromReq } = require('../services/audit-log');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
 
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require('stripe')(stripeKey) : null;
@@ -81,20 +82,15 @@ router.post('/reconcile', async (req, res, next) => {
       return res.status(400).json({ error: 'amount must be a positive number' });
     }
 
-    // 'processing' is blocked too: an ACH payment in flight will settle on its
-    // own — reconciling it as cash/check would double-collect the invoice.
-    const BLOCKED_STATUSES = ['paid', 'void', 'processing'];
-
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoice.status === 'paid') {
-      return res.status(409).json({ error: 'Invoice already paid' });
-    }
-    if (invoice.status === 'void') {
-      return res.status(409).json({ error: 'Invoice is void' });
-    }
-    if (invoice.status === 'processing') {
-      return res.status(409).json({ error: 'Invoice has a payment processing (e.g. ACH in flight) — wait for it to settle before reconciling' });
+    // Uncollectible invoices (paid/processing/void/refunded/canceled) can't be
+    // reconciled — 'processing' especially: an ACH payment in flight will
+    // settle on its own, so a cash/check reconcile would double-collect.
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (e) {
+      return res.status(409).json({ error: e.message });
     }
 
     const updates = {
@@ -146,12 +142,13 @@ router.post('/reconcile', async (req, res, next) => {
       updates.payment_method = collectedVia;
     }
 
-    // Conditional update closes the TOCTOU window: if the invoice was paid,
-    // voided, or moved to processing between our read and this write, the
-    // UPDATE matches 0 rows and we bail instead of double-marking it.
+    // Conditional update closes the TOCTOU window: if the invoice became
+    // uncollectible (paid/processing/void/refunded/canceled) between our read
+    // and this write, the UPDATE matches 0 rows and we bail instead of
+    // double-marking it.
     const updatedRows = await db('invoices')
       .where({ id: invoiceId })
-      .whereNotIn('status', BLOCKED_STATUSES)
+      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
       .update(updates);
     if (!updatedRows) {
       const current = await db('invoices').where({ id: invoiceId }).first('status');
@@ -160,13 +157,18 @@ router.post('/reconcile', async (req, res, next) => {
       });
     }
 
+    // What was actually collected: Stripe reconciles record the verified
+    // charge amount (a caller-supplied amount must not override it); manual
+    // reconciles honor the operator-supplied amount, else the invoice total.
+    const collectedAmount = chargeDetails
+      ? chargeDetails.amount / 100
+      : (amount != null ? Number(amount) : parseFloat(invoice.total));
+
     // Also create a payments ledger row so revenue reports pick up the collection
     try {
       await db('payments').insert({
         customer_id: invoice.customer_id,
-        // Record what the operator actually collected when they supplied an
-        // amount; fall back to the invoice total otherwise.
-        amount: amount != null ? Number(amount) : parseFloat(invoice.total),
+        amount: collectedAmount,
         status: 'paid',
         description: `Invoice ${invoice.invoice_number} — ${collectedVia}`,
         payment_date: etDateString(),
@@ -201,7 +203,7 @@ router.post('/reconcile', async (req, res, next) => {
       invoice_number: invoice.invoice_number,
       collected_via: collectedVia,
       stripe_charge_id: stripeChargeId || null,
-      amount: amount != null ? Number(amount) : parseFloat(invoice.total),
+      amount: collectedAmount,
       ip_address: ipFromReq(req),
       user_agent: uaFromReq(req),
     });
