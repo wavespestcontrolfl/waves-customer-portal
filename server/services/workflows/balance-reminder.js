@@ -567,7 +567,9 @@ class BalanceReminder {
 
   async onPaymentReceived(customerId, amount) {
     const customer = await db("customers").where({ id: customerId }).first();
-    if (!customer) return;
+    // Archived customers get no outbound asks — event-driven path, so the
+    // cron-side deleted_at filters don't cover it.
+    if (!customer || customer.deleted_at) return;
 
     const recentReminder = await db("sms_log")
       .where({ customer_id: customerId })

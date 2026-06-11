@@ -196,6 +196,13 @@ const ReviewService = {
   }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
+    // Event-driven callers (paid-invoice webhook, completion flows,
+    // intelligence bar) reach here directly — don't even create the row
+    // for an archived customer (sendSMS would suppress it later, but a
+    // restore would then revive a stale ask).
+    if (customer.deleted_at) {
+      throw new Error("Customer is archived — review outreach not created");
+    }
 
     // Don't create duplicate for same service
     if (serviceRecordId) {

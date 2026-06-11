@@ -291,6 +291,43 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // WEEKLY SUNDAY 4:30AM — Terminate stale outreach rows for soft-deleted
+  // customers. The cron-side deleted_at filters only SKIP these rows, and
+  // the terminal pre-passes only catch rows as they come due — anything
+  // armed before a customer was archived (or before those guards shipped)
+  // sits pending forever and would fire stale if the customer is restored.
+  // =========================================================================
+  cron.schedule('30 4 * * 0', async () => {
+    logger.info('Running: deleted-customer outreach row cleanup');
+    try {
+      await runExclusive('deleted-customer-row-cleanup', async () => {
+        const deletedCustomers = db('customers').select('id').whereNotNull('deleted_at');
+
+        const reminders = await db('appointment_reminders')
+          .where({ cancelled: false })
+          .whereIn('customer_id', deletedCustomers.clone())
+          .update({ cancelled: true, updated_at: new Date() });
+
+        const reviews = await db('review_requests')
+          .where({ status: 'pending' })
+          .whereIn('customer_id', deletedCustomers.clone())
+          .update({ status: 'suppressed' });
+
+        const followups = await db('invoice_followup_sequences')
+          .whereIn('status', ['active', 'autopay_hold'])
+          .whereIn('customer_id', deletedCustomers.clone())
+          .update({ status: 'paused', next_touch_at: null, updated_at: new Date() });
+
+        if (reminders || reviews || followups) {
+          logger.info(`[deleted-cleanup] Terminated stale rows for archived customers: ${reminders} reminder(s), ${reviews} review request(s), ${followups} invoice follow-up sequence(s)`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Deleted-customer row cleanup failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY SUNDAY 3:30AM — Backlink scan
   cron.schedule('30 3 * * 0', async () => {
     if (!isEnabled('seoIntelligence')) return;
@@ -778,7 +815,17 @@ function initScheduledJobs() {
           });
           const completedAt = new Date();
           if (smsResult.sent) {
-            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'sent', created_at: completedAt, updated_at: completedAt });
+            // created_at is re-stamped to send time on purpose — comms
+            // threads order by it, and a scheduled SMS composed days ago
+            // must appear when it was DELIVERED. Preserve the original
+            // queue moment in metadata so the audit trail isn't lost
+            // (jsonb_build_object reads the pre-update column value).
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'sent',
+              created_at: completedAt,
+              updated_at: completedAt,
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
+            });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
           } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
