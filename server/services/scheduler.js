@@ -1802,6 +1802,9 @@ function initScheduledJobs() {
   cron.schedule('0 18 * * *', async () => {
     logger.info('Running: missed appointment check');
     try {
+      // The reschedule_log dedupe below is check-then-insert — overlapping
+      // deploy instances would both pass it and double-count a no-show.
+      await runExclusive('missed-appointment-check', async () => {
       const missedAppointment = require('./workflows/missed-appointment');
       if (missedAppointment.onSkip) {
         // Find recent services that were scheduled but not completed.
@@ -1858,6 +1861,7 @@ function initScheduledJobs() {
         }
         logger.info(`Missed appointment check done: ${candidates.length} candidate(s), ${flagged} flagged as no-show`);
       }
+      });
     } catch (err) {
       logger.error(`Missed appointment check failed: ${err.message}`);
     }
