@@ -745,6 +745,48 @@ function initScheduledJobs() {
   });
 
   // =========================================================================
+  // EVERY 2 MIN — Autonomous blog PR lifecycle. Autonomous publishes have no
+  // blog_posts row, so pages-poll never tracks their PRs; this reconciles
+  // autonomous_runs parked at astro_pr_pending_merge with live GitHub state:
+  // human merge → completes the run (IndexNow + internal-link planning),
+  // close-unmerged → fails it, and — ONLY when AUTONOMOUS_BLOG_AUTO_MERGE is
+  // set (default off) — merges green + Codex-clear PRs itself, capped per
+  // tick. runExclusive: a merge and its post-merge chain must not double-run
+  // across overlapping deploy instances.
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await runExclusive('autonomous-pr-poll', async () => {
+        const AutonomousPrPoller = require('./content/autonomous-pr-poller');
+        await AutonomousPrPoller.pollPending();
+      });
+    } catch (err) {
+      logger.error(`Autonomous PR poll failed: ${err.message}`);
+    }
+  });
+
+  // =========================================================================
+  // DAILY 5:40AM ET — Post-publish visibility sweep. Re-runs the visibility
+  // worker (live/canonical/noindex/sitemap/IndexNow/AI-readiness) for
+  // content published in the last few days: blog_posts that recently went
+  // live AND autonomous_runs publishes (which have no blog_posts row). The
+  // one-shot check at live-flip can miss slow-propagating issues; this is
+  // the bounded daily backstop. Off-peak, small batch; failures log inside
+  // the sweep and never throw out of the cron.
+  // =========================================================================
+  cron.schedule('40 5 * * *', async () => {
+    logger.info('Running: post-publish visibility sweep');
+    try {
+      await runExclusive('post-publish-visibility-sweep', async () => {
+        const VisibilityWorker = require('./content/post-publish-visibility-worker');
+        await VisibilityWorker.sweepRecentlyPublished();
+      });
+    } catch (err) {
+      logger.error(`Post-publish visibility sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10AM (weekdays) — 7-Day Late Payment SMS
   // Checks invoices 7+ days overdue, sends tiered reminder SMS
   // =========================================================================

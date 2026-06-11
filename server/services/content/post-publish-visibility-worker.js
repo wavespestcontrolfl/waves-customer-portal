@@ -115,6 +115,82 @@ async function runForUrl(url, options = {}) {
 }
 
 /**
+ * Daily cron sweep: re-run visibility checks for recently-published content.
+ *
+ * pages-poll fires runForPost exactly once at the merged→live flip, and the
+ * autonomous PR poller completes runs at merge time — but a check that ran
+ * minutes after deploy can miss slow-propagating problems (sitemap lag,
+ * canonical/noindex regressions from a later deploy). This sweep re-checks
+ * everything published in the last few days:
+ *   - blog_posts rows that reached astro_status='live' recently
+ *     (scheduler/admin-driven posts), and
+ *   - autonomous_runs completed_published rows (no blog_posts row exists for
+ *     those — published_url is the only handle).
+ * Batch is bounded (limit per source) and every failure logs without
+ * throwing, so the cron can never crash on one bad URL. IndexNow inside
+ * runForUrl is 24h-throttled, so a daily re-check does not spam submissions.
+ *
+ * runPost/runUrl are injectable for tests (same options-injection style as
+ * runForUrl itself).
+ */
+async function sweepRecentlyPublished({
+  days = 3,
+  limit = 10,
+  runPost = runForPost,
+  runUrl = runForUrl,
+} = {}) {
+  const cutoff = new Date(Date.now() - days * 86400000);
+  const results = [];
+
+  let posts = [];
+  try {
+    posts = await db('blog_posts')
+      .where('astro_status', 'live')
+      .whereNotNull('astro_live_url')
+      .where('astro_published_at', '>=', cutoff)
+      .orderBy('astro_published_at', 'desc')
+      .limit(limit)
+      .select('id', 'slug', 'title', 'keyword', 'astro_live_url');
+  } catch (err) {
+    logger.warn(`[post-publish-visibility] sweep blog_posts query failed: ${err.message}`);
+  }
+  for (const post of posts) {
+    try {
+      const r = await runPost(post);
+      results.push({ source: 'blog_post', id: post.id, url: post.astro_live_url, ok: r?.ok ?? false });
+    } catch (err) {
+      logger.warn(`[post-publish-visibility] sweep check failed for blog ${post.id}: ${err.message}`);
+      results.push({ source: 'blog_post', id: post.id, url: post.astro_live_url, error: err.message });
+    }
+  }
+
+  let runs = [];
+  try {
+    runs = await db('autonomous_runs')
+      .where('outcome', 'completed_published')
+      .whereNotNull('published_url')
+      .where('completed_at', '>=', cutoff)
+      .orderBy('completed_at', 'desc')
+      .limit(limit)
+      .select('id', 'published_url');
+  } catch (err) {
+    logger.warn(`[post-publish-visibility] sweep autonomous_runs query failed: ${err.message}`);
+  }
+  for (const run of runs) {
+    try {
+      const r = await runUrl(run.published_url);
+      results.push({ source: 'autonomous_run', id: run.id, url: run.published_url, ok: r?.ok ?? false });
+    } catch (err) {
+      logger.warn(`[post-publish-visibility] sweep check failed for run ${run.id}: ${err.message}`);
+      results.push({ source: 'autonomous_run', id: run.id, url: run.published_url, error: err.message });
+    }
+  }
+
+  logger.info(`[post-publish-visibility] daily sweep checked ${results.length} URL(s) (${posts.length} blog, ${runs.length} autonomous)`);
+  return { checked: results.length, results };
+}
+
+/**
  * GATE-002: the AI-visibility gate can only run on the LIVE page, so it
  * stays post-publish — but a freshly auto-published blog that lands with a
  * P0 (noindex, robots block, canonical-elsewhere, content not rendered) was
@@ -332,6 +408,7 @@ function parseJsonObject(value) {
 module.exports = {
   runForPost,
   runForUrl,
+  sweepRecentlyPublished,
   _internals: {
     fetchHtml,
     fetchRobotsTxt,

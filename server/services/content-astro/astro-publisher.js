@@ -1278,14 +1278,30 @@ function queueInternalLinkPlanning(post) {
 }
 
 async function planInternalLinksForMergedPost(post) {
+  const url = liveUrlForPost(post);
+  if (!url) return null;
+  return planInternalLinksForTarget({
+    url,
+    keyword: post.keyword,
+    city: post.city,
+    title: post.title,
+  });
+}
+
+// Target-shaped core of the post-merge planning above. Autonomous publishes
+// have no blog_posts row (the run's draft_payload is the source of truth), so
+// the PR-lifecycle poller calls this directly with { url, keyword, city,
+// title } once the PR merges — same planner, corpus, dedupe, and dry-run as
+// the blog_posts path.
+async function planInternalLinksForTarget(target = {}) {
   const planner = require('../content/internal-link-planner');
   if (!planner?.planForTarget) return null;
-  const url = liveUrlForPost(post);
+  const url = target.url;
   if (!url) return null;
   const corpus = await loadAstroCorpusForPlanning(planner);
   if (!corpus.length) return null;
   const tasks = planner.planForTarget(
-    { url, keyword: post.keyword, city: post.city, title: post.title },
+    { url, keyword: target.keyword, city: target.city, title: target.title },
     { corpus }
   );
   const taskIds = [];
@@ -1920,6 +1936,11 @@ module.exports = {
   unpublishAstro,
   buildFrontmatter,
   liveUrlForPost,
+  // Reused by the autonomous PR-lifecycle poller (no blog_posts row exists
+  // for autonomous publishes, so it drives these directly).
+  planInternalLinksForTarget,
+  internalLinkPlanningDisabled,
+  assertCodexReviewClear,
   _internals: {
     generateHeroBuffer,
     compressToWebp,
@@ -1931,6 +1952,7 @@ module.exports = {
     queueInternalLinkPlanning,
     internalLinkPlanningDisabled,
     planInternalLinksForMergedPost,
+    planInternalLinksForTarget,
     isCommittedHeroUrl,
     absoluteHeroUrl,
     slugPathFromFrontmatter,

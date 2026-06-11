@@ -159,6 +159,15 @@ async function pollPost(post, { allowMerge = true } = {}) {
         updated_at: new Date(),
       });
 
+      // DELIBERATE auto-merge path for SCHEDULER-driven posts: publish_status
+      // 'publishing' is the content-scheduler's transient claim state while it
+      // drives a scheduled post live, and mergeAstro below is Codex-gated
+      // (assertCodexReviewClear) before any merge. Note the coupling: a row
+      // STRANDED at 'publishing' (process crashed mid-publish) would keep this
+      // branch armed indefinitely — the content-scheduler's stale-publishing
+      // sweep (resetStalePublishingBlogs, ~30 min) bounds that window by
+      // resetting crashed claims to 'pending_review'. Keep that sweep in mind
+      // before changing this condition.
       if (post.astro_status === 'pr_open' && post.publish_status === 'publishing') {
         if (!allowMerge) {
           // Per-poll auto-merge cap reached — defer this merge to the next tick
@@ -302,4 +311,8 @@ module.exports = {
   liveUrlResponds,
   deploymentMatchesMergedPost,
   runPostPublishVisibility,
+  // Reused by the autonomous PR-lifecycle poller to verify a PR branch's
+  // Cloudflare preview build is green before auto-merging.
+  latestDeploymentForBranch,
+  extractStatus,
 };
