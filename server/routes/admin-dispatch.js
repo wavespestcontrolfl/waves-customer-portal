@@ -1083,6 +1083,25 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // Day-of lifecycle guard: en_route / on_site / completed are field
+    // actions that only happen on (or after) the scheduled day. A
+    // future-dated job here means a stale dispatch tab racing a live
+    // reschedule (rebooker allowLive) or a flip on the wrong day's
+    // board — and proceeding would commit the operational status while
+    // the track-side helper below refuses (future_scheduled_date),
+    // leaving status and track_state divergent with the tech never
+    // freed. Reject before the transition; cancelling or confirming a
+    // future job stays allowed. To genuinely run a job early,
+    // reschedule it to today first.
+    const DAY_OF_LIFECYCLE_STATUSES = new Set(['en_route', 'on_site', 'completed']);
+    if (DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
+      && trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: `This job is scheduled for ${serviceDateOnly(svc.scheduled_date)} — it may have been rescheduled while this board was open. Refresh, or move it to today to run it early.`,
+        code: 'future_scheduled_date',
+      });
+    }
+
     if (toStatus === 'cancelled' && ['following', 'series'].includes(scope)) {
       const parentId = svc.recurring_parent_id || svc.id;
       const parent = await db('scheduled_services').where({ id: parentId }).first();
