@@ -105,4 +105,13 @@ describe('fact-check gate', () => {
     expect(r.findings[0].severity).toBe('P2');
     expect(r.pass).toBe(true);
   });
+
+  test('normalizes casing/whitespace so "p1" / "P1 " still BLOCK', async () => {
+    for (const variant of ['p1', 'P1 ', ' p0']) {
+      reply([{ severity: variant, claim: 'x', issue: 'y' }]);
+      const r = await load().evaluate(DRAFT);
+      expect(r.findings[0].severity).toBe(variant.trim().toUpperCase());
+      expect(r.pass).toBe(false);
+    }
+  });
 });

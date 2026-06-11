@@ -50,7 +50,11 @@ Return ONLY JSON, no prose:
 Empty findings array means the content is factually clean.`;
 
 function normalizeFinding(f) {
-  const severity = ['P0', 'P1', 'P2'].includes(f && f.severity) ? f.severity : 'P2';
+  // The model's severity is only prompt-constrained, so normalize casing/space
+  // ("p1", "P1 ") before the allowlist — otherwise a real P0/P1 gets demoted to
+  // the non-blocking P2 and ships.
+  const sev = String((f && f.severity) || '').trim().toUpperCase();
+  const severity = ['P0', 'P1', 'P2'].includes(sev) ? sev : 'P2';
   const claim = String((f && f.claim) || '').slice(0, 300);
   const issue = String((f && f.issue) || '').slice(0, 600);
   const fix = String((f && f.fix) || '').slice(0, 600);
