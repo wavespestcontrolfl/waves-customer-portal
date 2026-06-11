@@ -393,7 +393,6 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
   if (!hasAnyPropertyFact(parsed)) {
     logger.info('[county-property] Manatee PAO found parcel but no usable facts', {
       elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
     });
     return null;
   }
@@ -419,7 +418,6 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
 
   logger.info('[county-property] got Manatee PAO facts', {
     elapsedMs: Date.now() - t0,
-    parcelId: search.parcelId,
     fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
   });
   return record;
@@ -452,7 +450,6 @@ async function fetchSarasotaParcelDetails(search, address, timeoutMs, t0 = Date.
   const buildingDetailHtml = await fetchSarasotaPrimaryBuildingDetail(search.html, timeoutMs, t0).catch((err) => {
     logger.warn('[county-property] Sarasota PAO building detail fetch failed', {
       elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
       error: summarizeProviderError(err),
     });
     return null;
@@ -466,7 +463,6 @@ async function fetchSarasotaParcelDetails(search, address, timeoutMs, t0 = Date.
   if (!hasAnyPropertyFact(parsed)) {
     logger.info('[county-property] Sarasota PAO found parcel but no usable facts', {
       elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
     });
     return null;
   }
@@ -491,7 +487,6 @@ async function fetchSarasotaParcelDetails(search, address, timeoutMs, t0 = Date.
 
   logger.info('[county-property] got Sarasota PAO facts', {
     elapsedMs: Date.now() - t0,
-    parcelId: search.parcelId,
     fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
   });
   return record;
@@ -538,7 +533,6 @@ async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date
   if (ownershipResult.status === 'rejected') {
     logger.warn('[county-property] Charlotte PAO ownership fetch failed', {
       elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
       error: summarizeProviderError(ownershipResult.reason),
     });
   }
@@ -552,7 +546,6 @@ async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date
   if (!hasAnyPropertyFact(parsed)) {
     logger.info('[county-property] Charlotte PAO found parcel but no usable facts', {
       elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
     });
     return null;
   }
@@ -580,7 +573,6 @@ async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date
 
   logger.info('[county-property] got Charlotte PAO facts', {
     elapsedMs: Date.now() - t0,
-    parcelId: search.parcelId,
     fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
   });
   return record;
@@ -1059,13 +1051,18 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   // by-parcel miss) the existing address search.
   let countyRecord = null;
   if (parcel?.paoParcelId) {
+    // Cap the by-parcel attempt at half the county budget AND reserve a
+    // minimum fallback window out of what actually remains (a slow GIS hit
+    // already consumed budget): a stale parcel or stalled PAO detail fetch
+    // must leave the typed-address fallback below enough time to run.
     const remainingMs = remainingCountyLookupMs(t0, countyTimeoutMs);
-    if (remainingMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
-      // Cap the by-parcel attempt at half the county budget: a stale parcel
-      // or stalled PAO detail fetch must leave the typed-address fallback
-      // below enough time to run (mirrors the geo starvation cap).
+    const byParcelTimeoutMs = Math.min(
+      Math.ceil(countyTimeoutMs / 2),
+      remainingMs - COUNTY_LOOKUP_MIN_REMAINING_MS,
+    );
+    if (byParcelTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
       countyRecord = await lookupPropertyFromCountyByParcel(parcel, searchAddress, {
-        timeoutMs: Math.min(remainingMs, Math.ceil(countyTimeoutMs / 2)),
+        timeoutMs: byParcelTimeoutMs,
         geoContext,
       }).catch(() => null);
     }
