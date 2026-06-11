@@ -158,11 +158,17 @@ function preflightDigest(lineupOrPlan, reqs = {}) {
 
 /**
  * Render an actionable skip notification body from a preflight report.
+ * sourceHealthLines (optional) names the failing / zero-yield sources so
+ * the operator sees WHY the eligible pool is thin, not just that it is.
  */
-function formatPreflightReport(report, weekOf) {
+function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
   const lines = [`Fresh This Week autopilot skipped (week of ${weekOf}).`, '', 'Reason:'];
   for (const f of report.hardFailures) lines.push(`- ${f}`);
   for (const w of report.warnings) lines.push(`- ${w} (warning)`);
+  if (sourceHealthLines.length) {
+    lines.push('', 'Source health:');
+    for (const l of sourceHealthLines) lines.push(l);
+  }
   lines.push('', 'Next actions:');
   lines.push('- Approve more pending events for this Thu–Wed window');
   lines.push('- Check failing ingestion sources (Events → Sources health)');
@@ -283,12 +289,23 @@ async function autoDraftFlagship() {
 
     // Notify admin with an actionable report (exact counts + next actions).
     try {
+      // Name the broken sources in the report — a thin eligible pool is
+      // almost always upstream source rot, not an approval backlog.
+      let sourceHealthLines = [];
+      try {
+        const { classifyUnhealthySources, formatSourceHealthLines } = require('./event-source-health');
+        const sourceRows = await db('event_sources').where({ enabled: true });
+        sourceHealthLines = formatSourceHealthLines(classifyUnhealthySources(sourceRows));
+      } catch (e) {
+        logger.warn(`[newsletter-autopilot] source health fetch failed: ${e.message}`);
+      }
+
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('newsletter_autopilot_skipped', {
         eligible: preflight.stats.eligibleCount,
         reason,
         preflight: preflight.stats,
-        report: formatPreflightReport(preflight, weekOf),
+        report: formatPreflightReport(preflight, weekOf, sourceHealthLines),
       });
     } catch (e) {
       logger.warn(`[newsletter-autopilot] skip notification failed: ${e.message}`);

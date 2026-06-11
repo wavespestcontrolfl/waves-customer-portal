@@ -35,6 +35,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -734,6 +735,9 @@ async function ingestSource(source) {
       last_pull_status: 'success',
       last_error: null,
       consecutive_failures: 0,
+      // Zero-yield tracking: a pull that "succeeds" with 0 events run
+      // after run is a broken source wearing a green badge.
+      ...yieldTrackingUpdateFor(result.upserted || 0),
       updated_at: db.fn.now(),
     });
 
@@ -784,6 +788,15 @@ async function ingestAllEnabledSources() {
   logger.info(
     `[event-ingestion] Done: ${totalUpserted} upserted across ${sources.length} source(s), ${failed} failed`
   );
+
+  // Escalate unhealthy sources (hard failures + zero-yield streaks) —
+  // one notification per run at most, never fails the ingest.
+  try {
+    await checkAndNotifySourceHealth();
+  } catch (err) {
+    logger.warn(`[event-ingestion] source-health check failed: ${err.message}`);
+  }
+
   return { sources: sources.length, totalUpserted, failed, results };
 }
 

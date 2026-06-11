@@ -355,6 +355,21 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=dashboard',
     }),
   },
+  event_sources_unhealthy: {
+    label: 'Event ingestion sources unhealthy',
+    category: 'newsletter',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Event sources unhealthy',
+      // p.summary lists each failing / zero-yield source with its streak;
+      // built by event-source-health.formatSourceHealthLines().
+      body: p.summary
+        ? `${p.summary}\n\nFix or disable these sources — they feed the weekly newsletter digest.`
+        : 'One or more event ingestion sources are failing or yielding zero events.',
+      link: '/admin/newsletter?tab=events',
+    }),
+  },
   kb_audit_flagged: {
     label: 'Knowledge base audit flagged entries',
     category: 'knowledge',
