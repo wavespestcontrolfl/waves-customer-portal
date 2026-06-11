@@ -114,6 +114,22 @@ function chain(overrides = {}) {
   };
 }
 
+// appointmentManagedProjectTypes now runs two distinct() queries against
+// service_completion_profiles (project_required rows = still-backed types,
+// then service_report rows). Discriminate on the captured where() mode.
+function modeAwareProfilesChain({ flipped = [], backed = [], first = null } = {}) {
+  let mode = null;
+  const c = chain({
+    first: jest.fn().mockResolvedValue(first),
+  });
+  c.where = jest.fn((args) => {
+    if (args && args.completion_mode) mode = args.completion_mode;
+    return c;
+  });
+  c.distinct = jest.fn(async () => (mode === 'project_required' ? backed : flipped));
+  return c;
+}
+
 function appServer() {
   const app = express();
   app.use(express.json());
@@ -339,12 +355,13 @@ describe('admin projects routes', () => {
         customer_id: 'customer-1', scheduled_date: '2026-06-11',
       }),
     });
-    const profilesChain = chain({
-      distinct: jest.fn().mockResolvedValue([{ project_type: 'one_time_pest_treatment' }]),
-      first: jest.fn().mockResolvedValue({
+    const profilesChain = modeAwareProfilesChain({
+      flipped: [{ project_type: 'one_time_pest_treatment' }],
+      backed: [{ project_type: 'one_time_pest_treatment' }],
+      first: {
         service_key: 'general_appointment', completion_mode: 'project_required',
         project_type: 'one_time_pest_treatment', active: true,
-      }),
+      },
     });
     const projectInsert = chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
     db.mockImplementation((table) => {
@@ -377,15 +394,16 @@ describe('admin projects routes', () => {
     // The bypass is scoped to the linked profile's own type — linking a
     // general_appointment while submitting mosquito_event must still 422.
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
-    const profilesChain = chain({
-      distinct: jest.fn().mockResolvedValue([
+    const profilesChain = modeAwareProfilesChain({
+      flipped: [
         { project_type: 'one_time_pest_treatment' },
         { project_type: 'mosquito_event' },
-      ]),
-      first: jest.fn().mockResolvedValue({
+      ],
+      backed: [{ project_type: 'one_time_pest_treatment' }],
+      first: {
         service_key: 'general_appointment', completion_mode: 'project_required',
         project_type: 'one_time_pest_treatment', active: true,
-      }),
+      },
     });
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return chain({
@@ -412,11 +430,51 @@ describe('admin projects routes', () => {
     }
   });
 
+  test('service_record_id link to a typed completion is rejected too', async () => {
+    // The route accepts service_record_id without scheduled_service_id —
+    // that path must resolve the same profile guard (Codex P1 side door).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return chain({
+        first: jest.fn().mockResolvedValue({ scheduled_service_id: 'svc-7' }),
+      });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({ id: 'svc-7', service_id: 'service-9', service_type: 'Rodent Trapping' }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue({ service_key: 'rodent_trapping', name: 'Rodent Trapping', category: 'specialty', billing_type: 'one_time' }) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [{ project_type: 'rodent_trapping' }],
+        backed: [],
+        first: {
+          service_key: 'rodent_trapping', completion_mode: 'service_report',
+          project_type: 'rodent_trapping', active: true,
+        },
+      });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'rodent_trapping', service_record_id: 'rec-12' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(422);
+        expect(body.code).toBe('scheduled_service_appointment_managed');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('managed project type is rejected for unlinked creations', async () => {
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
     db.mockImplementation((table) => {
-      if (table === 'service_completion_profiles') return chain({
-        distinct: jest.fn().mockResolvedValue([{ project_type: 'one_time_pest_treatment' }]),
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [{ project_type: 'one_time_pest_treatment' }],
+        backed: [],
       });
       throw new Error(`Unexpected table query: ${table}`);
     });

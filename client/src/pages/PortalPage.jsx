@@ -2107,7 +2107,9 @@ function ServicesTab() {
                               : 'Report generated automatically from service data'}
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            {(!s.isProjectCompletion || s.reportUrl) && (
+                            {/* reportAvailable === false → no button at all: the
+                                fallback generator 404s for internal-only records. */}
+                            {(s.isProjectCompletion ? Boolean(s.reportUrl) : s.reportAvailable !== false) && (
                               <a
                                 href={s.reportUrl || api.getServiceReportUrl(s.id)}
                                 target="_blank"

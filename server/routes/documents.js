@@ -588,6 +588,7 @@ router.get('/', authenticate, async (req, res, next) => {
           'service_records.service_type',
           'service_records.report_view_token',
           'service_records.report_template_version',
+          'service_records.structured_notes',
           'technicians.name as technician_name',
         )
         .orderBy('service_records.service_date', 'desc')
@@ -612,6 +613,15 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const autoGenDocs = [];
     for (const svc of services) {
+      // internal_only typed completions (Phase-1b shadow) store a report for
+      // admin review only — no auto-generated "Visit Report" document entry.
+      let svcNotes = {};
+      try {
+        svcNotes = typeof svc.structured_notes === 'string'
+          ? JSON.parse(svc.structured_notes)
+          : (svc.structured_notes || {});
+      } catch { svcNotes = {}; }
+      if (svcNotes.typedReportDelivery && svcNotes.typedReportDelivery !== 'auto_send') continue;
       // Service Report
       if (!linkedServiceIds.has(svc.id) || !docs.find(d => d.linked_service_record_id === svc.id && d.document_type === 'service_report')) {
         const viewUrl = svc.report_view_token ? `/report/${svc.report_view_token}` : null;
@@ -769,6 +779,20 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
 
     if (!service) return res.status(404).json({ error: 'Service record not found' });
 
+    // internal_only typed completions (Phase-1b shadow) are admin-review
+    // only — this authenticated fallback generator must refuse them too,
+    // since the portal client falls back here exactly when reportUrl is
+    // suppressed. 404 (not 403) so the record's existence isn't signposted.
+    let reportNotes = {};
+    try {
+      reportNotes = typeof service.structured_notes === 'string'
+        ? JSON.parse(service.structured_notes)
+        : (service.structured_notes || {});
+    } catch { reportNotes = {}; }
+    if (reportNotes.typedReportDelivery && reportNotes.typedReportDelivery !== 'auto_send') {
+      return res.status(404).json({ error: 'Service record not found' });
+    }
+
     // Get products with catalog enrichment (EPA, dilution, signal word)
     const products = await db('service_products as sp')
       .where({ 'sp.service_record_id': service.id })
@@ -851,6 +875,19 @@ router.post('/share/:id', authenticate, async (req, res, next) => {
         .first()
         .catch(() => null);
       if (!svc) return res.status(404).json({ error: 'Document not found' });
+      // Suppressed typed reports (internal_only shadow / disabled kill
+      // switch) are not shareable either — ownership alone isn't enough,
+      // or a crafted share request mints a public PDF link for a record
+      // every other customer surface hides.
+      let shareNotes = {};
+      try {
+        shareNotes = typeof svc.structured_notes === 'string'
+          ? JSON.parse(svc.structured_notes)
+          : (svc.structured_notes || {});
+      } catch { shareNotes = {}; }
+      if (shareNotes.typedReportDelivery && shareNotes.typedReportDelivery !== 'auto_send') {
+        return res.status(404).json({ error: 'Document not found' });
+      }
     } else {
       const doc = await db('customer_documents')
         .where({ id: docId, customer_id: req.customerId })
@@ -925,6 +962,18 @@ router.get('/shared/:token', async (req, res, next) => {
         )
         .first();
       if (!service) return res.status(404).json({ error: 'Document not found' });
+
+      // Defense in depth: even a previously-minted share link must not
+      // render a suppressed typed report (internal_only / disabled).
+      let sharedNotes = {};
+      try {
+        sharedNotes = typeof service.structured_notes === 'string'
+          ? JSON.parse(service.structured_notes)
+          : (service.structured_notes || {});
+      } catch { sharedNotes = {}; }
+      if (sharedNotes.typedReportDelivery && sharedNotes.typedReportDelivery !== 'auto_send') {
+        return res.status(404).json({ error: 'Document not found' });
+      }
 
       const customer = await db('customers').where({ id: link.customer_id }).first();
       if (!customer) return res.status(404).json({ error: 'Document not found' });

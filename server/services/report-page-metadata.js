@@ -100,8 +100,19 @@ async function loadServiceReportPageMetadata(reqPath, knex = db) {
   if (!token) return null;
   const service = await knex('service_records')
     .where({ report_view_token: token })
-    .first('service_type', 'service_date');
-  return service ? metadataForServiceReport(service) : null;
+    .first('service_type', 'service_date', 'structured_notes');
+  if (!service) return null;
+  // Suppressed typed reports (internal_only shadow / disabled) must not
+  // leak existence or service type/date through the unauthenticated SSR
+  // HTML / link previews — mirror reports-public.js suppression and fall
+  // back to the generic portal metadata.
+  let notes = service.structured_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  const deliveryMode = notes && typeof notes === 'object' ? notes.typedReportDelivery : null;
+  if (deliveryMode && deliveryMode !== 'auto_send') return null;
+  return metadataForServiceReport(service);
 }
 
 module.exports = {

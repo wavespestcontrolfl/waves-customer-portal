@@ -2200,6 +2200,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
               ? { completionTelemetry }
               : {}),
+            // Delivery posture at completion time, frozen on the record:
+            // /api/services suppresses report links for internal_only rows
+            // (Phase-1b shadow) — a later graduation to auto_send must not
+            // retroactively expose reports that were never sent.
+            ...(typedFindingsType ? { typedReportDelivery: typedDeliveryMode } : {}),
           };
           const serviceData = {
             protocol: {
@@ -3075,10 +3080,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
-    // delivery_mode 'disabled' (typed kill switch): no PDF render either.
-    // 'internal_only' still renders + stores (token + PDF) — only customer
-    // SMS/email below are suppressed via effectiveSendCompletionSms.
-    if (serviceReportV1Delivery && reportToken && typedDeliveryMode !== 'disabled') {
+    // Only auto_send completions queue a PDF render. 'disabled' is the typed
+    // kill switch; 'internal_only' (Phase-1b shadow) can't render either —
+    // the headless renderer opens /report/:token?mode=pdf without a staff
+    // JWT, and the public report routes 404 suppressed reports for
+    // non-staff. Staff review the shadow via the HTML report; the PDF only
+    // feeds customer sends, which are suppressed anyway.
+    if (serviceReportV1Delivery && reportToken && typedDeliveryMode === 'auto_send') {
       await enqueuePdfRenderJob({
         serviceRecordId: record.id,
         payload: {

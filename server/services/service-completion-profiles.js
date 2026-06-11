@@ -167,13 +167,23 @@ async function resolveCompletionProfileForServiceId(serviceId, knex = db) {
 /**
  * Project types that are "appointment-managed": at least one ACTIVE profile
  * routes them through the typed service-report completion flow
- * (completion_mode='service_report' with a project_type pointer). Keyed to
- * live cutover state — NOT registry metadata — so Projects creation for a
- * type stays available until the moment that type actually cuts over.
+ * (completion_mode='service_report' with a project_type pointer) AND no
+ * active project_required profile still points at the type — i.e. the type
+ * has FULLY cut over. While any key of the type remains project_required
+ * (Phase 1's excluded keys, the Phase-1b single-key shadow), ad hoc /
+ * unlinked project creation must stay available for those keys; LINKED
+ * creation is independently guarded by the linked service's own profile in
+ * POST /admin/projects, which is where the dual-entry risk actually lives.
+ * Keyed to live cutover state — NOT registry metadata.
  */
 async function appointmentManagedProjectTypes(knex = db) {
   if (!(await tableAvailable(knex))) return new Set();
   try {
+    const stillBacked = await knex('service_completion_profiles')
+      .where({ completion_mode: 'project_required', active: true })
+      .whereNotNull('project_type')
+      .distinct('project_type');
+    const backed = new Set(stillBacked.map((row) => row.project_type).filter(Boolean));
     const rows = await knex('service_completion_profiles')
       .where({ completion_mode: 'service_report', active: true })
       .whereNotNull('project_type')
@@ -182,6 +192,9 @@ async function appointmentManagedProjectTypes(knex = db) {
       rows
         .map((row) => row.project_type)
         .filter(Boolean)
+        // Partially-cutover types (some keys still project_required) stay
+        // creatable — see docblock.
+        .filter((type) => !backed.has(type))
         // Code-enforced V1 exclusions (see V1_EXCLUDED_PROJECT_TYPES) — a
         // flipped profile row must not retire the Projects creation path for
         // a type whose completion the V1 flow cannot legally perform.
