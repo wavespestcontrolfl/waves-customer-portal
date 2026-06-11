@@ -11,6 +11,27 @@ const logger = require('./logger');
 
 const GBP_LOCATION_KEYS = ['LWR', 'PARRISH', 'SARASOTA', 'VENICE'];
 
+// Location ids used by google-business.js for OAuth token storage in
+// system_settings (`gbp.oauth_tokens.{locationId}`). Must stay in sync with
+// LOCATION_ENV_KEYS in services/google-business.js.
+const GBP_LOCATION_IDS = { LWR: 'bradenton', PARRISH: 'parrish', SARASOTA: 'sarasota', VENICE: 'venice' };
+
+// OAuth tokens are written to system_settings by the admin connect flow;
+// the GBP_REFRESH_TOKEN_* env vars are a legacy bootstrap fallback only.
+async function getStoredGbpRefreshToken(locationKey) {
+  const locationId = GBP_LOCATION_IDS[locationKey];
+  if (!locationId) return null;
+  try {
+    const row = await db('system_settings').where({ key: `gbp.oauth_tokens.${locationId}` }).first();
+    if (!row?.value) return null;
+    const parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+    return parsed?.refresh_token || null;
+  } catch (err) {
+    logger.warn(`[token-health] GBP stored token lookup failed for ${locationKey}: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Helper: upsert result into token_credentials ──
 async function upsertResult({ platform, tokenType, status, lastError, expiresAt, envVarName }) {
   try {
@@ -144,15 +165,17 @@ async function checkGBP(locationKey) {
   const platform = `gbp_${locationKey.toLowerCase()}`;
   const clientId = process.env[`GBP_CLIENT_ID_${locationKey}`];
   const clientSecret = process.env[`GBP_CLIENT_SECRET_${locationKey}`];
-  const refreshToken = process.env[`GBP_REFRESH_TOKEN_${locationKey}`];
+  const refreshToken = (await getStoredGbpRefreshToken(locationKey)) || process.env[`GBP_REFRESH_TOKEN_${locationKey}`];
   const envVarName = `GBP_REFRESH_TOKEN_${locationKey}`;
 
   if (!clientId || !clientSecret || !refreshToken) {
     const missing = [];
     if (!clientId) missing.push(`GBP_CLIENT_ID_${locationKey}`);
     if (!clientSecret) missing.push(`GBP_CLIENT_SECRET_${locationKey}`);
-    if (!refreshToken) missing.push(`GBP_REFRESH_TOKEN_${locationKey}`);
-    const result = { platform, status: 'not_configured', lastError: `Missing: ${missing.join(', ')}`, expiresAt: null };
+    const lastError = missing.length
+      ? `Missing: ${missing.join(', ')}`
+      : 'Not connected — authorize via Admin Settings → Integrations';
+    const result = { platform, status: 'not_configured', lastError, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'refresh_token', envVarName });
     return result;
   }
@@ -178,7 +201,13 @@ async function checkGBP(locationKey) {
       return result;
     }
 
-    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    // Google's OAuth endpoint reports dead refresh tokens as HTTP 400 with
+    // error=invalid_grant (revoked/expired) or error=unauthorized_client
+    // (token minted by a different OAuth client), so classify from the error
+    // body rather than only from the HTTP status.
+    const tokenRejected = res.status === 401 || res.status === 403
+      || data.error === 'invalid_grant' || data.error === 'unauthorized_client';
+    const status = tokenRejected ? 'expired' : 'error';
     const result = { platform, status, lastError: data.error_description || data.error || `HTTP ${res.status}`, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'refresh_token', envVarName });
     return result;

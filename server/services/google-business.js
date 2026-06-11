@@ -92,11 +92,12 @@ async function readJsonOrThrow(res, label) {
 
 class GoogleBusinessService {
   constructor() {
-    // Check if any location has credentials
+    // Check if any location has OAuth client credentials. Refresh tokens are
+    // NOT required here: they live in system_settings (written by the admin
+    // connect flow) and are resolved per-location in _getClient at call time.
     this.configured = Object.values(LOCATION_ENV_KEYS).some(key =>
       process.env[`GBP_CLIENT_ID_${key}`] &&
-      process.env[`GBP_CLIENT_SECRET_${key}`] &&
-      process.env[`GBP_REFRESH_TOKEN_${key}`]
+      process.env[`GBP_CLIENT_SECRET_${key}`]
     );
 
     const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
@@ -106,7 +107,7 @@ class GoogleBusinessService {
     this._clients = {};
 
     if (!this.configured) {
-      logger.warn('[gbp] No GBP credentials found for any location — Google Business Profile disabled');
+      logger.warn('[gbp] No GBP OAuth client credentials found for any location — Google Business Profile disabled');
     }
   }
 
