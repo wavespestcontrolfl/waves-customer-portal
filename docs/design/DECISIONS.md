@@ -569,3 +569,15 @@ The tier price is the full customer total — there is **no separate setup charg
 **Review follow-up (consumers of the retired tier):** a code review caught several consumers still speaking the old `enhanced` vocabulary; the rename was propagated to all of them — `customer-pricing-ai.js` (portal AI now offers a Light 4x downsell instead of a phantom "Enhanced 9-visit" option that priced at Standard), `estimate-public.js` `treeShrubTierKey` (surfaces the Light row to customers; keeps the `enhanced` mapping so saved pre-v4.5 estimates still render), `estimate-assistant.js` `normalizeFrequencyKey` (adds `light`; keeps `enhanced`, still a live **Lawn** tier), the `admin-pricing-config.js` bootstrap seed (now seeds `4x_light`/`6x_standard`), and `server/services/pricing-engine/README.md`.
 
 **Revisit if:** the operator wants the engine to auto-recommend Light (4x) for clean/low-pest-history properties per the protocol note (today Light is customer-selectable but not the auto-recommended default), or wants the 0.43 multiplier lowered toward 0.50 (~14% lower list, ~7pp less margin) as a deliberate second step.
+
+---
+
+## 2026-06-11 — Phase-1 cutover migration: self-healing rewrite (deploy unblock)
+
+**What happened:** `20260611000012`'s per-key `count===1` assertions did their job — and revealed that live catalogs have drifted per environment (prod lacks an active `pest_initial_cleanout` profile; staging lacks `mosquito_event`). Because the migration runs in `preDeployCommand`, the throw blocked every deployment after #1617 merged. A Railway bot PR (#1628) proposed downgrading the assertions to warnings — rejected: silently skipping keys converts the loud-drift guard into silent partial cutover.
+
+**Decision:** deterministic per-key resolution instead of a fixed-count assertion (file edited in place — it never ran successfully anywhere, so knex has no record of it): FLIP expected rows; ALREADY for idempotent re-runs; **HEAL** (insert the profile in cut-over shape, seed defaults derived from the services row, marked in `notes`) when the services row exists without a profile; **ABSENT** (loud warn, skip) when the environment genuinely lacks the service or the row is inactive; **THROW** on any unexpected mode/pointer — that's real drift needing eyes, and the transaction still rolls back atomically. Every key's outcome is logged so each environment's deploy log records what it had.
+
+**Verification:** fresh 646-migration replay (flipped=16) + drift simulation: deleted profile w/ service present → healed with correct alert/14 follow-up policy; deleted profile+service → absent; idempotent re-run → already=15; injected wrong pointer → throws and aborts; down() reverts healed rows to valid `project_required`.
+
+**Durable lesson:** environment catalogs are admin-mutable — cutover migrations must resolve per-key against live state, never assert a replay-derived count.
