@@ -10,6 +10,7 @@ import { useState } from 'react';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 export default function MobileCheckTenderSheet({
+  desktopVisible = false,
   invoiceId,
   amount,           // invoice total (dollars)
   onClose,
@@ -57,7 +58,7 @@ export default function MobileCheckTenderSheet({
   }
 
   return (
-    <div className="fixed inset-0 z-[115] bg-white flex flex-col md:hidden">
+    <div className={`fixed inset-0 z-[115] bg-white flex flex-col ${desktopVisible ? '' : 'md:hidden'}`}>
       {/* Header */}
       <div
         className="flex items-center px-3 border-b border-hairline border-zinc-200"

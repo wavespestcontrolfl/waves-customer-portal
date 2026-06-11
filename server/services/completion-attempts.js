@@ -16,7 +16,10 @@ function isUniqueViolation(err) {
 }
 
 function hashCompletionRequest(body) {
-  const { idempotencyKey, timeOnSite, ...stableBody } = body || {};
+  // completionTelemetry carries per-attempt timestamps (submitClickedAt) —
+  // including it would make every legitimate retry an
+  // idempotency_key_mismatch for typed completions.
+  const { idempotencyKey, timeOnSite, completionTelemetry, ...stableBody } = body || {};
   return crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
     .digest('hex');

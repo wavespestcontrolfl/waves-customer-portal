@@ -30,6 +30,7 @@ const {
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const ActivityIndicators = require('../services/service-report/activity-indicators');
 const {
   stampSeriesPrepaid,
   resolveSeriesParentId,
@@ -1010,6 +1011,13 @@ async function loadProjectCompletionContextByServiceId(services) {
       });
     return [service.id, {
       completionProfile,
+      // Typed-findings schema embedded alongside the profile so the
+      // CompletionPanel (fed by this endpoint on desktop AND mobile) can
+      // render the typed form without a registry round-trip. Null for
+      // everything except cut-over specialty types.
+      findingsSchema: completionProfile?.findingsType
+        ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType)
+        : null,
       linkedProject: linkedProjectsByServiceId.get(service.id) || null,
     }];
   }));
@@ -1145,6 +1153,7 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         completionProfile: projectCompletionContext.completionProfile || null,
+        findingsSchema: projectCompletionContext.findingsSchema || null,
         linkedProject: projectCompletionContext.linkedProject || null,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
@@ -1353,6 +1362,7 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
           completionProfile: projectCompletionContext.completionProfile || null,
+          findingsSchema: projectCompletionContext.findingsSchema || null,
           linkedProject: projectCompletionContext.linkedProject || null,
           technicianId: s.technician_id,
           technicianName: s.tech_name,

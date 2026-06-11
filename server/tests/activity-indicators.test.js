@@ -368,3 +368,27 @@ describe('findingsSchemaForType', () => {
     expect(findingsSchemaForType('not_a_type')).toBeNull();
   });
 });
+
+describe('banned customer copy', () => {
+  const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
+
+  test('flags absolute and promissory claims', () => {
+    expect(findBannedCustomerCopy('The roaches have been eliminated.')).toContain('eliminated');
+    expect(findBannedCustomerCopy('We guarantee your home is pest-free!').length).toBeGreaterThanOrEqual(2);
+    expect(findBannedCustomerCopy('All clear — no infestation remains.').length).toBeGreaterThanOrEqual(2);
+    expect(findBannedCustomerCopy('The treated areas are clear.').length).toBeGreaterThanOrEqual(1);
+    expect(findBannedCustomerCopy('Activity cleared after service.')).toContain('cleared');
+    expect(findBannedCustomerCopy('Your kitchen is now clear of roaches.').length).toBeGreaterThanOrEqual(1);
+    expect(findBannedCustomerCopy('The problem is gone for good.')).toContain('gone');
+    expect(findBannedCustomerCopy('The issue is resolved.')).toContain('resolved');
+    expect(findBannedCustomerCopy('Activity is gone.')).toContain('gone');
+  });
+
+  test('allows observational wording and legitimate sanitation advice', () => {
+    expect(findBannedCustomerCopy('No active signs observed in accessible areas today.')).toEqual([]);
+    expect(findBannedCustomerCopy('Please clear food debris from under the fridge.')).toEqual([]);
+    expect(findBannedCustomerCopy('Activity has decreased since our last visit.')).toEqual([]);
+    expect(findBannedCustomerCopy('Keep counters clear of food debris.')).toEqual([]);
+    expect(findBannedCustomerCopy('Keep vegetation clear of the foundation.')).toEqual([]);
+  });
+});

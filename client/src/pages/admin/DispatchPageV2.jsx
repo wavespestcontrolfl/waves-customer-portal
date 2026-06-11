@@ -103,8 +103,13 @@ function shouldOpenMobileCompletion(service) {
 }
 
 function isProjectBackedCompletion(service) {
+  // projectBacked covers BOTH special projects (WDO/pre-treat) and the
+  // still-project_required one-time types — those must keep routing to the
+  // Projects flow or the server 409s them out of /complete. Typed
+  // service_report profiles serialize projectBacked:false, so cut-over
+  // jobs fall through to CompletionPanel.
   const profile = service?.completionProfile;
-  return !!(profile?.projectBacked || profile?.requiresProject);
+  return !!(profile?.projectBacked || profile?.requiresProject || service?.linkedProject?.id);
 }
 
 function projectCompletionActionLabel(service) {
@@ -2249,6 +2254,14 @@ export default function DispatchPageV2({
             }
           }}
           onSubmit={handleCompleteSubmit}
+          onBillingRequired={(svc) => {
+            // Typed one-time completion hit the billing 409 — close the
+            // panel (its draft autosave preserves the findings) and open
+            // the existing checkout flow; the post-payment paths re-open
+            // completion automatically.
+            setCompletingService(null);
+            setCheckoutService(svc);
+          }}
           onViewDetails={
             isMobile
               ? (svc) => {
@@ -2351,6 +2364,7 @@ export default function DispatchPageV2({
       {checkoutService && (
         <MobileCheckoutSheet
           service={checkoutService}
+          desktopVisible
           onClose={() => setCheckoutService(null)}
           onChargeSuccess={({
             service: svc,
@@ -2376,6 +2390,7 @@ export default function DispatchPageV2({
       )}
       {editingLineService && (
         <MobileServiceEditModal
+          desktopVisible
           service={editingLineService}
           technicians={technicians}
           onClose={() => setEditingLineService(null)}
@@ -2397,6 +2412,7 @@ export default function DispatchPageV2({
           invoiceId={paymentData.invoiceId}
           invoiceToken={paymentData.invoiceToken}
           amount={paymentData.amount}
+          desktopVisible
           onClose={() => setPaymentData(null)}
           onInvoiceSent={() => {
             // Invoice SMS+email was just sent — the bill is now in the
@@ -2413,11 +2429,22 @@ export default function DispatchPageV2({
             setCompletingService(svc);
             fetchSchedule(date);
           }}
-          onChargeSuccess={() => {
+          onChargeSuccess={async () => {
+            // Card paths reopen completion like the invoice/cash/check
+            // paths do — otherwise a billing-409 detour that pays by card
+            // drops the tech back to the schedule with the visit still
+            // incomplete and the typed draft stranded.
+            const svc = {
+              ...paymentData.service,
+              checkoutInvoiceId: paymentData.invoiceId,
+              checkoutInvoiceStatus: "paid",
+            };
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            fetchSchedule(date);
+            const fresh = await fetchSchedule(date);
+            const updated = fresh?.services?.find((s) => s.id === svc.id);
+            setCompletingService(updated ? { ...updated, ...svc } : svc);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
             // Cash / Check tender marked the pre-minted invoice paid server-side;

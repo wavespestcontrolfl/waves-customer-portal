@@ -43,6 +43,7 @@ export default function MobilePaymentSheet({
   onInvoiceSent,
   onChargeSuccess,
   onPrepaidRecorded,
+  desktopVisible = false,
 }) {
   const [charging, setCharging] = useState(false);
   const [sendingInvoice, setSendingInvoice] = useState(false);
@@ -110,7 +111,7 @@ export default function MobilePaymentSheet({
 
   return (
     <>
-      <div className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden">
+      <div className={`fixed inset-0 z-[110] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
         {/* Header */}
         <div
           className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
@@ -216,6 +217,7 @@ export default function MobilePaymentSheet({
 
       {showManualCard && (
         <MobileManualCardSheet
+          desktopVisible={desktopVisible}
           invoiceToken={invoiceToken}
           amount={amount}
           onClose={() => setShowManualCard(false)}
@@ -228,6 +230,7 @@ export default function MobilePaymentSheet({
 
       {showCash && (
         <MobileCashTenderSheet
+          desktopVisible={desktopVisible}
           invoiceId={invoiceId}
           amount={amount}
           onClose={() => setShowCash(false)}
@@ -240,6 +243,7 @@ export default function MobilePaymentSheet({
 
       {showCheck && (
         <MobileCheckTenderSheet
+          desktopVisible={desktopVisible}
           invoiceId={invoiceId}
           amount={amount}
           onClose={() => setShowCheck(false)}
@@ -252,6 +256,7 @@ export default function MobilePaymentSheet({
 
       {showCardOnFile && (
         <MobileCardOnFileSheet
+          desktopVisible={desktopVisible}
           service={service}
           invoiceId={invoiceId}
           customerId={service?.customerId || service?.customer_id}

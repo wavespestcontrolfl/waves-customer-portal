@@ -57,6 +57,7 @@ export default function MobileCheckoutSheet({
   onClose,
   onChargeSuccess,
   onEditServiceLine,
+  desktopVisible = false,
 }) {
   const [minting, setMinting] = useState(false);
   const [mintError, setMintError] = useState(null);
@@ -206,7 +207,7 @@ export default function MobileCheckoutSheet({
   }
 
   return (
-    <div className="fixed inset-0 z-[105] bg-white overflow-y-auto md:hidden">
+    <div className={`fixed inset-0 z-[105] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
       <div
         className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
         style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
@@ -366,12 +367,14 @@ export default function MobileCheckoutSheet({
 
       {showServicePicker && (
         <MobileServicePickerSheet
+          desktopVisible={desktopVisible}
           onClose={() => setShowServicePicker(false)}
           onSelect={handleAddService}
         />
       )}
       {showItemPicker && (
         <MobileItemDiscountPickerSheet
+          desktopVisible={desktopVisible}
           onClose={() => setShowItemPicker(false)}
           onSelect={handleAddItem}
         />

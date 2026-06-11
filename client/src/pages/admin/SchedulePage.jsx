@@ -35,6 +35,7 @@ import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
+import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -368,10 +369,17 @@ function adminFetch(path, options = {}) {
       ...options.headers,
     },
     ...options,
-  }).then((r) => {
+  }).then(async (r) => {
     if (!r.ok) {
-      const err = new Error(`HTTP ${r.status}`);
+      // Surface the server's error body — completion handlers branch on
+      // err.code (completion_billing_required and friends), so a bare
+      // "HTTP 409" string breaks the billing-detour routing.
+      let body = null;
+      try { body = await r.json(); } catch { /* non-JSON error */ }
+      const err = new Error(body?.error || `HTTP ${r.status}`);
       err.status = r.status;
+      if (body?.code) err.code = body.code;
+      if (body?.violations) err.violations = body.violations;
       throw err;
     }
     return r.json();
@@ -4492,6 +4500,221 @@ function CPChip({ selected, onClick, children, dot }) {
   );
 }
 
+// Typed specialty completion form (specialty-service-completion-contract.md
+// §3-§4, §7): registry-driven findings fields + activity gauge + next-step
+// chips + optional AI-drafted recommendations. Shared by the mobile and
+// desktop renders of CompletionPanel — `variant` only switches the
+// palette/label chrome between the CP mobile tokens and the D palette.
+function TypedFindingsSection({
+  variant,
+  schema,
+  values,
+  onFieldChange,
+  activityScore,
+  activityScoreTouched,
+  onActivityTap,
+  nextStepChips,
+  onToggleChip,
+  recommendations,
+  onRecommendationsChange,
+  aiDrafting,
+  aiError,
+  includeComms,
+  onIncludeCommsChange,
+  onAiDraft,
+}) {
+  const mobile = variant === "mobile";
+  const labelCss = mobile ? CP_EYEBROW : labelStyle;
+  const textColor = mobile ? CP_M.ink : D.text;
+  const mutedColor = mobile ? CP_M.ink4 : D.muted;
+  const cardBg = mobile ? CP_M.card : D.card;
+  const hairline = mobile ? CP_M.hairline : D.border;
+  const accent = mobile ? CP_M.ink : D.teal;
+  const accentFg = mobile ? CP_M.actionFg : D.teal;
+  const requiredColor = mobile ? "#C2410C" : D.red;
+  const scoreLabels = schema.activity?.techScoreLabels || {};
+  const fieldLabelStyle = {
+    fontSize: 14,
+    fontWeight: 600,
+    color: textColor,
+    marginBottom: 6,
+  };
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <label style={labelCss}>Service findings</label>
+      {(schema.fields || []).map((field) => (
+        <div key={field.key} style={{ marginBottom: 12 }}>
+          <div style={fieldLabelStyle}>
+            {field.label}
+            {field.required && (
+              <span style={{ color: requiredColor }}> *</span>
+            )}
+          </div>
+          <ProjectFindingFieldInput
+            field={field}
+            id={`typed-finding-${schema.type}-${field.key}`}
+            name={`structuredFindings.${field.key}`}
+            value={values[field.key] || ""}
+            onChange={(value) => onFieldChange(field.key, value)}
+            inputStyle={{ width: "100%", boxSizing: "border-box" }}
+          />
+        </div>
+      ))}
+      {schema.activity && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fieldLabelStyle}>
+            {schema.activity.label}
+            <span style={{ color: requiredColor }}> *</span>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {[0, 1, 2, 3, 4, 5].map((n) => {
+              const selected = activityScore === n;
+              return (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => onActivityTap(n)}
+                  aria-pressed={selected}
+                  aria-label={`${schema.activity.label}: ${scoreLabels[n] || n}`}
+                  style={{
+                    minWidth: 64,
+                    height: 44,
+                    padding: "0 10px",
+                    borderRadius: 10,
+                    background: selected
+                      ? mobile
+                        ? accent
+                        : accent + "18"
+                      : cardBg,
+                    color: selected ? accentFg : textColor,
+                    border: `1px solid ${selected ? accent : hairline}`,
+                    fontSize: 14,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  {scoreLabels[n] || n}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 12, color: mutedColor, marginTop: 6 }}>
+            {activityScoreTouched
+              ? "Set by technician"
+              : "Prefills from findings until you tap"}
+          </div>
+        </div>
+      )}
+      <div style={{ marginBottom: 12 }}>
+        <div style={fieldLabelStyle}>Next steps (up to 4)</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {(schema.nextStepChips || []).map((chip) => {
+            const selected = nextStepChips.includes(chip);
+            return (
+              <button
+                key={chip}
+                type="button"
+                onClick={() => onToggleChip(chip)}
+                aria-pressed={selected}
+                style={{
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 999,
+                  background: selected
+                    ? mobile
+                      ? accent
+                      : accent + "18"
+                    : cardBg,
+                  color: selected ? accentFg : textColor,
+                  border: `1px solid ${selected ? accent : hairline}`,
+                  fontSize: 14,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {chip}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ marginBottom: 4 }}>
+        <div style={fieldLabelStyle}>Recommendations (optional)</div>
+        <textarea
+          value={recommendations}
+          onChange={(e) => onRecommendationsChange(e.target.value)}
+          rows={3}
+          placeholder="Optional customer-facing recommendations..."
+          style={{
+            width: "100%",
+            background: cardBg,
+            color: textColor,
+            border: `1px solid ${hairline}`,
+            borderRadius: 10,
+            padding: 12,
+            fontSize: 14,
+            resize: "vertical",
+            boxSizing: "border-box",
+          }}
+        />
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            marginTop: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <button
+            type="button"
+            onClick={onAiDraft}
+            disabled={aiDrafting}
+            style={{
+              height: 36,
+              padding: "0 14px",
+              borderRadius: 999,
+              background: "transparent",
+              color: accent,
+              border: `1px solid ${accent}`,
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: aiDrafting ? "wait" : "pointer",
+              opacity: aiDrafting ? 0.5 : 1,
+            }}
+          >
+            {aiDrafting ? "Drafting..." : "AI draft"}
+          </button>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 14,
+              color: textColor,
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={includeComms}
+              onChange={(e) => onIncludeCommsChange(e.target.checked)}
+              style={{ width: 16, height: 16, accentColor: accent }}
+            />
+            Include recent customer calls/texts/emails
+          </label>
+        </div>
+        {aiError && (
+          <div style={{ fontSize: 12, color: requiredColor, marginTop: 6 }}>
+            {aiError}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weeds" },
@@ -5837,6 +6060,11 @@ export function CompletionPanel({
   onClose,
   onSubmit,
   onViewDetails,
+  // Typed specialty completion (PR 3): parent-owned routes for the
+  // billing-required 409 (opens the checkout flow) and the success-screen
+  // follow-up CTA (wired by PR 4 — the button only renders when provided).
+  onBillingRequired,
+  onScheduleFollowup,
 }) {
   const [notes, setNotes] = useState("");
   const [selectedProducts, setSelectedProducts] = useState([]);
@@ -5876,6 +6104,36 @@ export function CompletionPanel({
   // Null = not entered; 0-5 = explicit rating; backend ignores when the
   // config flag `allowTechnicianClientRatingEntry` is off.
   const [clientPestRating, setClientPestRating] = useState(null);
+  // Typed specialty completion (specialty-service-completion-contract.md).
+  // A job is "typed" when its completion profile carries a findingsType AND
+  // the dispatch payload embedded the registry schema slice for it.
+  const typedFindingsSchema = service.findingsSchema || null;
+  const isTypedFindings = !!(
+    service.completionProfile?.findingsType && typedFindingsSchema
+  );
+  const [findingsValues, setFindingsValues] = useState({});
+  const [typedActivityScore, setTypedActivityScore] = useState(null);
+  // Pin semantics (contract §4): while untouched, the score recomputes from
+  // deriveScores[values[deriveField]]; the FIRST tap on the picker pins
+  // technician-set — even on the same value.
+  const [typedActivityTouched, setTypedActivityTouched] = useState(false);
+  const [typedNextStepChips, setTypedNextStepChips] = useState([]);
+  const [typedRecommendations, setTypedRecommendations] = useState("");
+  const [typedRecommendationsEdited, setTypedRecommendationsEdited] =
+    useState(false);
+  const [typedAiDrafting, setTypedAiDrafting] = useState(false);
+  const [typedAiError, setTypedAiError] = useState("");
+  // Customer calls/texts/emails reach the AI prompt only on explicit opt-in
+  // — they can carry PII, so the box starts unchecked.
+  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(false);
+  const [typedAiDraftUsed, setTypedAiDraftUsed] = useState(false);
+  // Tech-speed telemetry (contract §10) — rides inside the completion POST
+  // as `completionTelemetry`; never a separate request.
+  const completionTelemetryRef = useRef({
+    panelOpenedAt: new Date().toISOString(),
+    firstFieldTouchedAt: null,
+    requiredFieldErrorCount: 0,
+  });
   // `null` = unknown (still loading or fetch failed). The picker only
   // renders when this is explicitly `true`, so a config-flag flip OFF
   // hides the UI rather than letting the tech enter data the backend
@@ -5891,6 +6149,12 @@ export function CompletionPanel({
     // detectServiceCategory ↔ detectServiceLine drift (e.g. rodent
     // labels classify as `pest` client-side but `rodent` server-side).
     if (!service || !service.id) return undefined;
+    // Typed jobs never show the Pest Pressure picker — activity capture
+    // happens through the findings activity gauge instead. Skip the fetch.
+    if (isTypedFindings) {
+      setTechRatingAllowed(false);
+      return undefined;
+    }
     adminFetch(`/admin/dispatch/${service.id}/tech-rating-allowed`)
       .then((body) => {
         if (cancelled) return;
@@ -5968,10 +6232,14 @@ export function CompletionPanel({
   const photoInputRef = useRef(null);
   const recapRequestRef = useRef(0);
   const recapAbortRef = useRef(null);
+  const draftSnapshotRef = useRef(null);
   const completionIdempotencyKeyRef = useRef(null);
   const draftReadyRef = useRef(false);
 
-  const isLawn = detectServiceCategory(service.serviceType) === "lawn";
+  // Typed jobs use the findings form — lawn/WaveGuard closeout sections
+  // (soil readings, treatment plan/calibration, tank cleanout) never apply.
+  const isLawn =
+    !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
   const serviceTypeForArea = service?.serviceType || service?.service_type || "";
   const calibrationRequired = isLawn && !!service.waveguardTier;
   const currentAdminUser = (() => {
@@ -5988,9 +6256,9 @@ export function CompletionPanel({
   const usesPlantHealthChips =
     serviceCategory === "lawn" || serviceCategory === "tree_shrub";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
-  const treeShrubCloseoutRequired = ["tree_shrub", "palm"].includes(
-    serviceLineForCloseout,
-  );
+  const treeShrubCloseoutRequired =
+    !isTypedFindings &&
+    ["tree_shrub", "palm"].includes(serviceLineForCloseout);
   const handleLawnAssessmentConfirmed = (assessmentId) => {
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
@@ -6353,7 +6621,8 @@ export function CompletionPanel({
     setProtocolActions([]);
     setProtocolActionMeta(null);
     setProtocolActionError("");
-    if (!service.serviceType)
+    // Typed jobs hide the protocol-actions section entirely — skip the fetch.
+    if (!service.serviceType || isTypedFindings)
       return () => {
         cancelled = true;
       };
@@ -6405,6 +6674,7 @@ export function CompletionPanel({
     service.scheduled_date,
     service.date,
     isLawn,
+    isTypedFindings,
   ]);
 
   useEffect(() => {
@@ -6576,11 +6846,14 @@ export function CompletionPanel({
       tankCleanoutMethod.trim() ||
       tankCleanoutNote.trim() ||
       JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
+      Object.keys(findingsValues).length ||
+      typedActivityScore != null ||
+      typedNextStepChips.length ||
+      typedRecommendations.trim() ||
       visitOutcome !== "completed";
     if (!hasDraftContent) return;
 
-    const timer = setTimeout(() => {
-      const draft = {
+    const draft = {
         serviceId: service.id,
         savedAt: new Date().toISOString(),
         notes,
@@ -6620,7 +6893,19 @@ export function CompletionPanel({
         tankCleanoutMethod,
         tankCleanoutNote,
         treeShrubCloseout,
+        // Typed specialty findings — must survive the billing-409 checkout
+        // detour (the panel closes while the tech collects payment).
+        findingsValues,
+        typedActivityScore,
+        typedActivityTouched,
+        typedNextStepChips,
+        typedRecommendations,
       };
+    // Latest draft is always reachable synchronously — the billing-409
+    // detour unmounts this panel before the debounce timer fires, and the
+    // cleanup below would otherwise drop the newest edits.
+    draftSnapshotRef.current = draft;
+    const timer = setTimeout(() => {
       localStorage.setItem(
         completionDraftKey(service.id),
         JSON.stringify(draft),
@@ -6668,6 +6953,11 @@ export function CompletionPanel({
     tankCleanoutMethod,
     tankCleanoutNote,
     treeShrubCloseout,
+    findingsValues,
+    typedActivityScore,
+    typedActivityTouched,
+    typedNextStepChips,
+    typedRecommendations,
     service.city,
     service.address,
     service.serviceAddress,
@@ -6745,6 +7035,23 @@ export function CompletionPanel({
     setTreeShrubCloseout(
       normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
     );
+    setFindingsValues(
+      savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
+        ? savedDraft.findingsValues
+        : {},
+    );
+    setTypedActivityScore(
+      Number.isInteger(savedDraft.typedActivityScore)
+        ? savedDraft.typedActivityScore
+        : null,
+    );
+    setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+    setTypedNextStepChips(
+      Array.isArray(savedDraft.typedNextStepChips)
+        ? savedDraft.typedNextStepChips
+        : [],
+    );
+    setTypedRecommendations(savedDraft.typedRecommendations || "");
     setShowDraftPrompt(false);
   }
 
@@ -7154,6 +7461,29 @@ export function CompletionPanel({
       );
       return;
     }
+    if (isTypedFindings && !isIncompleteVisit) {
+      const missingTypedRequired = (typedFindingsSchema.fields || [])
+        .filter(
+          (f) =>
+            f.required && String(findingsValues[f.key] ?? "").trim() === "",
+        )
+        .map((f) => f.label);
+      // Gauge types require a score on any completed-side outcome — the
+      // server 422s (activity_score_required) when findings are submitted
+      // without one and the derive field can't fill it.
+      const typedScoreMissing =
+        !!typedFindingsSchema.activity && typedActivityScore == null;
+      if (missingTypedRequired.length || typedScoreMissing) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(
+          `Complete the required service findings before submitting: ${[
+            ...missingTypedRequired,
+            ...(typedScoreMissing ? [typedFindingsSchema.activity.label] : []),
+          ].join(", ")}.`,
+        );
+        return;
+      }
+    }
     if (
       calibrationRequired &&
       !isIncompleteVisit &&
@@ -7256,9 +7586,14 @@ export function CompletionPanel({
         })
         .filter(Boolean);
       const reportObservations = labelsStillInNotes(selectedObservationLabels);
-      const reportRecommendations = labelsStillInNotes(
-        selectedRecommendationLabels,
-      );
+      // Typed mode appends the optional recommendations textarea into the
+      // existing recommendations array — no new server field.
+      const reportRecommendations = [
+        ...labelsStillInNotes(selectedRecommendationLabels),
+        ...(isTypedFindings && typedRecommendations.trim()
+          ? [typedRecommendations.trim()]
+          : []),
+      ];
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
@@ -7369,6 +7704,28 @@ export function CompletionPanel({
       if (clientPestRating != null && Number.isInteger(clientPestRating)) {
         body.clientPestRating = clientPestRating;
       }
+      // Typed specialty findings payload. Skipped on incomplete visits —
+      // the server ignores typed findings for them anyway.
+      if (isTypedFindings && !isIncompleteVisit) {
+        body.structuredFindings = {
+          type: typedFindingsSchema.type,
+          values: findingsValues,
+        };
+        if (typedActivityScore != null) {
+          body.activityScore = typedActivityScore;
+          body.activityScoreSource = typedActivityTouched
+            ? "technician"
+            : "derived";
+        }
+        body.nextStepChips = typedNextStepChips;
+        body.completionTelemetry = {
+          ...completionTelemetryRef.current,
+          submitClickedAt: new Date().toISOString(),
+          aiDraftUsed: typedAiDraftUsed,
+          recommendationTextEdited: typedRecommendationsEdited,
+          activityScoreTouched: typedActivityTouched,
+        };
+      }
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
@@ -7395,12 +7752,40 @@ export function CompletionPanel({
       const smsNeedsAttention = ["blocked", "failed"].includes(
         result?.completionSmsStatus,
       );
-      setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
+      // A required follow-up suggestion keeps the success overlay open so
+      // the tech can act on the CTA — it dismisses via the Done button.
+      if (!result?.followupSuggestion?.required) {
+        setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
+      }
     } catch (e) {
       if (e?.status >= 400 && e.status < 500 && e.status !== 409) {
         completionIdempotencyKeyRef.current = null;
       }
-      alert("Failed to complete service: " + e.message);
+      const billingRequired =
+        e?.status === 409 &&
+        (e?.code === "completion_billing_required" ||
+          /invoice or payment is required/i.test(e?.message || ""));
+      if (billingRequired) {
+        // Typed one-time billing gate — route to the existing checkout
+        // flow. Flush the draft synchronously first: the panel unmounts on
+        // detour, which cancels the debounced write and would lose edits
+        // made in the last 700ms.
+        if (draftSnapshotRef.current) {
+          try {
+            localStorage.setItem(
+              completionDraftKey(service.id),
+              JSON.stringify(draftSnapshotRef.current),
+            );
+          } catch { /* storage full — draft prompt simply won't restore */ }
+        }
+        alert(
+          "An invoice or payment is required before completing this one-time service." +
+            (onBillingRequired ? " Opening checkout." : ""),
+        );
+        if (onBillingRequired) onBillingRequired(service);
+      } else {
+        alert("Failed to complete service: " + e.message);
+      }
     }
     setSubmitting(false);
   }
@@ -7481,6 +7866,75 @@ export function CompletionPanel({
       appendUniqueLabel(setSelectedRecommendationLabels, value);
       addChipNote("Next", value);
     }
+  }
+  function markTypedFirstFieldTouch() {
+    if (!completionTelemetryRef.current.firstFieldTouchedAt) {
+      completionTelemetryRef.current.firstFieldTouchedAt =
+        new Date().toISOString();
+    }
+  }
+  function handleTypedFindingChange(key, value) {
+    markTypedFirstFieldTouch();
+    setFindingsValues((prev) => ({ ...prev, [key]: value }));
+    // Derived prefill (contract §4): while the picker is untouched, the
+    // score recomputes from the derive-field select on every change.
+    const activity = typedFindingsSchema?.activity;
+    if (activity?.deriveField === key && !typedActivityTouched) {
+      const derived = activity.deriveScores?.[String(value)];
+      setTypedActivityScore(derived == null ? null : derived);
+    }
+  }
+  function handleTypedActivityTap(n) {
+    markTypedFirstFieldTouch();
+    // First tap pins technician-set, even when the value doesn't change.
+    setTypedActivityTouched(true);
+    setTypedActivityScore(n);
+  }
+  function toggleTypedNextStepChip(chip) {
+    markTypedFirstFieldTouch();
+    setTypedNextStepChips((prev) => {
+      if (prev.includes(chip)) return prev.filter((c) => c !== chip);
+      if (prev.length >= 4) return prev;
+      return [...prev, chip];
+    });
+  }
+  function handleTypedRecommendationsChange(value) {
+    markTypedFirstFieldTouch();
+    setTypedRecommendations(value);
+    setTypedRecommendationsEdited(true);
+  }
+  // Optional AI polish — failures surface inline and never block submit;
+  // the Complete button stays usable while a draft is in flight.
+  async function handleTypedAiDraft() {
+    if (typedAiDrafting || !typedFindingsSchema) return;
+    setTypedAiError("");
+    setTypedAiDrafting(true);
+    try {
+      const r = await adminFetch(
+        `/admin/dispatch/${service.id}/findings-recap/draft`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            structuredFindings: {
+              type: typedFindingsSchema.type,
+              values: findingsValues,
+            },
+            nextStepChips: typedNextStepChips,
+            includeCustomerComms: typedAiIncludeComms,
+          }),
+        },
+      );
+      if (r?.draft) {
+        setTypedRecommendations(r.draft);
+        setTypedRecommendationsEdited(false);
+        setTypedAiDraftUsed(true);
+      } else {
+        setTypedAiError("AI draft unavailable — write manually or skip.");
+      }
+    } catch {
+      setTypedAiError("AI draft unavailable — write manually or skip.");
+    }
+    setTypedAiDrafting(false);
   }
   // ────────────────────────────────────────────────────────────────────
   // Mobile admin render — follows reference_waves_admin_ui_system.md
@@ -7672,6 +8126,54 @@ export function CompletionPanel({
                         : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
+              {completionResult?.typedDeliveryMode === "internal_only" && (
+                <div
+                  style={{
+                    fontFamily: font,
+                    fontSize: 13,
+                    color: M.ink3,
+                    marginTop: 8,
+                    textAlign: "center",
+                  }}
+                >
+                  Report stored — customer delivery is off for this service
+                  type.
+                </div>
+              )}
+              {completionResult?.followupSuggestion?.required && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    marginTop: 20,
+                    width: "100%",
+                    maxWidth: 360,
+                  }}
+                >
+                  {onScheduleFollowup && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onScheduleFollowup(completionResult.followupSuggestion)
+                      }
+                      style={primaryPill}
+                    >
+                      Schedule follow-up
+                      {completionResult.followupSuggestion.suggestedDate
+                        ? ` (suggested ${completionResult.followupSuggestion.suggestedDate})`
+                        : ""}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onClose(true)}
+                    style={secondaryPill}
+                  >
+                    Done
+                  </button>
+                </div>
+              )}
             </div>
           )}
           {/* Sticky top bar — Square pattern: ← · centered title · ⋯ */}
@@ -8433,76 +8935,78 @@ export function CompletionPanel({
                 style={{ ...mTextarea, minHeight: quickComplete ? 90 : 140 }}
               />{" "}
             </Field>
-            <Field label="Protocol actions">
-              {protocolActionMeta?.programName && (
-                <div
-                  style={{
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: M.ink4,
-                    marginBottom: 8,
-                  }}
-                >
-                  {protocolActionMeta.programName}
-                  {protocolActionMeta.visit?.month
-                    ? ` - ${protocolActionMeta.visit.month}`
-                    : ""}
-                </div>
-              )}
-              {protocolActionsLoading ? (
-                <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
-                  Loading protocol actions...
-                </div>
-              ) : (
-                <>
-                  {protocolActionError && !protocolActions.length && (
-                    <div
-                      style={{
-                        fontFamily: font,
-                        fontSize: 12,
-                        color: M.ink4,
-                        marginBottom: 8,
-                      }}
-                    >
-                      Protocol actions unavailable.
-                    </div>
-                  )}
-                  <select
-                    aria-label="Add protocol action"
-                    value=""
-                    onChange={(e) => handleProtocolActionSelect(e.target.value)}
-                    style={mSelect}
+            {!isTypedFindings && (
+              <Field label="Protocol actions">
+                {protocolActionMeta?.programName && (
+                  <div
+                    style={{
+                      fontFamily: font,
+                      fontSize: 12,
+                      color: M.ink4,
+                      marginBottom: 8,
+                    }}
                   >
-                    <option value="">Add protocol action...</option>
-                    {protocolActions.length > 0
-                      ? protocolActionSelectOptions.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.selected ? "(applied) " : ""}
-                            {opt.label}
-                          </option>
-                        ))
-                      : CHIP_ACTIONS.map((chip) => (
-                          <option key={chip.label} value={chip.label}>
-                            {chip.label}
-                          </option>
-                        ))}
-                  </select>
-                  {selectedProtocolActionCount > 0 && (
-                    <div
-                      style={{
-                        fontFamily: font,
-                        fontSize: 12,
-                        color: M.ink3,
-                        marginTop: 6,
-                      }}
+                    {protocolActionMeta.programName}
+                    {protocolActionMeta.visit?.month
+                      ? ` - ${protocolActionMeta.visit.month}`
+                      : ""}
+                  </div>
+                )}
+                {protocolActionsLoading ? (
+                  <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
+                    Loading protocol actions...
+                  </div>
+                ) : (
+                  <>
+                    {protocolActionError && !protocolActions.length && (
+                      <div
+                        style={{
+                          fontFamily: font,
+                          fontSize: 12,
+                          color: M.ink4,
+                          marginBottom: 8,
+                        }}
+                      >
+                        Protocol actions unavailable.
+                      </div>
+                    )}
+                    <select
+                      aria-label="Add protocol action"
+                      value=""
+                      onChange={(e) => handleProtocolActionSelect(e.target.value)}
+                      style={mSelect}
                     >
-                      {selectedProtocolActionCount} protocol action
-                      {selectedProtocolActionCount === 1 ? "" : "s"} applied
-                    </div>
-                  )}
-                </>
-              )}
-            </Field>
+                      <option value="">Add protocol action...</option>
+                      {protocolActions.length > 0
+                        ? protocolActionSelectOptions.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.selected ? "(applied) " : ""}
+                              {opt.label}
+                            </option>
+                          ))
+                        : CHIP_ACTIONS.map((chip) => (
+                            <option key={chip.label} value={chip.label}>
+                              {chip.label}
+                            </option>
+                          ))}
+                    </select>
+                    {selectedProtocolActionCount > 0 && (
+                      <div
+                        style={{
+                          fontFamily: font,
+                          fontSize: 12,
+                          color: M.ink3,
+                          marginTop: 6,
+                        }}
+                      >
+                        {selectedProtocolActionCount} protocol action
+                        {selectedProtocolActionCount === 1 ? "" : "s"} applied
+                      </div>
+                    )}
+                  </>
+                )}
+              </Field>
+            )}
             <Field label="Observations">
               {" "}
               <select
@@ -8649,6 +9153,27 @@ export function CompletionPanel({
                   </div>
                 )}
               </Field>
+            )}
+            {/* Service findings — typed specialty completion */}
+            {isTypedFindings && (
+              <TypedFindingsSection
+                variant="mobile"
+                schema={typedFindingsSchema}
+                values={findingsValues}
+                onFieldChange={handleTypedFindingChange}
+                activityScore={typedActivityScore}
+                activityScoreTouched={typedActivityTouched}
+                onActivityTap={handleTypedActivityTap}
+                nextStepChips={typedNextStepChips}
+                onToggleChip={toggleTypedNextStepChip}
+                recommendations={typedRecommendations}
+                onRecommendationsChange={handleTypedRecommendationsChange}
+                aiDrafting={typedAiDrafting}
+                aiError={typedAiError}
+                includeComms={typedAiIncludeComms}
+                onIncludeCommsChange={setTypedAiIncludeComms}
+                onAiDraft={handleTypedAiDraft}
+              />
             )}
             {/* Products applied */}
             <Field label="Products applied">
@@ -9532,6 +10057,67 @@ export function CompletionPanel({
                     : "SMS + Report sent"}{" "}
               for {service.customerName}
             </div>{" "}
+            {completionResult?.typedDeliveryMode === "internal_only" && (
+              <div
+                style={{
+                  fontSize: 13,
+                  color: D.muted,
+                  marginTop: 8,
+                  textAlign: "center",
+                }}
+              >
+                Report stored — customer delivery is off for this service type.
+              </div>
+            )}
+            {completionResult?.followupSuggestion?.required && (
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  marginTop: 20,
+                  width: "100%",
+                  maxWidth: 360,
+                  padding: "0 24px",
+                  boxSizing: "border-box",
+                }}
+              >
+                {onScheduleFollowup && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onScheduleFollowup(completionResult.followupSuggestion)
+                    }
+                    style={{
+                      ...btnBase,
+                      width: "100%",
+                      background: D.teal,
+                      color: "#fff",
+                      fontSize: 14,
+                    }}
+                  >
+                    Schedule follow-up
+                    {completionResult.followupSuggestion.suggestedDate
+                      ? ` (suggested ${completionResult.followupSuggestion.suggestedDate})`
+                      : ""}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onClose(true)}
+                  style={{
+                    ...btnBase,
+                    width: "100%",
+                    background: "transparent",
+                    color: D.text,
+                    border: `1px solid ${D.border}`,
+                    fontSize: 14,
+                  }}
+                >
+                  Done
+                </button>
+              </div>
+            )}
           </div>
         )}
         {/* Header */}
@@ -10269,6 +10855,7 @@ export function CompletionPanel({
           />
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
+            {!isTypedFindings && (
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
@@ -10323,6 +10910,7 @@ export function CompletionPanel({
                 </>
               )}
             </div>
+            )}
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.amber }}>
                 Observations
@@ -10493,6 +11081,27 @@ export function CompletionPanel({
                 </div>
               )}
             </div>
+          )}
+          {/* Service findings — typed specialty completion */}
+          {isTypedFindings && (
+            <TypedFindingsSection
+              variant="desktop"
+              schema={typedFindingsSchema}
+              values={findingsValues}
+              onFieldChange={handleTypedFindingChange}
+              activityScore={typedActivityScore}
+              activityScoreTouched={typedActivityTouched}
+              onActivityTap={handleTypedActivityTap}
+              nextStepChips={typedNextStepChips}
+              onToggleChip={toggleTypedNextStepChip}
+              recommendations={typedRecommendations}
+              onRecommendationsChange={handleTypedRecommendationsChange}
+              aiDrafting={typedAiDrafting}
+              aiError={typedAiError}
+              includeComms={typedAiIncludeComms}
+              onIncludeCommsChange={setTypedAiIncludeComms}
+              onAiDraft={handleTypedAiDraft}
+            />
           )}
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>

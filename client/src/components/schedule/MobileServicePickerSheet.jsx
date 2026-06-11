@@ -36,7 +36,8 @@ function formatPrice(s) {
   return p ? `$${p.toFixed(0)}` : 'Variable';
 }
 
-export default function MobileServicePickerSheet({ onClose, onSelect }) {
+export default function MobileServicePickerSheet({
+  desktopVisible = false, onClose, onSelect }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -53,7 +54,7 @@ export default function MobileServicePickerSheet({ onClose, onSelect }) {
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
   return (
-    <div className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden">
+    <div className={`fixed inset-0 z-[110] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
       <div
         className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
         style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}

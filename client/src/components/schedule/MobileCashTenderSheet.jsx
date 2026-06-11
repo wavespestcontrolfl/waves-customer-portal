@@ -16,6 +16,7 @@ function fmt(cents) {
 }
 
 export default function MobileCashTenderSheet({
+  desktopVisible = false,
   invoiceId,
   amount,           // invoice total (dollars)
   onClose,
@@ -84,7 +85,7 @@ export default function MobileCashTenderSheet({
   const displayValue = entered > 0 ? fmt(entered) : '';
 
   return (
-    <div className="fixed inset-0 z-[115] bg-white flex flex-col md:hidden">
+    <div className={`fixed inset-0 z-[115] bg-white flex flex-col ${desktopVisible ? '' : 'md:hidden'}`}>
       {/* Header */}
       <div
         className="flex items-center px-3 border-b border-hairline border-zinc-200"

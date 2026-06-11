@@ -56,6 +56,7 @@ function baseServiceName(serviceType) {
 }
 
 export default function MobileServiceEditModal({
+  desktopVisible = false,
   service,
   technicians = [],
   onClose,
@@ -125,7 +126,7 @@ export default function MobileServiceEditModal({
   if (!service) return null;
 
   return (
-    <div className="fixed inset-0 z-[115] bg-white overflow-y-auto md:hidden">
+    <div className={`fixed inset-0 z-[115] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
       {/* Header: X + title + Save */}
       <div
         className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center"

@@ -688,8 +688,38 @@ function findingsSchemaForType(projectType) {
   };
 }
 
+// Customer-copy claims the business never makes (contract §6/§9): absence
+// wording must stay observational ("no active signs observed today"), never
+// absolute or promissory. Used to validate AI-drafted recommendations before
+// they can reach a customer-facing report. "clear" is banned as a STATE
+// claim ("areas are clear", "clear of pests", "activity cleared") but the
+// imperative verb stays allowed — "please clear food debris" is legitimate
+// sanitation advice.
+const BANNED_CUSTOMER_COPY = [
+  /\beliminated\b/i,
+  /\beradicated\b/i,
+  /\bexterminated\b/i,
+  /\bguarantee[ds]?\b/i,
+  /\bno infestation\b/i,
+  /\bpest[- ]free\b/i,
+  /\b(?:is|are|was|were|now|all|looks?|stays?|remains?)\s+clear\b/i,
+  /\bclear of (?:pests?|insects?|roach(?:es)?|ants?|termites?|bed ?bugs?|rodents?|mice|rats?|wildlife|fleas?|mosquito(?:es)?|activity|infestations?|evidence|signs)\b/i,
+  /\bcleared\b/i,
+  /\bresolved\b/i,
+  /\bgone\b/i,
+];
+
+function findBannedCustomerCopy(text) {
+  const str = String(text || '');
+  return BANNED_CUSTOMER_COPY
+    .map((rx) => str.match(rx)?.[0] || null)
+    .filter(Boolean);
+}
+
 module.exports = {
   SCHEMA_VERSION,
+  BANNED_CUSTOMER_COPY,
+  findBannedCustomerCopy,
   COPY_MAP_VERSION,
   SUMMARY_TEMPLATE_VERSION,
   ACTIVITY_INDICATORS,

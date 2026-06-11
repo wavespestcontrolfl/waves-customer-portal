@@ -1509,6 +1509,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       activityScore = null,
       activityScoreSource = null,
       nextStepChips = null,
+      completionTelemetry = null,
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -1710,6 +1711,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         typedChips = chipsValidation.chips;
         typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
 
+        // Every customer-facing free-text surface on a typed report gets the
+        // same banned-copy policy the AI draft endpoint enforces: manual
+        // recommendations, [Next]-tagged technician note lines (both feed
+        // protocol.recommendations verbatim), and the structured findings
+        // values themselves (rendered on the "What we found & did" card).
+        // Same { status, body } shape as the other validation failures —
+        // this closure's caller writes the response.
+        const customerCopySources = [
+          ...(Array.isArray(recommendations) ? recommendations : []),
+          ...(Array.isArray(observations) ? observations : []),
+          ...(customerRecap ? [customerRecap] : []),
+          ...taggedCompletionNoteLines(technicianNotes, ['next']),
+          ...taggedCompletionNoteLines(technicianNotes, ['found']),
+          ...Object.values(structuredFindings?.values || {}).filter((v) => typeof v === 'string'),
+        ];
+        const copyViolations = [...new Set(
+          customerCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
+        )];
+        if (copyViolations.length) {
+          return {
+            status: 422,
+            body: {
+              error: `This completion contains wording we can't put on a customer report (${copyViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
+              code: 'typed_recommendations_banned_copy',
+              violations: copyViolations,
+            },
+          };
+        }
+
         // Activity score: strict integer 0-5 or null (same contract as
         // clientPestRating). Gauge types require a score on a completed
         // visit — derived prefill fills it when the tech didn't touch the
@@ -1759,7 +1789,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
-    const treeShrubCloseoutRequired = !isIncompleteVisit && ['tree_shrub', 'palm'].includes(reportServiceLine);
+    // Typed completions (e.g. palm_injection detects to the 'palm' line)
+    // capture their structured findings instead of the Tree/Shrub closeout —
+    // the client hides that UI in typed mode, so requiring the payload here
+    // would make those jobs impossible to complete (Codex P1).
+    const treeShrubCloseoutRequired = !isIncompleteVisit
+      && !typedFindingsType
+      && ['tree_shrub', 'palm'].includes(reportServiceLine);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -2159,6 +2195,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,
+            // Tech-speed telemetry from the typed CompletionPanel (contract
+            // §10) — opaque client timings, persisted for budget analysis.
+            ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
+              ? { completionTelemetry }
+              : {}),
           };
           const serviceData = {
             protocol: {
@@ -3884,6 +3925,183 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
     res.json(result);
   } catch (err) { next(err); }
+});
+
+// =========================================================================
+// TYPED FINDINGS — AI RECOMMENDATIONS DRAFT
+// =========================================================================
+// POST /:serviceId/findings-recap/draft — AI-draft the OPTIONAL
+// customer-facing recommendations paragraph for a typed specialty
+// completion from the structured findings + next-step chips (and, when
+// asked, recent customer comms). Same auth surface + per-tech ownership
+// guard as the pest-recap draft above. This endpoint is polish only —
+// completion never waits on it, and any failure here is a non-blocking
+// 4xx/5xx the client surfaces inline and ignores.
+const MODELS = require('../config/models');
+
+// Compact recent-comms context (last few calls/texts/emails), modeled on
+// admin-projects' ai-write communication loader. Each source is
+// best-effort — a missing table never fails the draft.
+async function loadFindingsRecapCommsContext(customerId) {
+  if (!customerId) return '';
+  const compact = (value, max = 280) => {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    return text.length > max ? `${text.slice(0, max - 3).trim()}...` : text;
+  };
+  const dateOf = (value) => {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  };
+  const tsOf = (value) => {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+  };
+  const [calls, sms, emails] = await Promise.all([
+    db('call_log')
+      .where({ customer_id: customerId })
+      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
+      .orderBy('created_at', 'desc')
+      .limit(3)
+      .catch(() => []),
+    db('sms_log')
+      .where({ customer_id: customerId })
+      .select('created_at', 'direction', 'message_body')
+      .orderBy('created_at', 'desc')
+      .limit(4)
+      .catch(() => []),
+    db('emails')
+      .where({ customer_id: customerId })
+      .select('received_at', 'subject', 'snippet', 'body_text')
+      .orderBy('received_at', 'desc')
+      .limit(3)
+      .catch(() => []),
+  ]);
+  const entries = [];
+  for (const call of calls) {
+    const summary = compact(call.lead_synopsis || call.notes || call.transcription);
+    if (summary) entries.push({ ts: tsOf(call.created_at), line: `Call ${dateOf(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}` });
+  }
+  for (const msg of sms) {
+    const summary = compact(msg.message_body);
+    if (summary) entries.push({ ts: tsOf(msg.created_at), line: `Text ${dateOf(msg.created_at)} (${msg.direction || 'unknown'}): ${summary}` });
+  }
+  for (const email of emails) {
+    const summary = compact(email.snippet || email.body_text);
+    const subject = compact(email.subject, 120);
+    if (summary || subject) entries.push({ ts: tsOf(email.received_at), line: `Email ${dateOf(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}` });
+  }
+  return entries
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 6)
+    .map((entry) => entry.line)
+    .join('\n');
+}
+
+function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext }) {
+  const fieldLines = (schema.fields || [])
+    .map((field) => {
+      const value = values?.[field.key];
+      if (value == null || String(value).trim() === '') return null;
+      return `${field.label}: ${String(value).trim()}`;
+    })
+    .filter(Boolean);
+  return `Write a short customer-facing "recommendations" paragraph (2-4 sentences) for a Waves Pest Control & Lawn Care service report.
+
+Rules:
+- Plain, friendly, professional language. Plain text only — no markdown, headings, greeting, or sign-off.
+- Wording must be observation-scoped: describe only what was observed and done today (e.g. "No active signs observed today"). Never claim the problem is permanently fixed.
+- NEVER use any of these words/phrases: "clear", "cleared", "gone", "eliminated", "no infestation", "guaranteed", "resolved".
+- Never mention chemical product names, application rates, prices, or EPA details.
+- Base the recommendations on the findings and selected next steps below. Do not invent findings.
+
+Service type: ${serviceType || schema.label}
+Findings type: ${schema.label}
+Findings:
+${fieldLines.length ? fieldLines.join('\n') : '[none recorded]'}
+Next steps selected: ${Array.isArray(chips) && chips.length ? chips.join(', ') : '[none]'}
+Recent customer communications:
+${commsContext || '[not provided]'}
+
+Return only the paragraph text.`;
+}
+
+router.post('/:serviceId/findings-recap/draft', async (req, res) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    const { structuredFindings, nextStepChips, includeCustomerComms } = req.body || {};
+    const findingsType = structuredFindings?.type;
+    if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
+      return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
+    }
+    const schema = ActivityIndicators.findingsSchemaForType(findingsType);
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'customer_id', 'service_type', 'service_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // The appointment's PROFILE is authoritative for which findings type
+    // (if any) this service uses — never the client payload. Without this,
+    // any assigned tech could pull customer comms into an AI call for an
+    // arbitrary type on a non-typed job (pre-push Codex P1).
+    const draftProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+    if (draftProfile?.findingsType !== findingsType) {
+      return res.status(409).json({
+        error: 'This service does not use that findings form.',
+        code: 'findings_type_mismatch',
+      });
+    }
+    // Chips are advisory inputs here — drop invalid ones instead of failing
+    // the draft (the complete endpoint enforces them strictly). Validate
+    // against THIS type's allowed chips, not the global list, so an off-type
+    // chip can't steer the customer-facing draft (Codex P2).
+    const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, draftProfile.findingsType);
+    const chips = chipsValidation.ok ? chipsValidation.chips : [];
+    const commsContext = includeCustomerComms === true
+      ? await loadFindingsRecapCommsContext(svc.customer_id).catch(() => '')
+      : '';
+    const Anthropic = require('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const basePrompt = buildFindingsRecapPrompt({
+      schema,
+      values: structuredFindings?.values || {},
+      chips,
+      serviceType: svc.service_type,
+      commsContext,
+    });
+    // Prompt instructions are not enforcement: the draft lands on a
+    // customer-facing report, so validate it against the banned-claims list
+    // and retry once with the violations called out. Still dirty after the
+    // retry -> 502 and the tech writes the note manually (AI is never in
+    // the critical path).
+    let draft = '';
+    let violations = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const msg = await anthropic.messages.create({
+        model: MODELS.FLAGSHIP,
+        max_tokens: 400,
+        messages: [{
+          role: 'user',
+          content: attempt === 0
+            ? basePrompt
+            : `${basePrompt}\n\nYour previous draft used prohibited wording (${violations.join(', ')}). Rewrite it without any absolute or promissory claims — describe only what was observed and done today.`,
+        }],
+      });
+      draft = String(msg.content?.[0]?.text || '').trim();
+      if (!draft) break;
+      violations = ActivityIndicators.findBannedCustomerCopy(draft);
+      if (!violations.length) break;
+    }
+    if (!draft) return res.status(502).json({ error: 'Draft generation returned no text' });
+    if (violations.length) {
+      logger.warn(`[dispatch] findings-recap draft failed banned-copy check for ${req.params.serviceId}: ${violations.join(', ')}`);
+      return res.status(502).json({ error: 'Draft failed the customer-copy quality check — please write the note manually.' });
+    }
+    res.json({ draft });
+  } catch (err) {
+    logger.warn(`[dispatch] findings-recap draft failed for ${req.params.serviceId}: ${err.message}`);
+    res.status(502).json({ error: 'Draft generation failed' });
+  }
 });
 
 // =========================================================================

@@ -82,14 +82,17 @@ export async function adminFetch(path, options = {}) {
       // Try to surface the server's error string when present, otherwise
       // fall back to status text. Don't blow up if the body isn't JSON.
       let serverMsg = '';
+      let serverCode = null;
       try {
         const body = await r.clone().json();
         serverMsg = body?.error || '';
+        serverCode = body?.code || null;
       } catch {
         try { serverMsg = await r.text(); } catch { /* ignore */ }
       }
       const err = new Error(serverMsg || `${r.status} ${r.statusText}`);
       err.status = r.status;
+      if (serverCode) err.code = serverCode;
       throw err;
     }
 
