@@ -3559,8 +3559,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.
+    // allowLive: the anchor may be en_route / on_site (rain mid-visit,
+    // customer pushes the whole cadence) — the rebooker rewinds its
+    // tracker lifecycle and frees the tech, same as the single path.
     if (scope === 'series') {
-      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
+      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', { allowLive: true });
       const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
       for (const occurrence of occurrences) {
         await syncRescheduleReminder(

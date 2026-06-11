@@ -308,13 +308,15 @@ class SmartRebooker {
   // inside the same trx, so a direct UPDATE + history INSERT keeps
   // the audit trail consistent without re-introducing racing checks
   // designed for a different access pattern.
-  async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy) {
+  async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
-    if (!RESCHEDULABLE_STATUSES.has(service.status)) {
-      // No allowLive override here — a series shift recomputes every
-      // future sibling and must not anchor off a job mid-visit. Point
-      // staff at the single-occurrence path, which does allow it.
+    const allowedStatuses = options.allowLive === true
+      ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
+      : RESCHEDULABLE_STATUSES;
+    if (!allowedStatuses.has(service.status)) {
+      // Strict callers (no allowLive) get pointed at the
+      // single-occurrence path, which the admin route always overrides.
       const hint = LIVE_OVERRIDE_STATUSES.has(service.status)
         ? ' as a series — reschedule this appointment only, then adjust the series from the new date if needed'
         : '';
@@ -322,6 +324,11 @@ class SmartRebooker {
         statusCode: 409,
       });
     }
+    // Only the ANCHOR may be live under allowLive — it's the job the
+    // staffer is explicitly standing in front of (rain mid-visit, the
+    // customer asking to push the cadence). Other live siblings are a
+    // different visit actively in progress and stay untouched below.
+    const wasLive = LIVE_OVERRIDE_STATUSES.has(service.status);
 
     const parentId = service.recurring_parent_id || service.id;
     const parent = await db('scheduled_services').where({ id: parentId }).first();
@@ -380,7 +387,11 @@ class SmartRebooker {
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];
-        if (!RESCHEDULABLE.has(sib.status)) continue; // skip live + skipped rows
+        // The live anchor (allowLive) moves like a single-job override;
+        // every OTHER live/skipped row is still skipped — see the
+        // cadence-math comment above.
+        const isLiveAnchor = wasLive && String(sib.id) === String(serviceId);
+        if (!RESCHEDULABLE.has(sib.status) && !isLiveAnchor) continue;
 
         const occurrenceIndex = i - startIdx;
         const date = occurrenceIndex === 0
@@ -393,6 +404,7 @@ class SmartRebooker {
           window_end: win.end || sib.window_end,
           status: 'confirmed',
           updated_at: trx.fn.now(),
+          ...(isLiveAnchor ? LIVE_LIFECYCLE_RESET : {}),
         };
         updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(
           trx,
@@ -441,6 +453,25 @@ class SmartRebooker {
 
       return touched;
     });
+
+    // Live-anchor post-commit cleanup — same pattern as the single-job
+    // override in reschedule(): free the tech_status pointer and push
+    // the customer-tracker refresh so an open TrackPage doesn't sit on
+    // the stale en-route / on-site screen.
+    if (wasLive) {
+      if (service.technician_id) {
+        try {
+          await clearTechCurrentJob({
+            tech_id: service.technician_id,
+            current_job_id: serviceId,
+            status: 'idle',
+          });
+        } catch (err) {
+          logger.error(`[rebooker] tech_status clear after live series reschedule failed for ${serviceId}: ${err.message}`);
+        }
+      }
+      emitCustomerJobRefresh({ ...service, id: serviceId }, 'confirmed');
+    }
 
     return {
       success: true,
