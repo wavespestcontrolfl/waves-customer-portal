@@ -251,8 +251,11 @@ async function sendProjectReportReady({
   isResend = false,
   idempotencyKey,
   attachments = [],
+  // Explicit recipient override (third-party report copies). Default
+  // resolution (service contact → primary) stays the customer recipient.
+  recipient = null,
 } = {}) {
-  const payload = buildProjectPayload({ project, customer, reportUrl });
+  const payload = buildProjectPayload({ project, customer, reportUrl, recipient });
   const suffix = isResend ? `resend:${new Date().toISOString()}` : `initial:${safeKey(project?.report_token || project?.id)}`;
   return sendProjectTemplate({
     project,
@@ -264,6 +267,7 @@ async function sendProjectReportReady({
     triggerEventId: `project_report.ready:${project?.id || 'unknown'}`,
     idempotencyKey: idempotencyKey || `project.report_ready:${project?.id || 'unknown'}:${suffix}`,
     attachments,
+    recipient,
   });
 }
 
@@ -283,6 +287,9 @@ async function sendProjectReportWithInvoice({
   attachments = [],
   reportAttached = false,
   idempotencyKey,
+  // Explicit recipient override (billing-contact copy). Default resolution
+  // (service contact → primary) stays the customer recipient.
+  recipient = null,
 } = {}) {
   // The template's attachments sentence is a variable, not hardcoded copy: only
   // WDO sends carry a report PDF attachment (the FDACS-13645), so a non-WDO send
@@ -293,7 +300,7 @@ async function sendProjectReportWithInvoice({
     ? 'The official report PDF and your invoice PDF are attached to this email.'
     : 'Your invoice PDF is attached, and you can view your full report online using the link below.';
   const payload = {
-    ...buildProjectPayload({ project, customer, reportUrl }),
+    ...buildProjectPayload({ project, customer, reportUrl, recipient }),
     invoice_url: payUrl || '',
     pay_url: payUrl || '',
     invoice_number: clean(invoice?.invoice_number),
@@ -311,6 +318,7 @@ async function sendProjectReportWithInvoice({
     idempotencyKey: idempotencyKey
       || `project.report_with_invoice:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
     attachments,
+    recipient,
   });
 }
 

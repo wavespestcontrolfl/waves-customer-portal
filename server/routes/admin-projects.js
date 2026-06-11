@@ -37,6 +37,8 @@ const {
   resolveProjectPortalAttachment,
 } = require('../services/project-completion');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
+const { wdoReportCopyEmails } = require('../services/wdo-report-copies');
+const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -2212,6 +2214,22 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       channels.email = { ok: false, error: 'No email on file' };
     }
 
+    // Third-party report copies — the FDACS "Report Sent to Requestor and
+    // to:" line is a delivery claim; any emails the tech entered there get a
+    // report-only copy once the customer email has succeeded.
+    if (isWdo && channels.email?.ok) {
+      const copies = await sendWdoReportCopies({
+        req,
+        project: updatedProject,
+        customer,
+        reportUrl,
+        attachment: wdoPdf ? wdoPdf.attachment : null,
+        excludeEmails: [emailRecipient.email],
+        isResend: Boolean(project.sent_at || project.status === 'sent'),
+      });
+      if (copies) channels.report_copies = copies;
+    }
+
     // SMS (report link). For WDO, defer until the email (with the FDACS PDF)
     // succeeds so a failed email can't leave the customer with only a link while
     // the report is recorded not-sent; for other project types it's independent.
@@ -2330,6 +2348,51 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
 function projectEmailFailureMessage(result) {
   return result?.reason || result?.error || 'Email send blocked/failed';
+}
+
+// Email the report-only third-party copies named on the FDACS form (emails
+// parsed from findings.report_sent_to — the realtor/title company in a
+// closing). Runs only after the customer email succeeded; sends the FDACS PDF
+// + report link and NEVER the invoice or pay link; logs to the project
+// activity trail because the filing itself claims these deliveries ("Report
+// Sent to Requestor and to:"). Best-effort per recipient — copy failures are
+// recorded but don't change delivered/claim semantics.
+async function sendWdoReportCopies({ req, project, customer, reportUrl, attachment, excludeEmails, isResend }) {
+  const emails = wdoReportCopyEmails(parseFindings(project), excludeEmails);
+  if (!emails.length) return null;
+  const sent = [];
+  const failed = [];
+  for (const email of emails) {
+    try {
+      const result = await ProjectEmail.sendProjectReportReady({
+        project,
+        customer,
+        reportUrl,
+        attachments: attachment ? [attachment] : [],
+        // name 'there' keeps the template greeting generic — the customer's
+        // first name on a title company's copy would read wrong.
+        recipient: { email, name: 'there', role: 'report_copy' },
+        idempotencyKey: `project.report_copy:${project.id}:${email}:${isResend ? new Date().toISOString() : 'initial'}`,
+      });
+      if (result.ok) sent.push(email);
+      else failed.push({ email, error: projectEmailFailureMessage(result) });
+    } catch (err) {
+      failed.push({ email, error: err.message });
+    }
+  }
+  if (sent.length) {
+    await logProjectActivity(
+      req,
+      project,
+      'project_report_copy_sent',
+      `WDO report copy emailed to ${sent.join(', ')}`,
+      { sent, failed: failed.map((f) => f.email) },
+    ).catch(() => {});
+  }
+  if (failed.length) {
+    logger.warn(`[projects] WDO report copies failed for ${project.id}: ${failed.map((f) => `${f.email} (${f.error})`).join('; ')}`);
+  }
+  return { sent, failed };
 }
 
 function normalizeUsPhone(phone) {
@@ -2602,6 +2665,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // dry_run: surface the resolved invoice + amount, send nothing and (for a
     // brand-new WDO) create nothing — `invoice` is a non-persisted preview here.
     if (dryRun) {
+      // Routing preview so the confirm dialog shows exactly who gets what
+      // BEFORE the send: the customer recipient (combined report+invoice
+      // email), the billing-contact copy (same email, when a distinct billing
+      // contact is configured), and the report-only third-party copies parsed
+      // from the FDACS "Report Sent to Requestor and to:" line.
+      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+      const previewPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+      const [previewBilling] = getInvoiceEmailRecipients(customer, previewPrefs || {});
+      const previewRecipientEmail = String(previewRecipient.email || '').trim().toLowerCase();
+      const previewBillingEmail = String(previewBilling?.email || '').trim().toLowerCase();
       return res.json({
         dry_run: true,
         invoice: {
@@ -2610,6 +2683,13 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           total: invoice.total,
           status: invoice.status,
           created,
+        },
+        email_routing: {
+          recipient: previewRecipient.email || null,
+          billing_copy: previewBillingEmail && previewBillingEmail !== previewRecipientEmail ? previewBillingEmail : null,
+          report_copies: isWdoProject
+            ? wdoReportCopyEmails(parseFindings(project), [previewRecipientEmail, previewBillingEmail])
+            : [],
         },
       });
     }
@@ -2668,8 +2748,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // rather than sending a report-less message.
     const attachments = [];
     let wdoFiling = null;
+    let wdoPdf = null;
     try {
-      const wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
+      wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
       if (wdoPdf) {
         attachments.push(wdoPdf.attachment);
         // Archive the exact PDF being emailed BEFORE any channel send
@@ -2726,6 +2807,54 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       }
     } else {
       channels.email = { ok: false, error: 'No email on file' };
+    }
+
+    // Billing-contact copy: recipient resolution above prefers the slot-1
+    // service contact, so a configured billing contact (notification_prefs
+    // billing_email / billing-role contact — the same resolution standalone
+    // invoice emails use) otherwise never sees the invoice, amount due, or pay
+    // link. Same combined email, explicit recipient. Best-effort: failures are
+    // recorded on channels but never change delivered/claim semantics — the
+    // customer copy governs.
+    let billingCopyEmail = '';
+    if (channels.email?.ok) {
+      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+      const [billing] = getInvoiceEmailRecipients(customer, prefs || {});
+      const billingEmail = String(billing?.email || '').trim().toLowerCase();
+      if (billingEmail && billingEmail !== String(emailRecipient.email || '').trim().toLowerCase()) {
+        billingCopyEmail = billingEmail;
+        try {
+          const result = await ProjectEmail.sendProjectReportWithInvoice({
+            project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+            reportAttached: isWdoProject,
+            recipient: { email: billing.email, name: billing.name || '', role: billing.role || 'billing' },
+            idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:billing:${new Date().toISOString()}`,
+          });
+          channels.billing_email = result.ok
+            ? { ok: true, recipient: billingEmail }
+            : { ok: false, recipient: billingEmail, error: projectEmailFailureMessage(result) };
+        } catch (e) {
+          logger.error(`[projects] combined send billing copy failed: ${e.message}`);
+          channels.billing_email = { ok: false, recipient: billingEmail, error: e.message };
+        }
+      }
+    }
+
+    // Third-party report copies — the FDACS "Report Sent to Requestor and
+    // to:" line is a delivery claim; any emails the tech entered there get a
+    // report-only copy (FDACS PDF + report link, never the invoice or pay
+    // link) once the customer email has succeeded.
+    if (isWdoProject && channels.email?.ok) {
+      const copies = await sendWdoReportCopies({
+        req,
+        project: refreshed,
+        customer,
+        reportUrl,
+        attachment: wdoPdf ? wdoPdf.attachment : null,
+        excludeEmails: [emailRecipient.email, billingCopyEmail],
+        isResend: Boolean(project.sent_at || project.status === 'sent'),
+      });
+      if (copies) channels.report_copies = copies;
     }
 
     // ONE SMS — report link + pay link. It goes through the canonical
