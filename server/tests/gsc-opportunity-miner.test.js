@@ -217,6 +217,10 @@ describe('actionForOpportunity', () => {
       expect(actionForOpportunity({ bucket: 'aeo_gap', query: q })).toBe('do_not_publish');
     }
   });
+  test('near-me WITH city+service routes to the city-service lane instead of being dropped', () => {
+    expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'exterminator near me sarasota', city: 'Sarasota', service: 'pest' }))
+      .toBe('create_or_refresh_city_service_page');
+  });
   test('near-me queries with an existing page still refresh — proximity terms are fine on PAGES', () => {
     expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'exterminator near me', page_url: 'x' }))
       .toBe('refresh_existing_page');

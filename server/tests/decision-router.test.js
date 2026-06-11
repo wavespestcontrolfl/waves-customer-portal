@@ -85,6 +85,35 @@ describe('router upgrades action to match SERP recommendation', () => {
   });
 });
 
+describe('terminal near-me guard (operator directive 2026-06-11)', () => {
+  test('profiler recommendation cannot resurrect a blog action for a near-me query', () => {
+    const r = route(
+      opp({ action_type: 'do_not_publish', query: 'exterminator near me' }),
+      { serp_profile: serp({ dominant_intent: 'mixed', dominant_page_type: 'blog', recommended_asset_type: 'new_supporting_blog' }) }
+    );
+    expect(r.action_type).toBe('do_not_publish');
+    expect(r.human_review_required).toBe(true);
+    expect(r.human_review_reason).toMatch(/never blog material/);
+    expect(r.router_notes).toMatch(/transactional query routed away from blog lane/);
+  });
+  test('miner-emitted blog action on a near-me query is demoted even with no SERP profile', () => {
+    const r = route(opp({ action_type: 'new_supporting_blog', query: 'rat removal near me' }), {});
+    expect(r.action_type).toBe('do_not_publish');
+    expect(r.human_review_required).toBe(true);
+  });
+  test('informational queries are untouched by the guard', () => {
+    const r = route(opp({ action_type: 'new_supporting_blog', query: 'how to read a termite bond' }), {});
+    expect(r.action_type).toBe('new_supporting_blog');
+  });
+  test('near-me queries upgraded to PAGE actions stay upgraded (guard is blog-specific)', () => {
+    const r = route(
+      opp({ action_type: 'new_supporting_blog', query: 'pest control near me' }),
+      { serp_profile: serp({ recommended_asset_type: 'create_or_refresh_city_service_page' }) }
+    );
+    expect(r.action_type).toBe('create_or_refresh_city_service_page');
+  });
+});
+
 // ── mismatch penalty ────────────────────────────────────────────────
 
 describe('page-type mismatch penalty', () => {

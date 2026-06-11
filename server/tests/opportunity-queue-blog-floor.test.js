@@ -179,4 +179,32 @@ describe('miner persistAll action-aware gate', () => {
     expect(persistedKeys).not.toContain('blog-44');
     expect(persistedKeys).not.toContain('rw-69');
   });
+
+  test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        where: jest.fn((f) => { q._filters = f; return q; }),
+        update: jest.fn((u) => { updates.push({ table, filters: q._filters, updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1 });
+
+    // near-me query demoted to do_not_publish by actionForOpportunity →
+    // score 49 < 75 non-blog floor → dropped, but the stale pending
+    // new_supporting_blog row sharing the dedupe_key must be expired
+    const persisted = await miner.persistAll([
+      opp({ score: 49, action_type: 'do_not_publish', query: 'exterminator near me', dedupe_key: 'nearme-49' }),
+    ]);
+
+    expect(persisted).toBe(0);
+    const cleanup = updates.find((u) => u.table === 'opportunity_queue');
+    expect(cleanup.filters).toMatchObject({
+      dedupe_key: 'nearme-49',
+      status: 'pending',
+      action_type: 'new_supporting_blog',
+    });
+    expect(cleanup.updates).toMatchObject({ status: 'skipped', skip_reason: 'transactional_query_not_blog_material' });
+  });
 });

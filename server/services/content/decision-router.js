@@ -22,7 +22,7 @@
  * Pure function — no DB, no logger, no I/O. Easily testable.
  */
 
-const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY } = require('./scoring-config');
+const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, isTransactionalQuery } = require('./scoring-config');
 
 // ── action priorities (which actions are "safer" defaults) ──────────
 
@@ -186,6 +186,19 @@ function route(opportunity, signals = {}) {
   if (opportunity.bucket === 'cannibalization' || opportunity.bucket === 'page_type_mismatch') {
     humanReview = true;
     humanReason = humanReason || `${opportunity.bucket} bucket requires human triage`;
+  }
+
+  // ── terminal near-me guard (operator directive 2026-06-11) ────────
+  // Runs LAST so no upstream branch can reverse it: the SERP-profile
+  // upgrade above defers to live SERPs, and "exterminator near me" SERPs
+  // profile as mixed/blog-dominant — which would resurrect the blog action
+  // the miner already demoted. Transactional queries are service-page
+  // intent, never blog material; park for human review instead.
+  if (action === 'new_supporting_blog' && isTransactionalQuery(opportunity.query)) {
+    action = 'do_not_publish';
+    humanReview = true;
+    humanReason = 'transactional/near-me query — never blog material (operator directive)';
+    notes.push('blocked: transactional query routed away from blog lane');
   }
 
   // ── final score + page_type ───────────────────────────────────────
