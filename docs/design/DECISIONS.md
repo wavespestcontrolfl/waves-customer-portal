@@ -501,3 +501,13 @@ The tier price is the full customer total — there is **no separate setup charg
 **Deferred to the cutover PR:** short progress-visit SMS copy (DB template work — owner-reviewable alongside Phase-1 golden-report approval).
 
 **Blast radius:** zero for recurring reports (typedSnapshot absent → all new paths skip; regression-tested).
+
+---
+
+## 2026-06-12 — Specialty services → Service Report V1 pipeline (PR 4.5: Projects creation gating, dark)
+
+**Decision:** Projects creation is gated per type by **live cutover state**, not registry metadata: a project type is "appointment-managed" iff an ACTIVE `service_completion_profiles` row routes it to `completion_mode='service_report'` with that `project_type`. Pre-cutover this PR is a complete no-op (no flipped rows exist), which is exactly the point — creation for a type shuts off at the moment that type actually cuts over, never before.
+
+**Implementation:** `appointmentManagedProjectTypes()` (service-completion-profiles.js, fails open to the empty set). `GET /admin/projects/types` serves per-type `appointmentManaged` flags; `POST /admin/projects` 422s (`project_type_appointment_managed`) so stale clients can't recreate the dual-entry path. CreateProjectModal filters its type picker by the flag (explicit `allowedProjectTypes` prop still wins — the WDO/special-project dispatch path keeps working); ProjectsPage's general-create list filters from the fetched registry; TechHomePage routes typed jobs (profile `findingsType` set) away from both the recap modal (no findings/billing gate) and project creation, pointing techs to the Dispatch completion form. Legacy project records of every type stay fully usable — list/detail/edit/send/close untouched.
+
+**Blast radius:** zero until a cutover migration flips a profile row; verified by tests (empty-set pre-cutover, fail-open on missing table/query error) and client build.

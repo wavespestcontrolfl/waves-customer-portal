@@ -110,9 +110,30 @@ async function resolveCompletionProfileForServiceId(serviceId, knex = db) {
   return resolveCompletionProfileForScheduledService(scheduledService, knex);
 }
 
+/**
+ * Project types that are "appointment-managed": at least one ACTIVE profile
+ * routes them through the typed service-report completion flow
+ * (completion_mode='service_report' with a project_type pointer). Keyed to
+ * live cutover state — NOT registry metadata — so Projects creation for a
+ * type stays available until the moment that type actually cuts over.
+ */
+async function appointmentManagedProjectTypes(knex = db) {
+  if (!(await tableAvailable(knex))) return new Set();
+  try {
+    const rows = await knex('service_completion_profiles')
+      .where({ completion_mode: 'service_report', active: true })
+      .whereNotNull('project_type')
+      .distinct('project_type');
+    return new Set(rows.map((row) => row.project_type).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
 module.exports = {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
   serializeProfile,
+  appointmentManagedProjectTypes,
   DEFAULT_SERVICE_REPORT_PROFILE,
 };
