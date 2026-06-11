@@ -5,6 +5,7 @@ const {
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
   cadenceFromEstimateLine,
+  compactServiceContactSlots,
   customerSearchTerms,
   hasMembership,
   isSchedulableOneTimeEstimateLine,
@@ -103,6 +104,96 @@ describe('admin customers route helpers', () => {
       cardsOnFile: 1,
       tags: ['gate', 'pets'],
     });
+  });
+
+  test('maps slot 2/3 service contacts on customer list rows', () => {
+    const mapped = mapCustomerListRow({
+      id: 'customer-1',
+      first_name: 'Ada',
+      service_contact2_name: 'Sam Spouse',
+      service_contact2_phone: '+19415550112',
+      service_contact2_email: 'sam@example.com',
+      service_contact3_name: 'Pat Manager',
+      service_contact3_phone: '+19415550113',
+      service_contact3_email: 'pat@example.com',
+      tags_str: '',
+    });
+
+    expect(mapped).toMatchObject({
+      serviceContact2Name: 'Sam Spouse',
+      serviceContact2Phone: '+19415550112',
+      serviceContact2Email: 'sam@example.com',
+      serviceContact3Name: 'Pat Manager',
+      serviceContact3Phone: '+19415550113',
+      serviceContact3Email: 'pat@example.com',
+    });
+  });
+
+  test('clearing slot 1 promotes slot 2 so no hidden contact keeps notifications', () => {
+    const before = {
+      service_contact_name: 'Grace Hopper',
+      service_contact_phone: '+19415550199',
+      service_contact_email: 'grace@example.com',
+      service_contact2_name: 'Sam Spouse',
+      service_contact2_phone: '+19415550112',
+      service_contact2_email: 'sam@example.com',
+      service_contact3_name: null,
+      service_contact3_phone: null,
+      service_contact3_email: null,
+    };
+    const updates = {
+      service_contact_name: '',
+      service_contact_phone: '',
+      service_contact_email: '',
+    };
+
+    compactServiceContactSlots(updates, before);
+
+    expect(updates).toEqual({
+      service_contact_name: 'Sam Spouse',
+      service_contact_phone: '+19415550112',
+      service_contact_email: 'sam@example.com',
+      service_contact2_name: null,
+      service_contact2_phone: null,
+      service_contact2_email: null,
+      service_contact3_name: null,
+      service_contact3_phone: null,
+      service_contact3_email: null,
+    });
+  });
+
+  test('slot compaction is a no-op when no service-contact column is updated', () => {
+    const updates = { city: 'Sarasota' };
+    compactServiceContactSlots(updates, {
+      service_contact2_name: 'Sam Spouse',
+    });
+    expect(updates).toEqual({ city: 'Sarasota' });
+  });
+
+  test('clearing every slot nulls all service-contact columns', () => {
+    const before = {
+      service_contact_name: 'Grace Hopper',
+      service_contact_phone: '+19415550199',
+      service_contact_email: 'grace@example.com',
+      service_contact2_name: 'Sam Spouse',
+      service_contact2_phone: '+19415550112',
+      service_contact2_email: 'sam@example.com',
+    };
+    const updates = {
+      service_contact_name: '',
+      service_contact_phone: '',
+      service_contact_email: '',
+      service_contact2_name: '',
+      service_contact2_phone: '',
+      service_contact2_email: '',
+      service_contact3_name: '',
+      service_contact3_phone: '',
+      service_contact3_email: '',
+    };
+
+    compactServiceContactSlots(updates, before);
+
+    expect(Object.values(updates).every((v) => v === null)).toBe(true);
   });
 
   test('parses explicit recurring cadence before generic month and annual tokens', () => {

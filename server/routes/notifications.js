@@ -5,8 +5,57 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 
 router.use(authenticate);
+
+// Max on-location contacts per property (slots on the customers row).
+const MAX_SERVICE_CONTACTS = 3;
+
+function serviceContactPayload(slot = {}) {
+  const name = String(slot.name || '').trim();
+  return {
+    name,
+    firstName: name.split(/\s+/)[0] || '',
+    lastName: name.split(/\s+/).slice(1).join(' '),
+    phone: slot.phone || '',
+    email: slot.email || '',
+  };
+}
+
+// Filled slots in order — compacted, so the UI renders a simple list.
+function serviceContactsPayload(customerRow) {
+  return getServiceContactSlots(customerRow)
+    .filter((slot) => slot.name || slot.phone || slot.email)
+    .map(serviceContactPayload);
+}
+
+// Map an ordered contact list (≤3, already trimmed of empty entries) onto the
+// slot columns, nulling everything past the last filled slot.
+function serviceContactSlotUpdates(contacts = []) {
+  const updates = {};
+  const slotColumns = [
+    ['service_contact_name', 'service_contact_phone', 'service_contact_email'],
+    ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email'],
+    ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email'],
+  ];
+  slotColumns.forEach(([nameCol, phoneCol, emailCol], i) => {
+    const contact = contacts[i];
+    updates[nameCol] = contact?.name || null;
+    updates[phoneCol] = contact?.phone || null;
+    updates[emailCol] = contact?.email || null;
+  });
+  return updates;
+}
+
+function normalizeContactInput(contact = {}) {
+  return {
+    // slice: joined first+last (50+1+50) can exceed the varchar(100) column
+    name: [contact.firstName || '', contact.lastName || ''].map(s => String(s).trim()).filter(Boolean).join(' ').slice(0, 100),
+    phone: String(contact.phone || '').trim(),
+    email: String(contact.email || '').trim(),
+  };
+}
 
 const PREF_SELECT = [
   'appointment_confirmation',
@@ -127,7 +176,7 @@ function prefDisplayValue(key, value) {
 function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, options = {}) {
   const items = [];
   for (const key of Object.keys(updates)) {
-    if (key === 'serviceContact') continue;
+    if (key === 'serviceContact' || key === 'serviceContacts') continue;
     const label = ACCOUNT_PREF_LABELS[key];
     if (!label) continue;
     const dbField = DB_FIELD_BY_PREF[key];
@@ -145,11 +194,11 @@ function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, optio
       scope: options.scope || 'Account',
     });
   }
-  if (updates.serviceContact) {
+  if (updates.serviceContact || updates.serviceContacts) {
     items.push({
       key: 'serviceContact',
-      label: 'On-location Contact',
-      oldValue: 'Previous contact',
+      label: updates.serviceContacts ? 'On-location Contacts' : 'On-location Contact',
+      oldValue: 'Previous contacts',
       newValue: 'Updated',
       scope: options.scope || 'Property',
     });
@@ -223,7 +272,7 @@ router.get('/property-preferences', async (req, res, next) => {
       .whereIn('id', ids)
       .select(
         'id', 'profile_label', 'address_line1', 'city', 'state', 'zip', 'is_primary_profile',
-        'service_contact_name', 'service_contact_phone', 'service_contact_email'
+        ...SERVICE_CONTACT_COLUMNS
       )
       .orderBy('is_primary_profile', 'desc')
       .orderBy('profile_label', 'asc');
@@ -248,13 +297,14 @@ router.get('/property-preferences', async (req, res, next) => {
           zip: p.zip,
         },
         preferences: preferencePayload(byCustomerId.get(String(p.id)) || {}),
-        serviceContact: {
-          name: p.service_contact_name || '',
-          firstName: String(p.service_contact_name || '').trim().split(/\s+/)[0] || '',
-          lastName: String(p.service_contact_name || '').trim().split(/\s+/).slice(1).join(' '),
-          phone: p.service_contact_phone || '',
-          email: p.service_contact_email || '',
-        },
+        // Legacy single-contact shape (slot 1) — kept for older clients.
+        serviceContact: serviceContactPayload({
+          name: p.service_contact_name,
+          phone: p.service_contact_phone,
+          email: p.service_contact_email,
+        }),
+        serviceContacts: serviceContactsPayload(p),
+        maxServiceContacts: MAX_SERVICE_CONTACTS,
       })),
     });
   } catch (err) {
@@ -339,12 +389,20 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       serviceReminder24h: Joi.boolean(),
       techEnRoute: Joi.boolean(),
       appointmentNotifyPrimary: Joi.boolean(),
+      // phone max matches the service_contact*_phone column width (varchar 20)
+      // so an over-long value is a 400, not a database length error.
       serviceContact: Joi.object({
         firstName: Joi.string().trim().max(50).allow('', null),
         lastName: Joi.string().trim().max(50).allow('', null),
-        phone: Joi.string().trim().max(30).allow('', null),
+        phone: Joi.string().trim().max(20).allow('', null),
         email: Joi.string().trim().email().max(150).allow('', null),
       }),
+      serviceContacts: Joi.array().max(MAX_SERVICE_CONTACTS).items(Joi.object({
+        firstName: Joi.string().trim().max(50).allow('', null),
+        lastName: Joi.string().trim().max(50).allow('', null),
+        phone: Joi.string().trim().max(20).allow('', null),
+        email: Joi.string().trim().email().max(150).allow('', null),
+      })),
     }).min(1);
     const updates = await schema.validateAsync(req.body);
     const targetCustomer = await db('customers')
@@ -357,13 +415,25 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     if (updates.techEnRoute !== undefined) dbUpdates.tech_en_route = updates.techEnRoute;
     if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
 
-    if (updates.serviceContact !== undefined) {
-      const firstName = updates.serviceContact.firstName || '';
-      const lastName = updates.serviceContact.lastName || '';
+    let savedContacts;
+    if (updates.serviceContacts !== undefined) {
+      // Full-list save: compact out empty entries and rewrite all three slots.
+      const contacts = updates.serviceContacts
+        .map(normalizeContactInput)
+        .filter((c) => c.name || c.phone || c.email)
+        .slice(0, MAX_SERVICE_CONTACTS);
       await db('customers').where({ id: req.params.customerId }).update({
-        service_contact_name: [firstName, lastName].filter(Boolean).join(' ') || null,
-        service_contact_phone: updates.serviceContact.phone || null,
-        service_contact_email: updates.serviceContact.email || null,
+        ...serviceContactSlotUpdates(contacts),
+        updated_at: new Date(),
+      });
+      savedContacts = contacts.map(serviceContactPayload);
+    } else if (updates.serviceContact !== undefined) {
+      // Legacy single-contact save: writes slot 1 only.
+      const contact = normalizeContactInput(updates.serviceContact);
+      await db('customers').where({ id: req.params.customerId }).update({
+        service_contact_name: contact.name || null,
+        service_contact_phone: contact.phone || null,
+        service_contact_email: contact.email || null,
         updated_at: new Date(),
       });
     }
@@ -384,7 +454,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       items: preferenceChangeItems(updates, existing || {}, payload, { scope: 'Property' }),
       section: 'Property notifications',
     });
-    res.json({ success: true, preferences: payload });
+    res.json({
+      success: true,
+      preferences: payload,
+      ...(savedContacts !== undefined ? { serviceContacts: savedContacts } : {}),
+    });
   } catch (err) {
     next(err);
   }
@@ -394,6 +468,10 @@ router._private = {
   comparableEmail,
   notificationPrefsDbUpdates,
   preferenceChangeItems,
+  serviceContactPayload,
+  serviceContactsPayload,
+  serviceContactSlotUpdates,
+  normalizeContactInput,
 };
 
 module.exports = router;

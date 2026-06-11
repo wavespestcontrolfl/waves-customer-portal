@@ -2222,6 +2222,9 @@ function formatPropertyAddress(property) {
   return [address.line1, cityStateZip].filter(Boolean).join(', ');
 }
 
+// Mirrors MAX_SERVICE_CONTACTS in server/routes/notifications.js.
+const MAX_PROPERTY_CONTACTS = 3;
+
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
@@ -2305,41 +2308,67 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     }
   };
 
-  const handlePropertyContactChange = (propertyId, key, value) => {
+  const emptyServiceContact = () => ({ firstName: '', lastName: '', phone: '', email: '' });
+
+  // Always render at least one editable contact block per property.
+  const displayContacts = (property) => {
+    const contacts = Array.isArray(property?.serviceContacts) ? property.serviceContacts : [];
+    return contacts.length ? contacts : [emptyServiceContact()];
+  };
+
+  const setPropertyContacts = (propertyId, updater) => {
     setPropertyPrefs(prev => prev.map(p => (
       p.id === propertyId
-        ? { ...p, serviceContact: { ...(p.serviceContact || {}), [key]: value } }
+        ? { ...p, serviceContacts: updater(displayContacts(p)) }
         : p
     )));
+  };
+
+  const handlePropertyContactChange = (propertyId, index, key, value) => {
+    setPropertyContacts(propertyId, contacts => contacts.map((c, i) => (
+      i === index ? { ...c, [key]: value } : c
+    )));
+  };
+
+  const handlePropertyContactAdd = (propertyId) => {
+    setPropertyContacts(propertyId, contacts => (
+      contacts.length >= MAX_PROPERTY_CONTACTS ? contacts : [...contacts, emptyServiceContact()]
+    ));
+  };
+
+  const handlePropertyContactRemove = (propertyId, index) => {
+    setPropertyContacts(propertyId, contacts => {
+      const next = contacts.filter((_, i) => i !== index);
+      return next.length ? next : [emptyServiceContact()];
+    });
   };
 
   const handlePropertyContactSave = async (propertyId) => {
     const property = propertyPrefs.find(p => p.id === propertyId);
     if (!property || prefsLocked[`${propertyId}:contact`]) return;
-    const serviceContact = property.serviceContact || {};
-    const savedContact = {
-      firstName: serviceContact.firstName || '',
-      lastName: serviceContact.lastName || '',
-      phone: serviceContact.phone || '',
-      email: serviceContact.email || '',
-    };
+    const savedContacts = displayContacts(property).map(c => ({
+      firstName: c.firstName || '',
+      lastName: c.lastName || '',
+      phone: c.phone || '',
+      email: c.email || '',
+    }));
     const lockKey = `${propertyId}:contact`;
     setPrefsLocked(prev => ({ ...prev, [lockKey]: true }));
     try {
       const result = await api.updatePropertyNotificationPrefs(propertyId, {
-        serviceContact: savedContact,
+        serviceContacts: savedContacts,
       });
       setPropertyPrefs(prev => prev.map(p => (
         p.id === propertyId
           ? {
             ...p,
             preferences: { ...(p.preferences || {}), ...(result.preferences || {}) },
-            serviceContact: result.serviceContact || savedContact,
+            serviceContacts: result.serviceContacts || savedContacts,
           }
           : p
       )));
     } catch (err) {
-      alert('Could not save the on-location contact. Please try again.');
+      alert('Could not save the on-location contacts. Please try again.');
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [lockKey]: false }));
@@ -2828,7 +2857,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'techEnRoute', label: 'En route' },
                 { key: 'appointmentNotifyPrimary', label: 'Me too' },
               ];
-              const contact = property.serviceContact || {};
+              const contacts = displayContacts(property);
               const contactLockKey = `${property.id}:contact`;
               return (
                 <div key={property.id} style={{
@@ -2879,40 +2908,74 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     })}
                   </div>
                   <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
-                    <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 8 }}>On-location contact</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
-                      <input
-                        value={contact.firstName || ''}
-                        onChange={(e) => handlePropertyContactChange(property.id, 'firstName', e.target.value)}
-                        placeholder="First name"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
-                      />
-                      <input
-                        value={contact.lastName || ''}
-                        onChange={(e) => handlePropertyContactChange(property.id, 'lastName', e.target.value)}
-                        placeholder="Last name"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
-                      />
+                    <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 8 }}>
+                      On-location contacts{contacts.length > 1 ? ` (${contacts.length} of ${MAX_PROPERTY_CONTACTS})` : ''}
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 10 }}>
-                      <input
-                        value={contact.phone || ''}
-                        onChange={(e) => handlePropertyContactChange(property.id, 'phone', e.target.value)}
-                        placeholder="Phone number"
-                        inputMode="tel"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
-                      />
-                      <input
-                        value={contact.email || ''}
-                        onChange={(e) => handlePropertyContactChange(property.id, 'email', e.target.value)}
-                        placeholder="Email address"
-                        inputMode="email"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
-                      />
-                    </div>
+                    {contacts.map((contact, idx) => (
+                      <div key={idx} style={{ marginBottom: 10 }}>
+                        {contacts.length > 1 && (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase' }}>Contact {idx + 1}</div>
+                            <button
+                              type="button"
+                              onClick={() => handlePropertyContactRemove(property.id, idx)}
+                              style={{
+                                border: 'none', background: 'none', cursor: 'pointer', padding: '2px 4px',
+                                fontSize: 12, fontWeight: 850, color: B.orange, fontFamily: FONTS.body,
+                              }}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        )}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
+                          <input
+                            value={contact.firstName || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
+                            placeholder="First name"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                          />
+                          <input
+                            value={contact.lastName || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
+                            placeholder="Last name"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                          />
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
+                          <input
+                            value={contact.phone || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
+                            placeholder="Phone number"
+                            inputMode="tel"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                          />
+                          <input
+                            value={contact.email || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
+                            placeholder="Email address"
+                            inputMode="email"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    {contacts.length < MAX_PROPERTY_CONTACTS && (
+                      <button
+                        type="button"
+                        onClick={() => handlePropertyContactAdd(property.id)}
+                        style={{
+                          border: `1px dashed ${B.wavesBlue}`, borderRadius: 8, padding: '8px 12px',
+                          background: 'none', cursor: 'pointer', marginBottom: 10,
+                          fontSize: 13, fontWeight: 850, color: B.wavesBlue, fontFamily: FONTS.body,
+                        }}
+                      >
+                        + Add another contact
+                      </button>
+                    )}
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4 }}>
-                        This person receives appointment texts for this property. Turn on “Me too” to send those texts to you as well.
+                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). Turn on “Me too” to send those texts to you as well.
                       </div>
                       <button
                         type="button"
@@ -2930,7 +2993,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                           opacity: prefsLocked[contactLockKey] ? 0.6 : 1,
                         }}
                       >
-                        {prefsLocked[contactLockKey] ? 'Saving...' : 'Save contact'}
+                        {prefsLocked[contactLockKey] ? 'Saving...' : contacts.length > 1 ? 'Save contacts' : 'Save contact'}
                       </button>
                     </div>
                   </div>

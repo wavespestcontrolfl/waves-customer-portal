@@ -12,7 +12,7 @@ const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
-const { getServiceReportEmailRecipients } = require('../customer-contact');
+const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS } = require('../customer-contact');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
@@ -367,9 +367,7 @@ async function loadServiceRecord(recordId) {
       'customers.last_name',
       'customers.email as customer_email',
       'customers.phone as customer_phone',
-      'customers.service_contact_name',
-      'customers.service_contact_phone',
-      'customers.service_contact_email',
+      ...SERVICE_CONTACT_COLUMNS.map((column) => `customers.${column}`),
       'customers.city',
       'customers.state',
       'technicians.name as technician_name',
@@ -394,9 +392,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     last_name: service.last_name,
     email: service.customer_email,
     phone: service.customer_phone,
-    service_contact_name: service.service_contact_name,
-    service_contact_phone: service.service_contact_phone,
-    service_contact_email: service.service_contact_email,
+    ...Object.fromEntries(SERVICE_CONTACT_COLUMNS.map((column) => [column, service[column]])),
   }, prefs || {});
   if (!recipients.length) return { ok: false, skipped: true, error: 'No service report recipient email' };
 

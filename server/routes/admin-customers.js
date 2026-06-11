@@ -417,6 +417,33 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   };
 }
 
+// Service-contact slots stay compacted (no empty slot before a filled one):
+// clearing the visible slot-1 contact promotes slot 2 instead of leaving a
+// hidden contact still receiving notifications. Mutates `updates` in place;
+// no-op unless a slot column is being updated.
+const SERVICE_CONTACT_SLOT_COLUMNS = [
+  ['service_contact_name', 'service_contact_phone', 'service_contact_email'],
+  ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email'],
+  ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email'],
+];
+
+function compactServiceContactSlots(updates, before = {}) {
+  if (!SERVICE_CONTACT_SLOT_COLUMNS.flat().some((col) => updates[col] !== undefined)) return updates;
+  const merged = SERVICE_CONTACT_SLOT_COLUMNS
+    .map(([n, p, e]) => ({
+      name: String((updates[n] !== undefined ? updates[n] : before[n]) || '').trim(),
+      phone: String((updates[p] !== undefined ? updates[p] : before[p]) || '').trim(),
+      email: String((updates[e] !== undefined ? updates[e] : before[e]) || '').trim(),
+    }))
+    .filter((slot) => slot.name || slot.phone || slot.email);
+  SERVICE_CONTACT_SLOT_COLUMNS.forEach(([n, p, e], i) => {
+    updates[n] = merged[i]?.name || null;
+    updates[p] = merged[i]?.phone || null;
+    updates[e] = merged[i]?.email || null;
+  });
+  return updates;
+}
+
 function mapCustomerListRow(c) {
   return {
     id: c.id,
@@ -443,6 +470,12 @@ function mapCustomerListRow(c) {
     serviceContactName: c.service_contact_name,
     serviceContactPhone: c.service_contact_phone,
     serviceContactEmail: c.service_contact_email,
+    serviceContact2Name: c.service_contact2_name,
+    serviceContact2Phone: c.service_contact2_phone,
+    serviceContact2Email: c.service_contact2_email,
+    serviceContact3Name: c.service_contact3_name,
+    serviceContact3Phone: c.service_contact3_phone,
+    serviceContact3Email: c.service_contact3_email,
     lastContactDate: c.last_contact_date,
     lastContactType: c.last_contact_type,
     nextFollowUp: c.next_follow_up_date,
@@ -1594,6 +1627,12 @@ router.get('/:id', async (req, res, next) => {
         serviceContactName: c.service_contact_name,
         serviceContactPhone: c.service_contact_phone,
         serviceContactEmail: c.service_contact_email,
+        serviceContact2Name: c.service_contact2_name,
+        serviceContact2Phone: c.service_contact2_phone,
+        serviceContact2Email: c.service_contact2_email,
+        serviceContact3Name: c.service_contact3_name,
+        serviceContact3Phone: c.service_contact3_phone,
+        serviceContact3Email: c.service_contact3_email,
         address: { line1: c.address_line1, city: c.city, state: c.state, zip: c.zip },
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
@@ -1839,7 +1878,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', hasLeftGoogleReview: 'has_left_google_review' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
@@ -1859,6 +1898,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else { updates[v] = req.body[k]; }
       }
     }
+    compactServiceContactSlots(updates, before);
     // Stamp when the review flag flips so admins can see who/when later.
     if (updates.has_left_google_review !== undefined) {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
@@ -1883,7 +1923,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       }
 
       await db('customers').where({ id: req.params.id }).update(updates);
-      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email'];
+      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       if (changed.some(field => sensitiveFields.includes(field))) {
         await auditCustomerMutation(req, 'customer.update_sensitive', req.params.id, {
@@ -2163,6 +2203,7 @@ router._private = {
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
   cadenceFromEstimateLine,
+  compactServiceContactSlots,
   customerSearchTerms,
   hasMembership,
   isSchedulableOneTimeEstimateLine,

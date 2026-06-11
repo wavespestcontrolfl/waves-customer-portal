@@ -2240,39 +2240,61 @@ export default function Customer360ProfileV2({
                 )}
               </div>
             )}
-            {(c.serviceContactPhone || c.serviceContactEmail) && (
-              <div className="text-12 text-ink-secondary mb-1.5">
-                {" "}
-                <span className="text-ink-tertiary mr-1">Service contact:</span>
-                {c.serviceContactName && (
-                  <span className="text-zinc-900 mr-2">
-                    {c.serviceContactName}
-                  </span>
-                )}
-                {c.serviceContactPhone && (
-                  <CallBridgeLink
-                    phone={c.serviceContactPhone}
-                    customerName={
-                      c.serviceContactName ||
-                      `${c.firstName || ""} ${c.lastName || ""}`.trim()
-                    }
-                    className="u-nums text-zinc-900 hover:underline mr-3"
-                  >
-                    {c.serviceContactPhone}
-                  </CallBridgeLink>
-                )}
-                {c.serviceContactEmail && (
-                  <a
-                    href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.serviceContactEmail)}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-zinc-900 hover:underline"
-                  >
-                    {c.serviceContactEmail}
-                  </a>
-                )}
-              </div>
-            )}
+            {[
+              {
+                key: "1",
+                label: "Service contact:",
+                name: c.serviceContactName,
+                phone: c.serviceContactPhone,
+                email: c.serviceContactEmail,
+              },
+              {
+                key: "2",
+                label: "Service contact 2:",
+                name: c.serviceContact2Name,
+                phone: c.serviceContact2Phone,
+                email: c.serviceContact2Email,
+              },
+              {
+                key: "3",
+                label: "Service contact 3:",
+                name: c.serviceContact3Name,
+                phone: c.serviceContact3Phone,
+                email: c.serviceContact3Email,
+              },
+            ]
+              .filter((slot) => slot.phone || slot.email)
+              .map((slot) => (
+                <div key={slot.key} className="text-12 text-ink-secondary mb-1.5">
+                  {" "}
+                  <span className="text-ink-tertiary mr-1">{slot.label}</span>
+                  {slot.name && (
+                    <span className="text-zinc-900 mr-2">{slot.name}</span>
+                  )}
+                  {slot.phone && (
+                    <CallBridgeLink
+                      phone={slot.phone}
+                      customerName={
+                        slot.name ||
+                        `${c.firstName || ""} ${c.lastName || ""}`.trim()
+                      }
+                      className="u-nums text-zinc-900 hover:underline mr-3"
+                    >
+                      {slot.phone}
+                    </CallBridgeLink>
+                  )}
+                  {slot.email && (
+                    <a
+                      href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(slot.email)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-900 hover:underline"
+                    >
+                      {slot.email}
+                    </a>
+                  )}
+                </div>
+              ))}
             <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
               {(() => {
                 const parts = [
