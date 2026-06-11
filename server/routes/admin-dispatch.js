@@ -4055,6 +4055,36 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       });
     }
 
+    // This is the server-side gate for the completion CTA, not a generic
+    // booking API — the source visit must be completed and its persisted
+    // completion must actually call for a follow-up (mirrors the /complete
+    // followupSuggestion logic, incl. the cockroach German-only rule on the
+    // stored snapshot). A stale or crafted POST can't mint included $0
+    // appointments for visits that never owed one (Codex P2).
+    if (svc.status !== 'completed') {
+      return res.status(409).json({
+        error: 'Follow-ups can only be booked from a completed visit.',
+        code: 'followup_source_not_completed',
+      });
+    }
+    const suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
+    let followupRequired = !!suggestion?.required;
+    if (followupRequired && profile.findingsType === 'cockroach') {
+      const sourceRecord = await db('service_records')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('created_at', 'desc')
+        .first()
+        .catch(() => null);
+      const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
+      if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
+    }
+    if (!followupRequired) {
+      return res.status(409).json({
+        error: 'This completed visit does not call for a follow-up appointment.',
+        code: 'followup_not_required',
+      });
+    }
+
     const cols = await db('scheduled_services').columnInfo().catch(() => ({}));
     if (!cols.followup_source_service_id || !cols.followup_included) {
       return res.status(503).json({ error: 'Follow-up booking is not available yet (pending migration).', code: 'followup_columns_missing' });
@@ -4069,9 +4099,13 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       return res.json({ success: true, alreadyScheduled: true, appointment: { id: existing.id, scheduledDate: serviceDateOnly(existing.scheduled_date), status: existing.status } });
     }
 
+    // technicianId override is admin-only — a tech-authenticated caller
+    // could otherwise book the follow-up onto another technician's lane
+    // (Codex P2). Techs always inherit the source visit's technician.
+    const technicianOverride = req.techRole === 'admin' ? technicianId : null;
     const insertData = {
       customer_id: svc.customer_id,
-      technician_id: technicianId || svc.technician_id || null,
+      technician_id: technicianOverride || svc.technician_id || null,
       scheduled_date: date,
       window_start: windowStart || svc.window_start || null,
       window_end: windowEnd || svc.window_end || null,
