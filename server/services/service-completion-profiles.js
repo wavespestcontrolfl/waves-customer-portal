@@ -36,13 +36,36 @@ const DEFAULT_SERVICE_REPORT_PROFILE = {
 
 function serializeProfile(row = null) {
   if (!row) return { ...DEFAULT_SERVICE_REPORT_PROFILE };
-  let completionMode = row.completion_mode || 'service_report';
-  if (completionMode === 'service_report' && V1_EXCLUDED_PROJECT_TYPES.has(row.project_type)) {
+  if (row.completion_mode === 'service_report' && V1_EXCLUDED_PROJECT_TYPES.has(row.project_type)) {
     logger.warn(
       `[completion-profiles] profile ${row.service_key || row.id} claims service_report completion for excluded project type "${row.project_type}" — coercing to special_project (compliance-gated flow)`,
     );
-    completionMode = 'special_project';
+    // The row has been flagged bad — don't half-trust it. Keep only its
+    // identity (service key/name/category/billing), the project-flow pointer,
+    // and active state; every BEHAVIOR field resets to conservative defaults
+    // rather than whatever the corrupted service_report row carried.
+    return {
+      serviceKey: row.service_key || null,
+      serviceName: row.service_name_snapshot || null,
+      category: row.category || null,
+      billingType: row.billing_type || null,
+      completionMode: 'special_project',
+      projectType: row.project_type,
+      findingsType: null,
+      createsServiceRecord: true,
+      portalVisibility: 'customer_portal',
+      portalAttachPolicy: 'active_portal_customer',
+      followupPolicy: 'none',
+      defaultFollowupDays: null,
+      active: row.active !== false,
+      notes: row.notes || null,
+      projectBacked: true,
+      specialProject: true,
+      requiresProject: true,
+      deliveryMode: 'auto_send',
+    };
   }
+  const completionMode = row.completion_mode || 'service_report';
   const projectBacked = completionMode === 'project_required' || completionMode === 'special_project';
   return {
     serviceKey: row.service_key || null,

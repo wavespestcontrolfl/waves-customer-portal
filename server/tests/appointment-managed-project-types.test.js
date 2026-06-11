@@ -76,6 +76,30 @@ describe('serializeProfile V1 exclusion coercion', () => {
     expect(profile.findingsType).toBe(null);
   });
 
+  test('coercion resets behavior fields from the flagged row to conservative defaults', () => {
+    const profile = serializeProfile({
+      service_key: 'wdo_inspection_svc',
+      completion_mode: 'service_report',
+      project_type: 'wdo_inspection',
+      creates_service_record: false,
+      portal_visibility: 'hidden',
+      portal_attach_policy: 'always',
+      followup_policy: 'auto',
+      default_followup_days: 14,
+      delivery_mode: 'review_first',
+      active: true,
+    });
+    // A flagged row is not half-trusted: identity survives, behavior resets.
+    expect(profile.completionMode).toBe('special_project');
+    expect(profile.createsServiceRecord).toBe(true);
+    expect(profile.portalVisibility).toBe('customer_portal');
+    expect(profile.portalAttachPolicy).toBe('active_portal_customer');
+    expect(profile.followupPolicy).toBe('none');
+    expect(profile.defaultFollowupDays).toBe(null);
+    expect(profile.deliveryMode).toBe('auto_send');
+    expect(profile.serviceKey).toBe('wdo_inspection_svc');
+  });
+
   test('non-excluded service_report profiles are untouched', () => {
     const profile = serializeProfile({
       service_key: 'cockroach_svc',
