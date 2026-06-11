@@ -1774,13 +1774,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
       && svc.followup_included !== true
     ) {
-      const typedBilling = await resolveProjectCompletionBilling({
-        scheduledService: svc,
-        customer: { monthly_rate: svc.cust_monthly_rate },
-      }).catch((err) => {
-        logger.warn(`[dispatch] typed completion billing check failed for ${svc.id}: ${err.message}`);
-        return { required: false, resolved: true, reason: 'billing_check_failed' };
-      });
+      // Money-correctness guard — FAIL CLOSED on lookup errors (pre-push
+      // Codex P0). A transient DB failure must not let a one-time service
+      // complete and mint customer artifacts without an invoice check.
+      let typedBilling;
+      try {
+        typedBilling = await resolveProjectCompletionBilling({
+          scheduledService: svc,
+          customer: { monthly_rate: svc.cust_monthly_rate },
+        });
+      } catch (err) {
+        logger.error(`[dispatch] typed completion billing check failed for ${svc.id}: ${err.message}`);
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+        return res.status(503).json({
+          error: 'Could not verify billing for this one-time service. Try again in a moment.',
+          code: 'completion_billing_check_failed',
+        });
+      }
       if (typedBilling.required && !typedBilling.resolved) {
         // The resolver only sees invoices linked to this scheduled service /
         // service record. The completion path further down can also satisfy
