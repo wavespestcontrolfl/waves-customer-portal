@@ -32,6 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const estimateSlotAvailability = require('./estimate-slot-availability');
+const { etParts, etDateString } = require('../utils/datetime-et');
 
 const DEFAULT_HOLD_MINUTES = 15;
 const DEFAULT_DURATION_MINUTES = 60;
@@ -183,6 +184,28 @@ async function reserveSlot({
   }
   const { date, windowStart, techId } = parsed;
 
+  // Past-slot guard: the slot list is generated minutes before the customer
+  // taps it, and ASAP same-day slots can have already elapsed by confirm
+  // time. A reservation for an elapsed window books a visit no tech will
+  // ever make.
+  const todayEt = etDateString();
+  if (date < todayEt) {
+    const err = new Error('slot date has already passed');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
+  if (date === todayEt) {
+    const nowEt = etParts(new Date());
+    const [sh, sm] = String(windowStart).split(':').map(Number);
+    if (sh * 60 + sm <= nowEt.hour * 60 + nowEt.minute) {
+      const err = new Error('slot time has already passed today');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = slotId;
+      throw err;
+    }
+  }
+
   // Numeric coerce + bound the hold window so we can safely interpolate it
   // into a Postgres INTERVAL string below.
   const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
@@ -216,6 +239,16 @@ async function reserveSlot({
         err.code = 'ESTIMATE_TERMINAL';
         throw err;
       }
+
+      // The FOR UPDATE above only serializes THIS estimate — two different
+      // customers' estimates reserving the same tech/date can both pass the
+      // conflict check below concurrently and both insert. Serialize all
+      // reserves per tech+day (coarse but reserves are quick), released on
+      // commit/rollback.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', `${techId || 'unassigned'}:${date}`],
+      );
 
       const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
         ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {

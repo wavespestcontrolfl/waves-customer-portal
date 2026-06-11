@@ -781,21 +781,6 @@ router.post('/confirm', async (req, res, next) => {
     const endMin = slot_end ? timeToMin(slot_end) : (timeToMin(slot_start) + duration);
     const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
 
-    // Re-verify the slot is still available (race condition guard)
-    const conflict = await db('scheduled_services')
-      .where('scheduled_date', slot_date)
-      .where('technician_id', technician_id || null)
-      .whereNotIn('status', ['cancelled'])
-      .where(function () {
-        this.where(function () {
-          this.where('window_start', '<', endTime).andWhere('window_end', '>', slot_start);
-        });
-      })
-      .first();
-    if (conflict && technician_id) {
-      return res.status(409).json({ error: 'That time slot was just taken. Please pick another.' });
-    }
-
     const confCode = 'WPC-' + Array.from({ length: 4 }, () =>
       'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]
     ).join('');
@@ -811,38 +796,89 @@ router.post('/confirm', async (req, res, next) => {
       || estimate?.service_type
       || 'General Pest Control';
 
-    const [booking] = await db('self_booked_appointments').insert({
-      customer_id: custId,
-      estimate_id: estimate_id || null,
-      technician_id: technician_id || null,
-      service_zone_id: zone?.id || null,
-      date: slot_date,
-      start_time: slot_start,
-      end_time: endTime,
-      duration_minutes: duration,
-      customer_notes: customer_notes || null,
-      confirmation_code: confCode,
-      source: source || 'direct',
-      referrer_url: referrer_url || req.get('referer') || null,
-      service_type: resolvedServiceType,
-    }).returning('*');
+    // Conflict re-check + both inserts ride one transaction, serialized per
+    // customer+day: a double-submit (button double-tap, client retry)
+    // otherwise mints two parents — and two seeded quarterly series — and a
+    // partial failure could leave a booking without its dispatch row.
+    const txResult = await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['self-booking-confirm', `${custId}:${slot_date}`],
+      );
 
-    const [serviceRow] = await db('scheduled_services').insert({
-      customer_id: custId,
-      technician_id: technician_id || null,
-      scheduled_date: slot_date,
-      window_start: slot_start,
-      window_end: endTime,
-      service_type: resolvedServiceType,
-      status: 'confirmed',
-      customer_confirmed: true,
-      confirmed_at: new Date(),
-      notes: customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
-      source: source || 'self_booked',
-      self_booking_id: booking.id,
-      estimated_duration_minutes: duration,
-      zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
-    }).returning('*');
+      // Idempotent replay: same customer, same day, same start time →
+      // return the original booking instead of creating a duplicate.
+      const existing = await trx('self_booked_appointments')
+        .where({ customer_id: custId, date: slot_date, start_time: slot_start })
+        .whereNot('status', 'cancelled')
+        .first();
+      if (existing) return { existing };
+
+      // Re-verify the slot is still available (race condition guard)
+      const conflict = await trx('scheduled_services')
+        .where('scheduled_date', slot_date)
+        .where('technician_id', technician_id || null)
+        .whereNotIn('status', ['cancelled'])
+        .where(function () {
+          this.where(function () {
+            this.where('window_start', '<', endTime).andWhere('window_end', '>', slot_start);
+          });
+        })
+        .first();
+      if (conflict && technician_id) {
+        throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+
+      const [bookingRow] = await trx('self_booked_appointments').insert({
+        customer_id: custId,
+        estimate_id: estimate_id || null,
+        technician_id: technician_id || null,
+        service_zone_id: zone?.id || null,
+        date: slot_date,
+        start_time: slot_start,
+        end_time: endTime,
+        duration_minutes: duration,
+        customer_notes: customer_notes || null,
+        confirmation_code: confCode,
+        source: source || 'direct',
+        referrer_url: referrer_url || req.get('referer') || null,
+        service_type: resolvedServiceType,
+      }).returning('*');
+
+      const [scheduledRow] = await trx('scheduled_services').insert({
+        customer_id: custId,
+        technician_id: technician_id || null,
+        scheduled_date: slot_date,
+        window_start: slot_start,
+        window_end: endTime,
+        service_type: resolvedServiceType,
+        status: 'confirmed',
+        customer_confirmed: true,
+        confirmed_at: new Date(),
+        notes: customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
+        source: source || 'self_booked',
+        self_booking_id: bookingRow.id,
+        estimated_duration_minutes: duration,
+        zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
+      }).returning('*');
+
+      return { booking: bookingRow, serviceRow: scheduledRow };
+    });
+
+    if (txResult.existing) {
+      logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slot_date} ${slot_start} — returning existing booking ${txResult.existing.id}`);
+      return res.json({
+        booking: txResult.existing,
+        confirmationCode: txResult.existing.confirmation_code,
+        replayed: true,
+      });
+    }
+
+    const { booking, serviceRow } = txResult;
 
     let followUpRows = [];
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);

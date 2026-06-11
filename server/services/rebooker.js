@@ -153,6 +153,18 @@ class SmartRebooker {
       });
     }
 
+    // A past target date moves the job where no "upcoming" query will ever
+    // find it — silently never serviced. Stale SMS replies and freeform
+    // admin input both reach this path.
+    const newDateStr = String(newDate || '').split('T')[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(newDateStr) || newDateStr < etDateString()) {
+      throw Object.assign(new Error('Reschedule target date is invalid or in the past'), {
+        statusCode: 400,
+        isOperational: true,
+        code: 'INVALID_DATE',
+      });
+    }
+
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
     const windowEnd = win.end || service.window_end;
@@ -167,6 +179,34 @@ class SmartRebooker {
     }
 
     await db.transaction(async (trx) => {
+      // The kept technician's route is real — writing 'confirmed' on top
+      // of an overlapping job double-books them deterministically (the
+      // customer picked from offers that never checked the route).
+      const keptTechId = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        ? options.technicianId
+        : service.technician_id;
+      if (keptTechId && updates.window_start && windowEnd) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['slot-reserve', `${keptTechId}:${newDateStr}`],
+        );
+        const overlap = await trx('scheduled_services')
+          .where('scheduled_date', newDateStr)
+          .where('technician_id', keptTechId)
+          .whereNot('id', serviceId)
+          .whereNotIn('status', ['cancelled', 'completed'])
+          .where('window_start', '<', windowEnd)
+          .where('window_end', '>', updates.window_start)
+          .first('id');
+        if (overlap) {
+          throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
+
       const updated = await trx('scheduled_services')
         .where({ id: serviceId, status: service.status })
         .whereIn('status', Array.from(RESCHEDULABLE_STATUSES))

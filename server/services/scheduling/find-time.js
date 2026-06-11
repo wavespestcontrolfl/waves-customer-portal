@@ -13,6 +13,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { HQ, haversine } = require('../route-optimizer');
+const { etParts, etDateString } = require('../../utils/datetime-et');
 
 const ROAD_FACTOR = 1.4;
 const AVG_MPH = 30;
@@ -142,6 +143,14 @@ async function findAvailableSlots(opts) {
   const candidates = [];
   let evaluated = 0;
 
+  // Same-day floor: without it, an evening request still offers (and lets
+  // the customer book) "Today 9:00 AM" — a confirmed visit whose window
+  // already elapsed. 30-minute lead so a slot isn't offered seconds before
+  // it starts.
+  const todayEt = etDateString();
+  const nowEt = etParts(new Date());
+  const todayFloorMin = nowEt.hour * 60 + nowEt.minute + 30;
+
   for (const date of dates) {
     for (const tech of techs) {
       // Pull this tech's stops for this day
@@ -180,8 +189,13 @@ async function findAvailableSlots(opts) {
         const detourDrive = driveMin(prev, newStop) + driveMin(newStop, next);
         const extraDrive = Math.max(0, detourDrive - baselineDrive);
 
-        // Earliest the new job could start: after prev.endMin + drive from prev → new
-        const earliestStart = Math.max(dayOpen, prev.endMin + driveMin(prev, newStop));
+        // Earliest the new job could start: after prev.endMin + drive from
+        // prev → new — floored at "now + lead" when the date is today.
+        const earliestStart = Math.max(
+          dayOpen,
+          prev.endMin + driveMin(prev, newStop),
+          date === todayEt ? todayFloorMin : 0,
+        );
         const earliestEnd = earliestStart + durationMinutes;
         // Must allow drive from new → next before next.startMin
         const latestEnd = next.startMin - driveMin(newStop, next);

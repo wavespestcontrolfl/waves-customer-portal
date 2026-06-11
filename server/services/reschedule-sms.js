@@ -3,6 +3,7 @@ const SmartRebooker = require('./rebooker');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { etDateString } = require('../utils/datetime-et');
 
 async function sendAppointmentSms({ to, body, customerId, messageType }) {
   const result = await sendCustomerMessage({
@@ -97,9 +98,14 @@ class RescheduleSMS {
   }
 
   async handleRescheduleReply(customerId, messageBody) {
+    // Offers expire: with no age limit, a customer texting "1" weeks later
+    // matched whatever pending offer row existed and booked its (possibly
+    // long-past) date. 7 days comfortably covers a real reschedule
+    // conversation.
     const pending = await db('reschedule_log')
       .where({ customer_id: customerId })
       .whereNull('customer_response')
+      .where('created_at', '>', new Date(Date.now() - 7 * 86400000))
       .orderBy('created_at', 'desc')
       .first();
 
@@ -125,6 +131,16 @@ class RescheduleSMS {
       responseType = 'option_2';
     } else if (reply.includes('call') || reply.includes('phone')) {
       responseType = 'call_requested';
+    }
+
+    // Offered dates can lapse between offer and reply — booking a past
+    // date moves the job where no "upcoming" query finds it (rebooker
+    // also rejects this; here we degrade to the call-requested flow so
+    // the office follows up instead of the reply erroring out).
+    if (selectedOption?.date && String(selectedOption.date) < etDateString()) {
+      logger.warn(`[reschedule-sms] Customer ${customerId} picked an expired option (${selectedOption.date}) on log ${pending.id} — routing to office follow-up`);
+      selectedOption = null;
+      responseType = 'option_expired';
     }
 
     await db('reschedule_log').where({ id: pending.id }).update({
