@@ -64,21 +64,20 @@ function chainResolving(rows) {
 }
 
 describe('claimNext action-aware floor', () => {
-  test('claim SQL lets blog rows clear at the blog floor while others need minScore', async () => {
+  test('default call: blog rows clear at the blog floor while others need the global floor', async () => {
     db.mockImplementation(() => chainResolving([])); // recoverStaleClaims
     db.raw.mockResolvedValue({ rows: [] });
 
     await queue.claimNext({});
 
     const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/score >= LEAST\(\?, CASE WHEN action_type = 'new_supporting_blog' THEN \? ELSE \? END\)/);
-    // bindings: [claimed_at, minScore, blogFloor, minScore]
-    expect(bindings[1]).toBe(THRESHOLDS.minScoreToAct);
-    expect(bindings[2]).toBe(THRESHOLDS.blogMinScoreToAct);
-    expect(bindings[3]).toBe(THRESHOLDS.minScoreToAct);
+    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' THEN \? ELSE \? END/);
+    // bindings: [claimed_at, blogFloor, minScore]
+    expect(bindings[1]).toBe(THRESHOLDS.blogMinScoreToAct);
+    expect(bindings[2]).toBe(THRESHOLDS.minScoreToAct);
   });
 
-  test('an explicitly lower caller minScore still applies to every action type (LEAST)', async () => {
+  test('an explicitly LOWER caller minScore applies to every action type', async () => {
     db.mockImplementation(() => chainResolving([]));
     db.raw.mockResolvedValue({ rows: [] });
 
@@ -86,7 +85,18 @@ describe('claimNext action-aware floor', () => {
 
     const [, bindings] = db.raw.mock.calls[0];
     expect(bindings[1]).toBe(0);
-    expect(bindings[3]).toBe(0);
+    expect(bindings[2]).toBe(0);
+  });
+
+  test('an explicitly HIGHER caller minScore restricts blogs too (no blog-floor leak on --min-score=90)', async () => {
+    db.mockImplementation(() => chainResolving([]));
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({ minScore: 90 });
+
+    const [, bindings] = db.raw.mock.calls[0];
+    expect(bindings[1]).toBe(90);
+    expect(bindings[2]).toBe(90);
   });
 
   test('env-tuned blog floor flows into the claim bindings', async () => {
@@ -97,21 +107,30 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({});
 
     const [, bindings] = db.raw.mock.calls[0];
-    expect(bindings[2]).toBe(50);
+    expect(bindings[1]).toBe(50);
   });
 });
 
 describe('peek action-aware floor', () => {
-  test('peek with minScore uses the same CASE floor so previews match claims', async () => {
+  test('peek at the default uses the same CASE floor so previews match claims', async () => {
     const q = chainResolving([]);
     db.mockImplementation(() => q);
 
     await queue.peek({ minScore: THRESHOLDS.minScoreToAct });
 
     expect(q.whereRaw).toHaveBeenCalledWith(
-      expect.stringMatching(/LEAST\(\?, CASE WHEN action_type = 'new_supporting_blog' THEN \? ELSE \? END\)/),
-      [THRESHOLDS.minScoreToAct, THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct],
+      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' THEN \? ELSE \? END/),
+      [THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct],
     );
+  });
+
+  test('peek with an explicit override applies it to blogs too', async () => {
+    const q = chainResolving([]);
+    db.mockImplementation(() => q);
+
+    await queue.peek({ minScore: 90 });
+
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.any(String), [90, 90]);
   });
 
   test('peek without minScore applies no floor (unchanged behavior)', async () => {

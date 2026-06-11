@@ -24,6 +24,21 @@ const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_FETCH_LIMIT = 20;
 
+/**
+ * The blog floor applies ONLY when the caller runs at the global default —
+ * an explicit minScore override (run-autonomous-next --min-score, the admin
+ * run-now route) wins for every action type, in BOTH directions: 0 opens
+ * the queue fully, 90 restricts a high-confidence run to >=90 including
+ * blogs. (An explicit override equal to the default is indistinguishable
+ * from the default and gets the blog floor — acceptable: it asks for
+ * exactly the standing policy.)
+ */
+function blogMinScoreFor(minScore) {
+  return minScore === THRESHOLDS.minScoreToAct
+    ? minScoreToActFor('new_supporting_blog')
+    : minScore;
+}
+
 class OpportunityQueue {
   /**
    * Read top-N pending opportunities, sorted by score desc. No claim.
@@ -39,8 +54,8 @@ class OpportunityQueue {
         // Same action-aware floor as claimNext, so previews show exactly
         // what the runner would claim.
         q = q.whereRaw(
-          `score >= LEAST(?, CASE WHEN action_type = 'new_supporting_blog' THEN ? ELSE ? END)`,
-          [minScore, minScoreToActFor('new_supporting_blog'), minScore],
+          `score >= CASE WHEN action_type = 'new_supporting_blog' THEN ? ELSE ? END`,
+          [blogMinScoreFor(minScore), minScore],
         );
       }
       if (bucket) q = q.where('bucket', bucket);
@@ -88,7 +103,7 @@ class OpportunityQueue {
        WHERE id = (
          SELECT id FROM opportunity_queue
          WHERE status = 'pending'
-           AND score >= LEAST(?, CASE WHEN action_type = 'new_supporting_blog' THEN ? ELSE ? END)
+           AND score >= CASE WHEN action_type = 'new_supporting_blog' THEN ? ELSE ? END
            ${whereActionType}
            ${whereExclude}
          ORDER BY score DESC, mined_at ASC
@@ -96,11 +111,7 @@ class OpportunityQueue {
          LIMIT 1
        )
        RETURNING *`,
-      // Action-aware floor: blog rows clear at the lower blog floor, all
-      // other action types at the caller's minScore. LEAST() preserves an
-      // explicitly lower caller minScore (e.g. admin testing with 0) for
-      // every action type.
-      [new Date(), minScore, minScoreToActFor('new_supporting_blog'), minScore]
+      [new Date(), blogMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(exclude.length ? [exclude] : [])
     );
