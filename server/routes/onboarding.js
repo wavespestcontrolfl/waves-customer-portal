@@ -568,7 +568,40 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
     // Book the customer-picked slot through the same engine the portal uses,
     // so we inherit confirmation codes, dispatch sync, and SMS notifications.
     const availability = require('../services/availability');
-    const booking = await availability.confirmBooking(null, req.customer.id, date, startTime, 'Picked during onboarding');
+    let booking;
+    try {
+      booking = await availability.confirmBooking(null, req.customer.id, date, startTime, 'Picked during onboarding');
+    } catch (bookErr) {
+      // confirmBooking can now refuse stale/raced slots (SLOT_TAKEN /
+      // INVALID_DATE). We already cancelled the original appointment
+      // above — without a replacement the customer would be left with
+      // nothing on the board, so restore it before answering.
+      if (current && (bookErr.code === 'SLOT_TAKEN' || bookErr.code === 'INVALID_DATE')) {
+        await db('scheduled_services').where({ id: current.id }).update({
+          status: current.status,
+          notes: current.notes || null,
+        }).catch(() => {});
+        if (current.self_booking_id) {
+          await db('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'confirmed' }).catch(() => {});
+        }
+        try {
+          const AppointmentReminders = require('../services/appointment-reminders');
+          const restoredDate = current.scheduled_date instanceof Date
+            ? current.scheduled_date.toISOString().split('T')[0]
+            : String(current.scheduled_date).split('T')[0];
+          await AppointmentReminders.registerAppointment(
+            current.id,
+            req.customer.id,
+            `${restoredDate}T${String(current.window_start || '08:00').slice(0, 5)}`,
+            current.service_type,
+            'onboarding_restore',
+            { sendConfirmation: false },
+          );
+        } catch {}
+        return res.status(bookErr.statusCode || 409).json({ error: bookErr.message, originalRestored: true });
+      }
+      throw bookErr;
+    }
 
     await db('onboarding_sessions')
       .where({ id: req.session.id })

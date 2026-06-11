@@ -736,20 +736,14 @@ router.post('/confirm', async (req, res, next) => {
         .first();
       if (existing) {
         if (!customer_id) {
-          // A double-submit retry for a just-created new_customer lands
-          // here — the first attempt created the profile, so the phone is
-          // now "on file". If that exact slot is already booked for this
-          // customer, replay the original booking instead of 409ing the
-          // retry (the replay guard inside the transaction can't help —
-          // this return fires before it).
-          const replay = await db('self_booked_appointments')
-            .where({ customer_id: existing.id, date: slotDateStr, start_time: slot_start })
-            .whereNot('status', 'cancelled')
-            .first();
-          if (replay) {
-            logger.info(`[booking:confirm] Phone-matched double-submit replay for customer ${existing.id} on ${slotDateStr} ${slot_start}`);
-            return res.json({ booking: replay, confirmationCode: replay.confirmation_code, replayed: true });
-          }
+          // NOTE: a new_customer double-submit retry lands here (the first
+          // attempt created the profile) and gets this 409 rather than an
+          // idempotent replay — deliberately. Phone + date + start time is
+          // NOT proof of identity on a public route; replaying the booking
+          // row + confirmation code here would let anyone with a
+          // customer's phone number probe slots and harvest booking
+          // details. The in-transaction replay guard still covers callers
+          // that proved identity (customer_id / estimate token).
           return res.status(409).json({ error: 'This phone number is already on file. Please verify the customer profile before booking.' });
         }
         if (String(existing.id) !== String(customer_id)) {
@@ -842,18 +836,22 @@ router.post('/confirm', async (req, res, next) => {
       );
       // The customer-keyed lock above only serializes a double-submit —
       // two DIFFERENT customers confirming the same slot can still both
-      // pass the overlap check under READ COMMITTED. Tech bookings lock
-      // per tech+day (same slot-reserve namespace slot-reservation and
-      // rebooker use, so all three writers serialize); the public
-      // BookingPage sends no technician_id, so those lock and
-      // conflict-check per zone+day instead.
+      // pass the overlap check under READ COMMITTED. Tech bookings take
+      // BOTH locks: tech:date serializes against slot-reservation and
+      // rebooker, zone:date serializes against the zone-capacity writers
+      // (availability.confirmBooking and no-tech confirms here). Lock
+      // order is fixed (tech first) so concurrent confirms can't
+      // deadlock.
       const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
-      const slotScopeKey = technician_id
-        ? `${technician_id}:${slotDateStr}`
-        : `zone:${zone?.id || 'unknown'}:${slotDateStr}`;
+      if (technician_id) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['slot-reserve', `${technician_id}:${slotDateStr}`],
+        );
+      }
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['slot-reserve', slotScopeKey],
+        ['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],
       );
 
       // Idempotent replay: same customer, same day, same start time →

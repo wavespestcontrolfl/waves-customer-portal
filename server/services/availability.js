@@ -254,6 +254,21 @@ class AvailabilityEngine {
         for (const b of selfBooked) {
           occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
         }
+        // Live estimate-slot holds (customer_id NULL, tech-keyed, no zone)
+        // occupy real route time even though they don't match the zone
+        // predicates above — count them so a self-booking can't land on a
+        // held slot.
+        const liveHolds = await trx('scheduled_services')
+          .where('scheduled_date', dateStr)
+          .whereNull('customer_id')
+          .whereRaw('reservation_expires_at > NOW()')
+          .select('window_start', 'window_end');
+        for (const h of liveHolds) {
+          occupied.push({
+            start: this.timeToMin(h.window_start || '09:00'),
+            end: this.timeToMin(h.window_end || (h.window_start ? this.addMinutes(h.window_start, 60) : '10:00')),
+          });
+        }
         if (occupied.some((b) => b.start < endMin && b.end > startMin)) {
           throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
         }
