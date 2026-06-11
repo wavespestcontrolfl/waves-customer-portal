@@ -469,11 +469,11 @@ describe('Astro publisher autonomous draft adapter', () => {
     factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
   });
 
-  test('blocks an autonomous publish when the fact-check finds a P1 error (no branch/PR opened)', async () => {
+  test('blocks an autonomous publish when the fact-check finds a P0 error (no branch/PR opened)', async () => {
     factCheckGate.evaluate.mockResolvedValueOnce({
       pass: false,
       checked: true,
-      findings: [{ severity: 'P1', code: 'FACTUAL_ERROR', message: 'wrong pathogen: C. jacksonii is cool-season' }],
+      findings: [{ severity: 'P0', code: 'FACTUAL_ERROR', message: 'wrong pathogen: C. jacksonii is cool-season' }],
     });
     const frontmatter = validFrontmatter({
       title: 'Autonomous Dollar Spot in Venice',
@@ -1290,7 +1290,7 @@ describe('publishRefresh fact-check (refreshed blog bodies)', () => {
   test('blocks a refresh whose changed body fails the fact-check (no branch/PR opened)', async () => {
     factCheckGate.evaluate.mockResolvedValueOnce({
       pass: false, checked: true,
-      findings: [{ severity: 'P1', code: 'FACTUAL_ERROR', message: 'wrong pathogen for warm-season turf' }],
+      findings: [{ severity: 'P0', code: 'FACTUAL_ERROR', message: 'wrong pathogen for warm-season turf' }],
     });
     await expect(AstroPublisher.publishRefresh(...refreshDraft('A NEW refreshed body naming the wrong pathogen.')))
       .rejects.toMatchObject({ code: 'BLOG_FACTCHECK_FAILED' });

@@ -54,18 +54,20 @@ describe('fact-check gate', () => {
     expect(opts.timeout).toBeLessThanOrEqual(60000);
   });
 
-  test('BLOCKS on a P1 factual finding (wrong pathogen)', async () => {
-    reply([{ severity: 'P1', claim: 'Clarireedia jacksonii', issue: 'cool-season pathogen; warm-season FL turf is C. monteithiana', fix: 'use C. monteithiana' }]);
+  test('BLOCKS on a P0 (objective error: reversed pathogen)', async () => {
+    reply([{ severity: 'P0', claim: 'C. jacksonii on warm-season turf', issue: 'reversed; warm-season FL turf is C. monteithiana', fix: 'use C. monteithiana' }]);
     const r = await load().evaluate(DRAFT);
     expect(r.pass).toBe(false);
-    expect(r.findings[0].severity).toBe('P1');
+    expect(r.findings[0].severity).toBe('P0');
     expect(r.findings[0].code).toBe('FACTUAL_ERROR');
     expect(r.findings[0].message).toMatch(/monteithiana/);
   });
 
-  test('BLOCKS on P0', async () => {
-    reply([{ severity: 'P0', claim: 'apply nitrogen in July', issue: 'illegal during the Sarasota County summer blackout', fix: 'no nitrogen Jun 1–Sep 30' }]);
-    expect((await load().evaluate(DRAFT)).pass).toBe(false);
+  test('P1 is ADVISORY now — a debatable judgment does NOT block', async () => {
+    reply([{ severity: 'P1', claim: 'dollar spot on St. Augustine', issue: 'uncommon host; debatable prevalence', fix: 'note bermuda/zoysia' }]);
+    const r = await load().evaluate(DRAFT);
+    expect(r.pass).toBe(true);
+    expect(r.findings[0].severity).toBe('P1');
   });
 
   test('P2 is advisory — does NOT block', async () => {
@@ -119,12 +121,19 @@ describe('fact-check gate', () => {
     expect(r.pass).toBe(true);
   });
 
-  test('normalizes casing/whitespace so "p1" / "P1 " still BLOCK', async () => {
-    for (const variant of ['p1', 'P1 ', ' p0']) {
+  test('normalizes casing/whitespace so "p0" / "P0 " still BLOCK', async () => {
+    for (const variant of ['p0', 'P0 ', ' p0']) {
       reply([{ severity: variant, claim: 'x', issue: 'y' }]);
       const r = await load().evaluate(DRAFT);
-      expect(r.findings[0].severity).toBe(variant.trim().toUpperCase());
+      expect(r.findings[0].severity).toBe('P0');
       expect(r.pass).toBe(false);
     }
+  });
+
+  test('normalized "p1" is advisory (does NOT block)', async () => {
+    reply([{ severity: 'p1 ', claim: 'x', issue: 'y' }]);
+    const r = await load().evaluate(DRAFT);
+    expect(r.findings[0].severity).toBe('P1');
+    expect(r.pass).toBe(true);
   });
 });
