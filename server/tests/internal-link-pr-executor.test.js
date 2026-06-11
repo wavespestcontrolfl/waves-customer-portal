@@ -390,6 +390,24 @@ describe('internal-link dry-run executor helpers', () => {
     expect(result.skip_reason).toBe('source_renders_on_spoke');
   });
 
+  test('skips spoke-canonical sources at execution time', () => {
+    const spokeCanonicalBody = sourceBody.replace(
+      'canonical: https://www.wavespestcontrol.com/termite-swarmers-bathroom/',
+      'canonical: https://sarasotafllawncare.com/termite-swarmers-bathroom/'
+    );
+    const result = evaluateDryRunTask({
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/termite-inspection/',
+      anchor_text: 'termite inspection in Florida',
+    }, {
+      sourcePage: page('src/content/blog/termite-swarmers-bathroom.md', spokeCanonicalBody),
+      targetPage: page('src/content/services/termite-inspection.md', targetBody),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.skip_reason).toBe('source_canonical_off_hub');
+  });
+
   test('hub-only domains frontmatter is still an eligible source', () => {
     const hubSourceBody = sourceBody.replace(
       'category: termite',

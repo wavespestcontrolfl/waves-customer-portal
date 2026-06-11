@@ -531,9 +531,13 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   if (!sourcePage?.body) return skipped(base, 'source_body_missing');
   if (!targetPage?.body) return skipped(base, 'target_body_missing');
   // Tasks planned before the planner grew its spoke guard can still name a
-  // spoke-rendered source; re-check at execution time so they skip cleanly.
+  // spoke-rendered or spoke-canonical source; re-check at execution time so
+  // they skip cleanly.
   if (planner._internals.sourceRendersOffHub(sourcePage.frontmatter || {})) {
     return skipped(base, 'source_renders_on_spoke');
+  }
+  if (planner._internals.canonicalPointsOffHub(sourcePage.frontmatter || {})) {
+    return skipped(base, 'source_canonical_off_hub');
   }
 
   const targetUrl = policy.normalizeInternalUrl(task.target_url || targetPage.url || targetPage.canonical_url);
