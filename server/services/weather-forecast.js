@@ -32,7 +32,11 @@ function cacheKey(lat, lng) {
   return `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
 }
 
-async function fetchJson(url) {
+// `label` is what gets logged on failure — NEVER the URL. Both NWS
+// request URLs embed location (customer lat/lng on /points, the
+// resolved grid cell on /gridpoints), and address-level PII does not
+// belong in application logs.
+async function fetchJson(url, label) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -43,7 +47,7 @@ async function fetchJson(url) {
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
-    logger.info(`[weather-forecast] fetch failed for ${url}: ${err.message}`);
+    logger.info(`[weather-forecast] ${label} fetch failed: ${err.message}`);
     return null;
   } finally {
     clearTimeout(timer);
@@ -58,6 +62,9 @@ async function fetchJson(url) {
  *          precipitation chance, or null when NWS is unreachable.
  */
 async function getDailyRainOutlook(lat, lng) {
+  // Reject empty inputs BEFORE coercion — Number(null) is 0, which
+  // would send an ungeocoded customer's lookup to lat 0.
+  if (lat == null || lng == null || lat === '' || lng === '') return null;
   const latNum = Number(lat);
   const lngNum = Number(lng);
   if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
@@ -66,11 +73,11 @@ async function getDailyRainOutlook(lat, lng) {
   const cached = _cache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
 
-  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`);
+  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
   const forecastUrl = points?.properties?.forecast;
   if (!forecastUrl) return null;
 
-  const forecast = await fetchJson(forecastUrl);
+  const forecast = await fetchJson(forecastUrl, 'grid forecast');
   const periods = forecast?.properties?.periods;
   if (!Array.isArray(periods)) return null;
 
