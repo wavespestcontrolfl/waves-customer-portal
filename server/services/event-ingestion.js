@@ -294,8 +294,15 @@ function buildArticleBundle(items) {
   const parts = [];
   let used = 0;
   for (const item of items) {
-    const content = String(item.contentSnippet || item.content || item.summary || '')
-      .slice(0, MAX_ARTICLE_CHARS);
+    // Prefer the FULL article body over the description teaser:
+    // rss-parser maps <content:encoded> to item['content:encoded'] /
+    // ['content:encodedSnippet'] (plain-text), while contentSnippet /
+    // content come from <description>. Feeds that tease in the
+    // description carry their event dates only in the encoded body.
+    const content = String(
+      item['content:encodedSnippet'] || item['content:encoded']
+      || item.contentSnippet || item.content || item.summary || '',
+    ).slice(0, MAX_ARTICLE_CHARS);
     const image = safeHttpUrl(item.enclosure?.url || item['itunes:image']?.href);
     const part = [
       `### Article ${parts.length + 1}`,
@@ -387,14 +394,22 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
  * Validate one Claude-extracted event and shape it for upsert.
  * Pure — returns null when the event should be dropped, else
  * { row, autoApprove } where row holds the events_raw columns.
+ *
+ * opts.requireStart — drop events without a parseable start date.
+ * News-mode RSS sets this: the articles contract says "no stated event
+ * date → no event", and an undated article summary can never enter the
+ * digest but WOULD clutter the inbox/dashboard (the events endpoint
+ * includes NULL start_at rows). Page mode keeps undated events —
+ * ongoing exhibits/markets on real event pages are legitimate.
  */
-function normalizeExtractedEvent(source, ev, nowMs) {
+function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const cutoffMs = nowMs + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
   const title = (ev.title || '').toString().trim().slice(0, 512);
   if (!title) return null;
 
   const start = parseDateOrNull(ev.startAt);
+  if (opts.requireStart && !start) return null;
   if (start && start.getTime() > cutoffMs) return null;
   if (start && start.getTime() < nowMs - 24 * 60 * 60 * 1000) return null;
 
@@ -449,13 +464,13 @@ function normalizeExtractedEvent(source, ev, nowMs) {
   };
 }
 
-async function upsertExtractedEvents(source, claudeEvents) {
+async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   const nowMs = Date.now();
   let upserted = 0;
   let dropped = 0;
 
   for (const ev of claudeEvents) {
-    const normalized = normalizeExtractedEvent(source, ev, nowMs);
+    const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
     const { row, autoApprove } = normalized;
 
@@ -496,7 +511,9 @@ async function pullNewsRssItems(source, items) {
   if (!text.trim()) return { upserted: 0, dropped: 0, total: 0 };
 
   const claudeEvents = await extractEventsWithClaude(source, text, { mode: 'articles', maxEvents });
-  const { upserted, dropped } = await upsertExtractedEvents(source, claudeEvents);
+  // requireStart: the articles contract is "no stated event date → no
+  // event" — enforce it even when the model ignores the prompt rule.
+  const { upserted, dropped } = await upsertExtractedEvents(source, claudeEvents, { requireStart: true });
   return { upserted, dropped, total: claudeEvents.length, articlesBundled: bundled };
 }
 

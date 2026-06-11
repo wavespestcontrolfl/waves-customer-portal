@@ -264,6 +264,19 @@ describe('event ingestion buildArticleBundle — news-RSS article bundling', () 
     expect(badImg.text).not.toContain('Image:');
   });
 
+  test('prefers the full content:encoded body over the description teaser', () => {
+    const { text } = buildArticleBundle([
+      {
+        title: 'Roundup',
+        link: 'https://x.co/a',
+        'content:encodedSnippet': 'Full body: jazz night Saturday 7pm at the Blue Rooster.',
+        contentSnippet: 'Click to read our weekend picks…',
+      },
+    ]);
+    expect(text).toContain('jazz night Saturday');
+    expect(text).not.toContain('Click to read');
+  });
+
   test('stops adding articles once the bundle budget is spent', () => {
     const big = 'y'.repeat(2500);
     const items = Array.from({ length: 30 }, (_, i) => ({
@@ -313,6 +326,15 @@ describe('event ingestion normalizeExtractedEvent — validation + auto-approve 
     expect(normalizeExtractedEvent(tier1, { title: '  ' }, NOW)).toBeNull();
     expect(normalizeExtractedEvent(tier1, { title: 'Way out', startAt: '2026-12-15T10:00:00-04:00' }, NOW)).toBeNull();
     expect(normalizeExtractedEvent(tier1, { title: 'Old news', startAt: '2026-06-01T10:00:00-04:00' }, NOW)).toBeNull();
+  });
+
+  test('requireStart (news mode) drops undated or unparseable-date events; page mode keeps them', () => {
+    const undated = { title: 'Ongoing exhibit', startAt: null };
+    const garbled = { title: 'Garbled', startAt: 'next Tuesday-ish' };
+    expect(normalizeExtractedEvent(tier2, undated, NOW, { requireStart: true })).toBeNull();
+    expect(normalizeExtractedEvent(tier2, garbled, NOW, { requireStart: true })).toBeNull();
+    // page mode (no opts): undated events are legitimate (ongoing exhibits)
+    expect(normalizeExtractedEvent(tier2, undated, NOW)).not.toBeNull();
   });
 
   test('tier-1 auto-approves ONLY when a real start date was extracted', () => {
