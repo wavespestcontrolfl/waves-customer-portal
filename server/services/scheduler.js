@@ -1804,15 +1804,19 @@ function initScheduledJobs() {
     try {
       const missedAppointment = require('./workflows/missed-appointment');
       if (missedAppointment.onSkip) {
-        // Find today's services that were scheduled but not completed.
+        // Find recent services that were scheduled but not completed.
         // In-progress statuses (en_route / on_site) are intentionally
         // excluded along with completed/cancelled/skipped/rescheduled —
-        // a tech actively on the job is not a no-show.
+        // a tech actively on the job is not a no-show. The range reaches
+        // back to yesterday so evening windows that hadn't elapsed at
+        // yesterday's 6 PM sweep — and genuinely closed as no-shows —
+        // are picked up today instead of never counting.
         const today = etDateString();
+        const yesterday = etDateString(addETDays(new Date(), -1));
         const candidates = await db('scheduled_services')
-          .where({ scheduled_date: today })
+          .whereBetween('scheduled_date', [yesterday, today])
           .whereIn('status', ['pending', 'confirmed'])
-          .select('id', 'window_start', 'window_end');
+          .select('id', 'scheduled_date', 'window_start', 'window_end');
 
         // Only flag services whose arrival window has already elapsed at
         // sweep time. Evening jobs (e.g. a 6–8 PM window that completes at
@@ -1823,6 +1827,11 @@ function initScheduledJobs() {
         const { hour, minute } = etParts();
         const nowET = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
         const windowHasPassed = (svc) => {
+          // Yesterday's windows have all elapsed by today's sweep.
+          const svcDate = svc.scheduled_date instanceof Date
+            ? svc.scheduled_date.toISOString().split('T')[0]
+            : String(svc.scheduled_date).split('T')[0];
+          if (svcDate < today) return true;
           // window_start/window_end are TIME columns ('HH:MM:SS' strings).
           const cutoff = svc.window_end || svc.window_start;
           if (!cutoff) return true; // no window recorded — legacy behavior
@@ -1832,6 +1841,14 @@ function initScheduledJobs() {
         let flagged = 0;
         for (const svc of candidates) {
           if (!windowHasPassed(svc)) continue;
+          // onSkip inserts a reschedule_log row unconditionally — with the
+          // sweep spanning two days, a service yesterday's pass already
+          // flagged must not be re-flagged toward the
+          // 2-noshows-in-90-days outreach trigger.
+          const alreadyFlagged = await db('reschedule_log')
+            .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+            .first('id');
+          if (alreadyFlagged) continue;
           try {
             await missedAppointment.onSkip(svc.id, 'no_show');
             flagged++;
