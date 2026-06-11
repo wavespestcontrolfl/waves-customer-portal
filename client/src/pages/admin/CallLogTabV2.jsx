@@ -122,9 +122,9 @@ function getCallBackTarget(call) {
   const metadataPhones = getMetadataPhoneCandidates(call);
   if (call.direction === "outbound") {
     return firstCallableCustomerPhone([
+      call.to_phone,
       call.customer_phone,
       ...metadataPhones,
-      call.to_phone,
       call.from_phone,
     ]);
   }
