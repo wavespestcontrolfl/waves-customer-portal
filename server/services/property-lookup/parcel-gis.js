@@ -94,6 +94,13 @@ function zipFromPhyZipcd(value) {
   return /^\d{5}$/.test(digits) ? digits : null;
 }
 
+// Logs must not identify the customer's property (AGENTS.md non-card PII
+// rule): no parcel IDs, and coordinates coarsened to ~1km so failures stay
+// debuggable without pinpointing an address.
+function coarseCoord(value) {
+  return Number.isFinite(value) ? Number(value.toFixed(2)) : null;
+}
+
 // Signed shoelace area of one ring in square feet via an equirectangular
 // projection at the ring's mean latitude — accurate to well under 1% at
 // parcel scale, which is all the turf math needs.
@@ -203,12 +210,14 @@ async function lookupParcelByPoint(lat, lng, options = {}) {
 
     const features = Array.isArray(data?.features) ? data.features : [];
     if (!features.length) {
-      logger.info('[parcel-gis] no parcel at point', { lat, lng, elapsedMs: Date.now() - t0 });
+      logger.info('[parcel-gis] no parcel at point', {
+        latApprox: coarseCoord(lat), lngApprox: coarseCoord(lng), elapsedMs: Date.now() - t0,
+      });
       return null;
     }
     if (features.length > 1) {
       logger.info('[parcel-gis] multiple parcels at point — picking smallest containing polygon', {
-        lat, lng, count: features.length,
+        count: features.length,
       });
     }
 
@@ -217,7 +226,7 @@ async function lookupParcelByPoint(lat, lng, options = {}) {
     const county = countyFromCoNo(attrs.CO_NO);
     if (!county) {
       logger.info('[parcel-gis] parcel outside serviced counties', {
-        lat, lng, coNo: attrs.CO_NO ?? null, elapsedMs: Date.now() - t0,
+        latApprox: coarseCoord(lat), lngApprox: coarseCoord(lng), coNo: attrs.CO_NO ?? null, elapsedMs: Date.now() - t0,
       });
       return null;
     }
@@ -251,10 +260,7 @@ async function lookupParcelByPoint(lat, lng, options = {}) {
     };
 
     logger.info('[parcel-gis] matched parcel', {
-      lat,
-      lng,
       county,
-      parcelId: parcel.parcelId,
       lotSqft: parcel.lotSqft,
       polygonAreaSqft: parcel.polygonAreaSqft,
       elapsedMs: Date.now() - t0,
@@ -263,8 +269,8 @@ async function lookupParcelByPoint(lat, lng, options = {}) {
   } catch (err) {
     const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
     logger.warn('[parcel-gis] lookup failed', {
-      lat,
-      lng,
+      latApprox: coarseCoord(lat),
+      lngApprox: coarseCoord(lng),
       timeoutMs,
       aborted,
       error: err?.message || String(err),

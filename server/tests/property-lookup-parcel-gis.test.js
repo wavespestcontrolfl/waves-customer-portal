@@ -234,6 +234,25 @@ describe('cadastral evidence record', () => {
     expect(buildCadastralRecord(null, 'x')).toBeNull();
   });
 
+  it('a cadastral-only merge is labeled cadastral, not ai', () => {
+    const cadastral = buildCadastralRecord(parcelFixture, '5510 Lakewood Ranch Blvd');
+    const merged = mergePropertyRecords([cadastral], '5510 Lakewood Ranch Blvd');
+    expect(merged._source).toBe('cadastral');
+    expect(merged._raw._source).toBe('cadastral');
+
+    const ai = {
+      squareFootage: 1800,
+      _provider: 'openai',
+      _source: 'ai',
+      _aiConfidence: 'high',
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/x/1_zpid/',
+      _aiSourceType: 'listing',
+      _aiSourceQuality: 75,
+    };
+    const hybrid = mergePropertyRecords([cadastral, ai], '5510 Lakewood Ranch Blvd');
+    expect(hybrid._source).toBe('hybrid');
+  });
+
   it('cadastral beats listing but loses to live county in the merge', () => {
     const cadastral = buildCadastralRecord(parcelFixture, '5510 Lakewood Ranch Blvd');
 

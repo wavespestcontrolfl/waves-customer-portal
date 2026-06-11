@@ -683,7 +683,6 @@ async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
       };
       logger.info('[county-property] resolved county record by GIS parcel', {
         county: parcel.county,
-        parcelId: parcel.paoParcelId,
         elapsedMs: Date.now() - t0,
       });
     }
@@ -2551,7 +2550,15 @@ function mergePropertyRecords(records, address) {
   const sourceKinds = [...new Set(sorted.map((r) => r._source).filter(Boolean))];
   const hasCountySource = sorted.some((r) => r._source === 'county');
   const hasAiSource = sorted.some((r) => r._source === 'ai');
-  merged._source = hasCountySource && !hasAiSource ? 'county' : hasCountySource ? 'hybrid' : 'ai';
+  const hasCadastralSource = sorted.some((r) => r._source === 'cadastral');
+  // Cadastral-only merges must not read as 'ai' — the FDOR roll is county
+  // data, and the "sourced from AI web search" field-verify flag keys off
+  // _source === 'ai'.
+  merged._source = hasCountySource && !hasAiSource ? 'county'
+    : hasCountySource ? 'hybrid'
+    : hasCadastralSource && hasAiSource ? 'hybrid'
+    : hasCadastralSource ? 'cadastral'
+    : 'ai';
   merged._provider = providers.join('+') || 'ai';
   merged._aiProviders = providers;
   merged._aiSources = sources;
@@ -2562,7 +2569,10 @@ function mergePropertyRecords(records, address) {
   merged._dataQuality = buildPropertyDataQuality(mergedFieldEvidence, providers);
   merged._raw = {
     ...(merged._raw || {}),
-    _source: merged._source === 'county' ? 'county' : merged._source === 'hybrid' ? 'county_ai' : 'ai_trio',
+    _source: merged._source === 'county' ? 'county'
+      : merged._source === 'cadastral' ? 'cadastral'
+      : merged._source === 'hybrid' ? 'county_ai'
+      : 'ai_trio',
     _provider: merged._provider,
     _providers: providers,
     _sources: sources,
