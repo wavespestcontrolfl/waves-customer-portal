@@ -148,6 +148,8 @@ export default function TechHomePage() {
   const [recapService, setRecapService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
+  const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
+  const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   const techName = getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
@@ -418,6 +420,7 @@ export default function TechHomePage() {
               if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
             }} />
             <ActionBtn label="Protocol" icon="📖" onClick={() => navigate('/tech/protocols')} />
+            <ActionBtn label="Rain Out" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
             <ActionBtn
               label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
               icon="🚗"
@@ -530,6 +533,29 @@ export default function TechHomePage() {
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
         />
+      )}
+
+      {rainOutService && (
+        <RainOutSheet
+          service={rainOutService}
+          onClose={() => setRainOutService(null)}
+          onDone={(summary) => {
+            setRainOutService(null);
+            setRainOutResult(summary);
+            fetchSchedule();
+            setTimeout(() => setRainOutResult(''), 6000);
+          }}
+        />
+      )}
+
+      {rainOutResult && (
+        <div style={{
+          position: 'fixed', bottom: 16, left: 16, right: 16, zIndex: 1100,
+          padding: '10px 14px', borderRadius: 10, fontSize: 13, fontWeight: 600,
+          background: '#22c55e22', border: '1px solid #22c55e', color: '#22c55e',
+        }}>
+          {rainOutResult}
+        </div>
       )}
     </div>
   );
@@ -831,6 +857,226 @@ function StatCard({ label, value, color }) {
       <p style={{ fontSize: 24, fontWeight: 800, color: color || DARK.teal, margin: 0,
         fontFamily: "'Montserrat', sans-serif" }}>{value}</p>
       <p style={{ fontSize: 12, color: DARK.muted, margin: '2px 0 0' }}>{label}</p>
+    </div>
+  );
+}
+
+// Weather reschedule sheet. Storm rolls in mid-route → the tech picks
+// where this visit (or the rest of today's route) goes. "Later today"
+// options lead because SWFL cells usually pass within a couple hours;
+// day options carry NWS rain % so the tech doesn't reschedule into
+// tomorrow's storms. The server moves the job(s) immediately and texts
+// the customer a reply-1-confirm / reply-2-switch message.
+const RAIN_REASONS = [
+  { code: 'weather_rain', label: 'Rain' },
+  { code: 'weather_lightning', label: 'Lightning' },
+  { code: 'weather_wind', label: 'Wind' },
+  { code: 'weather_heat', label: 'Heat' },
+];
+
+function RainOutSheet({ service, onClose, onDone }) {
+  const [options, setOptions] = useState(null);
+  const [error, setError] = useState('');
+  const [reason, setReason] = useState('weather_rain');
+  const [selectedKey, setSelectedKey] = useState(null);
+  const [scope, setScope] = useState('job');
+  const [notify, setNotify] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = getAdminAuthToken();
+        const res = await fetch(`${API}/api/tech/services/${service.id}/rain-out-options`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (!cancelled) {
+          setOptions(data);
+          const first = data.sameDay?.[0] || data.days?.[0];
+          setSelectedKey(first ? `${first.kind}:${first.date}:${first.window.start}` : null);
+        }
+      } catch (err) {
+        if (!cancelled) setError(err.message || 'Failed to load options');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [service.id]);
+
+  const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
+  const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
+  const selected = allOptions.find((opt) => keyOf(opt) === selectedKey) || null;
+  // The SMS offers the best *other-day* option as the reply-2 alternate.
+  const alt = selected ? (options?.days || []).find((opt) => keyOf(opt) !== selectedKey) || null : null;
+
+  const handleCommit = async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const token = getAdminAuthToken();
+      // The server books THIS stop into exactly this window (what's
+      // displayed); on a route-wide same-day push it shifts the other
+      // stops by this stop's window delta to preserve running order.
+      const target = { date: selected.date, window: selected.window };
+      const res = await fetch(`${API}/api/tech/services/${service.id}/rain-out`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reasonCode: reason,
+          scope,
+          target,
+          alt: alt ? { date: alt.date, window: alt.window } : null,
+          notifyCustomer: notify,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const failures = data.failedCount ? `, ${data.failedCount} failed — check dispatch` : '';
+      onDone(`Moved ${data.movedCount} ${data.movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notify ? ', customer texted' : ''}${failures}`);
+    } catch (err) {
+      setError(err.message || 'Rain out failed');
+      setBusy(false);
+    }
+  };
+
+  const chip = (active) => ({
+    padding: '7px 12px', borderRadius: 16, fontSize: 13, fontWeight: 600,
+    border: `1px solid ${active ? DARK.teal : DARK.border}`,
+    background: active ? '#0ea5e922' : 'transparent',
+    color: active ? DARK.teal : DARK.text, cursor: 'pointer',
+  });
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000,
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: DARK.card, borderRadius: '16px 16px 0 0', width: '100%',
+          maxWidth: 560, maxHeight: '85vh', overflowY: 'auto', padding: 20,
+          border: `1px solid ${DARK.border}`, borderBottom: 'none',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: DARK.text, fontFamily: "'Montserrat', sans-serif" }}>
+            ⛈️ Weather Reschedule
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" style={{
+            background: 'transparent', border: 'none', color: DARK.muted, fontSize: 24, cursor: 'pointer', padding: '0 6px',
+          }}>×</button>
+        </div>
+        <div style={{ fontSize: 13, color: DARK.muted, marginBottom: 14 }}>
+          {(service.customer_name || service.customerName || 'Customer')}
+          {options?.today?.rainChance != null && ` · today ${options.today.rainChance}% rain`}
+        </div>
+
+        {error && (
+          <div style={{
+            marginBottom: 12, fontSize: 13, padding: '8px 10px', borderRadius: 8,
+            background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
+          }}>
+            {error}
+          </div>
+        )}
+
+        {!options && !error && (
+          <div style={{ color: DARK.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>Loading options…</div>
+        )}
+
+        {options && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>WEATHER</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+              {RAIN_REASONS.map((r) => (
+                <button key={r.code} type="button" onClick={() => setReason(r.code)} style={chip(reason === r.code)}>
+                  {r.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>MOVE TO</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+              {allOptions.length === 0 && (
+                <div style={{ fontSize: 13, color: DARK.muted }}>No slots available — call dispatch.</div>
+              )}
+              {allOptions.map((opt) => {
+                const key = keyOf(opt);
+                const active = key === selectedKey;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setSelectedKey(key)}
+                    style={{
+                      textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14,
+                      border: `1px solid ${active ? DARK.teal : DARK.border}`,
+                      background: active ? '#0ea5e91a' : 'transparent', color: DARK.text,
+                      cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    }}
+                  >
+                    <span>
+                      {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
+                      {opt.kind === 'same_day' && (
+                        <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
+                      )}
+                    </span>
+                    {opt.rainChance != null && (
+                      <span style={{
+                        fontSize: 12, fontWeight: 700,
+                        color: opt.rainChance >= 50 ? '#f59e0b' : '#22c55e',
+                      }}>
+                        {opt.rainChance}% 🌧
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {options.remainingRouteCount > 0 && (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>APPLY TO</div>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                  <button type="button" onClick={() => setScope('job')} style={chip(scope === 'job')}>
+                    This stop only
+                  </button>
+                  <button type="button" onClick={() => setScope('route')} style={chip(scope === 'route')}>
+                    Rest of route ({options.remainingRouteCount + 1} stops)
+                  </button>
+                </div>
+              </>
+            )}
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: DARK.text, marginBottom: 16, cursor: 'pointer' }}>
+              <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
+              Text customer{scope === 'route' ? 's' : ''} (reply 1 confirms, 2 switches{alt ? ` to ${alt.display}` : ''}; includes local forecast link)
+            </label>
+
+            <button
+              type="button"
+              onClick={handleCommit}
+              disabled={!selected || busy}
+              style={{
+                width: '100%', padding: '13px 0', borderRadius: 10, border: 'none',
+                background: DARK.teal, color: '#fff', fontSize: 15, fontWeight: 700,
+                cursor: busy ? 'wait' : 'pointer', opacity: (!selected || busy) ? 0.6 : 1,
+              }}
+            >
+              {busy ? 'Moving…' : `Move ${scope === 'route' ? `${options.remainingRouteCount + 1} stops` : 'this stop'}${notify ? ' & text' : ''}`}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

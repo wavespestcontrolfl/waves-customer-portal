@@ -251,6 +251,99 @@ router.post('/:id/on-site', async (req, res, next) => {
   }
 });
 
+// ── Rain-out: weather hits mid-route, the tech moves the visit (or the
+// rest of today's route) and the customer gets a "we moved you" text
+// they can adjust by replying 1/2 (existing reschedule-sms webhook).
+// All heavy lifting in services/rain-out.js.
+
+// GET /api/tech/services/:id/rain-out-options
+router.get('/:id/rain-out-options', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'technician_id', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    // Stale-tap guard — same as /en-route and /on-site: a job dispatch
+    // already moved to a future day must not be rain-out'd back to
+    // today from a stale Tech Home tab.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: 'This job has been rescheduled to a future date. Refresh your route.',
+        code: 'future_scheduled_date',
+      });
+    }
+
+    const RainOut = require('../services/rain-out');
+    const options = await RainOut.getOptions(req.params.id);
+    if (!options.ok) {
+      return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
+    }
+    return res.json(options);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tech/services/:id/rain-out
+// body: { reasonCode, scope: 'job'|'route', target: { date, window?, deltaMinutes? },
+//         alt?: { date, window }, notifyCustomer? }
+router.post('/:id/rain-out', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'technician_id', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    // Stale-tap guard — same as /en-route and /on-site. The guard is on
+    // the job's CURRENT date (acting on a job that's no longer today's),
+    // not on the rain-out target, which may legitimately be future.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: 'This job has been rescheduled to a future date. Refresh your route.',
+        code: 'future_scheduled_date',
+      });
+    }
+
+    const { reasonCode, scope, target, alt, notifyCustomer } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.commit({
+      serviceId: req.params.id,
+      technicianId: req.technicianId,
+      reasonCode,
+      scope: scope === 'route' ? 'route' : 'job',
+      target,
+      alt,
+      notifyCustomer: notifyCustomer !== false,
+    });
+
+    if (!result.ok) {
+      const code = result.reason === 'not_found' ? 404
+        : (result.reason === 'bad_reason' || result.reason === 'bad_target') ? 400
+          : 409;
+      return res.status(code).json({ error: result.reason, results: result.results || [] });
+    }
+
+    logger.info(
+      `[tech-track] rain-out service=${req.params.id} tech=${req.technicianId} ` +
+      `scope=${scope === 'route' ? 'route' : 'job'} moved=${result.movedCount} failed=${result.failedCount}`
+    );
+    return res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/tech/services/:id/photos — tech-portal field photo upload.
 //
 // Multipart upload. Tech attaches a photo to a completed service
