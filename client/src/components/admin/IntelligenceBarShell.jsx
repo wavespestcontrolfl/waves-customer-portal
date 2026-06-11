@@ -399,7 +399,22 @@ export default function IntelligenceBarShell({
           >
             {renderMarkdown(response)}
           </div>
-          <PendingActionsCard actions={pendingActions} variant="light" />
+          <PendingActionsCard
+            actions={pendingActions}
+            variant="light"
+            onResolved={(action, decision, body) => {
+              // A confirmed write is when the data actually changed — replay
+              // the host's post-query refresh path with the same shape it
+              // already inspects (toolCalls names).
+              if (decision === "confirm" && body?.success && onAfterSubmit) {
+                onAfterSubmit({
+                  toolCalls: [{ name: action.tool }],
+                  confirmedAction: true,
+                  result: body.result,
+                });
+              }
+            }}
+          />
           {responseSlot && responseSlot(structuredData)}
           {/* Follow-up */}
           <div className="mt-3 flex gap-2">

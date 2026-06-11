@@ -518,7 +518,15 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
           >
             {renderMarkdown(response)}
           </div>
-          <PendingActionsCard actions={pendingActions} variant="dark" />
+          <PendingActionsCard
+            actions={pendingActions}
+            variant="dark"
+            onResolved={(action, decision, body) => {
+              if (decision === "confirm" && body?.success && onRefresh) {
+                setTimeout(() => onRefresh(), 500);
+              }
+            }}
+          />
           {/* Follow-up */}
           <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
             {" "}
