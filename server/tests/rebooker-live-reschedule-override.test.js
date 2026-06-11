@@ -367,6 +367,31 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
+  test('rescheduleSeries aborts when the live anchor raced to skipped (present but not movable)', async () => {
+    // 'skipped' is non-terminal for cadence math, so the raced anchor IS
+    // in the sibling set — but a no-show drop must not be revived to
+    // confirmed with a tracker rewind.
+    const { updates, historyInsert, logInsert } = wireSeriesMocks('on_site', [
+      { id: 'svc-1', status: 'skipped', scheduled_date: '2026-06-10', window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
+    ]);
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      { allowLive: true },
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining('transitioned to a non-reschedulable state concurrently'),
+    });
+
+    expect(updates[0].update).not.toHaveBeenCalled();
+    expect(updates[1].update).not.toHaveBeenCalled();
+    expect(historyInsert.insert).not.toHaveBeenCalled();
+    expect(logInsert.insert).not.toHaveBeenCalled();
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).not.toHaveBeenCalled();
+  });
+
   test('rescheduleSeries allowLive never permits a terminal anchor', async () => {
     const serviceLookup = chain({ first: jest.fn().mockResolvedValue(liveService('completed')) });
     db.mockImplementation(() => serviceLookup);
