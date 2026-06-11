@@ -1421,8 +1421,8 @@ export function calculateEstimate(inputs) {
   const addMod = (service, label, impact, type = 'info') => modifiers.push({ service, label, impact, type });
   const pestFootprintBrackets = [
     { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 3 }, { at: 3000, adj: 6 },
-    { at: 4000, adj: 10 }, { at: 5500, adj: 16 },
+    { at: 1750, adj: -5 }, { at: 2000, adj: 0 }, { at: 2500, adj: 3 },
+    { at: 3000, adj: 6 }, { at: 4000, adj: 10 }, { at: 5500, adj: 16 },
   ];
   const pestInterp = (v, b) => {
     if (v <= b[0].at) return b[0].adj;
