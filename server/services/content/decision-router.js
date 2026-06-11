@@ -190,11 +190,13 @@ function route(opportunity, signals = {}) {
 
   // ── terminal near-me guard (operator directive 2026-06-11) ────────
   // Runs LAST so no upstream branch can reverse it: the SERP-profile
-  // upgrade above defers to live SERPs, and "exterminator near me" SERPs
-  // profile as mixed/blog-dominant — which would resurrect the blog action
-  // the miner already demoted. Transactional queries are service-page
-  // intent, never blog material; park for human review instead.
-  if (action === 'new_supporting_blog' && isTransactionalQuery(opportunity.query)) {
+  // upgrade defers to live SERPs ("exterminator near me" profiles as
+  // mixed/blog-dominant → would resurrect the blog action), and the
+  // customer-demand block reroutes blog → create_customer_question_page —
+  // which is still an article. Transactional queries are service-page
+  // intent, never ARTICLE material of any shape; park for human review.
+  const ARTICLE_ACTIONS = ['new_supporting_blog', 'create_customer_question_page'];
+  if (ARTICLE_ACTIONS.includes(action) && isTransactionalQuery(opportunity.query)) {
     action = 'do_not_publish';
     humanReview = true;
     humanReason = 'transactional/near-me query — never blog material (operator directive)';

@@ -105,6 +105,18 @@ describe('terminal near-me guard (operator directive 2026-06-11)', () => {
     const r = route(opp({ action_type: 'new_supporting_blog', query: 'how to read a termite bond' }), {});
     expect(r.action_type).toBe('new_supporting_blog');
   });
+  test('customer-cluster reroute to create_customer_question_page cannot bypass the guard', () => {
+    // pre-sale customer cluster reroutes blog → customer-question page
+    // BEFORE the terminal guard; an FAQ page is still an article — blocked
+    const r = route(
+      opp({ action_type: 'new_supporting_blog', query: 'exterminator near me' }),
+      { customer_signal: { funnel_stage: 'pre-sale', total_count: 14 } }
+    );
+    // prove the reroute actually fired before the guard caught it
+    expect(r.router_notes).toMatch(/routed to customer_question_page/);
+    expect(r.action_type).toBe('do_not_publish');
+    expect(r.human_review_required).toBe(true);
+  });
   test('near-me queries upgraded to PAGE actions stay upgraded (guard is blog-specific)', () => {
     const r = route(
       opp({ action_type: 'new_supporting_blog', query: 'pest control near me' }),
