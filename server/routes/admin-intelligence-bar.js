@@ -1114,3 +1114,6 @@ router.get('/quick-actions', async (req, res) => {
 
 
 module.exports = router;
+// Exposed for the write-gate contract test — keeps the test's
+// CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
+module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;

@@ -20,6 +20,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.transaction = jest.fn();
@@ -27,6 +29,18 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Behavioral tests drive optimize_* far enough to invoke the optimizer —
+// keep it off the network.
+jest.mock('../services/route-optimizer', () => ({
+  HQ: { lat: 27.4, lng: -82.5 },
+  optimizeRoute: jest.fn(async (stops) => ({
+    orderedStops: stops,
+    totalDistanceMeters: 10000,
+    unoptimizedDistanceMeters: 16000,
+    totalDurationSeconds: 1200,
+    source: 'nearest_neighbor',
+  })),
+}));
 
 const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 
@@ -273,20 +287,28 @@ describe('intelligence bar write-gate contract (issue #1568)', () => {
 // ─── BEHAVIORAL CONTRACT ────────────────────────────────────────
 // Schema declaration is not proof: a write could declare `confirmed` and
 // ignore it. Exercise every two-step executor WITHOUT confirmed against a
-// recording knex mock and assert zero mutations reach the database.
+// recording knex mock SEEDED with realistic rows — so every lookup succeeds,
+// the executor reaches its confirmation gate (not a "not found" early
+// return), and the suite asserts the gate returned a preview/proposal with
+// zero mutations reaching the database.
 
-function makeRecordingDb() {
+function makeRecordingDb(seed = {}) {
   const mutations = [];
   const MUTATING_OPS = new Set(['insert', 'update', 'del', 'delete', 'increment', 'decrement', 'truncate', 'upsert']);
+  const firstIndex = {}; // rotates .first() rows per table so consecutive lookups differ (e.g. tech A then tech B)
 
   function makeBuilder(table) {
+    const rows = seed[table] || [];
     const state = { single: false };
     const builder = new Proxy(function () {}, {
       get(_target, prop) {
         if (prop === 'then') {
-          // Awaiting the builder: .first() chains resolve undefined (no row),
-          // list queries resolve [] (no rows).
-          return (resolve) => resolve(state.single ? undefined : []);
+          if (state.single) {
+            const i = firstIndex[table] || 0;
+            firstIndex[table] = i + 1;
+            return (resolve) => resolve(rows.length ? rows[i % rows.length] : undefined);
+          }
+          return (resolve) => resolve(rows);
         }
         if (prop === 'first') {
           return () => { state.single = true; return builder; };
@@ -310,13 +332,37 @@ function makeRecordingDb() {
 describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   const dbMock = require('../models/db');
 
+  const TECHS = [
+    { id: 'tech-1', name: 'Adam' },
+    { id: 'tech-2', name: 'Jose' },
+  ];
+  const STOPS = [
+    {
+      id: '00000000-0000-0000-0000-000000000001', customer_id: 'cust-1', technician_id: 'tech-1',
+      scheduled_date: '2026-06-11', service_type: 'Pest Control', status: 'scheduled',
+      lat: 27.39, lng: -82.45, first_name: 'Pat', last_name: 'Tester', city: 'Bradenton',
+      address_line1: '1 Test St', state: 'FL', zip: '34208', current_tech_name: 'Adam',
+    },
+    {
+      id: '00000000-0000-0000-0000-000000000002', customer_id: 'cust-2', technician_id: 'tech-1',
+      scheduled_date: '2026-06-11', service_type: 'Lawn Care Visit', status: 'scheduled',
+      lat: 27.34, lng: -82.53, first_name: 'Sam', last_name: 'Tester', city: 'Sarasota',
+      address_line1: '2 Test St', state: 'FL', zip: '34232', current_tech_name: 'Adam',
+    },
+  ];
+  // create_customer's duplicate check must MISS (an existing customer would
+  // legitimately stop before the gate), so `customers` stays unseeded.
+  // Everything the schedule writes look up is present, so each executor
+  // reaches its `confirmed !== true` branch with real work to do.
+  const SEED = { technicians: TECHS, scheduled_services: STOPS };
+
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
   const UNCONFIRMED_CALLS = [
     ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
-    ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: ['00000000-0000-0000-0000-000000000001'], technician_name: 'Adam' }],
-    ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: ['00000000-0000-0000-0000-000000000001'], new_date: '2026-06-12' }],
+    ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],
+    ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: [STOPS[0].id], new_date: '2026-06-12' }],
     ['schedule-tools', 'executeScheduleTool', 'swap_tech_assignments', { date: '2026-06-11', tech_a_name: 'Adam', tech_b_name: 'Jose' }],
   ];
 
@@ -330,8 +376,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     expect(UNCONFIRMED_CALLS.map(c => c[2]).sort()).toEqual([...WRITE_TWO_STEP].sort());
   });
 
-  test.each(UNCONFIRMED_CALLS)('%s %s: unconfirmed %s performs zero DB mutations', async (mod, exec, toolName, input) => {
-    const { db, mutations } = makeRecordingDb();
+  test.each(UNCONFIRMED_CALLS)('%s %s: unconfirmed %s reaches the gate, returns a preview, mutates nothing', async (mod, exec, toolName, input) => {
+    const { db, mutations } = makeRecordingDb(SEED);
     dbMock.mockImplementation(db);
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
@@ -339,8 +385,20 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input);
 
-    expect(mutations).toEqual([]);
-    // The unconfirmed call must never report a completed write.
+    // The executor must have reached its confirmation gate — not an error or
+    // "not found" early return — and answered with a preview/proposal.
+    expect(result?.error).toBeUndefined();
+    expect(result?.preview === true || result?.proposal === true).toBe(true);
     expect(result?.success).not.toBe(true);
+    expect(mutations).toEqual([]);
+  });
+});
+
+describe('endpoint-write classification matches the route guard', () => {
+  test('CONFIRMED_ENDPOINT_WRITES equals CONFIRMED_ACTION_TOOL_NAMES in admin-intelligence-bar.js', () => {
+    const route = require('../routes/admin-intelligence-bar');
+    expect(route.CONFIRMED_ACTION_TOOL_NAMES).toBeInstanceOf(Set);
+    expect([...route.CONFIRMED_ACTION_TOOL_NAMES].sort())
+      .toEqual([...CONFIRMED_ENDPOINT_WRITES].sort());
   });
 });
