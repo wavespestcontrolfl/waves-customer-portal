@@ -5703,7 +5703,12 @@ function getUrgencyIndicator(e) {
   }
 
   if (e.status === "viewed" && e.viewedAt) {
-    const hoursSinceViewed = (now - new Date(e.viewedAt).getTime()) / HOUR;
+    // Key off the latest engagement (re-view/click), not the first view — a
+    // customer who re-opened the estimate yesterday isn't overdue.
+    const engagementStamps = [e.lastViewedAt, e.viewedAt, e.lastClickedAt]
+      .map((iso) => (iso ? new Date(iso).getTime() : NaN))
+      .filter((ts) => !Number.isNaN(ts));
+    const hoursSinceViewed = (now - Math.max(...engagementStamps)) / HOUR;
     if (hoursSinceViewed >= 168)
       return { label: "Final follow-up", color: C.red, bg: `${C.red}18` };
     if (hoursSinceViewed >= 48)

@@ -55,7 +55,11 @@ const {
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
 
-const ESTIMATE_LIST_LIMIT = 500;
+// Hard ceiling for limit=all list fetches. The estimates pipeline computes
+// all-time KPIs client-side from this list; if the table ever outgrows this
+// cap the analytics silently truncate to the newest rows, so keep generous
+// headroom (pricing-risk batch is pure compute after one inventory preload).
+const ESTIMATE_LIST_LIMIT = 2000;
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
 const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
 

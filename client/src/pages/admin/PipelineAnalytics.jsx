@@ -43,6 +43,7 @@ const SERVICE_META = {
   lawn: { label: "Lawn care", icon: Leaf, ticketSuffix: "/mo recurring" },
   tree_shrub: { label: "Tree & shrub", icon: Trees, ticketSuffix: "per visit" },
   rodent: { label: "Rodent", icon: PawPrint, ticketSuffix: "/mo recurring" },
+  palm_injection: { label: "Palm injection", icon: Trees, ticketSuffix: "/mo recurring" },
   termite: { label: "Termite bait", icon: ShieldCheck, ticketSuffix: "one-time" },
   unknown: { label: "Unknown", icon: HelpCircle, ticketSuffix: "unclassified" },
 };
@@ -60,6 +61,20 @@ export function withinDateRange(iso, range, nowMs = Date.now()) {
   return true;
 }
 
+// Most recent customer touch on the estimate. First-view timestamps alone
+// misclassify customers who re-open or click days later, so idle-time checks
+// must key off the latest of view/re-view/click.
+export function lastEngagementMs(estimate) {
+  const stamps = [
+    estimate?.lastViewedAt,
+    estimate?.viewedAt,
+    estimate?.lastClickedAt,
+  ]
+    .map((iso) => (iso ? new Date(iso).getTime() : NaN))
+    .filter((ts) => !Number.isNaN(ts));
+  return stamps.length ? Math.max(...stamps) : null;
+}
+
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   if (
     estimate?.status === "sent" &&
@@ -70,36 +85,49 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
   }
   if (estimate?.status === "viewed" && estimate.viewedAt) {
-    const viewedAt = new Date(estimate.viewedAt).getTime();
-    return !Number.isNaN(viewedAt) && nowMs - viewedAt > 48 * HOUR;
+    const last = lastEngagementMs(estimate);
+    return last != null && nowMs - last > 48 * HOUR;
   }
   return false;
 }
 
+// Matches the row-badge definition in getUrgencyIndicator(): an estimate is
+// going cold when it sits unopened 72h after sending, or when a viewed
+// estimate has had no engagement for 48h–7d (past 7d it's final-follow-up /
+// expiry territory, not "going cold").
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed" || !estimate.viewedAt) return false;
-  const viewedAt = new Date(estimate.viewedAt).getTime();
-  if (Number.isNaN(viewedAt)) return false;
-  const age = nowMs - viewedAt;
+  if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
+    const sentAt = new Date(estimate.sentAt).getTime();
+    return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
+  }
+  if (estimate?.status !== "viewed") return false;
+  const last = lastEngagementMs(estimate);
+  if (last == null) return false;
+  const age = nowMs - last;
   return age > 48 * HOUR && age < 168 * HOUR;
 }
 
 function serviceLineEntriesForEstimate(estimate) {
   if (Array.isArray(estimate.serviceLines) && estimate.serviceLines.length) {
     return estimate.serviceLines
-      .filter((line) => line && SERVICE_META[line.key])
       .map((line) => ({
-        key: line.key,
-        amount: Number(line.amount || 0),
+        key: line && SERVICE_META[line.key] ? line.key : "unknown",
+        amount: Number(line?.amount || 0),
+        basis: line?.amountBasis === "one_time" ? "one_time" : "monthly",
       }));
   }
   const key = classifyEstimateServiceLine(estimate);
-  return [{ key, amount: Number(estimate.monthlyTotal || 0) }];
+  return [
+    { key, amount: Number(estimate.monthlyTotal || 0), basis: "monthly" },
+  ];
 }
 
 // Aggregate offers/won/avg-ticket per service line. Offers = any non-draft
 // estimate in the window, counted once per quoted service line when the API
-// provides line-level service data. Won = status === 'accepted'.
+// provides line-level service data. Won = status === 'accepted'. Monthly and
+// one-time amounts are averaged separately — the displayed ticket uses
+// whichever basis dominates the line so a one-time job can't inflate a
+// "/mo recurring" average (and vice versa).
 export function aggregateServiceLineRows(estimates) {
   const buckets = new Map();
   for (const e of estimates) {
@@ -107,25 +135,49 @@ export function aggregateServiceLineRows(estimates) {
     for (const entry of serviceLineEntriesForEstimate(e)) {
       const line = entry.key;
       if (!buckets.has(line))
-        buckets.set(line, { sent: 0, won: 0, ticketSum: 0, ticketCount: 0 });
+        buckets.set(line, {
+          sent: 0,
+          won: 0,
+          monthlySum: 0,
+          monthlyCount: 0,
+          oneTimeSum: 0,
+          oneTimeCount: 0,
+        });
       const b = buckets.get(line);
       b.sent += 1;
       if (e.status === "accepted") b.won += 1;
       if (entry.amount > 0) {
-        b.ticketSum += entry.amount;
-        b.ticketCount += 1;
+        if (entry.basis === "one_time") {
+          b.oneTimeSum += entry.amount;
+          b.oneTimeCount += 1;
+        } else {
+          b.monthlySum += entry.amount;
+          b.monthlyCount += 1;
+        }
       }
     }
   }
   return Array.from(buckets.entries())
-    .map(([key, b]) => ({
-      key,
-      ...SERVICE_META[key],
-      sent: b.sent,
-      won: b.won,
-      acceptancePct: b.sent > 0 ? Math.round((b.won / b.sent) * 100) : 0,
-      avgTicket: b.ticketCount > 0 ? Math.round(b.ticketSum / b.ticketCount) : 0,
-    }))
+    .map(([key, b]) => {
+      const useOneTime = b.oneTimeCount > b.monthlyCount;
+      const ticketSum = useOneTime ? b.oneTimeSum : b.monthlySum;
+      const ticketCount = useOneTime ? b.oneTimeCount : b.monthlyCount;
+      const metaSuffix = SERVICE_META[key].ticketSuffix;
+      let ticketSuffix = metaSuffix;
+      if (ticketCount > 0) {
+        if (useOneTime) ticketSuffix = "one-time";
+        else if (metaSuffix === "one-time") ticketSuffix = "/mo recurring";
+      }
+      return {
+        key,
+        ...SERVICE_META[key],
+        sent: b.sent,
+        won: b.won,
+        acceptancePct: b.sent > 0 ? Math.round((b.won / b.sent) * 100) : 0,
+        avgTicket: ticketCount > 0 ? Math.round(ticketSum / ticketCount) : 0,
+        ticketSuffix,
+      };
+    })
     .sort((a, b) => b.sent - a.sent || a.label.localeCompare(b.label));
 }
 
@@ -137,9 +189,17 @@ function amount(e) {
   return Number(e?.monthlyTotal || 0);
 }
 
+// Avg ticket = mean recurring price across priced, non-draft offers. Unpriced
+// drafts and one-time-only estimates carry monthlyTotal 0 and would otherwise
+// drag the average far below any real ticket.
+function pricedOffers(estimates) {
+  return estimates.filter((e) => e.status !== "draft" && amount(e) > 0);
+}
+
 function avgTicketFor(estimates) {
-  if (estimates.length === 0) return 0;
-  return Math.round(estimates.reduce((sum, e) => sum + amount(e), 0) / estimates.length);
+  const priced = pricedOffers(estimates);
+  if (priced.length === 0) return 0;
+  return Math.round(priced.reduce((sum, e) => sum + amount(e), 0) / priced.length);
 }
 
 function prior30Estimates(estimates, nowMs) {
@@ -312,9 +372,10 @@ export default function PipelineAnalytics({
       (e) => e.status === "declined" || e.status === "expired",
     ).length;
     const conversionDenominator = sent + accepted + declined;
-    const totalMRRWon = inRange
-      .filter((e) => e.status === "accepted")
-      .reduce((sum, e) => sum + amount(e), 0);
+    const acceptedEstimates = inRange.filter((e) => e.status === "accepted");
+    const totalMRRWon = acceptedEstimates.reduce((sum, e) => sum + amount(e), 0);
+    const wonRecurring = acceptedEstimates.filter((e) => amount(e) > 0).length;
+    const wonOneTime = acceptedEstimates.length - wonRecurring;
     const pipelineEstimates = inRange.filter(
       (e) => !["accepted", "declined", "expired"].includes(e.status),
     );
@@ -370,6 +431,8 @@ export default function PipelineAnalytics({
         closed: conversionDenominator,
         totalMRRWon,
         wonAccounts: accepted,
+        wonRecurring,
+        wonOneTime,
       },
       funnel: {
         drafts: needsEstimate + readyToSend,
@@ -468,7 +531,11 @@ export default function PipelineAnalytics({
         <StatCard
           label="MRR won"
           value={money(metrics.kpis.totalMRRWon)}
-          sub={`${metrics.kpis.wonAccounts} new accounts`}
+          sub={
+            metrics.kpis.wonOneTime > 0
+              ? `${metrics.kpis.wonRecurring} recurring · ${metrics.kpis.wonOneTime} one-time`
+              : `${metrics.kpis.wonAccounts} new accounts`
+          }
         />
       </div>
 
@@ -587,7 +654,7 @@ export default function PipelineAnalytics({
         <AttentionCard
           label="Going cold"
           value={metrics.attention.goingCold}
-          sub="Viewed over 48h"
+          sub="Idle 48h–7d · unopened 72h+"
           filterKey="going_cold"
           onFilterChange={onFilterChange}
         />

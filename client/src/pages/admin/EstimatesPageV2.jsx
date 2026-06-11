@@ -69,7 +69,6 @@ import CreateAppointmentModal from "../../components/schedule/CreateAppointmentM
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
-const ESTIMATE_PIPELINE_LIMIT = 500;
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -108,7 +107,10 @@ function mergeEstimateRows(...lists) {
 }
 
 function estimatePipelineFetchPaths(filter) {
-  const base = `limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+  // limit=all → server-side ESTIMATE_LIST_LIMIT cap. PipelineAnalytics
+  // computes all-time KPIs from this list, so a numeric page-size here would
+  // silently truncate the funnel once the table outgrows it.
+  const base = `limit=all&pricingRisk=1`;
   if (filter === "archived") {
     return [`/admin/estimates?archived=only&${base}`];
   }
