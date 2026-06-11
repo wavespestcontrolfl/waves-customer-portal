@@ -687,10 +687,28 @@ httpServer.listen(PORT, () => {
     }
 
     // Call recordings are processed by the every-5-minute scheduler.js
-    // cron (recoverMissingRecentRecordings + processAllPending). The
-    // 10-minute setInterval that used to live here duplicated it —
-    // harmless thanks to the processor's atomic token-fenced claims, but
-    // pure redundant load.
+    // cron (recoverMissingRecentRecordings + processAllPending). Running
+    // this interval alongside it duplicated the work (harmless only
+    // thanks to the processor's token-fenced claims), so it now runs
+    // ONLY as the fallback when the cron fleet is gated off — recordings
+    // must still get processed in environments without GATE_CRON_JOBS.
+    {
+      const { isEnabled } = require('./config/feature-gates');
+      if (config.nodeEnv !== 'test' && !isEnabled('cronJobs')) {
+        setInterval(async () => {
+          try {
+            const processor = require('./services/call-recording-processor');
+            if (processor.recoverMissingRecentRecordings) await processor.recoverMissingRecentRecordings();
+            const result = await processor.processAllPending();
+            if (result.processed > 0) {
+              logger.info(`[call-proc-cron] Processed ${result.processed} pending recording(s)`);
+            }
+          } catch (err) {
+            logger.error(`[call-proc-cron] Failed: ${err.message}`);
+          }
+        }, 10 * 60 * 1000).unref();
+      }
+    }
 
     // Log memory every 5 minutes to catch leaks / OOM before SIGTERM
     setInterval(() => {
