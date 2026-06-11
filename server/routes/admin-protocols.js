@@ -1329,7 +1329,7 @@ function buildCompletionActions({ lines, products, programKey, visit }) {
 }
 
 async function getProtocolProducts() {
-  return db('products_catalog')
+  const products = await db('products_catalog')
     .where(function () {
       this.where({ active: true }).orWhereNull('active');
     })
@@ -1346,6 +1346,29 @@ async function getProtocolProducts() {
       'label_source_note',
     )
     .catch(() => []);
+
+  if (!products.length) return products;
+
+  // Protocol lines reference products by shorthand ("High Mn Combo",
+  // "Three-Way") that only resolves through product_aliases; matching
+  // without them leaves most shorthand lines unmatched.
+  const productIds = products.map((product) => product.id).filter(Boolean);
+  const aliases = productIds.length
+    ? await db('product_aliases')
+      .whereIn('product_id', productIds)
+      .select('product_id', 'alias_name')
+      .catch(() => [])
+    : [];
+  const aliasesByProduct = aliases.reduce((acc, row) => {
+    if (!acc[row.product_id]) acc[row.product_id] = [];
+    acc[row.product_id].push(row.alias_name);
+    return acc;
+  }, {});
+
+  return products.map((product) => ({
+    ...product,
+    aliases: aliasesByProduct[product.id] || [],
+  }));
 }
 
 async function getActiveCalibration(equipmentSystemId) {
@@ -1470,6 +1493,16 @@ router.get('/match', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Protocol visit text mixes product applications with scout/task/expectation
+// lines that never resolve to a catalog row by design. Only unmatched lines
+// carrying a "($N...)" cost tag — the protocol convention for a priced
+// product application — indicate a real catalog/alias gap.
+function unmatchedPricedProtocolLines(items) {
+  return items
+    .filter((item) => !item.matched && /\(\s*\$\s*\d/.test(item.raw || ''))
+    .map((item) => item.raw);
+}
+
 // GET /api/admin/protocols/lawn-mix — generic tech-facing protocol preview.
 router.get('/lawn-mix', async (req, res, next) => {
   try {
@@ -1592,10 +1625,12 @@ router.get('/lawn-mix', async (req, res, next) => {
         message: `Calibration for ${calibration.system_name || 'selected equipment'} is expired. Mix amounts are withheld until the rig is recalibrated.`,
       });
     }
-    if (items.some((item) => !item.matched)) {
+    const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
+    if (unmatchedPricedLines.length) {
       warnings.push({
         code: 'unmatched_product',
-        message: 'Some protocol lines do not match a product catalog row yet; label-rate math is unavailable for those lines.',
+        lines: unmatchedPricedLines,
+        message: `${unmatchedPricedLines.length} priced protocol line${unmatchedPricedLines.length === 1 ? ' has' : 's have'} no product catalog match; label-rate math is unavailable for: ${unmatchedPricedLines.join(' | ')}`,
       });
     }
 
@@ -2438,6 +2473,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
 router._internals = {
   defaultProductStockPublishIssue,
   stockStatusForProduct,
+  unmatchedPricedProtocolLines,
 };
 
 module.exports = router;
