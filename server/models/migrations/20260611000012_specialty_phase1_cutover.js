@@ -10,9 +10,27 @@
  * per-profile delivery_mode + SPECIALTY_REPORT_DELIVERY_DISABLED env are the
  * kill switches).
  *
- * Explicit allowlist only — no pattern sweeps. The count assertion throws
- * (rolling back the transaction) if prod rows drift from this list, so a
- * mismatch fails the deploy loudly instead of flipping a partial set.
+ * SELF-HEALING REWRITE (this file never ran successfully in any environment,
+ * so editing it in place is safe — knex has no record of it): the original
+ * version asserted count===1 per key and aborted on any mismatch. That
+ * blocked every deploy, because live catalogs have drifted per environment
+ * (prod lacks an active pest_initial_cleanout profile; staging lacks
+ * mosquito_event) — admin catalog edits mean no fixed allowlist holds
+ * everywhere. Per-key resolution is now deterministic:
+ *
+ *  - active project_required row, expected pointer       → FLIP
+ *  - active service_report row already at target pointer → ALREADY (idempotent)
+ *  - no profile row, but the services row exists         → HEAL: insert the
+ *    profile directly in its cut-over shape (seed defaults derived from the
+ *    services row, mirroring the 20260521000005 one_time branch)
+ *  - no profile row AND no services row, or inactive row → ABSENT: warn and
+ *    skip — this environment has no such service to cut over (runtime only
+ *    resolves active rows, so an inactive profile is inert either way)
+ *  - anything else (unexpected mode or pointer)          → THROW: genuine
+ *    drift that needs human eyes; transaction rolls back, nothing flips
+ *
+ * Every key's outcome is logged so the deploy log records exactly what each
+ * environment had. Explicit allowlist only — no pattern sweeps.
  *
  * Deliberately EXCLUDED (stay project_required):
  *  - general_appointment     — generic catch-all; the pest-treatment findings
@@ -23,83 +41,113 @@
  *  - termite_*               — Phase 3, after FS 482.226 / FAC 5E-14 signoff.
  */
 
-// service_key → expected current project_type pointer (verified against the
-// full migration replay; the WHERE below also asserts it at run time).
-const PHASE1_KEYS = {
-  pest_inspection: 'pest_inspection',
-  new_customer_inspection: 'pest_inspection',
-  mosquito_event: 'mosquito_event',
-  palm_injection: 'palm_injection',
-  lawn_aeration: 'one_time_lawn_treatment',
-  lawn_care_one_time: 'one_time_lawn_treatment',
-  lawn_fungicide: 'one_time_lawn_treatment',
-  lawn_insect_control: 'one_time_lawn_treatment',
-  lawn_inspection: 'one_time_lawn_treatment',
-  bee_wasp_removal: 'one_time_pest_treatment',
-  fire_ant: 'one_time_pest_treatment',
-  mud_dauber_removal: 'one_time_pest_treatment',
-  pest_initial_cleanout: 'one_time_pest_treatment',
-  pest_re_service: 'one_time_pest_treatment',
-  tick_control: 'one_time_pest_treatment',
-};
-
-// One pointer correction rides along: mosquito_one_time fell into the generic
+// { key, from: expected current pointer, to: pointer after cutover }.
+// mosquito_one_time is the one pointer correction: it fell into the generic
 // pest fallback at profile seeding, but its work content (areas treated,
 // breeding sources) is the mosquito_event report family — and the generic
 // schema's required activity gauge doesn't fit mosquito work.
-const REPOINTED_KEYS = {
-  mosquito_one_time: { from: 'one_time_pest_treatment', to: 'mosquito_event' },
-};
-
-const EXPECTED_TOTAL = Object.keys(PHASE1_KEYS).length + Object.keys(REPOINTED_KEYS).length;
+const PHASE1_KEYS = [
+  { key: 'pest_inspection', from: 'pest_inspection', to: 'pest_inspection' },
+  { key: 'new_customer_inspection', from: 'pest_inspection', to: 'pest_inspection' },
+  { key: 'mosquito_event', from: 'mosquito_event', to: 'mosquito_event' },
+  { key: 'mosquito_one_time', from: 'one_time_pest_treatment', to: 'mosquito_event' },
+  { key: 'palm_injection', from: 'palm_injection', to: 'palm_injection' },
+  { key: 'lawn_aeration', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
+  { key: 'lawn_care_one_time', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
+  { key: 'lawn_fungicide', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
+  { key: 'lawn_insect_control', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
+  { key: 'lawn_inspection', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
+  { key: 'bee_wasp_removal', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
+  { key: 'fire_ant', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
+  { key: 'mud_dauber_removal', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
+  { key: 'pest_initial_cleanout', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
+  { key: 'pest_re_service', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
+  { key: 'tick_control', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
+];
 
 exports.up = async function up(knex) {
   const hasTable = await knex.schema.hasTable('service_completion_profiles');
   if (!hasTable) throw new Error('service_completion_profiles table missing — cutover cannot run');
 
   await knex.transaction(async (trx) => {
-    let flipped = 0;
+    const outcomes = { flipped: [], healed: [], already: [], absent: [] };
 
-    for (const [serviceKey, projectType] of Object.entries(PHASE1_KEYS)) {
-      const count = await trx('service_completion_profiles')
-        .where({
-          service_key: serviceKey,
-          project_type: projectType,
-          completion_mode: 'project_required',
-          active: true,
-        })
-        .update({ completion_mode: 'service_report', updated_at: trx.fn.now() });
-      if (count !== 1) {
+    for (const { key, from, to } of PHASE1_KEYS) {
+      const row = await trx('service_completion_profiles')
+        .where({ service_key: key })
+        .first();
+
+      if (row && !row.active) {
+        console.warn(`[phase1-cutover] ${key}: profile row is INACTIVE in this environment — skipping (runtime ignores inactive rows)`);
+        outcomes.absent.push(key);
+        continue;
+      }
+
+      if (row && row.completion_mode === 'service_report' && row.project_type === to) {
+        outcomes.already.push(key);
+        continue;
+      }
+
+      if (row && row.completion_mode === 'project_required' && row.project_type === from) {
+        await trx('service_completion_profiles')
+          .where({ service_key: key })
+          .update({ completion_mode: 'service_report', project_type: to, updated_at: trx.fn.now() });
+        outcomes.flipped.push(key);
+        continue;
+      }
+
+      if (row) {
+        // Unexpected mode or pointer — genuine per-environment drift this
+        // migration must not paper over.
         throw new Error(
-          `[phase1-cutover] expected exactly 1 active project_required row for ` +
-          `${serviceKey} (${projectType}), matched ${count} — aborting, nothing flipped`,
+          `[phase1-cutover] ${key}: unexpected profile state ` +
+          `(mode=${row.completion_mode}, pointer=${row.project_type}, expected ${from}→${to}) ` +
+          `— aborting, nothing flipped`,
         );
       }
-      flipped += count;
-    }
 
-    for (const [serviceKey, { from, to }] of Object.entries(REPOINTED_KEYS)) {
-      const count = await trx('service_completion_profiles')
-        .where({
-          service_key: serviceKey,
-          project_type: from,
-          completion_mode: 'project_required',
-          active: true,
-        })
-        .update({ completion_mode: 'service_report', project_type: to, updated_at: trx.fn.now() });
-      if (count !== 1) {
-        throw new Error(
-          `[phase1-cutover] expected exactly 1 active project_required row for ` +
-          `${serviceKey} (${from}), matched ${count} — aborting, nothing flipped`,
-        );
+      const service = await trx('services')
+        .where({ service_key: key })
+        .first('service_key', 'name', 'category', 'billing_type', 'requires_follow_up', 'follow_up_interval_days');
+      if (!service) {
+        console.warn(`[phase1-cutover] ${key}: no profile row and no services row in this environment — skipping (nothing to cut over)`);
+        outcomes.absent.push(key);
+        continue;
       }
-      flipped += count;
+
+      // Profile row missing but the service exists (the 20260521000005 seed
+      // ran before this service existed here, or the row was removed).
+      // Insert directly in the cut-over shape, seed defaults matching that
+      // migration's one_time branch.
+      await trx('service_completion_profiles').insert({
+        service_key: key,
+        service_name_snapshot: service.name || null,
+        category: service.category || null,
+        billing_type: service.billing_type || null,
+        completion_mode: 'service_report',
+        project_type: to,
+        creates_service_record: true,
+        portal_visibility: 'token_only',
+        portal_attach_policy: 'recurring_customer',
+        followup_policy: service.requires_follow_up ? 'alert' : 'none',
+        default_followup_days: service.follow_up_interval_days || null,
+        active: true,
+        notes: 'Profile healed at Phase-1 cutover (20260611000012): services row existed without a completion profile.',
+      });
+      outcomes.healed.push(key);
     }
 
-    if (flipped !== EXPECTED_TOTAL) {
-      throw new Error(`[phase1-cutover] flipped ${flipped}, expected ${EXPECTED_TOTAL} — aborting`);
+    const total = outcomes.flipped.length + outcomes.healed.length
+      + outcomes.already.length + outcomes.absent.length;
+    if (total !== PHASE1_KEYS.length) {
+      throw new Error(`[phase1-cutover] accounted for ${total}/${PHASE1_KEYS.length} keys — aborting`);
     }
-    console.log(`[phase1-cutover] ${flipped} profiles flipped to service_report (delivery_mode untouched)`);
+    console.log(
+      `[phase1-cutover] flipped=${outcomes.flipped.length} healed=${outcomes.healed.length} ` +
+      `already=${outcomes.already.length} absent=${outcomes.absent.length}` +
+      (outcomes.healed.length ? ` | healed: ${outcomes.healed.join(', ')}` : '') +
+      (outcomes.absent.length ? ` | absent: ${outcomes.absent.join(', ')}` : ''),
+    );
   });
 };
 
@@ -108,14 +156,12 @@ exports.down = async function down(knex) {
   if (!hasTable) return;
 
   await knex.transaction(async (trx) => {
-    for (const [serviceKey, projectType] of Object.entries(PHASE1_KEYS)) {
+    for (const { key, from, to } of PHASE1_KEYS) {
+      // Healed rows (inserted by up()) also revert to project_required here —
+      // they become valid pre-cutover rows the environment was missing, which
+      // is the safe direction for a rollback.
       await trx('service_completion_profiles')
-        .where({ service_key: serviceKey, project_type: projectType, completion_mode: 'service_report' })
-        .update({ completion_mode: 'project_required', updated_at: trx.fn.now() });
-    }
-    for (const [serviceKey, { from, to }] of Object.entries(REPOINTED_KEYS)) {
-      await trx('service_completion_profiles')
-        .where({ service_key: serviceKey, project_type: to, completion_mode: 'service_report' })
+        .where({ service_key: key, project_type: to, completion_mode: 'service_report' })
         .update({ completion_mode: 'project_required', project_type: from, updated_at: trx.fn.now() });
     }
     console.log('[phase1-cutover] rolled back — Phase-1 keys restored to project_required');
