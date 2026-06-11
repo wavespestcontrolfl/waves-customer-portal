@@ -274,9 +274,10 @@ describe('Google Business review sync', () => {
     expect(db.__state.rows.google_reviews.find(r => r.id === 'review-1').review_reply).toBe('[DRAFT] We are sorry.');
   });
 
-  test('Places fallback updates the existing row when a reviewer edits their review (no duplicate)', async () => {
+  test('Places fallback dedupes an edited review against the GBP row once content converges (no duplicate)', async () => {
     // The synthetic places_* id embeds the Places `time` field, which moves
-    // on edit — the dedup must catch the same reviewer on the same location.
+    // on edit — when the GBP-linked row already carries the edited content
+    // (the GBP feed updated it), the sample must match it, not re-insert.
     db.__state.rows.google_reviews.push({
       id: 'gbp-row-1',
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
@@ -284,7 +285,7 @@ describe('Google Business review sync', () => {
       location_id: 'bradenton',
       reviewer_name: 'Jackie Lopez',
       star_rating: 5,
-      review_text: 'Original text',
+      review_text: 'Edited text',
       review_created_at: '2026-04-09T20:54:35Z',
       review_reply: 'Hello Jackie! Thanks!',
       reply_updated_at: '2026-04-10T00:00:00Z',
@@ -311,6 +312,46 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       review_text: 'Edited text',
       review_reply: 'Hello Jackie! Thanks!', // Places carries no reply data — never downgrade
+    });
+  });
+
+  test('Places fallback skips a same-name review with different content (no overwrite, no insert)', async () => {
+    // Ambiguous: a different account sharing the display name, or an edit
+    // the GBP feed has not caught up with — either way, defer to GBP.
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Jackie Lopez',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Jackie! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Jackie Lopez',
+          rating: 1,
+          text: 'Completely different text',
+          time: 1779307832,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      star_rating: 5,
+      review_text: 'Original text', // untouched
+      review_reply: 'Hello Jackie! Thanks!',
     });
   });
 

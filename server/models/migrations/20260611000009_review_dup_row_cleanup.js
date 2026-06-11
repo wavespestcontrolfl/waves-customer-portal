@@ -31,9 +31,16 @@
  *    googleStatsComplete freshness check. This rule is mechanical (the
  *    sync provably cannot reach these rows again) so it stays generic.
  *
- * down() restores the deleted duplicate from a full snapshot; the _stats
- * rows are unreproducible sync artifacts and stay deleted.
+ * down() restores the deleted duplicate from a full snapshot, but ONLY in
+ * an environment where up() actually deleted it — up() records the delete
+ * under a system_settings marker key, and down() is a no-op without it.
+ * Otherwise a rollback in a preview/dev database (where up() skipped)
+ * would insert a prod row that never existed there — and could fail the
+ * rollback outright on the customer_id FK. The _stats rows are
+ * unreproducible sync artifacts and stay deleted.
  */
+
+const MARKER_KEY = 'migration.20260611000009.dup_deleted';
 
 // Full snapshot of the duplicate row as captured from prod on 2026-06-11,
 // used for identity guards in up() and restoration in down().
@@ -81,6 +88,12 @@ exports.up = async function up(knex) {
       console.log(`[review_dup_row_cleanup] SKIPPED dup ${row.id} — referenced by incentive payout ${payout.id}`);
     } else {
       await knex('google_reviews').where({ id: row.id }).del();
+      if (await knex.schema.hasTable('system_settings')) {
+        await knex('system_settings')
+          .insert({ key: MARKER_KEY, value: 'true', category: 'migration', description: 'review_dup_row_cleanup deleted the duplicate review row in this environment' })
+          .onConflict('key')
+          .merge({ value: 'true' });
+      }
       // eslint-disable-next-line no-console
       console.log(`[review_dup_row_cleanup] deleted duplicate review ${row.id} @ ${row.location_id}`);
     }
@@ -100,8 +113,26 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('google_reviews'))) {
     return;
   }
+  // Restore only where up() actually deleted the row (marker present) —
+  // never seed the prod snapshot into an environment that skipped it.
+  if (!(await knex.schema.hasTable('system_settings'))) {
+    return;
+  }
+  const marker = await knex('system_settings').where({ key: MARKER_KEY }).first();
+  if (!marker || marker.value !== 'true') {
+    return;
+  }
   const exists = await knex('google_reviews').where({ id: DUP_ROW.id }).first();
   if (!exists) {
-    await knex('google_reviews').insert({ ...DUP_ROW, synced_at: knex.fn.now() });
+    // Guard the FK: if the linked customer is gone, restore unlinked.
+    const customer = DUP_ROW.customer_id
+      ? await knex('customers').where({ id: DUP_ROW.customer_id }).first()
+      : null;
+    await knex('google_reviews').insert({
+      ...DUP_ROW,
+      customer_id: customer ? DUP_ROW.customer_id : null,
+      synced_at: knex.fn.now(),
+    });
   }
+  await knex('system_settings').where({ key: MARKER_KEY }).del();
 };

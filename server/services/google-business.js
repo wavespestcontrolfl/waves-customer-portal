@@ -429,15 +429,17 @@ class GoogleBusinessService {
       // reviewer EDITS their review — so an edited review comes back with a
       // brand-new id and used to be re-inserted as a duplicate row (a
       // GBP-replied review then sat in the "No Portal Reply" queue twice).
-      // Google allows one review per account per listing, so a non-Anonymous
-      // reviewer-name match on the same location identifies the same review —
-      // but display names are not unique across accounts, so the merge is
-      // restricted to GBP-linked rows: if a *different* person sharing the
-      // name ever gets merged here, the next successful GBP sync restores
-      // the linked row from the authoritative feed and inserts the other
-      // person's review under its own GBP resource name (replies are never
-      // touched — Places carries no reply data). Un-linked Places rows have
-      // no such self-heal, so they never name-merge and a same-name reviewer
+      // Google allows one review per account per listing, but display names
+      // are NOT unique across accounts, so a name match alone never merges.
+      // The dedup requires the name-matched row to be GBP-linked AND carry
+      // identical content (text + rating): then the "merge" is a content
+      // no-op that only prevents the duplicate insert. A name match with
+      // DIFFERENT content is ambiguous — the same review edited while GBP is
+      // down, or a different account sharing the name — and is skipped
+      // entirely: no overwrite, no insert. The authoritative GBP feed
+      // resolves it on recovery (updates the linked row in place for an
+      // edit; inserts under its own resource name for a new account).
+      // Un-linked Places rows are never name-matched; a same-name reviewer
       // there always inserts a new row.
       const reviewerName = review.author_name || 'Anonymous';
       if (!existing && reviewerName !== 'Anonymous') {
@@ -446,7 +448,17 @@ class GoogleBusinessService {
           .where('reviewer_name', '!=', '_stats')
           .whereNotNull('gbp_review_name')
           .whereRaw('LOWER(reviewer_name) = LOWER(?)', [reviewerName]);
-        if (sameReviewer.length === 1) existing = sameReviewer[0];
+        if (sameReviewer.length === 1) {
+          const candidate = sameReviewer[0];
+          const sameContent = (candidate.review_text || null) === (review.text || null)
+            && Number(candidate.star_rating) === Number(review.rating || 0);
+          if (sameContent) {
+            existing = candidate;
+          } else {
+            logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
+            continue;
+          }
+        }
       }
       const ownerReply = review.owner_response?.text || null;
       const customerId = await this._findCustomerIdByReviewerName(reviewerName);
