@@ -70,6 +70,25 @@ describe('cron-lock runExclusive', () => {
     expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
   });
 
+  test('flags the connection for destruction when unlock fails', async () => {
+    const conn = {
+      query: jest.fn(async ({ text }) => {
+        if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+        if (text.includes('pg_advisory_unlock')) throw new Error('connection reset');
+        return { rows: [] };
+      }),
+    };
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    const result = await runExclusive('test-job', async () => 'ok');
+
+    expect(result).toBe('ok');
+    // A session that may still hold the advisory lock must not be reused
+    // by the pool — knex destroys connections with __knex__disposed set.
+    expect(conn.__knex__disposed).toMatch(/unlock failed/);
+    expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
+  });
+
   test('skips (without throwing) when no DB connection is available', async () => {
     db.client.acquireConnection.mockRejectedValue(new Error('pool exhausted'));
 

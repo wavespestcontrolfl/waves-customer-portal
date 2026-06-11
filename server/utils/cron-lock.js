@@ -59,9 +59,13 @@ async function runExclusive(jobName, fn) {
           values: [lockKey],
         });
       } catch (err) {
-        // Connection is being released anyway; if unlock failed the lock
-        // dies with the connection. Log so a leak pattern is visible.
-        logger.error(`[cron-lock] ${jobName}: advisory unlock failed: ${err.message}`);
+        // Session advisory locks survive pool release — if this session
+        // went back into the pool still holding the lock, every future
+        // tick would skip as lease_held until the process died. Flag the
+        // connection so knex's acquire-time validation destroys it
+        // instead of reusing it; the lock dies with the connection.
+        conn.__knex__disposed = `cron-lock unlock failed: ${err.message}`;
+        logger.error(`[cron-lock] ${jobName}: advisory unlock failed (${err.message}) — connection flagged for destruction so the lock is freed`);
       }
     }
     try {
