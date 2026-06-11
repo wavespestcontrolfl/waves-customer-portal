@@ -81,6 +81,7 @@ export function useIntelligenceBar({
     setExpanded(true);
     setResponse(null);
     setStructuredData(null);
+    setPendingActions([]);
 
     setRecentPrompts(addRecent(context, q));
 

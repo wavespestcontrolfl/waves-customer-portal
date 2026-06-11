@@ -412,6 +412,7 @@ function GlobalCommandPalette(_props, ref) {
         handleKeyDown={handleKeyDown}
         loading={loading}
         response={response}
+        pendingActions={pendingActions}
         recents={recents}
         quickActions={quickActions}
         contextLabel={contextLabel}
@@ -766,6 +767,7 @@ function MobileSheet({
   handleKeyDown,
   loading,
   response,
+  pendingActions,
   recents,
   quickActions,
   contextLabel,
