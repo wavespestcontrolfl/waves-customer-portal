@@ -320,6 +320,31 @@ describe('FAQ checks are neutral on FAQ-blocked topics', () => {
     expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: cs }).ok).toBe(false);
   });
 
+  test('faq_from_customer_calls resolves blocked topics from customer_signal.service when brief.service is broad', () => {
+    // City-service briefs persist the broad service ('pest') while the real
+    // topic lives on customer_signal.service/topic (content-brief-builder).
+    const cs = { service: 'rodent', normalized_question: 'do rats come back after treatment' };
+    const r = checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: cs });
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBe('faq_blocked_service_omission_is_correct');
+    // FAQ present on the blocked customer_signal topic still fails.
+    expect(checkFaqFromCustomer({ body: FAQ_BODY }, { service: 'pest', customer_signal: cs }).ok).toBe(false);
+  });
+
+  test('faq_from_customer_calls resolves blocked topics from customer_signal.topic too', () => {
+    const cs = { topic: 'termites', normalized_question: 'are termites active in summer' };
+    expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: cs }).ok).toBe(true);
+    // Non-blocked customer_signal topic: original behavior intact.
+    const open = { topic: 'ants in kitchen', normalized_question: 'how do i stop ants' };
+    expect(checkFaqFromCustomer({ body: NO_FAQ_BODY }, { service: 'pest', customer_signal: open }).ok).toBe(false);
+  });
+
+  test('faq checks resolve canonical blog tags via the guardrails alias map (Roaches, Stinging Insects)', () => {
+    expect(checkFaqSectionPresent({ body: NO_FAQ_BODY, frontmatter: { tag: 'Roaches' } }, { service: 'pest' }).ok).toBe(true);
+    expect(checkFaqSectionPresent({ body: NO_FAQ_BODY, frontmatter: { tag: 'Stinging Insects' } }, { service: 'pest' }).ok).toBe(true);
+    expect(checkFaqSectionPresent({ body: FAQ_BODY, frontmatter: { tag: 'Roaches' } }, { service: 'pest' }).ok).toBe(false);
+  });
+
   test('evaluate() awards faq_section_present weight to a blocked-topic supporting blog without an FAQ', () => {
     const result = evaluate(
       fullDraft({

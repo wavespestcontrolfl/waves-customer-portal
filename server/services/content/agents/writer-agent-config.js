@@ -96,7 +96,9 @@ FAQ_BLOCKED_SERVICE; this list is loaded from the same module the guardrail
 enforces):
 - FAQ-BLOCKED services: ${FAQ_BLOCKED_SERVICES_LIST}.
   Plural/display forms of these count too ("Rodents", "Bed Bugs",
-  "Cockroaches", "Termites", "Spiders", "Wasps", …).
+  "Cockroaches", "Termites", "Spiders", "Wasps", …), as do the canonical
+  blog tags that alias onto them ("Roaches" = cockroach, "Stinging
+  Insects" = wasp, "Lawn Pests" = lawn-pest).
 - If the brief's service or topic resolves to a FAQ-blocked service, the
   draft must contain NO FAQ section for ANY page type — no "Frequently
   Asked Questions", "FAQ", or "Common Questions" heading or Q&A block

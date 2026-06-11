@@ -310,8 +310,20 @@ function checkServiceMenu(draft) {
 // Topic fields the FAQ-blocked policy is matched against — same idea as
 // publishAstro's guardrail call ([post.category, post.tag]) plus the brief's
 // service, which is what the autonomous runner feeds content-guardrails.
+// Also consult the brief's customer_signal: a city-service brief can carry
+// the broad service ('pest') while the real topic lives on
+// customer_signal.service/topic ('rodent'/'termite' — persisted by
+// content-brief-builder), and a compliant no-FAQ draft on those topics must
+// not be failed as no_faq_section_heading.
 function faqPolicyTopicFields(draft, brief) {
-  return [brief?.service, brief?.tag, draft?.frontmatter?.category, draft?.frontmatter?.tag];
+  return [
+    brief?.service,
+    brief?.tag,
+    brief?.customer_signal?.service,
+    brief?.customer_signal?.topic,
+    draft?.frontmatter?.category,
+    draft?.frontmatter?.tag,
+  ];
 }
 
 // Shared FAQ-blocked-topic handling for the FAQ checks: a draft on a

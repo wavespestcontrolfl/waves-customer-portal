@@ -35,8 +35,8 @@ describe('blog-writer faqFormatInstruction', () => {
     }
   });
 
-  test('emits the NO-FAQ instruction for the four blocked display tags via [category, tag]', () => {
-    for (const tag of ['Rodents', 'Termites', 'Spiders', 'Bed Bugs']) {
+  test('emits the NO-FAQ instruction for every blocked display tag via [category, tag] — including the canonical-alias tags Roaches and Stinging Insects', () => {
+    for (const tag of ['Rodents', 'Termites', 'Spiders', 'Bed Bugs', 'Roaches', 'Stinging Insects', 'Lawn Pests']) {
       const instruction = faqFormatInstruction(['pest-control', tag]);
       expect(instruction).toBe(NO_FAQ_SECTION_INSTRUCTION);
       expect(instruction).toMatch(/Do NOT include any FAQ section/);
@@ -45,7 +45,7 @@ describe('blog-writer faqFormatInstruction', () => {
   });
 
   test('keeps the FAQ requirement for non-blocked tags', () => {
-    for (const tag of ['Mosquitoes', 'Ants', 'Roaches', 'Pest Control', 'Lawn Care', 'Lawn Disease', 'Fleas & Ticks']) {
+    for (const tag of ['Mosquitoes', 'Ants', 'Pest Control', 'Lawn Care', 'Lawn Disease', 'Fleas & Ticks']) {
       const instruction = faqFormatInstruction(['pest-control', tag]);
       expect(instruction).toBe(FAQ_SECTION_INSTRUCTION);
       expect(instruction).toMatch(/Include a final "Frequently Asked Questions" section/);

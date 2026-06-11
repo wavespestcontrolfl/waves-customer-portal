@@ -665,6 +665,62 @@ describe('canary guard env parsing', () => {
   });
 });
 
+// ── Sibling-title loader for metadata-rewrite dedupe ───────────────
+//
+// astro-publisher's metaRewriteFieldTargets writes the proposed title to
+// `metaTitle` on camelCase (service/location) pages and `title` on blog
+// pages — and those layouts render fm.metaTitle || fm.title. The sibling
+// set behind checkNoDuplicateTitle must therefore include BOTH fields per
+// sibling, or a rewrite could duplicate another page's rendered metaTitle
+// and still pass the hard duplicate-title check.
+describe('_loadSiblingTitlesForMetadata', () => {
+  function runnerWithCorpus(corpus) {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._loadAstroCorpus = jest.fn(async () => corpus);
+    return runner;
+  }
+
+  const corpus = [
+    {
+      url: '/blog/ants-bradenton/',
+      body: '---\ntitle: "Ant Control Tips for Bradenton"\n---\nbody',
+    },
+    {
+      url: '/pest-control-sarasota-fl/',
+      body: '---\nmetaTitle: "Pest Control Sarasota FL | Waves"\nmetaDescription: "desc"\n---\nbody',
+    },
+    {
+      url: '/pest-control-venice-fl/',
+      body: '---\ntitle: "Venice Page Internal Name"\nmetaTitle: "Pest Control Venice FL | Waves"\n---\nbody',
+    },
+  ];
+
+  test('collects both title and metaTitle from every sibling (lowercased)', async () => {
+    const runner = runnerWithCorpus(corpus);
+    const titles = await runner._loadSiblingTitlesForMetadata({ target_url: '/somewhere-else/' }, {});
+    expect(titles.has('ant control tips for bradenton')).toBe(true);
+    expect(titles.has('pest control sarasota fl | waves')).toBe(true); // metaTitle-only page
+    expect(titles.has('venice page internal name')).toBe(true); // both fields collected
+    expect(titles.has('pest control venice fl | waves')).toBe(true);
+  });
+
+  test('excludes the rewrite target page itself', async () => {
+    const runner = runnerWithCorpus(corpus);
+    const titles = await runner._loadSiblingTitlesForMetadata({ target_url: '/pest-control-sarasota-fl/' }, {});
+    expect(titles.has('pest control sarasota fl | waves')).toBe(false);
+    expect(titles.has('ant control tips for bradenton')).toBe(true);
+  });
+
+  test('returns an empty set when the corpus loader fails', async () => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._loadAstroCorpus = jest.fn(async () => { throw new Error('corpus unavailable'); });
+    const titles = await runner._loadSiblingTitlesForMetadata({ target_url: '/x/' }, {});
+    expect(titles.size).toBe(0);
+  });
+});
+
 // ── Module exports surface ──────────────────────────────────────────
 
 describe('module exports', () => {

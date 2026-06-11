@@ -95,6 +95,25 @@ function brandTokenFinding(body, domains) {
 // `category` is the broad Astro value ("pest-control") but whose real topic is
 // on `tag` ("Rodents") is still covered. Lowercase, hyphenate spaces, and try
 // de-pluralized forms so those match.
+
+// Canonical-tag → blocked-service aliases. blog-writer's normalizeTag()
+// collapses raw topics into a closed canonical tag set ("Roaches",
+// "Stinging Insects", …); two of those canonical forms do NOT reduce to a
+// blocklist id via lowercase/de-pluralize alone, so without these aliases a
+// cockroach or wasp post tagged with its canonical tag would get the
+// FAQ-required prompt AND bypass the publish-time FAQ_BLOCKED_SERVICE guard.
+// (Rodents/Termites/Spiders/Bed Bugs/Lawn Pests reduce to their blocked ids
+// already.) Data-driven here — the single-sourced module — so every consumer
+// of isFaqBlockedService/blockedServiceCandidates inherits the mapping.
+const BLOCKED_SERVICE_ALIASES = new Map([
+  ['roaches', 'cockroach'], // canonical blog tag "Roaches"
+  ['roach', 'cockroach'],
+  ['roache', 'cockroach'], // defensive: 'roaches' de-'s' form
+  ['palmetto-bug', 'cockroach'],
+  ['stinging-insects', 'wasp'], // canonical blog tag "Stinging Insects"
+  ['stinging-insect', 'wasp'],
+]);
+
 function blockedServiceCandidates(service) {
   const raw = Array.isArray(service) ? service : [service];
   const out = new Set();
@@ -104,6 +123,13 @@ function blockedServiceCandidates(service) {
     out.add(base);
     if (base.endsWith('es')) out.add(base.slice(0, -2)); // Cockroaches → cockroach
     if (base.endsWith('s')) out.add(base.slice(0, -1)); // Rodents → rodent, Bed Bugs → bed-bug
+  }
+  // Map canonical-tag forms onto their blocked service id (Roaches→cockroach,
+  // Stinging Insects→wasp) AFTER normalization so any input casing/plurality
+  // that reduces to an alias key picks up the alias target too.
+  for (const candidate of [...out]) {
+    const alias = BLOCKED_SERVICE_ALIASES.get(candidate);
+    if (alias) out.add(alias);
   }
   return [...out];
 }
@@ -196,5 +222,5 @@ module.exports = {
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES },
 };

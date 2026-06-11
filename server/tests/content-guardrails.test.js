@@ -193,7 +193,43 @@ describe('isFaqBlockedService (exported policy helper)', () => {
   });
 
   test('returns false for non-blocked services/tags', () => {
-    for (const value of ['Mosquitoes', 'Ants', 'Roaches', 'Pest Control', 'pest', 'pest-control', 'Lawn Care', 'lawn-care', '', null, undefined]) {
+    for (const value of ['Mosquitoes', 'Ants', 'Fleas & Ticks', 'Lawn Disease', 'Pest Control', 'pest', 'pest-control', 'Lawn Care', 'lawn-care', '', null, undefined]) {
+      expect(guardrails.isFaqBlockedService(value)).toBe(false);
+    }
+  });
+
+  // blog-writer's normalizeTag collapses raw topics into canonical display
+  // tags; "Roaches" and "Stinging Insects" do NOT reduce to their blocked ids
+  // (cockroach, wasp) via lowercase/de-pluralize alone, so they need explicit
+  // aliases. Without them, a cockroach/wasp post got the FAQ-required prompt
+  // AND bypassed the publish-time FAQ_BLOCKED_SERVICE guard.
+  test('matches canonical blog tags via the alias map (Roaches→cockroach, Stinging Insects→wasp)', () => {
+    for (const tag of ['Roaches', 'roaches', 'roach', 'Stinging Insects', 'stinging insects', 'stinging-insects', 'Palmetto Bug']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+  });
+
+  test('every canonical blog tag whose service is blocked resolves as blocked', () => {
+    // BLOG_TAGS (blog-writer) ∩ FAQ-blocked services — every canonical-tag
+    // form of a blocked service must be covered, alias or normalization.
+    for (const tag of ['Roaches', 'Rodents', 'Termites', 'Spiders', 'Bed Bugs', 'Stinging Insects', 'Lawn Pests']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+  });
+
+  test('publish-time FAQ_BLOCKED_SERVICE guard fires for canonical tags too', () => {
+    for (const tag of ['Roaches', 'Stinging Insects']) {
+      const r = guardrails.evaluate(
+        { body: '## Frequently Asked Questions\nQ: ...' },
+        { service: ['pest-control', tag] }, // publishAstro's [category, tag] form
+      );
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('alias map only fires on whole normalized values, not substrings', () => {
+    for (const value of ['approach', 'approaches', 'roach-motel-review-guide', 'wasp-free lawn care']) {
       expect(guardrails.isFaqBlockedService(value)).toBe(false);
     }
   });

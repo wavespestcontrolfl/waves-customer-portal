@@ -13,6 +13,7 @@ const {
   extractVisibleFaqs,
   pestPracticesComplete,
 } = require('./blog-seo-contract');
+const { isFaqBlockedService } = require('./content-guardrails');
 
 const P0_CODES = new Set([
   'P0_MISSING_TITLE',
@@ -203,6 +204,20 @@ function hasConversionCta(body) {
 }
 
 function faqRequired(brief = {}) {
+  // NO-FAQ policy override: a FAQ-blocked topic (content-guardrails.
+  // isFaqBlockedService — the same single-sourced module the publish-time P0
+  // enforces) can never require an FAQ, even if a legacy/stale brief still
+  // carries an "FAQ section (…)" required_section. Without this, a compliant
+  // no-FAQ draft raises P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ and — at the
+  // live AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 canary config — gets routed out
+  // of publish as a failure. Belt-and-braces with content-brief-builder, which
+  // now omits the FAQ required_section for blocked topics at compose time.
+  if (isFaqBlockedService([
+    brief.service,
+    brief.tag,
+    brief.customer_signal?.service,
+    brief.customer_signal?.topic,
+  ])) return false;
   const required = Array.isArray(brief.required_sections) ? brief.required_sections : safeParseArray(brief.required_sections);
   return required.some((section) => /\bfaq|frequently asked|common questions\b/i.test(String(section || '')));
 }
