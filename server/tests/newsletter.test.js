@@ -1119,6 +1119,39 @@ describe('newsletter Beehiiv-parity render devices', () => {
     expect(formatLockedLocation({ venue_name: null, city: 'anna-maria' })).toBe('Anna Maria');
   });
 
+  test('address survives when the venue only shares a number ("Studio 131" vs "131 N Orange Ave")', () => {
+    const { lockEventFactsFromDb } = require('../services/newsletter-draft');
+    const { locked } = lockEventFactsFromDb(
+      [{ eventId: '33333333-3333-3333-3333-333333333333', title: 'x' }],
+      [{
+        id: '33333333-3333-3333-3333-333333333333',
+        title: 'Show',
+        start_at: new Date('2026-06-13T00:00:00Z'),
+        venue_name: 'Studio 131',
+        venue_address: '131 N Orange Ave, Sarasota, FL',
+        city: 'Sarasota',
+        event_url: 'https://example.com',
+        image_url: null,
+      }],
+    );
+    expect(locked[0].address).toBe('131 N Orange Ave, Sarasota, FL');
+    // …but a venue string that embeds the real street IS treated as covering it
+    const { locked: covered } = lockEventFactsFromDb(
+      [{ eventId: '33333333-3333-3333-3333-333333333333', title: 'x' }],
+      [{
+        id: '33333333-3333-3333-3333-333333333333',
+        title: 'Show',
+        start_at: new Date('2026-06-13T00:00:00Z'),
+        venue_name: 'Izzy\'s Place, 12012 Cortez Rd W, Cortez, FL, 34215',
+        venue_address: '12012 Cortez Rd W, Cortez, FL 34215',
+        city: 'cortez',
+        event_url: 'https://example.com',
+        image_url: null,
+      }],
+    );
+    expect(covered[0].address).toBeNull();
+  });
+
   test('linkifyFirst links only the first case-insensitive occurrence; no match leaves html untouched', () => {
     const html = 'Go see <strong>the show</strong> — Bradenton Blues is back. bradenton blues forever.';
     const out = linkifyFirst(html, 'Bradenton Blues', 'https://example.com/blues');
@@ -1551,6 +1584,19 @@ describe('newsletter validateNewsletterDraft — hallucinated claims hard-block'
     const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
     // Non-flagship types intentionally allow pricing — service promos quote prices
     expect(errors.filter((e) => e.includes('Hallucinated claim'))).toEqual([]);
+  });
+
+  test('dollar amount in the SUBJECT or preview text hard-blocks too — first copy a subscriber sees', () => {
+    const subjectSend = { ...baseSend, subject: 'Someone\'s Going to Win $500 for Baking a Pie' };
+    expect(
+      validateNewsletterDraft(subjectSend, { recipientCount: 100 }).errors
+        .some((e) => e.includes('Hallucinated claim')),
+    ).toBe(true);
+    const previewSend = { ...baseSend, preview_text: 'Free admission all weekend!' };
+    expect(
+      validateNewsletterDraft(previewSend, { recipientCount: 100 }).errors
+        .some((e) => e.includes('Hallucinated claim')),
+    ).toBe(true);
   });
 
   test('hallucinated claim in plain-text fallback is blocked even when HTML is clean (Codex P2)', () => {

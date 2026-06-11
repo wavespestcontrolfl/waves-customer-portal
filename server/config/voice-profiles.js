@@ -35,7 +35,7 @@ const VOICE_PROFILES = {
         'Twisters, Tail Wags & Pirates? Unleash The Weekend',
         'Swifty Beats, Glitter Trolls & Gold Medals — Let\'s GOOOO!!!',
         'This Weekend\'s a Whole Circus (Literally)',
-        'Someone\'s Going to Win $500 for Baking a Pie',
+        'Someone\'s Going to Win Big for Baking a Pie',
         'Your No-Fail Guide to a Firework-Filled Fourth',
         'Your Social Life Called — It Wants You to Read This!',
       ],

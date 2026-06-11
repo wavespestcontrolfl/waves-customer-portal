@@ -439,8 +439,17 @@ function formatLockedLocation(row) {
 
 function locationCoversAddress(location, address) {
   if (!location || !address) return false;
-  const streetNumber = String(address).trim().match(/^\d+/);
-  return streetNumber ? location.includes(streetNumber[0]) : false;
+  const addr = String(address).trim();
+  const streetNumber = addr.match(/^\d+/);
+  if (!streetNumber) return false;
+  // The street number alone is too weak a signal — "Studio 131" would
+  // swallow the address "131 N Orange Ave". Require a street-NAME token
+  // too (first alphabetic word of 3+ chars after the number, skipping
+  // directionals like "N"/"SW").
+  const streetWord = addr.slice(streetNumber[0].length).match(/[A-Za-z]{3,}/);
+  if (!streetWord) return false;
+  const haystack = location.toLowerCase();
+  return haystack.includes(streetNumber[0]) && haystack.includes(streetWord[0].toLowerCase());
 }
 
 // Wrap the first occurrence of `text` inside already-escaped/markdown-rendered
@@ -485,6 +494,16 @@ async function assembleBeehiivNewsletter(draft) {
   const parts = [];
   const events = draft.events || [];
 
+  // Prefetch ALL Giphy lookups concurrently. GIF-first rendering would
+  // otherwise await searchGiphy serially inside the event loop — with
+  // Giphy slow/unreachable that's 5s × 12 events of dead time; in
+  // parallel the worst case is one 5s timeout. searchGiphy never
+  // rejects (catch → null), so Promise.all is safe.
+  const [introGif, ...eventGifs] = await Promise.all([
+    searchGiphy(draft.introGifTerm),
+    ...events.map((ev) => searchGiphy(ev.gifSearchTerm)),
+  ]);
+
   // ── Hero Image ──
   const heroUrl = safeUrl(draft.heroImageUrl);
   if (heroUrl) {
@@ -506,7 +525,6 @@ async function assembleBeehiivNewsletter(draft) {
 </div>`);
 
   // ── Intro GIF (cold open — caption is part of the joke) ──
-  const introGif = await searchGiphy(draft.introGifTerm);
   if (introGif) parts.push(gifBlock(introGif, draft.introGifCaption));
 
   // ── Greeting + Intro ──
@@ -531,8 +549,8 @@ async function assembleBeehiivNewsletter(draft) {
 
     // Reaction GIF first — in the shipped Beehiiv formula the GIF + caption
     // IS the joke; the event photo is only a fallback when Giphy yields
-    // nothing (or no API key, e.g. in tests).
-    const eventGif = await searchGiphy(ev.gifSearchTerm);
+    // nothing (or no API key, e.g. in tests). Prefetched above.
+    const eventGif = eventGifs[i];
     if (eventGif) {
       parts.push(gifBlock(eventGif, ev.gifCaption));
     } else {
