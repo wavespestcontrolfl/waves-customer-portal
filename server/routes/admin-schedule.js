@@ -3000,12 +3000,26 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
 
       return db.transaction(async (trx) => {
+        // Hold the same mint lock through prepaid application: the mint
+        // transaction releases it on commit, and a concurrent
+        // cancellation void sweep (which now takes this lock too) could
+        // otherwise void the fresh invoice in that gap — prepaid would
+        // then pay a void invoice for a cancelled service.
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['schedule.invoice.mint', String(svc.id)],
+        );
         const lockedInvoice = await trx('invoices')
           .where({ id: invoice.id })
           .forUpdate()
           .first();
         if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
-        if (lockedInvoice.status === 'paid') return { invoice: lockedInvoice, prepaidCredit: 0 };
+        // Only collectible invoices take prepaid credit — 'void' (cancelled
+        // service), 'processing' (payment in flight), or 'paid' must not be
+        // re-paid or resurrected by the credit.
+        if (!['draft', 'scheduled', 'sending', 'sent', 'viewed', 'overdue'].includes(lockedInvoice.status)) {
+          return { invoice: lockedInvoice, prepaidCredit: 0 };
+        }
 
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) {

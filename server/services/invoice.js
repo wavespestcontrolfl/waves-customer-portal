@@ -1985,6 +1985,15 @@ const InvoiceService = {
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
           const result = await db.transaction(async (trx) => {
+            // Same advisory lock the charge-now mint + prepaid-credit
+            // application hold (admin-schedule.js), so this void can't
+            // interleave between a mint committing and its prepaid credit
+            // applying — the loser of the lock sees the winner's final
+            // status and skips correctly.
+            await trx.raw(
+              "SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))",
+              ["schedule.invoice.mint", String(scheduledServiceId)],
+            );
             const locked = await trx("invoices")
               .where({ id: candidate.id })
               .forUpdate()
