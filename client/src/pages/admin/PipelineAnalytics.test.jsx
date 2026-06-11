@@ -475,6 +475,46 @@ describe("PipelineAnalytics", () => {
 
     expect(screen.getAllByText("$70").length).toBeGreaterThan(0);
     expect(screen.getByText("1 new accounts")).toBeInTheDocument();
+    // Acceptance uses the same resolution-date basis, so the recent win
+    // shows in BOTH KPIs for the window — not "MRR won $70" alongside
+    // "0 accepted of 0 resolved".
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("1 accepted of 1 resolved")).toBeInTheDocument();
+  });
+
+  it("keys the acceptance denominator on decline/expiry dates", () => {
+    renderAnalytics({
+      dateRange: "30d",
+      estimates: [
+        estimate({
+          id: "recent-win",
+          status: "accepted",
+          monthlyTotal: 40,
+          createdAt: daysAgo(10),
+          acceptedAt: daysAgo(5),
+        }),
+        // Declined inside the window though created long before → counts.
+        estimate({
+          id: "recent-decline",
+          status: "declined",
+          monthlyTotal: 30,
+          createdAt: daysAgo(60),
+          declinedAt: daysAgo(3),
+        }),
+        // Declined outside the window → excluded.
+        estimate({
+          id: "old-decline",
+          status: "declined",
+          monthlyTotal: 30,
+          createdAt: daysAgo(60),
+          declinedAt: daysAgo(45),
+        }),
+      ],
+    });
+
+    // 1 of 2 resolved this window → 50%, not 1/1 or 1/3.
+    expect(screen.getByText("50%")).toBeInTheDocument();
+    expect(screen.getByText("1 accepted of 2 resolved")).toBeInTheDocument();
   });
 
   it("excludes unpriced drafts and one-time-only rows from avg ticket", () => {

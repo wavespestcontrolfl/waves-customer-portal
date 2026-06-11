@@ -75,6 +75,19 @@ export function lastEngagementMs(estimate) {
   return stamps.length ? Math.max(...stamps) : null;
 }
 
+// When the offer left the pipeline: acceptance, decline, or expiry date.
+// Fallbacks cover rows that predate the timestamp columns. Returns null for
+// still-open offers.
+export function resolutionDate(estimate) {
+  if (estimate?.status === "accepted")
+    return estimate.acceptedAt || estimate.createdAt;
+  if (estimate?.status === "declined")
+    return estimate.declinedAt || estimate.updatedAt || estimate.createdAt;
+  if (estimate?.status === "expired")
+    return estimate.expiresAt || estimate.updatedAt || estimate.createdAt;
+  return null;
+}
+
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   if (
     estimate?.status === "sent" &&
@@ -372,13 +385,21 @@ export default function PipelineAnalytics({
     }));
 
     const total = inRange.length;
-    const accepted = inRange.filter((e) => e.status === "accepted").length;
-    const declined = inRange.filter(
-      (e) => e.status === "declined" || e.status === "expired",
+    // Resolved-only close rate over RESOLUTION dates: still-open offers
+    // don't count until they decline or expire, and the window is keyed on
+    // when the offer was resolved — same basis as MRR won, so a win always
+    // lands in the same range tab for both KPIs (an offer created before
+    // the window but accepted inside it counts in both, not just one).
+    const resolvedInRange = activeRows.filter((e) => {
+      const resolvedAt = resolutionDate(e);
+      return (
+        resolvedAt != null && withinDateRange(resolvedAt, selectedRange, nowMs)
+      );
+    });
+    const accepted = resolvedInRange.filter(
+      (e) => e.status === "accepted",
     ).length;
-    // Resolved-only close rate: still-open offers don't count against the
-    // rate until they actually decline or expire.
-    const conversionDenominator = accepted + declined;
+    const conversionDenominator = resolvedInRange.length;
     // Won/MRR KPIs key off the acceptance date (createdAt fallback for rows
     // that predate accepted_at): "MRR won (30d)" means won IN the window,
     // not "created in the window and eventually won".
