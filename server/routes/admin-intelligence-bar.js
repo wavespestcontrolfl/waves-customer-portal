@@ -30,6 +30,8 @@ const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
+const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const logger = require('../services/logger');
@@ -99,6 +101,72 @@ const PII_TOOL_NAMES = new Set([
 
 function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
+}
+
+// UI-backed write confirmation (issue #1568). Dark until the Railway env
+// flips it on; read per-request so it can be toggled without a restart.
+function uiConfirmEnabled() {
+  return process.env.GATE_IB_UI_CONFIRM === 'true';
+}
+
+function summarizeProposal(toolName, params) {
+  const pairs = Object.entries(params || {})
+    .filter(([, v]) => v !== undefined && v !== null && typeof v !== 'object')
+    .map(([k, v]) => `${k}: ${String(v)}`)
+    .join(', ');
+  const summary = pairs ? `${toolName} — ${pairs}` : toolName;
+  return summary.length > 200 ? `${summary.slice(0, 197)}...` : summary;
+}
+
+/**
+ * Propose a gated write as a pending action instead of executing it.
+ *
+ * Trust boundary: modelResult (what goes back into the tool_result, i.e.
+ * model-visible context) NEVER contains the pending-action id. The id is
+ * returned only in clientPayload, which reaches the client via the HTTP
+ * response's pendingActions array. Model-supplied confirmed/confirm booleans
+ * are stripped before anything is stored or previewed.
+ */
+async function proposePendingWrite({ toolUse, req, context }) {
+  const params = { ...(toolUse.input || {}) };
+  delete params.confirmed;
+  delete params.confirm;
+
+  let preview;
+  if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
+    // Two-step executors are contract-tested to be mutation-free without
+    // confirmed — run them for the rich preview.
+    preview = await executeToolByName(toolUse.name, params, null);
+    if (isToolFailure(preview)) {
+      return { failed: true, modelResult: preview };
+    }
+  } else {
+    // Legacy bare writes mutate on call — never execute from the model loop.
+    preview = { proposal: true, tool: toolUse.name, params };
+  }
+
+  const row = await PendingActions.createPendingAction({
+    toolName: toolUse.name,
+    params,
+    summary: summarizeProposal(toolUse.name, params),
+    requestedBy: getAdminActorId(req),
+    context,
+  });
+
+  return {
+    modelResult: {
+      ...preview,
+      pending_confirmation: true,
+      note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
+    },
+    clientPayload: {
+      id: row.id,
+      tool: toolUse.name,
+      summary: row.summary,
+      params,
+      expiresAt: row.expires_at,
+    },
+  };
 }
 
 function getAdminActorId(req) {
@@ -742,6 +810,7 @@ router.post('/query', async (req, res, next) => {
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
+    const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
 
     // Tool-use loop
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -787,6 +856,24 @@ router.post('/query', async (req, res, next) => {
           result = { error: 'Explicit confirmation is required for this action. Use the confirmed action endpoint.' };
           failed = true;
           errorMessage = result.error;
+        } else if (uiConfirmEnabled() && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
+          // Issue #1568: gated writes are proposed, never executed, from the
+          // model loop. The confirmation id goes to the client only.
+          try {
+            const proposed = await proposePendingWrite({ toolUse, req, context });
+            result = proposed.modelResult;
+            if (proposed.failed) {
+              failed = true;
+              errorMessage = result.error || 'proposal failed';
+            } else if (proposed.clientPayload) {
+              pendingProposals.push(proposed.clientPayload);
+            }
+          } catch (err) {
+            logger.error(`[intelligence-bar] Proposal for ${toolUse.name} threw:`, err);
+            result = { error: err.message || 'Could not create the pending action' };
+            failed = true;
+            errorMessage = result.error;
+          }
         } else if (adminToolBreaker.isTripped()) {
           result = adminToolBreaker.fastFailResult();
           failed = true;
@@ -864,6 +951,10 @@ router.post('/query', async (req, res, next) => {
       toolCalls,
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
+      // Pending write proposals for the client confirmation card. This is the
+      // ONLY channel the confirmation ids travel on — the client must keep
+      // them in component state, never in conversationHistory.
+      ...(uiConfirmEnabled() ? { pendingActions: pendingProposals } : {}),
       // Return conversation history for multi-turn
       conversationHistory: [
         ...conversationHistory.slice(-8),
@@ -938,6 +1029,72 @@ router.post('/execute', async (req, res, next) => {
 
   } catch (err) {
     logger.error('[intelligence-bar] Execute failed:', err);
+    next(err);
+  }
+});
+
+
+// ─── UI-CONFIRMED PENDING ACTIONS (issue #1568) ─────────────────
+// Called by the portal client only. These are NOT model tools — they never
+// appear in any tools array, so the model cannot invoke them. The
+// pending-action id is the confirmation credential: it travels client →
+// server only, and only a real Confirm click produces it.
+
+router.post('/confirm-action', async (req, res, next) => {
+  try {
+    const id = String(req.body?.pending_action_id || '').trim();
+    if (!id) return res.status(400).json({ error: 'pending_action_id is required' });
+
+    const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req));
+    if (claim.error) {
+      const status = claim.error === 'not_found' ? 404
+        : claim.error === 'actor_mismatch' ? 403
+          : 409; // already_used | cancelled | expired | hash_mismatch
+      return res.status(status).json({ error: `Pending action ${claim.error.replace(/_/g, ' ')}` });
+    }
+    const action = claim.action;
+
+    if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required for this action' });
+    }
+
+    const execParams = { ...action.params };
+    if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
+      // Server-derived confirmation: the operator clicked Confirm. This is
+      // the only place a confirmed flag is ever attached.
+      execParams.confirmed = true;
+    }
+
+    const result = await executeToolByName(action.tool_name, execParams, null, {
+      isAdmin: req.techRole === 'admin',
+      technicianId: req.technicianId || req.technician?.id || null,
+      confirmed: true,
+    });
+    await PendingActions.recordResult(action.id, result);
+
+    logger.info(`[intelligence-bar:pending] Confirmed action ${action.id} (${action.tool_name})`, {
+      success: !result?.error,
+    });
+
+    res.json({ success: !result?.error, tool: action.tool_name, result });
+  } catch (err) {
+    logger.error('[intelligence-bar] confirm-action failed:', err);
+    next(err);
+  }
+});
+
+router.post('/cancel-action', async (req, res, next) => {
+  try {
+    const id = String(req.body?.pending_action_id || '').trim();
+    if (!id) return res.status(400).json({ error: 'pending_action_id is required' });
+
+    const { cancelled } = await PendingActions.cancelPendingAction(id, getAdminActorId(req));
+    if (!cancelled) return res.status(409).json({ error: 'Pending action not cancellable (missing, expired, consumed, or not yours)' });
+
+    logger.info(`[intelligence-bar:pending] Cancelled action ${id}`);
+    res.json({ success: true });
+  } catch (err) {
+    logger.error('[intelligence-bar] cancel-action failed:', err);
     next(err);
   }
 });
