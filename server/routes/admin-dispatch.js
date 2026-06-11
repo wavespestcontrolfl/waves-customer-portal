@@ -1711,18 +1711,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         typedChips = chipsValidation.chips;
         typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
 
-        // Manual recommendations are customer-facing on typed reports (the
-        // V1 page renders protocol.recommendations verbatim) — the same
-        // banned-copy policy the AI draft endpoint enforces applies to
-        // hand-typed text. 422 so the tech rephrases before anything sends.
-        const recommendationCopyViolations = (Array.isArray(recommendations) ? recommendations : [])
-          .flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry));
-        if (recommendationCopyViolations.length) {
-          return res.status(422).json({
-            error: `Recommendations contain wording we can't put on a customer report (${[...new Set(recommendationCopyViolations)].join(', ')}). Describe what was observed and done today instead of absolute claims.`,
-            code: 'typed_recommendations_banned_copy',
-            violations: [...new Set(recommendationCopyViolations)],
-          });
+        // Every customer-facing free-text surface on a typed report gets the
+        // same banned-copy policy the AI draft endpoint enforces: manual
+        // recommendations, [Next]-tagged technician note lines (both feed
+        // protocol.recommendations verbatim), and the structured findings
+        // values themselves (rendered on the "What we found & did" card).
+        // Same { status, body } shape as the other validation failures —
+        // this closure's caller writes the response.
+        const customerCopySources = [
+          ...(Array.isArray(recommendations) ? recommendations : []),
+          ...taggedCompletionNoteLines(technicianNotes, ['next']),
+          ...Object.values(structuredFindings?.values || {}).filter((v) => typeof v === 'string'),
+        ];
+        const copyViolations = [...new Set(
+          customerCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
+        )];
+        if (copyViolations.length) {
+          return {
+            status: 422,
+            body: {
+              error: `This completion contains wording we can't put on a customer report (${copyViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
+              code: 'typed_recommendations_banned_copy',
+              violations: copyViolations,
+            },
+          };
         }
 
         // Activity score: strict integer 0-5 or null (same contract as
