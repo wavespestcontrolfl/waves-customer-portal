@@ -800,7 +800,9 @@ router.post('/confirm', async (req, res, next) => {
     // customer+day: a double-submit (button double-tap, client retry)
     // otherwise mints two parents — and two seeded quarterly series — and a
     // partial failure could leave a booking without its dispatch row.
-    const txResult = await db.transaction(async (trx) => {
+    let txResult;
+    try {
+      txResult = await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['self-booking-confirm', `${custId}:${slot_date}`],
@@ -878,7 +880,16 @@ router.post('/confirm', async (req, res, next) => {
       }).returning('*');
 
       return { booking: bookingRow, serviceRow: scheduledRow };
-    });
+      });
+    } catch (txErr) {
+      // Expected race outcome — answer directly rather than throwing into
+      // the global error middleware, which logs req.body (new_customer
+      // phone/email/address would land in the logs).
+      if (txErr.code === 'SLOT_TAKEN') {
+        return res.status(409).json({ error: txErr.message });
+      }
+      throw txErr;
+    }
 
     if (txResult.existing) {
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slot_date} ${slot_start} — returning existing booking ${txResult.existing.id}`);

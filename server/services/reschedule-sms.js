@@ -151,11 +151,29 @@ class RescheduleSMS {
     });
 
     if (selectedOption) {
-      await SmartRebooker.reschedule(
-        pending.scheduled_service_id, selectedOption.date,
-        selectedOption.window, pending.reason_code, 'customer_sms'
-      );
+      try {
+        await SmartRebooker.reschedule(
+          pending.scheduled_service_id, selectedOption.date,
+          selectedOption.window, pending.reason_code, 'customer_sms'
+        );
+      } catch (err) {
+        // The offer was computed without a route check — rebooker can now
+        // refuse it (tech conflict, window elapsed). The pending offer is
+        // already marked responded above, so without a fallback the
+        // customer would get silence. Degrade to the office-follow-up
+        // flow below.
+        if (err.isOperational || err.statusCode === 409 || err.statusCode === 400) {
+          logger.warn(`[reschedule-sms] Selected option rejected for log ${pending.id} (${err.message}) — routing to office follow-up`);
+          await db('reschedule_log').where({ id: pending.id }).update({ customer_response: 'option_unavailable' });
+          selectedOption = null;
+          responseType = 'option_expired';
+        } else {
+          throw err;
+        }
+      }
+    }
 
+    if (selectedOption) {
       const customer = await db('customers').where({ id: customerId }).first();
       const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 

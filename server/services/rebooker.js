@@ -168,6 +168,24 @@ class SmartRebooker {
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
     const windowEnd = win.end || service.window_end;
+
+    // Same-day target whose window already elapsed in ET is just as
+    // unreachable as yesterday — a stale morning option accepted in the
+    // afternoon would move the job into a past window.
+    if (newDateStr === etDateString()) {
+      const cutoff = windowEnd || win.start || service.window_start;
+      if (cutoff) {
+        const nowEt = etParts(new Date());
+        const [ch, cm] = String(cutoff).split(':').map(Number);
+        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
+          throw Object.assign(new Error('That window has already passed today'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
+    }
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
