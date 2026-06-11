@@ -183,7 +183,12 @@ class RescheduleSMS {
       return { handled: true, action: 'rescheduled', newDate: selectedOption.date, smsSent: !!confirmedBody };
     }
 
-    if (responseType === 'call_requested') {
+    // option_expired rides the call-requested flow: the customer picked a
+    // date that lapsed before they replied, so the right outcome is the
+    // same "we'll call you to find a time" SMS + handled:true — otherwise
+    // the reply falls through to generic inbound handling after we already
+    // closed the pending offer.
+    if (responseType === 'call_requested' || responseType === 'option_expired') {
       const customer = await db('customers').where({ id: customerId }).first();
       const callBody = await renderSmsTemplate(
         'reschedule_call_requested',
@@ -200,7 +205,7 @@ class RescheduleSMS {
       } else {
         logger.warn(`[reschedule-sms] reschedule_call_requested template missing/disabled — call request logged without SMS reply for customer ${customerId}`);
       }
-      return { handled: true, action: 'call_requested', smsSent: !!callBody };
+      return { handled: true, action: responseType, smsSent: !!callBody };
     }
 
     return { handled: false, action: 'needs_review', reply: messageBody };
