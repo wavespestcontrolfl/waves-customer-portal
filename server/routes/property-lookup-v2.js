@@ -491,6 +491,9 @@ function parseGeocodeResult(result) {
     city: city ? city.long_name : null,
     zip: zip ? zip.long_name : null,
     partialMatch: result.partial_match === true,
+    // ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE — the GIS
+    // parcel match only trusts rooftop-grade points.
+    locationType: result.geometry.location_type || null,
   };
 }
 

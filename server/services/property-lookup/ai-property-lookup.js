@@ -20,6 +20,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -136,6 +137,10 @@ const PROPERTY_EVIDENCE_FIELDS = [
 
 const SOURCE_TYPE_WEIGHTS = {
   county: 100,
+  // FDOR statewide cadastral roll — county-grade data, but an annual vintage:
+  // sits above permits and below the live PAO so a fresh county record always
+  // out-ranks it field-by-field.
+  cadastral: 97,
   permit: 95,
   builder: 85,
   listing: 75,
@@ -146,6 +151,7 @@ const SOURCE_TYPE_WEIGHTS = {
 
 const SOURCE_TYPE_LABELS = {
   county: 'county record',
+  cadastral: 'county cadastral roll (FDOR)',
   permit: 'permit record',
   builder: 'builder/floorplan',
   listing: 'listing',
@@ -361,49 +367,7 @@ async function lookupPropertyFromManateePAO(address, options = {}) {
   try {
     const search = await searchManateeParcel(address, timeoutMs, t0);
     if (!search?.parcelId) return null;
-
-    const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
-    if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
-
-    const [land, buildings] = await Promise.all([
-      fetchManateePaoJson(`${MANATEE_PAO_LAND_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
-      fetchManateePaoJson(`${MANATEE_PAO_BUILDINGS_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
-    ]);
-
-    const parsed = parseManateePaoRecord({ address, search, land, buildings });
-    if (!hasAnyPropertyFact(parsed)) {
-      logger.info('[county-property] Manatee PAO found parcel but no usable facts', {
-        elapsedMs: Date.now() - t0,
-        parcelId: search.parcelId,
-      });
-      return null;
-    }
-
-    const record = shapeAsPropertyRecord(parsed, address, 'manatee_pao');
-    record._source = 'county';
-    record._raw = {
-      ...(record._raw || {}),
-      _source: 'county',
-      _provider: 'manatee_pao',
-      parcelId: search.parcelId,
-      situsAddress: search.situsAddress,
-      postalCity: search.city,
-      land,
-      buildings,
-    };
-    record.addressLine1 = search.situsAddress || '';
-    record.city = search.city || '';
-    record.state = 'FL';
-    record.county = 'Manatee';
-    record._provider = 'manatee_pao';
-    record._aiProviders = ['manatee_pao'];
-
-    logger.info('[county-property] got Manatee PAO facts', {
-      elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
-      fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
-    });
-    return record;
+    return await fetchManateeParcelDetails(search, address, timeoutMs, t0);
   } catch (err) {
     logger.warn('[county-property] Manatee PAO errored', {
       elapsedMs: Date.now() - t0,
@@ -411,6 +375,54 @@ async function lookupPropertyFromManateePAO(address, options = {}) {
     });
     return null;
   }
+}
+
+// Detail half of the Manatee lookup: takes a search match ({ parcelId,
+// situsAddress, city }) from either the PAO address search or a GIS parcel
+// match and turns it into a shaped county record.
+async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.now()) {
+  const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
+  if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+  const [land, buildings] = await Promise.all([
+    fetchManateePaoJson(`${MANATEE_PAO_LAND_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
+    fetchManateePaoJson(`${MANATEE_PAO_BUILDINGS_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
+  ]);
+
+  const parsed = parseManateePaoRecord({ address, search, land, buildings });
+  if (!hasAnyPropertyFact(parsed)) {
+    logger.info('[county-property] Manatee PAO found parcel but no usable facts', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+    });
+    return null;
+  }
+
+  const record = shapeAsPropertyRecord(parsed, address, 'manatee_pao');
+  record._source = 'county';
+  record._raw = {
+    ...(record._raw || {}),
+    _source: 'county',
+    _provider: 'manatee_pao',
+    parcelId: search.parcelId,
+    situsAddress: search.situsAddress,
+    postalCity: search.city,
+    land,
+    buildings,
+  };
+  record.addressLine1 = search.situsAddress || '';
+  record.city = search.city || '';
+  record.state = 'FL';
+  record.county = 'Manatee';
+  record._provider = 'manatee_pao';
+  record._aiProviders = ['manatee_pao'];
+
+  logger.info('[county-property] got Manatee PAO facts', {
+    elapsedMs: Date.now() - t0,
+    parcelId: search.parcelId,
+    fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+  });
+  return record;
 }
 
 async function lookupPropertyFromSarasotaPAO(address, options = {}) {
@@ -423,53 +435,7 @@ async function lookupPropertyFromSarasotaPAO(address, options = {}) {
   try {
     const search = await searchSarasotaParcel(address, timeoutMs, t0);
     if (!search?.parcelId || !search?.html) return null;
-
-    const buildingDetailHtml = await fetchSarasotaPrimaryBuildingDetail(search.html, timeoutMs, t0).catch((err) => {
-      logger.warn('[county-property] Sarasota PAO building detail fetch failed', {
-        elapsedMs: Date.now() - t0,
-        parcelId: search.parcelId,
-        error: summarizeProviderError(err),
-      });
-      return null;
-    });
-    const parsed = parseSarasotaPaoRecord({
-      address,
-      search,
-      detailHtml: search.html,
-      buildingDetailHtml,
-    });
-    if (!hasAnyPropertyFact(parsed)) {
-      logger.info('[county-property] Sarasota PAO found parcel but no usable facts', {
-        elapsedMs: Date.now() - t0,
-        parcelId: search.parcelId,
-      });
-      return null;
-    }
-
-    const record = shapeAsPropertyRecord(parsed, address, 'sarasota_pao');
-    record._source = 'county';
-    record._raw = {
-      ...(record._raw || {}),
-      _source: 'county',
-      _provider: 'sarasota_pao',
-      parcelId: search.parcelId,
-      situsAddress: search.situsAddress,
-      postalCity: search.city,
-      detailUrl: search.detailUrl,
-    };
-    record.addressLine1 = search.situsAddress || '';
-    record.city = search.city || '';
-    record.state = 'FL';
-    record.county = 'Sarasota';
-    record._provider = 'sarasota_pao';
-    record._aiProviders = ['sarasota_pao'];
-
-    logger.info('[county-property] got Sarasota PAO facts', {
-      elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
-      fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
-    });
-    return record;
+    return await fetchSarasotaParcelDetails(search, address, timeoutMs, t0);
   } catch (err) {
     logger.warn('[county-property] Sarasota PAO errored', {
       elapsedMs: Date.now() - t0,
@@ -477,6 +443,58 @@ async function lookupPropertyFromSarasotaPAO(address, options = {}) {
     });
     return null;
   }
+}
+
+// Detail half of the Sarasota lookup: takes a search match ({ parcelId,
+// situsAddress, city, detailUrl, html }) — html is the parcel detail page —
+// from either the PAO address search or a GIS parcel match.
+async function fetchSarasotaParcelDetails(search, address, timeoutMs, t0 = Date.now()) {
+  const buildingDetailHtml = await fetchSarasotaPrimaryBuildingDetail(search.html, timeoutMs, t0).catch((err) => {
+    logger.warn('[county-property] Sarasota PAO building detail fetch failed', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  });
+  const parsed = parseSarasotaPaoRecord({
+    address,
+    search,
+    detailHtml: search.html,
+    buildingDetailHtml,
+  });
+  if (!hasAnyPropertyFact(parsed)) {
+    logger.info('[county-property] Sarasota PAO found parcel but no usable facts', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+    });
+    return null;
+  }
+
+  const record = shapeAsPropertyRecord(parsed, address, 'sarasota_pao');
+  record._source = 'county';
+  record._raw = {
+    ...(record._raw || {}),
+    _source: 'county',
+    _provider: 'sarasota_pao',
+    parcelId: search.parcelId,
+    situsAddress: search.situsAddress,
+    postalCity: search.city,
+    detailUrl: search.detailUrl,
+  };
+  record.addressLine1 = search.situsAddress || '';
+  record.city = search.city || '';
+  record.state = 'FL';
+  record.county = 'Sarasota';
+  record._provider = 'sarasota_pao';
+  record._aiProviders = ['sarasota_pao'];
+
+  logger.info('[county-property] got Sarasota PAO facts', {
+    elapsedMs: Date.now() - t0,
+    parcelId: search.parcelId,
+    fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+  });
+  return record;
 }
 
 async function lookupPropertyFromCharlottePAO(address, options = {}) {
@@ -489,70 +507,7 @@ async function lookupPropertyFromCharlottePAO(address, options = {}) {
   try {
     const search = await searchCharlotteParcel(address, timeoutMs, t0);
     if (!search?.parcelId) return null;
-
-    const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
-    if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
-
-    const [detailResult, ownershipResult] = await Promise.allSettled([
-      fetchCountyText(charlotteRecordUrl(search.parcelId), remainingMs, {
-        headers: {
-          Referer: `${CHARLOTTE_PAO_BASE}/RPSearchEnter.asp`,
-        },
-      }),
-      fetchCharlotteOwnership(search.parcelId, remainingMs),
-    ]);
-    if (detailResult.status === 'rejected') throw detailResult.reason;
-    const detail = detailResult.value;
-    const ownership = ownershipResult.status === 'fulfilled' ? ownershipResult.value : null;
-    if (ownershipResult.status === 'rejected') {
-      logger.warn('[county-property] Charlotte PAO ownership fetch failed', {
-        elapsedMs: Date.now() - t0,
-        parcelId: search.parcelId,
-        error: summarizeProviderError(ownershipResult.reason),
-      });
-    }
-
-    const parsed = parseCharlottePaoRecord({
-      address,
-      search,
-      detailHtml: detail.text,
-      ownership,
-    });
-    if (!hasAnyPropertyFact(parsed)) {
-      logger.info('[county-property] Charlotte PAO found parcel but no usable facts', {
-        elapsedMs: Date.now() - t0,
-        parcelId: search.parcelId,
-      });
-      return null;
-    }
-
-    const record = shapeAsPropertyRecord(parsed, address, 'charlotte_pao');
-    record._source = 'county';
-    record._raw = {
-      ...(record._raw || {}),
-      _source: 'county',
-      _provider: 'charlotte_pao',
-      parcelId: search.parcelId,
-      situsAddress: search.situsAddress,
-      postalCity: search.city,
-      zipCode: search.zipCode,
-      ownership: ownership?.attributes || null,
-      detailUrl: charlotteRecordUrl(search.parcelId),
-    };
-    record.addressLine1 = search.situsAddress || '';
-    record.city = search.city || '';
-    record.state = 'FL';
-    record.zipCode = search.zipCode || '';
-    record.county = 'Charlotte';
-    record._provider = 'charlotte_pao';
-    record._aiProviders = ['charlotte_pao'];
-
-    logger.info('[county-property] got Charlotte PAO facts', {
-      elapsedMs: Date.now() - t0,
-      parcelId: search.parcelId,
-      fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
-    });
-    return record;
+    return await fetchCharlotteParcelDetails(search, address, timeoutMs, t0);
   } catch (err) {
     logger.warn('[county-property] Charlotte PAO errored', {
       elapsedMs: Date.now() - t0,
@@ -560,6 +515,75 @@ async function lookupPropertyFromCharlottePAO(address, options = {}) {
     });
     return null;
   }
+}
+
+// Detail half of the Charlotte lookup: takes a search match ({ parcelId,
+// situsAddress, city, zipCode }) from either the GIS address search or a
+// statewide-cadastral parcel match.
+async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date.now()) {
+  const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
+  if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+  const [detailResult, ownershipResult] = await Promise.allSettled([
+    fetchCountyText(charlotteRecordUrl(search.parcelId), remainingMs, {
+      headers: {
+        Referer: `${CHARLOTTE_PAO_BASE}/RPSearchEnter.asp`,
+      },
+    }),
+    fetchCharlotteOwnership(search.parcelId, remainingMs),
+  ]);
+  if (detailResult.status === 'rejected') throw detailResult.reason;
+  const detail = detailResult.value;
+  const ownership = ownershipResult.status === 'fulfilled' ? ownershipResult.value : null;
+  if (ownershipResult.status === 'rejected') {
+    logger.warn('[county-property] Charlotte PAO ownership fetch failed', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+      error: summarizeProviderError(ownershipResult.reason),
+    });
+  }
+
+  const parsed = parseCharlottePaoRecord({
+    address,
+    search,
+    detailHtml: detail.text,
+    ownership,
+  });
+  if (!hasAnyPropertyFact(parsed)) {
+    logger.info('[county-property] Charlotte PAO found parcel but no usable facts', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+    });
+    return null;
+  }
+
+  const record = shapeAsPropertyRecord(parsed, address, 'charlotte_pao');
+  record._source = 'county';
+  record._raw = {
+    ...(record._raw || {}),
+    _source: 'county',
+    _provider: 'charlotte_pao',
+    parcelId: search.parcelId,
+    situsAddress: search.situsAddress,
+    postalCity: search.city,
+    zipCode: search.zipCode,
+    ownership: ownership?.attributes || null,
+    detailUrl: charlotteRecordUrl(search.parcelId),
+  };
+  record.addressLine1 = search.situsAddress || '';
+  record.city = search.city || '';
+  record.state = 'FL';
+  record.zipCode = search.zipCode || '';
+  record.county = 'Charlotte';
+  record._provider = 'charlotte_pao';
+  record._aiProviders = ['charlotte_pao'];
+
+  logger.info('[county-property] got Charlotte PAO facts', {
+    elapsedMs: Date.now() - t0,
+    parcelId: search.parcelId,
+    fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+  });
+  return record;
 }
 
 async function lookupPropertyFromCountyRecords(address, options = {}) {
@@ -608,6 +632,161 @@ async function lookupPropertyFromCountyRecords(address, options = {}) {
     if (record) return record;
   }
   return null;
+}
+
+// County detail lookup keyed directly on a GIS parcel match — skips the
+// brittle typed-address → PAO string search entirely. The point-in-polygon
+// hit IS the address match, so the synthesized search object carries the
+// FDOR situs fields instead of re-validating strings.
+async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
+  if (!parcel?.paoParcelId || !parcel?.county) return null;
+  const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const t0 = Date.now();
+
+  try {
+    let record = null;
+    if (parcel.county === 'Manatee') {
+      record = await fetchManateeParcelDetails({
+        parcelId: parcel.paoParcelId,
+        situsAddress: parcel.situsAddress,
+        city: parcel.situsCity,
+      }, address, timeoutMs, t0);
+    } else if (parcel.county === 'Sarasota') {
+      const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
+      if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+      const detailUrl = sarasotaDetailUrl(parcel.paoParcelId);
+      const detailHtml = (await fetchCountyText(detailUrl, remainingMs, {
+        headers: { Referer: `${SARASOTA_PAO_BASE}/propertysearch/` },
+      })).text;
+      const situsAddress = extractSarasotaSitusAddress(detailHtml) || parcel.situsAddress;
+      record = await fetchSarasotaParcelDetails({
+        parcelId: parcel.paoParcelId,
+        situsAddress,
+        city: parcel.situsCity || extractCountyResultCity(situsAddress),
+        detailUrl,
+        html: detailHtml,
+      }, address, timeoutMs, t0);
+    } else if (parcel.county === 'Charlotte') {
+      record = await fetchCharlotteParcelDetails({
+        parcelId: parcel.paoParcelId,
+        situsAddress: parcel.situsAddress,
+        city: parcel.situsCity,
+        zipCode: parcel.situsZip,
+      }, address, timeoutMs, t0);
+    }
+
+    if (record) {
+      record._raw = {
+        ...(record._raw || {}),
+        parcelMatch: 'gis_point',
+        gisParcelId: parcel.parcelId,
+      };
+      logger.info('[county-property] resolved county record by GIS parcel', {
+        county: parcel.county,
+        parcelId: parcel.paoParcelId,
+        elapsedMs: Date.now() - t0,
+      });
+    }
+    return record;
+  } catch (err) {
+    logger.warn('[county-property] by-parcel lookup errored', {
+      county: parcel.county,
+      parcelId: parcel.paoParcelId,
+      elapsedMs: Date.now() - t0,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  }
+}
+
+// Conservative DOR use-code → property type map. Only codes with a single
+// unambiguous estimator mapping; everything else stays null so live county /
+// AI evidence decides (vacant, agricultural, and commercial ranges are
+// deliberately unmapped).
+const DOR_UC_PROPERTY_TYPES = {
+  '001': 'Single Family',
+  '003': 'Multifamily',
+  '004': 'Condo',
+  '008': 'Multifamily',
+};
+
+function dorUcPropertyType(code) {
+  const normalized = String(code ?? '').trim().padStart(3, '0');
+  return DOR_UC_PROPERTY_TYPES[normalized] || null;
+}
+
+// Shapes the FDOR cadastral attributes as a merge-ready evidence record.
+// Weight 97 (cadastral): county-grade data on an annual vintage — it joins
+// the merge as supporting evidence but never short-circuits live PAO / AI
+// lookups (new construction outruns the roll).
+function buildCadastralRecord(parcel, address) {
+  if (!parcel) return null;
+  const parsed = {
+    squareFootage: coerceInt(parcel.livingAreaSqft, 500, 15000),
+    lotSize: clampLotSqft(Number(parcel.lotSqft)),
+    yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
+    propertyType: dorUcPropertyType(parcel.dorUseCode),
+    source: parcel.sourceUrl || null,
+    confidence: 'high',
+    county: parcel.county,
+    formattedAddress: [parcel.situsAddress, parcel.situsCity, 'FL', parcel.situsZip].filter(Boolean).join(', ') || address,
+  };
+  if (!hasAnyPropertyFact(parsed)) return null;
+
+  const record = shapeAsPropertyRecord(parsed, address, 'fdor_cadastral');
+  record._source = 'cadastral';
+  record._raw = {
+    ...(record._raw || {}),
+    _source: 'cadastral',
+    _provider: 'fdor_cadastral',
+    parcelId: parcel.parcelId,
+    county: parcel.county,
+    dorUseCode: parcel.dorUseCode,
+    assessmentYear: parcel.assessmentYear,
+  };
+  record.addressLine1 = parcel.situsAddress || '';
+  record.city = parcel.situsCity || '';
+  record.state = 'FL';
+  record.zipCode = parcel.situsZip || '';
+  record.county = parcel.county;
+  record._aiProviders = ['fdor_cadastral'];
+  return record;
+}
+
+// Parcel matching trusts the point, so the point has to be trustworthy:
+// rooftop-grade geocodes only. Interpolated and centroid results can land on
+// a neighbor (or a downtown block), and a wrong parcel at cadastral weight is
+// far worse than falling back to the address search.
+function canUseParcelGis(geoContext) {
+  return Boolean(
+    geoContext
+    && !geoContext.partialMatch
+    && geoContext.locationType === 'ROOFTOP'
+    && Number.isFinite(geoContext.lat)
+    && Number.isFinite(geoContext.lng),
+  );
+}
+
+// Attached AFTER mergePropertyRecords — the merge spreads only the
+// top-scoring record, so metadata stamped on an input record can be
+// silently dropped.
+function attachParcelMeta(merged, parcel) {
+  if (!merged || !parcel) return merged;
+  merged._parcel = {
+    parcelId: parcel.parcelId,
+    paoParcelId: parcel.paoParcelId,
+    county: parcel.county,
+    situsAddress: parcel.situsAddress,
+    situsCity: parcel.situsCity,
+    situsZip: parcel.situsZip,
+    polygon: parcel.polygon,
+    polygonAreaSqft: parcel.polygonAreaSqft,
+    lotSqft: parcel.lotSqft,
+    dorUseCode: parcel.dorUseCode,
+    residentialUnits: parcel.residentialUnits,
+    vintage: parcel.assessmentYear,
+  };
+  return merged;
 }
 
 async function lookupPropertyFromAI(address) {
@@ -863,14 +1042,51 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
   // typed address on geocode miss or partial match.
   const searchAddress = canonicalLookupAddress(address, geoContext);
-  const countyRecord = await lookupPropertyFromCountyRecords(searchAddress, { geoContext }).catch((err) => {
-    logger.warn('[county-property] lookup failed before AI fallback', {
-      error: summarizeProviderError(err),
-    });
-    return null;
-  });
+  const countyTimeoutMs = positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const t0 = Date.now();
+
+  // GIS parcel match: rooftop point → parcel polygon + FDOR roll facts. Runs
+  // inside the shared county budget with its own (shorter) timeout; every
+  // failure mode degrades to the address-search path below.
+  let parcel = null;
+  if (canUseParcelGis(geoContext)) {
+    const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
+    parcel = await lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: gisTimeoutMs })
+      .catch(() => null);
+  }
+
+  // County record: keyed by parcel ID when GIS matched, else (or on a
+  // by-parcel miss) the existing address search.
+  let countyRecord = null;
+  if (parcel?.paoParcelId) {
+    const remainingMs = remainingCountyLookupMs(t0, countyTimeoutMs);
+    if (remainingMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
+      countyRecord = await lookupPropertyFromCountyByParcel(parcel, searchAddress, {
+        timeoutMs: remainingMs,
+        geoContext,
+      }).catch(() => null);
+    }
+  }
+  if (!countyRecord) {
+    const remainingMs = remainingCountyLookupMs(t0, countyTimeoutMs);
+    if (remainingMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
+      countyRecord = await lookupPropertyFromCountyRecords(searchAddress, {
+        timeoutMs: remainingMs,
+        geoContext,
+      }).catch((err) => {
+        logger.warn('[county-property] lookup failed before AI fallback', {
+          error: summarizeProviderError(err),
+        });
+        return null;
+      });
+    }
+  }
+
+  const cadastralRecord = parcel ? buildCadastralRecord(parcel, searchAddress) : null;
+
   if (countyRecord && hasCountyPricingCore(countyRecord)) {
-    return mergePropertyRecords([countyRecord], searchAddress);
+    const merged = mergePropertyRecords([countyRecord, cadastralRecord].filter(Boolean), searchAddress);
+    return attachParcelMeta(merged, parcel);
   }
 
   const results = await Promise.allSettled([
@@ -880,13 +1096,14 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   ]);
   const records = [
     countyRecord,
+    cadastralRecord,
     ...results
       .filter((r) => r.status === 'fulfilled' && r.value)
       .map((r) => r.value),
   ].filter(Boolean);
 
   if (!records.length) return null;
-  return mergePropertyRecords(records, searchAddress);
+  return attachParcelMeta(mergePropertyRecords(records, searchAddress), parcel);
 }
 
 async function searchManateeParcel(address, timeoutMs, startedAt = Date.now()) {
@@ -2443,6 +2660,9 @@ function classifyPropertySource(url) {
   if (host.includes('manateepao.gov') || host.includes('sc-pa.com') || host.includes('ccappraiser.com')) {
     return { type: 'county', weight: SOURCE_TYPE_WEIGHTS.county };
   }
+  if (host.includes('arcgis.com') && path.includes('florida_statewide_cadastral')) {
+    return { type: 'cadastral', weight: SOURCE_TYPE_WEIGHTS.cadastral };
+  }
   if (host.includes('buildzoom.com') || path.includes('permit')) {
     return { type: 'permit', weight: SOURCE_TYPE_WEIGHTS.permit };
   }
@@ -2585,9 +2805,17 @@ module.exports = {
   lookupPropertyFromCharlottePAO,
   lookupPropertyFromCountyRecords,
   lookupPropertyFromAITrio,
+  lookupPropertyFromCountyByParcel,
   _private: {
+    attachParcelMeta,
+    buildCadastralRecord,
     buildPropertyDataQuality,
     canonicalLookupAddress,
+    canUseParcelGis,
+    dorUcPropertyType,
+    fetchManateeParcelDetails,
+    fetchSarasotaParcelDetails,
+    fetchCharlotteParcelDetails,
     geoOpensCountyGate,
     hasCountyPricingCore,
     hasAnyPropertyFact,
