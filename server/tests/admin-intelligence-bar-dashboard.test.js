@@ -243,7 +243,7 @@ describe('dashboard intelligence-bar guard', () => {
         headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'create_customer',
-          params: { first_name: 'Jeff', phone: '9415550100', confirm: true },
+          params: { first_name: 'Jeff', phone: '9415550100', confirmed: true },
         }),
       });
       const body = await res.json();
@@ -262,7 +262,7 @@ describe('dashboard intelligence-bar guard', () => {
         headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'create_customer',
-          params: { first_name: 'Jeff', phone: '9415550100', confirm: true },
+          params: { first_name: 'Jeff', phone: '9415550100', confirmed: true },
         }),
       });
       const body = await res.json();
@@ -270,7 +270,7 @@ describe('dashboard intelligence-bar guard', () => {
       expect(body.success).toBe(true);
       expect(mockExecuteTool).toHaveBeenCalledWith(
         'create_customer',
-        expect.objectContaining({ first_name: 'Jeff', confirm: true }),
+        expect.objectContaining({ first_name: 'Jeff', confirmed: true }),
       );
     });
   });

@@ -137,11 +137,11 @@ Only returns active customers with prior service history in that category.`,
     name: 'create_customer',
     description: `Create a new customer record (new lead or new account). Use when the operator asks to add a customer who is not in the database yet.
 Checks for an existing customer with the same phone number first — if one exists, returns that customer instead of creating a duplicate.
-Without confirm: true this returns a PREVIEW only and writes nothing. Workflow: call once to get the preview, show it to the operator, and only after they approve call again with confirm: true.`,
+Two-step pattern (same as route optimization): call WITHOUT \`confirmed\` first — it returns a PREVIEW and writes nothing. Show the preview to the operator, and only after they approve re-call WITH \`confirmed: true\`.`,
     input_schema: {
       type: 'object',
       properties: {
-        confirm: { type: 'boolean', description: 'Must be true to actually create the record. Omit on the first call to get a no-write preview.' },
+        confirmed: { type: 'boolean', description: 'Must be true to actually create the record. Omit on the first call to get a no-write preview.' },
         first_name: { type: 'string' },
         last_name: { type: 'string' },
         phone: { type: 'string' },
@@ -836,11 +836,11 @@ async function createCustomer(input) {
     lead_source: String(input.lead_source || '').trim() || 'intelligence_bar',
   };
 
-  if (input.confirm !== true) {
+  if (input.confirmed !== true) {
     return {
       preview: true,
       would_create: record,
-      note: 'PREVIEW ONLY — nothing was created. Show these details to the operator, and after they approve, call create_customer again with the same fields plus confirm: true.',
+      note: 'PREVIEW ONLY — nothing was created. Show these details to the operator, and after they approve, call create_customer again with the same fields plus confirmed: true.',
     };
   }
 

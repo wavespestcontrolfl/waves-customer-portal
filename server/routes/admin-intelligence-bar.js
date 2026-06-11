@@ -669,7 +669,7 @@ RULES:
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
-- You CAN create new customers with create_customer — first call returns a preview, show it to the operator, then re-call with confirm: true after they approve
+- You CAN create new customers with create_customer — first call returns a preview, show it to the operator, then re-call with confirmed: true after they approve
 - You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
 
@@ -740,6 +740,7 @@ router.post('/query', async (req, res, next) => {
     let currentMessages = messages;
     let finalResponse = null;
     const toolCalls = [];
+    const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
 
     // Tool-use loop
@@ -765,7 +766,7 @@ router.post('/query', async (req, res, next) => {
       for (const toolUse of toolUses) {
         // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
         const loggableInput = PII_TOOL_NAMES.has(toolUse.name)
-          ? { fields: Object.keys(toolUse.input || {}), confirm: toolUse.input?.confirm === true }
+          ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
 
@@ -826,9 +827,8 @@ router.post('/query', async (req, res, next) => {
           ...(failed ? { is_error: true } : {}),
         });
 
-        // loggableInput keeps create_customer PII out of the persisted
-        // intelligence_bar_queries.tool_calls log and the API response
         toolCalls.push({ name: toolUse.name, input: loggableInput });
+        persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
       }
 
@@ -843,15 +843,16 @@ router.post('/query', async (req, res, next) => {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
 
-    // Log the query for analytics. Queries that ran PII-bearing tools get
-    // their prompt/response redacted — prompts carry typed customer contact
-    // details and responses echo SMS bodies.
+    // Log the query for analytics. tool_calls stores names + field keys only;
+    // prompt/response are additionally redacted when a PII-bearing tool ran —
+    // those prompts carry typed customer contact details and the responses
+    // echo SMS bodies.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
     try {
       await db('intelligence_bar_queries').insert({
         prompt: usedPiiTool ? '[redacted — PII-bearing tools used]' : prompt,
         response: usedPiiTool ? '[redacted — PII-bearing tools used]' : finalResponse.substring(0, 5000),
-        tool_calls: JSON.stringify(toolCalls),
+        tool_calls: JSON.stringify(persistedToolCalls),
         created_at: new Date(),
       });
     } catch {

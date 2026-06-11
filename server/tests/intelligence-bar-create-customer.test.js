@@ -98,7 +98,7 @@ describe('intelligence bar create_customer', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('returns a no-write preview when confirm is not true', async () => {
+  test('returns a no-write preview when confirmed is not true', async () => {
     db.mockImplementation(() => makeDuplicateLookup(undefined));
 
     const result = await executeTool('create_customer', {
@@ -117,7 +117,7 @@ describe('intelligence bar create_customer', () => {
     db.transaction.mockImplementation(async (cb) => cb(trx));
 
     const result = await executeTool('create_customer', {
-      confirm: true,
+      confirmed: true,
       first_name: 'Jeffrey',
       last_name: 'Menard',
       phone: '(941) 524-0066',
