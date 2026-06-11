@@ -138,7 +138,25 @@ describe('content-brief-builder operator-intercept injection', () => {
     expect(brief.required_sections.slice(0, byId.A0.outline.length)).toEqual(byId.A0.outline);
     expect(brief.required_sections).toContain('preserve existing slug');
     expect(brief.internal_links_to_add).toEqual([]);
-    expect(brief.voice_constraints.operator_brief.id).toBe('A0');
+    const op = brief.voice_constraints.operator_brief;
+    expect(op.id).toBe('A0');
+    // publishRefresh freezes live schema — the brief must NOT require new
+    // schema_types on a refresh (the runner would accept schema that never
+    // lands on the page). The operator's schema request routes to the human
+    // reviewer instead.
+    expect(brief.schema_types).toEqual([]);
+    expect(op.refresh_schema_note).toMatch(/freezes live schema/);
+    const joined = op.binding_instructions.join('\n');
+    expect(joined).toMatch(/SCHEMA \(refresh limitation\)/);
+    expect(joined).toMatch(/notes_for_reviewer/);
+  });
+
+  test('every intercept brief carries the price-guard framing rule for sourced competitor dollar figures', async () => {
+    queue.getById.mockResolvedValue(opportunityFor('B3')); // brief whose outline mandates dollar figures
+    const brief = await briefBuilder.compose('opp-B3', { persist: false, skipSerp: true });
+    const joined = brief.voice_constraints.operator_brief.binding_instructions.join('\n');
+    expect(joined).toMatch(/COMPETITOR PRICING FRAMING/);
+    expect(joined).toMatch(/"quote", "range", "pricing varies", "depends", or "estimate"/);
   });
 
   test('non-intercept opportunities are completely untouched by the overlay', async () => {

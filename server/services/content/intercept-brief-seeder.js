@@ -259,11 +259,23 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
 
   // Operator schema_types + the house BreadcrumbList requirement (the SEO
   // completion gate P1s a supporting blog whose schema_types omit it).
-  const schema = Array.from(new Set([
-    ...(Array.isArray(payload.schema_types) ? payload.schema_types : []),
-    ...(pageType === 'supporting-blog' ? ['Article', 'BreadcrumbList'] : []),
-    ...schemaTypes,
-  ]));
+  //
+  // REFRESH exception (A0): publishRefresh freezes the live page's schema/
+  // frontmatter — only body + editable title/meta ship — so requiring new
+  // schema_types on a refresh brief would let the runner accept a draft
+  // schema that silently never lands on the Astro page. Keep the refresh
+  // contract's preserve-existing schema list and route the operator's
+  // schema request to the human reviewer instead (refresh_schema_note +
+  // binding instruction → notes_for_reviewer); the refresh lane parks for
+  // review in prod, so the reviewer applies it manually.
+  const isRefresh = pageType === 'refresh' || payload.action === 'refresh_existing_page';
+  const schema = isRefresh
+    ? [...schemaTypes]
+    : Array.from(new Set([
+      ...(Array.isArray(payload.schema_types) ? payload.schema_types : []),
+      ...(pageType === 'supporting-blog' ? ['Article', 'BreadcrumbList'] : []),
+      ...schemaTypes,
+    ]));
 
   const byline = BYLINE_AUTHORS[payload.byline] || BYLINE_AUTHORS.adam;
   const ctaCodes = meta.cta_codes || {};
@@ -299,7 +311,12 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
       emphasis: byline.emphasis,
     },
     global_rules: meta.manifest_notes || null,
-    binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, globalRules: meta.manifest_notes }),
+    // Surfaced for the human reviewer on the refresh lane: requested schema
+    // additions cannot ship through publishRefresh (schema is frozen).
+    refresh_schema_note: isRefresh && Array.isArray(payload.schema_types) && payload.schema_types.length
+      ? `Operator requests ${payload.schema_types.join(' + ')} schema on this page, but the refresh publisher freezes live schema/frontmatter — apply the schema change manually (or via a follow-up page edit) when reviewing this parked refresh.`
+      : null,
+    binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, globalRules: meta.manifest_notes, isRefresh }),
   };
 
   return {
@@ -310,7 +327,7 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
   };
 }
 
-function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules }) {
+function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules, isRefresh = false }) {
   const lines = [
     'This is an OPERATOR-AUTHORED intercept brief. Everything below is BINDING — do not re-derive the topic, angle, slug, or sources.',
     payload.working_title ? `TITLE DIRECTION: "${payload.working_title}" — refine for length/SEO but keep the meaning and promise intact.` : null,
@@ -327,12 +344,26 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules 
     `AUTHOR (exact frontmatter author block): ${JSON.stringify(byline.frontmatter)}.`,
     byline.emphasis || null,
     ctaDirectives.length ? `CTAs: ${ctaDirectives.join(' || ')}` : null,
-    payload.schema_types?.length
+    // Refresh lane cannot ship schema changes (publishRefresh freezes live
+    // schema/frontmatter) — convert the operator's schema request into an
+    // explicit reviewer note instead of an instruction the publisher would
+    // silently drop.
+    payload.schema_types?.length && isRefresh
+      ? `SCHEMA (refresh limitation): the refresh publisher ships body + title/meta ONLY — live schema/frontmatter are frozen and any schema you emit will NOT land on the page. Do not treat ${payload.schema_types.join(' + ')} as deliverable here; instead list the operator's requested schema additions in notes_for_reviewer so the human reviewer applies them when this parked refresh is approved.`
+      : null,
+    payload.schema_types?.length && !isRefresh
       ? `SCHEMA: emit ${payload.schema_types.join(' + ')} structured data with matching VISIBLE content (FAQPage requires the visible FAQ section; HowTo requires visible steps). The operator manifest explicitly REQUIRES the FAQ section for this post (owner directive 2026-06-11) — this operator mandate overrides the default no-FAQ rule for blocked topics for THIS brief only; include the FAQ section as outlined.`
       : null,
     globalRules ? `GLOBAL RULES (apply to every intercept post): ${globalRules}` : null,
     'COMPARISON DISCLAIMER: end the post with a short footer noting competitor pricing/terms are as of the publish date and readers should verify current terms directly.',
     'Never hardcode Waves pricing — link to /pest-control-calculator/ instead.',
+    // The publish-time price guards (content-guardrails + seo-completion-gate)
+    // P0 any bare dollar figure unless one of their allowance words sits
+    // within ~80 characters. The manifest REQUIRES sourced competitor dollar
+    // figures, so the framing rule below is what makes those two requirements
+    // compatible — without it a compliant draft gets routed out as
+    // HARDCODED_PRICE.
+    'COMPETITOR PRICING FRAMING (mandatory for every dollar figure): each competitor dollar amount must appear in the same sentence as at least one of these exact words: "quote", "range", "pricing varies", "depends", or "estimate" — AND carry a dated source attribution. Example: "Aptive\'s early-cancellation fee is $199 as of June 2026 per ConsumerAffairs, though quoted pricing varies by contract." A bare dollar figure with none of those words nearby will block the post at the publish-time price guard.',
   ];
   return lines.filter(Boolean);
 }

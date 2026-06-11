@@ -294,6 +294,26 @@ describe('operator FAQ mandate (termite-cluster intercept briefs)', () => {
   });
 });
 
+// ── competitor pricing framing — instruction ↔ price-guard compatibility ─
+
+describe('competitor pricing framing rule', () => {
+  test('the prescribed framing passes both price guards; a bare dollar figure still fails', () => {
+    const guardrailInternals = require('../services/content/content-guardrails')._internals;
+    const { detectHardcodedPrice } = require('../services/content/seo-completion-gate')._internals;
+
+    // The example sentence from the binding instruction — must satisfy the
+    // exact allowance-word window both guards share, or the manifest's
+    // required dollar figures and the P0 price guard are incompatible.
+    const framed = "Aptive's early-cancellation fee is $199 as of June 2026 per ConsumerAffairs, though quoted pricing varies by contract.";
+    expect(guardrailInternals.priceFinding(framed)).toBeNull();
+    expect(detectHardcodedPrice(framed)).toBe(false);
+
+    const bare = 'The early-cancellation fee is $199 and the monthly cost is $49.';
+    expect(guardrailInternals.priceFinding(bare)).not.toBeNull();
+    expect(detectHardcodedPrice(bare)).toBe(true);
+  });
+});
+
 // ── archive.org snapshots — fail-soft ───────────────────────────────
 
 describe('snapshotSources', () => {
