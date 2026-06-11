@@ -3190,6 +3190,16 @@ router.post('/:id/invoice', async (req, res, next) => {
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['schedule.invoice.mint', String(svc.id)],
       );
+      // Re-read the service under the lock — the pre-lock `svc` row is
+      // stale, and a cancellation committing in the gap (its void sweep
+      // holds this same lock) would otherwise let this request mint a
+      // fresh collectible invoice for a cancelled job.
+      const svcNow = await trx('scheduled_services')
+        .where({ id: svc.id })
+        .first('status');
+      if (!svcNow || ['cancelled', 'rescheduled', 'skipped'].includes(svcNow.status)) {
+        return { invoice: null, blocked: `service is ${svcNow?.status || 'missing'}` };
+      }
       const replayed = await trx('invoices')
         .where({ scheduled_service_id: svc.id })
         .whereNot('status', 'void')
@@ -3209,6 +3219,10 @@ router.post('/:id/invoice', async (req, res, next) => {
       });
       return { invoice: created, reused: false };
     });
+
+    if (minted.blocked) {
+      return res.status(409).json({ error: `Cannot invoice — ${minted.blocked}` });
+    }
 
     let invoice = minted.invoice;
     const applied = await applyPrepaidCredit(invoice);
