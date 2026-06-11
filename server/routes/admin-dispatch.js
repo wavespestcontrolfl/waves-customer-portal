@@ -49,6 +49,11 @@ const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
 } = require('../services/service-completion-profiles');
+const ActivityIndicators = require('../services/service-report/activity-indicators');
+const {
+  resolveProjectCompletionBilling,
+  projectFollowupSuggestion,
+} = require('../services/project-completion');
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -984,6 +989,12 @@ router.get('/:date?', async (req, res, next) => {
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         completionProfile,
+        // Typed-findings schema embedded per appointment so mobile completion
+        // never blocks on a registry fetch (bad-network field conditions).
+        // Null for everything except cut-over specialty types.
+        findingsSchema: completionProfile?.findingsType
+          ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType)
+          : null,
         linkedProject: linkedProject ? {
           id: linkedProject.id,
           status: linkedProject.status,
@@ -1475,6 +1486,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       treeShrubCompletion = null,
       completionPhotos = [],
       clientPestRating = null,
+      structuredFindings = null,
+      activityScore = null,
+      activityScoreSource = null,
+      nextStepChips = null,
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -1591,6 +1606,83 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
 
+    // Typed specialty completion (dark until a type's profile is cut over to
+    // completion_mode='service_report' with a project_type pointer).
+    // structuredFindings stays OPTIONAL at the endpoint — a stale client tab
+    // mid-deploy submits none and completes exactly like today. When the
+    // client DOES submit typed findings, they're validated fully (required
+    // fields, unknown keys, select values) against the registry.
+    const typedFindingsType = completionProfile?.findingsType || null;
+    const typedIndicator = typedFindingsType
+      ? ActivityIndicators.getActivityIndicator(typedFindingsType)
+      : null;
+    let typedFindings = null;
+    let typedChips = [];
+    let typedActivityScore = null;
+    let typedScoreSource = null;
+    if (typedFindingsType && structuredFindings != null && !isIncompleteVisit) {
+      const findingsValidation = ActivityIndicators.validateTypedFindings({
+        type: structuredFindings?.type,
+        values: structuredFindings?.values,
+        expectedType: typedFindingsType,
+        enforceRequired: true,
+      });
+      if (!findingsValidation.ok) {
+        return res.status(findingsValidation.missing.length && !findingsValidation.errors.length ? 422 : 400).json({
+          error: 'Structured findings failed validation',
+          code: 'typed_findings_invalid',
+          details: findingsValidation.errors,
+          missing: findingsValidation.missing,
+        });
+      }
+      const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips);
+      if (!chipsValidation.ok) {
+        return res.status(400).json({ error: chipsValidation.error, code: 'next_step_chips_invalid' });
+      }
+      typedChips = chipsValidation.chips;
+      typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
+
+      // Activity score: strict integer 0-5 or null (same contract as
+      // clientPestRating). Gauge types require a score on a completed visit —
+      // derived prefill fills it when the tech didn't touch the picker.
+      if (activityScore != null
+        && (!Number.isInteger(activityScore) || activityScore < 0 || activityScore > 5)) {
+        return res.status(400).json({
+          error: 'activityScore must be an integer 0-5 (or null/omitted)',
+          code: 'activity_score_invalid',
+        });
+      }
+      if (typedIndicator) {
+        const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
+        if (activityScore != null) {
+          typedActivityScore = activityScore;
+          typedScoreSource = activityScoreSource === 'derived' && derived?.score === activityScore
+            ? 'derived'
+            : 'technician';
+        } else if (derived) {
+          typedActivityScore = derived.score;
+          typedScoreSource = 'derived';
+        } else {
+          return res.status(422).json({
+            error: `${typedIndicator.label} requires an activity score (0-5) on a completed visit`,
+            code: 'activity_score_required',
+          });
+        }
+      }
+    }
+    // Delivery control for typed completions: profile delivery_mode
+    // (auto_send | internal_only | disabled) + a global kill env.
+    // internal_only renders + stores the report (token/PDF) without customer
+    // SMS/email — the Phase-1b shadow mode. Recurring completions
+    // (findingsType null) are never affected.
+    const typedDeliveryMode = typedFindingsType
+      ? (process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true'
+        ? 'disabled'
+        : (completionProfile?.deliveryMode || 'auto_send'))
+      : 'auto_send';
+    const suppressTypedCustomerComms = !!typedFindingsType && typedDeliveryMode !== 'auto_send';
+    const effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
     const treeShrubCloseoutRequired = !isIncompleteVisit && ['tree_shrub', 'palm'].includes(reportServiceLine);
@@ -1620,10 +1712,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ...(Array.isArray(recommendations) ? recommendations : []),
       ...taggedCompletionNoteLines(technicianNotes, ['next']),
     ]);
-    const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable] = await Promise.all([
+    const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
       db.schema.hasTable('service_findings').catch(() => false),
+      db.schema.hasTable('service_activity_scores').catch(() => false),
     ]);
     const useServiceReportV1 = true;
     let conditionsAtApplication = null;
@@ -1643,6 +1736,39 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    // Billing pre-gate for typed one-time completions — ports the project
+    // flow's enforcement (resolveProjectCompletionBilling) so a one-time
+    // specialty job can't complete unbilled, and fires BEFORE any customer
+    // artifact. Bypasses: $0 visits resolve as not_billable inside the
+    // resolver, and included follow-up appointments (followup_included,
+    // set by the schedule-followup endpoint) skip the gate entirely.
+    if (
+      claim.action === 'proceed'
+      && typedFindingsType
+      && typedFindings
+      && !isIncompleteVisit
+      && !recapReviewOnly
+      && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
+      && svc.followup_included !== true
+    ) {
+      const typedBilling = await resolveProjectCompletionBilling({
+        scheduledService: svc,
+        customer: { monthly_rate: svc.cust_monthly_rate },
+      }).catch((err) => {
+        logger.warn(`[dispatch] typed completion billing check failed for ${svc.id}: ${err.message}`);
+        return { required: false, resolved: true, reason: 'billing_check_failed' };
+      });
+      if (typedBilling.required && !typedBilling.resolved) {
+        const billingErr = new Error('Completion billing required');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, billingErr);
+        return res.status(409).json({
+          error: 'An invoice or payment is required before completing this one-time service.',
+          code: 'completion_billing_required',
+          details: { amount: typedBilling.amount },
+        });
+      }
+    }
 
     if (claim.action === 'proceed' && treeShrubCloseoutRequired) {
       const treeShrubProductRows = await loadSubmittedCatalogProducts(products);
@@ -1894,6 +2020,48 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               recommendations: reportRecommendations,
             },
           };
+          // Typed specialty completion: resolve trend vs the customer's prior
+          // visit for the same indicator, then persist the immutable
+          // customer-copy snapshot (typedReportSnapshot). The report renders
+          // from this snapshot forever — labels/copy are resolved HERE.
+          let typedActivity = null;
+          let typedVisitSequence = 1;
+          if (typedFindings) {
+            if (typedIndicator && typedActivityScore != null && activityScoresAvailable) {
+              const priorRows = await trx('service_activity_scores')
+                .where({
+                  customer_id: svc.customer_id,
+                  indicator_key: typedIndicator.indicatorKey,
+                })
+                .where('service_date', '<=', completionServiceDate)
+                .orderBy('service_date', 'desc')
+                .orderBy('created_at', 'desc')
+                .limit(8);
+              const priorScore = priorRows.length ? Number(priorRows[0].score) : null;
+              typedVisitSequence = priorRows.length + 1;
+              const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
+              typedActivity = {
+                indicatorKey: typedIndicator.indicatorKey,
+                label: typedIndicator.label,
+                score: typedActivityScore,
+                source: typedScoreSource,
+                derivedFrom: derived
+                  ? { field: derived.field, value: derived.value, initialDerivedScore: derived.score }
+                  : null,
+                trend: ActivityIndicators.trendDirection(typedActivityScore, priorScore),
+                trendWord: ActivityIndicators.trendWordForScores(typedActivityScore, priorScore),
+              };
+            }
+            serviceData.typedReportSnapshot = ActivityIndicators.buildTypedReportSnapshot({
+              projectType: typedFindingsType,
+              values: typedFindings.values,
+              nextStepChips: typedChips,
+              serviceKey: completionProfile?.serviceKey || null,
+              serviceLabel: completionProfile?.serviceName || svc.service_type || null,
+              visitSequence: typedVisitSequence,
+              activity: typedActivity,
+            });
+          }
           const [priorVisitCountRow] = serviceRecordCols.visit_number
             ? await trx('service_records')
               .where({ customer_id: svc.customer_id, status: 'completed' })
@@ -1973,6 +2141,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // config inside the txn so we read a consistent snapshot with
           // the score calc that runs a few lines below.
           if (clientPestRating != null
+            && !typedFindingsType
             && serviceRecordCols.client_pest_rating
             && serviceRecordCols.client_pest_rating_source) {
             const pestPressureConfig = await loadPestPressureConfig(trx);
@@ -2000,6 +2169,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
 
+        // Typed activity score — in the same trx as the record so retries
+        // and durable-completion resumes can never double-insert (composite
+        // unique on (service_record_id, indicator_key) backstops).
+        if (typedActivity && activityScoresAvailable) {
+          await trx('service_activity_scores')
+            .insert({
+              customer_id: svc.customer_id,
+              service_record_id: record.id,
+              indicator_key: typedActivity.indicatorKey,
+              service_date: completionServiceDate,
+              score: typedActivity.score,
+              source: typedActivity.source,
+              derived_from: typedActivity.derivedFrom ? serializeJsonb(typedActivity.derivedFrom) : null,
+            })
+            .onConflict(['service_record_id', 'indicator_key'])
+            .ignore();
+        }
+
         if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length) {
           const findingRows = reportObservations.map((title) => ({
             service_record_id: record.id,
@@ -2026,7 +2213,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ...buildNoActivityFinding(reportServiceLine),
           });
         }
-        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index) {
+        // Typed specialty completions never feed Pest Pressure — their
+        // service_type can detect to the 'pest' line and slip past the
+        // one-time-label gate, which would pollute recurring pressure
+        // history. The activity score above is their indicator instead.
+        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType) {
           const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
           if (pestPressure && pestPressure.result.displayedScore != null) {
             record.pressure_index = pestPressure.result.displayedScore;
@@ -2671,7 +2862,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       logger.error(`[dispatch] service report token mint failed: ${err.message}`);
     }
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
-    if (serviceReportV1Delivery && reportToken) {
+    // delivery_mode 'disabled' (typed kill switch): no PDF render either.
+    // 'internal_only' still renders + stores (token + PDF) — only customer
+    // SMS/email below are suppressed via effectiveSendCompletionSms.
+    if (serviceReportV1Delivery && reportToken && typedDeliveryMode !== 'disabled') {
       await enqueuePdfRenderJob({
         serviceRecordId: record.id,
         payload: {
@@ -2694,7 +2888,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
     let serviceReportDynamicContext = null;
     let serviceReportPreviewAsset = null;
-    if (serviceReportV1Delivery && useServiceReportV1) {
+    if (serviceReportV1Delivery && useServiceReportV1 && !suppressTypedCustomerComms) {
       serviceReportDynamicContext = await buildServiceReportDynamicContext({
         recordId: record.id,
         mode: 'static',
@@ -2832,7 +3026,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // request below.
     const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
-    const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
+    const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
+      && !suppressTypedCustomerComms;
     const suppressCompletionInvoiceLink = !!invoiceAlreadySent;
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
@@ -2846,7 +3041,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       || completionSmsSendingFresh;
 
     const shouldBundleReview =
-      sendCompletionSms &&
+      effectiveSendCompletionSms &&
       !completionSmsAlreadyHandled &&
       effectiveRequestReview &&
       svc.cust_phone &&
@@ -2916,7 +3111,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
-    if (sendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
+    if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         const recapText = (customerRecap || '').trim();
@@ -3158,7 +3353,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
       }
-    } else if (sendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
+    } else if (effectiveSendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
       const bundledReviewId = recordStructuredNotes.completionSmsBundledReviewRequestId || null;
       const bundledReviewUrlFromNotes = recordStructuredNotes.completionSmsBundledReviewUrl || null;
       const sentBody = String(recordStructuredNotes.sentSmsBody || '');
@@ -3186,7 +3381,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           false,
         )
       : false;
-    if (serviceReportV1Delivery && sendCompletionSms && !serviceReportEmailEnabled) {
+    if (serviceReportV1Delivery && effectiveSendCompletionSms && !serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
       if (!latestNotes.serviceReportV1EmailStatus) {
         const disabledNotes = {
@@ -3201,7 +3396,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    if (serviceReportV1Delivery && sendCompletionSms && serviceReportEmailEnabled) {
+    if (serviceReportV1Delivery && effectiveSendCompletionSms && serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
       const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
       if (!emailAlreadyHandled) {
@@ -3333,9 +3528,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
     }
 
+    // Follow-up suggestion for typed completions (profiles followup_policy /
+    // default_followup_days). Cockroach only suggests for German — matched on
+    // the canonical registry option value, never display-label text.
+    let followupSuggestion = null;
+    if (typedFindingsType && typedFindings && !isIncompleteVisit) {
+      followupSuggestion = projectFollowupSuggestion({
+        scheduledService: svc,
+        project: {},
+        profile: completionProfile,
+      });
+      if (followupSuggestion?.required && typedFindingsType === 'cockroach'
+        && String(typedFindings.values?.species || '') !== 'German') {
+        followupSuggestion = { ...followupSuggestion, required: false, reason: 'species_not_german' };
+      }
+    }
+
     const finalRecordNotes = parseJsonObject(record.structured_notes);
     const completionSmsStatus = finalRecordNotes.completionSmsStatus
-      || (sendCompletionSms ? (svc.cust_phone ? 'not_sent' : 'no_phone') : 'not_requested');
+      || (suppressTypedCustomerComms && sendCompletionSms
+        ? 'suppressed_delivery_mode'
+        : (sendCompletionSms ? (svc.cust_phone ? 'not_sent' : 'no_phone') : 'not_requested'));
     const completionSmsType = finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null;
     const invoicePaymentActionRequired = !!invoice
       && invoice.status !== 'paid'
@@ -3358,6 +3571,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
       completionPhotoUpload: completionPhotoUploadResult,
+      ...(typedFindingsType ? {
+        typedFindingsType,
+        typedDeliveryMode,
+        followupSuggestion,
+      } : {}),
     };
     // Refresh the stored response with the final invoice info — this is an
     // UPDATE of an already-succeeded row (set above immediately after the
