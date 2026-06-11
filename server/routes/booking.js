@@ -805,6 +805,17 @@ router.post('/confirm', async (req, res, next) => {
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['self-booking-confirm', `${custId}:${slot_date}`],
       );
+      // The customer-keyed lock above only serializes a double-submit —
+      // two DIFFERENT customers confirming the same tech/date can still
+      // both pass the overlap check under READ COMMITTED. Same
+      // slot-reserve namespace slot-reservation/rebooker use, so all
+      // three writers serialize against each other per tech+day.
+      if (technician_id) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['slot-reserve', `${technician_id}:${slot_date}`],
+        );
+      }
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate.
