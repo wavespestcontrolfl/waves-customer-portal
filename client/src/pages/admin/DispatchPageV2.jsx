@@ -2262,6 +2262,27 @@ export default function DispatchPageV2({
             setCompletingService(null);
             setCheckoutService(svc);
           }}
+          onScheduleFollowup={async (suggestion) => {
+            // Books the suggested follow-up as a PENDING appointment (the
+            // normal pending → confirmed dispatch flow is the confirmation
+            // step). Idempotent server-side per source visit.
+            const serviceId = completingService?.id;
+            if (!serviceId || !suggestion?.suggestedDate) return;
+            try {
+              // adminFetch returns the parsed JSON body (not a Response).
+              const d = await adminFetch(`/admin/dispatch/${serviceId}/schedule-followup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ date: suggestion.suggestedDate }),
+              });
+              alert(d.alreadyScheduled
+                ? `Follow-up already on the books for ${d.appointment.scheduledDate}.`
+                : `Follow-up booked (pending) for ${d.appointment.scheduledDate}.`);
+              setScheduleRefreshKey((k) => k + 1);
+            } catch (e) {
+              alert(`Could not book the follow-up: ${e.message || 'unknown error'}`);
+            }
+          }}
           onViewDetails={
             isMobile
               ? (svc) => {

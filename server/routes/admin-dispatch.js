@@ -4026,6 +4026,104 @@ ${commsContext || '[not provided]'}
 Return only the paragraph text.`;
 }
 
+// POST /:serviceId/schedule-followup — book the suggested follow-up visit
+// for a typed specialty completion as a PENDING appointment (the normal
+// pending → confirmed dispatch flow is the admin confirmation step, so the
+// full scheduling validation stack isn't duplicated here). Idempotent per
+// source visit via followup_source_service_id — a retried CTA tap returns
+// the existing booking. The appointment is $0 + followup_included, which the
+// typed completion billing pre-gate bypasses (included program visit).
+router.post('/:serviceId/schedule-followup', async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const { date, windowStart = null, windowEnd = null, technicianId = null } = req.body || {};
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
+      return res.status(400).json({ error: 'date (YYYY-MM-DD) is required', code: 'followup_date_invalid' });
+    }
+    if (String(date) < etDateString()) {
+      return res.status(400).json({ error: 'Follow-up date must be today or later', code: 'followup_date_past' });
+    }
+
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const profile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+    if (!profile?.findingsType) {
+      return res.status(409).json({
+        error: 'Follow-up booking from completion is only available for typed specialty services.',
+        code: 'followup_not_typed',
+      });
+    }
+
+    const cols = await db('scheduled_services').columnInfo().catch(() => ({}));
+    if (!cols.followup_source_service_id || !cols.followup_included) {
+      return res.status(503).json({ error: 'Follow-up booking is not available yet (pending migration).', code: 'followup_columns_missing' });
+    }
+
+    const existing = await db('scheduled_services')
+      .where({ followup_source_service_id: svc.id })
+      .whereNotIn('status', ['cancelled', 'skipped'])
+      .orderBy('created_at', 'desc')
+      .first();
+    if (existing) {
+      return res.json({ success: true, alreadyScheduled: true, appointment: { id: existing.id, scheduledDate: serviceDateOnly(existing.scheduled_date), status: existing.status } });
+    }
+
+    const insertData = {
+      customer_id: svc.customer_id,
+      technician_id: technicianId || svc.technician_id || null,
+      scheduled_date: date,
+      window_start: windowStart || svc.window_start || null,
+      window_end: windowEnd || svc.window_end || null,
+      service_type: svc.service_type,
+      status: 'pending',
+      notes: `Follow-up to ${serviceDateOnly(svc.scheduled_date)} visit (booked at completion)`,
+      is_recurring: false,
+      followup_included: true,
+      followup_source_service_id: svc.id,
+    };
+    if (cols.service_id && svc.service_id) insertData.service_id = svc.service_id;
+    if (cols.zone && svc.zone) insertData.zone = svc.zone;
+    if (cols.estimated_duration_minutes && svc.estimated_duration_minutes) insertData.estimated_duration_minutes = svc.estimated_duration_minutes;
+    if (cols.estimated_price) insertData.estimated_price = 0;
+    if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = false;
+    if (cols.time_window && svc.time_window) insertData.time_window = svc.time_window;
+
+    let appointment;
+    try {
+      [appointment] = await db('scheduled_services').insert(insertData).returning('*');
+    } catch (err) {
+      // Partial unique index on followup_source_service_id — a concurrent
+      // CTA tap lost the race; return the winner's booking idempotently.
+      if (err && err.code === '23505') {
+        const winner = await db('scheduled_services')
+          .where({ followup_source_service_id: svc.id })
+          .whereNotIn('status', ['cancelled', 'skipped'])
+          .orderBy('created_at', 'desc')
+          .first();
+        if (winner) {
+          return res.json({
+            success: true,
+            alreadyScheduled: true,
+            appointment: { id: winner.id, scheduledDate: serviceDateOnly(winner.scheduled_date), status: winner.status },
+          });
+        }
+      }
+      throw err;
+    }
+    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
+    res.json({
+      success: true,
+      alreadyScheduled: false,
+      appointment: {
+        id: appointment.id,
+        scheduledDate: serviceDateOnly(appointment.scheduled_date),
+        status: appointment.status,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 router.post('/:serviceId/findings-recap/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;

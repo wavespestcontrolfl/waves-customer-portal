@@ -523,3 +523,15 @@ The tier price is the full customer total — there is **no separate setup charg
 **Judgment calls:** photo caption chips skipped (the panel's photo capture has no caption affordance — would have meant inventing UI); telemetry rides inside the /complete body rather than a new endpoint; checkout 409 closes the panel (z-index stacking) and relies on draft restore + existing post-payment reopen.
 
 **Blast radius:** zero until cutover (no profile emits findingsType); non-typed completion paths byte-identical; `err.code` on admin-fetch errors is additive.
+
+---
+
+## 2026-06-12 — Specialty services → Service Report V1 pipeline (PR 4: follow-up booking)
+
+**Decision:** The completion success screen's "Schedule follow-up" CTA books the suggested visit as a **PENDING appointment** — the existing pending → confirmed dispatch flow is the admin confirmation step, so the heavy scheduling validation stack isn't duplicated and the booking can't silently bypass capacity review (the contract's "admin-confirmed request" option).
+
+**Implementation:** Migration `20260611000007` adds `scheduled_services.followup_included` (the typed billing pre-gate bypass for included program visits — the column PR 1's gate already reads) and `followup_source_service_id` (FK to the completed visit; the idempotency key — a retried CTA tap returns the existing booking, `alreadyScheduled: true`). New `POST /:serviceId/schedule-followup` (per-tech ownership guard via assertRecapOwnership): requires a typed profile (`followup_not_typed` 409 otherwise — this is not a generic booking API), validates date ≥ today ET, clones customer/tech/service/zone/duration/window from the source visit, $0 + `create_invoice_on_complete=false` + `followup_included=true`, status `pending`, graceful 503 if the migration hasn't run. DispatchPageV2 wires `onScheduleFollowup` (CTA shipped in PR 3) → endpoint with the suggested date → schedule refresh.
+
+**Blast radius:** dark — the CTA only renders on typed completions with `followupSuggestion.required` (no profile emits that pre-cutover); the endpoint 409s for non-typed services.
+
+**Revisit if:** trapping cadence needs multi-visit chains booked upfront (today each completion books the next check), or follow-ups should inherit a non-zero price for non-included programs.
