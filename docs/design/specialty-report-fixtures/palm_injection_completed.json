@@ -1,0 +1,40 @@
+{
+  "fixture": "palm_injection_completed",
+  "proves": ["phase1", "tier1_minimal_form"],
+  "typedReportSnapshot": {
+    "type": "palm_injection",
+    "typeLabel": "Palm Injection",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "palm_injection",
+    "serviceLabel": "Palm Injection",
+    "reportTypeLabel": "Palm Injection Treatment Summary",
+    "visitSequence": 1,
+    "values": {
+      "palm_species": "Canary Island date palm",
+      "palm_count": "3",
+      "treatment_performed": "Trunk injection for palm weevil and nutritional support",
+      "followup_plan": "Retreatment in 12 months; monitor fronds for change"
+    },
+    "nextStepChips": ["Retreatment scheduled", "Monitor fronds for change"],
+    "todaysResult": {
+      "headline": "Palm Injection Treatment completed today.",
+      "body": "We treated 3 Canary Island date palms with trunk injections for palm weevil protection and nutritional support.",
+      "nextStep": "Monitor fronds for change — retreatment is recommended in 12 months."
+    },
+    "findings": [
+      { "fieldKey": "palm_species", "technicianLabel": "Palm species", "customerLabel": "What we treated", "value": "Canary Island date palm", "customerValueLabel": "Canary Island date palm (3 palms)" },
+      { "fieldKey": "treatment_performed", "technicianLabel": "Treatment performed", "customerLabel": "What we did", "value": "Trunk injection for palm weevil and nutritional support", "customerValueLabel": "Trunk injection for palm weevil and nutritional support" },
+      { "fieldKey": "followup_plan", "technicianLabel": "Follow-up / retreatment plan", "customerLabel": "Next steps", "value": "Retreatment in 12 months; monitor fronds for change", "customerValueLabel": "Retreatment in 12 months; monitor fronds for change" }
+    ],
+    "activity": null
+  },
+  "expected": {
+    "todaysResultPresent": true,
+    "pestPressureRendered": false,
+    "gaugeRendered": false,
+    "nextStepPresent": true,
+    "requiredInteractionsAtMost": 5
+  }
+}

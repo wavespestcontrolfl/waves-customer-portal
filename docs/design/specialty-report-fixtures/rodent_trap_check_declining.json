@@ -1,0 +1,57 @@
+{
+  "fixture": "rodent_trap_check_declining",
+  "proves": ["progress_visit", "short_progress_sms", "report_every_visit_cadence"],
+  "completionContext": {
+    "billingType": "one_time",
+    "amountDueCents": 0,
+    "followupIncluded": true,
+    "expectedGate": "no_billing_409"
+  },
+  "typedReportSnapshot": {
+    "type": "rodent_trapping",
+    "typeLabel": "Rodent Trapping",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "rodent_trapping_setup",
+    "serviceLabel": "Rodent Trapping",
+    "reportTypeLabel": "Rodent Program — Progress Visit",
+    "visitSequence": 3,
+    "values": {
+      "species": "Roof rat",
+      "activity_found": "One capture in attic; no new droppings since last check",
+      "traps_set": "Reset 6 attic traps; garage boards unchanged",
+      "followup_plan": "Final check in 4 days; exclusion sealing scheduled"
+    },
+    "nextStepChips": ["Trap check scheduled", "Exclusion work scheduled"],
+    "todaysResult": {
+      "headline": "Rodent activity has decreased since our last visit.",
+      "body": "One capture since the last check and no new droppings observed. We reset all attic traps, and the entry-point sealing is scheduled.",
+      "nextStep": "Final trap check in 4 days."
+    },
+    "findings": [
+      { "fieldKey": "activity_found", "technicianLabel": "Activity found", "customerLabel": "Activity observed", "value": "One capture in attic; no new droppings since last check", "customerValueLabel": "One capture in the attic; no new droppings since the last check" },
+      { "fieldKey": "traps_set", "technicianLabel": "Traps set (count + locations)", "customerLabel": "Traps in place", "value": "Reset 6 attic traps; garage boards unchanged", "customerValueLabel": "All 6 attic traps reset; garage boards unchanged" }
+    ],
+    "activity": {
+      "indicatorKey": "rodent_activity",
+      "label": "Rodent Activity",
+      "score": 2,
+      "levelWord": "Low activity",
+      "source": "technician",
+      "derivedFrom": null,
+      "trend": "improving",
+      "trendWord": "decreased since the last visit",
+      "history": [{ "visit": 1, "score": 4 }, { "visit": 2, "score": 3 }, { "visit": 3, "score": 2 }]
+    }
+  },
+  "expected": {
+    "reportTitleContains": "Progress Visit",
+    "trendClaimed": true,
+    "historyPointCount": 3,
+    "billing409Fired": false,
+    "smsCopy": "Your trap check was completed today. Activity is improving. Details: {url}",
+    "emphasizesProgressNotDiagnosis": true,
+    "pestPressureRendered": false
+  }
+}

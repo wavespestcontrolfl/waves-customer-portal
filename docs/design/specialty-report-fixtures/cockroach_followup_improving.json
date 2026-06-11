@@ -1,0 +1,58 @@
+{
+  "fixture": "cockroach_followup_improving",
+  "proves": ["progress_visit_framing", "trend_words", "same_indicator_history", "zero_followup_billing"],
+  "completionContext": {
+    "billingType": "one_time",
+    "amountDueCents": 0,
+    "followupIncluded": true,
+    "expectedGate": "no_billing_409"
+  },
+  "typedReportSnapshot": {
+    "type": "cockroach",
+    "typeLabel": "Cockroach Treatment",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "cockroach_control",
+    "serviceLabel": "Cockroach Control Service",
+    "reportTypeLabel": "Cockroach Program — Progress Visit",
+    "visitSequence": 2,
+    "values": {
+      "species": "German",
+      "areas_inspected": "Kitchen, both bathrooms, prior harborage points",
+      "activity_level": "Low",
+      "treatment_performed": "Refreshed gel bait placements, re-applied IGR at prior harborage points"
+    },
+    "nextStepChips": ["Monitor activity", "Keep treated areas undisturbed"],
+    "todaysResult": {
+      "headline": "Cockroach activity has decreased since our last visit.",
+      "body": "Activity is now low and limited to the kitchen. We refreshed bait placements and growth regulator at the previous activity points.",
+      "nextStep": "Continue keeping treated areas undisturbed — contact us if activity increases."
+    },
+    "findings": [
+      { "fieldKey": "activity_level", "technicianLabel": "Activity level", "customerLabel": "Activity observed", "value": "Low", "customerValueLabel": "Low activity" },
+      { "fieldKey": "treatment_performed", "technicianLabel": "Treatment performed", "customerLabel": "What we did", "value": "Refreshed gel bait placements, re-applied IGR at prior harborage points", "customerValueLabel": "Refreshed bait placements and growth regulator at previous activity points" }
+    ],
+    "activity": {
+      "indicatorKey": "roach_activity",
+      "label": "Roach Activity",
+      "score": 1,
+      "levelWord": "Very low activity",
+      "source": "technician",
+      "derivedFrom": { "field": "activity_level", "value": "Low", "initialDerivedScore": 1, "pinnedAt": "<completion>" },
+      "trend": "improving",
+      "trendWord": "decreased since the last visit",
+      "history": [{ "visit": 1, "score": 3 }, { "visit": 2, "score": 1 }]
+    }
+  },
+  "expected": {
+    "reportTitleContains": "Progress Visit",
+    "trendClaimed": true,
+    "trendWordPresent": "decreased since the last visit",
+    "historyPointCount": 2,
+    "billing409Fired": false,
+    "smsCopy": "Your follow-up visit was completed today. Activity is improving. Details: {url}",
+    "smsIsShortProgressForm": true,
+    "pestPressureRendered": false
+  }
+}

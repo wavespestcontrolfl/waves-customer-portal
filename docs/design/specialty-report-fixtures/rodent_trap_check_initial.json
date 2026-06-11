@@ -1,0 +1,53 @@
+{
+  "fixture": "rodent_trap_check_initial",
+  "proves": ["trend_baseline", "traps_language", "tech_set_score"],
+  "typedReportSnapshot": {
+    "type": "rodent_trapping",
+    "typeLabel": "Rodent Trapping",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "rodent_trapping_setup",
+    "serviceLabel": "Rodent Trapping",
+    "reportTypeLabel": "Rodent Trapping Summary",
+    "visitSequence": 1,
+    "values": {
+      "species": "Roof rat",
+      "activity_found": "Droppings and rub marks in attic near AC plenum; noises reported at night",
+      "traps_set": "6 snap traps in attic, 2 glue boards in garage",
+      "entry_points_observed": "Gap at roof return on south side; unscreened gable vent",
+      "followup_plan": "Return in 3 days to check and reset traps"
+    },
+    "nextStepChips": ["Trap check scheduled", "Seal entry points"],
+    "todaysResult": {
+      "headline": "Rodent activity was high today.",
+      "body": "We found roof rat activity in the attic, set 6 snap traps in the attic and 2 glue boards in the garage, and identified two entry points that need sealing.",
+      "nextStep": "We'll return in 3 days to check and reset traps."
+    },
+    "findings": [
+      { "fieldKey": "species", "technicianLabel": "Species", "customerLabel": "What we found", "value": "Roof rat", "customerValueLabel": "Roof rats" },
+      { "fieldKey": "activity_found", "technicianLabel": "Activity found", "customerLabel": "Activity observed", "value": "Droppings and rub marks in attic near AC plenum; noises reported at night", "customerValueLabel": "Droppings and rub marks in the attic near the AC unit" },
+      { "fieldKey": "traps_set", "technicianLabel": "Traps set (count + locations)", "customerLabel": "Traps in place", "value": "6 snap traps in attic, 2 glue boards in garage", "customerValueLabel": "6 traps in the attic, 2 in the garage" },
+      { "fieldKey": "entry_points_observed", "technicianLabel": "Entry points observed", "customerLabel": "Entry points we found", "value": "Gap at roof return on south side; unscreened gable vent", "customerValueLabel": "Gap at the roof return (south side) and an unscreened gable vent" }
+    ],
+    "activity": {
+      "indicatorKey": "rodent_activity",
+      "label": "Rodent Activity",
+      "score": 4,
+      "levelWord": "High activity",
+      "source": "technician",
+      "derivedFrom": null,
+      "trend": null,
+      "trendWord": "Baseline recorded today",
+      "history": [{ "visit": 1, "score": 4 }]
+    }
+  },
+  "expected": {
+    "todaysResultPresent": true,
+    "gaugeRendered": true,
+    "trendClaimed": false,
+    "baselineWordingPresent": true,
+    "followupSuggestionRequired": true,
+    "pestPressureRendered": false
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "fixture": "one_time_pest_bee_wasp_completed",
+  "proves": ["phase1", "subtype_aware_labels", "payment_required_completion"],
+  "completionContext": {
+    "billingType": "one_time",
+    "amountDueCents": 22500,
+    "expectedGate": "completion_billing_required_until_invoice_resolved"
+  },
+  "typedReportSnapshot": {
+    "type": "one_time_pest_treatment",
+    "typeLabel": "One-Time Pest Treatment",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "bee_wasp_removal",
+    "serviceLabel": "Bee/Wasp Removal",
+    "reportTypeLabel": "Bee/Wasp Treatment Summary",
+    "visitSequence": 1,
+    "values": {
+      "target_pest": "Paper wasps",
+      "areas_inspected": "Front entry soffit, lanai, eaves on all sides",
+      "activity_level": "Moderate",
+      "treatment_performed": "Removed two paper wasp nests at the front entry soffit and treated eave lines",
+      "products_used": "Onslaught FastCap (eave/soffit application)"
+    },
+    "nextStepChips": ["Monitor activity"],
+    "todaysResult": {
+      "headline": "Wasp activity was moderate today.",
+      "body": "We removed two paper wasp nests at the front entry soffit and treated the eave lines around the home.",
+      "nextStep": "Monitor activity — contact us if new nests appear."
+    },
+    "findings": [
+      { "fieldKey": "target_pest", "technicianLabel": "Target pest", "customerLabel": "What we found", "value": "Paper wasps", "customerValueLabel": "Paper wasps" },
+      { "fieldKey": "activity_level", "technicianLabel": "Activity level", "customerLabel": "Activity observed", "value": "Moderate", "customerValueLabel": "Moderate activity" },
+      { "fieldKey": "treatment_performed", "technicianLabel": "Treatment performed", "customerLabel": "What we did", "value": "Removed two paper wasp nests at the front entry soffit and treated eave lines", "customerValueLabel": "Removed two paper wasp nests at the front entry soffit and treated eave lines" },
+      { "fieldKey": "products_used", "technicianLabel": "Products used", "customerLabel": "Products applied", "value": "Onslaught FastCap (eave/soffit application)", "customerValueLabel": "Onslaught FastCap (eave/soffit application)" }
+    ],
+    "activity": null
+  },
+  "expected": {
+    "todaysResultPresent": true,
+    "reportTitleContains": "Bee/Wasp",
+    "genericTypeLabelNotShownAsTitle": true,
+    "pestPressureRendered": false,
+    "gaugeRendered": false,
+    "reentryAdvisoryPresent": true,
+    "nextStepPresent": true,
+    "smsCopy": "Hi {first}, your Bee/Wasp Treatment Summary report is ready: {url}"
+  }
+}

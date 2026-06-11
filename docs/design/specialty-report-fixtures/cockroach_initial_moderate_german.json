@@ -1,0 +1,59 @@
+{
+  "fixture": "cockroach_initial_moderate_german",
+  "proves": ["phase1b", "gauge_baseline", "german_followup_trigger", "derived_prefill"],
+  "typedReportSnapshot": {
+    "type": "cockroach",
+    "typeLabel": "Cockroach Treatment",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "cockroach_control",
+    "serviceLabel": "Cockroach Control Service",
+    "reportTypeLabel": "Cockroach Treatment Summary",
+    "visitSequence": 1,
+    "values": {
+      "species": "German",
+      "areas_inspected": "Kitchen, both bathrooms, under appliances, sink cabinets",
+      "activity_level": "Moderate",
+      "harborage_locations": "Behind refrigerator, dishwasher kick plate, under-sink cabinet hinge gaps",
+      "treatment_performed": "Gel bait placements, IGR application, crack & crevice treatment, vacuumed visible activity",
+      "prep_for_customer": "Store food sealed, reduce cardboard, avoid cleaning treated cracks for 2 weeks"
+    },
+    "nextStepChips": ["Follow-up recommended", "Keep treated areas undisturbed"],
+    "todaysResult": {
+      "headline": "Cockroach activity was moderate today.",
+      "body": "We found German cockroach activity concentrated behind the refrigerator and dishwasher, placed gel bait and growth regulator in all activity areas, and treated cracks and crevices.",
+      "nextStep": "A follow-up visit in about 14 days is recommended for German cockroaches."
+    },
+    "findings": [
+      { "fieldKey": "species", "technicianLabel": "Species", "customerLabel": "What we found", "value": "German", "customerValueLabel": "German cockroaches" },
+      { "fieldKey": "activity_level", "technicianLabel": "Activity level", "customerLabel": "Activity observed", "value": "Moderate", "customerValueLabel": "Moderate activity" },
+      { "fieldKey": "harborage_locations", "technicianLabel": "Harborage locations", "customerLabel": "Where activity was concentrated", "value": "Behind refrigerator, dishwasher kick plate, under-sink cabinet hinge gaps", "customerValueLabel": "Behind refrigerator, dishwasher kick plate, under-sink cabinet hinge gaps" },
+      { "fieldKey": "treatment_performed", "technicianLabel": "Treatment performed", "customerLabel": "What we did", "value": "Gel bait placements, IGR application, crack & crevice treatment, vacuumed visible activity", "customerValueLabel": "Gel bait placements, growth regulator application, crack & crevice treatment" },
+      { "fieldKey": "prep_for_customer", "technicianLabel": "Customer prep / responsibilities", "customerLabel": "What you can do", "value": "Store food sealed, reduce cardboard, avoid cleaning treated cracks for 2 weeks", "customerValueLabel": "Store food sealed, reduce cardboard, avoid cleaning treated cracks for 2 weeks" }
+    ],
+    "activity": {
+      "indicatorKey": "roach_activity",
+      "label": "Roach Activity",
+      "score": 3,
+      "levelWord": "Moderate activity",
+      "source": "derived",
+      "derivedFrom": { "field": "activity_level", "value": "Moderate", "initialDerivedScore": 3 },
+      "trend": null,
+      "trendWord": "Baseline recorded today",
+      "history": [{ "visit": 1, "score": 3 }]
+    }
+  },
+  "expected": {
+    "todaysResultPresent": true,
+    "gaugeRendered": true,
+    "gaugeShowsLevelWordNotNumber": true,
+    "trendClaimed": false,
+    "baselineWordingPresent": true,
+    "followupSuggestionRequired": true,
+    "followupSuggestionDays": 14,
+    "followupTriggerMatchedOnCanonicalValue": "German",
+    "pestPressureRendered": false,
+    "customerRatingPromptRendered": false
+  }
+}
