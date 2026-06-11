@@ -368,7 +368,7 @@ async function checkCustomerStatus(input) {
 
   const health = await db('customer_health_scores')
     .where({ customer_id: customer.id })
-    .orderBy('created_at', 'desc').first();
+    .orderByRaw('scored_at DESC NULLS LAST, created_at DESC').first();
 
   const lastService = await db('service_records')
     .where({ customer_id: customer.id, status: 'completed' })

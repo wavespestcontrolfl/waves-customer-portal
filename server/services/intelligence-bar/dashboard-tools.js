@@ -256,8 +256,10 @@ async function getKpiSnapshot() {
         db.raw("SUM(CASE WHEN due_date < (NOW() AT TIME ZONE 'America/New_York')::date THEN total ELSE 0 END) as overdue"),
         db.raw('COUNT(*) as count'),
       ).first(),
+    // Latest per customer keys on scored_at (current rows are updated in
+    // place, so created_at never moves); created_at is the tie/null fallback.
     db('customer_health_scores as h')
-      .join(db.raw("(SELECT customer_id, MAX(created_at) as max_created FROM customer_health_scores GROUP BY customer_id) latest ON h.customer_id = latest.customer_id AND h.created_at = latest.max_created"))
+      .join(db.raw("(SELECT customer_id, MAX(COALESCE(scored_at, created_at)) as max_scored FROM customer_health_scores GROUP BY customer_id) latest ON h.customer_id = latest.customer_id AND COALESCE(h.scored_at, h.created_at) = latest.max_scored"))
       .select('h.churn_risk', db.raw('COUNT(*) as count')).groupBy('h.churn_risk'),
   ]);
 
@@ -826,9 +828,14 @@ async function getTodayBriefing() {
       .count('* as c').first(),
 
     // At-risk customers — same ET anchoring on the 7-day threshold.
+    // Freshness comes from scored_at: current rows are updated in place by
+    // the nightly scorers, so created_at stays at first-insert time and
+    // would wrongly age rows out of this window. 'high' is included because
+    // the v3 scorer writes low/moderate/high/critical onto the same row the
+    // CI scorer stamps at_risk/critical.
     db('customer_health_scores')
-      .whereIn('churn_risk', ['at_risk', 'critical'])
-      .whereRaw("created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '7 days')")
+      .whereIn('churn_risk', ['at_risk', 'critical', 'high'])
+      .whereRaw("COALESCE(scored_at, created_at) >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '7 days')")
       .count('* as c').first(),
 
     // Last 5 activity items

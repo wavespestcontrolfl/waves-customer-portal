@@ -266,7 +266,7 @@ async function queryCustomers(input) {
       'customers.last_contact_date',
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed')) as next_service_date"),
-      db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY created_at DESC LIMIT 1) as health_score"),
+      db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC NULLS LAST, created_at DESC LIMIT 1) as health_score"),
     );
 
   // Apply filters
@@ -476,7 +476,7 @@ async function getCustomerDetail(customerId) {
 
   const health = await db('customer_health_scores')
     .where('customer_id', customerId)
-    .orderBy('created_at', 'desc')
+    .orderByRaw('scored_at DESC NULLS LAST, created_at DESC')
     .first();
 
   return {

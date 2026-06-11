@@ -48,7 +48,11 @@ router.get('/', async (req, res, next) => {
       const risk = normalizeRisk(s.churn_risk);
       dist[risk] = (dist[risk] || 0) + 1;
       if (['at_risk', 'critical'].includes(risk)) {
-        mrrAtRisk += parseFloat(s.lifetime_value_estimate || 0) / 12;
+        // lifetime_value_estimate is only written by the CI scorer; rows
+        // last stamped by the v3 scorer won't have it — fall back to the
+        // customer's monthly rate so they don't count as $0 at risk.
+        const ltvMonthly = parseFloat(s.lifetime_value_estimate || 0) / 12;
+        mrrAtRisk += ltvMonthly > 0 ? ltvMonthly : parseFloat(s.monthly_rate || 0);
       }
     }
 
