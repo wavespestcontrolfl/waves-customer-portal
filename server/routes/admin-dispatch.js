@@ -1711,6 +1711,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         typedChips = chipsValidation.chips;
         typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
 
+        // Manual recommendations are customer-facing on typed reports (the
+        // V1 page renders protocol.recommendations verbatim) — the same
+        // banned-copy policy the AI draft endpoint enforces applies to
+        // hand-typed text. 422 so the tech rephrases before anything sends.
+        const recommendationCopyViolations = (Array.isArray(recommendations) ? recommendations : [])
+          .flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry));
+        if (recommendationCopyViolations.length) {
+          return res.status(422).json({
+            error: `Recommendations contain wording we can't put on a customer report (${[...new Set(recommendationCopyViolations)].join(', ')}). Describe what was observed and done today instead of absolute claims.`,
+            code: 'typed_recommendations_banned_copy',
+            violations: [...new Set(recommendationCopyViolations)],
+          });
+        }
+
         // Activity score: strict integer 0-5 or null (same contract as
         // clientPestRating). Gauge types require a score on a completed
         // visit — derived prefill fills it when the tech didn't touch the

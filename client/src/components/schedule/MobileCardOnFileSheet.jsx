@@ -34,6 +34,7 @@ function cardTitle(c) {
 }
 
 export default function MobileCardOnFileSheet({
+  desktopVisible = false,
   service,
   invoiceId,
   customerId,
@@ -86,7 +87,7 @@ export default function MobileCardOnFileSheet({
   }
 
   return (
-    <div className="fixed inset-0 z-[115] bg-white overflow-y-auto md:hidden">
+    <div className={`fixed inset-0 z-[115] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
       {/* Header — back button left, customer name centered. */}
       <div
         className="sticky top-0 bg-white flex items-center px-3 border-b border-hairline border-zinc-200"

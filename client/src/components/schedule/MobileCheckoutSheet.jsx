@@ -367,12 +367,14 @@ export default function MobileCheckoutSheet({
 
       {showServicePicker && (
         <MobileServicePickerSheet
+          desktopVisible={desktopVisible}
           onClose={() => setShowServicePicker(false)}
           onSelect={handleAddService}
         />
       )}
       {showItemPicker && (
         <MobileItemDiscountPickerSheet
+          desktopVisible={desktopVisible}
           onClose={() => setShowItemPicker(false)}
           onSelect={handleAddItem}
         />

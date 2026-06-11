@@ -26,6 +26,7 @@ function loadStripeJs(publishableKey) {
 }
 
 export default function MobileManualCardSheet({
+  desktopVisible = false,
   invoiceToken,
   amount,
   onClose,
@@ -197,7 +198,7 @@ export default function MobileManualCardSheet({
   const displayedTotal = quoteData?.total ?? amount;
 
   return (
-    <div className="fixed inset-0 z-[115] bg-white overflow-y-auto md:hidden">
+    <div className={`fixed inset-0 z-[115] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
       {/* Header */}
       <div
         className="sticky top-0 bg-white flex items-center px-3"

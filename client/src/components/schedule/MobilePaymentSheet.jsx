@@ -217,6 +217,7 @@ export default function MobilePaymentSheet({
 
       {showManualCard && (
         <MobileManualCardSheet
+          desktopVisible={desktopVisible}
           invoiceToken={invoiceToken}
           amount={amount}
           onClose={() => setShowManualCard(false)}
@@ -229,6 +230,7 @@ export default function MobilePaymentSheet({
 
       {showCash && (
         <MobileCashTenderSheet
+          desktopVisible={desktopVisible}
           invoiceId={invoiceId}
           amount={amount}
           onClose={() => setShowCash(false)}
@@ -241,6 +243,7 @@ export default function MobilePaymentSheet({
 
       {showCheck && (
         <MobileCheckTenderSheet
+          desktopVisible={desktopVisible}
           invoiceId={invoiceId}
           amount={amount}
           onClose={() => setShowCheck(false)}
@@ -253,6 +256,7 @@ export default function MobilePaymentSheet({
 
       {showCardOnFile && (
         <MobileCardOnFileSheet
+          desktopVisible={desktopVisible}
           service={service}
           invoiceId={invoiceId}
           customerId={service?.customerId || service?.customer_id}

@@ -2390,6 +2390,7 @@ export default function DispatchPageV2({
       )}
       {editingLineService && (
         <MobileServiceEditModal
+          desktopVisible
           service={editingLineService}
           technicians={technicians}
           onClose={() => setEditingLineService(null)}
