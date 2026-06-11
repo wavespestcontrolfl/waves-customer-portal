@@ -154,12 +154,23 @@ router.put('/retention/:id/approve', async (req, res, next) => {
     const outreach = await db('retention_outreach').where('id', req.params.id).first();
     if (!outreach) return res.status(404).json({ error: 'Outreach not found' });
 
-    const updates = { status: 'approved', approved_by: req.body.approvedBy || 'admin', sent_at: new Date() };
+    // Never text archived customers — retention outreach for a soft-deleted
+    // customer is stale by definition.
+    const customer = await db('customers')
+      .where('id', outreach.customer_id)
+      .whereNull('deleted_at')
+      .first();
+    if (!customer) {
+      return res.status(409).json({ error: 'Customer is archived or missing — outreach cannot be sent' });
+    }
+
+    // sent_at / status 'sent' are only stamped AFTER a successful send so a
+    // blocked or failed send leaves the row in a truthful state.
+    const updates = { status: 'approved', approved_by: req.body.approvedBy || 'admin' };
 
     // If SMS, actually send it
     if (outreach.outreach_type === 'sms') {
-      const customer = await db('customers').where('id', outreach.customer_id).first();
-      if (customer?.phone) {
+      if (customer.phone) {
         try {
           const smsResult = await sendCustomerMessage({
             to: customer.phone,
@@ -183,13 +194,18 @@ router.put('/retention/:id/approve', async (req, res, next) => {
           });
           if (smsResult.sent) {
             updates.status = 'sent';
+            updates.sent_at = new Date();
           } else {
             updates.status = 'blocked';
             logger.warn(`Retention SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           }
         } catch (err) {
+          updates.status = 'blocked';
           logger.error(`Retention SMS failed: ${err.message}`);
         }
+      } else {
+        updates.status = 'blocked';
+        logger.warn(`Retention SMS for customer ${outreach.customer_id} has no phone on file — marked blocked`);
       }
     } else {
       updates.status = 'approved'; // Call — marked as approved, Adam calls manually

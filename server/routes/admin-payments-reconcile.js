@@ -77,6 +77,13 @@ router.post('/reconcile', async (req, res, next) => {
     const { invoiceId, stripeChargeId, collectedVia, amount, note } = req.body || {};
     if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
     if (!collectedVia) return res.status(400).json({ error: 'collectedVia required' });
+    if (amount != null && (!Number.isFinite(Number(amount)) || Number(amount) <= 0)) {
+      return res.status(400).json({ error: 'amount must be a positive number' });
+    }
+
+    // 'processing' is blocked too: an ACH payment in flight will settle on its
+    // own — reconciling it as cash/check would double-collect the invoice.
+    const BLOCKED_STATUSES = ['paid', 'void', 'processing'];
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
@@ -85,6 +92,9 @@ router.post('/reconcile', async (req, res, next) => {
     }
     if (invoice.status === 'void') {
       return res.status(409).json({ error: 'Invoice is void' });
+    }
+    if (invoice.status === 'processing') {
+      return res.status(409).json({ error: 'Invoice has a payment processing (e.g. ACH in flight) — wait for it to settle before reconciling' });
     }
 
     const updates = {
@@ -136,13 +146,27 @@ router.post('/reconcile', async (req, res, next) => {
       updates.payment_method = collectedVia;
     }
 
-    await db('invoices').where({ id: invoiceId }).update(updates);
+    // Conditional update closes the TOCTOU window: if the invoice was paid,
+    // voided, or moved to processing between our read and this write, the
+    // UPDATE matches 0 rows and we bail instead of double-marking it.
+    const updatedRows = await db('invoices')
+      .where({ id: invoiceId })
+      .whereNotIn('status', BLOCKED_STATUSES)
+      .update(updates);
+    if (!updatedRows) {
+      const current = await db('invoices').where({ id: invoiceId }).first('status');
+      return res.status(409).json({
+        error: `Invoice status changed to '${current?.status || 'unknown'}' while reconciling — no changes applied`,
+      });
+    }
 
     // Also create a payments ledger row so revenue reports pick up the collection
     try {
       await db('payments').insert({
         customer_id: invoice.customer_id,
-        amount: parseFloat(invoice.total),
+        // Record what the operator actually collected when they supplied an
+        // amount; fall back to the invoice total otherwise.
+        amount: amount != null ? Number(amount) : parseFloat(invoice.total),
         status: 'paid',
         description: `Invoice ${invoice.invoice_number} — ${collectedVia}`,
         payment_date: etDateString(),

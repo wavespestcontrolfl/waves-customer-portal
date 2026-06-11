@@ -116,7 +116,7 @@ router.post('/sms', async (req, res, next) => {
     }
     let trustedCustomerId;
     if (customerId) {
-      const customer = await db('customers').where({ id: customerId }).first('id', 'phone');
+      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
       const normalizedCustomerPhone = normalizePhone(customer.phone);
@@ -912,7 +912,7 @@ router.post('/schedule-sms', async (req, res, next) => {
 
     let trustedCustomerId = null;
     if (customerId) {
-      const customer = await db('customers').where({ id: customerId }).first('id', 'phone');
+      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
       const normalizedCustomerPhone = normalizePhone(customer.phone);
@@ -921,7 +921,10 @@ router.post('/schedule-sms', async (req, res, next) => {
       }
       trustedCustomerId = customer.id;
     } else {
-      const fallback = await db('customers').where({ phone: to }).first('id');
+      // Digit-normalized, deleted-filtered, ambiguity-aware lookup — a raw
+      // exact-string phone match misses formatting variants and can link the
+      // scheduled SMS to a soft-deleted or arbitrary duplicate customer.
+      const fallback = await findSingleCustomerForPhone(to).catch(() => null);
       if (fallback) trustedCustomerId = fallback.id;
     }
 
