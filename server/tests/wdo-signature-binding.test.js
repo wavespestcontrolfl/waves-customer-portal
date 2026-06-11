@@ -429,6 +429,107 @@ describe('WDO signature content binding', () => {
     });
   });
 
+  // Section 2 contradiction gate: "NO visible signs" (box A) must never file
+  // with text still on the Section 2.B lines — box A checked over B findings
+  // text is an internally contradictory legal document.
+  test('/send 422s contradictory_findings when "No visible signs" coexists with Section 2.B text', async () => {
+    const findings = {
+      ...WDO_FINDINGS,
+      wdo_finding: 'No visible signs of WDO observed',
+      // wdo_evidence kept from WDO_FINDINGS — typed before the select flip
+    };
+    const project = wdoProject({
+      findings,
+      wdo_signature: JSON.stringify({
+        image: PNG_DATA_URL,
+        signer_name: 'A',
+        content_hash: expectedContentHash(findings, '2026-06-10'),
+      }),
+    });
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('contradictory_findings');
+      expect(body.error).toMatch(/Evidence of WDO/);
+    });
+  });
+
+  test('/send-with-invoice 422s contradictory_findings the same way', async () => {
+    const findings = {
+      ...WDO_FINDINGS,
+      wdo_finding: 'No visible signs of WDO observed',
+      wdo_damage: 'Galleries in sill plate',
+    };
+    const project = wdoProject({
+      findings,
+      wdo_signature: JSON.stringify({
+        image: PNG_DATA_URL,
+        signer_name: 'A',
+        content_hash: expectedContentHash(findings, '2026-06-10'),
+      }),
+    });
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('contradictory_findings');
+    });
+  });
+
+  test('"No visible signs" with clean Section 2.B lines passes the gate (reaches readiness)', async () => {
+    // Same shape as the fresh-signature pass-through test: getting the
+    // readiness 422 (no `code`) proves the contradiction gate let it through.
+    const findings = { wdo_finding: 'No visible signs of WDO observed', live_wdo: '   ' };
+    const project = wdoProject({
+      findings,
+      wdo_signature: JSON.stringify({
+        image: PNG_DATA_URL,
+        signer_name: 'A',
+        content_hash: expectedContentHash(findings, '2026-06-10'),
+      }),
+    });
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
+    const customerRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', email: 'c@example.com' }) });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBeUndefined();
+      expect(body.missing.map((m) => m.key)).toEqual(expect.arrayContaining(['wdo_property_address']));
+    });
+  });
+
   test('DELETE wdo-signature rejects non-WDO projects and logs the clear on WDO', async () => {
     const nonWdoRead = chain({
       first: jest.fn().mockResolvedValue(wdoProject({ project_type: 'rodent_exclusion' })),

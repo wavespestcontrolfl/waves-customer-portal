@@ -1597,6 +1597,28 @@ function wdoSignatureFreshness(project) {
   return { signed: true, fresh, signature };
 }
 
+// FDACS Section 2 integrity: "NO visible signs of WDO(s)" (box A) with text
+// still in the Section 2.B lines (live / evidence / damage) would print an
+// internally contradictory legal filing — box A checked while B's lines carry
+// findings. Happens when the tech types text first and flips the select late.
+// Hard 422, no override: the fix is a 30-second edit (clear the text or
+// change the finding; explanatory notes belong in Section 5 Comments), unlike
+// the missing-data overrides which cover genuinely unknowable fields.
+function wdoSectionTwoContradiction(project) {
+  const findings = parseFindings(project);
+  const finding = String(findings.wdo_finding || '').trim().toLowerCase();
+  if (!finding.startsWith('no visible')) return null;
+  const labels = {
+    live_wdo: 'Live WDO(s)',
+    wdo_evidence: 'Evidence of WDO(s)',
+    wdo_damage: 'Damage caused by WDO(s)',
+  };
+  const conflicting = Object.keys(labels).filter((key) => String(findings[key] || '').trim());
+  if (!conflicting.length) return null;
+  const names = conflicting.map((key) => labels[key]).join(', ');
+  return `Section 2 contradiction: "${findings.wdo_finding}" is selected but ${names} still contain${conflicting.length === 1 ? 's' : ''} text. Clear ${conflicting.length === 1 ? 'it' : 'them'} or change the finding — explanatory notes belong in Comments.`;
+}
+
 // Called after PUT /:id persists a findings/project_date edit on a WDO
 // project. If the project is signed and the attested content changed, flag the
 // signature stale (and self-heal back to fresh if a hashed signature's content
@@ -2123,6 +2145,10 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       if (!sigState.fresh) {
         return res.status(422).json({ error: 'Findings were edited after signing — the licensee must re-sign before sending', code: 'signature_stale' });
       }
+      const contradiction = wdoSectionTwoContradiction(project);
+      if (contradiction) {
+        return res.status(422).json({ error: contradiction, code: 'contradictory_findings' });
+      }
     }
 
     const customer = project.customer_id
@@ -2575,6 +2601,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       }
       if (!sigState.fresh) {
         return res.status(422).json({ error: 'Findings were edited after signing — the licensee must re-sign before sending', code: 'signature_stale' });
+      }
+      const contradiction = wdoSectionTwoContradiction(project);
+      if (contradiction) {
+        return res.status(422).json({ error: contradiction, code: 'contradictory_findings' });
       }
     }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
