@@ -686,19 +686,11 @@ httpServer.listen(PORT, () => {
       setInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
     }
 
-    // Process unprocessed call recordings every 10 minutes (safety net)
-    setInterval(async () => {
-      try {
-        const processor = require('./services/call-recording-processor');
-        if (processor.recoverMissingRecentRecordings) await processor.recoverMissingRecentRecordings();
-        const result = await processor.processAllPending();
-        if (result.processed > 0) {
-          logger.info(`[call-proc-cron] Processed ${result.processed} pending recording(s)`);
-        }
-      } catch (err) {
-        logger.error(`[call-proc-cron] Failed: ${err.message}`);
-      }
-    }, 10 * 60 * 1000);
+    // Call recordings are processed by the every-5-minute scheduler.js
+    // cron (recoverMissingRecentRecordings + processAllPending). The
+    // 10-minute setInterval that used to live here duplicated it —
+    // harmless thanks to the processor's atomic token-fenced claims, but
+    // pure redundant load.
 
     // Log memory every 5 minutes to catch leaks / OOM before SIGTERM
     setInterval(() => {
