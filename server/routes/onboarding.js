@@ -551,7 +551,14 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
     const finishLock = async (commit = true) => {
       if (lockDone) return;
       lockDone = true;
-      try { await (commit ? lockTrx.commit() : lockTrx.rollback()); } catch {}
+      if (commit) {
+        // A failed COMMIT means the booking/cancel writes did NOT persist —
+        // it must propagate so the customer gets an error, not a success
+        // response (and no post-commit SMS fires for a phantom booking).
+        await lockTrx.commit();
+        return;
+      }
+      try { await lockTrx.rollback(); } catch {}
     };
 
     try {
