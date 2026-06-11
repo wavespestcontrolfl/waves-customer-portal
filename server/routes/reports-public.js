@@ -43,18 +43,29 @@ async function staffCanViewSuppressed(req) {
 }
 
 // Centralized gate: runs for EVERY route in this router with a :token param
-// (data, PDF, preview, map.svg, ask, client-rating, …) so no content-bearing
-// or write subroute can be added and forgotten. Project-report tokens and
-// unknown tokens pass through — each route resolves/404s on its own; this
-// gate owns exactly one concern: suppressed service reports are staff-only.
+// (data, PDF, preview, map.svg, ask, …) so no content-bearing subroute can
+// be added and forgotten. Project-report tokens and unknown tokens pass
+// through — each route resolves/404s on its own; this gate owns exactly one
+// concern: suppressed service reports are staff-READ-only.
+const RATE_LIMITED_WRITE_RE = /^\/[a-f0-9]{32}\/(events|pest-pressure\/client-rating)$/i;
 router.param('token', async (req, res, next, token) => {
   try {
     if (!FULL_TOKEN_RE.test(String(token || ''))) return next();
+    // These POST routes carry their own rate limiter, which must run before
+    // any DB work (the general limiter deliberately skips /events). Their
+    // handlers enforce suppression themselves, post-limiter.
+    if (req.method === 'POST' && RATE_LIMITED_WRITE_RE.test(req.path || '')) return next();
     const record = await db('service_records')
       .where({ report_view_token: token })
       .first('id', 'structured_notes');
     if (!record || !suppressedTypedReport(record)) return next();
-    if (await staffCanViewSuppressed(req)) return next();
+    // Staff bypass is READ-only review access. Writes on suppressed reports
+    // mirror customer read eligibility and are rejected for everyone — a
+    // staff token must not store customer state (ratings, events, questions)
+    // on a report the customer cannot see.
+    if ((req.method === 'GET' || req.method === 'HEAD') && await staffCanViewSuppressed(req)) {
+      return next();
+    }
     return res.status(404).json({ error: 'Report not found' });
   } catch (err) {
     return next(err);
@@ -354,9 +365,14 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'report_template_version')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Suppressed reports take no event writes from anyone — this route is
+    // skipped by the central param gate so its limiter runs before DB work.
+    if (suppressedTypedReport(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
@@ -406,8 +422,13 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
 
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'report_template_version', 'client_pest_rating');
+      .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'report_template_version', 'client_pest_rating', 'structured_notes');
     if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Suppressed reports take no rating writes from anyone — this route is
+    // skipped by the central param gate so its limiter runs before DB work.
+    if (suppressedTypedReport(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
 

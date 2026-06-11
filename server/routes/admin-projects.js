@@ -1165,19 +1165,30 @@ router.post('/', async (req, res, next) => {
     // their Projects flow — otherwise they need a project they can't create.
     // The type-level check governs unlinked/ad hoc creations only.
     const managedTypes = await appointmentManagedProjectTypes();
-    // The profile resolves from EITHER link field: the route also accepts
-    // service_record_id without scheduled_service_id, and that path must not
-    // become a side door for typed completions (Codex P1) — especially for
-    // partially-cutover types the type-level guard no longer blocks.
+    // The profile resolves from BOTH link fields: the route accepts
+    // service_record_id with or without scheduled_service_id, and neither
+    // path may become a side door for typed completions (Codex P1) —
+    // especially for partially-cutover types the type-level guard no longer
+    // blocks. When both links are present they must refer to the same visit,
+    // or a crafted create could pair a project_required appointment with a
+    // typed record and never have the record's profile checked.
     let linkedProfile = null;
-    let linkedScheduledServiceId = scheduled_service_id || null;
-    if (!linkedScheduledServiceId && service_record_id) {
+    let recordScheduledServiceId = null;
+    if (service_record_id) {
       const linkedRecord = await db('service_records')
         .where({ id: service_record_id })
         .first('scheduled_service_id')
         .catch(() => null);
-      linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+      recordScheduledServiceId = linkedRecord?.scheduled_service_id || null;
     }
+    if (scheduled_service_id && recordScheduledServiceId
+        && String(recordScheduledServiceId) !== String(scheduled_service_id)) {
+      return res.status(400).json({
+        error: 'scheduled_service_id and service_record_id refer to different visits.',
+        code: 'project_link_mismatch',
+      });
+    }
+    const linkedScheduledServiceId = scheduled_service_id || recordScheduledServiceId;
     if (linkedScheduledServiceId) {
       linkedProfile = await resolveCompletionProfileForServiceId(linkedScheduledServiceId)
         .catch(() => null);
