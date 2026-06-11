@@ -1931,6 +1931,22 @@ const InvoiceService = {
     const voided = [];
     if (!scheduledServiceId) return voided;
     try {
+      // Barrier: wait for any in-flight charge-now mint to settle before
+      // scanning. The mint transaction holds this advisory lock until its
+      // commit, so acquiring (and immediately releasing) it here means the
+      // scan below sees every invoice an earlier mint produced. A mint
+      // STARTING after this barrier re-reads the service status under the
+      // lock and aborts on the cancellation — so neither ordering can
+      // leave an unseen collectible invoice. The lock is NOT held across
+      // the Stripe triage below (no locks across network calls); the
+      // per-invoice void transaction re-takes it for the final write.
+      await db.transaction(async (trx) => {
+        await trx.raw(
+          "SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))",
+          ["schedule.invoice.mint", String(scheduledServiceId)],
+        );
+      });
+
       const candidates = await db("invoices")
         .where({ scheduled_service_id: scheduledServiceId })
         .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
