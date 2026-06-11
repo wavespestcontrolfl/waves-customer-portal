@@ -205,7 +205,7 @@ async function submitRecap({
     const locked = await trx('scheduled_services')
       .where({ id: serviceId })
       .forUpdate()
-      .first('id', 'status');
+      .first('id', 'status', 'scheduled_date');
     // Re-read status under the lock — svc.status was read before the lock
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
@@ -215,6 +215,16 @@ async function submitRecap({
     //     written (no transition, no record, no products, no SMS).
     if (NON_COMPLETABLE_STATUSES.has(lockedStatus)) {
       rejectReason = `service_${lockedStatus}`;
+      return;
+    }
+
+    // 0c. Re-check the stale-recap guard under the lock. The pre-lock
+    //     check reads scheduled_date before FOR UPDATE — a staff live
+    //     reschedule can commit while this submit waits on the lock,
+    //     leaving the row pointing at a future visit that this recap
+    //     must not complete (TOCTOU; Codex P1).
+    if (locked && trackTransitions.isFutureScheduledDate(locked.scheduled_date)) {
+      rejectReason = 'future_scheduled_date';
       return;
     }
 
