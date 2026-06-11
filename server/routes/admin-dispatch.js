@@ -3252,10 +3252,60 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       || completionSmsSendingFresh;
+    // The pest-recap path (services/pest-recap.js) writes its own
+    // service_records row and claims recap_sms_sent_at when it texts the
+    // customer. That recap text and this completion SMS are two wordings of
+    // the same "service done" message — if a recap already texted this
+    // visit, sending the templated completion SMS double-texts the customer.
+    // The recap row is a SIBLING of `record` (each path inserts its own row
+    // keyed by scheduled_service_id), so the structured_notes check above
+    // can't see it.
+    let recapSmsAlreadySentForVisit = false;
+    if (!completionSmsAlreadyHandled && serviceRecordCols.recap_sms_sent_at) {
+      try {
+        const readRecapClaim = () => db('service_records')
+          .where({ scheduled_service_id: svc.id })
+          .whereNotNull('recap_sms_sent_at')
+          .first('id', 'recap_sms_sent_at');
+        let recapTexted = await readRecapClaim();
+        // pest-recap claims recap_sms_sent_at BEFORE its send and releases
+        // the claim if the send fails, so a seconds-old claim may still be
+        // in flight. Suppressing on an in-flight claim whose send then
+        // fails would leave the customer with no text from either path —
+        // so for a fresh claim, wait briefly and re-read. A released claim
+        // means the recap failed and this completion SMS should proceed; a
+        // claim that survives the recheck is a delivered recap (success
+        // never releases it). Claims older than the window are durable.
+        //
+        // ACCEPTED RESIDUAL (decided on PR #1627): a recap send that takes
+        // longer than this ~6s recheck AND then fails will release its
+        // claim after we've already skipped — the customer gets no
+        // completion text from either path. This requires /complete to
+        // race the recap by seconds AND a slow provider failure; when it
+        // happens the recap submitter sees the smsError in the recap
+        // modal and re-sending from there works (the claim was released).
+        // We deliberately prefer this rare, operator-visible miss over
+        // double-texting (the original customer complaint) and over
+        // stalling the Complete button to wait out the provider timeout.
+        const recapClaimAgeMs = recapTexted
+          ? Date.now() - new Date(recapTexted.recap_sms_sent_at).getTime()
+          : Infinity;
+        if (recapTexted && recapClaimAgeMs < 60 * 1000) {
+          for (let attempt = 0; attempt < 2 && recapTexted; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            recapTexted = await readRecapClaim();
+          }
+        }
+        recapSmsAlreadySentForVisit = !!recapTexted;
+      } catch (e) {
+        logger.warn(`[dispatch] recap SMS claim lookup failed for service ${svc.id}: ${e.message}`);
+      }
+    }
 
     const shouldBundleReview =
       effectiveSendCompletionSms &&
       !completionSmsAlreadyHandled &&
+      !recapSmsAlreadySentForVisit &&
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
@@ -3324,7 +3374,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
-    if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
+    if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         const recapText = (customerRecap || '').trim();
@@ -3566,6 +3616,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
       }
+    } else if (effectiveSendCompletionSms && svc.cust_phone && recapSmsAlreadySentForVisit) {
+      // Record the skip in structured_notes so the audit trail (and the
+      // completionSmsStatus surfaced in the response) shows WHY no
+      // completion SMS went out for a visit that asked for one.
+      const skippedNotes = {
+        ...recordStructuredNotes,
+        completionSmsStatus: 'skipped_recap_sms_already_sent',
+        completionSmsSkippedAt: new Date().toISOString(),
+      };
+      await db('service_records').where({ id: record.id }).update({
+        structured_notes: serializeJsonb(skippedNotes),
+      }).catch((updateErr) => logger.warn(`[dispatch] completion SMS skip status update failed: ${updateErr.message}`));
+      record.structured_notes = skippedNotes;
+      logger.info(`[dispatch] Recap SMS already texted for service ${svc.id}; skipping completion SMS to avoid double-texting`);
     } else if (effectiveSendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
       const bundledReviewId = recordStructuredNotes.completionSmsBundledReviewRequestId || null;
       const bundledReviewUrlFromNotes = recordStructuredNotes.completionSmsBundledReviewUrl || null;

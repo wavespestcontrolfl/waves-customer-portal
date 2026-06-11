@@ -42,6 +42,22 @@ const COMPLETED_STATUS = 'completed';
 // customer for a visit the status machine says never happened (Codex P1).
 const NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped']);
 
+// service_records.structured_notes is jsonb in prod but may surface as a
+// string depending on driver config — mirror admin-dispatch's tolerant parse.
+function parseStructuredNotes(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 async function loadServiceWithCustomer(serviceId, knex = db) {
   return knex('scheduled_services')
     .where('scheduled_services.id', serviceId)
@@ -194,6 +210,11 @@ async function submitRecap({
   // Whether THIS submit is the one that gets to send the recap text.
   // Decided under the row lock so concurrent submits can't both send.
   let willSendSms = false;
+  // Set under the lock when the heavy /complete flow already texted this
+  // customer its templated completion SMS (structured_notes claim). The
+  // recap text and the completion SMS are two wordings of the same
+  // "service done" message — sending both double-texts the customer.
+  let completionSmsAlreadySent = false;
   // Set under the lock if the visit can't be recapped (cancelled/skipped);
   // the transaction aborts having written nothing and we return ok:false.
   let rejectReason = null;
@@ -255,14 +276,35 @@ async function submitRecap({
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
-      .first('id', 'recap_sms_sent_at');
+      .first('id', 'recap_sms_sent_at', 'structured_notes');
 
     // At-most-once recap text: claim recap_sms_sent_at here, inside the
     // lock. If a prior submit already sent (column set), this one skips —
     // so a double-tap/retry/race never re-texts the customer, while a
     // record whose claim is still NULL (e.g. completed earlier via the
-    // heavy /complete path) can still send.
-    const alreadyTexted = !!existing?.recap_sms_sent_at;
+    // heavy /complete path WITHOUT a text) can still send. When that
+    // /complete path DID text (completionSmsStatus claim in
+    // structured_notes), the recap must not send a second, differently
+    // worded completion message. A fresh 'sending' status counts too —
+    // /complete writes it before the provider call, so a recap landing in
+    // that window would double-text once the in-flight send delivers.
+    // The 10-minute freshness window mirrors /complete's own
+    // completionSmsSendingFresh guard: a stale 'sending' (crashed
+    // mid-send) does not suppress, the same way /complete itself treats
+    // it as retryable. If the in-flight send ultimately fails, /complete
+    // overwrites the status with 'failed'/'blocked' and a recap re-submit
+    // is then allowed to text.
+    const existingNotes = parseStructuredNotes(existing?.structured_notes);
+    const completionSmsAttemptedAtMs = existingNotes.completionSmsAttemptedAt
+      ? new Date(existingNotes.completionSmsAttemptedAt).getTime()
+      : 0;
+    const completionSmsSendingFresh = existingNotes.completionSmsStatus === 'sending'
+      && completionSmsAttemptedAtMs
+      && Date.now() - completionSmsAttemptedAtMs < 10 * 60 * 1000;
+    completionSmsAlreadySent = existingNotes.completionSmsStatus === 'sent'
+      || !!existingNotes.sentSmsBody
+      || completionSmsSendingFresh;
+    const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent;
     willSendSms = wantSms && !alreadyTexted;
     const smsClaim = willSendSms ? { recap_sms_sent_at: new Date() } : {};
 
@@ -363,6 +405,11 @@ async function submitRecap({
     }
   } else if (sendSms && recapText && !svc.cust_phone) {
     smsError = 'no_phone';
+  } else if (wantSms && completionSmsAlreadySent) {
+    // The /complete flow already texted this customer its completion SMS
+    // for this visit — a recap text on top would be the "two different
+    // versions of the same message" double-text.
+    smsError = 'completion_sms_already_sent';
   } else if (wantSms) {
     // Wanted to text but the claim was already taken (concurrent double-
     // submit, or a recap that already texted this customer): no-op.
