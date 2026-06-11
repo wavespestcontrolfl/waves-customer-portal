@@ -1422,7 +1422,9 @@ router.post('/wdo-history', async (req, res, next) => {
     try {
       history = await lookupWdoHistory(propertyAddress);
     } catch (err) {
-      logger.warn(`[projects] WDO history lookup failed for "${propertyAddress}": ${err.message}`);
+      // Log ids only — the property address is customer PII and must not be
+      // interpolated into log lines.
+      logger.warn(`[projects] WDO history lookup failed (project=${projectId || 'pre-save'}, customer=${scopedCustomerId || 'n/a'}): ${err.message}`);
       return res.status(502).json({ error: 'Treatment/permit history lookup failed — try again in a moment.', code: 'lookup_failed' });
     }
     if (!history) {
