@@ -772,6 +772,7 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     // Create customer from new_customer payload if none resolved
+    let createdCustomerId = null;
     if (!custId && new_customer && phoneDigits && new_customer.first_name) {
       const [created] = await db('customers').insert({
         first_name: new_customer.first_name,
@@ -786,6 +787,7 @@ router.post('/confirm', async (req, res, next) => {
         longitude: new_customer.lng || null,
       }).returning('id');
       custId = created.id || created;
+      createdCustomerId = custId;
       await db('notification_prefs')
         .insert({ customer_id: custId })
         .onConflict('customer_id')
@@ -949,6 +951,16 @@ router.post('/confirm', async (req, res, next) => {
       // the global error middleware, which logs req.body (new_customer
       // phone/email/address would land in the logs).
       if (txErr.code === 'SLOT_TAKEN') {
+        // Undo a profile this request just created: leaving it would make
+        // the customer's retry with a different slot hit the
+        // phone-already-on-file 409 and strand them entirely. The row is
+        // seconds old with no children beyond its prefs row.
+        if (createdCustomerId) {
+          await db('notification_prefs').where({ customer_id: createdCustomerId }).del().catch(() => {});
+          await db('customers').where({ id: createdCustomerId }).del().catch((delErr) => {
+            logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
+          });
+        }
         return res.status(409).json({ error: txErr.message });
       }
       throw txErr;
