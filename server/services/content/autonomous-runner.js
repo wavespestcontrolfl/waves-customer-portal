@@ -333,12 +333,26 @@ class AutonomousRunner {
         await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
         return finalize(run, t0, result.patch);
       }
-      const finalized = await finalize(run, t0, result.patch);
       if (result.claim === 'complete') {
-        await this._completeClaimOrThrow(queue, opp.id, { claimToken });
-      } else {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'gbp_post_pending_review', { claimToken });
+        // The post is already live on Google: a failure to persist the run
+        // or complete the claim must NOT release it for retry (that would
+        // double-post). Park for reconciliation like the page publish path.
+        let finalized;
+        try {
+          finalized = await finalize(run, t0, result.patch);
+        } catch (err) {
+          await this._parkPublishedClaimForReconciliation(queue, opp.id, 'gbp_post_audit_failed', { claimToken }, err);
+          throw err;
+        }
+        try {
+          await this._completeClaimOrThrow(queue, opp.id, { notes: `gbp_posted:${run.draft_payload?.gbp_post?.post_name || 'unknown'}`, claimToken });
+        } catch (err) {
+          await this._parkPublishedClaimForReconciliation(queue, opp.id, 'gbp_post_queue_complete_failed', { claimToken }, err);
+        }
+        return finalized;
       }
+      const finalized = await finalize(run, t0, result.patch);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'gbp_post_pending_review', { claimToken });
       return finalized;
     }
 
@@ -1526,6 +1540,23 @@ class AutonomousRunner {
       };
     }
 
+    // Trust-build ramp: the first N live posts park for human approval
+    // unless AUTO_PUBLISH_GBP_POST is explicitly enabled. Parked runs hold
+    // the full would-be post in reviewer_notes; approving them counts
+    // toward the ramp (countsTowardTrustBuild).
+    const trustBuildCount = await this._getTrustBuildCount('gbp_post');
+    run.trust_build_count_after = trustBuildCount + 1;
+    if (!autoPublishEnabled('gbp_post') && trustBuildCount < TRUST_BUILD_THRESHOLD) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`,
+          reviewer_notes: `Trust-build ramp (${trustBuildCount}/${TRUST_BUILD_THRESHOLD}) — held before posting. Would post to ${location.name} GBP: "${content}"${link ? ` (CTA: ${link})` : ''}`,
+        },
+      };
+    }
+
     const ready = await social.assertSocialPublishingReady('gbp');
     if (!ready.ready) {
       return {
@@ -1534,6 +1565,19 @@ class AutonomousRunner {
           outcome: 'completed_pending_review',
           skip_reason: 'gbp_post_social_not_ready',
           reviewer_notes: `Social publishing gate blocked GBP: ${ready.reason}`,
+        },
+      };
+    }
+
+    // assertSocialPublishingReady does not gate SOCIAL_DRY_RUN — honor it
+    // here so a dry-run-configured social system never posts externally.
+    if (social.SOCIAL_FLAGS?.dryRun) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_post_social_dry_run',
+          reviewer_notes: `SOCIAL_DRY_RUN — would post to ${location.name} GBP: "${content}"${link ? ` (CTA: ${link})` : ''}`,
         },
       };
     }
@@ -1566,12 +1610,16 @@ class AutonomousRunner {
       logger.warn(`[autonomous-runner] social_media_posts audit insert failed: ${err.message}`);
     }
 
+    // published_url stays null: impact-tracker sweeps non-null
+    // published_url rows as newly live PAGES, and a GBP post must not
+    // create SEO impact rows for the linked hub page. The Google post
+    // name lives in draft_payload.gbp_post.post_name.
     return {
       claim: 'complete',
       patch: {
         outcome: 'completed_published',
-        published_url: link,
-        reviewer_notes: `Posted to ${location.name} GBP (${result.postId || 'no post id returned'}).`,
+        published_url: null,
+        reviewer_notes: `Posted to ${location.name} GBP (${result.postId || 'no post id returned'})${link ? ` with CTA ${link}` : ''}.`,
       },
     };
   }

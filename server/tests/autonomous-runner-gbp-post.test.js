@@ -10,6 +10,7 @@ jest.mock('../services/social-media', () => ({
   validateContent: jest.fn(),
   postToGBP: jest.fn(),
   assertSocialPublishingReady: jest.fn(),
+  SOCIAL_FLAGS: { dryRun: false },
 }));
 
 const db = require('../models/db');
@@ -19,15 +20,17 @@ const { gbpLocationIdForCity } = runner._internals;
 
 const ORIGINAL_ENV = { ...process.env };
 
-// db('autonomous_runs') serves the daily-cap count; db('social_media_posts')
-// absorbs the audit insert.
-function mockDb({ publishedToday = 0 } = {}) {
+// db('autonomous_runs') serves both the daily-cap count and the
+// trust-build select; db('social_media_posts') absorbs the audit insert.
+function mockDb({ publishedToday = 0, trustBuildRows = [] } = {}) {
   const inserts = [];
   db.mockImplementation((table) => {
     if (table === 'autonomous_runs') {
       return {
         where() { return this; },
+        whereIn() { return this; },
         count: async () => [{ count: String(publishedToday) }],
+        select: async () => trustBuildRows,
       };
     }
     if (table === 'social_media_posts') {
@@ -55,6 +58,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env = { ...ORIGINAL_ENV };
   delete process.env.AUTONOMOUS_GBP_POST_DAILY_CAP;
+  delete process.env.AUTO_PUBLISH_GBP_POST;
+  social.SOCIAL_FLAGS.dryRun = false;
   social.generateContent.mockResolvedValue('Sarasota ghost ants are peaking. Schedule an inspection.');
   social.validateContent.mockReturnValue({ valid: true, issues: [] });
   social.assertSocialPublishingReady.mockResolvedValue({ ready: true });
@@ -93,7 +98,8 @@ describe('_handleGbpPostAction', () => {
     expect(run.draft_payload.gbp_post.location_id).toBe('sarasota');
   });
 
-  test('live mode: posts to the single covering location and completes', async () => {
+  test('live mode (auto-publish enabled): posts to the single covering location and completes', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
     const inserts = mockDb();
     const run = { shadow_mode: false };
     const result = await runner._handleGbpPostAction(baseBrief(), run);
@@ -106,8 +112,34 @@ describe('_handleGbpPostAction', () => {
     );
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
+    // published_url must stay null — impact-tracker sweeps non-null rows as pages.
+    expect(result.patch.published_url).toBeNull();
     expect(inserts).toHaveLength(1);
     expect(inserts[0].source_type).toBe('content_engine');
+  });
+
+  test('live mode default: parks under the trust-build ramp before posting', async () => {
+    mockDb();
+    const run = { shadow_mode: false };
+    const result = await runner._handleGbpPostAction(baseBrief(), run);
+
+    expect(result.claim).toBe('pending');
+    expect(result.patch.outcome).toBe('completed_pending_review');
+    expect(result.patch.skip_reason).toMatch(/^trust_build_0_of_\d+$/);
+    expect(result.patch.reviewer_notes).toContain('Sarasota ghost ants');
+    expect(social.postToGBP).not.toHaveBeenCalled();
+    expect(run.trust_build_count_after).toBe(1);
+  });
+
+  test('SOCIAL_DRY_RUN parks instead of posting even with auto-publish on', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.SOCIAL_FLAGS.dryRun = true;
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(result.claim).toBe('pending');
+    expect(result.patch.skip_reason).toBe('gbp_post_social_dry_run');
+    expect(social.postToGBP).not.toHaveBeenCalled();
   });
 
   test('unmapped city parks for manual routing without generating', async () => {
@@ -129,6 +161,7 @@ describe('_handleGbpPostAction', () => {
   });
 
   test('non-hub target_url is dropped from the CTA', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
     const run = { shadow_mode: false };
     await runner._handleGbpPostAction(
@@ -149,6 +182,7 @@ describe('_handleGbpPostAction', () => {
   });
 
   test('social kill switch parks the post in live mode', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
     social.assertSocialPublishingReady.mockResolvedValue({ ready: false, reason: 'Automation paused by admin' });
     const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
@@ -160,6 +194,7 @@ describe('_handleGbpPostAction', () => {
   });
 
   test('post failure releases the claim for retry (failed_publish)', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
     social.postToGBP.mockResolvedValue({ platform: 'gbp', location: 'sarasota', success: false, error: 'HTTP 503' });
     const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
@@ -170,9 +205,10 @@ describe('_handleGbpPostAction', () => {
   });
 
   test('audit insert failure does not fail the publish', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
     db.mockImplementation((table) => {
       if (table === 'autonomous_runs') {
-        return { where() { return this; }, count: async () => [{ count: '0' }] };
+        return { where() { return this; }, whereIn() { return this; }, count: async () => [{ count: '0' }], select: async () => [] };
       }
       if (table === 'social_media_posts') {
         return { insert: async () => { throw new Error('relation missing'); } };
