@@ -367,12 +367,20 @@ export default function PipelineAnalytics({
 
     const total = inRange.length;
     const accepted = inRange.filter((e) => e.status === "accepted").length;
-    const sent = inRange.filter((e) => ["sent", "viewed"].includes(e.status)).length;
     const declined = inRange.filter(
       (e) => e.status === "declined" || e.status === "expired",
     ).length;
-    const conversionDenominator = sent + accepted + declined;
-    const acceptedEstimates = inRange.filter((e) => e.status === "accepted");
+    // Resolved-only close rate: still-open offers don't count against the
+    // rate until they actually decline or expire.
+    const conversionDenominator = accepted + declined;
+    // Won/MRR KPIs key off the acceptance date (createdAt fallback for rows
+    // that predate accepted_at): "MRR won (30d)" means won IN the window,
+    // not "created in the window and eventually won".
+    const acceptedEstimates = estimates.filter(
+      (e) =>
+        e.status === "accepted" &&
+        withinDateRange(e.acceptedAt || e.createdAt, selectedRange, nowMs),
+    );
     const totalMRRWon = acceptedEstimates.reduce((sum, e) => sum + amount(e), 0);
     const wonRecurring = acceptedEstimates.filter((e) => amount(e) > 0).length;
     const wonOneTime = acceptedEstimates.length - wonRecurring;
@@ -393,7 +401,13 @@ export default function PipelineAnalytics({
     const awaiting = classified.filter((e) => e._class === "awaiting").length;
     const followUp = classified.filter((e) => e._class === "follow_up").length;
     const scheduled = classified.filter((e) => e._class === "scheduled").length;
-    const won = classified.filter((e) => e._class === "won");
+    // Won = won forever: archiving an accepted estimate (housekeeping)
+    // must not shrink the funnel, so archived-accepted rows still count.
+    const won = classified.filter(
+      (e) =>
+        e._class === "won" ||
+        (e._class === "archived" && e.status === "accepted"),
+    );
     const lost = classified.filter((e) => e._class === "lost");
     const wonMrr = won.reduce((sum, e) => sum + amount(e), 0);
     const declinedCount = estimates.filter(
@@ -430,7 +444,7 @@ export default function PipelineAnalytics({
         accepted,
         closed: conversionDenominator,
         totalMRRWon,
-        wonAccounts: accepted,
+        wonAccounts: acceptedEstimates.length,
         wonRecurring,
         wonOneTime,
       },
@@ -526,7 +540,7 @@ export default function PipelineAnalytics({
         <StatCard
           label="Offer acceptance"
           value={`${metrics.kpis.acceptanceRate}%`}
-          sub={`${metrics.kpis.accepted} accepted of ${metrics.kpis.closed} offers`}
+          sub={`${metrics.kpis.accepted} accepted of ${metrics.kpis.closed} resolved`}
         />
         <StatCard
           label="MRR won"
