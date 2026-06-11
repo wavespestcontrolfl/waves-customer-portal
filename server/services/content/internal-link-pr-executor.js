@@ -349,11 +349,20 @@ class InternalLinkPrExecutor {
   }
 
   async _loadTargetPage(task) {
-    const targetFile = task.target_file || resolveAstroFileForUrl(task.target_url);
-    if (!targetFile) throw new Error(`target_file_unresolved:${task.target_url}`);
-    const resolved = await resolveContentFileByPath(targetFile);
-    if (!resolved?.file?.content) throw new Error(`target_file_not_found:${targetFile}`);
-    return { ...pageFromAstroFile(resolved.path, resolved.file.content, { fallbackUrl: task.target_url }), file: resolved.path, sha: resolved.file.sha || null };
+    // Prefer the planner-stamped target_file, but keep the URL-derived
+    // candidates as fallback — a stamped path can go stale (post renamed or
+    // migrated after planning).
+    const candidates = task.target_file ? [task.target_file] : [];
+    for (const candidate of candidateAstroFilesForUrl(task.target_url)) {
+      if (!candidates.includes(candidate)) candidates.push(candidate);
+    }
+    if (!candidates.length) throw new Error(`target_file_unresolved:${task.target_url}`);
+    for (const candidate of candidates) {
+      const resolved = await resolveContentFileByPath(candidate);
+      if (!resolved?.file?.content) continue;
+      return { ...pageFromAstroFile(resolved.path, resolved.file.content, { fallbackUrl: task.target_url }), file: resolved.path, sha: resolved.file.sha || null };
+    }
+    throw new Error(`target_file_not_found:${candidates[0]}`);
   }
 
   async _persistDryRunResult(taskId, result) {
@@ -521,6 +530,15 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   const base = baseResult(task, sourcePage, targetPage);
   if (!sourcePage?.body) return skipped(base, 'source_body_missing');
   if (!targetPage?.body) return skipped(base, 'target_body_missing');
+  // Tasks planned before the planner grew its spoke guard can still name a
+  // spoke-rendered or spoke-canonical source; re-check at execution time so
+  // they skip cleanly.
+  if (planner._internals.sourceRendersOffHub(sourcePage.frontmatter || {})) {
+    return skipped(base, 'source_renders_on_spoke');
+  }
+  if (planner._internals.canonicalPointsOffHub(sourcePage.frontmatter || {})) {
+    return skipped(base, 'source_canonical_off_hub');
+  }
 
   const targetUrl = policy.normalizeInternalUrl(task.target_url || targetPage.url || targetPage.canonical_url);
   const sourceUrl = policy.normalizeInternalUrl(sourcePage.url || task.source_url || sourcePage.canonical_url);
@@ -723,13 +741,33 @@ async function resolveContentFileByPath(filePath) {
 }
 
 function resolveAstroFileForUrl(url) {
+  return candidateAstroFilesForUrl(url)[0] || null;
+}
+
+// Candidate content files for a site URL, most-likely first. The slug shape
+// alone cannot distinguish a root-slug blog post (frontmatter `slug`
+// override) from a location page — both live at /<slug>/ — so the target
+// loader probes every candidate for existence instead of trusting the first
+// guess. The old single-guess resolution sent root-slug blog targets to
+// src/content/locations/ and hard-failed the task.
+function candidateAstroFilesForUrl(url) {
   const path = policy.normalizeInternalUrl(url);
-  if (!path) return null;
+  if (!path) return [];
   const slug = path.replace(/^\/+|\/+$/g, '');
-  if (!slug) return null;
-  if (slug.startsWith('blog/')) return `src/content/blog/${slug.slice(5)}.md`;
-  if (/-fl$/.test(slug) || SERVICE_HUB_SLUGS.has(slug)) return `src/content/services/${slug}.md`;
-  return `src/content/locations/${slug}.md`;
+  if (!slug) return [];
+  if (slug.startsWith('blog/')) return [`src/content/blog/${slug.slice(5)}.md`];
+  if (/-fl$/.test(slug) || SERVICE_HUB_SLUGS.has(slug)) {
+    return [
+      `src/content/services/${slug}.md`,
+      `src/content/blog/${slug}.md`,
+      `src/content/locations/${slug}.md`,
+    ];
+  }
+  return [
+    `src/content/locations/${slug}.md`,
+    `src/content/blog/${slug}.md`,
+    `src/content/services/${slug}.md`,
+  ];
 }
 
 const SERVICE_HUB_SLUGS = new Set([
@@ -1166,6 +1204,7 @@ module.exports._internals = {
   canonicalUrlFromFrontmatter,
   slugToInternalUrl,
   resolveAstroFileForUrl,
+  candidateAstroFilesForUrl,
   inferPageType,
   inferCluster,
   robotsNoindex,

@@ -545,6 +545,82 @@ treehoppers can damage ornamental plants.`;
   test('returns [] for unsafe target URL', () => {
     expect(planner.planForTarget({ url: 'javascript:alert(1)', keyword: 'pest control bradenton' }, { corpus })).toEqual([]);
   });
+  test('stamps target_file from the corpus so the executor never guesses the collection', () => {
+    const withTarget = [
+      ...corpus,
+      {
+        file: 'src/content/services/pest-control-bradenton-fl.md',
+        body: '---\ntitle: Pest Control Bradenton\n---\nService page body.',
+        url: '/pest-control-bradenton-fl/',
+      },
+    ];
+    const tasks = planner.planForTarget(target, { corpus: withTarget });
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].target_file).toBe('src/content/services/pest-control-bradenton-fl.md');
+  });
+  test('stamps target_file for a root-slug blog target', () => {
+    const c = [
+      {
+        file: 'src/content/blog/venice-dollar-spot-guide.md',
+        body: '---\nslug: /venice-dollar-spot-guide/\n---\nDollar spot guide body.',
+        url: '/venice-dollar-spot-guide/',
+      },
+      {
+        file: 'src/content/blog/post-a.md',
+        body: 'Lawns showing venice dollar spot rings need fungicide timing.',
+        url: '/blog/post-a/',
+      },
+    ];
+    const tasks = planner.planForTarget({ url: '/venice-dollar-spot-guide/', keyword: 'venice dollar spot' }, { corpus: c });
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].target_file).toBe('src/content/blog/venice-dollar-spot-guide.md');
+  });
+  test('target_file is null when the target page is not in the corpus', () => {
+    const tasks = planner.planForTarget(target, { corpus });
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].target_file).toBeNull();
+  });
+});
+
+// ── spoke-source guard ──────────────────────────────────────────────
+
+describe('spoke-source guard', () => {
+  const target = {
+    url: '/pest-control-bradenton-fl/',
+    keyword: 'pest control bradenton',
+  };
+  const matchingBody = (frontmatterLines) => [
+    '---',
+    'title: Source Page',
+    ...frontmatterLines,
+    '---',
+    'Homeowners searching pest control bradenton deserve straight answers.',
+  ].join('\n');
+
+  test('skips sources whose domains frontmatter names a spoke', () => {
+    const c = [{ file: 'src/content/services/x.md', body: matchingBody(['domains:', '  - veniceflpestcontrol.com']), url: '/x/' }];
+    expect(planner.planForTarget(target, { corpus: c })).toEqual([]);
+  });
+  test('skips sources that render on hub AND a spoke', () => {
+    const c = [{ file: 'src/content/services/x.md', body: matchingBody(['domains:', '  - wavespestcontrol.com', '  - sarasotaflpestcontrol.com']), url: '/x/' }];
+    expect(planner.planForTarget(target, { corpus: c })).toEqual([]);
+  });
+  test('keeps hub-only domains sources', () => {
+    const c = [{ file: 'src/content/services/x.md', body: matchingBody(['domains:', '  - wavespestcontrol.com']), url: '/x/' }];
+    expect(planner.planForTarget(target, { corpus: c })).toHaveLength(1);
+  });
+  test('keeps sources without domains frontmatter (hub-only by default)', () => {
+    const c = [{ file: 'src/content/services/x.md', body: matchingBody([]), url: '/x/' }];
+    expect(planner.planForTarget(target, { corpus: c })).toHaveLength(1);
+  });
+  test('skips spoke-canonical sources', () => {
+    const c = [{ file: 'src/content/services/x.md', body: matchingBody(['canonical: https://sarasotafllawncare.com/lawn-care-sarasota/']), url: '/x/' }];
+    expect(planner.planForTarget(target, { corpus: c })).toEqual([]);
+  });
+  test('keeps hub-canonical sources', () => {
+    const c = [{ file: 'src/content/services/x.md', body: matchingBody(['canonical: https://www.wavespestcontrol.com/x/']), url: '/x/' }];
+    expect(planner.planForTarget(target, { corpus: c })).toHaveLength(1);
+  });
 });
 
 // ── applyTaskToBody integration ─────────────────────────────────────

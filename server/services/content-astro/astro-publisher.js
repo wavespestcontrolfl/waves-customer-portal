@@ -1084,6 +1084,7 @@ async function mergeAstro(postId) {
     const pr = await gh.getPr(post.astro_pr_number);
     if (pr.merged) {
       await applyMergeEffect(postId, post, pr.merged_at ? new Date(pr.merged_at) : new Date(), isUnpublish, pr.merge_commit_sha || null);
+      if (!isUnpublish) queueInternalLinkPlanning(post);
       return { already_merged: true, pr_number: pr.number, live_url: isUnpublish ? null : liveUrlForPost(post) };
     }
     if (pr.state !== 'open') {
@@ -1097,6 +1098,7 @@ async function mergeAstro(postId) {
     });
 
     await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);
+    if (!isUnpublish) queueInternalLinkPlanning(post);
 
     logger.info(`[astro-publisher] merged PR #${post.astro_pr_number} for post ${postId}${isUnpublish ? ' (unpublish)' : ''}`);
     return { merged: true, pr_number: post.astro_pr_number, sha: result?.sha, unpublished: isUnpublish, live_url: isUnpublish ? null : liveUrlForPost(post) };
@@ -1108,6 +1110,70 @@ async function mergeAstro(postId) {
     });
     throw err;
   }
+}
+
+// ── Internal links (post-merge) ────────────────────────────────────
+//
+// Mirror of the autonomous engine's publish-time planning: once a post is
+// live on main, plan contextual internal links from existing hub content to
+// the new URL and dry-run them to patch_candidate so they surface in the
+// admin review queue. Fire-and-forget — a planner or corpus outage must
+// never fail or slow the merge. PR opening stays with the existing gated
+// executor paths; this only produces content_internal_link_tasks rows.
+// Spoke-published posts are excluded by construction: liveUrlForPost returns
+// a spoke-domain URL for them, which the planner's hub-only canonicalization
+// rejects.
+function queueInternalLinkPlanning(post) {
+  if (process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE === 'false') return;
+  planInternalLinksForMergedPost(post)
+    .then((result) => {
+      if (result) {
+        logger.info(`[astro-publisher] internal-link planning for ${result.url}: queued=${result.queued} candidates=${result.candidates}`);
+      }
+    })
+    .catch((err) => {
+      logger.warn(`[astro-publisher] internal-link planning failed for post ${post.id}: ${err.message}`);
+    });
+}
+
+async function planInternalLinksForMergedPost(post) {
+  const planner = require('../content/internal-link-planner');
+  if (!planner?.planForTarget) return null;
+  const url = liveUrlForPost(post);
+  if (!url) return null;
+  const corpus = await loadAstroCorpusForPlanning(planner);
+  if (!corpus.length) return null;
+  const tasks = planner.planForTarget(
+    { url, keyword: post.keyword, city: post.city, title: post.title },
+    { corpus }
+  );
+  const taskIds = [];
+  for (const task of tasks) {
+    const inserted = await db('content_internal_link_tasks')
+      .insert(task)
+      .onConflict(['source_file', 'target_url', 'anchor_text'])
+      .ignore()
+      .returning('id');
+    const row = Array.isArray(inserted) ? inserted[0] : inserted;
+    const id = row && typeof row === 'object' ? row.id : row;
+    if (id) taskIds.push(id);
+  }
+  let candidates = 0;
+  if (taskIds.length) {
+    const executor = require('../content/internal-link-pr-executor');
+    if (executor?.runDryRun) {
+      const dryRun = await executor.runDryRun({ taskIds, limit: taskIds.length });
+      candidates = (dryRun?.results || []).filter((r) => r.status === 'patch_candidate').length;
+    }
+  }
+  return { url, queued: taskIds.length, candidates };
+}
+
+async function loadAstroCorpusForPlanning(planner) {
+  const astroDir = process.env.ASTRO_REPO_DIR;
+  if (astroDir && planner.loadAstroCorpus) return planner.loadAstroCorpus(astroDir, {});
+  if (planner.loadAstroCorpusFromGitHub) return planner.loadAstroCorpusFromGitHub({});
+  return [];
 }
 
 // Read the hero_image.src that the just-merged post's frontmatter actually
@@ -1717,6 +1783,8 @@ module.exports = {
     generateHeroBuffer,
     compressToWebp,
     applyMergeEffect,
+    queueInternalLinkPlanning,
+    planInternalLinksForMergedPost,
     isCommittedHeroUrl,
     absoluteHeroUrl,
     slugPathFromFrontmatter,

@@ -17,6 +17,7 @@ const {
   evaluateDryRunTask,
   pageFromAstroFile,
   resolveAstroFileForUrl,
+  candidateAstroFilesForUrl,
   countInternalLinks,
   firstValidInternalUrl,
   canonicalUrlFromFrontmatter,
@@ -320,6 +321,108 @@ describe('internal-link dry-run executor helpers', () => {
     expect(resolveAstroFileForUrl('/pest-control-bradenton-fl/')).toBe('src/content/services/pest-control-bradenton-fl.md');
     expect(resolveAstroFileForUrl('/termite-inspection/')).toBe('src/content/services/termite-inspection.md');
     expect(resolveAstroFileForUrl('/sarasota/')).toBe('src/content/locations/sarasota.md');
+  });
+
+  test('returns every collection candidate for ambiguous root slugs', () => {
+    expect(candidateAstroFilesForUrl('/venice-dollar-spot-guide/')).toEqual([
+      'src/content/locations/venice-dollar-spot-guide.md',
+      'src/content/blog/venice-dollar-spot-guide.md',
+      'src/content/services/venice-dollar-spot-guide.md',
+    ]);
+    expect(candidateAstroFilesForUrl('/blog/ghost-ants/')).toEqual(['src/content/blog/ghost-ants.md']);
+    expect(candidateAstroFilesForUrl('')).toEqual([]);
+  });
+
+  test('loads a root-slug blog target by probing collections for existence', async () => {
+    const blogPath = 'src/content/blog/venice-dollar-spot-guide.mdx';
+    GitHubClient.getFile.mockImplementation(async (file) =>
+      file === blogPath
+        ? { sha: 'blog-sha', content: '---\ntitle: Dollar Spot in Venice\nslug: /venice-dollar-spot-guide/\n---\nGuide body.' }
+        : null
+    );
+
+    const target = await new InternalLinkPrExecutor()._loadTargetPage({
+      target_url: '/venice-dollar-spot-guide/',
+    });
+
+    expect(target.file).toBe(blogPath);
+    expect(target.url).toBe('/venice-dollar-spot-guide/');
+  });
+
+  test('falls back to URL candidates when a stamped target_file has gone stale', async () => {
+    const blogPath = 'src/content/blog/venice-dollar-spot-guide.mdx';
+    GitHubClient.getFile.mockImplementation(async (file) =>
+      file === blogPath
+        ? { sha: 'blog-sha', content: '---\ntitle: Dollar Spot in Venice\n---\nGuide body.' }
+        : null
+    );
+
+    const target = await new InternalLinkPrExecutor()._loadTargetPage({
+      target_url: '/venice-dollar-spot-guide/',
+      target_file: 'src/content/locations/venice-dollar-spot-guide.md',
+    });
+
+    expect(target.file).toBe(blogPath);
+  });
+
+  test('throws target_file_not_found when no candidate exists', async () => {
+    GitHubClient.getFile.mockResolvedValue(null);
+    await expect(new InternalLinkPrExecutor()._loadTargetPage({
+      target_url: '/no-such-page/',
+    })).rejects.toThrow('target_file_not_found:src/content/locations/no-such-page.md');
+  });
+
+  test('skips sources that render on a spoke domain', () => {
+    const spokeSourceBody = sourceBody.replace(
+      'category: termite',
+      'category: termite\ndomains:\n  - veniceflpestcontrol.com'
+    );
+    const result = evaluateDryRunTask({
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/termite-inspection/',
+      anchor_text: 'termite inspection in Florida',
+    }, {
+      sourcePage: page('src/content/blog/termite-swarmers-bathroom.md', spokeSourceBody),
+      targetPage: page('src/content/services/termite-inspection.md', targetBody),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.skip_reason).toBe('source_renders_on_spoke');
+  });
+
+  test('skips spoke-canonical sources at execution time', () => {
+    const spokeCanonicalBody = sourceBody.replace(
+      'canonical: https://www.wavespestcontrol.com/termite-swarmers-bathroom/',
+      'canonical: https://sarasotafllawncare.com/termite-swarmers-bathroom/'
+    );
+    const result = evaluateDryRunTask({
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/termite-inspection/',
+      anchor_text: 'termite inspection in Florida',
+    }, {
+      sourcePage: page('src/content/blog/termite-swarmers-bathroom.md', spokeCanonicalBody),
+      targetPage: page('src/content/services/termite-inspection.md', targetBody),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.skip_reason).toBe('source_canonical_off_hub');
+  });
+
+  test('hub-only domains frontmatter is still an eligible source', () => {
+    const hubSourceBody = sourceBody.replace(
+      'category: termite',
+      'category: termite\ndomains:\n  - wavespestcontrol.com'
+    );
+    const result = evaluateDryRunTask({
+      source_file: 'src/content/blog/termite-swarmers-bathroom.md',
+      target_url: '/termite-inspection/',
+      anchor_text: 'termite inspection in Florida',
+    }, {
+      sourcePage: page('src/content/blog/termite-swarmers-bathroom.md', hubSourceBody),
+      targetPage: page('src/content/services/termite-inspection.md', targetBody),
+    });
+
+    expect(result.status).toBe('patch_candidate');
   });
 
   test('counts only internal markdown and HTML links', () => {
