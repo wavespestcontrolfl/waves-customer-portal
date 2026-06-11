@@ -152,7 +152,7 @@
           "visit": 10,
           "month": "Oct",
           "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\n★ Torque SC (FRAC 12) fungicide ($7.50)\nChelated Iron Plus ($1.52)",
-          "secondary": "Headway ONLY if severe ($26.13) — resets FRAC 11 clock\nSoil re-test problem props\n★ THATCH MEASUREMENT #2: compare to Mar",
+          "secondary": "Headway ONLY if severe ($26.13) — resets FRAC 11 clock\nSoil re-test problem props — OPTIONAL on request\n★ THATCH MEASUREMENT #2: compare to Mar",
           "material_cost": "39.69",
           "labor_cost": "26.96",
           "tiers": {
@@ -181,8 +181,8 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ ALL TIERS: Winter wellness touchpoint\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus ($1.52)\nPremium: CarbonPro-L ($14.24)",
-          "secondary": "★ Basic/Std: Door hanger + irrigation winterize check\n★ Annual report ALL tiers (simplified for Basic)\n⚠ Atrazine backup if Nov too hot",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus ($1.52)\nPremium: CarbonPro-L ($14.24)",
+          "secondary": "★ OPTIONAL Basic/Std: Door hanger + irrigation winterize check\n★ OPTIONAL: Annual report on request (simplified for Basic)\n⚠ Atrazine backup if Nov too hot",
           "material_cost": "84.29",
           "labor_cost": "26.96",
           "tiers": {
@@ -191,7 +191,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "★ MAJOR: Basic/Std get Dec touchpoint (was Premium-only). Eliminates 3-month dead zone. Annual report. Retention play vs competitor door-knocks."
+          "notes": "★ MAJOR: Basic/Std get Dec touchpoint (was Premium-only). Eliminates 3-month dead zone. Annual report optional on request. Retention play vs competitor door-knocks."
         }
       ],
       "site_condition_rules": {
@@ -385,8 +385,8 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ ALL TIERS: Winter wellness touchpoint\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus ($1.52)\nPremium: CarbonPro-L ($14.24)",
-          "secondary": "★ Basic/Std: Door hanger + dormancy expectations\n★ Annual report ALL tiers\nDormancy is NORMAL — set expectations\n★ Bermuda color loss = not a problem, it's biology",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus ($1.52)\nPremium: CarbonPro-L ($14.24)",
+          "secondary": "★ OPTIONAL Basic/Std: Door hanger + dormancy expectations\n★ OPTIONAL: Annual report on request\nDormancy is NORMAL — set expectations\n★ Bermuda color loss = not a problem, it's biology",
           "material_cost": "84.29",
           "labor_cost": "26.96",
           "tiers": {
@@ -395,7 +395,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "★ MAJOR: Basic/Std Dec touchpoint. Bermuda dormancy door hanger: \"Brown = dormant, not dead.\" Annual report. Prevents winter cancellations."
+          "notes": "★ MAJOR: Basic/Std Dec touchpoint. Bermuda dormancy door hanger (optional): \"Brown = dormant, not dead.\" Annual report optional on request. Prevents winter cancellations."
         }
       ]
     },
@@ -582,8 +582,8 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ ALL TIERS: Winter wellness touchpoint\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)\n★ Torque SC (FRAC 12) large patch #3 ($7.50)",
-          "secondary": "★ Basic/Std: Door hanger + irrigation winterize\n★ Annual report ALL tiers\n★ FRAC rotation: Torque (12) follows Medallion (7)\nThatch assessment for spring mechanical work",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)\n★ Torque SC (FRAC 12) large patch #3 ($7.50)",
+          "secondary": "★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Torque (12) follows Medallion (7)\nThatch assessment for spring mechanical work",
           "material_cost": "25.8",
           "labor_cost": "26.96",
           "tiers": {
@@ -592,7 +592,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ FRAC rotation: Headway (11+3) Oct → Medallion (7) Nov → Torque (12) Dec. Three different MOAs. Annual report."
+          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ FRAC rotation: Headway (11+3) Oct → Medallion (7) Nov → Torque (12) Dec. Three different MOAs. Annual report optional on request."
         }
       ]
     },
@@ -617,7 +617,7 @@
           "visit": 1,
           "month": "Jan",
           "primary": "Prodiamine 65 WDG split 1 ($3.51)\nSpeedZone Southern + NIS broadleaf ($5.95)",
-          "secondary": "Sedgehammer Plus if sedge ($1.33)\n★ CLASSIFY: Irrigated vs. Non-irrigated → CRM tag\n★ CUSTOMER EXPECTATION TALK #1:\n\"Bahia = drought survival turf, not manicured lawn.\nIt will look different than St. ",
+          "secondary": "Sedgehammer Plus if sedge ($1.33)\n★ OPTIONAL CLASSIFY: Irrigated vs. Non-irrigated → CRM tag\n★ OPTIONAL CUSTOMER EXPECTATION TALK #1:\n\"Bahia = drought survival turf, not manicured lawn.\nIt will look different than St. ",
           "material_cost": "4.81",
           "labor_cost": "26.96",
           "tiers": {
@@ -626,7 +626,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Pre-em critical — BY JAN 15. Bahia open/thin = crabgrass invades. N rate: 0 lb. ★ Irrigated/non-irrigated classification drives entire year. ★ Expectation talk #1."
+          "notes": "Pre-em critical — BY JAN 15. Bahia open/thin = crabgrass invades. N rate: 0 lb. ★ Irrigated/non-irrigated classification (optional) — drives entire year when done. ★ Expectation talk #1 (optional)."
         },
         {
           "visit": 2,
@@ -707,7 +707,7 @@
           "visit": 7,
           "month": "Jul",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo 6-0-0 Ca ($1.39)",
-          "secondary": "★ Ca replaces K-Flow — cation rotation\n★ CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
+          "secondary": "★ Ca replaces K-Flow — cation rotation\n★ OPTIONAL CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
           "material_cost": "5.07",
           "labor_cost": "26.96",
           "tiers": {
@@ -752,7 +752,7 @@
           "visit": 10,
           "month": "Oct",
           "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\n★ T-Storm CONDITIONAL — ONLY if dollar spot active ($6.15)\nChelated Iron Plus ($1.52)",
-          "secondary": "★ Mole cricket: Dylox 420 SL fall curative if tunneling ($12.53)\n★ Topchoice fall app ONLY if spring Topchoice not applied ($8.22)\nSoil re-test problem props",
+          "secondary": "★ Mole cricket: Dylox 420 SL fall curative if tunneling ($12.53)\n★ Topchoice fall app ONLY if spring Topchoice not applied ($8.22)\nSoil re-test problem props — OPTIONAL on request",
           "material_cost": "24.38",
           "labor_cost": "26.96",
           "tiers": {
@@ -781,8 +781,8 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ ALL TIERS: Winter wellness touchpoint\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)",
-          "secondary": "★ Basic/Std: Door hanger + dormancy expectations\n★ Annual report ALL tiers (simplified for Basic)\n★ CUSTOMER EXPECTATION TALK #3 — DORMANCY:\n\"Bahia goes dormant earlier and longer than St. Aug.\nBrown ",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)",
+          "secondary": "★ OPTIONAL Basic/Std: Door hanger + dormancy expectations\n★ OPTIONAL: Annual report on request (simplified for Basic)\n★ OPTIONAL CUSTOMER EXPECTATION TALK #3 — DORMANCY:\n\"Bahia goes dormant earlier and longer than St. Aug.\nBrown ",
           "material_cost": "10.49",
           "labor_cost": "26.96",
           "tiers": {
@@ -791,7 +791,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ Dormancy expectation talk STRUCTURED. Bahia-specific door hanger. Annual report. Prevents winter/spring cancellations."
+          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ Dormancy expectation talk STRUCTURED (optional). Bahia-specific door hanger (optional). Annual report optional on request. Prevents winter/spring cancellations."
         }
       ]
     }
