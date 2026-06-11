@@ -221,8 +221,13 @@ class SmartRebooker {
             q.whereNull('reservation_expires_at')
               .orWhereRaw('reservation_expires_at > NOW()');
           })
-          .where('window_start', '<', windowEnd)
-          .where('window_end', '>', updates.window_start)
+          // COALESCE the nullable window_end (same predicate as
+          // slot-reservation) — rows without an end time would otherwise
+          // never register as conflicts.
+          .whereRaw(
+            "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+            [windowEnd, updates.window_start],
+          )
           .first('id');
         if (overlap) {
           throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {

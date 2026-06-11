@@ -736,6 +736,20 @@ router.post('/confirm', async (req, res, next) => {
         .first();
       if (existing) {
         if (!customer_id) {
+          // A double-submit retry for a just-created new_customer lands
+          // here — the first attempt created the profile, so the phone is
+          // now "on file". If that exact slot is already booked for this
+          // customer, replay the original booking instead of 409ing the
+          // retry (the replay guard inside the transaction can't help —
+          // this return fires before it).
+          const replay = await db('self_booked_appointments')
+            .where({ customer_id: existing.id, date: slotDateStr, start_time: slot_start })
+            .whereNot('status', 'cancelled')
+            .first();
+          if (replay) {
+            logger.info(`[booking:confirm] Phone-matched double-submit replay for customer ${existing.id} on ${slotDateStr} ${slot_start}`);
+            return res.json({ booking: replay, confirmationCode: replay.confirmation_code, replayed: true });
+          }
           return res.status(409).json({ error: 'This phone number is already on file. Please verify the customer profile before booking.' });
         }
         if (String(existing.id) !== String(customer_id)) {
@@ -873,10 +887,17 @@ router.post('/confirm', async (req, res, next) => {
         // Availability builds slots from ALL jobs in the zone — assigned
         // or not — so a stale confirm must conflict against the same set,
         // not just unassigned rows (mirrors getAvailableSlots' occupied
-        // predicate: zone slug OR customer city in the zone).
+        // predicate: zone slug OR customer city in the zone). Live
+        // estimate-slot holds have customer_id NULL and no zone, so they
+        // get their own branch — a 15-minute county-wide hold briefly
+        // blocking a zone slot beats double-booking over a held slot.
         conflictQuery.where((q) => {
           if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
           if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+          q.orWhere((hold) => {
+            hold.whereNull('scheduled_services.customer_id')
+              .whereRaw('scheduled_services.reservation_expires_at > NOW()');
+          });
         });
       }
       const conflict = (technician_id || zoneSlug || zoneCities.length)
