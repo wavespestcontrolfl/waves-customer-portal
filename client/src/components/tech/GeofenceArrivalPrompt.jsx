@@ -73,7 +73,7 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt() {
+export default function GeofenceArrivalPrompt({ onStormReview }) {
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -157,8 +157,37 @@ export default function GeofenceArrivalPrompt() {
           {n.type === 'geofence_timer_stopped' && (
             <StopToast n={n} onUndo={() => handleUndo(n)} onDismiss={() => removeCard(n.id, { silent: true })} />
           )}
+          {n.type === 'storm_watch_alert' && (
+            <StormCard
+              n={n}
+              onReview={() => {
+                onStormReview?.(n.payload || {});
+                removeCard(n.id, { silent: true });
+              }}
+              onDismiss={() => removeCard(n.id)}
+            />
+          )}
         </div>
       ))}
+    </div>
+  );
+}
+
+// Storm-watch nudge: weather crossing the threshold for an upcoming
+// stop. Review opens the Rain Out sheet pre-loaded for that job (via
+// onStormReview from TechHomePage); the tech still makes the call.
+function StormCard({ n, onReview, onDismiss }) {
+  const p = n.payload || {};
+  return (
+    <div style={cardStyle(COLORS.amber)}>
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>⛈️ Storm watch</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>
+        {n.message || `Storms approaching an upcoming stop${p.city ? ` in ${p.city}` : ''}.`}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onReview} style={btnPrimary}>Review options</button>
+        <button onClick={onDismiss} style={btnSecondary}>Working through it</button>
+      </div>
     </div>
   );
 }

@@ -674,6 +674,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Storm watch. Probes the NWS hourly forecast at the
+  // CUSTOMER coordinates of each tech's upcoming stops and nudges the
+  // tech (tech_notifications, same channel as geofence prompts) when
+  // heavy rain crosses the threshold inside the look-ahead. Notify-only:
+  // never reschedules, never texts customers. Internally gated to ET
+  // service hours + one alert per job per day. runExclusive because
+  // overlapping deploy instances would double-ping techs.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await runExclusive('storm-watch', async () => {
+        const StormWatch = require('./storm-watch');
+        await StormWatch.sweep();
+      });
+    } catch (err) {
+      logger.error(`Storm watch sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
   // the post to build_failed if it blows up.

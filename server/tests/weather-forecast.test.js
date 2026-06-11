@@ -1,12 +1,13 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const logger = require('../services/logger');
-const { getDailyRainOutlook, forecastLinkForZip, _test } = require('../services/weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip, _test } = require('../services/weather-forecast');
 
 describe('weather-forecast (NWS)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     _test._cache.clear();
+    _test._hourlyCache.clear();
     global.fetch = jest.fn();
   });
 
@@ -62,6 +63,36 @@ describe('weather-forecast (NWS)', () => {
       expect(line).not.toContain('82.45');
       expect(line).not.toContain('api.weather.gov');
     }
+  });
+
+  test('hourly outlook maps periods and rejects empty coords before coercion', async () => {
+    global.fetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ properties: { forecastHourly: 'https://api.weather.gov/gridpoints/TBW/1,2/forecast/hourly' } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          properties: {
+            periods: [
+              { startTime: '2026-06-11T13:00:00-04:00', probabilityOfPrecipitation: { value: 72 }, shortForecast: 'Thunderstorms' },
+              { startTime: '2026-06-11T14:00:00-04:00', probabilityOfPrecipitation: { value: null }, shortForecast: 'Showers' },
+            ],
+          },
+        }),
+      });
+
+    const hours = await getHourlyRainOutlook(27.1, -82.45);
+    expect(hours).toHaveLength(2);
+    expect(hours[0]).toEqual({ startTime: '2026-06-11T13:00:00-04:00', rainChance: 72, shortForecast: 'Thunderstorms' });
+    expect(hours[1].rainChance).toBeNull();
+
+    // Cached on the second call; null coords rejected without fetching.
+    await getHourlyRainOutlook(27.1, -82.45);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(await getHourlyRainOutlook(null, -82.45)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   test('non-finite coordinates are rejected without fetching', async () => {

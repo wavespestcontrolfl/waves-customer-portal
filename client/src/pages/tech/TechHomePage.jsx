@@ -313,7 +313,20 @@ export default function TechHomePage() {
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
-      <GeofenceArrivalPrompt />
+      <GeofenceArrivalPrompt
+        onStormReview={(payload) => {
+          // Storm-watch nudge → open the Rain Out sheet for that job.
+          // Prefer the live row from today's schedule; fall back to a
+          // minimal object (the sheet fetches its options server-side,
+          // so only id + display label matter here).
+          const svc = myServices.find((s) => String(s.id) === String(payload.job_id));
+          setRainOutService(svc || {
+            id: payload.job_id,
+            customer_name: payload.city ? `${payload.city} stop` : 'Upcoming stop',
+            service_type: payload.service_type || null,
+          });
+        }}
+      />
       {/* Greeting */}
       <h1 style={{
         fontSize: 22, fontWeight: 700, margin: '0 0 4px',
