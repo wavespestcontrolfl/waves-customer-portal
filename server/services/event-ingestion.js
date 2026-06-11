@@ -187,6 +187,28 @@ async function pullRssSource(source) {
   const feed = await parser.parseURL(source.feed_url);
   const items = (feed.items || []).slice(0, MAX_ITEMS_PER_FEED);
 
+  // RSS feeds come in two shapes, selected per-source via
+  // scrape_config.rssMode:
+  //
+  //   'news' (DEFAULT) — items are ARTICLES (weekend roundups, "things
+  //     to do" columns, municipal announcements). item.pubDate is the
+  //     publication date, NOT an event date — writing it to start_at
+  //     dates every event "yesterday at pull time", so nothing ever
+  //     lands in the forward digest window and tier-1 auto-approval
+  //     seeds junk (council agendas) into the approved pool. Articles
+  //     are bundled and run through the same Claude extraction as
+  //     scrape sources to pull real event dates out of the text;
+  //     articles with no dated event yield nothing.
+  //
+  //   'calendar' — items ARE events and the item date is the event
+  //     start. Opt-in only: every RSS source live today is a news
+  //     feed, and pubDate-as-event-date is the default failure mode
+  //     of a newly added RSS source, so news is the safe default.
+  const rssMode = source.scrape_config?.rssMode === 'calendar' ? 'calendar' : 'news';
+  if (rssMode === 'news') {
+    return pullNewsRssItems(source, items);
+  }
+
   const cutoffMs = Date.now() + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const now = Date.now();
 
@@ -252,6 +274,247 @@ async function pullRssSource(source) {
   }
 
   return { upserted, dropped, total: items.length };
+}
+
+// ── Shared Claude event extraction ──────────────────────────────────
+// Used by both the scrape handler (page mode: raw HTML from Playwright)
+// and the news-RSS handler (articles mode: bundled feed items). One
+// Claude call per source per run either way.
+
+// Per-article cap keeps one long-form post from crowding everything
+// else out of the bundle; the bundle cap matches the scrape handler's
+// HTML truncation so both modes send Claude the same input budget.
+const MAX_ARTICLE_CHARS = 2500;
+const MAX_BUNDLE_CHARS = 25000;
+
+// Bundle RSS article items into one labeled text document for
+// extraction. Items are taken in feed order (newest first on every
+// live feed) until the bundle budget is spent.
+function buildArticleBundle(items) {
+  const parts = [];
+  let used = 0;
+  for (const item of items) {
+    // Prefer the FULL article body over the description teaser:
+    // rss-parser maps <content:encoded> to item['content:encoded'] /
+    // ['content:encodedSnippet'] (plain-text), while contentSnippet /
+    // content come from <description>. Feeds that tease in the
+    // description carry their event dates only in the encoded body.
+    const content = String(
+      item['content:encodedSnippet'] || item['content:encoded']
+      || item.contentSnippet || item.content || item.summary || '',
+    ).slice(0, MAX_ARTICLE_CHARS);
+    const image = safeHttpUrl(item.enclosure?.url || item['itunes:image']?.href);
+    const part = [
+      `### Article ${parts.length + 1}`,
+      `Title: ${item.title || '(untitled)'}`,
+      `URL: ${item.link || '(none)'}`,
+      `Published: ${item.isoDate || item.pubDate || '(unknown)'}`,
+      image ? `Image: ${image}` : null,
+      `Content: ${content}`,
+    ].filter(Boolean).join('\n');
+    if (used + part.length > MAX_BUNDLE_CHARS) break;
+    parts.push(part);
+    used += part.length;
+  }
+  return { text: parts.join('\n\n'), bundled: parts.length };
+}
+
+function buildExtractionSystemPrompt(source, maxEvents, mode, todayIso) {
+  const intro = mode === 'articles'
+    ? 'You extract upcoming public events from recent articles in a Southwest Florida local-news RSS feed.'
+    : 'You extract upcoming public events from raw HTML scraped from a Southwest Florida event-listing page.';
+
+  const modeRules = mode === 'articles'
+    ? [
+      '- The input is one or more articles. A single article (weekend roundup, "things to do" column) often describes several distinct events — extract each one.',
+      "- An article's Published date is NOT the event date. Only use event dates stated in the text. If no specific event date is stated, skip that event.",
+      "- For eventUrl: use the event's own detail-page URL when the article includes one; otherwise use the article's URL.",
+      '- For imageUrl: use the article\'s Image line only when the article clearly covers that single event; null when ambiguous.',
+    ]
+    : [];
+
+  return `${intro}
+
+Today's date: ${todayIso}. Source: ${source.name} (${source.url}).
+
+Output STRICT JSON only, no prose, with this shape:
+{
+  "events": [
+    {
+      "title": "string, the event name",
+      "startAt": "ISO 8601 datetime in America/New_York timezone, or null if no specific date is given",
+      "venueName": "string or null",
+      "city": "lowercase city slug — sarasota | bradenton | venice | tampa | st-petersburg | clearwater | gulfport | punta-gorda | port-charlotte | englewood | north-port | lakewood-ranch | parrish | palmetto | anna-maria | siesta-key | longboat-key | etc — or null if not determinable",
+      "description": "string, 1-2 short sentences describing why someone would go. May be null if no description is on the page.",
+      "eventUrl": "absolute http(s) URL to the event detail page, or null",
+      "imageUrl": "absolute http(s) URL of an image clearly associated with this event, or null"
+    }
+  ]
+}
+
+Rules:
+- Skip events with no title.
+- Skip events that already happened (date < today).
+- Skip events more than 90 days out.
+- Skip recurring/series rows that don't have a specific upcoming instance.
+- Skip "View all events" or navigation links.
+- Skip government/administrative items: council, committee, or board meetings, agendas, public hearings, workshops, and procurement/RFP/bid notices. Readers want things to DO, not civic process.
+${modeRules.length ? `${modeRules.join('\n')}\n` : ''}- Cap output at ${maxEvents} events.
+- If you can't find events, return {"events": []}.
+- Return JSON only — no code fence, no commentary.`;
+}
+
+async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
+  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+    throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
+  }
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // Anchor "today" in America/New_York, not UTC. The cron runs at 4am ET
+  // which is in the UTC-day-overlap region; without ET anchoring the
+  // prompt could tell Claude the wrong day and a same-evening event
+  // gets filtered as already past, or the 90-day cutoff shifts by ±1d.
+  const todayIso = etDateString(new Date());
+  const systemPrompt = buildExtractionSystemPrompt(source, maxEvents, mode, todayIso);
+  const wrapped = mode === 'articles' ? `<articles>\n${content}\n</articles>` : `<html>\n${content}\n</html>`;
+
+  const response = await anthropic.messages.create({
+    model: MODELS.WORKHORSE,
+    max_tokens: 2000,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: wrapped }],
+  });
+  const text = response.content?.[0]?.text || '';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Claude did not return JSON for event extraction');
+  const parsed = JSON.parse(jsonMatch[0]);
+  return Array.isArray(parsed.events) ? parsed.events.slice(0, maxEvents) : [];
+}
+
+/**
+ * Validate one Claude-extracted event and shape it for upsert.
+ * Pure — returns null when the event should be dropped, else
+ * { row, autoApprove } where row holds the events_raw columns.
+ *
+ * opts.requireStart — drop events without a parseable start date.
+ * News-mode RSS sets this: the articles contract says "no stated event
+ * date → no event", and an undated article summary can never enter the
+ * digest but WOULD clutter the inbox/dashboard (the events endpoint
+ * includes NULL start_at rows). Page mode keeps undated events —
+ * ongoing exhibits/markets on real event pages are legitimate.
+ */
+function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
+  const cutoffMs = nowMs + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
+  const title = (ev.title || '').toString().trim().slice(0, 512);
+  if (!title) return null;
+
+  const start = parseDateOrNull(ev.startAt);
+  if (opts.requireStart && !start) return null;
+  if (start && start.getTime() > cutoffMs) return null;
+  if (start && start.getTime() < nowMs - 24 * 60 * 60 * 1000) return null;
+
+  // Compute canonicalized fields BEFORE the dedup key so the key is
+  // stable across pulls. Claude's raw startAt/eventUrl strings can
+  // drift between runs (different timezone formatting, trailing
+  // slashes, etc) — the parsed Date's toISOString() and the
+  // safeHttpUrl() canonical form don't.
+  const description = ev.description ? String(ev.description).slice(0, 2000) : null;
+  const venueName = ev.venueName ? String(ev.venueName).slice(0, 256) : null;
+  const eventUrl = safeHttpUrl(ev.eventUrl);
+  const imageUrl = safeHttpUrl(ev.imageUrl);
+
+  // Synthesize a stable dedup key from canonical title+date+url.
+  // Extracted events don't have a UID/guid, so we key on the
+  // post-normalization fields. Title is lowercased so casing drift
+  // from Claude (e.g. "Boat Parade" vs "BOAT PARADE") doesn't
+  // create duplicates either.
+  const titleKey = title.toLowerCase().slice(0, 80);
+  const startKey = start ? start.toISOString() : '';
+  const urlKey = eventUrl || '';
+  const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
+
+  // Clamp to varchar(128) — events_raw.city per migration
+  // 20260427000003. Claude can return long location strings; without
+  // the slice the INSERT throws "value too long for type character
+  // varying(128)" and bubbles out of the loop, failing the whole
+  // source pull and dropping remaining events.
+  const city = (typeof ev.city === 'string' && ev.city.trim())
+    ? ev.city.trim().toLowerCase().slice(0, 128)
+    : (source.coverage_geo?.[0] || null);
+
+  // Tier-1 auto-approve additionally requires a real extracted start
+  // date. An undated event can never enter the digest (eligibility
+  // requires start_at), so pre-approving it only seeds unreviewed
+  // rows into the approved pool.
+  const autoApprove = source.priority_tier === 1 && Boolean(start);
+
+  return {
+    autoApprove,
+    row: {
+      source_id: source.id,
+      external_id: externalId,
+      title,
+      description,
+      start_at: start,
+      venue_name: venueName,
+      city,
+      event_url: eventUrl,
+      image_url: imageUrl,
+    },
+  };
+}
+
+async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
+  const nowMs = Date.now();
+  let upserted = 0;
+  let dropped = 0;
+
+  for (const ev of claudeEvents) {
+    const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
+    if (!normalized) { dropped += 1; continue; }
+    const { row, autoApprove } = normalized;
+
+    await db('events_raw')
+      .insert({
+        ...row,
+        ...(autoApprove && { admin_status: 'approved' }),
+      })
+      .onConflict(['source_id', 'external_id'])
+      .merge({
+        title: row.title,
+        description: row.description,
+        start_at: row.start_at,
+        venue_name: row.venue_name,
+        city: row.city,
+        event_url: row.event_url,
+        image_url: row.image_url,
+        pulled_at: db.fn.now(),
+        updated_at: db.fn.now(),
+        ...revivalResetFields(),
+      });
+
+    upserted += 1;
+  }
+
+  return { upserted, dropped };
+}
+
+// News-mode RSS: bundle the feed's articles and extract real, dated
+// events from their text. Returns the same shape as the other pull
+// handlers so ingestSource logging/health stays uniform.
+async function pullNewsRssItems(source, items) {
+  if (!items.length) return { upserted: 0, dropped: 0, total: 0 };
+  const cfg = source.scrape_config || {};
+  const maxEvents = Math.max(3, Math.min(30, Number(cfg.maxEvents) || 15));
+
+  const { text, bundled } = buildArticleBundle(items);
+  if (!text.trim()) return { upserted: 0, dropped: 0, total: 0 };
+
+  const claudeEvents = await extractEventsWithClaude(source, text, { mode: 'articles', maxEvents });
+  // requireStart: the articles contract is "no stated event date → no
+  // event" — enforce it even when the model ignores the prompt rule.
+  const { upserted, dropped } = await upsertExtractedEvents(source, claudeEvents, { requireStart: true });
+  return { upserted, dropped, total: claudeEvents.length, articlesBundled: bundled };
 }
 
 // node-ical's `vevent` records use unconventional shapes:
@@ -441,125 +704,10 @@ async function pullScrapeSource(source) {
   const TRUNC = 25000;
   const truncated = html.length > TRUNC ? html.slice(0, TRUNC) : html;
 
-  // Ask Claude to extract structured events. Strict JSON schema; we
-  // parse + validate per-item before insert so a model hallucination
-  // can't poison the table.
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  // Anchor "today" in America/New_York, not UTC. The cron runs at 4am ET
-  // which is in the UTC-day-overlap region; without ET anchoring the
-  // prompt could tell Claude the wrong day and a same-evening event
-  // gets filtered as already past, or the 90-day cutoff shifts by ±1d.
-  const todayIso = etDateString(new Date());
-  const systemPrompt = `You extract upcoming public events from raw HTML scraped from a Southwest Florida event-listing page.
-
-Today's date: ${todayIso}. Source: ${source.name} (${source.url}).
-
-Output STRICT JSON only, no prose, with this shape:
-{
-  "events": [
-    {
-      "title": "string, the event name",
-      "startAt": "ISO 8601 datetime in America/New_York timezone, or null if no specific date is given",
-      "venueName": "string or null",
-      "city": "lowercase city slug — sarasota | bradenton | venice | tampa | st-petersburg | clearwater | gulfport | punta-gorda | port-charlotte | englewood | north-port | lakewood-ranch | parrish | palmetto | anna-maria | siesta-key | longboat-key | etc — or null if not determinable",
-      "description": "string, 1-2 short sentences describing why someone would go. May be null if no description is on the page.",
-      "eventUrl": "absolute http(s) URL to the event detail page, or null"
-    }
-  ]
-}
-
-Rules:
-- Skip events with no title.
-- Skip events that already happened (date < today).
-- Skip events more than 90 days out.
-- Skip recurring/series rows that don't have a specific upcoming instance.
-- Skip "View all events" or navigation links.
-- Cap output at ${maxEvents} events.
-- If you can't find events, return {"events": []}.
-- Return JSON only — no code fence, no commentary.`;
-
-  const response = await anthropic.messages.create({
-    model: MODELS.WORKHORSE,
-    max_tokens: 2000,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: `<html>\n${truncated}\n</html>` }],
-  });
-  const text = response.content?.[0]?.text || '';
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Claude did not return JSON for scrape extraction');
-  const parsed = JSON.parse(jsonMatch[0]);
-  const claudeEvents = Array.isArray(parsed.events) ? parsed.events.slice(0, maxEvents) : [];
-
-  const cutoffMs = Date.now() + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  const now = Date.now();
-
-  let upserted = 0;
-  let dropped = 0;
-
-  for (const ev of claudeEvents) {
-    const title = (ev.title || '').toString().trim().slice(0, 512);
-    if (!title) { dropped += 1; continue; }
-
-    const start = parseDateOrNull(ev.startAt);
-    if (start && start.getTime() > cutoffMs) { dropped += 1; continue; }
-    if (start && start.getTime() < now - 24 * 60 * 60 * 1000) { dropped += 1; continue; }
-
-    // Compute canonicalized fields BEFORE the dedup key so the key is
-    // stable across pulls. Claude's raw startAt/eventUrl strings can
-    // drift between runs (different timezone formatting, trailing
-    // slashes, etc) — the parsed Date's toISOString() and the
-    // safeHttpUrl() canonical form don't.
-    const description = ev.description ? String(ev.description).slice(0, 2000) : null;
-    const venueName = ev.venueName ? String(ev.venueName).slice(0, 256) : null;
-    const eventUrl = safeHttpUrl(ev.eventUrl);
-
-    // Synthesize a stable dedup key from canonical title+date+url.
-    // Scraped sources don't have a UID/guid, so we key on the
-    // post-normalization fields. Title is lowercased so casing drift
-    // from Claude (e.g. "Boat Parade" vs "BOAT PARADE") doesn't
-    // create duplicates either.
-    const titleKey = title.toLowerCase().slice(0, 80);
-    const startKey = start ? start.toISOString() : '';
-    const urlKey = eventUrl || '';
-    const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
-    // Clamp to varchar(128) — events_raw.city per migration
-    // 20260427000003. Claude can return long location strings; without
-    // the slice the INSERT throws "value too long for type character
-    // varying(128)" and bubbles out of the loop, failing the whole
-    // source pull and dropping remaining events.
-    const city = (typeof ev.city === 'string' && ev.city.trim())
-      ? ev.city.trim().toLowerCase().slice(0, 128)
-      : (source.coverage_geo?.[0] || null);
-    const autoApprove = source.priority_tier === 1;
-
-    await db('events_raw')
-      .insert({
-        source_id: source.id,
-        external_id: externalId,
-        title,
-        description,
-        start_at: start,
-        venue_name: venueName,
-        city,
-        event_url: eventUrl,
-        ...(autoApprove && { admin_status: 'approved' }),
-      })
-      .onConflict(['source_id', 'external_id'])
-      .merge({
-        title,
-        description,
-        start_at: start,
-        venue_name: venueName,
-        city,
-        event_url: eventUrl,
-        pulled_at: db.fn.now(),
-        updated_at: db.fn.now(),
-        ...revivalResetFields(),
-      });
-
-    upserted += 1;
-  }
-
+  // Shared Claude extraction + validated upsert — same path the
+  // news-RSS handler uses, in page mode.
+  const claudeEvents = await extractEventsWithClaude(source, truncated, { mode: 'page', maxEvents });
+  const { upserted, dropped } = await upsertExtractedEvents(source, claudeEvents);
   return { upserted, dropped, total: claudeEvents.length };
 }
 
@@ -643,4 +791,8 @@ module.exports = {
   ingestAllEnabledSources,
   ingestSource, // exported for ad-hoc admin-triggered pulls
   revivalResetFields, // exported for unit testing the past→future revival SQL
+  // Exported for unit tests — pure pieces of the shared extraction path.
+  buildArticleBundle,
+  buildExtractionSystemPrompt,
+  normalizeExtractedEvent,
 };
