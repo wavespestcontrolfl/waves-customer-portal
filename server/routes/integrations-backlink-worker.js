@@ -23,7 +23,7 @@ router.get('/claim', async (req, res, next) => {
       return res.json({ prospects: [], note: 'outreach is approval-gated (linkProspectOutreach off)' });
     }
     const prospects = await worker.claim({ n: req.query.n, type });
-    res.json({ prospects });
+    res.json({ prospects, business_profile: worker.businessProfile() });
   } catch (err) { next(err); }
 });
 

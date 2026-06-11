@@ -228,7 +228,10 @@ A worker, not a peer system. Add to the existing router (already auth'd
 GET  /api/admin/backlink-agent/prospects/claim?n=10&type=signup|outreach
        → leases N prospects in status 'prospect' (type-filtered), sets
          claimed_at/claimed_by='hermes' under a transaction + FOR UPDATE SKIP LOCKED
-         so parallel Hermes subagents never grab the same row. Returns work packets.
+         so parallel Hermes subagents never grab the same row. Returns work packets
+         plus `business_profile` — the canonical NAP (brand, website, contact email,
+         per-office address/phone/place-id from config/locations.js) the worker MUST
+         copy verbatim on signups; it never invents business details.
 
 POST /api/integrations/backlink-worker/report
        body: { prospect_id, lease_token, outcome: 'placed'|'failed'|'skipped',

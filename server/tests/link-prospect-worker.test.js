@@ -1,4 +1,4 @@
-const { mapReportToPatch } = require('../services/seo/link-prospect-worker');
+const { mapReportToPatch, businessProfile } = require('../services/seo/link-prospect-worker');
 
 describe('link prospect worker — report mapping', () => {
   test('placed records live_url/anchor/evidence, sets status=placed, releases lease', () => {
@@ -51,5 +51,33 @@ describe('link prospect worker — report mapping', () => {
     const p = mapReportToPatch('placed', {});
     expect(p.status).toBe('placed');
     expect(p.live_url).toBeNull();
+  });
+});
+
+describe('link prospect worker — business profile (canonical NAP)', () => {
+  test('serves complete NAP for every GBP-backed office', () => {
+    const bp = businessProfile();
+    expect(bp.brand).toBe('Waves Pest Control');
+    expect(bp.website).toBe('https://wavespestcontrol.com');
+    expect(bp.contact_email).toMatch(/@wavespestcontrol\.com$/);
+    expect(bp.locations.length).toBeGreaterThanOrEqual(4);
+    for (const loc of bp.locations) {
+      expect(loc.id).toBeTruthy();
+      expect(loc.address).toMatch(/, FL \d{5}$/);
+      expect(loc.phone).toMatch(/^\(941\) \d{3}-\d{4}$/);
+      expect(loc.google_place_id).toBeTruthy();
+    }
+  });
+
+  test('default_location_id resolves to a served location', () => {
+    const bp = businessProfile();
+    expect(bp.locations.some((l) => l.id === bp.default_location_id)).toBe(true);
+  });
+
+  test('exposes only public NAP — no GBP account internals', () => {
+    const json = JSON.stringify(businessProfile());
+    expect(json).not.toMatch(/RefreshToken/i);
+    expect(json).not.toMatch(/googleAccountId|googleLocationId|accounts\//);
+    expect(json).not.toMatch(/latitude|longitude/);
   });
 });
