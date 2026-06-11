@@ -1,0 +1,40 @@
+{
+  "fixture": "mosquito_event_completed",
+  "proves": ["phase1", "tier1_minimal_form"],
+  "typedReportSnapshot": {
+    "type": "mosquito_event",
+    "typeLabel": "Mosquito Event Spray",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "mosquito_event",
+    "serviceLabel": "Mosquito Event Spray",
+    "reportTypeLabel": "Mosquito Event Treatment Summary",
+    "visitSequence": 1,
+    "values": {
+      "areas_treated": "Backyard foliage, lanai perimeter, pool cage landscaping",
+      "standing_water_sources": "Plant saucers on lanai (emptied during service)",
+      "products_used": "In2Care + barrier application"
+    },
+    "nextStepChips": ["Dump standing water weekly", "Avoid treated foliage until dry"],
+    "todaysResult": {
+      "headline": "Mosquito Event Treatment completed today.",
+      "body": "We treated the backyard foliage, lanai perimeter, and pool cage landscaping ahead of your event, and emptied plant saucers that were holding water.",
+      "nextStep": "Dump standing water weekly and avoid treated foliage until dry."
+    },
+    "findings": [
+      { "fieldKey": "areas_treated", "technicianLabel": "Areas treated", "customerLabel": "Areas we treated", "value": "Backyard foliage, lanai perimeter, pool cage landscaping", "customerValueLabel": "Backyard foliage, lanai perimeter, pool cage landscaping" },
+      { "fieldKey": "standing_water_sources", "technicianLabel": "Standing water / breeding sources", "customerLabel": "Mosquito breeding sources found", "value": "Plant saucers on lanai (emptied during service)", "customerValueLabel": "Plant saucers on lanai (emptied during service)" }
+    ],
+    "activity": null
+  },
+  "expected": {
+    "todaysResultPresent": true,
+    "pestPressureRendered": false,
+    "gaugeRendered": false,
+    "metricsBandLooksIntentional": true,
+    "reentryAdvisoryPresent": true,
+    "nextStepPresent": true,
+    "requiredInteractionsAtMost": 5
+  }
+}

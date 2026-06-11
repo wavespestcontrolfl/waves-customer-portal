@@ -1,0 +1,59 @@
+{
+  "fixture": "bed_bug_followup_no_active_signs",
+  "proves": ["zero_state_trend", "bed_bug_safe_wording", "no_guarantee_language"],
+  "completionContext": {
+    "billingType": "one_time",
+    "amountDueCents": 0,
+    "followupIncluded": true,
+    "expectedGate": "no_billing_409"
+  },
+  "typedReportSnapshot": {
+    "type": "bed_bug",
+    "typeLabel": "Bed Bug Treatment",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "bed_bug_treatment",
+    "serviceLabel": "Bed Bug Treatment",
+    "reportTypeLabel": "Bed Bug Program — Progress Visit",
+    "visitSequence": 2,
+    "values": {
+      "rooms_treated": "Master bedroom, guest bedroom (re-inspection)",
+      "evidence_level": "No active signs observed",
+      "treatment_method": "Steam + chemical",
+      "prep_for_customer": "Continue using mattress encasements; launder bedding weekly on high heat"
+    },
+    "nextStepChips": ["Continue monitoring"],
+    "todaysResult": {
+      "headline": "No active signs observed during today's service.",
+      "body": "We re-inspected and treated both bedrooms as scheduled. Activity has decreased since the initial visit, with no live bed bugs or new evidence found in accessible areas.",
+      "nextStep": "Continue monitoring and contact us if activity returns."
+    },
+    "findings": [
+      { "fieldKey": "evidence_level", "technicianLabel": "Evidence level", "customerLabel": "Activity observed", "value": "No active signs observed", "customerValueLabel": "No active signs observed today" },
+      { "fieldKey": "rooms_treated", "technicianLabel": "Rooms treated", "customerLabel": "Areas we treated", "value": "Master bedroom, guest bedroom (re-inspection)", "customerValueLabel": "Master bedroom and guest bedroom" },
+      { "fieldKey": "prep_for_customer", "technicianLabel": "Customer prep for follow-up", "customerLabel": "What you can do", "value": "Continue using mattress encasements; launder bedding weekly on high heat", "customerValueLabel": "Continue using mattress encasements; launder bedding weekly on high heat" }
+    ],
+    "activity": {
+      "indicatorKey": "bed_bug_activity",
+      "label": "Bed Bug Activity",
+      "score": 0,
+      "levelWord": "No active signs observed today",
+      "source": "derived",
+      "derivedFrom": { "field": "evidence_level", "value": "No active signs observed", "initialDerivedScore": 0 },
+      "trend": "improving",
+      "trendWord": "decreased since the last visit",
+      "history": [{ "visit": 1, "score": 4 }, { "visit": 2, "score": 0 }]
+    }
+  },
+  "expected": {
+    "zeroScoreRendersPositively": true,
+    "bannedWordsAbsent": ["clear", "cleared", "gone", "eliminated", "no infestation", "guaranteed", "resolved"],
+    "observationScopedWordingPresent": "No active signs observed",
+    "trendClaimed": true,
+    "monitoringGuidancePresent": true,
+    "billing409Fired": false,
+    "pestPressureRendered": false,
+    "customerRatingPromptRendered": false
+  }
+}

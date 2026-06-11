@@ -1,0 +1,41 @@
+{
+  "fixture": "pest_inspection_no_major_findings",
+  "proves": ["phase1", "zero_state", "tier2_quick_path"],
+  "typedReportSnapshot": {
+    "type": "pest_inspection",
+    "typeLabel": "Pest Inspection",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "pest_inspection",
+    "serviceLabel": "Pest Inspection",
+    "reportTypeLabel": "Pest Inspection Summary",
+    "visitSequence": 1,
+    "values": {
+      "areas_inspected": "Kitchen, bathrooms, garage, exterior perimeter, attic access",
+      "severity": "None observed"
+    },
+    "nextStepChips": ["No action needed"],
+    "todaysResult": {
+      "headline": "No active signs of pest activity observed today.",
+      "body": "We inspected the kitchen, bathrooms, garage, exterior perimeter, and attic access. Continue monitoring and contact us if activity returns.",
+      "nextStep": "No action needed"
+    },
+    "findings": [
+      { "fieldKey": "severity", "technicianLabel": "Severity", "customerLabel": "Activity observed", "value": "None observed", "customerValueLabel": "No active signs observed today" },
+      { "fieldKey": "areas_inspected", "technicianLabel": "Areas inspected", "customerLabel": "Areas we checked", "value": "Kitchen, bathrooms, garage, exterior perimeter, attic access", "customerValueLabel": "Kitchen, bathrooms, garage, exterior perimeter, attic access" }
+    ],
+    "activity": null
+  },
+  "expected": {
+    "todaysResultPresent": true,
+    "pestPressureRendered": false,
+    "gaugeRendered": false,
+    "zeroStateRendersPositively": true,
+    "bannedWordsAbsent": ["clear", "eliminated", "no infestation", "guaranteed"],
+    "rawFieldKeysAbsent": true,
+    "nextStepPresent": true,
+    "trendClaimed": false,
+    "smsCopy": "Hi {first}, your Pest Inspection Summary report is ready: {url}"
+  }
+}

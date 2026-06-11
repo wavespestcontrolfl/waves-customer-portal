@@ -1,0 +1,42 @@
+{
+  "fixture": "one_time_lawn_treatment_completed",
+  "proves": ["phase1", "lawn_family", "no_lawn_program_cards"],
+  "typedReportSnapshot": {
+    "type": "one_time_lawn_treatment",
+    "typeLabel": "One-Time Lawn Treatment",
+    "schemaVersion": 1,
+    "copyMapVersion": 1,
+    "summaryTemplateVersion": 1,
+    "serviceKey": "lawn_one_time_treatment",
+    "serviceLabel": "One-Time Lawn Treatment",
+    "reportTypeLabel": "Lawn Treatment Summary",
+    "visitSequence": 1,
+    "values": {
+      "turf_type": "St. Augustine",
+      "areas_treated": "Front and back lawn, full coverage",
+      "condition_found": "Chinch bug damage along the driveway edge; thinning in full-sun areas",
+      "treatment_performed": "Insecticide application targeting chinch bugs plus spot fertilization",
+      "irrigation_or_cultural_notes": "Increase irrigation to 2x/week on dry zones until recovery"
+    },
+    "nextStepChips": ["Follow watering guidance", "Re-check scheduled"],
+    "todaysResult": {
+      "headline": "Lawn Treatment completed today.",
+      "body": "We found chinch bug damage along the driveway edge and treated the full lawn, with spot fertilization in thinning areas.",
+      "nextStep": "Follow the watering guidance below — we recommend a re-check in 3–4 weeks."
+    },
+    "findings": [
+      { "fieldKey": "turf_type", "technicianLabel": "Turf type", "customerLabel": "Lawn type", "value": "St. Augustine", "customerValueLabel": "St. Augustine" },
+      { "fieldKey": "condition_found", "technicianLabel": "Condition found", "customerLabel": "What we observed", "value": "Chinch bug damage along the driveway edge; thinning in full-sun areas", "customerValueLabel": "Chinch bug damage along the driveway edge; thinning in full-sun areas" },
+      { "fieldKey": "treatment_performed", "technicianLabel": "Treatment performed", "customerLabel": "What we did", "value": "Insecticide application targeting chinch bugs plus spot fertilization", "customerValueLabel": "Insecticide application targeting chinch bugs plus spot fertilization" },
+      { "fieldKey": "irrigation_or_cultural_notes", "technicianLabel": "Irrigation / cultural notes", "customerLabel": "Watering & care notes", "value": "Increase irrigation to 2x/week on dry zones until recovery", "customerValueLabel": "Increase irrigation to 2x/week on dry zones until recovery" }
+    ],
+    "activity": null
+  },
+  "expected": {
+    "todaysResultPresent": true,
+    "lawnProgramCardsRendered": false,
+    "pestPressureRendered": false,
+    "gaugeRendered": false,
+    "nextStepPresent": true
+  }
+}
