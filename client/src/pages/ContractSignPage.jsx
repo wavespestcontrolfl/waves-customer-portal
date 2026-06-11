@@ -150,6 +150,7 @@ export default function ContractSignPage() {
   }, [token]);
 
   const canSubmit = useMemo(() => {
+    if (contract?.requiresSignature === false) return false;
     const isAutopayContract = contract?.contractType === 'autopay_authorization';
     const acceptedTerms = isAutopayContract ? form.agreeAuthorization : form.agreeDocumentTerms;
     return (
@@ -211,11 +212,12 @@ export default function ContractSignPage() {
     return <ContractError title="We could not open that contract" message="The link may be expired or mistyped." />;
   }
 
-  const signedLabel = signed ? 'Signed' : 'Ready to sign';
   const isAutopay = contract.contractType === 'autopay_authorization';
+  const needsSignature = contract.requiresSignature !== false;
+  const signedLabel = signed ? 'Signed' : needsSignature ? 'Ready to sign' : 'Ready to view';
   const documentTitle = contract.title || (isAutopay ? 'AutoPay Authorization' : 'Document');
   const documentKind = isAutopay ? 'authorization' : 'document';
-  const termsLabel = isAutopay ? 'Authorization terms' : 'Document terms';
+  const termsLabel = isAutopay ? 'Authorization terms' : needsSignature ? 'Document terms' : 'Document details';
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -227,7 +229,9 @@ export default function ContractSignPage() {
             <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 16, lineHeight: 1.55, maxWidth: 660 }}>
               {isAutopay
                 ? 'Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.'
-                : 'Review this Waves document, then sign electronically to acknowledge and accept the terms shown below.'}
+                : needsSignature
+                  ? 'Review this Waves document, then sign electronically to acknowledge and accept the terms shown below.'
+                  : 'Review this Waves document. No signature is required.'}
             </p>
           </div>
         </div>
@@ -312,6 +316,29 @@ export default function ContractSignPage() {
                 <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
                   Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature{isAutopay ? ' and authorization' : ''}.
                 </p>
+              </div>
+            ) : !needsSignature ? (
+              <div>
+                <div style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: 8,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'var(--brand-soft)',
+                  color: 'var(--brand)',
+                  marginBottom: 14,
+                }}>
+                  <Icon name="document" size={24} strokeWidth={2} />
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>No signature required</div>
+                <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
+                  This Waves document is ready to view. You can save this link or reply to the message that sent it if you have questions.
+                </p>
+                <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                  Need help? <HelpPhoneLink tone="dark" inline />
+                </div>
               </div>
             ) : (
               <form onSubmit={submit}>

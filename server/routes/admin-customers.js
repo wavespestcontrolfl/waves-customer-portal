@@ -11,6 +11,7 @@ const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { listCustomerPrepaidPlans } = require('../services/prepaid-series');
+const { documentRequiresSignature } = require('../services/contracts');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1535,6 +1536,7 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] payment_method_consents: ${e.message}`); return []; }),
       db('customer_contracts as cc')
         .leftJoin('payment_methods as pm', 'cc.payment_method_id', 'pm.id')
+        .leftJoin('document_templates as dt', 'cc.document_template_id', 'dt.id')
         .where('cc.customer_id', c.id)
         .select(
           'cc.*',
@@ -1542,7 +1544,10 @@ router.get('/:id', async (req, res, next) => {
           'pm.card_brand',
           'pm.last_four',
           'pm.bank_name',
-          'pm.bank_last_four'
+          'pm.bank_last_four',
+          'dt.requires_signature as document_template_requires_signature',
+          'dt.category as document_template_category',
+          'dt.document_type as document_template_document_type'
         )
         .orderBy('cc.created_at', 'desc')
         .limit(20)
@@ -1702,6 +1707,14 @@ router.get('/:id', async (req, res, next) => {
         consentTextSnapshot: contract.consent_text_snapshot,
         contractTextSnapshot: contract.contract_text_snapshot,
         esignDisclosureSnapshot: contract.esign_disclosure_snapshot,
+        documentTemplateId: contract.document_template_id || null,
+        documentTemplateVersionId: contract.document_template_version_id || null,
+        documentTemplateKey: contract.document_template_key || null,
+        documentTemplateCategory: contract.document_template_category || null,
+        documentTemplateDocumentType: contract.document_template_document_type || null,
+        requiresSignature: contract.contract_type === 'document_template'
+          ? documentRequiresSignature(contract)
+          : true,
         shareTokenExpiresAt: contract.share_token_expires_at,
         sharedAt: contract.shared_at,
         viewedAt: contract.viewed_at,

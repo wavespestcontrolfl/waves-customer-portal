@@ -4,7 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   ESIGN_DISCLOSURE,
-  contractExpiresAt,
+  documentContractExpiresAt,
   hashContractToken,
   mintContractToken,
   publicContractUrl,
@@ -12,6 +12,7 @@ const {
   signerName,
 } = require('../services/contracts');
 const {
+  assertTemplateSignatureMode,
   buildCustomerDocumentContext,
   jsonb,
   renderDocumentTemplate,
@@ -20,6 +21,10 @@ const {
   validateTemplatePayload,
   validateVersionPayload,
 } = require('../services/document-template-library');
+const {
+  previewBulkDocumentSend,
+  sendBulkDocument,
+} = require('../services/document-template-bulk-send');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -68,6 +73,7 @@ function splitTemplateRow(row = {}) {
 function contractQuery(conn = db) {
   return conn('customer_contracts as cc')
     .leftJoin('payment_methods as pm', 'cc.payment_method_id', 'pm.id')
+    .leftJoin('document_templates as dt', 'cc.document_template_id', 'dt.id')
     .select(
       'cc.*',
       'pm.method_type',
@@ -75,6 +81,9 @@ function contractQuery(conn = db) {
       'pm.last_four',
       'pm.bank_name',
       'pm.bank_last_four',
+      'dt.requires_signature as document_template_requires_signature',
+      'dt.category as document_template_category',
+      'dt.document_type as document_template_document_type',
       conn.raw(`CASE
         WHEN pm.method_type IN ('ach', 'us_bank_account') THEN CONCAT(COALESCE(pm.bank_name, 'Bank account'), ' ending ', COALESCE(pm.bank_last_four, '----'))
         WHEN pm.id IS NOT NULL THEN CONCAT(COALESCE(pm.card_brand, 'Card'), ' ending ', COALESCE(pm.last_four, '----'))
@@ -204,8 +213,20 @@ router.post('/', async (req, res, next) => {
 
 router.put('/:key', async (req, res, next) => {
   try {
+    const existing = await db('document_templates')
+      .where({ template_key: req.params.key })
+      .first('id', 'category', 'document_type', 'requires_signature');
+    if (!existing) return res.status(404).json({ error: 'Document template not found' });
+
     const payload = validateTemplatePayload(req.body || {}, { partial: true });
     delete payload.template_key;
+    assertTemplateSignatureMode({
+      category: payload.category || existing.category,
+      document_type: payload.document_type || existing.document_type,
+      requires_signature: Object.prototype.hasOwnProperty.call(payload, 'requires_signature')
+        ? payload.requires_signature
+        : existing.requires_signature !== false,
+    });
     if (payload.variables) payload.variables = jsonb(payload.variables, []);
     if (payload.tags) payload.tags = jsonb(payload.tags, []);
     if (payload.reminder_schedule_days) payload.reminder_schedule_days = jsonb(payload.reminder_schedule_days, [1, 3, -1]);
@@ -301,6 +322,26 @@ router.post('/:key/preview', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.post('/:key/bulk-preview', async (req, res, next) => {
+  try {
+    const result = await previewBulkDocumentSend(req.params.key, req.body || {});
+    res.json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+router.post('/:key/bulk-send', async (req, res, next) => {
+  try {
+    const result = await sendBulkDocument(req.params.key, req.body || {}, req);
+    res.status(202).json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
 router.post('/:key/contracts', async (req, res, next) => {
   try {
     const loaded = await loadTemplateByKey(req.params.key);
@@ -330,7 +371,7 @@ router.post('/:key/contracts', async (req, res, next) => {
     }
 
     const token = mintContractToken();
-    const expiresAt = contractExpiresAt(new Date(), loaded.template.expire_after_days);
+    const expiresAt = documentContractExpiresAt(new Date(), loaded.template.expire_after_days, loaded.template);
     const recipientName = cleanRecipientName(req.body?.recipientName) || signerName(customer);
     const recipientEmail = cleanRecipientName(req.body?.recipientEmail) || customer.email || null;
     const recipientPhone = cleanRecipientName(req.body?.recipientPhone) || customer.phone || null;
@@ -354,6 +395,7 @@ router.post('/:key/contracts', async (req, res, next) => {
         document_template_id: loaded.template.id,
         document_template_version_id: loaded.activeVersion.id,
         document_template_key: loaded.template.template_key,
+        requires_signature_snapshot: loaded.template.requires_signature !== false,
         document_variables_snapshot: jsonb(context, {}),
         document_render_summary: jsonb(rendered.renderSummary, {}),
       }).returning('*');

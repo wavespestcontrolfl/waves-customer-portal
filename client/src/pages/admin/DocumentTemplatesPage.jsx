@@ -22,6 +22,7 @@ const CATEGORY_TABS = [
   { key: "wdo", label: "WDO" },
   { key: "prep_form", label: "Prep" },
   { key: "notice", label: "Notices" },
+  { key: "marketing", label: "Marketing" },
 ];
 
 const EMPTY_TEMPLATE = {
@@ -72,6 +73,25 @@ const DEFAULT_SEND_VALUES = {
   inspectionDate: "2026-06-10",
 };
 
+const BULK_AUDIENCES = [
+  { value: "active_pest", label: "Active pest customers" },
+  { value: "active_lawn", label: "Active lawn customers" },
+  { value: "active_customers", label: "Active customers" },
+  { value: "upcoming_service", label: "Upcoming service" },
+  { value: "recent_service", label: "Recent service" },
+  { value: "all", label: "All customers" },
+];
+
+const BULK_GUIDE_TYPES = [
+  { value: "pest", label: "Pest control" },
+  { value: "lawn", label: "Lawn care" },
+  { value: "all", label: "All products" },
+];
+
+const BULK_CHANNELS = [
+  { value: "sms", label: "SMS" },
+];
+
 function api(path, options = {}) {
   return rawAdminFetch(path, options).then(async (res) => {
     const body = await res.json().catch(() => ({}));
@@ -120,6 +140,11 @@ function statusTone(status) {
   if (status === "active") return "strong";
   if (status === "paused") return "alert";
   return "neutral";
+}
+
+function numberLabel(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n.toLocaleString() : "0";
 }
 
 function customerName(customer) {
@@ -218,6 +243,17 @@ export default function DocumentTemplatesPage() {
   const [sendValues, setSendValues] = useState(JSON.stringify(DEFAULT_SEND_VALUES, null, 2));
   const [sendAllowUnresolved, setSendAllowUnresolved] = useState(false);
   const [signingUrl, setSigningUrl] = useState("");
+  const [bulkAudience, setBulkAudience] = useState("active_pest");
+  const [bulkGuideType, setBulkGuideType] = useState("pest");
+  const [bulkChannel, setBulkChannel] = useState("sms");
+  const [bulkSearch, setBulkSearch] = useState("");
+  const [bulkCity, setBulkCity] = useState("");
+  const [bulkDays, setBulkDays] = useState(30);
+  const [bulkLimit, setBulkLimit] = useState(100);
+  const [bulkSkipRecentDays, setBulkSkipRecentDays] = useState(14);
+  const [bulkPreview, setBulkPreview] = useState(null);
+  const [bulkResult, setBulkResult] = useState(null);
+  const [bulkLoading, setBulkLoading] = useState(false);
 
   const loadTemplates = useCallback(async () => {
     setLoading(true);
@@ -250,6 +286,15 @@ export default function DocumentTemplatesPage() {
       setVersionDraft(nextVersion);
       setPreview(null);
       setSigningUrl("");
+      setBulkPreview(null);
+      setBulkResult(null);
+      if (nextTemplate.templateKey?.includes("lawn")) {
+        setBulkGuideType("lawn");
+        setBulkAudience("active_lawn");
+      } else if (nextTemplate.templateKey?.includes("pest")) {
+        setBulkGuideType("pest");
+        setBulkAudience("active_pest");
+      }
     } catch (err) {
       setError(err.message || "Could not load document template");
     }
@@ -304,6 +349,12 @@ export default function DocumentTemplatesPage() {
       ...extractVariables(versionDraft.body),
     ])].sort();
   }, [templateDraft.variables, versionDraft.title, versionDraft.body]);
+  const bulkEnabled = Boolean(!newMode
+    && templateDraft.templateKey
+    && templateDraft.category === "marketing"
+    && templateDraft.documentType === "customer_guide"
+    && templateDraft.requiresSignature === false);
+  const bulkSendableCount = bulkPreview?.counts?.sendable || 0;
 
   const updateTemplate = (key, value) => {
     setTemplateDraft((prev) => ({ ...prev, [key]: value }));
@@ -325,6 +376,8 @@ export default function DocumentTemplatesPage() {
     setCustomerQuery("");
     setCustomerResults([]);
     setSelectedCustomer(null);
+    setBulkPreview(null);
+    setBulkResult(null);
     setToast("");
     setError("");
   };
@@ -435,9 +488,9 @@ export default function DocumentTemplatesPage() {
       });
       setSigningUrl(data.signingUrl || data.contract?.signingUrl || "");
       setPreview(data.rendered || null);
-      setToast("Signing link created");
+      setToast("Document link created");
     } catch (err) {
-      setError(err.message || "Could not create signing link");
+      setError(err.message || "Could not create document link");
     } finally {
       setSaving(false);
     }
@@ -446,7 +499,64 @@ export default function DocumentTemplatesPage() {
   const copySigningUrl = async () => {
     if (!signingUrl) return;
     await navigator.clipboard?.writeText(signingUrl).catch(() => {});
-    setToast("Signing link copied");
+    setToast("Document link copied");
+  };
+
+  const bulkPayload = () => ({
+    audience: bulkAudience,
+    guideType: bulkGuideType,
+    channel: bulkChannel,
+    search: bulkSearch,
+    city: bulkCity,
+    days: Number(bulkDays) || 30,
+    limit: Number(bulkLimit) || 100,
+    skipRecentDays: Number(bulkSkipRecentDays) || 0,
+    values: safeJsonParse(sendValues, DEFAULT_SEND_VALUES),
+    allowUnresolved: sendAllowUnresolved,
+  });
+
+  const runBulkPreview = async ({ silent = false } = {}) => {
+    if (!bulkEnabled) return;
+    setBulkLoading(true);
+    setError("");
+    if (!silent) {
+      setToast("");
+      setBulkResult(null);
+    }
+    try {
+      const data = await api(`/admin/document-templates/${encodeURIComponent(templateDraft.templateKey)}/bulk-preview`, {
+        method: "POST",
+        body: bulkPayload(),
+      });
+      setBulkPreview(data);
+      if (!silent) setToast("Bulk audience preview ready");
+    } catch (err) {
+      setError(err.message || "Could not preview bulk send");
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const sendBulkGuide = async () => {
+    if (!bulkEnabled || !bulkPreview || bulkSendableCount <= 0) return;
+    const confirmed = window.confirm(`Send ${templateDraft.name} to ${numberLabel(bulkSendableCount)} customer${bulkSendableCount === 1 ? "" : "s"}?`);
+    if (!confirmed) return;
+    setBulkLoading(true);
+    setError("");
+    setToast("");
+    try {
+      const data = await api(`/admin/document-templates/${encodeURIComponent(templateDraft.templateKey)}/bulk-send`, {
+        method: "POST",
+        body: bulkPayload(),
+      });
+      setBulkResult(data);
+      setToast(`Bulk send complete: ${numberLabel(data.summary?.sentEmail || 0)} email, ${numberLabel(data.summary?.sentSms || 0)} SMS`);
+      await runBulkPreview({ silent: true });
+    } catch (err) {
+      setError(err.message || "Could not send bulk guide");
+    } finally {
+      setBulkLoading(false);
+    }
   };
 
   return (
@@ -457,7 +567,7 @@ export default function DocumentTemplatesPage() {
         sections={CATEGORY_TABS}
         activeKey={category}
         onSectionChange={setCategory}
-        navGridClassName="grid-cols-2 md:grid-cols-5"
+        navGridClassName="grid-cols-2 md:grid-cols-6"
         actions={[
           { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: loadTemplates, disabled: loading },
           { label: "New Template", icon: Plus, onClick: startNew },
@@ -562,6 +672,7 @@ export default function DocumentTemplatesPage() {
                     <option value="wdo">WDO</option>
                     <option value="prep_form">Prep form</option>
                     <option value="notice">Notice</option>
+                    <option value="marketing">Marketing</option>
                     <option value="general">General</option>
                   </SelectInput>
                 </Field>
@@ -585,9 +696,8 @@ export default function DocumentTemplatesPage() {
                 <label className="mt-5 inline-flex h-9 items-center gap-2 text-12 font-medium text-zinc-900">
                   <input
                     type="checkbox"
-                    checked
-                    disabled
-                    onChange={() => {}}
+                    checked={templateDraft.requiresSignature !== false}
+                    onChange={(event) => updateTemplate("requiresSignature", event.target.checked)}
                     className="h-4 w-4 rounded-xs border-zinc-300 text-zinc-900 u-focus-ring"
                   />
                   Requires e-sign
@@ -704,7 +814,7 @@ export default function DocumentTemplatesPage() {
                 <CardBody className="p-4">
                   <div className="mb-3 flex items-center justify-between gap-2">
                     <div>
-                      <div className="u-label text-ink-secondary">Signing link</div>
+                      <div className="u-label text-ink-secondary">Customer link</div>
                       <div className="mt-1 text-13 text-zinc-900">Create customer document</div>
                     </div>
                     <Button size="sm" onClick={createSigningLink} disabled={saving || newMode || !selectedCustomerId}>
@@ -800,13 +910,202 @@ export default function DocumentTemplatesPage() {
                     <div className="mt-3 rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-2">
                       <div className="mb-2 flex items-center gap-2 text-12 font-medium text-zinc-900">
                         <Link2 size={14} />
-                        Link ready
+                        Document link ready
                       </div>
                       <div className="break-all text-11 leading-5 text-zinc-800">{signingUrl}</div>
                       <Button size="sm" variant="secondary" className="mt-2" onClick={copySigningUrl}>
                         <Copy size={14} className="mr-1.5" />
                         Copy
                       </Button>
+                    </div>
+                  )}
+                </CardBody>
+              </Card>
+
+              <Card>
+                <CardBody className="p-4">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div>
+                      <div className="u-label text-ink-secondary">Bulk send guide</div>
+                      <div className="mt-1 text-13 text-zinc-900">Preview audience and send</div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="secondary" onClick={runBulkPreview} disabled={!bulkEnabled || bulkLoading}>
+                        <Eye size={14} className="mr-1.5" />
+                        Preview
+                      </Button>
+                      <Button size="sm" onClick={sendBulkGuide} disabled={!bulkEnabled || bulkLoading || !bulkPreview || bulkSendableCount <= 0}>
+                        <Send size={14} className="mr-1.5" />
+                        Send batch
+                      </Button>
+                    </div>
+                  </div>
+
+                  {!bulkEnabled ? (
+                    <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 px-3 py-2 text-12 text-ink-secondary">
+                      Select an active marketing or customer-guide template.
+                    </div>
+                  ) : (
+                    <div className="grid gap-3">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <Field label="Audience">
+                          <SelectInput
+                            value={bulkAudience}
+                            onChange={(event) => {
+                              const next = event.target.value;
+                              setBulkAudience(next);
+                              if (next === "active_lawn") setBulkGuideType("lawn");
+                              if (next === "active_pest") setBulkGuideType("pest");
+                              setBulkPreview(null);
+                            }}
+                          >
+                            {BULK_AUDIENCES.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </SelectInput>
+                        </Field>
+                        <Field label="Guide type">
+                          <SelectInput
+                            value={bulkGuideType}
+                            onChange={(event) => {
+                              setBulkGuideType(event.target.value);
+                              setBulkPreview(null);
+                            }}
+                          >
+                            {BULK_GUIDE_TYPES.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </SelectInput>
+                        </Field>
+                        <Field label="Delivery">
+                          <SelectInput
+                            value={bulkChannel}
+                            onChange={(event) => {
+                              setBulkChannel(event.target.value);
+                              setBulkPreview(null);
+                            }}
+                          >
+                            {BULK_CHANNELS.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </SelectInput>
+                        </Field>
+                        <Field label="Batch limit">
+                          <TextInput
+                            type="number"
+                            min="1"
+                            max="250"
+                            value={bulkLimit}
+                            onChange={(event) => {
+                              setBulkLimit(event.target.value);
+                              setBulkPreview(null);
+                            }}
+                          />
+                        </Field>
+                        <Field label="Search">
+                          <TextInput
+                            value={bulkSearch}
+                            onChange={(event) => {
+                              setBulkSearch(event.target.value);
+                              setBulkPreview(null);
+                            }}
+                            placeholder="Optional name, phone, email, address"
+                          />
+                        </Field>
+                        <Field label="City">
+                          <TextInput
+                            value={bulkCity}
+                            onChange={(event) => {
+                              setBulkCity(event.target.value);
+                              setBulkPreview(null);
+                            }}
+                            placeholder="Optional city"
+                          />
+                        </Field>
+                        <Field label="Days">
+                          <TextInput
+                            type="number"
+                            min="1"
+                            max="365"
+                            value={bulkDays}
+                            onChange={(event) => {
+                              setBulkDays(event.target.value);
+                              setBulkPreview(null);
+                            }}
+                          />
+                        </Field>
+                        <Field label="Skip duplicate days">
+                          <TextInput
+                            type="number"
+                            min="0"
+                            max="365"
+                            value={bulkSkipRecentDays}
+                            onChange={(event) => {
+                              setBulkSkipRecentDays(event.target.value);
+                              setBulkPreview(null);
+                            }}
+                          />
+                        </Field>
+                      </div>
+
+                      {bulkPreview && (
+                        <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-3">
+                          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                            <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
+                              <div className="u-label text-ink-secondary">Matched</div>
+                              <div className="u-nums mt-1 text-18 font-medium text-zinc-900">{numberLabel(bulkPreview.counts?.matched)}</div>
+                            </div>
+                            <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
+                              <div className="u-label text-ink-secondary">Sendable</div>
+                              <div className="u-nums mt-1 text-18 font-medium text-emerald-950">{numberLabel(bulkPreview.counts?.sendable)}</div>
+                            </div>
+                            <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
+                              <div className="u-label text-ink-secondary">Duplicates</div>
+                              <div className="u-nums mt-1 text-18 font-medium text-amber-950">{numberLabel(bulkPreview.counts?.duplicateSkipped)}</div>
+                            </div>
+                            <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
+                              <div className="u-label text-ink-secondary">Products</div>
+                              <div className="u-nums mt-1 text-18 font-medium text-zinc-900">{numberLabel(bulkPreview.productGuide?.productCount)}</div>
+                            </div>
+                          </div>
+                          {bulkPreview.counts?.capped && (
+                            <div className="mt-2 rounded-xs border-hairline border-amber-300 bg-amber-50 px-2 py-1.5 text-11 text-amber-950">
+                              Preview is capped by the batch limit.
+                            </div>
+                          )}
+                          <div className="mt-3 grid gap-2">
+                            {(bulkPreview.sampleCustomers || []).slice(0, 6).map((customer) => (
+                              <div key={customer.id} className="flex items-start justify-between gap-2 border-b-hairline border-zinc-200 pb-2 text-12 last:border-b-0 last:pb-0">
+                                <div className="min-w-0">
+                                  <div className="truncate font-medium text-zinc-900">{customer.name}</div>
+                                  <div className="truncate text-11 text-ink-secondary">
+                                    {[customer.address, customer.phone, customer.email].filter(Boolean).join(" · ")}
+                                  </div>
+                                </div>
+                                {customer.duplicateContractId && (
+                                  <span className="flex-shrink-0 rounded-xs border-hairline border-amber-300 bg-amber-50 px-1.5 py-0.5 text-10 uppercase tracking-label text-amber-950">
+                                    duplicate
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {bulkResult && (
+                        <div className="rounded-xs border-hairline border-emerald-200 bg-emerald-50 p-3 text-12 text-emerald-950">
+                          <div className="font-medium">Batch result</div>
+                          <div className="mt-1">
+                            Created {numberLabel(bulkResult.summary?.created)} documents, sent {numberLabel(bulkResult.summary?.sentSms)} SMS.
+                          </div>
+                          {(bulkResult.summary?.failed || bulkResult.summary?.skippedMissingContact || bulkResult.summary?.skippedDuplicate) ? (
+                            <div className="mt-1">
+                              Failed {numberLabel(bulkResult.summary?.failed)}, missing contact {numberLabel(bulkResult.summary?.skippedMissingContact)}, duplicate skipped {numberLabel(bulkResult.summary?.skippedDuplicate)}.
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
                     </div>
                   )}
                 </CardBody>

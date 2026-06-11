@@ -7,6 +7,7 @@ const BUSINESS_EMAIL = 'billing@wavespestcontrol.com';
 const BUSINESS_PHONE = '(941) 318-7612';
 const CONTRACT_TOKEN_BYTES = 32;
 const CONTRACT_TOKEN_TTL_DAYS = 14;
+const CONTRACT_TOKEN_MAX_TTL_DAYS = 14;
 
 const ESIGN_DISCLOSURE = [
   'I agree to receive and sign this authorization electronically.',
@@ -84,10 +85,34 @@ function hashContractToken(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex');
 }
 
-function contractExpiresAt(now = new Date(), ttlDays = CONTRACT_TOKEN_TTL_DAYS) {
+function contractExpiresAt(now = new Date(), ttlDays = CONTRACT_TOKEN_TTL_DAYS, options = {}) {
   const days = Number(ttlDays);
-  const safeDays = Number.isFinite(days) && days > 0 ? Math.min(CONTRACT_TOKEN_TTL_DAYS, Math.floor(days)) : CONTRACT_TOKEN_TTL_DAYS;
+  const configuredMaxDays = Number(options.maxDays ?? CONTRACT_TOKEN_MAX_TTL_DAYS);
+  const maxDays = Number.isFinite(configuredMaxDays) && configuredMaxDays > 0
+    ? Math.floor(configuredMaxDays)
+    : CONTRACT_TOKEN_MAX_TTL_DAYS;
+  const safeDays = Number.isFinite(days) && days > 0 ? Math.min(maxDays, Math.floor(days)) : CONTRACT_TOKEN_TTL_DAYS;
   return new Date(now.getTime() + safeDays * 24 * 60 * 60 * 1000);
+}
+
+function documentRequiresSignature(row = {}) {
+  if (row.requires_signature_snapshot !== undefined && row.requires_signature_snapshot !== null) {
+    return row.requires_signature_snapshot !== false;
+  }
+  if (row.requiresSignature !== undefined && row.requiresSignature !== null) {
+    return row.requiresSignature !== false;
+  }
+  if (row.requires_signature !== undefined && row.requires_signature !== null) {
+    return row.requires_signature !== false;
+  }
+  if (row.document_template_requires_signature !== undefined && row.document_template_requires_signature !== null) {
+    return row.document_template_requires_signature !== false;
+  }
+  return true;
+}
+
+function documentContractExpiresAt(now = new Date(), ttlDays = CONTRACT_TOKEN_TTL_DAYS) {
+  return contractExpiresAt(now, ttlDays);
 }
 
 function publicContractUrl(token) {
@@ -103,6 +128,8 @@ function isoDate(value) {
 function serializeContract(row, options = {}) {
   if (!row) return null;
   const includeDocumentSnapshots = options.includeDocumentSnapshots ?? options.includeAudit !== false;
+  const isDocumentTemplate = row.contract_type === 'document_template';
+  const requiresSignature = isDocumentTemplate ? documentRequiresSignature(row) : true;
   return {
     id: row.id,
     customerId: row.customer_id,
@@ -126,6 +153,9 @@ function serializeContract(row, options = {}) {
     documentTemplateId: row.document_template_id || null,
     documentTemplateVersionId: row.document_template_version_id || null,
     documentTemplateKey: row.document_template_key || null,
+    documentTemplateCategory: row.document_template_category || null,
+    documentTemplateDocumentType: row.document_template_document_type || null,
+    requiresSignature,
     ...(includeDocumentSnapshots ? {
       documentVariablesSnapshot: row.document_variables_snapshot || {},
       documentRenderSummary: row.document_render_summary || {},
@@ -165,6 +195,8 @@ module.exports = {
   CONTRACT_TOKEN_TTL_DAYS,
   buildAutopayContractSnapshot,
   contractExpiresAt,
+  documentContractExpiresAt,
+  documentRequiresSignature,
   hashContractToken,
   mintContractToken,
   paymentMethodLabel,

@@ -7,7 +7,8 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { toE164 } = require('../utils/phone');
 const {
   BUSINESS_PHONE,
-  contractExpiresAt,
+  documentContractExpiresAt,
+  documentRequiresSignature,
   hashContractToken,
   mintContractToken,
   publicContractUrl,
@@ -112,6 +113,9 @@ function requestSelect(query) {
     'dt.default_delivery_channel as template_default_delivery_channel',
     'dt.reminder_schedule_days as template_reminder_schedule_days',
     'dt.expire_after_days as template_expire_after_days',
+    'dt.requires_signature as document_template_requires_signature',
+    'dt.category as document_template_category',
+    'dt.document_type as document_template_document_type',
   );
 }
 
@@ -294,6 +298,17 @@ function deliveryError(message, status = 400, code = 'DOCUMENT_DELIVERY_ERROR') 
   return err;
 }
 
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function recipientFor(contract, customer, channel) {
   if (channel === 'email') return clean(contract.recipient_email || customer.email).toLowerCase();
   if (channel === 'sms') return clean(contract.recipient_phone || customer.phone);
@@ -303,6 +318,77 @@ function recipientFor(contract, customer, channel) {
 function trustedPhone(value) {
   const normalized = toE164(value);
   return /^\+\d{8,15}$/.test(normalized || '') ? normalized : null;
+}
+
+function requiresSignature(contract = {}) {
+  return documentRequiresSignature(contract);
+}
+
+function isMarketingCustomerGuide(contract = {}) {
+  if (contract.contract_type !== 'document_template') return false;
+  const renderSummary = parseJsonObject(contract.document_render_summary);
+  return renderSummary.bulkSend === true
+    || (
+      contract.document_template_category === 'marketing'
+      && contract.document_template_document_type === 'customer_guide'
+      && requiresSignature(contract) === false
+    );
+}
+
+async function marketingSmsConsentBasisForContract(contract = {}) {
+  const prefs = await db('notification_prefs')
+    .where({ customer_id: contract.customer_id })
+    .first('sms_enabled', 'seasonal_tips', 'created_at', 'updated_at')
+    .catch(() => null);
+  if (!prefs || prefs.sms_enabled === false || prefs.seasonal_tips !== true) return null;
+  return {
+    status: 'opted_in',
+    source: 'notification_prefs.seasonal_tips',
+    capturedAt: prefs.updated_at || prefs.created_at || undefined,
+  };
+}
+
+async function deliveryOptionsForContract(contract = {}, {
+  channel,
+  action = 'send',
+  smsPurpose,
+  smsConsentBasis,
+  smsEntryPoint,
+  smsMetadata,
+} = {}) {
+  if (!isMarketingCustomerGuide(contract)) {
+    return { smsPurpose, smsConsentBasis, smsEntryPoint, smsMetadata };
+  }
+
+  if (channel === 'email') {
+    throw deliveryError(
+      'Bulk product safety guides are SMS-only until marketing email unsubscribe handling is available.',
+      409,
+      'MARKETING_GUIDE_EMAIL_DISABLED',
+    );
+  }
+
+  const consentBasis = smsConsentBasis || await marketingSmsConsentBasisForContract(contract);
+  if (!consentBasis) {
+    throw deliveryError(
+      'Recipient has not opted in to marketing SMS for product safety guides.',
+      422,
+      'MARKETING_SMS_OPT_IN_REQUIRED',
+    );
+  }
+
+  return {
+    smsPurpose: 'marketing',
+    smsConsentBasis: consentBasis,
+    smsEntryPoint: smsEntryPoint || (action === 'reminder'
+      ? 'bulk_product_safety_guide_manual_reminder'
+      : 'bulk_product_safety_guide_manual_send'),
+    smsMetadata: {
+      original_message_type: 'bulk_product_safety_guide',
+      guardedMarketingGuide: true,
+      ...(smsMetadata || {}),
+    },
+  };
 }
 
 async function validatePreparedChannel(prepared, channel) {
@@ -336,7 +422,7 @@ async function prepareDelivery(contractId, req, { channel, action }) {
   if (TERMINAL_STATUSES.has(String(row.status || '').toLowerCase())) {
     throw deliveryError(`Cannot deliver a ${row.status} document request.`, 409, 'DOCUMENT_REQUEST_TERMINAL');
   }
-  const expiresAt = contractExpiresAt(new Date(), row.template_expire_after_days || 14);
+  const expiresAt = documentContractExpiresAt(new Date(), row.template_expire_after_days || 14, row);
 
   return {
     contract: row,
@@ -421,42 +507,64 @@ async function restoreActivatedDelivery(activated) {
   return updated === 1 ? restored : activated.contract;
 }
 
-async function sendPreparedChannel(prepared, req, { channel, action, recipient }) {
+async function sendPreparedChannel(prepared, req, {
+  channel,
+  action,
+  recipient,
+  smsPurpose,
+  smsConsentBasis,
+  smsEntryPoint,
+  smsMetadata,
+}) {
   const safeRecipient = recipient || await validatePreparedChannel(prepared, channel);
   return channel === 'email'
     ? sendEmailDelivery({ ...prepared, recipient: safeRecipient })
-    : sendSmsDelivery({ ...prepared, recipient: safeRecipient });
+    : sendSmsDelivery({
+      ...prepared,
+      recipient: safeRecipient,
+      smsPurpose,
+      smsConsentBasis,
+      smsEntryPoint,
+      smsMetadata,
+    });
 }
 
 function emailPayload({ contract, customer, signingUrl, action }) {
   const reminder = action === 'reminder';
+  const needsSignature = requiresSignature(contract);
   const title = clean(contract.title) || 'Waves document';
   const titleHtml = escapeHtml(title);
   const subject = reminder ? `Reminder: ${title} from Waves` : `${title} from Waves`;
-  const heading = reminder ? 'Document reminder' : 'Document ready for review';
-  const intro = `Hi ${escapeHtml(firstName(customer))}, ${reminder ? 'this is a reminder that ' : ''}Waves has a document ready for your review and electronic signature.`;
+  const heading = reminder ? 'Document reminder' : needsSignature ? 'Document ready for review' : 'Document ready to view';
+  const reviewAction = needsSignature ? 'review and electronic signature' : 'review';
+  const intro = `Hi ${escapeHtml(firstName(customer))}, ${reminder ? 'this is a reminder that ' : ''}Waves has a document ready for your ${reviewAction}.`;
   const lines = [
     ['Document', escapeHtml(title), true],
     ['Recipient', escapeHtml(clean(contract.recipient_name) || customerName(customer))],
     contract.share_token_expires_at ? ['Link expires', escapeHtml(dateLabel(contract.share_token_expires_at))] : null,
   ].filter(Boolean);
+  const ctaLabel = needsSignature ? 'Review and sign' : 'View document';
   const html = wrapEmail({
-    preheader: reminder ? `${titleHtml} is still waiting for review.` : `${titleHtml} is ready to sign.`,
+    preheader: reminder
+      ? `${titleHtml} is still ready for review.`
+      : needsSignature
+        ? `${titleHtml} is ready to sign.`
+        : `${titleHtml} is ready to view.`,
     heading,
     intro,
     lines,
     ctaHref: signingUrl,
-    ctaLabel: 'Review and sign',
+    ctaLabel,
     footerNote: `Questions? Reply to this email or call ${escapeHtml(BUSINESS_PHONE)}.`,
   });
   const text = plainText([
     `Hi ${firstName(customer)},`,
     '',
     reminder
-      ? `Reminder from Waves: ${title} is still waiting for review and signature.`
-      : `Waves has a document ready for your review and electronic signature: ${title}.`,
+      ? `Reminder from Waves: ${title} is still ready for ${needsSignature ? 'review and signature' : 'review'}.`
+      : `Waves has a document ready for your ${needsSignature ? 'review and electronic signature' : 'review'}: ${title}.`,
     '',
-    `Review and sign: ${signingUrl}`,
+    `${ctaLabel}: ${signingUrl}`,
     '',
     `Questions? Reply to this email or call ${BUSINESS_PHONE}.`,
   ]);
@@ -486,35 +594,52 @@ async function sendEmailDelivery({ contract, customer, recipient, signingUrl, ac
     heading: payload.heading,
     body: `<p>${escapeHtml(payload.text).replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>')}</p>`,
     ctaUrl: signingUrl,
-    ctaLabel: 'Review and sign',
+    ctaLabel: requiresSignature(contract) ? 'Review and sign' : 'View document',
   });
   if (!fallback.ok) throw deliveryError(fallback.error || 'Email could not be sent.', 422, 'EMAIL_DELIVERY_FAILED');
   return { ok: true, provider: 'smtp_fallback', providerMessageId: null };
 }
 
-function smsBody({ contract, customer, signingUrl, action }) {
+function smsBody({ contract, customer, signingUrl, action, smsPurpose = 'document_request' }) {
   const title = clean(contract.title) || 'Waves document';
+  const needsSignature = requiresSignature(contract);
   const prefix = action === 'reminder'
-    ? `Hi ${firstName(customer)}, reminder from Waves: ${title} is still waiting for review and signature.`
-    : `Hi ${firstName(customer)}, Waves has a document ready for your review and signature: ${title}.`;
+    ? `Hi ${firstName(customer)}, reminder from Waves: ${title} is still ready for ${needsSignature ? 'review and signature' : 'review'}.`
+    : `Hi ${firstName(customer)}, Waves has a document ready for your ${needsSignature ? 'review and signature' : 'review'}: ${title}.`;
+  if (smsPurpose === 'marketing' || isMarketingCustomerGuide(contract)) {
+    return `${prefix} ${signingUrl} Reply STOP to opt out. Msg & data rates may apply.`;
+  }
   return `${prefix} ${signingUrl} Reply with any questions.`;
 }
 
-async function sendSmsDelivery({ contract, customer, recipient, signingUrl, action }) {
+async function sendSmsDelivery({
+  contract,
+  customer,
+  recipient,
+  signingUrl,
+  action,
+  smsPurpose = 'document_request',
+  smsConsentBasis = null,
+  smsEntryPoint = null,
+  smsMetadata = null,
+}) {
+  const originalMessageType = action === 'reminder' ? 'document_request_reminder' : 'document_request';
   const result = await sendCustomerMessage({
     to: recipient,
-    body: smsBody({ contract, customer, signingUrl, action }),
+    body: smsBody({ contract, customer, signingUrl, action, smsPurpose }),
     channel: 'sms',
     audience: 'customer',
-    purpose: 'document_request',
+    purpose: smsPurpose,
     customerId: contract.customer_id,
     identityTrustLevel: 'phone_matches_customer',
-    entryPoint: action === 'reminder' ? 'document_request_manual_reminder' : 'document_request_manual_send',
+    consentBasis: smsConsentBasis || undefined,
+    entryPoint: smsEntryPoint || (action === 'reminder' ? 'document_request_manual_reminder' : 'document_request_manual_send'),
     metadata: {
-      original_message_type: action === 'reminder' ? 'document_request_reminder' : 'document_request',
+      original_message_type: smsMetadata?.original_message_type || originalMessageType,
       contractId: contract.id,
       documentTemplateKey: contract.document_template_key || undefined,
       action,
+      ...(smsMetadata || {}),
     },
   });
   if (!result.sent) {
@@ -578,11 +703,43 @@ async function activateCommittedDelivery(prepared, req, options) {
   return db.transaction((trx) => activatePreparedDelivery(prepared, req, options, trx));
 }
 
-async function deliverDocumentRequest(contractId, req = {}, { channel, action = 'send' } = {}) {
+async function deliverDocumentRequest(contractId, req = {}, {
+  channel,
+  action = 'send',
+  smsPurpose,
+  smsConsentBasis,
+  smsEntryPoint,
+  smsMetadata,
+} = {}) {
   if (!['email', 'sms'].includes(channel)) throw deliveryError('channel must be email or sms', 400, 'INVALID_CHANNEL');
   if (!['send', 'reminder'].includes(action)) throw deliveryError('action must be send or reminder', 400, 'INVALID_ACTION');
 
   const prepared = await prepareDelivery(contractId, req, { channel, action });
+  let effectiveOptions;
+  try {
+    effectiveOptions = await deliveryOptionsForContract(prepared.contract, {
+      channel,
+      action,
+      smsPurpose,
+      smsConsentBasis,
+      smsEntryPoint,
+      smsMetadata,
+    });
+  } catch (err) {
+    await safeRecordDeliveryFailure(prepared.contract, req, { channel, action, err });
+    return {
+      ok: false,
+      error: err.message,
+      code: err.code || 'DELIVERY_FAILED',
+      signingUrl: null,
+      contract: serializeContract(prepared.contract),
+      delivery: {
+        channel,
+        action,
+        status: 'failed',
+      },
+    };
+  }
   let recipient;
   try {
     recipient = await validatePreparedChannel(prepared, channel);
@@ -605,7 +762,12 @@ async function deliverDocumentRequest(contractId, req = {}, { channel, action = 
 
   const activated = await activateCommittedDelivery(prepared, req, { channel, action });
   try {
-    const result = await sendPreparedChannel(activated, req, { channel, action, recipient });
+    const result = await sendPreparedChannel(activated, req, {
+      channel,
+      action,
+      recipient,
+      ...effectiveOptions,
+    });
     await safeRecordDeliverySuccess(activated.contract, req, {
       channel,
       action,
@@ -645,7 +807,14 @@ async function deliverDocumentRequest(contractId, req = {}, { channel, action = 
   }
 }
 
-async function deliverDocumentRequestChannels(contractId, req = {}, { channels = ['email'], action = 'send' } = {}) {
+async function deliverDocumentRequestChannels(contractId, req = {}, {
+  channels = ['email'],
+  action = 'send',
+  smsPurpose,
+  smsConsentBasis,
+  smsEntryPoint,
+  smsMetadata,
+} = {}) {
   const safeChannels = [...new Set(channels)].filter(channel => ['email', 'sms'].includes(channel));
   if (!safeChannels.length) throw deliveryError('channels must include email or sms', 400, 'INVALID_CHANNEL');
   if (!['send', 'reminder'].includes(action)) throw deliveryError('action must be send or reminder', 400, 'INVALID_ACTION');
@@ -653,8 +822,16 @@ async function deliverDocumentRequestChannels(contractId, req = {}, { channels =
   const deliveries = [];
   for (const channel of safeChannels) {
     try {
+      const effectiveOptions = await deliveryOptionsForContract(prepared.contract, {
+        channel,
+        action,
+        smsPurpose,
+        smsConsentBasis,
+        smsEntryPoint,
+        smsMetadata,
+      });
       const recipient = await validatePreparedChannel(prepared, channel);
-      deliveries.push({ channel, recipient, valid: true });
+      deliveries.push({ channel, recipient, valid: true, effectiveOptions });
     } catch (err) {
       await safeRecordDeliveryFailure(prepared.contract, req, { channel, action, err });
       logger.warn(`[document-delivery] ${channel} ${action} failed for contract ${contractId}: ${err.message}`);
@@ -667,7 +844,7 @@ async function deliverDocumentRequestChannels(contractId, req = {}, { channels =
       ok: false,
       signingUrl: null,
       contract: serializeContract(prepared.contract),
-      deliveries: deliveries.map(({ valid, recipient, ...delivery }) => delivery),
+      deliveries: deliveries.map(({ valid, recipient, effectiveOptions, ...delivery }) => delivery),
     };
   }
 
@@ -678,6 +855,7 @@ async function deliverDocumentRequestChannels(contractId, req = {}, { channels =
         channel: delivery.channel,
         action,
         recipient: delivery.recipient,
+        ...delivery.effectiveOptions,
       });
       await safeRecordDeliverySuccess(activated.contract, req, {
         channel: delivery.channel,
@@ -699,7 +877,7 @@ async function deliverDocumentRequestChannels(contractId, req = {}, { channels =
     ok,
     signingUrl: ok ? activated.signingUrl : null,
     contract: serializeContract(responseContract, ok ? { signingUrl: activated.signingUrl } : undefined),
-    deliveries: deliveries.map(({ valid, recipient, ...delivery }) => delivery),
+    deliveries: deliveries.map(({ valid, recipient, effectiveOptions, ...delivery }) => delivery),
   };
 }
 
@@ -926,9 +1104,13 @@ module.exports = {
   processDocumentWorkflow,
   requestStatus,
   _internals: {
+    deliveryOptionsForContract,
     emailPayload,
+    isMarketingCustomerGuide,
+    marketingSmsConsentBasisForContract,
     parseReminderSchedule,
     smsBody,
+    requiresSignature,
     requestStatus,
   },
 };

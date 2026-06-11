@@ -10,6 +10,8 @@ const STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
 const DELIVERY_CHANNELS = new Set(['email', 'sms', 'both']);
 const DEFAULT_REMINDER_SCHEDULE_DAYS = [1, 3, -1];
 const MAX_DOCUMENT_EXPIRE_DAYS = 14;
+const VIEW_ONLY_TEMPLATE_CATEGORY = 'marketing';
+const VIEW_ONLY_TEMPLATE_DOCUMENT_TYPE = 'customer_guide';
 
 function parseJson(value, fallback) {
   if (value == null) return fallback;
@@ -50,6 +52,7 @@ function cleanArray(value) {
 
 function cleanNumberArray(value, fallback = []) {
   const source = Array.isArray(value) ? value : parseJson(value, value);
+  if (Array.isArray(source) && source.length === 0) return [];
   const raw = Array.isArray(source)
     ? source
     : String(source || '').split(',');
@@ -90,6 +93,18 @@ function normalizeStatus(value, fallback = 'active') {
   return status;
 }
 
+function canDisableTemplateSignature(template = {}) {
+  return template.category === VIEW_ONLY_TEMPLATE_CATEGORY
+    && template.document_type === VIEW_ONLY_TEMPLATE_DOCUMENT_TYPE;
+}
+
+function assertTemplateSignatureMode(template = {}) {
+  if (template.requires_signature !== false || canDisableTemplateSignature(template)) return;
+  const err = new Error('Only marketing customer-guide document templates can disable e-signature.');
+  err.status = 400;
+  throw err;
+}
+
 function validateTemplatePayload(body = {}, { partial = false } = {}) {
   const payload = {};
   if (!partial || Object.prototype.hasOwnProperty.call(body, 'templateKey') || Object.prototype.hasOwnProperty.call(body, 'template_key')) {
@@ -116,12 +131,8 @@ function validateTemplatePayload(body = {}, { partial = false } = {}) {
     payload.description = cleanString(body.description) || null;
   }
   if (!partial || Object.prototype.hasOwnProperty.call(body, 'requiresSignature') || Object.prototype.hasOwnProperty.call(body, 'requires_signature')) {
-    if ((body.requiresSignature ?? body.requires_signature) === false) {
-      const err = new Error('Document templates currently require e-signature.');
-      err.status = 400;
-      throw err;
-    }
-    payload.requires_signature = true;
+    payload.requires_signature = (body.requiresSignature ?? body.requires_signature) !== false;
+    if (!partial) assertTemplateSignatureMode(payload);
   }
   if (!partial || Object.prototype.hasOwnProperty.call(body, 'audience')) {
     payload.audience = cleanString(body.audience, 'customer').toLowerCase().replace(/\s+/g, '_');
@@ -286,7 +297,7 @@ function serializeTemplate(row = {}, activeVersion = null) {
     variables: cleanArray(parseJson(row.variables, [])),
     tags: cleanArray(parseJson(row.tags, [])),
     defaultDeliveryChannel: normalizeDeliveryChannel(row.default_delivery_channel || row.defaultDeliveryChannel, 'email'),
-    reminderScheduleDays: cleanNumberArray(row.reminder_schedule_days || row.reminderScheduleDays, DEFAULT_REMINDER_SCHEDULE_DAYS),
+    reminderScheduleDays: cleanNumberArray(row.reminder_schedule_days ?? row.reminderScheduleDays, DEFAULT_REMINDER_SCHEDULE_DAYS),
     expireAfterDays: normalizeExpireAfterDays(row.expire_after_days || row.expireAfterDays, 14),
     activeVersionId: row.active_version_id || null,
     createdAt: row.created_at || null,
@@ -314,7 +325,9 @@ function serializeVersion(row = {}) {
 
 module.exports = {
   ESIGN_DISCLOSURE,
+  assertTemplateSignatureMode,
   buildCustomerDocumentContext,
+  canDisableTemplateSignature,
   cleanArray,
   cleanNumberArray,
   DEFAULT_REMINDER_SCHEDULE_DAYS,

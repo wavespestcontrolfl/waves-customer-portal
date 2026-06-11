@@ -14,6 +14,7 @@ const {
   ESIGN_DISCLOSURE,
   buildAutopayContractSnapshot,
   contractExpiresAt,
+  documentContractExpiresAt,
   hashContractToken,
   mintContractToken,
   paymentMethodLabel,
@@ -35,6 +36,7 @@ function dateOrNull(value) {
 function contractQuery() {
   return db('customer_contracts as cc')
     .leftJoin('payment_methods as pm', 'cc.payment_method_id', 'pm.id')
+    .leftJoin('document_templates as dt', 'cc.document_template_id', 'dt.id')
     .select(
       'cc.*',
       'pm.method_type',
@@ -42,6 +44,9 @@ function contractQuery() {
       'pm.last_four',
       'pm.bank_name',
       'pm.bank_last_four',
+      'dt.requires_signature as document_template_requires_signature',
+      'dt.category as document_template_category',
+      'dt.document_type as document_template_document_type',
       db.raw(`CASE
         WHEN pm.method_type IN ('ach', 'us_bank_account') THEN CONCAT(COALESCE(pm.bank_name, 'Bank account'), ' ending ', COALESCE(pm.bank_last_four, '----'))
         WHEN pm.id IS NOT NULL THEN CONCAT(COALESCE(pm.card_brand, 'Card'), ' ending ', COALESCE(pm.last_four, '----'))
@@ -281,8 +286,11 @@ router.post('/:id/share-link', async (req, res, next) => {
       if (isDocumentRequest && contract.document_template_id) {
         const template = await trx('document_templates')
           .where({ id: contract.document_template_id })
-          .first('expire_after_days');
-        expiresAt = contractExpiresAt(new Date(), template?.expire_after_days || 14);
+          .first('expire_after_days', 'requires_signature');
+        expiresAt = documentContractExpiresAt(new Date(), template?.expire_after_days || 14, {
+          requires_signature_snapshot: contract.requires_signature_snapshot,
+          requires_signature: template?.requires_signature,
+        });
       }
 
       const updated = await trx('customer_contracts')
