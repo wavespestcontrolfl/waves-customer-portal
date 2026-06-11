@@ -896,22 +896,29 @@ function EventInboxView({ onDraftFromEvent }) {
         </button>
         {sourcesOpen && (
           <div className="px-4 pb-3 flex flex-wrap gap-2">
-            {sources.map((s) => (
-              <div
-                key={s.id}
-                className="flex items-center gap-1.5 px-2 py-1 bg-zinc-50 border-hairline border-zinc-200 rounded text-11"
-              >
-                <span
-                  className={`inline-block w-1.5 h-1.5 rounded-full ${s.lastPullStatus === "success" ? "bg-green-500" : s.lastPullStatus === "error" ? "bg-red-500" : "bg-zinc-300"}`}
-                />
-                <span className="text-ink-primary font-medium truncate max-w-[140px]">
-                  {s.name.split("—")[0].trim()}
-                </span>
-                <span className="text-ink-tertiary">
-                  {s.eventCount}
-                </span>
-              </div>
-            ))}
+            {sources.map((s) => {
+              // A source can "succeed" while yielding nothing for days —
+              // that's a broken feed, not a healthy one. Amber once the
+              // empty streak passes a week.
+              const zeroYieldDegraded = s.lastPullStatus === "success" && (s.consecutiveZeroYields ?? 0) >= 7;
+              return (
+                <div
+                  key={s.id}
+                  title={zeroYieldDegraded ? `Pulls succeed but 0 events for ${s.consecutiveZeroYields} runs` : (s.lastError || undefined)}
+                  className="flex items-center gap-1.5 px-2 py-1 bg-zinc-50 border-hairline border-zinc-200 rounded text-11"
+                >
+                  <span
+                    className={`inline-block w-1.5 h-1.5 rounded-full ${s.lastPullStatus === "error" ? "bg-red-500" : zeroYieldDegraded ? "bg-amber-500" : s.lastPullStatus === "success" ? "bg-green-500" : "bg-zinc-300"}`}
+                  />
+                  <span className="text-ink-primary font-medium truncate max-w-[140px]">
+                    {s.name.split("—")[0].trim()}
+                  </span>
+                  <span className="text-ink-tertiary">
+                    {s.eventCount}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

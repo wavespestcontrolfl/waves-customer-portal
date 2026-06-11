@@ -1431,6 +1431,9 @@ router.get('/events/sources', async (req, res, next) => {
       lastPullStatus: s.last_pull_status,
       lastError: s.last_error,
       consecutiveFailures: s.consecutive_failures,
+      consecutiveZeroYields: s.consecutive_zero_yields ?? 0,
+      lastYieldCount: s.last_yield_count,
+      lastNonzeroYieldAt: s.last_nonzero_yield_at,
       eventCount: countMap[s.id] || 0,
     }));
 
