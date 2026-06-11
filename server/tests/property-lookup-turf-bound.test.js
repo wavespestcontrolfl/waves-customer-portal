@@ -85,6 +85,21 @@ describe('applyParcelTurfBound', () => {
     expect(hoa.estimatedTurfSf).toBe(24000);
   });
 
+  it('a structured commercial subtype exempts even when propertyUse stays RESIDENTIAL', () => {
+    const hoaCommon = analysisFixture({ propertyUse: 'RESIDENTIAL', commercialUseType: 'HOA_COMMON_AREA' });
+    applyParcelTurfBound(hoaCommon, recordFixture());
+    expect(hoaCommon.estimatedTurfSf).toBe(24000);
+
+    const multifamily = analysisFixture({ propertyUse: 'UNKNOWN', commercialUseType: 'MULTIFAMILY_COMMON_AREA' });
+    applyParcelTurfBound(multifamily, recordFixture());
+    expect(multifamily.estimatedTurfSf).toBe(24000);
+
+    // The non-commercial sentinels do not exempt.
+    const none = analysisFixture({ commercialUseType: 'NONE' });
+    applyParcelTurfBound(none, recordFixture());
+    expect(none.estimatedTurfSf).toBe(10085);
+  });
+
   it('does nothing without a county-grade bound', () => {
     const ai = analysisFixture();
     applyParcelTurfBound(ai, recordFixture({ _parcel: null, _fieldEvidence: { lotSize: { sourceType: 'listing' } } }));

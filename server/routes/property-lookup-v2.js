@@ -1161,6 +1161,15 @@ function applyParcelTurfBound(aiAnalysis, propertyRecord) {
 
   const propertyUse = String(aiAnalysis.propertyUse || '').toUpperCase();
   if (propertyUse && !['RESIDENTIAL', 'UNKNOWN'].includes(propertyUse)) return aiAnalysis;
+  // A structured commercial subtype (HOA_COMMON_AREA etc.) marks the profile
+  // commercial downstream even when propertyUse stayed RESIDENTIAL/UNKNOWN —
+  // mirror that signal here so shared turf is never pre-clamped to one
+  // parcel before the commercial path takes over.
+  const commercialUseType = String(aiAnalysis.commercialUseType || '').toUpperCase();
+  if (commercialUseType
+      && !['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'].includes(commercialUseType)) {
+    return aiAnalysis;
+  }
   const propertyType = String(propertyRecord.propertyType || '').toUpperCase();
   if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
 
