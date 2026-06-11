@@ -164,8 +164,11 @@ export default function MobileAppointmentDetailSheet({
   const seriesCtx = service.prepaidSeriesContext || null;
   const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
   const completionProfile = service.completionProfile || {};
-  const projectBackedCompletion = !!(completionProfile.projectBacked || completionProfile.requiresProject);
   const linkedProject = service.linkedProject || null;
+  // Only true special projects (or jobs already linked to a project) route
+  // to the Projects flow — typed/service_report jobs use the standard
+  // completion sheet.
+  const projectBackedCompletion = !!(completionProfile.specialProject || linkedProject?.id);
   const projectCompletionClosed = projectBackedCompletion
     && (linkedProject?.status === 'closed' || service.status === 'completed');
   const projectCompletionLabel = projectCompletionClosed

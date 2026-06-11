@@ -103,8 +103,13 @@ function shouldOpenMobileCompletion(service) {
 }
 
 function isProjectBackedCompletion(service) {
+  // Only true special projects (or jobs already linked to a project) route
+  // to the Projects flow — typed/service_report jobs complete through
+  // CompletionPanel. serializeProfile nulls projectType for service_report
+  // rows, but key off specialProject explicitly so stale truthiness checks
+  // can't reroute a typed completion.
   const profile = service?.completionProfile;
-  return !!(profile?.projectBacked || profile?.requiresProject);
+  return !!(profile?.specialProject || service?.linkedProject?.id);
 }
 
 function projectCompletionActionLabel(service) {
@@ -2249,6 +2254,14 @@ export default function DispatchPageV2({
             }
           }}
           onSubmit={handleCompleteSubmit}
+          onBillingRequired={(svc) => {
+            // Typed one-time completion hit the billing 409 — close the
+            // panel (its draft autosave preserves the findings) and open
+            // the existing checkout flow; the post-payment paths re-open
+            // completion automatically.
+            setCompletingService(null);
+            setCheckoutService(svc);
+          }}
           onViewDetails={
             isMobile
               ? (svc) => {
