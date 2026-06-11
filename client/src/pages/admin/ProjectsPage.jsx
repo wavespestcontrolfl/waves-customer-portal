@@ -1633,10 +1633,24 @@ function ProjectDetail({
       const emailContents = isWdoReport
         ? "FDACS-13645 report PDF + invoice PDF"
         : "report + invoice PDF";
+      // Server-computed routing preview: who gets the combined email, whether
+      // a distinct billing contact gets a copy, and which third parties from
+      // the FDACS "Report sent to" line get a report-only copy (no invoice).
+      const routing = pv.email_routing || {};
+      const routingLines = [
+        routing.recipient ? `Email to: ${routing.recipient}` : null,
+        routing.billing_copy ? `Billing copy (same email): ${routing.billing_copy}` : null,
+        routing.report_copies?.length
+          ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
       if (
         !confirm(
           `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
-            `The customer gets one email (${emailContents}) and one text (report + pay links).`,
+            `The customer gets one email (${emailContents}) and one text (report + pay links).` +
+            (routingLines ? `\n\n${routingLines}` : ""),
         )
       ) {
         setSaving(false);
