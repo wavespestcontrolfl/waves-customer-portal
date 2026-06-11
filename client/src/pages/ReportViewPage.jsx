@@ -7337,7 +7337,14 @@ export default function ReportViewPage() {
     let cancelled = false;
     setLoading(true);
     const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
-    fetch(dataUrl, { cache: 'no-store' })
+    // Staff browsers attach their portal JWT so internal-only shadow reports
+    // (Phase 1b) render for review; the server ignores it for normal reports
+    // and customers never have one. Same-origin localStorage only.
+    const staffToken = localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken');
+    fetch(dataUrl, {
+      cache: 'no-store',
+      headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
+    })
       .then((r) => r.json())
       .then((d) => {
         if (!cancelled) setData(d);

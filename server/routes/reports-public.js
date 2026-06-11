@@ -10,6 +10,37 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
+const jwt = require('jsonwebtoken');
+const config = require('../config');
+
+// internal_only / disabled typed completions (Phase-1b shadow, kill switch)
+// store a report for STAFF review only. These public token routes serve them
+// solely when the request carries a valid staff JWT — the report page
+// attaches one when the browser is logged into the admin/tech portal — and
+// 404 for everyone else. The token alone is not enough for suppressed
+// reports: it appears in completion responses and staff UIs, so a copied
+// URL must not open a report the customer was never sent.
+function suppressedTypedReport(record) {
+  let notes = record?.structured_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  const mode = notes && typeof notes === 'object' ? notes.typedReportDelivery : null;
+  return Boolean(mode) && mode !== 'auto_send';
+}
+
+async function staffCanViewSuppressed(req) {
+  try {
+    const header = String(req.headers.authorization || '');
+    if (!header.startsWith('Bearer ')) return false;
+    const decoded = jwt.verify(header.slice(7), config.jwt.secret);
+    if (!decoded.technicianId || decoded.scope === 'terminal') return false;
+    const tech = await db('technicians').where({ id: decoded.technicianId }).first('id', 'active');
+    return Boolean(tech && tech.active);
+  } catch {
+    return false;
+  }
+}
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const {
   runAndSwallowErrors: runPestPressureForServiceRecord,
@@ -532,9 +563,14 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'report_template_version')
+      .select('id', 'report_template_version', 'structured_notes')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Suppressed reports never serve the unauthenticated preview asset
+    // (it's report content for link unfurlers — no staff exception needed).
+    if (suppressedTypedReport(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
@@ -594,8 +630,12 @@ router.get('/:token', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
-    // Track first view
-    await trackServiceReportView(service);
+    if (suppressedTypedReport(service) && !(await staffCanViewSuppressed(req))) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    // Track first view (staff shadow reviews aren't customer views)
+    if (!suppressedTypedReport(service)) await trackServiceReportView(service);
 
     if (service.report_template_version === 'service_report_v1') {
       // Embed a hash of Pest Pressure visibility-affecting config in the
@@ -754,7 +794,11 @@ router.get('/:token/data', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
-    if (mode === 'live') {
+    if (suppressedTypedReport(service) && !(await staffCanViewSuppressed(req))) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    if (mode === 'live' && !suppressedTypedReport(service)) {
       await trackServiceReportView(service);
     }
 
