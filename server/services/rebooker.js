@@ -236,6 +236,60 @@ class SmartRebooker {
             code: 'SLOT_TAKEN',
           });
         }
+
+        // Zone-capacity check: self-booking writers insert unassigned
+        // rows under the slot-reserve zone:<id>:<date> lock — take the
+        // same lock (after the tech lock, the fixed order everywhere)
+        // and conflict against unassigned zone rows so a reschedule
+        // can't stack the tech onto a self-booked slot.
+        try {
+          const svcCustomer = service.customer_id
+            ? await trx('customers').where({ id: service.customer_id }).first('city')
+            : null;
+          const svcCity = String(svcCustomer?.city || '').toLowerCase();
+          let svcZone = null;
+          if (svcCity) {
+            const zones = await trx('service_zones').select('id', 'cities', 'zone_name');
+            svcZone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === svcCity)) || null;
+          }
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `zone:${svcZone?.id || 'unknown'}:${newDateStr}`],
+          );
+          if (svcZone) {
+            const zoneSlug = svcZone.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
+            const zoneCities = svcZone.cities || [];
+            const zoneOverlap = await trx('scheduled_services')
+              .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+              .where('scheduled_services.scheduled_date', newDateStr)
+              .whereNull('scheduled_services.technician_id')
+              .whereNot('scheduled_services.id', serviceId)
+              .whereNotIn('scheduled_services.status', ['cancelled', 'completed'])
+              .where((q) => {
+                q.whereNull('scheduled_services.reservation_expires_at')
+                  .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+              })
+              .where((q) => {
+                if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
+                if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+              })
+              .whereRaw(
+                "scheduled_services.window_start < ?::time AND COALESCE(scheduled_services.window_end, scheduled_services.window_start + ((COALESCE(NULLIF(scheduled_services.estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+                [windowEnd, updates.window_start],
+              )
+              .first('scheduled_services.id');
+            if (zoneOverlap) {
+              throw Object.assign(new Error('That window conflicts with another booking in the area'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+              });
+            }
+          }
+        } catch (zoneErr) {
+          if (zoneErr.code === 'SLOT_TAKEN') throw zoneErr;
+          logger.warn(`[rebooker] zone conflict check failed for service ${serviceId}: ${zoneErr.message}`);
+        }
       }
 
       const updated = await trx('scheduled_services')
