@@ -1154,19 +1154,17 @@ router.post('/', async (req, res, next) => {
     // Types cut over to the typed service-report completion flow no longer
     // create project records — the appointment completion is the artifact.
     // Server-side guard so stale clients can't recreate the dual-entry path.
+    //
+    // The LINKED appointment's own profile decides before the type-level
+    // blanket: a project type becomes appointment-managed when ANY profile
+    // routes it typed, but keys excluded from cutover (general_appointment,
+    // waveguard_initial_setup) still resolve project_required and MUST keep
+    // their Projects flow — otherwise they need a project they can't create.
+    // The type-level check governs unlinked/ad hoc creations only.
     const managedTypes = await appointmentManagedProjectTypes();
-    if (managedTypes.has(project_type)) {
-      return res.status(422).json({
-        error: 'This service type is completed through the appointment flow now — finish the visit from Dispatch instead of creating a project.',
-        code: 'project_type_appointment_managed',
-      });
-    }
-    // The type check alone isn't enough: a stale client can link a cut-over
-    // appointment while submitting any still-creatable project_type, which
-    // recreates the dual-entry artifact this guard exists to block. Reject by
-    // the LINKED service's own profile regardless of the payload's type.
+    let linkedProfile = null;
     if (scheduled_service_id) {
-      const linkedProfile = await resolveCompletionProfileForServiceId(scheduled_service_id)
+      linkedProfile = await resolveCompletionProfileForServiceId(scheduled_service_id)
         .catch(() => null);
       if (linkedProfile?.findingsType) {
         return res.status(422).json({
@@ -1174,6 +1172,18 @@ router.post('/', async (req, res, next) => {
           code: 'scheduled_service_appointment_managed',
         });
       }
+    }
+    // The bypass is scoped to the linked profile's OWN type — a linked
+    // project_required appointment must not become a side door for creating
+    // OTHER cut-over types (e.g. linking a general_appointment while
+    // submitting mosquito_event).
+    const linkedProjectTypeMatches = !!linkedProfile?.projectBacked
+      && linkedProfile?.projectType === project_type;
+    if (managedTypes.has(project_type) && !linkedProjectTypeMatches) {
+      return res.status(422).json({
+        error: 'This service type is completed through the appointment flow now — finish the visit from Dispatch instead of creating a project.',
+        code: 'project_type_appointment_managed',
+      });
     }
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });

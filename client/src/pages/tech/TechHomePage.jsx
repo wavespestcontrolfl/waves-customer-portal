@@ -312,6 +312,11 @@ export default function TechHomePage() {
       customerLabel: service.customer_name || service.customerName || '',
       scheduledServiceId: service.id || '',
       projectDate: service.scheduled_date || etDateString(),
+      // The linked service's own profile picks the project type (same as the
+      // DispatchPageV2 path) — the explicit allowedProjectTypes override also
+      // keeps project_required keys creatable after their project type became
+      // appointment-managed for OTHER (cut-over) services.
+      projectType: service.completionProfile?.projectType || '',
     } : {});
     setShowCreateProject(true);
   }, []);
@@ -534,6 +539,8 @@ export default function TechHomePage() {
           defaultCustomerLabel={projectDefaults?.customerLabel || ''}
           defaultScheduledServiceId={projectDefaults?.scheduledServiceId || ''}
           defaultProjectDate={projectDefaults?.projectDate || ''}
+          defaultProjectType={projectDefaults?.projectType || ''}
+          allowedProjectTypes={projectDefaults?.projectType ? [projectDefaults.projectType] : null}
           onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}
           onCreated={() => { setShowCreateProject(false); setProjectDefaults(null); }}
         />
