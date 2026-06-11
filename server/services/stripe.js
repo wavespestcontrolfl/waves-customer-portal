@@ -17,7 +17,12 @@ function getStripe() {
     logger.warn('[stripe] STRIPE_SECRET_KEY not set — Stripe features disabled');
     return null;
   }
-  _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia' });
+  // maxNetworkRetries: connection blips after Stripe has processed a
+  // request are replayed by the SDK with the SAME idempotency key, so an
+  // ambiguous timeout resolves to the original outcome instead of being
+  // recorded as a failure (which the autopay cron would re-charge days
+  // later).
+  _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia', maxNetworkRetries: 2 });
   return _stripe;
 }
 
@@ -352,9 +357,14 @@ const StripeService = {
    * @param {number} amountDollars — charge amount in dollars
    * @param {string} description — charge description
    * @param {object} [metadata] — extra Stripe metadata
+   * @param {string} [idempotencyKey] — Stripe idempotency key scoped to the
+   *   caller's durable business operation (e.g. autopay_monthly_<cid>_<date>,
+   *   autopay_retry_<paymentId>_<rung>). When omitted a random per-call key
+   *   is generated, which still lets the SDK's network retries replay the
+   *   same request but provides no cross-process dedupe.
    * @returns {object} payments table row
    */
-  async charge(customerId, amountDollars, description, metadata = {}) {
+  async charge(customerId, amountDollars, description, metadata = {}, idempotencyKey = null) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -402,6 +412,17 @@ const StripeService = {
     // receipt_url off it directly (the prior `paymentIntent.charges.data`
     // path was removed by Stripe's 2022-11-15 API; latest_charge is the
     // supported replacement and survives future API bumps).
+    // Idempotency key: callers pass a key scoped to their durable
+    // business operation so overlapping cron instances (deploy window)
+    // and post-ambiguity re-runs replay the SAME PaymentIntent at
+    // Stripe instead of charging twice. The random fallback still
+    // gives the SDK's maxNetworkRetries a stable key to replay
+    // connection blips within this call. Replayed outcomes — success
+    // AND failure — are collapsed to a single ledger row by the
+    // advisory-locked writes below.
+    const effectiveIdempotencyKey = idempotencyKey
+      || `charge_${customerId}_${require('crypto').randomUUID()}`;
+
     let paymentIntent;
     try {
       const piParams = {
@@ -425,10 +446,10 @@ const StripeService = {
         },
       };
       if (surchargeDetails) piParams.amount_details = surchargeDetails;
-      paymentIntent = await stripe.paymentIntents.create(
-        piParams,
-        surchargeDetails ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
-      );
+      paymentIntent = await stripe.paymentIntents.create(piParams, {
+        idempotencyKey: effectiveIdempotencyKey,
+        ...(surchargeDetails ? { apiVersion: SURCHARGE_API_VERSION } : {}),
+      });
     } catch (err) {
       // Stripe charge failed — record the failure
       logger.error(`[stripe] Charge failed for ${customerId}: ${err.message}`);
@@ -443,31 +464,113 @@ const StripeService = {
       const authCode = err.code || err.raw?.code || err.decline_code || err.raw?.decline_code;
       const requiresAction = authCode === 'authentication_required';
       const piIdFromErr = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
+      // A no-PI failure is only AMBIGUOUS (Stripe may have processed the
+      // request) for connection/API errors. Deterministic pre-charge
+      // failures — invalid params, detached payment method — definitely
+      // moved no money and stay safe to auto-retry. The retry sweep
+      // parks ambiguous rows for manual reconciliation.
+      const errType = err.type || err.raw?.type || null;
+      const ambiguousOutcome = !piIdFromErr
+        && ['StripeConnectionError', 'StripeAPIError'].includes(errType);
 
-      const [failedRecord] = await db('payments').insert({
-        customer_id: customerId,
-        payment_method_id: card.id,
-        processor: 'stripe',
-        stripe_payment_intent_id: piIdFromErr,
-        payment_date: etDateString(),
-        amount: totalAmount,
-        // payments.status is a Postgres enum (upcoming/processing/paid/
-        // failed/refunded) — DON'T introduce a new value here, the
-        // insert would raise enum_invalid and tank the whole catch path.
-        // billing-cron skip-retry keys off the thrown STRIPE_REQUIRES_
-        // ACTION code below; admin dashboards surface SCA via the
-        // description suffix + metadata.requires_action flag.
-        status: 'failed',
-        description: requiresAction ? `${description} — REQUIRES AUTH` : `${description} — FAILED`,
-        failure_reason: err.message,
-        metadata: JSON.stringify({
-          error: err.message,
-          code: authCode || null,
-          requires_action: requiresAction,
-          base_amount: baseAmount,
-          card_surcharge: surchargeAmount,
-        }),
-      }).returning('*');
+      // Replay-aware failure record: with durable idempotency keys,
+      // overlapping workers can both receive the same replayed decline
+      // (same PI on the error). Serialize on the PI — or on the
+      // idempotency key when Stripe failed before minting a PI — and
+      // reuse the existing failed row instead of inserting a duplicate,
+      // which would seed duplicate retry-queue entries.
+      const failureLockScope = piIdFromErr || effectiveIdempotencyKey;
+      // The classified throws below must survive even when THIS write
+      // fails (DB blip): losing the AMBIGUOUS/SCA classification would
+      // make callers treat the error as a safe decline and arm a
+      // fresh-key retry — the exact double-charge vector being closed.
+      let failedRecord = null;
+      try {
+        failedRecord = await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['stripe.pi.payment', String(failureLockScope)],
+        );
+
+        if (piIdFromErr) {
+          // Check for a COLLECTED row first: a replayed error (e.g.
+          // authentication_required) can arrive after the webhook
+          // already flipped this PI to paid. Inserting a failed
+          // duplicate would show collected money as outstanding.
+          const collected = await trx('payments')
+            .where({ stripe_payment_intent_id: piIdFromErr })
+            .whereIn('status', ['paid', 'processing'])
+            .first();
+          if (collected) {
+            logger.warn(`[stripe] Replayed failure for PI ${piIdFromErr} but payment ${collected.id} is ${collected.status} — surfacing collected row, no failed duplicate`);
+            return collected;
+          }
+          const existing = await trx('payments')
+            .where({ stripe_payment_intent_id: piIdFromErr, status: 'failed' })
+            .first();
+          if (existing) {
+            logger.warn(`[stripe] Failed PI ${piIdFromErr} already recorded (payment ${existing.id}) — idempotency replay, reusing row`);
+            return existing;
+          }
+        } else {
+          // Stripe failed before minting a PI — dedupe on the durable
+          // idempotency key persisted in metadata, otherwise two
+          // overlapping workers each insert a null-PI failed row and
+          // billing-cron later retries BOTH with distinct rung keys
+          // (double charge for one obligation).
+          const existing = await trx('payments')
+            .where({ customer_id: customerId, status: 'failed' })
+            .whereRaw("metadata->>'idempotency_key' = ?", [effectiveIdempotencyKey])
+            .first();
+          if (existing) {
+            logger.warn(`[stripe] No-PI failure for key ${effectiveIdempotencyKey} already recorded (payment ${existing.id}) — reusing row`);
+            return existing;
+          }
+        }
+
+        const [row] = await trx('payments').insert({
+          customer_id: customerId,
+          payment_method_id: card.id,
+          processor: 'stripe',
+          stripe_payment_intent_id: piIdFromErr,
+          payment_date: etDateString(),
+          amount: totalAmount,
+          base_amount_cents: baseCents,
+          surcharge_amount_cents: surchargeCents,
+          // payments.status is a Postgres enum (upcoming/processing/paid/
+          // failed/refunded) — DON'T introduce a new value here, the
+          // insert would raise enum_invalid and tank the whole catch path.
+          // billing-cron skip-retry keys off the thrown STRIPE_REQUIRES_
+          // ACTION code below; admin dashboards surface SCA via the
+          // description suffix + metadata.requires_action flag.
+          status: 'failed',
+          description: requiresAction ? `${description} — REQUIRES AUTH` : `${description} — FAILED`,
+          failure_reason: err.message,
+          metadata: JSON.stringify({
+            error: err.message,
+            code: authCode || null,
+            error_type: errType,
+            ambiguous_outcome: ambiguousOutcome,
+            requires_action: requiresAction,
+            base_amount: baseAmount,
+            card_surcharge: surchargeAmount,
+            idempotency_key: effectiveIdempotencyKey,
+          }),
+        }).returning('*');
+        return row;
+        });
+      } catch (recordErr) {
+        logger.error(`[stripe] Could not record failed-charge row for ${customerId} (key ${effectiveIdempotencyKey}): ${recordErr.message}`);
+      }
+
+      // If the PI was already collected (webhook beat the replayed
+      // error), the truth is SUCCESS — return the collected row instead
+      // of throwing, so callers run their success path (supersede
+      // original, receipt) rather than arming retries against money
+      // already taken.
+      if (failedRecord && ['paid', 'processing'].includes(failedRecord.status)) {
+        return failedRecord;
+      }
 
       if (requiresAction) {
         const sca = new Error('Customer authentication required');
@@ -475,6 +578,18 @@ const StripeService = {
         sca.stripePaymentIntentId = piIdFromErr;
         sca.paymentRecord = failedRecord;
         throw sca;
+      }
+      if (ambiguousOutcome) {
+        // Distinct code so NO caller treats this as a safe decline:
+        // Stripe may have processed the charge, so re-attempting with a
+        // fresh idempotency key (cron rung key, admin re-click) is a
+        // double-charge vector. Callers must park for manual
+        // reconciliation instead.
+        const amb = new Error('Charge outcome ambiguous — Stripe may have processed the payment');
+        amb.code = 'STRIPE_AMBIGUOUS_OUTCOME';
+        amb.paymentRecord = failedRecord;
+        amb.idempotencyKey = effectiveIdempotencyKey;
+        throw amb;
       }
       throw Object.assign(new Error('Payment processing failed'), { paymentRecord: failedRecord });
     }
@@ -490,32 +605,55 @@ const StripeService = {
       const stripeChargeId = typeof latestCharge === 'string' ? latestCharge : (latestCharge?.id || null);
       const stripeReceiptUrl = typeof latestCharge === 'object' && latestCharge ? (latestCharge.receipt_url || null) : null;
 
-      const [paymentRecord] = await db('payments').insert({
-        customer_id: customerId,
-        payment_method_id: card.id,
-        processor: 'stripe',
-        stripe_payment_intent_id: paymentIntent.id,
-        stripe_charge_id: stripeChargeId,
-        payment_date: etDateString(),
-        amount: totalAmount,
-        base_amount_cents: baseCents,
-        surcharge_amount_cents: surchargeCents,
-        surcharge_rate_bps: rateBps,
-        surcharge_policy_version: policyVersion,
-        card_funding: card.card_funding || null,
-        card_brand: card.card_brand || null,
-        status,
-        description: surchargeAmount > 0
-          ? `${description} (includes $${surchargeAmount.toFixed(2)} credit card surcharge)`
-          : description,
-        metadata: JSON.stringify({
-          stripe_receipt_url: stripeReceiptUrl,
-          base_amount: baseAmount,
-          card_surcharge: surchargeAmount,
+      // Serialize on the PI (same lock namespace as confirmInvoicePayment
+      // and the succeeded-webhook handler) and collapse idempotency
+      // replays: when Stripe returns an already-created PaymentIntent —
+      // overlapping cron instances sharing a durable key, or a re-run
+      // after an ambiguous failure — exactly one paid/processing ledger
+      // row may exist for it.
+      const paymentRecord = await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['stripe.pi.payment', String(paymentIntent.id)],
+        );
+
+        const existing = await trx('payments')
+          .where({ stripe_payment_intent_id: paymentIntent.id })
+          .whereIn('status', ['paid', 'processing'])
+          .first();
+        if (existing) {
+          logger.warn(`[stripe] PI ${paymentIntent.id} already recorded (payment ${existing.id}) — idempotency replay, returning existing row`);
+          return existing;
+        }
+
+        const [row] = await trx('payments').insert({
+          customer_id: customerId,
+          payment_method_id: card.id,
+          processor: 'stripe',
+          stripe_payment_intent_id: paymentIntent.id,
+          stripe_charge_id: stripeChargeId,
+          payment_date: etDateString(),
+          amount: totalAmount,
+          base_amount_cents: baseCents,
+          surcharge_amount_cents: surchargeCents,
           surcharge_rate_bps: rateBps,
           surcharge_policy_version: policyVersion,
-        }),
-      }).returning('*');
+          card_funding: card.card_funding || null,
+          card_brand: card.card_brand || null,
+          status,
+          description: surchargeAmount > 0
+            ? `${description} (includes $${surchargeAmount.toFixed(2)} credit card surcharge)`
+            : description,
+          metadata: JSON.stringify({
+            stripe_receipt_url: stripeReceiptUrl,
+            base_amount: baseAmount,
+            card_surcharge: surchargeAmount,
+            surcharge_rate_bps: rateBps,
+            surcharge_policy_version: policyVersion,
+          }),
+        }).returning('*');
+        return row;
+      });
 
       logger.info(`[stripe] Charge processed: base=$${baseAmount} surcharge=$${surchargeAmount} total=$${totalAmount} for ${customerId}, PI: ${paymentIntent.id}`);
       return paymentRecord;
@@ -576,15 +714,27 @@ const StripeService = {
   /**
    * Charge monthly_rate from the customers table (autopay)
    */
-  async chargeMonthly(customerId) {
+  /**
+   * @param {string} [idempotencyKey] — override the default day-scoped
+   *   key. The retry sweep MUST pass its rung-scoped key here: two
+   *   distinct failed monthly rows retried on the same ET day would
+   *   otherwise share the date key and replay one PaymentIntent while
+   *   both originals get marked superseded.
+   */
+  async chargeMonthly(customerId, idempotencyKey = null) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
     const description = `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name}`;
+    // Default durable scope: one autopay charge per customer per ET day
+    // is the business rule for the daily cron (its month-window guard
+    // enforces the broader cadence). Overlapping cron instances replay
+    // the same PI.
+    const effectiveKey = idempotencyKey || `autopay_monthly_${customerId}_${etDateString()}`;
     return this.charge(customerId, customer.monthly_rate, description, {
       type: 'monthly_autopay',
       tier: customer.waveguard_tier || '',
-    });
+    }, effectiveKey);
   },
 
   // =========================================================================
@@ -593,9 +743,11 @@ const StripeService = {
 
   /**
    * Process a one-time charge (add-on service, event, etc.)
+   * @param {string} [idempotencyKey] — durable-operation key (see charge());
+   *   omitted for ad-hoc admin charges, where the random fallback applies.
    */
-  async chargeOneTime(customerId, amount, description) {
-    return this.charge(customerId, amount, description, { type: 'one_time' });
+  async chargeOneTime(customerId, amount, description, idempotencyKey = null) {
+    return this.charge(customerId, amount, description, { type: 'one_time' }, idempotencyKey);
   },
 
   // =========================================================================

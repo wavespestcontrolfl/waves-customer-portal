@@ -29,7 +29,10 @@ class ContextAggregator {
     ]);
 
     const lastService = serviceHistory[0] || null;
-    const balance = payments.filter(p => ['failed', 'pending', 'overdue'].includes(p.status)).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+    // Superseded failed attempts were collected by their retry's own row —
+    // counting them would describe already-taken money as owed in
+    // customer-facing replies.
+    const balance = payments.filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
 
     // Build flags
     const flags = [];

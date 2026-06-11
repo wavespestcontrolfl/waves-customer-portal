@@ -87,7 +87,7 @@ async function evaluateBadges(customerId) {
   const totalVisits = services.length;
   const totalReferrals = referrals.length;
   const paidPayments = payments.filter(p => p.status === 'paid');
-  const failedPayments = payments.filter(p => p.status === 'failed');
+  const failedPayments = payments.filter(p => p.status === 'failed' && !p.superseded_by_payment_id);
 
   // Service type detection
   const svcTypes = services.map(s => s.service_type.toLowerCase());

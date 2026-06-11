@@ -172,6 +172,7 @@ class BalanceReminder {
     const outstanding = await db("payments")
       .where({ "payments.customer_id": customerId })
       .whereIn("status", ["failed", "upcoming"])
+      .whereNull("superseded_by_payment_id")
       .where("payment_date", "<", etDateString())
       .orderBy("payment_date", "asc");
 

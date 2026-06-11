@@ -130,7 +130,8 @@ async function lookupCustomer(input, contextCustomerId) {
   if (!customer) return { found: false };
 
   const balance = await db('payments').where('customer_id', customer.id)
-    .whereIn('status', ['failed', 'overdue']).sum('amount as total').first();
+    .whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id')
+    .sum('amount as total').first();
 
   return {
     found: true,
@@ -197,7 +198,9 @@ async function getBillingInfo(customerId) {
   const customer = await db('customers').where('id', customerId).first();
   const payments = await db('payments').where('customer_id', customerId).orderBy('payment_date', 'desc').limit(5);
   const cards = await db('payment_methods').where('customer_id', customerId);
-  const overdue = payments.filter(p => ['failed', 'overdue'].includes(p.status));
+  // Superseded failed attempts were collected by their retry's own row —
+  // counting them would tell the customer they owe money already taken.
+  const overdue = payments.filter(p => ['failed', 'overdue'].includes(p.status) && !p.superseded_by_payment_id);
 
   return {
     tier: customer?.waveguard_tier,

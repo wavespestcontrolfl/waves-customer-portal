@@ -51,6 +51,7 @@ class LeadScorer {
 
     // Risk deductions
     const failedPay = await db('payments').where({ customer_id: customerId, status: 'failed' })
+      .whereNull('superseded_by_payment_id')
       .where('payment_date', '>', etDateString(addETDays(new Date(), -90)))
       .count('* as count').first();
     score -= parseInt(failedPay?.count || 0) * 5;

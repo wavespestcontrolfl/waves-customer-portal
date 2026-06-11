@@ -62,7 +62,7 @@ async function computePaymentScore(customerId) {
       const total = rows.length;
       const paid = rows.filter(r => ['paid', 'completed', 'succeeded'].includes(r.status));
       const late = rows.filter(r => ['late', 'overdue', 'past_due'].includes(r.status));
-      const failed = rows.filter(r => ['failed', 'declined', 'void'].includes(r.status));
+      const failed = rows.filter(r => ['failed', 'declined', 'void'].includes(r.status) && !r.superseded_by_payment_id);
 
       details.onTimeRate = total > 0 ? paid.length / total : 0;
       details.lateCount = late.length;
