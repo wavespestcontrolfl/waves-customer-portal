@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
+const factCheckGate = require('../content/fact-check-gate');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS } = require('./spoke-sites');
 
@@ -506,6 +507,29 @@ async function publishAstro(postId) {
       gErr.code = 'BLOG_GUARDRAILS_FAILED';
       gErr.details = blocking;
       throw gErr;
+    }
+
+    // 2c. LLM fact-check — the rule-based guardrails can't catch a wrong
+    // species/pathogen name, a mislabeled active ingredient, or a bad Florida
+    // ordinance date. This gate does, before the post ships under the licensed
+    // reviewer byline. Fail-open (a model hiccup never blocks publishing — the
+    // Astro PR Codex review remains a backstop); blocks only on P0/P1 findings.
+    const factCheck = await factCheckGate.evaluate({
+      title: post.title,
+      body,
+      city: post.city,
+      keyword: post.keyword,
+      tag: post.tag,
+    });
+    if (!factCheck.pass) {
+      const blocking = factCheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+      const fErr = new Error(`fact-check failed: ${blocking.map((f) => `${f.severity} ${f.message}`).join(' | ')}`);
+      fErr.code = 'BLOG_FACTCHECK_FAILED';
+      fErr.details = blocking;
+      throw fErr;
+    }
+    if (factCheck.findings.length) {
+      logger.info(`[astro-publisher] fact-check advisory for ${slug}: ${factCheck.findings.map((f) => f.message).join(' | ')}`);
     }
 
     const markdown = fm.stringify(data, body + '\n');
