@@ -111,6 +111,12 @@ router.get('/', async (req, res, next) => {
         reportToken: !internalOnlyReport ? (svc.report_view_token || null) : null,
         reportGeneratedAt: !internalOnlyReport ? (svc.report_generated_at || null) : null,
         reportViewedAt: !internalOnlyReport ? (svc.report_viewed_at || null) : null,
+        // Explicit signal for the client: when false, render no report
+        // button at all (the /api/documents/service-report fallback 404s
+        // for suppressed records, so a fallback link would dead-end).
+        reportAvailable: isProjectCompletion
+          ? Boolean(projectReportUrl)
+          : !internalOnlyReport,
       };
     }));
 

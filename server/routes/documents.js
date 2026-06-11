@@ -779,6 +779,20 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
 
     if (!service) return res.status(404).json({ error: 'Service record not found' });
 
+    // internal_only typed completions (Phase-1b shadow) are admin-review
+    // only — this authenticated fallback generator must refuse them too,
+    // since the portal client falls back here exactly when reportUrl is
+    // suppressed. 404 (not 403) so the record's existence isn't signposted.
+    let reportNotes = {};
+    try {
+      reportNotes = typeof service.structured_notes === 'string'
+        ? JSON.parse(service.structured_notes)
+        : (service.structured_notes || {});
+    } catch { reportNotes = {}; }
+    if (reportNotes.typedReportDelivery === 'internal_only') {
+      return res.status(404).json({ error: 'Service record not found' });
+    }
+
     // Get products with catalog enrichment (EPA, dilution, signal word)
     const products = await db('service_products as sp')
       .where({ 'sp.service_record_id': service.id })
