@@ -718,21 +718,126 @@ async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null
   }
 }
 
+// ── Autonomous hero pipeline ───────────────────────────────────────
+
+// Stamp the publisher-owned hero reference into autonomous frontmatter,
+// overriding whatever the writer agent emitted (including caption/credit —
+// agent-invented attribution for a generated image would be wrong).
+function stampAutonomousHero(frontmatter, src, alt) {
+  frontmatter.hero_image = { src, alt };
+  frontmatter.og_image = src;
+  return frontmatter;
+}
+
+// Alt text for the stamped hero: the agent's alt when it provided a usable
+// one (it describes the post's subject, which the generated hero also
+// depicts — both derive from the same title/keyword), else the title.
+function heroAltForDraft(frontmatter) {
+  const alt = typeof frontmatter?.hero_image?.alt === 'string' ? frontmatter.hero_image.alt.trim() : '';
+  return alt || String(frontmatter?.title || '').trim() || 'Blog post hero image';
+}
+
+// A /images/blog/... hero src is only trustworthy if the file actually exists
+// in the Astro repo (under public/). Returns the src when verified, else null.
+async function verifiedCommittedHeroSrc(src) {
+  if (typeof src !== 'string' || !src.startsWith(`${ASTRO_HERO_PUBLIC_BASE}/`)) return null;
+  if (src.includes('..') || !/\.(webp|jpe?g|png|avif)$/i.test(src)) return null;
+  const file = await gh.getFile(`public${src}`);
+  return file ? src : null;
+}
+
+// Resolve the hero for an autonomous blog publish. Reuse-first:
+//   1. the live post's own frontmatter hero (mirrors mergedHeroRef), verified
+//      to exist in the repo — refresh/update runs must not regenerate;
+//   2. a canonical /images/blog/<slug>/hero.* asset probed on main (covers a
+//      live post whose frontmatter predates the hero pipeline);
+//   3. an agent-emitted src that actually exists in the repo;
+//   4. otherwise generate an AI hero + compress to WebP for the caller to
+//      commit into the PR branch.
+// Returns { src, buffer: null } for reuse (nothing to commit) or
+// { src, repoPath, buffer } when bytes must be committed. Generation or
+// compression failure throws BLOG_HERO_IMAGE_FAILED — a DETERMINISTIC publish
+// error (see isDeterministicPublishError in autonomous-runner) so the runner
+// parks the run for review instead of retry-looping, and never publishes
+// hero-less.
+async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
+  if (existingFile) {
+    try {
+      const liveSrc = fm.parse(existingFile.file.content)?.data?.hero_image?.src;
+      const verified = await verifiedCommittedHeroSrc(liveSrc);
+      if (verified) return { src: verified, buffer: null };
+    } catch (err) {
+      logger.warn(`[astro-publisher] could not read live hero ref for ${slug}: ${err.message}`);
+    }
+    for (const ext of ['webp', 'png', 'jpg']) {
+      if (await gh.getFile(`${ASTRO_HERO_DIR}/${slug}/hero.${ext}`)) {
+        return { src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.${ext}`, buffer: null };
+      }
+    }
+  }
+
+  const agentVerified = await verifiedCommittedHeroSrc(frontmatter?.hero_image?.src);
+  if (agentVerified) return { src: agentVerified, buffer: null };
+
+  try {
+    const img = await generateHeroBuffer({
+      title: frontmatter.title,
+      meta_description: frontmatter.meta_description,
+      keyword: frontmatter.primary_keyword,
+      slug,
+    });
+    const buffer = await compressToWebp(img.buffer);
+    return {
+      src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
+      repoPath: `${ASTRO_HERO_DIR}/${slug}/hero.webp`,
+      buffer,
+    };
+  } catch (err) {
+    const heroErr = new Error(`autonomous blog hero image generation failed for ${slug}: ${err.message}`);
+    heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
+    throw heroErr;
+  }
+}
+
 async function publishOrUpdatePage(draft, brief = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
   }
 
   const frontmatter = { ...(draft.frontmatter || {}) };
-  assertValidBlogFrontmatter(frontmatter);
-
   const slug = slugPathFromFrontmatter(frontmatter);
   const canonical = assertCanonicalMatchesSlug(frontmatter, slug);
   const branchSlug = slugify(slug.replace(/\//g, '-'));
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
   frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
-  const markdown = fm.stringify(frontmatter, `${body}\n`);
+
+  // Hero contract: the writer agent's emit_draft tool only constrains
+  // `frontmatter` to "object", while the binding blog schema REQUIRES
+  // hero_image + og_image — so the agent typically invents a plausible
+  // /images/blog/... path to satisfy validation. Nothing in this lane ever
+  // committed hero bytes, so that invented path would 404 on the live hero
+  // (eager + fetchpriority=high — the LCP element). The publisher therefore
+  // OWNS the hero: whatever the agent emitted is overridden below with either
+  // a verified already-committed hero or a freshly generated one committed
+  // into the same branch as the markdown. (Publisher-side override needs zero
+  // prompt surgery vs. teaching the agent the canonical path, and is robust
+  // to the agent drifting anyway.)
+  const heroAlt = heroAltForDraft(frontmatter);
+
+  // Early pre-spend schema gate: validate the draft with a provisional
+  // canonical hero stamped in (the final src always matches the schema's hero
+  // pattern, so hero shape can't fail later). This keeps schema-invalid
+  // drafts (bad meta_description length, missing fields, …) failing BEFORE we
+  // spend an LLM fact-check call or image-generation dollars — same fail-fast
+  // position the pre-hero-pipeline code had. The BINDING validation runs
+  // again after the real hero is stamped.
+  assertValidBlogFrontmatter(stampAutonomousHero(
+    { ...frontmatter },
+    `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
+    heroAlt,
+  ));
+
   // New autonomous posts are written as .mdx so they can embed MDX infographic
   // components. If a post already exists as .mdx, update it in place. If a
   // LEGACY .md post exists at this slug, MIGRATE it to .mdx (the body may carry
@@ -746,6 +851,8 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // cut, so a factual error never opens an orphan PR. The autonomous runner's
   // upstream gates are rule-based (quality, uniqueness) — none catch a wrong
   // species/ingredient/ordinance fact. Fail-open; blocks only on P0/P1.
+  // Runs BEFORE hero resolution so a factually-blocked post never burns
+  // image-generation cost.
   await assertFactCheckClear({
     title: frontmatter.title,
     body,
@@ -754,7 +861,34 @@ async function publishOrUpdatePage(draft, brief = {}) {
     tag: frontmatter.category,
   }, slug);
 
+  // Resolve the real hero: reuse a hero already committed on main (update /
+  // refresh runs must not regenerate), otherwise generate + compress one to
+  // commit into this branch. Fails CLOSED (deterministic publish error) —
+  // never a silent hero-less publish. Resolution happens BEFORE the branch is
+  // cut so a hero failure can't orphan a branch/PR.
+  const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile });
+  stampAutonomousHero(frontmatter, hero.src, heroAlt);
+
+  // Binding validation — runs on the FINAL frontmatter, after hero stamping,
+  // so what we validate is exactly what we commit.
+  assertValidBlogFrontmatter(frontmatter);
+
+  const markdown = fm.stringify(frontmatter, `${body}\n`);
+
   await gh.createBranch(branch);
+  if (hero.buffer) {
+    // Same-branch hero commit (mirrors publishAstro): the PR carries both the
+    // markdown and the bytes its frontmatter references, so preview and live
+    // can never reference a hero that isn't merged atomically with the post.
+    const existingHero = await gh.getFile(hero.repoPath);
+    await gh.putBinary({
+      path: hero.repoPath,
+      buffer: hero.buffer,
+      message: `chore(blog): add hero image for ${slug}`,
+      branch,
+      sha: existingHero ? existingHero.sha : undefined,
+    });
+  }
   const fileCommit = await gh.putFile({
     path: filePath,
     content: markdown,
@@ -1789,6 +1923,10 @@ module.exports = {
   _internals: {
     generateHeroBuffer,
     compressToWebp,
+    resolveAutonomousHero,
+    stampAutonomousHero,
+    heroAltForDraft,
+    verifiedCommittedHeroSrc,
     applyMergeEffect,
     queueInternalLinkPlanning,
     internalLinkPlanningDisabled,

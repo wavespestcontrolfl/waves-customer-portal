@@ -609,6 +609,12 @@ describe('isDeterministicPublishError', () => {
     factErr.code = 'BLOG_FACTCHECK_FAILED';
     expect(isDeterministicPublishError(factErr)).toBe(true);
   });
+
+  test('a hero image generation failure is fail-closed → deterministic (park, not retry-loop)', () => {
+    const heroErr = new Error('autonomous blog hero image generation failed for x: image API down');
+    heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
+    expect(isDeterministicPublishError(heroErr)).toBe(true);
+  });
 });
 
 describe('DEFAULT_MIN_SCORE', () => {
