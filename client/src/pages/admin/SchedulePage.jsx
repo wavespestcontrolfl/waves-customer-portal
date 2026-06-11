@@ -6116,7 +6116,9 @@ export function CompletionPanel({
     useState(false);
   const [typedAiDrafting, setTypedAiDrafting] = useState(false);
   const [typedAiError, setTypedAiError] = useState("");
-  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(true);
+  // Customer calls/texts/emails reach the AI prompt only on explicit opt-in
+  // — they can carry PII, so the box starts unchecked.
+  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(false);
   const [typedAiDraftUsed, setTypedAiDraftUsed] = useState(false);
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.

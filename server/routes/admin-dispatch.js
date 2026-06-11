@@ -4026,7 +4026,7 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     // the draft (the complete endpoint enforces them strictly). Validate
     // against THIS type's allowed chips, not the global list, so an off-type
     // chip can't steer the customer-facing draft (Codex P2).
-    const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, profile.findingsType);
+    const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, draftProfile.findingsType);
     const chips = chipsValidation.ok ? chipsValidation.chips : [];
     const commsContext = includeCustomerComms === true
       ? await loadFindingsRecapCommsContext(svc.customer_id).catch(() => '')
