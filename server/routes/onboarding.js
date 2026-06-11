@@ -566,119 +566,48 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
       .orderBy('scheduled_date', 'asc')
       .first();
 
-    // Cancel the auto-picked service so we don't end up with two scheduled
-    // entries on the dispatch board.
+    // Book the replacement FIRST — excluding the original from the
+    // occupancy check so it can't collide with the row we're about to
+    // cancel. A refused slot (SLOT_TAKEN / INVALID_DATE) therefore leaves
+    // the original appointment fully intact: no cancel happened, nothing
+    // to restore, and no window where another customer can grab the
+    // original slot while this customer has nothing on the board.
+    const availability = require('../services/availability');
+    let booking;
+    try {
+      booking = await availability.confirmBooking(
+        null, req.customer.id, date, startTime, 'Picked during onboarding',
+        {
+          excludeServiceId: current?.id || null,
+          excludeSelfBookingId: current?.self_booking_id || null,
+        },
+      );
+    } catch (bookErr) {
+      if (bookErr.code === 'SLOT_TAKEN' || bookErr.code === 'INVALID_DATE') {
+        await finishLock(true);
+        return res.status(bookErr.statusCode || 409).json({ error: bookErr.message });
+      }
+      throw bookErr;
+    }
+
+    // Replacement is committed — now retire the original so we don't end
+    // up with two scheduled entries on the dispatch board.
     if (current) {
-      await db('scheduled_services').where({ id: current.id }).update({
+      await lockTrx('scheduled_services').where({ id: current.id }).update({
         status: 'cancelled',
         notes: `Rescheduled by customer during onboarding to ${date} ${startTime}`,
       });
       if (current.self_booking_id) {
-        await db('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'cancelled' });
+        await lockTrx('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'cancelled' });
       }
       // Kill the live reminder row too — otherwise the 72h/24h cron keeps
-      // texting the customer about the cancelled appointment. The replacement
-      // booking below registers its own reminder, so suppress the notice.
+      // texting the customer about the cancelled appointment. The
+      // replacement booking registered its own reminder, so suppress the
+      // notice.
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleCancellation(current.id, { sendNotification: false });
       } catch {}
-    }
-
-    // Book the customer-picked slot through the same engine the portal uses,
-    // so we inherit confirmation codes, dispatch sync, and SMS notifications.
-    const availability = require('../services/availability');
-    let booking;
-    try {
-      booking = await availability.confirmBooking(null, req.customer.id, date, startTime, 'Picked during onboarding');
-    } catch (bookErr) {
-      // confirmBooking can now refuse stale/raced slots (SLOT_TAKEN /
-      // INVALID_DATE). We already cancelled the original appointment
-      // above — without a replacement the customer would be left with
-      // nothing on the board, so restore it before answering.
-      if (current && (bookErr.code === 'SLOT_TAKEN' || bookErr.code === 'INVALID_DATE')) {
-        // The original slot may itself have been taken while we held it
-        // cancelled — restoring blindly would double-book it. Take the
-        // same slot-reserve locks the booking writers use (tech first,
-        // zone second — after the customer lock we already hold) so a
-        // concurrent confirm can't insert between this re-check and the
-        // restore; both run on the lock transaction.
-        const originalDateStr = current.scheduled_date instanceof Date
-          ? current.scheduled_date.toISOString().split('T')[0]
-          : String(current.scheduled_date).split('T')[0];
-        if (current.technician_id) {
-          await lockTrx.raw(
-            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-            ['slot-reserve', `${current.technician_id}:${originalDateStr}`],
-          );
-        }
-        const restoreZone = await availability.resolveZone(req.customer.city);
-        await lockTrx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `zone:${restoreZone?.id || 'unknown'}:${originalDateStr}`],
-        );
-        const slotRetaken = current.window_start ? await lockTrx('scheduled_services')
-          .where('scheduled_date', originalDateStr)
-          .whereNot('id', current.id)
-          .whereNotIn('status', ['cancelled', 'completed'])
-          .where((q) => {
-            q.whereNull('reservation_expires_at')
-              .orWhereRaw('reservation_expires_at > NOW()');
-          })
-          .where('window_start', '<', current.window_end || current.window_start)
-          .whereRaw('COALESCE(window_end, window_start) >= ?', [current.window_start])
-          .where((scope) => {
-            if (current.technician_id) scope.orWhere('technician_id', current.technician_id);
-            if (current.zone) scope.orWhere('zone', current.zone);
-            scope.orWhereNull('customer_id');
-          })
-          .first('id') : null;
-        if (slotRetaken) {
-          try {
-            await db('notifications').insert({
-              recipient_type: 'admin',
-              category: 'booking',
-              title: '⚠️ Onboarding reschedule needs a call-back',
-              body: `Customer ${req.customer.id} tried to reschedule during onboarding; the new slot was taken AND their original ${originalDateStr} slot was rebooked meanwhile. They currently have no appointment — call to schedule.`,
-              icon: '⚠️',
-              link: '/admin/dispatch',
-            });
-          } catch {}
-          await finishLock(true);
-          return res.status(409).json({
-            error: 'That time was just taken, and your original time is no longer available either — our office will call you to find a new time.',
-            originalRestored: false,
-          });
-        }
-        await lockTrx('scheduled_services').where({ id: current.id }).update({
-          status: current.status,
-          notes: current.notes || null,
-        }).catch(() => {});
-        if (current.self_booking_id) {
-          await lockTrx('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'confirmed' }).catch(() => {});
-        }
-        try {
-          const AppointmentReminders = require('../services/appointment-reminders');
-          await AppointmentReminders.registerAppointment(
-            current.id,
-            req.customer.id,
-            `${originalDateStr}T${String(current.window_start || '08:00').slice(0, 5)}`,
-            current.service_type,
-            'onboarding_restore',
-            { sendConfirmation: false },
-          );
-          // registerAppointment returns an existing reminder row as-is —
-          // handleCancellation above set cancelled=true on it, which would
-          // leave the restored appointment with its 72h/24h reminders
-          // permanently disabled. Un-cancel it explicitly.
-          await db('appointment_reminders')
-            .where({ scheduled_service_id: current.id })
-            .update({ cancelled: false, updated_at: new Date() });
-        } catch {}
-        await finishLock(true);
-        return res.status(bookErr.statusCode || 409).json({ error: bookErr.message, originalRestored: true });
-      }
-      throw bookErr;
     }
 
     await db('onboarding_sessions')

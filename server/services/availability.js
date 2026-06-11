@@ -163,7 +163,12 @@ class AvailabilityEngine {
     return null;
   }
 
-  async confirmBooking(estimateId, customerId, date, startTime, customerNotes) {
+  // options.excludeServiceId / options.excludeSelfBookingId: skip a specific
+  // existing appointment in the occupancy re-check — used by the onboarding
+  // reschedule, which books the replacement BEFORE cancelling the original
+  // (so a refused slot leaves the customer's original appointment intact)
+  // and must not collide with the row it is about to cancel.
+  async confirmBooking(estimateId, customerId, date, startTime, customerNotes, options = {}) {
     // Resolve estimate
     const estimate = estimateId ? await db('estimates').where('id', estimateId).first() : null;
     const customer = await db('customers').where('id', customerId).first();
@@ -240,6 +245,9 @@ class AvailabilityEngine {
           .where('scheduled_services.scheduled_date', dateStr)
           .whereNotIn('scheduled_services.status', ['cancelled'])
           .whereIn('customers.city', zoneCities)
+          .modify((q) => {
+            if (options.excludeServiceId) q.whereNot('scheduled_services.id', options.excludeServiceId);
+          })
           .select('scheduled_services.window_start', 'scheduled_services.window_end');
         for (const s of scheduledInZone) {
           occupied.push({
@@ -250,7 +258,10 @@ class AvailabilityEngine {
         const selfBooked = await trx('self_booked_appointments')
           .where('service_zone_id', zone.id)
           .where('date', dateStr)
-          .whereNot('status', 'cancelled');
+          .whereNot('status', 'cancelled')
+          .modify((q) => {
+            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
+          });
         for (const b of selfBooked) {
           occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
         }
