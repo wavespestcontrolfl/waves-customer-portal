@@ -7801,7 +7801,11 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
       const perTreatment = perTreatmentBase != null
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
-      const labelBase = tierKey === 'enhanced' ? 'Every 6 weeks' : 'Bi-monthly';
+      // House convention: T&S tiers display as cadences (4=Quarterly,
+      // 6=Bi-monthly, 9=Every 6 weeks). Light is the 4-visit Quarterly option.
+      const labelBase = tierKey === 'light' ? 'Quarterly'
+        : tierKey === 'enhanced' ? 'Every 6 weeks'
+        : 'Bi-monthly';
       return {
         key: tierKey,
         label: labelBase,
@@ -8038,6 +8042,15 @@ function finiteNumberOrNull(value) {
 
 function treeShrubTierRuntimeMeta(tierKey) {
   switch (String(tierKey || '').trim().toLowerCase()) {
+    case 'light':
+      return {
+        tierKey: 'light',
+        serviceKey: 'tree_shrub_quarterly',
+        name: 'Quarterly Tree & Shrub Care Service',
+        frequencyKey: 'quarterly',
+        label: 'Quarterly',
+        visitsPerYear: 4,
+      };
     case 'standard':
       return {
         tierKey: 'standard',
@@ -8155,7 +8168,7 @@ function markSelectedTreeShrubTierRows(rows = [], selectedTierKey = '') {
   const normalizedSelected = String(selectedTierKey || '').trim().toLowerCase();
   return rows.map((row) => {
     const tierKey = treeShrubTierKey(row);
-    if (!['standard', 'enhanced'].includes(tierKey)) return row;
+    if (!['light', 'standard', 'enhanced'].includes(tierKey)) return row;
     return {
       ...row,
       selected: tierKey === normalizedSelected,

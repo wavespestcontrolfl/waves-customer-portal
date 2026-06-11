@@ -377,7 +377,7 @@ function selectedFrequencyKeyFromEstimateData(estData = {}) {
   ];
   for (const candidate of serviceTierCandidates) {
     const key = normalizeFrequencyKey(candidate);
-    if (key === 'standard' || key === 'enhanced') return key;
+    if (key === 'light' || key === 'standard' || key === 'enhanced') return key;
   }
   const directCandidates = [
     customerSelection.frequencyKey,
