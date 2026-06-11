@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
@@ -696,6 +696,25 @@ router.post('/confirm', async (req, res, next) => {
       return res.status(400).json({ error: 'slot_date and slot_start required' });
     }
 
+    // Normalize the calendar day ONCE and use it for the advisory locks,
+    // the idempotency lookup, conflict checks, and inserts — an
+    // equivalent-but-differently-shaped date string would otherwise take
+    // a different lock key and bypass serialization entirely.
+    const slotDateStr = String(slot_date).split('T')[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(slotDateStr)) {
+      return res.status(400).json({ error: 'Invalid slot_date' });
+    }
+    const todayEtStr = etDateString();
+    if (slotDateStr < todayEtStr) {
+      return res.status(400).json({ error: 'That date has already passed — please pick another day.' });
+    }
+    if (slotDateStr === todayEtStr) {
+      const nowEt = etParts(new Date());
+      if (timeToMin(slot_start) <= nowEt.hour * 60 + nowEt.minute) {
+        return res.status(409).json({ error: 'That time has already passed today — please pick another slot.' });
+      }
+    }
+
     // Resolve customer
     let custId = null;
     let estimate = null;
@@ -805,7 +824,7 @@ router.post('/confirm', async (req, res, next) => {
       txResult = await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['self-booking-confirm', `${custId}:${slot_date}`],
+        ['self-booking-confirm', `${custId}:${slotDateStr}`],
       );
       // The customer-keyed lock above only serializes a double-submit —
       // two DIFFERENT customers confirming the same slot can still both
@@ -816,8 +835,8 @@ router.post('/confirm', async (req, res, next) => {
       // conflict-check per zone+day instead.
       const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
       const slotScopeKey = technician_id
-        ? `${technician_id}:${slot_date}`
-        : `zone:${zone?.id || 'unknown'}:${slot_date}`;
+        ? `${technician_id}:${slotDateStr}`
+        : `zone:${zone?.id || 'unknown'}:${slotDateStr}`;
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['slot-reserve', slotScopeKey],
@@ -826,7 +845,7 @@ router.post('/confirm', async (req, res, next) => {
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate.
       const existing = await trx('self_booked_appointments')
-        .where({ customer_id: custId, date: slot_date, start_time: slot_start })
+        .where({ customer_id: custId, date: slotDateStr, start_time: slot_start })
         .whereNot('status', 'cancelled')
         .first();
       if (existing) return { existing };
@@ -840,7 +859,7 @@ router.post('/confirm', async (req, res, next) => {
       const zoneCities = zone?.cities || [];
       const conflictQuery = trx('scheduled_services')
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .where('scheduled_services.scheduled_date', slot_date)
+        .where('scheduled_services.scheduled_date', slotDateStr)
         .whereNotIn('scheduled_services.status', ['cancelled'])
         .where((q) => {
           q.whereNull('scheduled_services.reservation_expires_at')
@@ -876,7 +895,7 @@ router.post('/confirm', async (req, res, next) => {
         estimate_id: estimate_id || null,
         technician_id: technician_id || null,
         service_zone_id: zone?.id || null,
-        date: slot_date,
+        date: slotDateStr,
         start_time: slot_start,
         end_time: endTime,
         duration_minutes: duration,
@@ -890,7 +909,7 @@ router.post('/confirm', async (req, res, next) => {
       const [scheduledRow] = await trx('scheduled_services').insert({
         customer_id: custId,
         technician_id: technician_id || null,
-        scheduled_date: slot_date,
+        scheduled_date: slotDateStr,
         window_start: slot_start,
         window_end: endTime,
         service_type: resolvedServiceType,
@@ -917,7 +936,7 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     if (txResult.existing) {
-      logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slot_date} ${slot_start} — returning existing booking ${txResult.existing.id}`);
+      logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
       return res.json({
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
@@ -956,7 +975,7 @@ router.post('/confirm', async (req, res, next) => {
       const AppointmentReminders = require('../services/appointment-reminders');
       for (const row of [serviceRow, ...followUpRows].filter(r => r?.id)) {
         const scheduledDate = row.id === serviceRow.id
-          ? slot_date
+          ? slotDateStr
           : (typeof row.scheduled_date === 'string'
               ? row.scheduled_date.slice(0, 10)
               : row.scheduled_date instanceof Date
@@ -978,7 +997,7 @@ router.post('/confirm', async (req, res, next) => {
 
     // SMS notifications (best-effort)
     try {
-      const dateLabel = new Date(slot_date + 'T12:00:00').toLocaleDateString('en-US', {
+      const dateLabel = new Date(slotDateStr + 'T12:00:00').toLocaleDateString('en-US', {
         weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));
