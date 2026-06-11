@@ -317,7 +317,16 @@ export default function TechHomePage() {
   }, []);
   const handleProjectQuickAction = useCallback(() => {
     if (myServices.length === 1) {
-      openProjectForService(myServices[0]);
+      const only = myServices[0];
+      // Same routing as the row/picker handlers — a cut-over typed job must
+      // not open CreateProjectModal through the quick action either.
+      if (isTypedFindingsService(only)) {
+        typedFindingsNotice();
+      } else if (isPestControlService(only)) {
+        setRecapService(only);
+      } else {
+        openProjectForService(only);
+      }
       return;
     }
     setShowProjectPicker(true);
