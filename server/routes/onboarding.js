@@ -659,17 +659,21 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
         }
         try {
           const AppointmentReminders = require('../services/appointment-reminders');
-          const restoredDate = current.scheduled_date instanceof Date
-            ? current.scheduled_date.toISOString().split('T')[0]
-            : String(current.scheduled_date).split('T')[0];
           await AppointmentReminders.registerAppointment(
             current.id,
             req.customer.id,
-            `${restoredDate}T${String(current.window_start || '08:00').slice(0, 5)}`,
+            `${originalDateStr}T${String(current.window_start || '08:00').slice(0, 5)}`,
             current.service_type,
             'onboarding_restore',
             { sendConfirmation: false },
           );
+          // registerAppointment returns an existing reminder row as-is —
+          // handleCancellation above set cancelled=true on it, which would
+          // leave the restored appointment with its 72h/24h reminders
+          // permanently disabled. Un-cancel it explicitly.
+          await db('appointment_reminders')
+            .where({ scheduled_service_id: current.id })
+            .update({ cancelled: false, updated_at: new Date() });
         } catch {}
         await finishLock(true);
         return res.status(bookErr.statusCode || 409).json({ error: bookErr.message, originalRestored: true });

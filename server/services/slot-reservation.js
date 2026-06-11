@@ -254,14 +254,14 @@ async function reserveSlot({
       // it, a self-book confirm and an estimate hold for the same window
       // each miss the other's uncommitted row. Fixed order everywhere:
       // tech lock first, zone lock second.
-      let reserveZoneId = null;
+      let reserveZone = null;
       if (estimate.customer_id) {
         try {
           const holder = await trx('customers').where({ id: estimate.customer_id }).first('city');
           const holderCity = String(holder?.city || '').toLowerCase();
           if (holderCity) {
-            const zones = await trx('service_zones').select('id', 'cities');
-            reserveZoneId = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity))?.id || null;
+            const zones = await trx('service_zones').select('id', 'cities', 'zone_name');
+            reserveZone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;
           }
         } catch (zoneErr) {
           logger.warn(`[slot-reservation] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
@@ -269,7 +269,7 @@ async function reserveSlot({
       }
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['slot-reserve', `zone:${reserveZoneId || 'unknown'}:${date}`],
+        ['slot-reserve', `zone:${reserveZone?.id || 'unknown'}:${date}`],
       );
 
       const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
@@ -309,6 +309,36 @@ async function reserveSlot({
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
+      }
+
+      // Zone-capacity check: the tech-scoped conflict above misses
+      // unassigned self-bookings (technician_id NULL) that occupy the
+      // same zone/time — availability treats the zone as one capacity
+      // pool, so an estimate hold must not stack on top of one.
+      if (reserveZone) {
+        const zoneSlug = reserveZone.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
+        const zoneCities = reserveZone.cities || [];
+        const zoneConflict = await trx('scheduled_services')
+          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+          .where('scheduled_services.scheduled_date', date)
+          .whereNull('scheduled_services.technician_id')
+          .whereNotIn('scheduled_services.status', ['cancelled'])
+          .where((q) => {
+            q.whereNull('scheduled_services.reservation_expires_at')
+              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+          })
+          .where((q) => {
+            if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
+            if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+          })
+          .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
+          .first('scheduled_services.id');
+        if (zoneConflict) {
+          const err = new Error('slot no longer available');
+          err.code = 'SLOT_UNAVAILABLE';
+          err.slotId = slotId;
+          throw err;
+        }
       }
 
       // service_type stays canonical for protocol/default lookups; notes
