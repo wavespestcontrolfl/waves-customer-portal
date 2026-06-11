@@ -238,6 +238,72 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(store.records).toHaveLength(1);
   });
 
+  test('a recap during a fresh in-flight completion SMS is suppressed (sending window)', async () => {
+    // /complete writes completionSmsStatus 'sending' before the provider
+    // call. A recap landing in that window must not text — the in-flight
+    // completion SMS will most likely deliver.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{
+        id: 'rec-complete',
+        recap_sms_sent_at: null,
+        structured_notes: JSON.stringify({
+          completionSmsStatus: 'sending',
+          completionSmsAttemptedAt: new Date().toISOString(),
+        }),
+      }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [],
+      customerRecap: 'Service complete.',
+      sendSms: true,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result.smsSent).toBe(false);
+    expect(result.smsError).toBe('completion_sms_already_sent');
+  });
+
+  test('a stale completion SMS "sending" claim (crashed mid-send) does not suppress the recap', async () => {
+    // Mirrors /complete's own completionSmsSendingFresh guard: a 'sending'
+    // older than 10 minutes is treated as retryable, not delivered.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{
+        id: 'rec-complete',
+        recap_sms_sent_at: null,
+        structured_notes: JSON.stringify({
+          completionSmsStatus: 'sending',
+          completionSmsAttemptedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
+        }),
+      }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Texting the customer now.',
+      products: [],
+      customerRecap: 'Service complete.',
+      sendSms: true,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(result.smsSent).toBe(true);
+  });
+
   test('a cancelled visit is rejected — no record, no track-complete, no SMS', async () => {
     const store = { serviceStatus: 'cancelled', records: [] };
     const knex = makeKnex(store);

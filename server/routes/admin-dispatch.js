@@ -3263,10 +3263,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let recapSmsAlreadySentForVisit = false;
     if (!completionSmsAlreadyHandled && serviceRecordCols.recap_sms_sent_at) {
       try {
-        const recapTexted = await db('service_records')
+        const readRecapClaim = () => db('service_records')
           .where({ scheduled_service_id: svc.id })
           .whereNotNull('recap_sms_sent_at')
-          .first('id');
+          .first('id', 'recap_sms_sent_at');
+        let recapTexted = await readRecapClaim();
+        // pest-recap claims recap_sms_sent_at BEFORE its send and releases
+        // the claim if the send fails, so a seconds-old claim may still be
+        // in flight. Suppressing on an in-flight claim whose send then
+        // fails would leave the customer with no text from either path —
+        // so for a fresh claim, wait briefly and re-read. A released claim
+        // means the recap failed and this completion SMS should proceed; a
+        // claim that survives the recheck is a delivered recap (success
+        // never releases it). Claims older than the window are durable.
+        const recapClaimAgeMs = recapTexted
+          ? Date.now() - new Date(recapTexted.recap_sms_sent_at).getTime()
+          : Infinity;
+        if (recapTexted && recapClaimAgeMs < 60 * 1000) {
+          for (let attempt = 0; attempt < 2 && recapTexted; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            recapTexted = await readRecapClaim();
+          }
+        }
         recapSmsAlreadySentForVisit = !!recapTexted;
       } catch (e) {
         logger.warn(`[dispatch] recap SMS claim lookup failed for service ${svc.id}: ${e.message}`);

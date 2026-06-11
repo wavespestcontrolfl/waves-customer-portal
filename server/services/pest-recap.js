@@ -285,10 +285,25 @@ async function submitRecap({
     // heavy /complete path WITHOUT a text) can still send. When that
     // /complete path DID text (completionSmsStatus claim in
     // structured_notes), the recap must not send a second, differently
-    // worded completion message.
+    // worded completion message. A fresh 'sending' status counts too —
+    // /complete writes it before the provider call, so a recap landing in
+    // that window would double-text once the in-flight send delivers.
+    // The 10-minute freshness window mirrors /complete's own
+    // completionSmsSendingFresh guard: a stale 'sending' (crashed
+    // mid-send) does not suppress, the same way /complete itself treats
+    // it as retryable. If the in-flight send ultimately fails, /complete
+    // overwrites the status with 'failed'/'blocked' and a recap re-submit
+    // is then allowed to text.
     const existingNotes = parseStructuredNotes(existing?.structured_notes);
+    const completionSmsAttemptedAtMs = existingNotes.completionSmsAttemptedAt
+      ? new Date(existingNotes.completionSmsAttemptedAt).getTime()
+      : 0;
+    const completionSmsSendingFresh = existingNotes.completionSmsStatus === 'sending'
+      && completionSmsAttemptedAtMs
+      && Date.now() - completionSmsAttemptedAtMs < 10 * 60 * 1000;
     completionSmsAlreadySent = existingNotes.completionSmsStatus === 'sent'
-      || !!existingNotes.sentSmsBody;
+      || !!existingNotes.sentSmsBody
+      || completionSmsSendingFresh;
     const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent;
     willSendSms = wantSms && !alreadyTexted;
     const smsClaim = willSendSms ? { recap_sms_sent_at: new Date() } : {};
