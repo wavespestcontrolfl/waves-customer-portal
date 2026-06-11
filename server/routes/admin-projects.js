@@ -37,6 +37,7 @@ const {
   resolveProjectPortalAttachment,
 } = require('../services/project-completion');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
+const { normalizeAddendumPhoto } = require('../services/pdf/addendum-photo');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -1642,18 +1643,24 @@ function applicatorForReport(baseApplicator, signature) {
   };
 }
 
-// pdf-lib embeds images as-is (no recompression) and we have no image library
-// to downscale, so bound the addendum to keep PDF build memory and the email
-// attachment within provider limits: a max page-count's worth of photos, an
-// oversized-photo skip, and a total-bytes budget.
+// Photos are normalized (EXIF-rotated + downscaled + recompressed) before
+// embedding, so the budgets below are backstops, not the primary control:
+// 16 normalized photos run ~3-12MB total. The total budget is sized so even
+// a fully-loaded addendum of fallback originals stays under SendGrid's 30MB
+// cap after ~33% base64 inflation plus the form pages, invoice PDF, and HTML
+// body (14MB raw → ~18.7MB encoded). The raw cap is a decode guard so a
+// pathological upload can't balloon sharp's memory.
 const MAX_ADDENDUM_PHOTOS = 16; // 8 addendum pages (2 per page)
-const MAX_ADDENDUM_PHOTO_BYTES = 8 * 1024 * 1024;
-const MAX_ADDENDUM_TOTAL_BYTES = 22 * 1024 * 1024;
+const MAX_ADDENDUM_RAW_PHOTO_BYTES = 32 * 1024 * 1024;
+const MAX_ADDENDUM_TOTAL_BYTES = 14 * 1024 * 1024;
 
-// Fetch the project's photos from S3 as buffers for the PDF photo addendum,
-// ordered the way the tech arranged them. Failures on individual photos are
-// skipped so one bad object can't sink the whole report; oversized photos and
-// anything past the count/byte budget are omitted (and logged).
+// Fetch the project's photos from S3 for the PDF photo addendum, ordered the
+// way the tech arranged them, normalizing each (normalizeAddendumPhoto:
+// EXIF rotation baked in, bounded JPEG). When normalization can't decode the
+// image, the original is used as-is if it's PNG/JPEG (pdf-lib can't embed
+// anything else). Failures on individual photos are skipped so one bad object
+// can't sink the whole report; anything past the count/byte budget is
+// omitted (and logged).
 async function loadWdoAddendumPhotos(project) {
   const rows = await db('project_photos')
     .where({ project_id: project.id })
@@ -1669,27 +1676,38 @@ async function loadWdoAddendumPhotos(project) {
     }
     try {
       const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }));
-      const buffer = await streamToBuffer(object.Body);
-      if (!buffer.length) continue;
-      if (buffer.length > MAX_ADDENDUM_PHOTO_BYTES) {
-        logger.warn(`[projects] addendum photo ${ph.id} skipped — ${buffer.length}B over per-photo cap`);
+      const raw = await streamToBuffer(object.Body);
+      if (!raw.length) continue;
+      if (raw.length > MAX_ADDENDUM_RAW_PHOTO_BYTES) {
+        logger.warn(`[projects] addendum photo ${ph.id} skipped — ${raw.length}B over raw decode guard`);
         continue;
       }
+
+      const normalized = await normalizeAddendumPhoto(raw);
+      let buffer;
+      let contentType;
+      if (normalized) {
+        ({ buffer, contentType } = normalized);
+      } else {
+        // Couldn't decode — fall back to the original, but pdf-lib only
+        // embeds PNG/JPEG, so skip anything else (e.g. WebP, GIF) rather
+        // than consume an addendum slot with a "[Photo N unavailable]".
+        const isPng = raw[0] === 0x89 && raw[1] === 0x50 && raw[2] === 0x4e && raw[3] === 0x47;
+        const isJpeg = raw[0] === 0xff && raw[1] === 0xd8 && raw[2] === 0xff;
+        if (!isPng && !isJpeg) {
+          logger.warn(`[projects] addendum photo ${ph.id} skipped — unsupported image format for PDF embedding`);
+          continue;
+        }
+        buffer = raw;
+        contentType = object.ContentType || 'image/jpeg';
+      }
+
       if (totalBytes + buffer.length > MAX_ADDENDUM_TOTAL_BYTES) {
         logger.warn(`[projects] addendum byte budget reached for ${project.id}; remaining photos omitted`);
         break;
       }
-      // pdf-lib only embeds PNG/JPEG. Skip other accepted upload types (e.g.
-      // WebP, GIF) by magic bytes so they don't consume an addendum slot or
-      // render a "[Photo N unavailable]" placeholder.
-      const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
-      const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
-      if (!isPng && !isJpeg) {
-        logger.warn(`[projects] addendum photo ${ph.id} skipped — unsupported image format for PDF embedding`);
-        continue;
-      }
       totalBytes += buffer.length;
-      out.push({ buffer, contentType: object.ContentType || 'image/jpeg', caption: ph.caption || '' });
+      out.push({ buffer, contentType, caption: ph.caption || '' });
     } catch (err) {
       logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
     }
