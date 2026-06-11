@@ -598,13 +598,26 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
       // nothing on the board, so restore it before answering.
       if (current && (bookErr.code === 'SLOT_TAKEN' || bookErr.code === 'INVALID_DATE')) {
         // The original slot may itself have been taken while we held it
-        // cancelled — restoring blindly would double-book it. Re-check
-        // before flipping it back; if it's gone, leave it cancelled and
-        // flag the office to call.
+        // cancelled — restoring blindly would double-book it. Take the
+        // same slot-reserve locks the booking writers use (tech first,
+        // zone second — after the customer lock we already hold) so a
+        // concurrent confirm can't insert between this re-check and the
+        // restore; both run on the lock transaction.
         const originalDateStr = current.scheduled_date instanceof Date
           ? current.scheduled_date.toISOString().split('T')[0]
           : String(current.scheduled_date).split('T')[0];
-        const slotRetaken = current.window_start ? await db('scheduled_services')
+        if (current.technician_id) {
+          await lockTrx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${current.technician_id}:${originalDateStr}`],
+          );
+        }
+        const restoreZone = await availability.resolveZone(req.customer.city);
+        await lockTrx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['slot-reserve', `zone:${restoreZone?.id || 'unknown'}:${originalDateStr}`],
+        );
+        const slotRetaken = current.window_start ? await lockTrx('scheduled_services')
           .where('scheduled_date', originalDateStr)
           .whereNot('id', current.id)
           .whereNotIn('status', ['cancelled', 'completed'])
@@ -637,12 +650,12 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
             originalRestored: false,
           });
         }
-        await db('scheduled_services').where({ id: current.id }).update({
+        await lockTrx('scheduled_services').where({ id: current.id }).update({
           status: current.status,
           notes: current.notes || null,
         }).catch(() => {});
         if (current.self_booking_id) {
-          await db('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'confirmed' }).catch(() => {});
+          await lockTrx('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'confirmed' }).catch(() => {});
         }
         try {
           const AppointmentReminders = require('../services/appointment-reminders');

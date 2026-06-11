@@ -879,8 +879,12 @@ router.post('/confirm', async (req, res, next) => {
           q.whereNull('scheduled_services.reservation_expires_at')
             .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
         })
-        .where('scheduled_services.window_start', '<', endTime)
-        .where('scheduled_services.window_end', '>', slot_start);
+        // COALESCE the nullable window_end (admin edits can leave a start
+        // with no end) — same predicate as slot-reservation/rebooker.
+        .whereRaw(
+          "scheduled_services.window_start < ?::time AND COALESCE(scheduled_services.window_end, scheduled_services.window_start + ((COALESCE(NULLIF(scheduled_services.estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+          [endTime, slot_start],
+        );
       // One capacity predicate for both branches: the tech's own route,
       // PLUS all zone jobs (assigned or not — availability builds slots
       // from the whole zone, so an unassigned zone booking occupies the
