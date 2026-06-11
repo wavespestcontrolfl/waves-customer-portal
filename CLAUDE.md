@@ -6,7 +6,6 @@ Context for Claude Code sessions working on the waves-customer-portal monorepo.
 
 - Start `npm run dev` in background on session start
 - Monitor build output; fix errors immediately before continuing other work
-- After every commit, drop a fresh tar.gz into ~/Downloads (exclude node_modules, .git, dist)
 
 ## Project Overview
 
