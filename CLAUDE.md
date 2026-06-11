@@ -137,7 +137,7 @@ All admin contexts get base tools from `tools.js` (customers incl. `create_custo
 - **One route, many contexts.** No page-specific API endpoints.
 - **Base tools always loaded on admin contexts.** Any admin page can answer "how many active customers?" even if it's the SEO page.
 - **Tech portal is isolated.** Only `tech-tools` loads. All read-only. Field-speed max_tokens.
-- **Write operations require confirmation.** Claude drafts the action, shows it, waits for "do it"/"send it" before executing.
+- **Write operations require UI confirmation (issue #1568).** With `GATE_IB_UI_CONFIRM=true` (prod default), write tools never execute from the model loop: the call returns a preview, the route persists a pending action (`ib_pending_actions` — actor-bound, 10-min expiry, payload hash, single-use), and the client renders a Confirm/Cancel card (`PendingActionsCard`). Only the operator's click commits, via `/confirm-action` — never a model tool, and the pending id is never model-visible. The gated tool list lives in `services/intelligence-bar/write-gates.js`, mirrored by `tests/intelligence-bar-write-gate-contract.test.js`. New write tools MUST be added to those sets. With the gate off (local dev), the legacy conversational `confirmed: true` two-step applies.
 - **`SEOIntelligenceBar` is the generic reusable wrapper.** Pass a `context` prop. Only build a custom wrapper if you need to inject page-specific React state as `pageData`.
 - **Some tools spawn their own Claude calls.** `run_price_lookup`, `draft_sms_reply` — they call Claude internally for content generation.
 

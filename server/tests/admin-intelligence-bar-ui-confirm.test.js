@@ -217,6 +217,27 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     });
   });
 
+  test('system prompt carries UI-mode write guidance when the gate is on, conversational guidance when off', async () => {
+    mockExecuteTool.mockResolvedValue({ customers: [] });
+
+    scriptModelTurns([[{ type: 'text', text: 'hi' }]]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'hello', context: 'customers' });
+    });
+    const onPrompt = mockMessagesCreate.mock.calls[0][0].system;
+    expect(onPrompt).toContain('WRITE CONFIRMATION (UI mode)');
+    expect(onPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
+
+    process.env.GATE_IB_UI_CONFIRM = 'false';
+    scriptModelTurns([[{ type: 'text', text: 'hi' }]]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'hello', context: 'customers' });
+    });
+    const offPrompt = mockMessagesCreate.mock.calls[0][0].system;
+    expect(offPrompt).toContain('WRITE CONFIRMATION (conversational mode)');
+    expect(offPrompt).not.toContain('WRITE CONFIRMATION (UI mode)');
+  });
+
   test('gate off: legacy behavior unchanged, no pendingActions field', async () => {
     process.env.GATE_IB_UI_CONFIRM = 'false';
     mockExecuteTool.mockResolvedValue({ success: true });

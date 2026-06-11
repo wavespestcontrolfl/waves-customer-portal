@@ -737,7 +737,7 @@ RULES:
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
-- You CAN create new customers with create_customer — first call returns a preview, show it to the operator, then re-call with confirmed: true after they approve
+- You CAN create new customers with create_customer
 - You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
 
@@ -781,6 +781,19 @@ router.post('/query', async (req, res, next) => {
     let systemPrompt = SYSTEM_PROMPT;
     if (context && CONTEXT_PROMPTS[context]) {
       systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
+    }
+    // Write-confirmation guidance must match the active mechanism (#1568) —
+    // the gate is read per-request, so the prompt is appended per-request.
+    if (context !== 'tech') {
+      systemPrompt += uiConfirmEnabled()
+        ? `\n\nWRITE CONFIRMATION (UI mode):
+Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT execute when you call them. Your call returns a preview, and the action appears as a confirmation card in the portal UI next to your response.
+- NEVER call the same write tool again after a pending_confirmation result — that creates a duplicate card. One call per intended action.
+- Adding confirmed: true does nothing; it is ignored. Only the operator's Confirm click on the card executes the write.
+- NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
+- The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`
+        : `\n\nWRITE CONFIRMATION (conversational mode):
+For create_customer and the route-optimization writes: the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
     }
     // Inject live page data (current date, schedule stats, etc.)
     if (pageData) {
