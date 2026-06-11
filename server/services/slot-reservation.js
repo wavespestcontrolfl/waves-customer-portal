@@ -32,6 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const estimateSlotAvailability = require('./estimate-slot-availability');
+const { etParts, etDateString } = require('../utils/datetime-et');
 
 const DEFAULT_HOLD_MINUTES = 15;
 const DEFAULT_DURATION_MINUTES = 60;
@@ -183,6 +184,28 @@ async function reserveSlot({
   }
   const { date, windowStart, techId } = parsed;
 
+  // Past-slot guard: the slot list is generated minutes before the customer
+  // taps it, and ASAP same-day slots can have already elapsed by confirm
+  // time. A reservation for an elapsed window books a visit no tech will
+  // ever make.
+  const todayEt = etDateString();
+  if (date < todayEt) {
+    const err = new Error('slot date has already passed');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
+  if (date === todayEt) {
+    const nowEt = etParts(new Date());
+    const [sh, sm] = String(windowStart).split(':').map(Number);
+    if (sh * 60 + sm <= nowEt.hour * 60 + nowEt.minute) {
+      const err = new Error('slot time has already passed today');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = slotId;
+      throw err;
+    }
+  }
+
   // Numeric coerce + bound the hold window so we can safely interpolate it
   // into a Postgres INTERVAL string below.
   const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
@@ -216,6 +239,46 @@ async function reserveSlot({
         err.code = 'ESTIMATE_TERMINAL';
         throw err;
       }
+
+      // The FOR UPDATE above only serializes THIS estimate — two different
+      // customers' estimates reserving the same tech/date can both pass the
+      // conflict check below concurrently and both insert. Serialize all
+      // reserves per tech+day (coarse but reserves are quick), released on
+      // commit/rollback.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', `${techId || 'unassigned'}:${date}`],
+      );
+      // Also take the zone+day lock the self-booking writers
+      // (availability.confirmBooking, /api/booking/confirm) use — without
+      // it, a self-book confirm and an estimate hold for the same window
+      // each miss the other's uncommitted row. Fixed order everywhere:
+      // tech lock first, zone lock second.
+      let reserveZone = null;
+      try {
+        const zones = await trx('service_zones').select('id', 'cities', 'zone_name');
+        if (estimate.customer_id) {
+          const holder = await trx('customers').where({ id: estimate.customer_id }).first('city');
+          const holderCity = String(holder?.city || '').toLowerCase();
+          if (holderCity) {
+            reserveZone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;
+          }
+        }
+        if (!reserveZone && estimate.address) {
+          // Unlinked/public estimates carry only a free-text address —
+          // match any zone city appearing in it so these reserves take
+          // the same zone lock the self-booking writers do instead of
+          // falling through to zone:unknown.
+          const addr = String(estimate.address).toLowerCase();
+          reserveZone = zones.find((z) => (z.cities || []).some((c) => c && addr.includes(String(c).toLowerCase()))) || null;
+        }
+      } catch (zoneErr) {
+        logger.warn(`[slot-reservation] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
+      }
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', `zone:${reserveZone?.id || 'unknown'}:${date}`],
+      );
 
       const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
         ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
@@ -254,6 +317,36 @@ async function reserveSlot({
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
+      }
+
+      // Zone-capacity check: the tech-scoped conflict above misses
+      // unassigned self-bookings (technician_id NULL) that occupy the
+      // same zone/time — availability treats the zone as one capacity
+      // pool, so an estimate hold must not stack on top of one.
+      if (reserveZone) {
+        const zoneSlug = reserveZone.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
+        const zoneCities = reserveZone.cities || [];
+        const zoneConflict = await trx('scheduled_services')
+          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+          .where('scheduled_services.scheduled_date', date)
+          .whereNull('scheduled_services.technician_id')
+          .whereNotIn('scheduled_services.status', ['cancelled'])
+          .where((q) => {
+            q.whereNull('scheduled_services.reservation_expires_at')
+              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+          })
+          .where((q) => {
+            if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
+            if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+          })
+          .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
+          .first('scheduled_services.id');
+        if (zoneConflict) {
+          const err = new Error('slot no longer available');
+          err.code = 'SLOT_UNAVAILABLE';
+          err.slotId = slotId;
+          throw err;
+        }
       }
 
       // service_type stays canonical for protocol/default lookups; notes

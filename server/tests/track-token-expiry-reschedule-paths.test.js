@@ -77,25 +77,25 @@ describe('track token expiry on reschedule paths', () => {
 
     await expect(SmartRebooker.reschedule(
       'svc-1',
-      '2026-06-03',
+      '2027-06-03',
       { start: '10:00:00', end: '12:30:00' },
       'weather',
       'admin',
     )).resolves.toEqual({
       success: true,
       originalDate: '2026-05-20',
-      newDate: '2026-06-03',
+      newDate: '2027-06-03',
     });
 
     const payload = updateQuery.update.mock.calls[0][0];
     expect(payload).toMatchObject({
-      scheduled_date: '2026-06-03',
+      scheduled_date: '2027-06-03',
       window_start: '10:00:00',
       window_end: '12:30:00',
       status: 'confirmed',
     });
     expect(payload.track_token_expires_at).toMatchObject({
-      bindings: ['2026-06-03', '12:30:00'],
+      bindings: ['2027-06-03', '12:30:00'],
     });
     expect(payload.track_token_expires_at.sql).toContain("AT TIME ZONE 'America/New_York'");
     expect(payload.track_token_expires_at.sql).toContain("COALESCE(?::time, TIME '23:59:59')");
@@ -155,7 +155,7 @@ describe('track token expiry on reschedule paths', () => {
 
     const result = await SmartRebooker.rescheduleSeries(
       'svc-parent',
-      '2026-06-03',
+      '2027-06-03',
       { start: '10:00:00', end: '12:30:00' },
       'weather',
       'admin',
@@ -165,13 +165,13 @@ describe('track token expiry on reschedule paths', () => {
       success: true,
       occurrencesRescheduled: 2,
       originalDate: '2026-05-20',
-      newDate: '2026-06-03',
+      newDate: '2027-06-03',
     });
     expect(firstUpdate.update.mock.calls[0][0].track_token_expires_at).toMatchObject({
-      bindings: ['2026-06-03', '12:30:00'],
+      bindings: ['2027-06-03', '12:30:00'],
     });
     expect(secondUpdate.update.mock.calls[0][0].track_token_expires_at).toMatchObject({
-      bindings: ['2026-06-10', '12:30:00'],
+      bindings: ['2027-06-10', '12:30:00'],
     });
   });
 
@@ -200,22 +200,22 @@ describe('track token expiry on reschedule paths', () => {
 
     await expect(executeScheduleTool('move_stops_to_day', {
       service_ids: ['svc-1'],
-      new_date: '2026-06-03',
+      new_date: '2027-06-03',
       reason: 'rain delay',
       confirmed: true,
     })).resolves.toMatchObject({
       success: true,
       moved_count: 1,
-      new_date: '2026-06-03',
+      new_date: '2027-06-03',
     });
 
     const payload = updateQuery.update.mock.calls[0][0];
     expect(payload).toMatchObject({
-      scheduled_date: '2026-06-03',
+      scheduled_date: '2027-06-03',
       notes: 'Gate code\nMoved from 2026-05-20: rain delay',
     });
     expect(payload.track_token_expires_at).toMatchObject({
-      bindings: ['2026-06-03', '11:00:00'],
+      bindings: ['2027-06-03', '11:00:00'],
     });
     expect(payload.track_token_expires_at.sql).toContain("AT TIME ZONE 'America/New_York'");
   });

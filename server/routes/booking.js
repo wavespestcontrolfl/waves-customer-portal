@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
@@ -696,6 +696,25 @@ router.post('/confirm', async (req, res, next) => {
       return res.status(400).json({ error: 'slot_date and slot_start required' });
     }
 
+    // Normalize the calendar day ONCE and use it for the advisory locks,
+    // the idempotency lookup, conflict checks, and inserts — an
+    // equivalent-but-differently-shaped date string would otherwise take
+    // a different lock key and bypass serialization entirely.
+    const slotDateStr = String(slot_date).split('T')[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(slotDateStr)) {
+      return res.status(400).json({ error: 'Invalid slot_date' });
+    }
+    const todayEtStr = etDateString();
+    if (slotDateStr < todayEtStr) {
+      return res.status(400).json({ error: 'That date has already passed — please pick another day.' });
+    }
+    if (slotDateStr === todayEtStr) {
+      const nowEt = etParts(new Date());
+      if (timeToMin(slot_start) <= nowEt.hour * 60 + nowEt.minute) {
+        return res.status(409).json({ error: 'That time has already passed today — please pick another slot.' });
+      }
+    }
+
     // Resolve customer
     let custId = null;
     let estimate = null;
@@ -717,6 +736,14 @@ router.post('/confirm', async (req, res, next) => {
         .first();
       if (existing) {
         if (!customer_id) {
+          // NOTE: a new_customer double-submit retry lands here (the first
+          // attempt created the profile) and gets this 409 rather than an
+          // idempotent replay — deliberately. Phone + date + start time is
+          // NOT proof of identity on a public route; replaying the booking
+          // row + confirmation code here would let anyone with a
+          // customer's phone number probe slots and harvest booking
+          // details. The in-transaction replay guard still covers callers
+          // that proved identity (customer_id / estimate token).
           return res.status(409).json({ error: 'This phone number is already on file. Please verify the customer profile before booking.' });
         }
         if (String(existing.id) !== String(customer_id)) {
@@ -745,6 +772,7 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     // Create customer from new_customer payload if none resolved
+    let createdCustomerId = null;
     if (!custId && new_customer && phoneDigits && new_customer.first_name) {
       const [created] = await db('customers').insert({
         first_name: new_customer.first_name,
@@ -759,6 +787,7 @@ router.post('/confirm', async (req, res, next) => {
         longitude: new_customer.lng || null,
       }).returning('id');
       custId = created.id || created;
+      createdCustomerId = custId;
       await db('notification_prefs')
         .insert({ customer_id: custId })
         .onConflict('customer_id')
@@ -781,21 +810,6 @@ router.post('/confirm', async (req, res, next) => {
     const endMin = slot_end ? timeToMin(slot_end) : (timeToMin(slot_start) + duration);
     const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
 
-    // Re-verify the slot is still available (race condition guard)
-    const conflict = await db('scheduled_services')
-      .where('scheduled_date', slot_date)
-      .where('technician_id', technician_id || null)
-      .whereNotIn('status', ['cancelled'])
-      .where(function () {
-        this.where(function () {
-          this.where('window_start', '<', endTime).andWhere('window_end', '>', slot_start);
-        });
-      })
-      .first();
-    if (conflict && technician_id) {
-      return res.status(409).json({ error: 'That time slot was just taken. Please pick another.' });
-    }
-
     const confCode = 'WPC-' + Array.from({ length: 4 }, () =>
       'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]
     ).join('');
@@ -811,38 +825,155 @@ router.post('/confirm', async (req, res, next) => {
       || estimate?.service_type
       || 'General Pest Control';
 
-    const [booking] = await db('self_booked_appointments').insert({
-      customer_id: custId,
-      estimate_id: estimate_id || null,
-      technician_id: technician_id || null,
-      service_zone_id: zone?.id || null,
-      date: slot_date,
-      start_time: slot_start,
-      end_time: endTime,
-      duration_minutes: duration,
-      customer_notes: customer_notes || null,
-      confirmation_code: confCode,
-      source: source || 'direct',
-      referrer_url: referrer_url || req.get('referer') || null,
-      service_type: resolvedServiceType,
-    }).returning('*');
+    // Conflict re-check + both inserts ride one transaction, serialized per
+    // customer+day: a double-submit (button double-tap, client retry)
+    // otherwise mints two parents — and two seeded quarterly series — and a
+    // partial failure could leave a booking without its dispatch row.
+    let txResult;
+    try {
+      txResult = await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['self-booking-confirm', `${custId}:${slotDateStr}`],
+      );
+      // The customer-keyed lock above only serializes a double-submit —
+      // two DIFFERENT customers confirming the same slot can still both
+      // pass the overlap check under READ COMMITTED. Tech bookings take
+      // BOTH locks: tech:date serializes against slot-reservation and
+      // rebooker, zone:date serializes against the zone-capacity writers
+      // (availability.confirmBooking and no-tech confirms here). Lock
+      // order is fixed (tech first) so concurrent confirms can't
+      // deadlock.
+      const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
+      if (technician_id) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['slot-reserve', `${technician_id}:${slotDateStr}`],
+        );
+      }
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],
+      );
 
-    const [serviceRow] = await db('scheduled_services').insert({
-      customer_id: custId,
-      technician_id: technician_id || null,
-      scheduled_date: slot_date,
-      window_start: slot_start,
-      window_end: endTime,
-      service_type: resolvedServiceType,
-      status: 'confirmed',
-      customer_confirmed: true,
-      confirmed_at: new Date(),
-      notes: customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
-      source: source || 'self_booked',
-      self_booking_id: booking.id,
-      estimated_duration_minutes: duration,
-      zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
-    }).returning('*');
+      // Idempotent replay: same customer, same day, same start time →
+      // return the original booking instead of creating a duplicate.
+      const existing = await trx('self_booked_appointments')
+        .where({ customer_id: custId, date: slotDateStr, start_time: slot_start })
+        .whereNot('status', 'cancelled')
+        .first();
+      if (existing) return { existing };
+
+      // Re-verify the slot is still available (race condition guard).
+      // Tech bookings conflict against the tech's route; no-tech bookings
+      // conflict against other unassigned jobs in the same zone (the
+      // capacity model the availability engine offers slots from).
+      // Expired estimate-slot holds don't count (same predicate as
+      // slot-reservation.js).
+      const zoneCities = zone?.cities || [];
+      const conflictQuery = trx('scheduled_services')
+        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+        .where('scheduled_services.scheduled_date', slotDateStr)
+        .whereNotIn('scheduled_services.status', ['cancelled'])
+        .where((q) => {
+          q.whereNull('scheduled_services.reservation_expires_at')
+            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+        })
+        // COALESCE the nullable window_end (admin edits can leave a start
+        // with no end) — same predicate as slot-reservation/rebooker.
+        .whereRaw(
+          "scheduled_services.window_start < ?::time AND COALESCE(scheduled_services.window_end, scheduled_services.window_start + ((COALESCE(NULLIF(scheduled_services.estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+          [endTime, slot_start],
+        );
+      // One capacity predicate for both branches: the tech's own route,
+      // PLUS all zone jobs (assigned or not — availability builds slots
+      // from the whole zone, so an unassigned zone booking occupies the
+      // slot even for a tech-backed confirm), PLUS live estimate-slot
+      // holds (customer_id NULL, no zone — a 15-minute county-wide hold
+      // briefly blocking a slot beats double-booking over it).
+      conflictQuery.where((q) => {
+        if (technician_id) q.orWhere('scheduled_services.technician_id', technician_id);
+        if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
+        if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+        q.orWhere((hold) => {
+          hold.whereNull('scheduled_services.customer_id')
+            .whereRaw('scheduled_services.reservation_expires_at > NOW()');
+        });
+      });
+      const conflict = await conflictQuery.first('scheduled_services.id');
+      if (conflict) {
+        throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+
+      const [bookingRow] = await trx('self_booked_appointments').insert({
+        customer_id: custId,
+        estimate_id: estimate_id || null,
+        technician_id: technician_id || null,
+        service_zone_id: zone?.id || null,
+        date: slotDateStr,
+        start_time: slot_start,
+        end_time: endTime,
+        duration_minutes: duration,
+        customer_notes: customer_notes || null,
+        confirmation_code: confCode,
+        source: source || 'direct',
+        referrer_url: referrer_url || req.get('referer') || null,
+        service_type: resolvedServiceType,
+      }).returning('*');
+
+      const [scheduledRow] = await trx('scheduled_services').insert({
+        customer_id: custId,
+        technician_id: technician_id || null,
+        scheduled_date: slotDateStr,
+        window_start: slot_start,
+        window_end: endTime,
+        service_type: resolvedServiceType,
+        status: 'confirmed',
+        customer_confirmed: true,
+        confirmed_at: new Date(),
+        notes: customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
+        source: source || 'self_booked',
+        self_booking_id: bookingRow.id,
+        estimated_duration_minutes: duration,
+        zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
+      }).returning('*');
+
+      return { booking: bookingRow, serviceRow: scheduledRow };
+      });
+    } catch (txErr) {
+      // Expected race outcome — answer directly rather than throwing into
+      // the global error middleware, which logs req.body (new_customer
+      // phone/email/address would land in the logs).
+      if (txErr.code === 'SLOT_TAKEN') {
+        // Undo a profile this request just created: leaving it would make
+        // the customer's retry with a different slot hit the
+        // phone-already-on-file 409 and strand them entirely. The row is
+        // seconds old with no children beyond its prefs row.
+        if (createdCustomerId) {
+          await db('notification_prefs').where({ customer_id: createdCustomerId }).del().catch(() => {});
+          await db('customers').where({ id: createdCustomerId }).del().catch((delErr) => {
+            logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
+          });
+        }
+        return res.status(409).json({ error: txErr.message });
+      }
+      throw txErr;
+    }
+
+    if (txResult.existing) {
+      logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
+      return res.json({
+        booking: txResult.existing,
+        confirmationCode: txResult.existing.confirmation_code,
+        replayed: true,
+      });
+    }
+
+    const { booking, serviceRow } = txResult;
 
     let followUpRows = [];
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
@@ -873,7 +1004,7 @@ router.post('/confirm', async (req, res, next) => {
       const AppointmentReminders = require('../services/appointment-reminders');
       for (const row of [serviceRow, ...followUpRows].filter(r => r?.id)) {
         const scheduledDate = row.id === serviceRow.id
-          ? slot_date
+          ? slotDateStr
           : (typeof row.scheduled_date === 'string'
               ? row.scheduled_date.slice(0, 10)
               : row.scheduled_date instanceof Date
@@ -895,7 +1026,7 @@ router.post('/confirm', async (req, res, next) => {
 
     // SMS notifications (best-effort)
     try {
-      const dateLabel = new Date(slot_date + 'T12:00:00').toLocaleDateString('en-US', {
+      const dateLabel = new Date(slotDateStr + 'T12:00:00').toLocaleDateString('en-US', {
         weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));

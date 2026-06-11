@@ -8,7 +8,11 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+
+function bookingError(message, code, statusCode = 409) {
+  return Object.assign(new Error(message), { code, statusCode, isOperational: true });
+}
 
 class AvailabilityEngine {
 
@@ -159,7 +163,12 @@ class AvailabilityEngine {
     return null;
   }
 
-  async confirmBooking(estimateId, customerId, date, startTime, customerNotes) {
+  // options.excludeServiceId / options.excludeSelfBookingId: skip a specific
+  // existing appointment in the occupancy re-check — used by the onboarding
+  // reschedule, which books the replacement BEFORE cancelling the original
+  // (so a refused slot leaves the customer's original appointment intact)
+  // and must not collide with the row it is about to cancel.
+  async confirmBooking(estimateId, customerId, date, startTime, customerNotes, options = {}) {
     // Resolve estimate
     const estimate = estimateId ? await db('estimates').where('id', estimateId).first() : null;
     const customer = await db('customers').where('id', customerId).first();
@@ -168,48 +177,165 @@ class AvailabilityEngine {
     const zone = await this.resolveZone(customer.city);
     const config = await db('booking_config').first();
     const slotDuration = config?.slot_duration_minutes || 60;
+    const maxPerDay = config?.max_self_books_per_day || 3;
 
     const endTime = this.addMinutes(startTime, slotDuration);
+
+    // The slot list was computed in getAvailableSlots minutes earlier —
+    // nothing else stops a stale (or hand-crafted) confirm. Reject
+    // impossible dates before touching the calendar.
+    const dateStr = String(date || '').split('T')[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      throw bookingError('Invalid booking date', 'INVALID_DATE', 400);
+    }
+    const todayStr = etDateString();
+    if (dateStr < todayStr) {
+      throw bookingError('That date has already passed — please pick another day', 'INVALID_DATE', 400);
+    }
+    if (etParts(parseETDateTime(`${dateStr}T12:00`)).dayOfWeek === 0) {
+      throw bookingError('We are closed on Sundays — please pick another day', 'INVALID_DATE', 400);
+    }
+    const startMin = this.timeToMin(startTime);
+    const endMin = this.timeToMin(endTime);
+    if (dateStr === todayStr) {
+      const nowEt = etParts(new Date());
+      if (startMin <= nowEt.hour * 60 + nowEt.minute) {
+        throw bookingError('That time has already passed today — please pick another slot', 'SLOT_TAKEN');
+      }
+    }
+
     const confCode = 'WPC-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-
-    // Create self_booked_appointment
-    const [booking] = await db('self_booked_appointments').insert({
-      customer_id: customerId,
-      estimate_id: estimateId || null,
-      service_zone_id: zone?.id || null,
-      date,
-      start_time: startTime,
-      end_time: endTime,
-      duration_minutes: slotDuration,
-      customer_notes: customerNotes || null,
-      confirmation_code: confCode,
-    }).returning('*');
-
-    // Create scheduled_service so it shows on the dispatch board
     const serviceType = estimate?.services?.[0] || estimate?.service_type || 'General Pest Control';
-    const [scheduled] = await db('scheduled_services').insert({
-      customer_id: customerId,
-      scheduled_date: date,
-      window_start: startTime,
-      window_end: endTime,
-      service_type: serviceType,
-      status: 'confirmed',
-      customer_confirmed: true,
-      confirmed_at: new Date(),
-      notes: customerNotes ? `Self-booked. Notes: ${customerNotes}` : 'Self-booked via portal',
-      source: 'self_booked',
-      self_booking_id: booking.id,
-      zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
-    }).returning('*');
+    const zoneCities = zone?.cities || [];
+
+    // Two customers browsing the same zone see the same slots and can both
+    // confirm one — the window is the whole slot-picker session, not
+    // milliseconds. Serialize confirms per zone+day with an advisory lock
+    // and re-validate occupancy inside it; both inserts ride the same
+    // transaction so a partial failure can't leave a booking without its
+    // dispatch row. options.trx lets a caller make the booking atomic with
+    // its own writes (onboarding reschedule books + cancels in one txn) —
+    // side effects are then deferred to the returned notify() so nothing
+    // customer-visible fires before the outer transaction commits.
+    const runBookingWork = async (work) => (options.trx ? work(options.trx) : db.transaction(work));
+    const { booking, scheduled } = await runBookingWork(async (trx) => {
+      // slot-reserve namespace + zone-key shape match routes/booking.js
+      // exactly, so confirms through onboarding/AI and the public
+      // /api/booking/confirm serialize against each other for the same
+      // zone+day (different namespaces would let both pass their overlap
+      // checks under READ COMMITTED).
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],
+      );
+
+      if (zone) {
+        const existingBookings = await trx('self_booked_appointments')
+          .where('service_zone_id', zone.id)
+          .where('date', dateStr)
+          .whereNot('status', 'cancelled')
+          // A same-day reschedule replaces its own booking — counting the
+          // row being moved against the daily cap would reject the move
+          // on a full day even though the final count is unchanged.
+          .modify((q) => {
+            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
+          })
+          .count('* as count')
+          .first();
+        if (parseInt(existingBookings.count) >= maxPerDay) {
+          throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+        }
+
+        // Mirror getAvailableSlots' occupied set: zone services + live
+        // self-bookings. Any overlap means the slot was taken since the
+        // customer loaded the picker.
+        const occupied = [];
+        const scheduledInZone = await trx('scheduled_services')
+          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+          .where('scheduled_services.scheduled_date', dateStr)
+          .whereNotIn('scheduled_services.status', ['cancelled'])
+          .whereIn('customers.city', zoneCities)
+          .modify((q) => {
+            if (options.excludeServiceId) q.whereNot('scheduled_services.id', options.excludeServiceId);
+          })
+          .select('scheduled_services.window_start', 'scheduled_services.window_end');
+        for (const s of scheduledInZone) {
+          occupied.push({
+            start: this.timeToMin(s.window_start || '09:00'),
+            end: this.timeToMin(s.window_end || (s.window_start ? this.addMinutes(s.window_start, 60) : '10:00')),
+          });
+        }
+        const selfBooked = await trx('self_booked_appointments')
+          .where('service_zone_id', zone.id)
+          .where('date', dateStr)
+          .whereNot('status', 'cancelled')
+          .modify((q) => {
+            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
+          });
+        for (const b of selfBooked) {
+          occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
+        }
+        // Live estimate-slot holds (customer_id NULL, tech-keyed, no zone)
+        // occupy real route time even though they don't match the zone
+        // predicates above — count them so a self-booking can't land on a
+        // held slot.
+        const liveHolds = await trx('scheduled_services')
+          .where('scheduled_date', dateStr)
+          .whereNull('customer_id')
+          .whereRaw('reservation_expires_at > NOW()')
+          .select('window_start', 'window_end');
+        for (const h of liveHolds) {
+          occupied.push({
+            start: this.timeToMin(h.window_start || '09:00'),
+            end: this.timeToMin(h.window_end || (h.window_start ? this.addMinutes(h.window_start, 60) : '10:00')),
+          });
+        }
+        if (occupied.some((b) => b.start < endMin && b.end > startMin)) {
+          throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
+        }
+      }
+
+      // Create self_booked_appointment
+      const [bookingRow] = await trx('self_booked_appointments').insert({
+        customer_id: customerId,
+        estimate_id: estimateId || null,
+        service_zone_id: zone?.id || null,
+        date: dateStr,
+        start_time: startTime,
+        end_time: endTime,
+        duration_minutes: slotDuration,
+        customer_notes: customerNotes || null,
+        confirmation_code: confCode,
+      }).returning('*');
+
+      // Create scheduled_service so it shows on the dispatch board
+      const [scheduledRow] = await trx('scheduled_services').insert({
+        customer_id: customerId,
+        scheduled_date: dateStr,
+        window_start: startTime,
+        window_end: endTime,
+        service_type: serviceType,
+        status: 'confirmed',
+        customer_confirmed: true,
+        confirmed_at: new Date(),
+        notes: customerNotes ? `Self-booked. Notes: ${customerNotes}` : 'Self-booked via portal',
+        source: 'self_booked',
+        self_booking_id: bookingRow.id,
+        zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
+      }).returning('*');
+
+      return { booking: bookingRow, scheduled: scheduledRow };
+    });
 
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
+    const notify = async () => {
     try {
       const AppointmentReminders = require('./appointment-reminders');
       await AppointmentReminders.registerAppointment(
         scheduled.id,
         customerId,
-        `${date}T${startTime || '08:00'}`,
+        `${dateStr}T${startTime || '08:00'}`,
         serviceType,
         'booking_new',
         { sendConfirmation: false },
@@ -221,7 +347,7 @@ class AvailabilityEngine {
     // Send SMS notifications
     try {
       const TwilioService = require('./twilio');
-      const dateLabel = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+      const dateLabel = new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
       const timeLabel = `${this.minToTime12(this.timeToMin(startTime))} - ${this.minToTime12(this.timeToMin(endTime))}`;
       const addressLabel = `${customer.address_line1}, ${customer.city}`;
       const body = await renderSmsTemplate(
@@ -266,7 +392,14 @@ class AvailabilityEngine {
     } catch (err) {
       logger.error(`Booking SMS failed: ${err.message}`);
     }
+    };
 
+    if (options.trx) {
+      // Caller commits the outer transaction first, then runs notify() —
+      // reminders/SMS must not fire for a booking that could roll back.
+      return { booking, confirmationCode: confCode, notify };
+    }
+    await notify();
     return { booking, confirmationCode: confCode };
   }
 

@@ -205,9 +205,39 @@ class SmartRebooker {
     }
     const wasLive = LIVE_OVERRIDE_STATUSES.has(service.status);
 
+    // A past target date moves the job where no "upcoming" query will ever
+    // find it — silently never serviced. Stale SMS replies and freeform
+    // admin input both reach this path.
+    const newDateStr = String(newDate || '').split('T')[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(newDateStr) || newDateStr < etDateString()) {
+      throw Object.assign(new Error('Reschedule target date is invalid or in the past'), {
+        statusCode: 400,
+        isOperational: true,
+        code: 'INVALID_DATE',
+      });
+    }
+
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
     const windowEnd = win.end || service.window_end;
+
+    // Same-day target whose window already elapsed in ET is just as
+    // unreachable as yesterday — a stale morning option accepted in the
+    // afternoon would move the job into a past window.
+    if (newDateStr === etDateString()) {
+      const cutoff = windowEnd || win.start || service.window_start;
+      if (cutoff) {
+        const nowEt = etParts(new Date());
+        const [ch, cm] = String(cutoff).split(':').map(Number);
+        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
+          throw Object.assign(new Error('That window has already passed today'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
+    }
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
@@ -220,6 +250,47 @@ class SmartRebooker {
     }
 
     await db.transaction(async (trx) => {
+      // The kept technician's route is real — writing 'confirmed' on top
+      // of an overlapping job double-books them deterministically (the
+      // customer picked from offers that never checked the route).
+      const keptTechId = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        ? options.technicianId
+        : service.technician_id;
+      if (keptTechId && updates.window_start && windowEnd) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['slot-reserve', `${keptTechId}:${newDateStr}`],
+        );
+        const overlap = await trx('scheduled_services')
+          .where('scheduled_date', newDateStr)
+          .where('technician_id', keptTechId)
+          .whereNot('id', serviceId)
+          .whereNotIn('status', ['cancelled', 'completed'])
+          // Expired estimate-slot holds are dead weight until cleanup
+          // reclaims them — same active-reservation predicate
+          // slot-reservation.js uses, so a lapsed hold can't block a
+          // legitimate reschedule.
+          .where((q) => {
+            q.whereNull('reservation_expires_at')
+              .orWhereRaw('reservation_expires_at > NOW()');
+          })
+          // COALESCE the nullable window_end (same predicate as
+          // slot-reservation) — rows without an end time would otherwise
+          // never register as conflicts.
+          .whereRaw(
+            "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+            [windowEnd, updates.window_start],
+          )
+          .first('id');
+        if (overlap) {
+          throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
+
       const updated = await trx('scheduled_services')
         .where({ id: serviceId, status: service.status })
         .whereIn('status', Array.from(allowedStatuses))
@@ -337,6 +408,33 @@ class SmartRebooker {
     }
 
     const win = parseWindow(newWindow);
+
+    // Same target validation as reschedule(): a past (or same-day elapsed)
+    // anchor would shift the whole chain into dates no "upcoming" query
+    // ever finds. Siblings shift forward of the anchor, so a valid anchor
+    // keeps them valid.
+    const seriesDateStr = String(newDate || '').split('T')[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(seriesDateStr) || seriesDateStr < etDateString()) {
+      throw Object.assign(new Error('Reschedule target date is invalid or in the past'), {
+        statusCode: 400,
+        isOperational: true,
+        code: 'INVALID_DATE',
+      });
+    }
+    if (seriesDateStr === etDateString()) {
+      const cutoff = win.end || service.window_end || win.start || service.window_start;
+      if (cutoff) {
+        const nowEt = etParts(new Date());
+        const [ch, cm] = String(cutoff).split(':').map(Number);
+        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
+          throw Object.assign(new Error('That window has already passed today'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
+    }
     const pattern = parent.recurring_pattern;
     const isMonthBasedPattern = pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
     const opts = {

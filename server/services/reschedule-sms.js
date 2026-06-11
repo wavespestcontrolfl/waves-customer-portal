@@ -3,6 +3,7 @@ const SmartRebooker = require('./rebooker');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { etDateString } = require('../utils/datetime-et');
 
 async function sendAppointmentSms({ to, body, customerId, messageType }) {
   const result = await sendCustomerMessage({
@@ -97,9 +98,14 @@ class RescheduleSMS {
   }
 
   async handleRescheduleReply(customerId, messageBody) {
+    // Offers expire: with no age limit, a customer texting "1" weeks later
+    // matched whatever pending offer row existed and booked its (possibly
+    // long-past) date. 7 days comfortably covers a real reschedule
+    // conversation.
     const pending = await db('reschedule_log')
       .where({ customer_id: customerId })
       .whereNull('customer_response')
+      .where('created_at', '>', new Date(Date.now() - 7 * 86400000))
       .orderBy('created_at', 'desc')
       .first();
 
@@ -127,6 +133,16 @@ class RescheduleSMS {
       responseType = 'call_requested';
     }
 
+    // Offered dates can lapse between offer and reply — booking a past
+    // date moves the job where no "upcoming" query finds it (rebooker
+    // also rejects this; here we degrade to the call-requested flow so
+    // the office follows up instead of the reply erroring out).
+    if (selectedOption?.date && String(selectedOption.date) < etDateString()) {
+      logger.warn(`[reschedule-sms] Customer ${customerId} picked an expired option (${selectedOption.date}) on log ${pending.id} — routing to office follow-up`);
+      selectedOption = null;
+      responseType = 'option_expired';
+    }
+
     await db('reschedule_log').where({ id: pending.id }).update({
       customer_response: responseType,
       customer_response_text: messageBody,
@@ -135,11 +151,29 @@ class RescheduleSMS {
     });
 
     if (selectedOption) {
-      await SmartRebooker.reschedule(
-        pending.scheduled_service_id, selectedOption.date,
-        selectedOption.window, pending.reason_code, 'customer_sms'
-      );
+      try {
+        await SmartRebooker.reschedule(
+          pending.scheduled_service_id, selectedOption.date,
+          selectedOption.window, pending.reason_code, 'customer_sms'
+        );
+      } catch (err) {
+        // The offer was computed without a route check — rebooker can now
+        // refuse it (tech conflict, window elapsed). The pending offer is
+        // already marked responded above, so without a fallback the
+        // customer would get silence. Degrade to the office-follow-up
+        // flow below.
+        if (err.isOperational || err.statusCode === 409 || err.statusCode === 400) {
+          logger.warn(`[reschedule-sms] Selected option rejected for log ${pending.id} (${err.message}) — routing to office follow-up`);
+          await db('reschedule_log').where({ id: pending.id }).update({ customer_response: 'option_unavailable' });
+          selectedOption = null;
+          responseType = 'option_expired';
+        } else {
+          throw err;
+        }
+      }
+    }
 
+    if (selectedOption) {
       const customer = await db('customers').where({ id: customerId }).first();
       const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
@@ -167,7 +201,12 @@ class RescheduleSMS {
       return { handled: true, action: 'rescheduled', newDate: selectedOption.date, smsSent: !!confirmedBody };
     }
 
-    if (responseType === 'call_requested') {
+    // option_expired rides the call-requested flow: the customer picked a
+    // date that lapsed before they replied, so the right outcome is the
+    // same "we'll call you to find a time" SMS + handled:true — otherwise
+    // the reply falls through to generic inbound handling after we already
+    // closed the pending offer.
+    if (responseType === 'call_requested' || responseType === 'option_expired') {
       const customer = await db('customers').where({ id: customerId }).first();
       const callBody = await renderSmsTemplate(
         'reschedule_call_requested',
@@ -184,7 +223,7 @@ class RescheduleSMS {
       } else {
         logger.warn(`[reschedule-sms] reschedule_call_requested template missing/disabled — call request logged without SMS reply for customer ${customerId}`);
       }
-      return { handled: true, action: 'call_requested', smsSent: !!callBody };
+      return { handled: true, action: responseType, smsSent: !!callBody };
     }
 
     return { handled: false, action: 'needs_review', reply: messageBody };

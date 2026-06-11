@@ -540,41 +540,128 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
     const { date, startTime } = req.body;
     if (!date || !startTime) return res.status(400).json({ error: 'date and startTime required' });
 
-    const current = await db('scheduled_services')
+    // Serialize cancel+rebook per customer: two concurrent reschedules
+    // would both cancel the same original, the second's confirm would
+    // conflict with the first's replacement, and its restore would
+    // resurrect the original alongside it — two active appointments.
+    // The lock transaction brackets the whole sequence; the `current`
+    // fetch rides it so the second request sees the first's outcome.
+    const lockTrx = await db.transaction();
+    let lockDone = false;
+    const finishLock = async (commit = true) => {
+      if (lockDone) return;
+      lockDone = true;
+      if (commit) {
+        // A failed COMMIT means the booking/cancel writes did NOT persist —
+        // it must propagate so the customer gets an error, not a success
+        // response (and no post-commit SMS fires for a phantom booking).
+        await lockTrx.commit();
+        return;
+      }
+      try { await lockTrx.rollback(); } catch {}
+    };
+
+    try {
+    await lockTrx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['onboarding-reschedule', String(req.customer.id)],
+    );
+
+    const current = await lockTrx('scheduled_services')
       .where({ customer_id: req.customer.id })
       .whereNotIn('status', ['cancelled', 'completed'])
       .orderBy('scheduled_date', 'asc')
       .first();
 
-    // Cancel the auto-picked service so we don't end up with two scheduled
-    // entries on the dispatch board.
+    // Same-slot retry (double-submit): nothing to move — answer
+    // idempotently instead of booking + cancelling a churn pair and
+    // re-firing confirmation SMS/reminders.
+    const requestedDateStr = String(date).split('T')[0];
+    const currentDateStr = current
+      ? (current.scheduled_date instanceof Date
+        ? current.scheduled_date.toISOString().split('T')[0]
+        : String(current.scheduled_date).split('T')[0])
+      : null;
+    if (current
+      && currentDateStr === requestedDateStr
+      && String(current.window_start || '').slice(0, 5) === String(startTime).slice(0, 5)) {
+      await lockTrx('onboarding_sessions')
+        .where({ id: req.session.id })
+        .update({ service_confirmed: true, status: 'service_confirmed' });
+      await finishLock(true);
+      const existingBooking = current.self_booking_id
+        ? await db('self_booked_appointments').where({ id: current.self_booking_id }).first()
+        : null;
+      return res.json({
+        success: true,
+        booking: { booking: existingBooking, confirmationCode: existingBooking?.confirmation_code || null },
+        unchanged: true,
+      });
+    }
+
+    // Book the replacement and cancel the original in ONE transaction
+    // (lockTrx) — excluding the original from the occupancy check so it
+    // can't collide with the row being cancelled. A refused slot
+    // (SLOT_TAKEN / INVALID_DATE) rolls everything back and leaves the
+    // original appointment fully intact; a cancellation failure rolls
+    // the replacement back too, so the customer can never end up with
+    // two appointments or none. Side effects (reminder registration,
+    // confirmation SMS) are deferred to notify() after commit.
+    const availability = require('../services/availability');
+    let booking;
+    try {
+      booking = await availability.confirmBooking(
+        null, req.customer.id, date, startTime, 'Picked during onboarding',
+        {
+          trx: lockTrx,
+          excludeServiceId: current?.id || null,
+          excludeSelfBookingId: current?.self_booking_id || null,
+        },
+      );
+    } catch (bookErr) {
+      if (bookErr.code === 'SLOT_TAKEN' || bookErr.code === 'INVALID_DATE') {
+        await finishLock(false);
+        return res.status(bookErr.statusCode || 409).json({ error: bookErr.message });
+      }
+      throw bookErr;
+    }
+
+    // Retire the original in the same transaction as the new booking.
     if (current) {
-      await db('scheduled_services').where({ id: current.id }).update({
+      await lockTrx('scheduled_services').where({ id: current.id }).update({
         status: 'cancelled',
         notes: `Rescheduled by customer during onboarding to ${date} ${startTime}`,
       });
       if (current.self_booking_id) {
-        await db('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'cancelled' });
+        await lockTrx('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'cancelled' });
       }
-      // Kill the live reminder row too — otherwise the 72h/24h cron keeps
-      // texting the customer about the cancelled appointment. The replacement
-      // booking below registers its own reminder, so suppress the notice.
+    }
+
+    await lockTrx('onboarding_sessions')
+      .where({ id: req.session.id })
+      .update({ service_confirmed: true, status: 'service_confirmed' });
+
+    await finishLock(true);
+
+    // Post-commit side effects: kill the old reminder row (otherwise the
+    // 72h/24h cron keeps texting about the cancelled appointment), then
+    // register the new booking's reminder + confirmation SMS.
+    if (current) {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleCancellation(current.id, { sendNotification: false });
       } catch {}
     }
+    if (typeof booking.notify === 'function') {
+      await booking.notify().catch((notifyErr) => {
+        logger.error(`[onboarding] Post-commit booking notifications failed: ${notifyErr.message}`);
+      });
+    }
 
-    // Book the customer-picked slot through the same engine the portal uses,
-    // so we inherit confirmation codes, dispatch sync, and SMS notifications.
-    const availability = require('../services/availability');
-    const booking = await availability.confirmBooking(null, req.customer.id, date, startTime, 'Picked during onboarding');
-
-    await db('onboarding_sessions')
-      .where({ id: req.session.id })
-      .update({ service_confirmed: true, status: 'service_confirmed' });
-
-    res.json({ success: true, booking });
+    res.json({ success: true, booking: { booking: booking.booking, confirmationCode: booking.confirmationCode } });
+    } finally {
+      await finishLock(false);
+    }
   } catch (err) { next(err); }
 });
 
