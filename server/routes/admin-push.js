@@ -62,20 +62,29 @@ router.post('/subscribe', async (req, res, next) => {
     // endpoint — a full-JSON match would miss the row, insert a duplicate,
     // and leave the stale row active (the server then keeps pushing to a
     // subscription whose keys no longer decrypt). Endpoint identifies the
-    // device; refresh keys in place.
-    const existing = await db('push_subscriptions')
+    // device; refresh keys in place. Pre-existing duplicates (from the old
+    // full-JSON-match era) are deactivated here — the senders push to
+    // EVERY active row, so leaving them active means failed attempts or
+    // duplicate notifications to the same device.
+    const existingRows = await db('push_subscriptions')
       .where({ admin_user_id: adminUserId })
       .whereRaw("subscription_data::jsonb->>'endpoint' = ?", [subscription.endpoint])
-      .first()
-      .catch(() => null);
+      .orderBy('created_at', 'asc')
+      .catch(() => []);
 
-    if (existing) {
-      await db('push_subscriptions').where({ id: existing.id }).update({
+    if (existingRows.length) {
+      const [keep, ...dupes] = existingRows;
+      await db('push_subscriptions').where({ id: keep.id }).update({
         subscription_data: subData,
         active: true,
-        device_info: deviceInfo || existing.device_info,
+        device_info: deviceInfo || keep.device_info,
       });
-      return res.json({ ok: true, id: existing.id, reactivated: true });
+      if (dupes.length) {
+        await db('push_subscriptions')
+          .whereIn('id', dupes.map((r) => r.id))
+          .update({ active: false });
+      }
+      return res.json({ ok: true, id: keep.id, reactivated: true });
     }
 
     const [row] = await db('push_subscriptions').insert({
