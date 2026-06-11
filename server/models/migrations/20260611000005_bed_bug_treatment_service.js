@@ -30,7 +30,10 @@ const SERVICE_ROW = {
     'Bed bug inspection and treatment (chemical, heat, or combined), with a follow-up visit about 14 days after the initial treatment.',
   internal_notes:
     'Priced per room/method from pricing config onetime_bed_bug — quote manually. Hidden + non-bookable until the specialty report rollout approves bed bug copy (owner sign-off required).',
-  category: 'pest_control',
+  // 'specialty' like wildlife_trapping et al — NOT 'pest_control': the pest
+  // recap path treats pest_control as recap-eligible, which would let this
+  // project_required service complete with no billing/project artifact.
+  category: 'specialty',
   subcategory: 'bed_bug',
   billing_type: 'one_time',
   is_waveguard: false,

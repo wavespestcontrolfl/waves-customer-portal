@@ -70,8 +70,14 @@ async function resolveEligibility(serviceId, knex = db) {
   // Typed specialty services (profile findingsType set post-cutover) must
   // complete through the typed completion form — the recap has no findings
   // validation, billing gate, or customer-copy snapshot. Same rule the
-  // /complete endpoint enforces (typed_recap_not_allowed).
-  const eligible = profile?.category === PEST_CONTROL_CATEGORY && !profile?.findingsType;
+  // /complete endpoint enforces (typed_recap_not_allowed). Project-backed
+  // profiles (project_required / special_project) are likewise excluded:
+  // those services must close through their project, and the recap would
+  // skip that billing/artifact path entirely.
+  const eligible = profile?.category === PEST_CONTROL_CATEGORY
+    && !profile?.findingsType
+    && !profile?.projectBacked
+    && !profile?.requiresProject;
   return { ok: true, svc, profile, eligible };
 }
 
