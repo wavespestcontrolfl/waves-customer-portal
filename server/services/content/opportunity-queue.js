@@ -54,7 +54,7 @@ class OpportunityQueue {
         // Same action-aware floor as claimNext, so previews show exactly
         // what the runner would claim.
         q = q.whereRaw(
-          `score >= CASE WHEN action_type = 'new_supporting_blog' THEN ? ELSE ? END`,
+          `score >= CASE WHEN action_type = 'new_supporting_blog' THEN ?::numeric ELSE ?::numeric END`,
           [blogMinScoreFor(minScore), minScore],
         );
       }
@@ -103,7 +103,11 @@ class OpportunityQueue {
        WHERE id = (
          SELECT id FROM opportunity_queue
          WHERE status = 'pending'
-           AND score >= CASE WHEN action_type = 'new_supporting_blog' THEN ? ELSE ? END
+           -- ::numeric casts are load-bearing: inside a CASE, Postgres types
+           -- bare parameters as text (no comparison context), and
+           -- integer >= text has no operator — this exact line failed in
+           -- prod on 2026-06-11. Mocked-db tests cannot catch this class.
+           AND score >= CASE WHEN action_type = 'new_supporting_blog' THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
          ORDER BY score DESC, mined_at ASC
