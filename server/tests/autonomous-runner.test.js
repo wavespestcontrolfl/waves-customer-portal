@@ -603,6 +603,12 @@ describe('isDeterministicPublishError', () => {
     expect(isDeterministicPublishError(new Error('could not resolve refresh target: missing target_url'))).toBe(true);
     expect(isDeterministicPublishError(new Error('Astro file not found for refresh: src/content/services/x.md'))).toBe(true);
   });
+
+  test('a fact-check block is edit-required → deterministic (park, not retry-loop)', () => {
+    const factErr = new Error('fact-check failed: P1 wrong pathogen');
+    factErr.code = 'BLOG_FACTCHECK_FAILED';
+    expect(isDeterministicPublishError(factErr)).toBe(true);
+  });
 });
 
 describe('DEFAULT_MIN_SCORE', () => {
