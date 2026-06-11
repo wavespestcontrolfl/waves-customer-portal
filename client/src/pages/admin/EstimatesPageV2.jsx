@@ -321,7 +321,12 @@ const PIPELINE_AND_RISK_FILTERS = [
 ];
 
 function estimateMatchesFilter(e, filter) {
-  if (filter === "all") return true;
+  // Archived-accepted rows ride along in the pipeline fetch for the Won
+  // funnel/MRR stats; the Archived tab (its own fetch) is where archived
+  // rows are browsed, so keep them out of All.
+  if (filter === "all") return !e.archivedAt;
+  if (filter === "won")
+    return e._class === "won" || (!!e.archivedAt && e.status === "accepted");
   if (filter === "drafts")
     return e._class === "needs_estimate" || e._class === "ready_to_send";
   if (filter === "sent_group")
@@ -1520,9 +1525,21 @@ function EstimatePipelineViewV2() {
   const refreshEstimates = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetchEstimatePipelineRows(filter)
-      .then((rows) => {
-        setEstimates(rows);
+    const fetches = [fetchEstimatePipelineRows(filter)];
+    if (filter !== "archived") {
+      // Won = won forever: archived-accepted rows ride along so the Won
+      // funnel and MRR-won KPI don't shrink when old wins get archived.
+      // estimateMatchesFilter keeps them out of the All list. Desktop-only —
+      // the mobile list view has no KPI bar and skips this fetch.
+      fetches.push(
+        adminFetch(
+          "/admin/estimates?archived=only&status=accepted&limit=all",
+        ).then((d) => d.estimates || []),
+      );
+    }
+    Promise.all(fetches)
+      .then(([rows, archivedWon = []]) => {
+        setEstimates(mergeEstimateRows(rows, archivedWon));
         setLoading(false);
       })
       .catch((err) => {

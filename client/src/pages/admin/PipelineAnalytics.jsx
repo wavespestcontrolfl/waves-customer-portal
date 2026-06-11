@@ -357,7 +357,13 @@ export default function PipelineAnalytics({
   const selectedRange = dateRange || "all";
   const metrics = useMemo(() => {
     const nowMs = Date.now();
-    const inRange = estimates.filter((e) =>
+    // Archived rows ride along ONLY for the Won funnel and MRR-won KPI
+    // ("won = won forever"). Every other metric — acceptance rate, avg
+    // ticket and its trend, pipeline value, ROI table, attention counts —
+    // excludes them: archived LOSSES are never fetched, so counting
+    // archived wins there would skew the rates upward.
+    const activeRows = estimates.filter((e) => !e.archivedAt);
+    const inRange = activeRows.filter((e) =>
       withinDateRange(e.createdAt, selectedRange, nowMs),
     );
     const classified = estimates.map((e) => ({
@@ -367,12 +373,20 @@ export default function PipelineAnalytics({
 
     const total = inRange.length;
     const accepted = inRange.filter((e) => e.status === "accepted").length;
-    const sent = inRange.filter((e) => ["sent", "viewed"].includes(e.status)).length;
     const declined = inRange.filter(
       (e) => e.status === "declined" || e.status === "expired",
     ).length;
-    const conversionDenominator = sent + accepted + declined;
-    const acceptedEstimates = inRange.filter((e) => e.status === "accepted");
+    // Resolved-only close rate: still-open offers don't count against the
+    // rate until they actually decline or expire.
+    const conversionDenominator = accepted + declined;
+    // Won/MRR KPIs key off the acceptance date (createdAt fallback for rows
+    // that predate accepted_at): "MRR won (30d)" means won IN the window,
+    // not "created in the window and eventually won".
+    const acceptedEstimates = estimates.filter(
+      (e) =>
+        e.status === "accepted" &&
+        withinDateRange(e.acceptedAt || e.createdAt, selectedRange, nowMs),
+    );
     const totalMRRWon = acceptedEstimates.reduce((sum, e) => sum + amount(e), 0);
     const wonRecurring = acceptedEstimates.filter((e) => amount(e) > 0).length;
     const wonOneTime = acceptedEstimates.length - wonRecurring;
@@ -381,7 +395,7 @@ export default function PipelineAnalytics({
     );
     const pipelineValue = pipelineEstimates.reduce((sum, e) => sum + amount(e), 0);
     const avgTicket = avgTicketFor(inRange);
-    const priorAvg = avgTicketFor(prior30Estimates(estimates, nowMs));
+    const priorAvg = avgTicketFor(prior30Estimates(activeRows, nowMs));
     const avgDelta = Math.round(avgTicket - priorAvg);
     const avgTrend =
       priorAvg === 0
@@ -393,26 +407,32 @@ export default function PipelineAnalytics({
     const awaiting = classified.filter((e) => e._class === "awaiting").length;
     const followUp = classified.filter((e) => e._class === "follow_up").length;
     const scheduled = classified.filter((e) => e._class === "scheduled").length;
-    const won = classified.filter((e) => e._class === "won");
+    // Won = won forever: archiving an accepted estimate (housekeeping)
+    // must not shrink the funnel, so archived-accepted rows still count.
+    const won = classified.filter(
+      (e) =>
+        e._class === "won" ||
+        (e._class === "archived" && e.status === "accepted"),
+    );
     const lost = classified.filter((e) => e._class === "lost");
     const wonMrr = won.reduce((sum, e) => sum + amount(e), 0);
-    const declinedCount = estimates.filter(
+    const declinedCount = activeRows.filter(
       (e) => e.status === "declined",
     ).length;
-    const expiredCount = estimates.filter((e) => e.status === "expired").length;
+    const expiredCount = activeRows.filter((e) => e.status === "expired").length;
 
-    const followUpOverdue = estimates.filter((e) =>
+    const followUpOverdue = activeRows.filter((e) =>
       isFollowUpOverdueEstimate(e, nowMs),
     );
     const atRiskMRR = followUpOverdue.reduce((sum, e) => sum + amount(e), 0);
-    const pricingRisk = estimates.filter((e) => e.pricingRisk?.hasRisk);
-    const missingCogs = estimates.filter(
+    const pricingRisk = activeRows.filter((e) => e.pricingRisk?.hasRisk);
+    const missingCogs = activeRows.filter(
       (e) => (e.pricingRisk?.missingCogsCount || 0) > 0,
     ).length;
-    const lowMargin = estimates.filter(
+    const lowMargin = activeRows.filter(
       (e) => (e.pricingRisk?.lowMarginCount || 0) > 0,
     ).length;
-    const goingCold = estimates.filter((e) =>
+    const goingCold = activeRows.filter((e) =>
       isGoingColdEstimate(e, nowMs),
     ).length;
 
@@ -430,7 +450,7 @@ export default function PipelineAnalytics({
         accepted,
         closed: conversionDenominator,
         totalMRRWon,
-        wonAccounts: accepted,
+        wonAccounts: acceptedEstimates.length,
         wonRecurring,
         wonOneTime,
       },
@@ -526,7 +546,7 @@ export default function PipelineAnalytics({
         <StatCard
           label="Offer acceptance"
           value={`${metrics.kpis.acceptanceRate}%`}
-          sub={`${metrics.kpis.accepted} accepted of ${metrics.kpis.closed} offers`}
+          sub={`${metrics.kpis.accepted} accepted of ${metrics.kpis.closed} resolved`}
         />
         <StatCard
           label="MRR won"

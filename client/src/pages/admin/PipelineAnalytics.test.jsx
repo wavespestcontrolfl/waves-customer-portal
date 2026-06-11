@@ -403,8 +403,78 @@ describe("PipelineAnalytics", () => {
     // Avg ticket over priced non-draft offers only: $1,250 / 17 → $74. The
     // three $0 drafts no longer drag the average down.
     expect(screen.getByText("$74")).toBeInTheDocument();
-    expect(screen.getByText("24%")).toBeInTheDocument();
+    // Resolved-only close rate: 4 accepted of 7 resolved (4 + 2 declined +
+    // 1 expired) → 57%. The 10 still-open offers no longer count against it.
+    expect(screen.getByText("57%")).toBeInTheDocument();
+    expect(screen.getByText("4 accepted of 7 resolved")).toBeInTheDocument();
     expect(screen.getByText("$400")).toBeInTheDocument();
+  });
+
+  it("keeps still-open offers out of the acceptance denominator", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "won", status: "accepted", monthlyTotal: 40 }),
+        estimate({ id: "no", status: "declined", monthlyTotal: 40 }),
+        ...Array.from({ length: 8 }, (_, i) =>
+          estimate({ id: `open-${i}`, status: "sent", monthlyTotal: 40 }),
+        ),
+      ],
+    });
+
+    // 1 of 2 resolved → 50%, not 1 of 10 → 10%.
+    expect(screen.getByText("50%")).toBeInTheDocument();
+  });
+
+  it("counts archived wins in MRR won but keeps them out of every other metric", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "active-won", status: "accepted", monthlyTotal: 40 }),
+        estimate({ id: "no", status: "declined", monthlyTotal: 30 }),
+        estimate({
+          id: "archived-won",
+          status: "accepted",
+          monthlyTotal: 60,
+          archivedAt: daysAgo(2),
+        }),
+      ],
+    });
+
+    // MRR won: $40 + $60 — archiving the second win must not erase its MRR.
+    expect(screen.getAllByText("$100").length).toBeGreaterThan(0);
+    expect(screen.getByText("2 new accounts")).toBeInTheDocument();
+    // Acceptance rate stays symmetric: archived losses are never fetched, so
+    // archived wins don't inflate it. 1 of 2 active-resolved → 50%, not 2/3.
+    expect(screen.getByText("50%")).toBeInTheDocument();
+    expect(screen.getByText("1 accepted of 2 resolved")).toBeInTheDocument();
+    // Avg ticket over active priced offers only: (40 + 30) / 2 → $35, not $43.
+    expect(screen.getAllByText("$35").length).toBeGreaterThan(0);
+  });
+
+  it("filters MRR won by acceptance date, not created date", () => {
+    renderAnalytics({
+      dateRange: "30d",
+      estimates: [
+        // Created outside the window but won inside it → counts.
+        estimate({
+          id: "old-created-recent-win",
+          status: "accepted",
+          monthlyTotal: 70,
+          createdAt: daysAgo(60),
+          acceptedAt: daysAgo(5),
+        }),
+        // Won outside the window → excluded even though created recently.
+        estimate({
+          id: "stale-win",
+          status: "accepted",
+          monthlyTotal: 25,
+          createdAt: daysAgo(60),
+          acceptedAt: daysAgo(45),
+        }),
+      ],
+    });
+
+    expect(screen.getAllByText("$70").length).toBeGreaterThan(0);
+    expect(screen.getByText("1 new accounts")).toBeInTheDocument();
   });
 
   it("excludes unpriced drafts and one-time-only rows from avg ticket", () => {
