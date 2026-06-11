@@ -33,7 +33,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
-const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor } =
+const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTransactionalQuery } =
   require('../content/scoring-config');
 
 // ── normalization helpers (pure, test-friendly) ─────────────────────
@@ -188,7 +188,31 @@ function impressionsBoost(impressions) {
   return 0;
 }
 
-function actionForOpportunity({ bucket, query, page_url, city, service }) {
+/**
+ * Near-me / transactional queries are service-page intent, never blog
+ * material (operator directive 2026-06-11): someone typing "exterminator
+ * near me" wants a provider, not an article. The quality gate flags
+ * near-me titles as spam and the brief-builder reroutes these to the
+ * (shadow-gated) city-service lane anyway — so emitting a blog action here
+ * only burns agent time before dead-ending. Demoting to do_not_publish
+ * keeps the demand visible in mineAll's calibration output while the
+ * non-blog floor (75) keeps low-scoring transactional rows out of the
+ * queue entirely. Near-me on PAGE actions (refresh/rewrite/city-service)
+ * is untouched — proximity terms are intentional on pages.
+ */
+function actionForOpportunity(opp) {
+  const action = baseActionForOpportunity(opp);
+  if (action === 'new_supporting_blog' && isTransactionalQuery(opp.query)) {
+    // City+service transactional demand is legitimate PAGE demand — route it
+    // to the city-service lane instead of dropping it (mirrors the other
+    // buckets' city/service branches). Only anchorless near-me queries are
+    // demoted outright.
+    return (opp.city && opp.service) ? 'create_or_refresh_city_service_page' : 'do_not_publish';
+  }
+  return action;
+}
+
+function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
   if (bucket === 'cannibalization' || bucket === 'page_type_mismatch') {
     return 'do_not_publish'; // always human review for these
   }
@@ -1004,7 +1028,24 @@ class GscOpportunityMiner {
       // blog floor, everything else the global one. mineAll's return still
       // exposes every candidate (including the dropped ones) so calibration
       // can see why the cut landed where it did.
-      if (o.score < minScoreToActFor(o.action_type)) continue;
+      if (o.score < minScoreToActFor(o.action_type)) {
+        // Rollout hygiene for the near-me demotion: a previously persisted
+        // new_supporting_blog row shares this candidate's dedupe_key, but a
+        // demoted candidate dropped here never reaches the ON CONFLICT
+        // upsert — so the stale pending blog action would stay claimable
+        // and burn the runner daily. Expire it explicitly. Fail-soft: a
+        // cleanup error must never abort the mining pass.
+        if (isTransactionalQuery(o.query)) {
+          try {
+            await db('opportunity_queue')
+              .where({ dedupe_key: o.dedupe_key, status: 'pending', action_type: 'new_supporting_blog' })
+              .update({ status: 'skipped', skip_reason: 'transactional_query_not_blog_material', updated_at: new Date() });
+          } catch (err) {
+            logger.warn(`[gsc-opp-miner] stale near-me row cleanup failed (${o.dedupe_key}): ${err.message}`);
+          }
+        }
+        continue;
+      }
       const row = {
         bucket: o.bucket,
         action_type: o.action_type,

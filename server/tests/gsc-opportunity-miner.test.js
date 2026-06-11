@@ -209,6 +209,30 @@ describe('conversionIntentScore', () => {
 // ── actionForOpportunity ────────────────────────────────────────────
 
 describe('actionForOpportunity', () => {
+  test('near-me / transactional queries NEVER become blog posts (operator directive 2026-06-11)', () => {
+    for (const q of ['exterminator near me', 'rat removal near me', 'pest control near-me', 'exterminator nearby', 'NEAR ME exterminator']) {
+      expect(actionForOpportunity({ bucket: 'seasonal_rising', query: q })).toBe('do_not_publish');
+      expect(actionForOpportunity({ bucket: 'striking_distance', query: q })).toBe('do_not_publish');
+      expect(actionForOpportunity({ bucket: 'no_content_yet', query: q })).toBe('do_not_publish');
+      expect(actionForOpportunity({ bucket: 'aeo_gap', query: q })).toBe('do_not_publish');
+    }
+  });
+  test('near-me WITH city+service routes to the city-service lane instead of being dropped', () => {
+    expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'exterminator near me sarasota', city: 'Sarasota', service: 'pest' }))
+      .toBe('create_or_refresh_city_service_page');
+  });
+  test('near-me queries with an existing page still refresh — proximity terms are fine on PAGES', () => {
+    expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'exterminator near me', page_url: 'x' }))
+      .toBe('refresh_existing_page');
+    expect(actionForOpportunity({ bucket: 'striking_distance', query: 'pest control near me', city: 'Bradenton', service: 'pest' }))
+      .toBe('create_or_refresh_city_service_page');
+  });
+  test('informational queries keep the blog action', () => {
+    expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'how to read a termite bond' }))
+      .toBe('new_supporting_blog');
+    expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'do i have to use hometeam pest defense' }))
+      .toBe('new_supporting_blog');
+  });
   test('cannibalization always do_not_publish', () => {
     expect(actionForOpportunity({ bucket: 'cannibalization', query: 'x', service: 'pest', city: 'Bradenton' }))
       .toBe('do_not_publish');

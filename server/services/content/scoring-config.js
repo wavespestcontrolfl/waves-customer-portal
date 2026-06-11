@@ -139,10 +139,22 @@ function minScoreToActFor(actionType) {
   return Math.min(Math.max(floor, 20), THRESHOLDS.minScoreToAct);
 }
 
+/**
+ * Near-me / transactional queries are service-page intent, never blog
+ * material (operator directive 2026-06-11). Single-sourced here so the
+ * miner's action mapping AND the decision router's final guard cannot
+ * drift — the router defers to live SERP profiles and would otherwise
+ * upgrade do_not_publish back to new_supporting_blog on blog-shaped SERPs.
+ */
+function isTransactionalQuery(query) {
+  return /\bnear\s*-?\s*me\b|\bnearby\b/i.test(String(query || ''));
+}
+
 module.exports = {
   WEIGHTS,
   THRESHOLDS,
   minScoreToActFor,
+  isTransactionalQuery,
   REVENUE_PRIORITY,
   CITIES,
   SERP_SAMPLE_CITIES,
