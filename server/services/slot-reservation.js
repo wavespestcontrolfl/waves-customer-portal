@@ -255,17 +255,25 @@ async function reserveSlot({
       // each miss the other's uncommitted row. Fixed order everywhere:
       // tech lock first, zone lock second.
       let reserveZone = null;
-      if (estimate.customer_id) {
-        try {
+      try {
+        const zones = await trx('service_zones').select('id', 'cities', 'zone_name');
+        if (estimate.customer_id) {
           const holder = await trx('customers').where({ id: estimate.customer_id }).first('city');
           const holderCity = String(holder?.city || '').toLowerCase();
           if (holderCity) {
-            const zones = await trx('service_zones').select('id', 'cities', 'zone_name');
             reserveZone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;
           }
-        } catch (zoneErr) {
-          logger.warn(`[slot-reservation] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
         }
+        if (!reserveZone && estimate.address) {
+          // Unlinked/public estimates carry only a free-text address —
+          // match any zone city appearing in it so these reserves take
+          // the same zone lock the self-booking writers do instead of
+          // falling through to zone:unknown.
+          const addr = String(estimate.address).toLowerCase();
+          reserveZone = zones.find((z) => (z.cities || []).some((c) => c && addr.includes(String(c).toLowerCase()))) || null;
+        }
+      } catch (zoneErr) {
+        logger.warn(`[slot-reservation] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
       }
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',

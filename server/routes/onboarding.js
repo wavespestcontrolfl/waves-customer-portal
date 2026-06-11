@@ -573,6 +573,32 @@ router.put('/:token/reschedule-service', loadSession, async (req, res, next) => 
       .orderBy('scheduled_date', 'asc')
       .first();
 
+    // Same-slot retry (double-submit): nothing to move — answer
+    // idempotently instead of booking + cancelling a churn pair and
+    // re-firing confirmation SMS/reminders.
+    const requestedDateStr = String(date).split('T')[0];
+    const currentDateStr = current
+      ? (current.scheduled_date instanceof Date
+        ? current.scheduled_date.toISOString().split('T')[0]
+        : String(current.scheduled_date).split('T')[0])
+      : null;
+    if (current
+      && currentDateStr === requestedDateStr
+      && String(current.window_start || '').slice(0, 5) === String(startTime).slice(0, 5)) {
+      await lockTrx('onboarding_sessions')
+        .where({ id: req.session.id })
+        .update({ service_confirmed: true, status: 'service_confirmed' });
+      await finishLock(true);
+      const existingBooking = current.self_booking_id
+        ? await db('self_booked_appointments').where({ id: current.self_booking_id }).first()
+        : null;
+      return res.json({
+        success: true,
+        booking: { booking: existingBooking, confirmationCode: existingBooking?.confirmation_code || null },
+        unchanged: true,
+      });
+    }
+
     // Book the replacement and cancel the original in ONE transaction
     // (lockTrx) — excluding the original from the occupancy check so it
     // can't collide with the row being cancelled. A refused slot
