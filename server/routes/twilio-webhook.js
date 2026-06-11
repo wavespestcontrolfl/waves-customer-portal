@@ -12,6 +12,7 @@ const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { hasSchedulingIntent, isSmsReaction } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { properCase } = require('../utils/name-case');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
@@ -30,9 +31,89 @@ function normalizeE164(phone) {
   return trimmed.startsWith('+') ? trimmed : trimmed || null;
 }
 
+function phoneDigits(phone) {
+  return String(phone || '').replace(/\D/g, '');
+}
+
+function phoneLookupKey(phone) {
+  const normalized = normalizeE164(phone);
+  const digits = phoneDigits(normalized || phone);
+  if (!digits) return '';
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+
 function maskPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
+  const digits = phoneDigits(phone);
   return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
+}
+
+async function findSingleCustomerByPhone(phone) {
+  const key = phoneLookupKey(phone);
+  if (!key) return null;
+
+  const matches = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
+    .orderBy('updated_at', 'desc')
+    .limit(2);
+
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
+  }
+  return null;
+}
+
+function cleanIntroNameSegment(segment) {
+  const text = String(segment || '')
+    .replace(/[“”]/g, '"')
+    .replace(/[’]/g, "'")
+    .split(/[.,;!?]/)[0]
+    .replace(/\s+(?:and|but|because|who|that|i|we)\b.*$/i, '')
+    .replace(/\s+(?:from|in|at|with|seeking|looking|need|needs|want|wants|live|lives|located)\b.*$/i, '')
+    .trim();
+  const words = text.match(/[a-z][a-z' -]*/gi);
+  if (!words) return '';
+  const candidate = words.join(' ').replace(/\s+/g, ' ').trim();
+  const lower = candidate.toLowerCase();
+  const firstWord = lower.split(' ')[0];
+  if (
+    !candidate ||
+    [
+      'about', 'at', 'for', 'from', 'in', 'located', 'live', 'lives', 'looking',
+      'need', 'needs', 'interested', 'seeking', 'trying', 'want', 'wants', 'with',
+    ].includes(firstWord) ||
+    /^(a|an|the|quote|service|pest|rodent|lawn|customer|homeowner|property)$/i.test(lower)
+  ) {
+    return '';
+  }
+  return properCase(candidate.split(' ').slice(0, 3).join(' '));
+}
+
+function extractContactNameFromSms(body) {
+  const text = String(body || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+
+  const patterns = [
+    /\bmy\s+name\s+is\s+(.{1,80})/i,
+    /\bthis\s+is\s+(.{1,80})/i,
+    /\bi['’]?m\s+(.{1,80})/i,
+    /\bi\s+am\s+(.{1,80})/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const fullName = cleanIntroNameSegment(match?.[1]);
+    if (!fullName) continue;
+    const parts = fullName.split(/\s+/);
+    return {
+      fullName,
+      firstName: parts[0] || '',
+      lastName: parts.slice(1).join(' '),
+    };
+  }
+
+  return null;
 }
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook
@@ -62,8 +143,9 @@ router.post('/sms', async (req, res) => {
 
     const inboundMedia = await uploadTwilioMedia(req.body);
 
-    // Try to match sender to a customer
-    const customer = await db('customers').where({ phone: From }).first();
+    // Try to match sender to a single active customer. Twilio sends E.164,
+    // while older customer rows may still have local formatting.
+    const customer = await findSingleCustomerByPhone(From);
 
     // Dual-write to unified messages table. Wrapped in fire-and-forget
     // because old sms_log writes still happen below; if this errors the
@@ -72,7 +154,7 @@ router.post('/sms', async (req, res) => {
       customerId: customer?.id,
       channel: 'sms',
       ourEndpointId: To,
-      contactPhone: customer ? null : From,
+      contactPhone: From,
       direction: 'inbound',
       body: Body,
       authorType: 'customer',
@@ -230,10 +312,12 @@ router.post('/sms', async (req, res) => {
       const { resolveLocation } = require('../config/locations');
       const loc = resolveLocation(numberConfig.area || leadSource.area || '');
       const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+      const inboundContactName = extractContactNameFromSms(Body);
 
       try {
         const [newCust] = await db('customers').insert({
-          first_name: 'Unknown', last_name: '',
+          first_name: inboundContactName?.firstName || 'Unknown',
+          last_name: inboundContactName?.lastName || '',
           phone: From, address_line1: '', city: numberConfig.area || '', state: 'FL', zip: '',
           referral_code: code, lead_source: leadSource.source,
           lead_source_detail: numberConfig.domain || leadSource.domain || 'Van wrap',
@@ -253,7 +337,7 @@ router.post('/sms', async (req, res) => {
           const source = numberConfig.domain || 'van wrap';
           await triggerNotification('new_lead', {
             title: `New lead from ${source}`,
-            name: 'Unknown prospect',
+            name: inboundContactName?.fullName || 'Unknown prospect',
             phone: From,
             message: Body || 'Phone call',
             source,
@@ -583,5 +667,9 @@ router.post('/status', async (req, res) => {
   }
   res.sendStatus(200);
 });
+
+router._internals = {
+  extractContactNameFromSms,
+};
 
 module.exports = router;

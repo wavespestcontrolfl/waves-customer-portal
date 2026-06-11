@@ -12,6 +12,93 @@
 const db = require('../models/db');
 const logger = require('../services/logger');
 
+function phoneDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function phoneLookupKey(value) {
+  const digits = phoneDigits(value);
+  if (!digits) return '';
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+
+function whereEndpoint(query, endpoint) {
+  if (endpoint) return query.where('our_endpoint_id', endpoint);
+  return query.whereNull('our_endpoint_id');
+}
+
+async function lockPhoneThreadKeyWith(conn, { channel, ourEndpointId, contactPhone }) {
+  const key = phoneLookupKey(contactPhone);
+  if (!key) return '';
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
+    `conversation:${channel}:${ourEndpointId || ''}:${key}`,
+  ]);
+  return key;
+}
+
+async function findUnknownPhoneThreadWith(conn, { channel, ourEndpointId, contactPhone }) {
+  const key = phoneLookupKey(contactPhone);
+  if (!key) return null;
+
+  const query = conn('conversations')
+    .whereNull('customer_id')
+    .where({ channel })
+    .whereRaw("RIGHT(regexp_replace(COALESCE(contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key]);
+
+  whereEndpoint(query, ourEndpointId || null);
+  if (typeof query.forUpdate === 'function') query.forUpdate();
+  return query.first();
+}
+
+async function promoteUnknownPhoneThreadWith(conn, {
+  customerId,
+  channel,
+  ourEndpointId,
+  contactPhone,
+  targetThread = null,
+}) {
+  if (!customerId || !contactPhone) return null;
+
+  const unknownThread = await findUnknownPhoneThreadWith(conn, { channel, ourEndpointId, contactPhone });
+  if (!unknownThread) return targetThread;
+
+  if (targetThread) {
+    await conn('messages')
+      .where({ conversation_id: unknownThread.id })
+      .update({ conversation_id: targetThread.id, updated_at: new Date() });
+
+    await conn('conversations')
+      .where({ id: unknownThread.id })
+      .whereNull('customer_id')
+      .update({
+        status: 'closed',
+        unknown_contact: false,
+        contact_phone: null,
+        contact_email: null,
+        contact_label: null,
+        updated_at: new Date(),
+      });
+    await refreshConversationStats(conn, targetThread.id);
+    return targetThread;
+  }
+
+  const [promoted] = await conn('conversations')
+    .where({ id: unknownThread.id })
+    .whereNull('customer_id')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLookupKey(contactPhone)])
+    .update({
+      customer_id: customerId,
+      unknown_contact: false,
+      contact_phone: null,
+      contact_email: null,
+      contact_label: null,
+      updated_at: new Date(),
+    })
+    .returning('*');
+
+  return promoted || unknownThread;
+}
+
 /**
  * Find or create a conversation thread. Threads are unique per
  *   (customer_id, channel, our_endpoint_id) for known customers
@@ -28,11 +115,35 @@ async function findOrCreateThreadWith(conn, {
 }) {
   if (!channel) throw new Error('findOrCreateThread: channel is required');
 
+  if (contactPhone) {
+    await lockPhoneThreadKeyWith(conn, { channel, ourEndpointId, contactPhone });
+  }
+
   if (customerId) {
     const existing = await conn('conversations')
       .where({ customer_id: customerId, channel, our_endpoint_id: ourEndpointId || null })
       .first();
-    if (existing) return existing;
+    if (existing) {
+      if (contactPhone) {
+        await promoteUnknownPhoneThreadWith(conn, {
+          customerId,
+          channel,
+          ourEndpointId,
+          contactPhone,
+          targetThread: existing,
+        });
+      }
+      return existing;
+    }
+    if (contactPhone) {
+      const promoted = await promoteUnknownPhoneThreadWith(conn, {
+        customerId,
+        channel,
+        ourEndpointId,
+        contactPhone,
+      });
+      if (promoted) return promoted;
+    }
     const [row] = await conn('conversations').insert({
       customer_id: customerId,
       channel,
@@ -78,7 +189,7 @@ async function findOrCreateThreadWith(conn, {
 }
 
 async function findOrCreateThread(opts) {
-  return findOrCreateThreadWith(db, opts);
+  return db.transaction((trx) => findOrCreateThreadWith(trx, opts));
 }
 
 function parseMetadata(value) {
