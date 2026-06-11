@@ -494,6 +494,17 @@ describe('pest-control pricing hardening', () => {
     expect(estimate.property.footprint).toBe(1800);
     expect(pest.footprintUsed).toBe(1800);
     expect(pest.footprintSource).toBe('footprint');
-    expect(pest.footprintAdj).toBe(-2);
+    expect(pest.footprintAdj).toBe(-4);
+  });
+
+  test('footprints under 1750 get the full -$5 bracket', () => {
+    const pest = pricePestControl(property({ homeSqFt: 1635 }), {
+      frequency: 'quarterly',
+      roachType: 'none',
+    });
+
+    expect(pest.footprintAdj).toBe(-5);
+    expect(pest.basePrice).toBe(112);
+    expect(pest.perApp).toBe(112);
   });
 });

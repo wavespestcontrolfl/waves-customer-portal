@@ -76,6 +76,7 @@ const PEST = {
     { sqft: 800,  adj: -r(15) },   // Was -r(20). Flattened — old value produced prices below floor.
     { sqft: 1200, adj: -r(10) },   // Was -r(12).
     { sqft: 1500, adj: -r(5) },    // Was -r(6).
+    { sqft: 1750, adj: -r(5) },    // Flat -$5 plateau 1500-1750; homes under 1750 get the full -$5 instead of interpolating toward 0.
     { sqft: 2000, adj: 0 },
     { sqft: 2500, adj: r(3) },
     { sqft: 3000, adj: r(6) },

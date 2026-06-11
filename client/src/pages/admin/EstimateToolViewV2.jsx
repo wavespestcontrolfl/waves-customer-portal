@@ -3262,6 +3262,7 @@ export default function EstimateToolViewV2({
           { at: 800, adj: -15 },
           { at: 1200, adj: -10 },
           { at: 1500, adj: -5 },
+          { at: 1750, adj: -5 },
           { at: 2000, adj: 0 },
           { at: 2500, adj: 3 },
           { at: 3000, adj: 6 },
