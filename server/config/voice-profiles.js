@@ -25,16 +25,19 @@ const VOICE_PROFILES = {
         'specific to this week\'s events',
         'FOMO-driven',
         'playful',
-        'occasionally emoji-led',
+        'one leading thematic emoji',
         'never corporate',
       ],
+      // Two proven shapes from the shipped Beehiiv era:
+      //   1. Noun-triple + kicker: "X, Y & Z — hype interjection"
+      //   2. Full declarative sentence with a curiosity gap
       examples: [
-        'Funnel Cakes, Live Music & One Very Chaotic Weekend',
-        'Your Social Life Called — It Wants This Lineup',
-        'Markets, Margaritas & Mayhem from North Port to Tampa',
-        'The Official "You Down?" Weekend Lineup',
+        'Twisters, Tail Wags & Pirates? Unleash The Weekend',
         'Swifty Beats, Glitter Trolls & Gold Medals — Let\'s GOOOO!!!',
         'This Weekend\'s a Whole Circus (Literally)',
+        'Someone\'s Going to Win Big for Baking a Pie',
+        'Your No-Fail Guide to a Firework-Filled Fourth',
+        'Your Social Life Called — It Wants You to Read This!',
       ],
       bannedPatterns: [
         'Monthly Newsletter',
@@ -43,6 +46,32 @@ const VOICE_PROFILES = {
         'Tips for homeowners',
         'Important update from Waves',
         'Pest Control Newsletter',
+      ],
+    },
+
+    // Preview text = the second punchline, not a summary. Sassy roast or
+    // three-fragment cadence, riffing on the subject.
+    previewTextRules: {
+      style: 'direct-address roast or three-fragment cadence; never a content summary',
+      examples: [
+        'Could be you. Could be Grandma. Will be chaos.',
+        'If you\'re bored this weekend, that\'s a you problem!',
+        'Because nothing says independence like Laser Beams & Lambos.',
+        'From high-flying stunts to lawn games with dads in capes, here\'s your weekend cheat sheet.',
+      ],
+    },
+
+    // GIF captions are their own comedic genre: short punchlines, NEVER a
+    // description of the image or the event.
+    gifCaptionRules: {
+      maxWords: 12,
+      shapes: [
+        'equation joke: "Planetarium + \'Laaaasers\' + legendary tracks = yes"',
+        'three-fragment cadence: "Tiny anglers. Big catches. Major bragging rights."',
+        'GIF-source riff: "Came for the rum. Stayed for the scandal."',
+        'meme grammar: "When the funnel cake slaps harder than the fireworks."',
+        '"X, but make it Y": "Photosynthesis but make it fun."',
+        '"Mood:" format: "Mood: Baroque and unhinged."',
       ],
     },
 
@@ -74,7 +103,10 @@ const VOICE_PROFILES = {
         'Do not pitch until the final CTA. The tip should stand on its own.',
     },
 
-    signoff: '— The Waves crew',
+    // Owner decision 2026-06-11: match what actually shipped in the mature
+    // Beehiiv era ("most recent newsletters are the template"), not the
+    // earlier "— The Waves crew" draft convention.
+    signoff: '— The Waves Pest Control Team',
 
     bannedCorporatePhrases: [
       'Dear valued customer',

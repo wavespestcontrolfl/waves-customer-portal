@@ -116,8 +116,12 @@ function validateNewsletterDraft(send, opts = {}) {
     }
     // Scan ALL customer-facing copy — SendGrid delivers text_body to
     // text-only clients, so a clean HTML body with a hallucinated claim
-    // in the plain-text fallback must still hard-block the send.
-    const combinedBody = [send.html_body, send.text_body].filter(Boolean).join('\n');
+    // in the plain-text fallback must still hard-block the send. Subject
+    // and preview text are scanned too: they're the first copy a
+    // subscriber sees, and an unverifiable "$500 prize" in the subject
+    // would otherwise sail through a body-only gate.
+    const combinedBody = [send.subject, send.preview_text, send.html_body, send.text_body]
+      .filter(Boolean).join('\n');
     if (combinedBody) errors.push(...findHallucinatedClaims(combinedBody));
   }
 

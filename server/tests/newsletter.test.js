@@ -1093,6 +1093,140 @@ describe('email template send history webhook updates', () => {
 // shape so a regression here can't silently let AI-fabricated dates or
 // admission strings reach a customer's inbox.
 
+describe('newsletter Beehiiv-parity render devices', () => {
+  const { clockEmojiFor, displayCity, formatLockedLocation, linkifyFirst } = require('../services/newsletter-draft');
+
+  test('clockEmojiFor matches the ET start hour, with half-hour faces', () => {
+    expect(clockEmojiFor(new Date('2026-06-12T20:00:00-04:00'))).toBe('🕗'); // 8:00 PM
+    expect(clockEmojiFor(new Date('2026-06-12T19:30:00-04:00'))).toBe('🕢'); // 7:30 PM
+    expect(clockEmojiFor(new Date('2026-06-13T11:00:00-04:00'))).toBe('🕚'); // 11:00 AM
+    expect(clockEmojiFor(new Date('2026-06-13T09:50:00-04:00'))).toBe('🕙'); // 9:50 → rounds to 10
+  });
+
+  test('displayCity humanizes stored slugs', () => {
+    expect(displayCity('anna-maria')).toBe('Anna Maria');
+    expect(displayCity('north port')).toBe('North Port');
+    expect(displayCity(null)).toBeNull();
+  });
+
+  test('formatLockedLocation never duplicates a city already embedded in the venue string', () => {
+    expect(formatLockedLocation({
+      venue_name: 'Izzy\'s Place, 12012 Cortez Rd W, Cortez, FL, 34215',
+      city: 'cortez',
+    })).toBe('Izzy\'s Place, 12012 Cortez Rd W, Cortez, FL, 34215');
+    expect(formatLockedLocation({ venue_name: 'Riverwalk Pavilion', city: 'Bradenton' }))
+      .toBe('Riverwalk Pavilion, Bradenton');
+    expect(formatLockedLocation({ venue_name: null, city: 'anna-maria' })).toBe('Anna Maria');
+  });
+
+  test('address survives when the venue only shares a number ("Studio 131" vs "131 N Orange Ave")', () => {
+    const { lockEventFactsFromDb } = require('../services/newsletter-draft');
+    const { locked } = lockEventFactsFromDb(
+      [{ eventId: '33333333-3333-3333-3333-333333333333', title: 'x' }],
+      [{
+        id: '33333333-3333-3333-3333-333333333333',
+        title: 'Show',
+        start_at: new Date('2026-06-13T00:00:00Z'),
+        venue_name: 'Studio 131',
+        venue_address: '131 N Orange Ave, Sarasota, FL',
+        city: 'Sarasota',
+        event_url: 'https://example.com',
+        image_url: null,
+      }],
+    );
+    expect(locked[0].address).toBe('131 N Orange Ave, Sarasota, FL');
+    // …but a venue string that embeds the real street IS treated as covering it
+    const { locked: covered } = lockEventFactsFromDb(
+      [{ eventId: '33333333-3333-3333-3333-333333333333', title: 'x' }],
+      [{
+        id: '33333333-3333-3333-3333-333333333333',
+        title: 'Show',
+        start_at: new Date('2026-06-13T00:00:00Z'),
+        venue_name: 'Izzy\'s Place, 12012 Cortez Rd W, Cortez, FL, 34215',
+        venue_address: '12012 Cortez Rd W, Cortez, FL 34215',
+        city: 'cortez',
+        event_url: 'https://example.com',
+        image_url: null,
+      }],
+    );
+    expect(covered[0].address).toBeNull();
+  });
+
+  test('linkifyFirst links only the first case-insensitive occurrence; no match leaves html untouched', () => {
+    const html = 'Go see <strong>the show</strong> — Bradenton Blues is back. bradenton blues forever.';
+    const out = linkifyFirst(html, 'Bradenton Blues', 'https://example.com/blues');
+    expect(out).toContain('<a href="https://example.com/blues"');
+    expect(out.match(/<a /g)).toHaveLength(1);
+    expect(out.indexOf('<a ')).toBeLessThan(out.indexOf('forever'));
+    expect(linkifyFirst(html, 'Sarasota Symphony', 'https://x.co')).toBe(html);
+  });
+});
+
+describe('newsletter assembly — Beehiiv-parity event rendering', () => {
+  const { assembleBeehiivNewsletter } = require('../services/newsletter-draft');
+  const baseEvent = {
+    eventId: 'a0000000-0000-4000-8000-000000000002',
+    emoji: '🎸',
+    title: 'Freckled Fin Gets Loud',
+    sourceTitle: 'Lisa & The All Terrain Band',
+    description: 'Lisa & The All Terrain Band are rolling in with big energy.',
+    dateStr: 'Friday, June 12',
+    timeStr: '8:00 PM',
+    clockEmoji: '🕗',
+    location: 'Freckled Fin Irish Pub, Holmes Beach',
+    address: null,
+    eventUrl: 'https://example.com/fin',
+    imageUrl: 'https://cdn.example.com/fin.jpg',
+    isFree: true,
+    scoopLabel: 'Here\'s the scoop:',
+    highlights: ['🎶 Crowd-pleaser setlist', '🍀 Irish pub vibes'],
+    proTip: 'Pro tip: Get there before 8 for a table.',
+    linkText: 'Grab your spot',
+    closingLine: 'Lace up — **this one\'s a sweat sesh.**',
+  };
+
+  test('renders the full Beehiiv event anatomy without doubled labels or generic anchors', async () => {
+    const html = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent }] });
+    // date | clock time line
+    expect(html).toContain('📅 <strong>Friday, June 12</strong> | 🕗 <strong>8:00 PM</strong>');
+    // DB-verified FREE badge
+    expect(html).toContain('🎟️ <strong>FREE</strong>');
+    // rotating anchor text, not "Tickets & Info"
+    expect(html).toContain('>Grab your spot</a>');
+    expect(html).not.toContain('Tickets &amp; Info');
+    // event name inline-linked in the description
+    expect(html).toContain('<a href="https://example.com/fin"');
+    // rotating scoop label, bullets carry their own emoji (no injected •)
+    expect(html).toContain('Here&#39;s the scoop:');
+    expect(html).not.toMatch(/<li[^>]*>• /);
+    // pro tip label never doubles
+    expect(html).toContain('<strong>Pro tip:</strong>');
+    expect(html).not.toMatch(/Pro tip:\s*<\/strong>\s*<em>\s*Pro tip/i);
+  });
+
+  test('no Giphy key → event image fallback renders; isFree false → no FREE badge', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      events: [{ ...baseEvent, isFree: false, gifSearchTerm: 'rock band' }],
+    });
+    expect(html).toContain('https://cdn.example.com/fin.jpg');
+    expect(html).not.toContain('🎟️ <strong>FREE</strong>');
+  });
+
+  test('closing checklist renders ✔️ items and the sign-off defaults to the Team form', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      events: [{ ...baseEvent }],
+      closingHeading: 'That\'s the scoop, crew',
+      closingText: 'Whatever you pick, we support it.',
+      closingChecklist: ['Pack a chair', 'Hydrate like it\'s your job'],
+    });
+    expect(html).toContain('✔️ Pack a chair');
+    expect(html).toContain('✔️ Hydrate like it&#39;s your job');
+    expect(html).toContain('— The Waves Pest Control Team');
+  });
+});
+
 describe('newsletter lockEventFactsFromDb', () => {
   const id1 = '11111111-1111-1111-1111-111111111111';
   const id2 = '22222222-2222-2222-2222-222222222222';
@@ -1450,6 +1584,19 @@ describe('newsletter validateNewsletterDraft — hallucinated claims hard-block'
     const { errors } = validateNewsletterDraft(send, { recipientCount: 100 });
     // Non-flagship types intentionally allow pricing — service promos quote prices
     expect(errors.filter((e) => e.includes('Hallucinated claim'))).toEqual([]);
+  });
+
+  test('dollar amount in the SUBJECT or preview text hard-blocks too — first copy a subscriber sees', () => {
+    const subjectSend = { ...baseSend, subject: 'Someone\'s Going to Win $500 for Baking a Pie' };
+    expect(
+      validateNewsletterDraft(subjectSend, { recipientCount: 100 }).errors
+        .some((e) => e.includes('Hallucinated claim')),
+    ).toBe(true);
+    const previewSend = { ...baseSend, preview_text: 'Free admission all weekend!' };
+    expect(
+      validateNewsletterDraft(previewSend, { recipientCount: 100 }).errors
+        .some((e) => e.includes('Hallucinated claim')),
+    ).toBe(true);
   });
 
   test('hallucinated claim in plain-text fallback is blocked even when HTML is clean (Codex P2)', () => {
