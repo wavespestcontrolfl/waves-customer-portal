@@ -136,6 +136,9 @@ const PROPERTY_EVIDENCE_FIELDS = [
 ];
 
 const SOURCE_TYPE_WEIGHTS = {
+  // Tech field-verified values (lookup-cache overrides) — a person who stood
+  // on the property beats every remote source, including the live PAO.
+  verified: 110,
   county: 100,
   // FDOR statewide cadastral roll — county-grade data, but an annual vintage:
   // sits above permits and below the live PAO so a fresh county record always
@@ -150,6 +153,7 @@ const SOURCE_TYPE_WEIGHTS = {
 };
 
 const SOURCE_TYPE_LABELS = {
+  verified: 'tech verified',
   county: 'county record',
   cadastral: 'county cadastral roll (FDOR)',
   permit: 'permit record',

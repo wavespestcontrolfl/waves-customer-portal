@@ -2405,6 +2405,31 @@ export default function EstimateToolViewV2({
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
+  // "" | "saving" | "saved" | "error" — Save-verified action in the
+  // field-verify nudge block (persists the edited dimensions as tech-verified
+  // overrides so future lookups of this address stop re-flagging them).
+  const [verifySaveState, setVerifySaveState] = useState("");
+
+  const saveVerifiedValues = useCallback(async () => {
+    const fields = {};
+    if (String(form.homeSqFt || "").trim() !== "") fields.squareFootage = Number(form.homeSqFt);
+    if (String(form.lotSqFt || "").trim() !== "") fields.lotSize = Number(form.lotSqFt);
+    if (String(form.stories || "").trim() !== "") fields.stories = Number(form.stories);
+    if (!form.address || !Object.keys(fields).length) return;
+    setVerifySaveState("saving");
+    try {
+      const r = await fetch("/api/admin/estimator/property-lookup/verify", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ address: form.address, fields }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setVerifySaveState("saved");
+    } catch {
+      setVerifySaveState("error");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
     const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
@@ -2633,6 +2658,7 @@ export default function EstimateToolViewV2({
 
       const ep = data.enriched;
       setEnrichedProfile(ep);
+      setVerifySaveState("");
 
       const upd = {};
       if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
@@ -4045,6 +4071,20 @@ export default function EstimateToolViewV2({
                       {flag.reason ? ` — ${flag.reason}` : ""}
                     </div>
                   ))}
+                  <button
+                    type="button"
+                    onClick={saveVerifiedValues}
+                    disabled={verifySaveState === "saving" || verifySaveState === "saved"}
+                    className="mt-1.5 text-12 underline text-zinc-900 disabled:no-underline disabled:text-zinc-500"
+                  >
+                    {verifySaveState === "saving"
+                      ? "Saving verified values…"
+                      : verifySaveState === "saved"
+                        ? "Verified values saved — future lookups will use them"
+                        : verifySaveState === "error"
+                          ? "Save failed — tap to retry"
+                          : "Save current sqft / lot / stories as field-verified"}
+                  </button>
                 </div>
               )}
               {existingCustomerMatch && (
