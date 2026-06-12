@@ -623,20 +623,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:10AM ET — Expire stale composer suggestions (brand-voice loop,
-  // Phase D). A pending house-voice suggestion nobody acted on within 48h is
-  // marked 'expired' so it stops surfacing under dead threads and doesn't
-  // skew the per-intent ignored-rate graduation signal.
+  // DAILY 4:10AM ET — Recover claimed Agent Review decisions + expire stale
+  // composer suggestions (brand-voice loop, Phase D). Recovery is NOT gated:
+  // the /sms claim path parks ANY verified Agent Review draft (lead
+  // workflows included) in status='scheduled' regardless of the suggest-mode
+  // gate, and a post-claim crash must never strand those rows invisible.
+  // Only the house-voice expiry (pending >48h → expired) is gated.
   // =========================================================================
   cron.schedule('10 4 * * *', async () => {
-    if (!isEnabled('smsSuggestMode')) return;
-    logger.info('Running: SMS suggestion expiry sweep');
+    logger.info('Running: SMS suggestion recovery + expiry sweep');
     try {
       const { runExclusive } = require('../utils/cron-lock');
-      const { expireStaleSuggestions } = require('./sms-suggest-mode');
-      await runExclusive('sms-suggest-expiry', () => expireStaleSuggestions());
+      const { recoverSuggestionHoldingStates, expireStaleSuggestions } = require('./sms-suggest-mode');
+      await runExclusive('sms-suggest-expiry', async () => {
+        await recoverSuggestionHoldingStates();
+        if (isEnabled('smsSuggestMode')) await expireStaleSuggestions();
+      });
     } catch (err) {
-      logger.error(`SMS suggestion expiry sweep failed: ${err.message}`);
+      logger.error(`SMS suggestion recovery/expiry sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -496,10 +496,17 @@ async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) 
  * would skew the ignored-rate graduation signal. Their drafts return to the
  * judge pool: human silence is the both_no_reply / human_no_reply signal.
  */
-async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
+/**
+ * Crash recovery for the 'scheduled' holding state — runs UNGATED in the
+ * nightly cron: the composer claim/park paths put ANY SMS Agent Review
+ * decision (lead workflows included) into 'scheduled' regardless of the
+ * suggest-mode gate, and a post-claim crash must never strand those rows
+ * invisible.
+ */
+async function recoverSuggestionHoldingStates({ maxAgeHours = EXPIRY_HOURS } = {}) {
   const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
 
-  // Recovery first: a 'scheduled' decision whose queued row already went
+  // Sent-linked first: a 'scheduled' decision whose queued row already went
   // SENT means the cron crashed between its sent-update and resolution. The
   // customer WAS texted — reopening would resurface a card on an answered
   // thread (and house-voice rows would later miscount as expired). Resolve
@@ -536,34 +543,35 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
     logger.warn(`[sms-suggest] sent-linked recovery failed: ${recoverErr.message}`);
   }
 
-  return db.transaction(async (trx) => {
-    // Orphaned holding states first: a 'scheduled' decision whose queued
-    // sms_log row no longer exists in a live state (cancelled outside the
-    // cancel route, stale-claim recovery marked it failed, or the process
-    // died mid-immediate-send) would hang forever — reopen it, and the
-    // created_at-keyed expiry below gives it a terminal state if it's
-    // already past the window. Deliberately NOT workflow-scoped: the
-    // composer claim/park paths put ANY SMS Agent Review decision (lead
-    // workflows included) into 'scheduled', and nothing else writes that
-    // status — those must recover too, back into their own lifecycles.
-    const reopened = await trx('agent_decisions as ad')
-      .where({ 'ad.source_channel': 'sms', 'ad.status': 'scheduled' })
-      .where('ad.updated_at', '<', cutoff)
-      .whereRaw(`NOT EXISTS (
-        SELECT 1 FROM sms_log sl
-        WHERE sl.status IN ('scheduled', 'sending')
-          AND (
-            sl.metadata->>'agent_decision_id' = ad.id::text
-            OR jsonb_exists(COALESCE(sl.metadata->'parked_decision_ids', '[]'::jsonb), ad.id::text)
-          )
-      )`)
-      .update({
-        status: 'pending_review',
-        correction_note: 'Scheduled send never fired — suggestion reopened by the expiry sweep.',
-        updated_at: new Date(),
-      });
-    if (reopened > 0) logger.info(`[sms-suggest] reopened ${reopened} orphaned scheduled suggestions`);
+  // Then orphans: a 'scheduled' decision whose queued sms_log row no longer
+  // exists in a live state (cancelled outside the cancel route, stale-claim
+  // recovery marked it failed, or the process died mid-immediate-send)
+  // would hang forever — reopen it into its own workflow's lifecycle; for
+  // house-voice rows the created_at-keyed expiry gives it a terminal state
+  // if it's already past the window.
+  const reopened = await db('agent_decisions as ad')
+    .where({ 'ad.source_channel': 'sms', 'ad.status': 'scheduled' })
+    .where('ad.updated_at', '<', cutoff)
+    .whereRaw(`NOT EXISTS (
+      SELECT 1 FROM sms_log sl
+      WHERE sl.status IN ('scheduled', 'sending')
+        AND (
+          sl.metadata->>'agent_decision_id' = ad.id::text
+          OR jsonb_exists(COALESCE(sl.metadata->'parked_decision_ids', '[]'::jsonb), ad.id::text)
+        )
+    )`)
+    .update({
+      status: 'pending_review',
+      correction_note: 'Scheduled send never fired — suggestion reopened by the recovery sweep.',
+      updated_at: new Date(),
+    });
+  if (reopened > 0) logger.info(`[sms-suggest] reopened ${reopened} orphaned scheduled suggestions`);
+  return reopened;
+}
 
+async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
+  const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
+  return db.transaction(async (trx) => {
     // Single guarded UPDATE ... RETURNING — no SELECT-then-UPDATE window in
     // which the composer could resolve a row we then stomp to expired.
     const expired = await trx('agent_decisions')
@@ -609,6 +617,7 @@ module.exports = {
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
   resolveSuggestionAfterSend,
+  recoverSuggestionHoldingStates,
   expireStaleSuggestions,
   lockSuggestThread,
 };
