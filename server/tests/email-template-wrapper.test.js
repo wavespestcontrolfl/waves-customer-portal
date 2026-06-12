@@ -23,6 +23,23 @@ describe('email template wrappers', () => {
     })).toContain(WAVES_ADDRESS_LINE);
   });
 
+  test('renders the Google Preferred Sources line only when opted in', () => {
+    const ctaUrl = 'https://www.google.com/preferences/source?q=wavespestcontrol.com';
+
+    expect(wrapNewsletter({
+      body: '<p>Hi Taylor, here is the latest.</p>',
+      unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/token',
+      preferredSourcesCta: true,
+    })).toContain(ctaUrl);
+
+    // Default off — automation drips and library templates that share this
+    // wrapper must not grow the CTA without opting in.
+    expect(wrapNewsletter({
+      body: '<p>Hi Taylor, here is the latest.</p>',
+      unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/token',
+    })).not.toContain(ctaUrl);
+  });
+
   test('keeps the physical mailing address in legal plain-text footers', () => {
     const text = ensureLegalTextFooter('Hi Taylor, here is the latest.', {
       unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/token',
