@@ -17,6 +17,8 @@ const {
   dateColToString,
   addDaysToDateString,
   windowBounds,
+  annotationBoundaries,
+  sortRows,
   classifyMovement,
   mergeWindowRows,
   buildRows,
@@ -110,6 +112,30 @@ describe('windowBounds', () => {
     expect(addDaysToDateString('2026-01-01', -1)).toBe('2025-12-31');
     expect(addDaysToDateString('2026-02-28', 1)).toBe('2026-03-01');
     expect(addDaysToDateString('garbage', 1)).toBeNull();
+  });
+});
+
+describe('annotationBoundaries', () => {
+  test('lookback starts at the anchored prior-window start, not wall-clock now (Codex r2)', () => {
+    const b = annotationBoundaries('2026-06-09', 7);
+    expect(b.sinceDateString).toBe('2026-05-27'); // anchor - 13d = prior window start
+    // timestamp boundary = ET midnight of that day (EDT = UTC-4 in June)
+    expect(b.sinceDate.toISOString()).toBe('2026-05-27T04:00:00.000Z');
+  });
+});
+
+describe('sortRows', () => {
+  test('lost pages outrank ordinary movers so the limit slice can never cut them (Codex r2)', () => {
+    const rows = [
+      { movement: 'win', change: -32.9, impressions_now: 1146, impressions_before: 1174 },
+      { movement: 'lost', change: null, impressions_now: 0, impressions_before: 50 },
+      { movement: 'flat', change: 0.1, impressions_now: 9000, impressions_before: 9000 },
+      { movement: 'lost', change: null, impressions_now: 0, impressions_before: 880 },
+    ];
+    sortRows(rows);
+    expect(rows.map((r) => r.movement)).toEqual(['lost', 'lost', 'win', 'flat']);
+    // within the lost tier, bigger prior exposure first
+    expect(rows[0].impressions_before).toBe(880);
   });
 });
 

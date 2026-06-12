@@ -22,12 +22,12 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 // chr(63) is '?' — a literal '?' inside a knex raw fragment collides with
 // knex's positional-binding syntax (same trap documented in
 // gsc-opportunity-miner.js; keep the two in sync).
-const CANON_URL_SQL = 'split_part(page_url, chr(63), 1)';
+const CANON_URL_SQL = 'split_part(g.page_url, chr(63), 1)';
 
 const HUB_HOST = 'wavespestcontrol.com';
 const DEFAULT_LIMIT = 200;
@@ -444,32 +444,78 @@ async function fetchAllAnnotations({ sinceDateString, sinceDate }) {
 
 // ── window queries ──────────────────────────────────────────────────
 
-function pageWindowQuery({ since, until = null, domain = null, type = null }) {
-  let query = db('gsc_pages')
-    .where('date', '>=', since)
-    .select(db.raw(`${CANON_URL_SQL} as page_url`), 'domain')
-    .max('page_type as page_type')
-    .sum('clicks as clicks')
-    .sum('impressions as impressions')
+/**
+ * Each GSC property syncs independently, so a spoke can run days behind
+ * the hub. A single global anchor would compare a lagging spoke's rows
+ * against another site's window and fabricate lost/GONE pages out of sync
+ * skew — so every domain's windows hang from ITS OWN latest synced date,
+ * via a join against the per-domain max(date). (Rows with a NULL domain
+ * predate the multi-domain sync and are older than any window; the join
+ * dropping them is correct.)
+ */
+function pageWindowQuery({ periodDays, phase, domain = null, type = null }) {
+  let query = db('gsc_pages as g')
+    .join(
+      db('gsc_pages').select('domain').max('date as anchor').groupBy('domain').as('a'),
+      'a.domain',
+      'g.domain'
+    )
+    .select(db.raw(`${CANON_URL_SQL} as page_url`), 'g.domain')
+    .max('g.page_type as page_type')
+    .sum('g.clicks as clicks')
+    .sum('g.impressions as impressions')
     // GSC's own aggregate position is impression-weighted — an unweighted
     // avg() lets a 1-impression day at position 1 halve a page's reported
     // position and fabricate wins/losses.
-    .select(db.raw('sum(position * impressions) / nullif(sum(impressions), 0) as avg_position'))
-    .groupByRaw(`${CANON_URL_SQL}, domain`);
-  if (until) query = query.where('date', '<', until);
-  if (domain) query = query.where('domain', domain);
-  if (type) query = query.where('page_type', type);
+    .select(db.raw('sum(g.position * g.impressions) / nullif(sum(g.impressions), 0) as avg_position'))
+    .groupByRaw(`${CANON_URL_SQL}, g.domain`);
+  if (phase === 'current') {
+    query = query.whereRaw('g.date >= a.anchor - ?', [periodDays - 1]);
+  } else {
+    query = query
+      .whereRaw('g.date >= a.anchor - ?', [periodDays * 2 - 1])
+      .whereRaw('g.date < a.anchor - ?', [periodDays - 1]);
+  }
+  if (domain) query = query.where('g.domain', domain);
+  if (type) query = query.where('g.page_type', type);
   return query;
 }
 
-// Latest date the GSC sync has actually written — the anchor both windows
-// hang from (see windowBounds).
-async function latestSyncedDate({ domain = null, type = null } = {}) {
-  let query = db('gsc_pages').max('date as max_date');
+// Per-domain anchors, for the caption (newest) and the annotation lookback
+// (oldest — widest net when a domain's sync is behind).
+async function domainAnchors({ domain = null, type = null } = {}) {
+  let query = db('gsc_pages').select('domain').max('date as anchor').groupBy('domain');
   if (domain) query = query.where('domain', domain);
   if (type) query = query.where('page_type', type);
-  const row = await query.first();
-  return dateColToString(row?.max_date);
+  const rows = await query;
+  const anchors = rows.map((r) => dateColToString(r.anchor)).filter(Boolean).sort();
+  return {
+    newest: anchors[anchors.length - 1] || null,
+    oldest: anchors[0] || null,
+  };
+}
+
+// Annotation lookback boundaries, derived from the same anchored window
+// math as the metrics — a wall-clock `now` lookback shifted the net by the
+// GSC sync lag and dropped chips from the start of the prior window.
+function annotationBoundaries(anchorDateString, periodDays) {
+  const priorSince = windowBounds(periodDays, anchorDateString).prior_since;
+  return {
+    sinceDateString: priorSince,
+    sinceDate: parseETDateTime(`${priorSince}T00:00`),
+  };
+}
+
+// Movers first, biggest absolute change first — and pages that vanished
+// from GSC outrank everything: a drop to nothing is the maximal move, and
+// the limit slice must never cut a GONE page while keeping smaller movers.
+function sortRows(rows) {
+  const tier = (r) => (r.movement === 'lost' ? 1 : 0);
+  const magnitude = (r) => (r.change == null ? 0 : Math.abs(r.change));
+  const exposure = (r) => Math.max(r.impressions_now || 0, r.impressions_before || 0);
+  return rows.sort(
+    (x, y) => tier(y) - tier(x) || magnitude(y) - magnitude(x) || exposure(y) - exposure(x)
+  );
 }
 
 // ── entry point ─────────────────────────────────────────────────────
@@ -482,33 +528,27 @@ async function build({
   minImpressions = DEFAULT_MIN_IMPRESSIONS,
   now = new Date(),
 } = {}) {
-  const anchor = (await latestSyncedDate({ domain, type })) || etDateString(now);
+  const anchors = await domainAnchors({ domain, type });
+  const anchor = anchors.newest || etDateString(now);
+  // Caption math only — each domain's rows are windowed against its own
+  // anchor inside pageWindowQuery.
   const bounds = windowBounds(periodDays, anchor);
   const [currentRows, priorRows] = await Promise.all([
-    pageWindowQuery({ since: bounds.current_since, domain, type }),
-    pageWindowQuery({ since: bounds.prior_since, until: bounds.current_since, domain, type }),
+    pageWindowQuery({ periodDays, phase: 'current', domain, type }),
+    pageWindowQuery({ periodDays, phase: 'prior', domain, type }),
   ]);
 
   const rows = buildRows(currentRows, priorRows, { minImpressions });
   // Annotations span both windows: a change made in the prior window is
-  // exactly what explains movement between them. The timestamp boundary
-  // tracks the anchored span (plus the sync lag days between anchor and
-  // now, which only widens the net).
-  const annotations = await fetchAllAnnotations({
-    sinceDateString: bounds.prior_since,
-    sinceDate: addETDays(now, -periodDays * 2),
-  });
+  // exactly what explains movement between them. Bounded from the OLDEST
+  // domain anchor's window start so a lagging domain's chips aren't cut.
+  const annotations = await fetchAllAnnotations(
+    annotationBoundaries(anchors.oldest || anchor, periodDays)
+  );
   attachAnnotations(rows, annotations);
 
   const summary = summarize(rows);
-  // Movers first (biggest absolute change), then by current impressions —
-  // the client partitions wins/losses/new from `movement`.
-  rows.sort((a, b) => {
-    const aChange = a.change == null ? 0 : Math.abs(a.change);
-    const bChange = b.change == null ? 0 : Math.abs(b.change);
-    if (bChange !== aChange) return bChange - aChange;
-    return b.impressions_now - a.impressions_now;
-  });
+  sortRows(rows);
 
   const boundedLimit = Math.min(Math.max(parseInt(limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   return {
@@ -535,6 +575,8 @@ module.exports._internals = {
   timestampToETDate,
   addDaysToDateString,
   windowBounds,
+  annotationBoundaries,
+  sortRows,
   toMetric,
   classifyMovement,
   mergeWindowRows,
