@@ -157,19 +157,121 @@ const PROJECT_TYPES = {
     ],
   },
 
+  // Rodent exclusion (owner spec 2026-06-12, Phase 2 §1) — a
+  // repair/prevention service, NOT a trapping report: entry points sealed,
+  // materials used, remaining risks. Tap-to-fill replaces the old textarea
+  // form (stored v1 snapshots keep rendering from their persisted labels).
+  // Wording rule (also banned-copy enforced): never "rodent-proof" —
+  // repairs "reduce rodent access and help prevent re-entry".
   rodent_exclusion: {
     label: 'Rodent Exclusion',
-    short: 'Rodent',
-    description: 'Entry-point mapping, trapping, and exclusion work.',
+    short: 'Rodent Exclusion',
+    description: 'Rodent exclusion repair visit: work areas, entry points addressed, repairs and materials, remaining concerns.',
     requiresFollowup: false,
-    photoCategories: ['exterior', 'entry_point', 'trap_placement', 'damage', 'exclusion_work', 'attic', 'crawlspace', 'other'],
+    photoCategories: ['exterior', 'entry_point', 'exclusion_work', 'before', 'after', 'attic', 'garage', 'crawlspace', 'other'],
     findingsFields: [
-      { key: 'species', label: 'Species', type: 'select', options: ['Roof rat', 'Norway rat', 'House mouse', 'Mixed', 'Unknown'] },
-      { key: 'entry_points_found', label: 'Entry points identified', type: 'textarea', placeholder: 'Dryer vent (S wall), gable vent (attic), garage door seal…' },
-      { key: 'traps_set', label: 'Traps set (count + locations)', type: 'textarea' },
-      { key: 'exclusion_completed', label: 'Exclusion work completed', type: 'textarea' },
-      { key: 'exclusion_pending', label: 'Exclusion work pending', type: 'textarea' },
-      { key: 'followup_plan', label: 'Follow-up plan', type: 'textarea' },
+      { key: 'exclusion_areas', label: 'Inspection / work areas', type: 'chips', section: 'Work areas', options: [
+        'Roofline', 'Soffit / fascia', 'Garage', 'Exterior perimeter',
+        'AC / utility penetrations', 'Vents', 'Doors', 'Lanai / pool cage',
+        'Crawlspace', 'Attic access', 'Other',
+      ] },
+      { key: 'entry_points_addressed', label: 'Entry points addressed', type: 'chips', section: 'Entry points', options: [
+        'Garage door gaps', 'AC line penetration', 'Plumbing / electrical penetration',
+        'Roof return gap', 'Soffit / fascia gap', 'Vent / screen opening',
+        'Door sweep gap', 'Weep hole / open masonry gap', 'Foundation gap', 'Other',
+      ] },
+      { key: 'exclusion_work_completed', label: 'Work completed', type: 'chips', section: 'Work completed', options: [
+        'Sealed entry point', 'Installed hardware cloth / mesh', 'Installed sealant / foam / backer',
+        'Repaired screen / vent', 'Installed door sweep / seal', 'Reinforced opening',
+        'Temporary seal', 'Permanent exclusion repair', 'Inspection only',
+      ] },
+      { key: 'exclusion_materials', label: 'Materials used', type: 'chips', section: 'Work completed', options: [
+        'Hardware cloth', 'Rodent-resistant mesh', 'Sealant', 'Foam + mesh backing',
+        'Sheet metal', 'Door sweep / weatherstrip', 'Vent cover', 'Concrete / mortar patch', 'Other',
+      ] },
+      { key: 'remaining_concerns', label: 'Remaining concerns', type: 'chips', section: 'Remaining concerns', options: [
+        'Activity still present', 'Trapping still active', 'Area inaccessible',
+        'Structural repair needed by others', 'Tree limbs touching roof',
+        'Garage seal replacement needed', 'Customer declined repair',
+        'Moisture / sanitation concern', 'No remaining concerns observed',
+      ] },
+    ],
+  },
+
+  // Rodent sanitation (owner spec §2) — a health/safety cleanup report, not
+  // a pest-control treatment report: contamination level, what was cleaned,
+  // and what limited the cleanup. Serves all three prod tiers
+  // (light / standard / heavy). No activity gauge: contamination is a
+  // cleanup measure, and pushing it onto the rodent_activity trend would
+  // corrupt the program trend line.
+  rodent_sanitation: {
+    label: 'Rodent Sanitation',
+    short: 'Rodent Sanitation',
+    description: 'Rodent sanitation cleanup visit: areas serviced, contamination level, evidence cleaned, limitations, recommendations.',
+    requiresFollowup: false,
+    photoCategories: ['attic', 'garage', 'before', 'after', 'contamination', 'insulation', 'other'],
+    findingsFields: [
+      { key: 'sanitation_areas', label: 'Areas serviced', type: 'chips', section: 'Areas serviced', options: [
+        'Attic', 'Garage', 'Closet', 'Kitchen area', 'Under sink', 'Laundry',
+        'Storage area', 'Crawlspace', 'Exterior area', 'Other',
+      ] },
+      { key: 'contamination_level', label: 'Contamination level', type: 'select', section: 'Areas serviced', options: [
+        'Light', 'Moderate', 'Heavy', 'Severe — office review needed',
+      ] },
+      { key: 'evidence_cleaned', label: 'Evidence cleaned', type: 'chips', section: 'Evidence cleaned', options: [
+        'Droppings', 'Urine staining', 'Nesting material', 'Dead rodent / remains',
+        'Odor source', 'Contaminated insulation', 'Food debris', 'Other',
+      ] },
+      { key: 'sanitation_work_completed', label: 'Work completed', type: 'chips', section: 'Work completed', options: [
+        'Removed droppings', 'Removed nesting material', 'Removed dead rodent',
+        'HEPA vacuum / controlled cleanup', 'Disinfected / sanitized affected areas',
+        'Deodorized affected areas', 'Bagged / disposed contaminated debris',
+        'Insulation removal recommended', 'Limited cleanup due to access',
+      ] },
+      { key: 'sanitation_limitations', label: 'Limitations', type: 'chips', section: 'Limitations', options: [
+        'Area not fully accessible', 'Heavy storage limited cleaning',
+        'Insulation contamination remains', 'Electrical / HVAC obstruction',
+        'Customer items could not be moved', 'PPE / safety limitation', 'No limitations',
+      ] },
+    ],
+  },
+
+  // Rodent inspection / general one-time (owner spec §4) — diagnostic and
+  // sales-supportive, never a heavy project feel: what was checked, what was
+  // found, what service is recommended and how urgently.
+  rodent_inspection: {
+    label: 'Rodent Inspection',
+    short: 'Rodent Inspection',
+    description: 'Diagnostic rodent inspection: areas checked, activity and evidence found, entry points, recommended service and urgency.',
+    requiresFollowup: false,
+    photoCategories: ['exterior', 'entry_point', 'droppings', 'attic', 'garage', 'evidence', 'other'],
+    findingsFields: [
+      { key: 'areas_inspected', label: 'Areas inspected', type: 'chips', section: 'Inspection', options: [
+        'Exterior perimeter', 'Roofline', 'Garage', 'Attic access', 'Attic interior',
+        'Kitchen area', 'Laundry', 'Interior living areas', 'Crawlspace', 'Other',
+      ] },
+      { key: 'activity_found', label: 'Activity found', type: 'select', section: 'Findings', options: ['Yes', 'No'] },
+      { key: 'evidence_observed', label: 'Evidence type', type: 'chips', section: 'Findings', options: [
+        'Droppings', 'Urine staining', 'Gnaw marks', 'Rub marks / grease trails',
+        'Nesting material', 'Noises reported by customer', 'Odor', 'Burrows / runways',
+        'Damaged insulation / wiring / stored items',
+      ] },
+      { key: 'species', label: 'Suspected rodent type', type: 'select', section: 'Findings', options: ['Rat', 'Mouse', 'Unknown'] },
+      { key: 'entry_points_found', label: 'Entry points found', type: 'text', section: 'Findings', placeholder: 'AC line gap right side, garage door corner…' },
+      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'chips', section: 'Findings', options: [
+        'Gaps under doors', 'Garage door seal gaps', 'A/C line penetrations', 'Roof returns',
+        'Soffit / fascia gaps', 'Weep holes', 'Utility penetrations', 'Vents / screens',
+        'Vegetation touching structure', 'Pet food / bird seed accessible', 'Trash / clutter',
+        'Open water source',
+      ] },
+      { key: 'interior_concern', label: 'Interior concern', type: 'select', section: 'Assessment', options: ['Yes', 'No'] },
+      { key: 'exterior_pressure', label: 'Exterior pressure', type: 'select', section: 'Assessment', options: ['Yes', 'No'] },
+      { key: 'photos_taken', label: 'Photos taken', type: 'select', section: 'Assessment', options: ['Yes', 'No'] },
+      { key: 'recommended_service', label: 'Recommended service', type: 'select', section: 'Recommendation', options: [
+        'Rodent trapping program', 'Trapping with exclusion to follow', 'Exclusion repairs',
+        'Sanitation cleanup', 'Bait station monitoring', 'No service needed at this time',
+      ] },
+      { key: 'urgency', label: 'Urgency', type: 'select', section: 'Recommendation', options: ['Routine', 'Soon', 'High'] },
     ],
   },
 
@@ -228,6 +330,45 @@ const PROJECT_TYPES = {
         'Informed of capture(s)', 'Explained current trap activity', 'Reviewed exclusion recommendation',
         'Approved follow-up visit', 'Approved exclusion quote',
       ] },
+      // Combo-key modules (owner spec §3): the rodent_trapping_* combo keys
+      // share this base checklist plus these OPTIONAL sections — fill them
+      // when the visit included exclusion or sanitation work, skip them on a
+      // pure trap check. Keys are shared with the dedicated
+      // rodent_exclusion / rodent_sanitation types so the customer copy map
+      // is written once.
+      { key: 'entry_points_addressed', label: 'Entry points sealed (combo)', type: 'chips', section: 'Exclusion module', options: [
+        'Garage door gaps', 'AC line penetration', 'Plumbing / electrical penetration',
+        'Roof return gap', 'Soffit / fascia gap', 'Vent / screen opening',
+        'Door sweep gap', 'Weep hole / open masonry gap', 'Foundation gap', 'Other',
+      ] },
+      { key: 'exclusion_materials', label: 'Materials used (combo)', type: 'chips', section: 'Exclusion module', options: [
+        'Hardware cloth', 'Rodent-resistant mesh', 'Sealant', 'Foam + mesh backing',
+        'Sheet metal', 'Door sweep / weatherstrip', 'Vent cover', 'Concrete / mortar patch', 'Other',
+      ] },
+      { key: 'remaining_concerns', label: 'Remaining access concerns (combo)', type: 'chips', section: 'Exclusion module', options: [
+        'Activity still present', 'Trapping still active', 'Area inaccessible',
+        'Structural repair needed by others', 'Tree limbs touching roof',
+        'Garage seal replacement needed', 'Customer declined repair',
+        'Moisture / sanitation concern', 'No remaining concerns observed',
+      ] },
+      { key: 'exclusion_followup_needed', label: 'Exclusion follow-up needed', type: 'select', section: 'Exclusion module', options: ['Yes', 'No'] },
+      { key: 'sanitation_areas', label: 'Areas cleaned (combo)', type: 'chips', section: 'Sanitation module', options: [
+        'Attic', 'Garage', 'Closet', 'Kitchen area', 'Under sink', 'Laundry',
+        'Storage area', 'Crawlspace', 'Exterior area', 'Other',
+      ] },
+      { key: 'contamination_level', label: 'Contamination level (combo)', type: 'select', section: 'Sanitation module', options: [
+        'Light', 'Moderate', 'Heavy', 'Severe — office review needed',
+      ] },
+      { key: 'evidence_cleaned', label: 'Evidence removed (combo)', type: 'chips', section: 'Sanitation module', options: [
+        'Droppings', 'Urine staining', 'Nesting material', 'Dead rodent / remains',
+        'Odor source', 'Contaminated insulation', 'Food debris', 'Other',
+      ] },
+      { key: 'sanitation_limitations', label: 'Sanitation limitations (combo)', type: 'chips', section: 'Sanitation module', options: [
+        'Area not fully accessible', 'Heavy storage limited cleaning',
+        'Insulation contamination remains', 'Electrical / HVAC obstruction',
+        'Customer items could not be moved', 'PPE / safety limitation', 'No limitations',
+      ] },
+      { key: 'additional_cleanup_needed', label: 'Additional cleanup needed', type: 'select', section: 'Sanitation module', options: ['Yes', 'No'] },
     ],
   },
 

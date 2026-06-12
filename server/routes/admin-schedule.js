@@ -1016,7 +1016,9 @@ async function loadProjectCompletionContextByServiceId(services) {
       // render the typed form without a registry round-trip. Null for
       // everything except cut-over specialty types.
       findingsSchema: completionProfile?.findingsType
-        ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType)
+        // serviceKey scopes combo-module sections (owner spec §3) — a pure
+        // trap check never sees the exclusion/sanitation modules.
+        ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType, { serviceKey: completionProfile.serviceKey })
         : null,
       linkedProject: linkedProjectsByServiceId.get(service.id) || null,
     }];

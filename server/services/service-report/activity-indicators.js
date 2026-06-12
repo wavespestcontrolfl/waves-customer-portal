@@ -85,6 +85,16 @@ const ACTIVITY_INDICATORS = {
     pestNoun: 'Rodent',
     derive: null,
   },
+  // Inspections set the program's baseline score (tech-set, like the rest
+  // of the rodent family). Sanitation deliberately has NO indicator —
+  // contamination is a cleanup measure, and pushing it onto rodent_activity
+  // would corrupt the program trend.
+  rodent_inspection: {
+    indicatorKey: 'rodent_activity',
+    label: 'Rodent Activity',
+    pestNoun: 'Rodent',
+    derive: null,
+  },
   wildlife_trapping: {
     indicatorKey: 'wildlife_activity',
     label: 'Wildlife Activity',
@@ -302,6 +312,23 @@ const CUSTOMER_FIELD_LABELS = {
   pre_emergent_applied: 'Pre-emergent bed treatment',
   mulch_depth_concern: 'Mulch check',
   weed_breakthrough_areas: 'Weed breakthrough areas',
+  exclusion_areas: 'Areas we worked',
+  entry_points_addressed: 'Entry points addressed',
+  exclusion_work_completed: 'Repairs completed',
+  exclusion_materials: 'Materials used',
+  remaining_concerns: 'Remaining concerns',
+  exclusion_followup_needed: 'Exclusion follow-up',
+  sanitation_areas: 'Areas we serviced',
+  contamination_level: 'Contamination level',
+  evidence_cleaned: 'What we removed & treated',
+  sanitation_work_completed: 'Work completed today',
+  sanitation_limitations: 'Service limitations',
+  additional_cleanup_needed: 'Additional cleanup',
+  interior_concern: 'Interior concern',
+  exterior_pressure: 'Exterior pressure',
+  photos_taken: 'Photos taken',
+  recommended_service: 'Recommended service',
+  urgency: 'Urgency',
 };
 
 // Registry select value → customer wording, keyed per field family. Values
@@ -324,6 +351,8 @@ const CUSTOMER_VALUE_LABELS = {
     'Roof rat': 'Roof rats',
     'Norway rat': 'Norway rats',
     'House mouse': 'House mice',
+    Rat: 'Rats',
+    Mouse: 'Mice',
     Mixed: 'Mixed species',
     Unknown: 'Species not yet confirmed',
   },
@@ -469,6 +498,39 @@ const CUSTOMER_VALUE_LABELS = {
     Yes: 'Mulch depth needs attention — see recommendations',
     No: 'Mulch depth looks good',
   },
+  // Rodent family Yes/No selects render as findings sentences, never raw
+  // booleans. Absence wording stays observational; "office review" stays
+  // internal — the customer hears "we will follow up on next steps".
+  contamination_level: {
+    Light: 'Light contamination',
+    Moderate: 'Moderate contamination',
+    Heavy: 'Heavy contamination',
+    'Severe — office review needed': 'Severe contamination — we will follow up with next steps',
+  },
+  activity_found: {
+    Yes: 'Rodent activity was found during the inspection',
+    No: 'No current rodent activity was observed',
+  },
+  interior_concern: {
+    Yes: 'Interior activity is a concern',
+    No: 'No interior concern at this time',
+  },
+  exterior_pressure: {
+    Yes: 'Exterior rodent pressure is present',
+    No: 'No notable exterior pressure observed today',
+  },
+  photos_taken: {
+    Yes: 'Photos were taken during the inspection',
+    No: 'No photos taken this visit',
+  },
+  exclusion_followup_needed: {
+    Yes: 'A return visit for additional exclusion work is needed',
+    No: 'No additional exclusion work is needed right now',
+  },
+  additional_cleanup_needed: {
+    Yes: 'An additional cleanup visit is recommended',
+    No: 'No additional cleanup needed',
+  },
 };
 
 // Required service-specific fields per type (contract §4; budget ≤4 except
@@ -483,7 +545,22 @@ const REQUIRED_FINDINGS_FIELDS = {
   cockroach: ['species', 'activity_level'],
   flea: ['evidence_level'],
   rodent_trapping: ['species'],
-  rodent_exclusion: ['species'],
+  // Owner spec §1/§2/§4 mark the full checklists required — all fast taps.
+  // Exceeds the ≤4 budget by owner instruction. Inspection adds conditional
+  // requirements (evidence + suspected type when activity was found) in
+  // validateTypedFindings.
+  rodent_exclusion: [
+    'exclusion_areas', 'entry_points_addressed', 'exclusion_work_completed',
+    'exclusion_materials', 'remaining_concerns',
+  ],
+  rodent_sanitation: [
+    'sanitation_areas', 'contamination_level', 'evidence_cleaned',
+    'sanitation_work_completed', 'sanitation_limitations',
+  ],
+  rodent_inspection: [
+    'areas_inspected', 'activity_found', 'interior_concern', 'exterior_pressure',
+    'recommended_service', 'urgency',
+  ],
   wildlife_trapping: ['target_animal'],
   bed_bug: ['evidence_level', 'treatment_method'],
   termite_inspection: ['termite_type', 'activity_status'],
@@ -575,6 +652,15 @@ const NEXT_STEP_CHIPS = {
   'Add station': 'An additional bait station is recommended for better coverage.',
   'Rodent inspection recommended': 'A full rodent inspection is recommended based on the activity observed.',
   'Customer action needed': 'Your help with the recommendations above will reduce activity before our next visit.',
+  'Return for additional exclusion': 'We will return to complete additional exclusion work.',
+  'Customer repair needed': 'A repair by your contractor is needed to fully close the noted access point.',
+  'No follow-up needed': 'No follow-up visit is needed right now.',
+  'Complete exclusion': 'Completing the exclusion repairs is the key next step.',
+  'Replace contaminated insulation': 'Replacing the contaminated insulation is recommended.',
+  'Reduce clutter': 'Reducing clutter in the noted areas will help.',
+  'Store food / pet food sealed': 'Store food and pet food in sealed containers.',
+  'Monitor odor': 'Monitor the noted odor and let us know if it persists.',
+  'Additional sanitation recommended': 'An additional sanitation visit is recommended.',
 };
 
 const MAX_NEXT_STEP_CHIPS = 4;
@@ -587,6 +673,7 @@ const REQUIRED_NEXT_STEP_TYPES = new Set([
   'rodent_trapping', 'mosquito_event', 'palm_injection', 'one_time_lawn_treatment',
   'pest_inspection', 'cockroach', 'wildlife_trapping', 'bed_bug',
   'termite_bait_station', 'rodent_bait_station', 'tree_shrub',
+  'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection',
 ]);
 
 function nextStepRequiredForType(projectType) {
@@ -626,7 +713,23 @@ const TYPE_NEXT_STEP_CHIPS = {
     'Follow-up recommended', 'Monitor activity',
   ],
   rodent_trapping: RODENT_TRAPPING_CHIPS,
-  rodent_exclusion: RODENT_FAMILY_CHIPS,
+  // Owner spec §1 follow-up list — exclusion reports end with the repair
+  // story's next action, not generic trapping steps.
+  rodent_exclusion: [
+    'Continue trapping', 'Monitor for new activity', 'Return for additional exclusion',
+    'Sanitation recommended', 'Customer repair needed', 'No follow-up needed',
+  ],
+  // Owner spec §2 recommendation list.
+  rodent_sanitation: [
+    'Continue trapping', 'Complete exclusion', 'Replace contaminated insulation',
+    'Reduce clutter', 'Store food / pet food sealed', 'Monitor odor',
+    'Additional sanitation recommended', 'No follow-up needed',
+  ],
+  // Owner spec §4 — diagnostic and sales-supportive.
+  rodent_inspection: [
+    'Treatment recommended', 'Estimate to follow', 'Follow-up recommended',
+    'Monitor activity', 'Exclusion recommended', 'Sanitation recommended', 'No action needed',
+  ],
   wildlife_trapping: [
     'Continue trapping', 'Daily trap checks underway', 'Install one-way device',
     'Exclusion after activity stops', 'Remove traps after inactivity',
@@ -878,6 +981,33 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     }
   }
 
+  // Cross-field consistency (rodent family, owner spec §§1–4): "none" chips
+  // can't ride with the findings they negate, and an inspection that found
+  // activity must say what the evidence was and what's suspected.
+  if (type === 'rodent_exclusion' || type === 'rodent_trapping') {
+    const concerns = String(values.remaining_concerns || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (concerns.includes('No remaining concerns observed') && concerns.length > 1) {
+      errors.push('"No remaining concerns observed" cannot be combined with other remaining concerns');
+    }
+  }
+  if (type === 'rodent_sanitation' || type === 'rodent_trapping') {
+    const limitations = String(values.sanitation_limitations || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (limitations.includes('No limitations') && limitations.length > 1) {
+      errors.push('"No limitations" cannot be combined with other limitations');
+    }
+  }
+  if (type === 'rodent_inspection' && enforceRequired && String(values.activity_found) === 'Yes') {
+    // Evidence with activity_found "No" stays legal — old droppings with no
+    // current activity is a real outcome; only the positive case requires
+    // the supporting detail.
+    for (const key of ['evidence_observed', 'species']) {
+      const value = values[key];
+      if (value == null || String(value).trim() === '') missing.push(key);
+    }
+  }
+
   if (enforceRequired) {
     for (const key of REQUIRED_FINDINGS_FIELDS[type] || []) {
       const value = values[key];
@@ -977,6 +1107,31 @@ function trapActivitySentence(values = {}) {
   return joined ? `We ${joined} today.` : null;
 }
 
+// Combo-key module sentences (owner spec §3): when a rodent_trapping_*
+// combo visit recorded exclusion or sanitation module work, the narrative
+// covers it after the trap sentence. Returns '' when no module was filled
+// (pure trap checks, wildlife — the module keys don't exist on wildlife).
+function rodentComboModuleSentences(values = {}) {
+  const parts = [];
+  const points = String(values.entry_points_addressed || '')
+    .split(',').map((s) => s.trim()).filter(Boolean)
+    .map((p) => (p === 'Other' ? null : p.toLowerCase())).filter(Boolean);
+  if (points.length) {
+    const materials = String(values.exclusion_materials || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .map((m) => (m === 'Other' ? null : m.toLowerCase())).filter(Boolean);
+    parts.push(`We also completed exclusion work at the ${joinPhrases(points)}${materials.length ? ` using ${joinPhrases(materials)}` : ''}.`);
+  }
+  const cleanedAreas = String(values.sanitation_areas || '')
+    .split(',').map((s) => s.trim()).filter(Boolean)
+    .map((a) => (a === 'Other' ? null : a.toLowerCase())).filter(Boolean);
+  if (cleanedAreas.length) {
+    const level = String(values.contamination_level || '').split('—')[0].trim().toLowerCase();
+    parts.push(`We also completed ${level ? `${level} ` : ''}sanitation cleanup in the ${joinPhrases(cleanedAreas)}.`);
+  }
+  return parts.join(' ');
+}
+
 // Work-chip → verb-phrase maps for the composed "what we did" sentence.
 // Only selected chips with a phrase contribute; types without an entry (or
 // with no selections) fall through to the generic fallback chain.
@@ -1020,6 +1175,34 @@ const WORK_PHRASE_FIELDS = {
       'Weed spot treatment': 'spot-treated bed weeds',
       'Soil amendment / acidifier': 'applied a soil amendment',
       'Inspection only': 'completed a full landscape inspection',
+    },
+  },
+  rodent_exclusion: {
+    field: 'exclusion_work_completed',
+    phrases: {
+      'Sealed entry point': 'sealed the noted entry points',
+      'Installed hardware cloth / mesh': 'installed rodent-resistant mesh',
+      'Installed sealant / foam / backer': 'installed sealant with mesh backing',
+      'Repaired screen / vent': 'repaired the damaged screen and vent areas',
+      'Installed door sweep / seal': 'installed door sweeps and seals',
+      'Reinforced opening': 'reinforced the vulnerable opening',
+      'Temporary seal': 'placed a temporary seal',
+      'Permanent exclusion repair': 'completed permanent exclusion repairs',
+      'Inspection only': 'completed an exclusion inspection',
+    },
+  },
+  rodent_sanitation: {
+    field: 'sanitation_work_completed',
+    phrases: {
+      'Removed droppings': 'removed droppings',
+      'Removed nesting material': 'removed nesting material',
+      'Removed dead rodent': 'removed the rodent remains',
+      'HEPA vacuum / controlled cleanup': 'completed a HEPA-controlled cleanup',
+      'Disinfected / sanitized affected areas': 'disinfected and sanitized the affected areas',
+      'Deodorized affected areas': 'deodorized the service areas',
+      'Bagged / disposed contaminated debris': 'bagged and disposed of contaminated debris',
+      'Insulation removal recommended': 'flagged contaminated insulation for removal',
+      'Limited cleanup due to access': 'completed a limited cleanup where access allowed',
     },
   },
   one_time_lawn_treatment: {
@@ -1127,7 +1310,11 @@ function buildTodaysResult({
   // produce a sentence.
   const isTrappingType = projectType === 'rodent_trapping' || projectType === 'wildlife_trapping';
   const isBaitStationType = projectType === 'termite_bait_station' || projectType === 'rodent_bait_station';
-  const whatWeDid = (isTrappingType && trapActivitySentence(values))
+  // Combo trapping visits (owner spec §3) append the exclusion/sanitation
+  // module work to the trap sentence so the narrative covers the whole stop.
+  const trapSentence = isTrappingType
+    && [trapActivitySentence(values), rodentComboModuleSentences(values)].filter(Boolean).join(' ');
+  const whatWeDid = trapSentence
     || (isBaitStationType && baitStationSentence(projectType, values))
     || composedWorkSentence(projectType, values)
     || firstSentenceFrom(
@@ -1223,6 +1410,107 @@ function buildTodaysResult({
         nextStep,
       };
     }
+  }
+
+  // Rodent exclusion (owner spec §1) — a repair story: areas, entry points,
+  // repairs/materials, remaining concerns. Headline carries the owner's
+  // approved phrasing ("reduce rodent access and help prevent re-entry" —
+  // never "rodent-proof"). Trend headlines still win on later visits.
+  if (projectType === 'rodent_exclusion' && values.exclusion_work_completed
+    && !(visitSequence > 1 && activity && activity.trendWord)) {
+    const lowerChips = (key) => String(values[key] || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .map((c) => (c === 'Other' ? null : c.toLowerCase())).filter(Boolean);
+    const areas = lowerChips('exclusion_areas');
+    const points = lowerChips('entry_points_addressed');
+    const materials = lowerChips('exclusion_materials');
+    const concerns = String(values.remaining_concerns || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const realConcerns = concerns.filter((c) => c !== 'No remaining concerns observed');
+    const sentences = [
+      areas.length
+        ? `Completed rodent exclusion work today around the ${joinPhrases(areas)}.`
+        : 'Completed rodent exclusion work today.',
+      points.length ? `Entry points addressed included the ${joinPhrases(points)}.` : null,
+      whatWeDid,
+      materials.length ? `Materials used included ${joinPhrases(materials)}.` : null,
+      realConcerns.length
+        ? `Remaining concerns: ${joinPhrases(realConcerns.map((c) => c.toLowerCase()))}.`
+        : 'No remaining concerns were observed today.',
+      nextStep,
+    ].filter(Boolean);
+    return {
+      headline: 'Exclusion repairs were completed to reduce rodent access and help prevent re-entry.',
+      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      nextStep,
+    };
+  }
+
+  // Rodent sanitation (owner spec §2) — a health/safety cleanup story with
+  // before/after clarity: areas, contamination level, what was removed,
+  // what limited the cleanup.
+  if (projectType === 'rodent_sanitation' && values.contamination_level) {
+    const lowerChips = (key) => String(values[key] || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .map((c) => (c === 'Other' ? null : c.toLowerCase())).filter(Boolean);
+    const areas = lowerChips('sanitation_areas');
+    const evidence = lowerChips('evidence_cleaned');
+    const limitations = String(values.sanitation_limitations || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .filter((c) => c !== 'No limitations');
+    const level = String(values.contamination_level).split('—')[0].trim().toLowerCase();
+    const sentences = [
+      areas.length
+        ? `Completed rodent sanitation service in the ${joinPhrases(areas)}.`
+        : 'Completed your rodent sanitation service today.',
+      `Contamination level was ${level}.`,
+      evidence.length ? `We removed and treated ${joinPhrases(evidence)}.` : null,
+      whatWeDid,
+      limitations.length
+        ? `Some areas had limitations: ${joinPhrases(limitations.map((c) => c.toLowerCase()))}.`
+        : 'No limitations were encountered during the cleanup.',
+      String(values.contamination_level).startsWith('Severe')
+        ? 'Because of the contamination level, our office will follow up with you on next steps.'
+        : null,
+      nextStep,
+    ].filter(Boolean);
+    return {
+      headline: `${level.charAt(0).toUpperCase()}${level.slice(1)} rodent contamination was cleaned and sanitized today.`,
+      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      nextStep,
+    };
+  }
+
+  // Rodent inspection (owner spec §4) — diagnostic and sales-supportive:
+  // what was checked, whether activity was found, the recommended service
+  // and its urgency.
+  if (projectType === 'rodent_inspection' && values.activity_found
+    && !(visitSequence > 1 && activity && activity.trendWord)) {
+    const areas = String(values.areas_inspected || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .map((a) => (a === 'Other' ? null : a.toLowerCase())).filter(Boolean);
+    const found = String(values.activity_found) === 'Yes';
+    const service = String(values.recommended_service || '');
+    const urgency = String(values.urgency || '');
+    const sentences = [
+      areas.length
+        ? `We inspected the ${joinPhrases(areas)}.`
+        : 'We completed a rodent inspection of the property today.',
+      values.entry_points_found
+        ? `Possible entry points were noted: ${String(values.entry_points_found).trim().replace(/\.$/, '')}.`
+        : null,
+      service && service !== 'No service needed at this time'
+        ? `Based on today's findings, we recommend ${service.charAt(0).toLowerCase()}${service.slice(1)}${urgency === 'High' ? ' — scheduling soon is recommended' : ''}.`
+        : 'No service is needed at this time based on today’s findings.',
+      nextStep,
+    ].filter(Boolean);
+    return {
+      headline: found
+        ? 'Rodent activity was found during today’s inspection.'
+        : 'No current rodent activity was observed during today’s inspection.',
+      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      nextStep,
+    };
   }
 
   // Mosquito has no 0-5 gauge (not a trend type) but the owner template
@@ -1401,27 +1689,48 @@ function buildTypedReportSnapshot({
  * dispatch jobs payload so mobile completion never blocks on a registry
  * fetch).
  */
-function findingsSchemaForType(projectType) {
+// Combo-key module sections (owner spec §3): one registry type serves the
+// rodent_trapping_* combo keys, and a module section is only SERVED to the
+// completion form when the service key actually includes that work — a pure
+// trap check never sees the exclusion/sanitation modules. Validation stays
+// permissive (module values are always legal registry fields), and callers
+// that don't know the service key (AI draft labeling) get the full list.
+const TYPE_MODULE_SECTIONS = {
+  rodent_trapping: {
+    'Exclusion module': /exclusion/,
+    'Sanitation module': /sanitation/,
+  },
+};
+
+function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
   const indicator = ACTIVITY_INDICATORS[projectType] || null;
+  const moduleRules = TYPE_MODULE_SECTIONS[projectType] || null;
   return {
     type: projectType,
     label: config.label,
     schemaVersion: SCHEMA_VERSION,
     copyMapVersion: COPY_MAP_VERSION,
-    fields: (config.findingsFields || []).map((f) => ({
-      key: f.key,
-      label: f.label,
-      type: f.type,
-      section: f.section || null,
-      options: f.options || null,
-      placeholder: f.placeholder || null,
-      required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
-      // internal fields are tech-facing compliance entries — validated and
-      // stored, but excluded from the customer-facing snapshot findings.
-      internal: !!f.internal,
-    })),
+    fields: (config.findingsFields || [])
+      .filter((f) => {
+        const rule = moduleRules && f.section ? moduleRules[f.section] : null;
+        if (!rule) return true;
+        if (!serviceKey) return true;
+        return rule.test(String(serviceKey));
+      })
+      .map((f) => ({
+        key: f.key,
+        label: f.label,
+        type: f.type,
+        section: f.section || null,
+        options: f.options || null,
+        placeholder: f.placeholder || null,
+        required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
+        // internal fields are tech-facing compliance entries — validated and
+        // stored, but excluded from the customer-facing snapshot findings.
+        internal: !!f.internal,
+      })),
     photoCategories: config.photoCategories || [],
     requiredFields: REQUIRED_FINDINGS_FIELDS[projectType] || [],
     nextStepChips: chipsForType(projectType),
