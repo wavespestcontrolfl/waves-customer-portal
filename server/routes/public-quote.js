@@ -111,17 +111,29 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
 
 // Per-application price for the wizard result screen (owner request,
 // 2026-06-12: lead with "$432/yr" wanted "$108 per application"). Only
-// derivable when exactly ONE recurring line carries per-app pricing —
-// with mixed cadences (pest 4x/yr + lawn 9x/yr) a single per-app number
-// would be wrong, so the client falls back to the annual caption.
+// derivable when the quote has exactly ONE recurring line (counted by
+// positive monthly, NOT by per-app fields — a multi-service quote where
+// only one line exposes perApp must not present that line's per-app
+// price as the whole quote's). Cadence comes from visitsPerYear (pest;
+// its `frequency` is a string like 'quarterly') or numeric `frequency`
+// (lawn exposes apps/year there and has no visitsPerYear). Anything
+// underivable falls back to the annual caption client-side.
 function derivePerApplication(estimate) {
-  const lines = (estimate?.lineItems || []).filter(
-    (item) => Number(item?.perApp) > 0 && Number(item?.visitsPerYear) > 0
+  const recurring = (estimate?.lineItems || []).filter(
+    (item) => Number(item?.monthlyAfterDiscount ?? item?.monthly) > 0
   );
-  if (lines.length !== 1) return null;
+  if (recurring.length !== 1) return null;
+  const line = recurring[0];
+  if (!(Number(line.perApp) > 0)) return null;
+  const visits = Number(line.visitsPerYear) > 0
+    ? Number(line.visitsPerYear)
+    : Number(line.frequency) > 0
+      ? Number(line.frequency)
+      : null;
+  if (!visits) return null;
   return {
-    amount: Math.round(Number(lines[0].perApp)),
-    visitsPerYear: Number(lines[0].visitsPerYear),
+    amount: Math.round(Number(line.perApp)),
+    visitsPerYear: visits,
   };
 }
 
