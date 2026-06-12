@@ -21,6 +21,7 @@ const {
   markSuggestionScheduled,
   parkThreadSuggestions,
   reopenScheduledSuggestions,
+  lockSuggestThread,
 } = require('../services/sms-suggest-mode');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -196,6 +197,12 @@ router.post('/sms', async (req, res, next) => {
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
       verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      // A supplied draft id that fails verification means the card the
+      // operator is acting on is stale — most often another operator just
+      // handled the same suggestion. Sending anyway risks a duplicate reply.
+      if (!verifiedAgentDecision) {
+        return res.status(409).json({ error: 'This Agent Review draft was just handled elsewhere — refresh the thread before sending.' });
+      }
     }
     const verifiedAgentDraft = normalizeReplyForComparison(verifiedAgentDecision?.suggested_message)
       ? verifiedAgentDecision.suggested_message
@@ -265,34 +272,41 @@ router.post('/sms', async (req, res, next) => {
     try {
       const ignoredPhoneLast10 = normalizePhoneLast10(to);
       if (ignoredPhoneLast10) {
-        const staleQuery = db('agent_decisions as ad')
-          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-          .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
-          .where('s.created_at', '<', sendStartedAt)
-          .andWhere(function byPhone() {
-            this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10])
-              .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
-          });
-        if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
-        const stale = await staleQuery.select('ad.id', 'ad.entity_id');
-        if (stale.length) {
-          // Revert only rows the guarded UPDATE actually changed: a parallel
-          // operator can send one of these suggestions between the SELECT
-          // and the UPDATE, and that draft must stay out of the judge pool.
-          const ignored = await db('agent_decisions')
-            .whereIn('id', stale.map((r) => r.id))
-            .where('status', 'pending_review')
-            .update({
-              status: 'ignored',
-              human_verdict: 'ignored',
-              correction_note: 'Staff sent their own reply from the SMS inbox.',
-              reviewed_by: req.technicianId || 'Admin',
-              reviewed_at: new Date(),
-              updated_at: new Date(),
-            })
-            .returning(['id', 'entity_id']);
-          await revertDraftsToShadow(db, ignored.map((r) => r.entity_id));
-        }
+        await db.transaction(async (trx) => {
+          // Same thread lock the drafter's publish takes: a publish that
+          // hasn't committed yet will land AFTER this sweep and re-check
+          // the (now committed) outbound in its answered guard.
+          await lockSuggestThread(trx, ignoredPhoneLast10);
+
+          const staleQuery = trx('agent_decisions as ad')
+            .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+            .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+            .where('s.created_at', '<', sendStartedAt)
+            .andWhere(function byPhone() {
+              this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10])
+                .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
+            });
+          if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
+          const stale = await staleQuery.select('ad.id', 'ad.entity_id');
+          if (stale.length) {
+            // Revert only rows the guarded UPDATE actually changed: a parallel
+            // operator can send one of these suggestions between the SELECT
+            // and the UPDATE, and that draft must stay out of the judge pool.
+            const ignored = await trx('agent_decisions')
+              .whereIn('id', stale.map((r) => r.id))
+              .where('status', 'pending_review')
+              .update({
+                status: 'ignored',
+                human_verdict: 'ignored',
+                correction_note: 'Staff sent their own reply from the SMS inbox.',
+                reviewed_by: req.technicianId || 'Admin',
+                reviewed_at: new Date(),
+                updated_at: new Date(),
+              })
+              .returning(['id', 'entity_id']);
+            await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
+          }
+        });
       }
     } catch (ignoreErr) {
       logger.warn(`[sms-suggest] failed to mark pending suggestions ignored: ${ignoreErr.message}`);
@@ -1051,6 +1065,12 @@ router.post('/schedule-sms', async (req, res, next) => {
     let scheduledAgentDecision = null;
     if (agentDecisionId && agentDraft) {
       scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      // Stale card — most often another operator just handled the same
+      // suggestion. Queueing anyway would schedule a duplicate reply with
+      // no decision linkage to resolve or cancel.
+      if (!scheduledAgentDecision) {
+        return res.status(409).json({ error: 'This Agent Review draft was just handled elsewhere — refresh the thread before scheduling.' });
+      }
     }
 
     // Queue + park in ONE transaction: the used decision AND every other
@@ -1062,6 +1082,10 @@ router.post('/schedule-sms', async (req, res, next) => {
     let row;
     try {
       row = await db.transaction(async (trx) => {
+        // Same thread lock as the drafter's publish and the post-send
+        // sweep — park + queue commit atomically with respect to both.
+        await lockSuggestThread(trx, normalizePhoneLast10(to) || to);
+
         let usedDecisionId = null;
         if (scheduledAgentDecision) {
           const parkedUsed = await markSuggestionScheduled(

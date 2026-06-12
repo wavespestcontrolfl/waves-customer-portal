@@ -47,6 +47,24 @@ const EXPIRY_HOURS = 48;
 const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const SENT_STATUSES = ['queued', 'sent', 'delivered'];
 
+const THREAD_LOCK_NS = 'sms_suggest_thread';
+
+/**
+ * One advisory xact lock per SMS thread, SHARED by every path that creates
+ * or resolves suggestions: drafter publish, the post-send ignore sweep, and
+ * the schedule park+queue transaction. Without a common lock a publish can
+ * pass its answered/in-flight guards before a staff reply commits, then
+ * insert an actionable card the staff path's sweep never saw. Keyed on the
+ * thread phone (last 10) — the identity every path has; falls back to the
+ * customer id. Releases at commit/rollback. (Two-key pattern per booking.js.)
+ */
+async function lockSuggestThread(trx, key) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [THREAD_LOCK_NS, String(key)]
+  );
+}
+
 function isEscalationIntent(intent) {
   return ESCALATION_INTENTS.has(String(intent || ''));
 }
@@ -173,18 +191,8 @@ function splitPendingSuggestions(pending, inboundAt) {
 async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion }) {
   try {
     return await db.transaction(async (trx) => {
-      // Serialize publishes per customer: two fire-and-forget drafter jobs
-      // can otherwise both pass the pending-suggestion read below before
-      // either inserts, and the composer card query (latest created_at
-      // wins) would surface whichever decision landed LAST — possibly the
-      // staler inbound's. The xact lock releases at commit/rollback, so the
-      // second publisher then sees the first one's committed row and the
-      // inbound-ordering guard works. (Same two-key pattern as booking.js.)
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['sms_suggest_publish', customerId]
-      );
-
+      // The inbound row is immutable — safe to read before the lock; the
+      // thread phone it carries IS the lock key.
       const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone');
       if (!inbound?.created_at) return null;
 
@@ -192,6 +200,12 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // sms_log row), so every guard below matches on customer_id OR the
       // thread phone — the customer's number this inbound arrived from.
       const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
+
+      // Serializes against other publishers AND the staff send/queue paths
+      // (same lock in the /sms ignore sweep and the schedule transaction):
+      // every guard below reads committed state, and anything we insert is
+      // visible to the next locked path.
+      await lockSuggestThread(trx, threadLast10 || customerId);
       const byCustomerOrThreadPhone = (phoneColumn) => function matchThread() {
         this.where({ customer_id: customerId });
         if (threadLast10) {
@@ -527,4 +541,5 @@ module.exports = {
   ignoreParkedSuggestions,
   resolveSuggestionAfterSend,
   expireStaleSuggestions,
+  lockSuggestThread,
 };
