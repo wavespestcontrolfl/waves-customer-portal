@@ -48,9 +48,19 @@ describe('sms shadow drafter — response parsing', () => {
     expect(parseShadowResponse(null)).toBeNull();
     expect(parseShadowResponse('')).toBeNull();
     expect(parseShadowResponse('no json here at all')).toBeNull();
-    expect(parseShadowResponse('{"intended_actions":[]}')).toBeNull(); // no reply
-    expect(parseShadowResponse('{"reply":"   "}')).toBeNull(); // blank reply
+    expect(parseShadowResponse('{"intended_actions":[]}')).toBeNull(); // missing reply
     expect(parseShadowResponse('{"reply": 7}')).toBeNull(); // non-string reply
+  });
+
+  test('empty reply is a valid "no reply warranted" draft', () => {
+    const parsed = parseShadowResponse(
+      '{"reply":"","intended_actions":[{"type":"none","note":"no reply warranted"}],"missing_info":null}'
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed.reply).toBe('');
+    expect(parsed.intended_actions).toEqual([{ type: 'none', note: 'no reply warranted' }]);
+    // whitespace-only normalizes to the same empty draft
+    expect(parseShadowResponse('{"reply":"   "}').reply).toBe('');
   });
 
   test('truncates oversized note and missing_info fields', () => {
@@ -73,6 +83,7 @@ describe('sms shadow drafter — prompt contract', () => {
     expect(AGENT_CONFIG.system).toContain(CUSTOMER_SMS_HOUSE_VOICE);
     expect(prompt).toContain('INTERNAL EVALUATION ONLY');
     expect(prompt).toContain('never be sent');
+    expect(prompt).toContain('no reply warranted'); // courtesy acks may draft an empty reply
   });
 
   test('user prompt carries thread, intent, and scheduling-intent caution', () => {

@@ -43,6 +43,7 @@ RULES:
 - Never make up dates, prices, or tech names — only reference facts present in the provided context. If the context doesn't contain the fact you need, say what you'd naturally say while a human checks (e.g. "let me confirm the exact time and get right back to you") and list the gap in missing_info.
 - If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.
 - Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
+- If the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
 
 Respond with ONLY a JSON object, no prose, no code fences:
 {
@@ -146,7 +147,9 @@ function parseShadowResponse(text) {
     return null;
   }
 
-  if (!parsed || typeof parsed.reply !== 'string' || !parsed.reply.trim()) return null;
+  // Empty reply is a VALID draft: "no reply warranted" (courtesy acks).
+  // Only a missing/non-string reply is unusable.
+  if (!parsed || typeof parsed.reply !== 'string') return null;
 
   const intendedActions = Array.isArray(parsed.intended_actions)
     ? parsed.intended_actions

@@ -623,19 +623,20 @@ router.post('/sms', async (req, res) => {
     if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location' && isEnabled('smsShadowDrafts')) {
       try {
         const { classifyCustomerSmsTriageIntent } = require('../services/estimate-conversion-agent');
+        // no_reply_needed messages are shadowed too (intent label kept):
+        // short confirmations like "yes" / "sounds good" classify that way
+        // from the body alone, but they're exactly where a human follows up
+        // — and knowing when NOT to reply is itself a judged class. The
+        // draft contract allows an empty reply for true courtesy acks.
         const triage = classifyCustomerSmsTriageIntent(Body, { customer });
-        if (triage?.intent === 'no_reply_needed') {
-          logger.info('[sms-shadow] courtesy acknowledgement; skipping shadow draft');
-        } else {
-          void require('../services/sms-shadow-drafter').draftShadowReply({
-            inboundMessage: Body,
-            fromPhone: From,
-            customer,
-            smsLogId: smsLogEntry?.id || null,
-            intent: triage,
-            schedulingIntent,
-          }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
-        }
+        void require('../services/sms-shadow-drafter').draftShadowReply({
+          inboundMessage: Body,
+          fromPhone: From,
+          customer,
+          smsLogId: smsLogEntry?.id || null,
+          intent: triage,
+          schedulingIntent,
+        }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
