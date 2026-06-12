@@ -54,6 +54,12 @@ const LEVEL_SELECT_SCORES = {
   Severe: 5,
 };
 
+// activity_signs chips that assert live/current termite evidence — shared by
+// the zero-state headline guard and cross-field validation so the two can
+// never drift apart. 'Previous feeding evidence' and conducive-condition
+// chips are deliberately absent: they don't contradict "None observed".
+const TERMITE_LIVE_ACTIVITY_SIGNS = ['Live termites in station', 'Mud tubing in station', 'Bait feeding'];
+
 /**
  * Per-project-type indicator config.
  *   indicatorKey  — service_activity_scores key; shared across related types
@@ -717,6 +723,36 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     }
   }
 
+  // Cross-field consistency (termite stations): the gauge derives from
+  // termite_activity ALONE, so "None observed" alongside positive evidence
+  // would persist a zero score into the shared termite trend while the
+  // findings list right below shows feeding (Codex P2). Reject the
+  // contradiction at entry — the tech resolves it on the form. The
+  // evidence-aware zero-state headline in buildTodaysResult stays as
+  // defense-in-depth for drafts and previously stored values.
+  if (type === 'termite_bait_station') {
+    const liveSigns = String(values.activity_signs || '')
+      .split(',').map((s) => s.trim())
+      .filter((s) => TERMITE_LIVE_ACTIVITY_SIGNS.includes(s));
+    const activeStations = Number(values.stations_with_activity);
+    const consumption = String(values.bait_consumption || '');
+    const evidence = [];
+    if (liveSigns.length) evidence.push(liveSigns.join(', '));
+    if (Number.isInteger(activeStations) && activeStations > 0) evidence.push('stations with termite activity');
+    if (String(values.active_station_location || '').trim()) evidence.push('an active station location');
+    if (consumption !== '' && consumption !== 'None — bait intact') evidence.push(`bait consumption "${consumption}"`);
+    if (String(values.termite_activity || '') === 'None observed' && evidence.length) {
+      errors.push(`Termite activity "None observed" contradicts the recorded evidence (${evidence.join('; ')}) — update the activity selection or remove the evidence`);
+    }
+    // Live termites are by definition active — "Previous feeding noted"
+    // (score 1) would understate them on the trend the same way.
+    if (liveSigns.includes('Live termites in station')
+      && values.termite_activity
+      && String(values.termite_activity) !== 'Active termites present') {
+      errors.push('"Live termites in station" requires termite activity "Active termites present"');
+    }
+  }
+
   if (enforceRequired) {
     for (const key of REQUIRED_FINDINGS_FIELDS[type] || []) {
       const value = values[key];
@@ -974,7 +1010,7 @@ function buildTodaysResult({
       // station location, or any feeding-level consumption.
       const liveSigns = String(values.activity_signs || '')
         .split(',').map((s) => s.trim())
-        .some((s) => ['Live termites in station', 'Mud tubing in station', 'Bait feeding'].includes(s));
+        .some((s) => TERMITE_LIVE_ACTIVITY_SIGNS.includes(s));
       const activeStations = Number(values.stations_with_activity);
       const consumption = String(values.bait_consumption || '');
       const contradictsZero = liveSigns
@@ -1233,8 +1269,12 @@ const BANNED_CUSTOMER_COPY = [
   /\b(?:rodent|wildlife|pest|bug|mosquito|critter|animal)[\s-]?proof/i,
   // Owner rule (bait stations): absence claims are scoped to the accessible
   // stations inspected today — a property-wide "no termites" claim is never
-  // supportable from a station check.
-  /\bno termites? (?:on|at) (?:the |this |your )?(?:property|home|house)\b/i,
+  // supportable from a station check. Catches any same-sentence phrasing of
+  // "no … termites … on/at the property" ("No termites were found on the
+  // property", "no termite activity at your home"), not just the adjacent
+  // shape. The tempered gaps refuse to cross "station(s)" so legitimately
+  // scoped copy ("no feeding in the stations on your property") stays legal.
+  /\bno\b(?:(?!\bstations?\b)[^.!?]){0,40}?\btermites?\b(?:(?!\bstations?\b)[^.!?]){0,80}?\b(?:on|at|in|around|across|throughout)\s+(?:the\s+|this\s+|your\s+)?(?:property|home|house|premises|structure)\b/i,
 ];
 
 function findBannedCustomerCopy(text) {

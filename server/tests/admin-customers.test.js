@@ -8,12 +8,14 @@ const {
   compactServiceContactSlots,
   customerSearchTerms,
   hasMembership,
+  indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
   scheduleLinesFromEstimate,
+  serviceCatalogMatch,
 } = adminCustomersRoute._private;
 
 describe('admin customers route helpers', () => {
@@ -266,6 +268,31 @@ describe('admin customers route helpers', () => {
     expect(isSchedulableOneTimeEstimateLine({ service: 'bed_bug', quoteRequired: true })).toBe(false);
     expect(isSchedulableOneTimeEstimateLine({ label: 'Membership setup fee', amount: 99 })).toBe(false);
     expect(isSchedulableOneTimeEstimateLine({ service: 'termite_bait', label: 'Termite bait installation', amount: 499 })).toBe(true);
+  });
+
+  test('rodent bait estimate lines route to the quarterly profile-backed service (Codex P2)', () => {
+    const serviceIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'rodent_bait_quarterly', name: 'Quarterly Rodent Bait Station Service', short_name: 'Rodent Bait', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 },
+      { id: 2, service_key: 'rodent_monitoring', name: 'Rodent Monitoring (Monthly)', short_name: 'Rodent Monitor', billing_type: 'recurring', frequency: 'monthly', visits_per_year: 12 },
+      { id: 3, service_key: 'termite_bait', name: 'Termite Bait System', short_name: 'Termite Bait' },
+    ]);
+
+    // Keyed lines and label-only lines both land on the quarterly service so
+    // completion resolves the typed rodent_bait_station profile.
+    expect(serviceCatalogMatch({ service: 'rodent_bait' }, serviceIndex)?.service_key).toBe('rodent_bait_quarterly');
+    expect(serviceCatalogMatch({ name: 'Rodent Bait Stations' }, serviceIndex)?.service_key).toBe('rodent_bait_quarterly');
+    // Explicit monthly monitoring text keeps the monthly service.
+    expect(serviceCatalogMatch({ name: 'Monthly rodent monitoring' }, serviceIndex)?.service_key).toBe('rodent_monitoring');
+    // Bare "bait station" text no longer satisfies the termite pick — only
+    // genuinely termite-worded lines do.
+    expect(serviceCatalogMatch({ name: 'Termite bait stations' }, serviceIndex)?.service_key).toBe('termite_bait');
+  });
+
+  test('rodent bait falls back to monthly monitoring when the catalog lacks the quarterly row', () => {
+    const legacyIndex = indexServicesForSchedule([
+      { id: 2, service_key: 'rodent_monitoring', name: 'Rodent Monitoring (Monthly)', short_name: 'Rodent Monitor' },
+    ]);
+    expect(serviceCatalogMatch({ service: 'rodent_bait' }, legacyIndex)?.service_key).toBe('rodent_monitoring');
   });
 
   test('does not create fallback schedule lines from billing-only estimate rows', () => {

@@ -88,6 +88,15 @@ describe('owner risk wording', () => {
     expect(findBannedCustomerCopy('No termite activity was observed in the accessible bait stations during today’s inspection.')).toEqual([]);
   });
 
+  test('broader property-wide absence phrasings are caught too (Codex P2)', () => {
+    expect(findBannedCustomerCopy('No termites were found on the property.')).not.toEqual([]);
+    expect(findBannedCustomerCopy('No termite activity on the property.')).not.toEqual([]);
+    expect(findBannedCustomerCopy('We saw no signs of termites at your home.')).not.toEqual([]);
+    expect(findBannedCustomerCopy('No evidence of termite activity throughout the home today.')).not.toEqual([]);
+    // Station-scoped sentences stay legal even when they name the property.
+    expect(findBannedCustomerCopy('No termite feeding was observed in the stations on your property.')).toEqual([]);
+  });
+
   test('termite zero state scopes to accessible stations', () => {
     const result = buildTodaysResult({
       projectType: 'termite_bait_station',
@@ -249,6 +258,70 @@ describe('validation', () => {
     expect(result.ok).toBe(false);
     expect(result.errors.join(' ')).toMatch(/stations_checked/);
     expect(result.errors.join(' ')).toMatch(/Station vaporized/);
+  });
+
+  test('termite "None observed" with positive evidence is rejected (Codex P2)', () => {
+    // The gauge derives from termite_activity alone — these combos would
+    // persist a zero score into the shared termite trend while the findings
+    // list shows feeding. Each evidence field trips the contradiction alone.
+    const base = { stations_checked: '18', termite_activity: 'None observed' };
+    for (const extra of [
+      { bait_consumption: 'Moderate feeding' },
+      { bait_consumption: 'None — bait intact', stations_with_activity: '2' },
+      { bait_consumption: 'None — bait intact', active_station_location: 'Station #7, rear wall' },
+      { bait_consumption: 'None — bait intact', activity_signs: 'Bait feeding' },
+    ]) {
+      const result = validateTypedFindings({
+        type: 'termite_bait_station',
+        values: { ...base, ...extra },
+        expectedType: 'termite_bait_station',
+        enforceRequired: true,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.join(' ')).toMatch(/None observed/);
+    }
+    // Coherent zero state passes: bait intact + non-live signs only.
+    const clean = validateTypedFindings({
+      type: 'termite_bait_station',
+      values: {
+        ...base,
+        bait_consumption: 'None — bait intact',
+        activity_signs: 'Previous feeding evidence, Favorable moisture / soil conditions',
+      },
+      expectedType: 'termite_bait_station',
+      enforceRequired: true,
+    });
+    expect(clean.ok).toBe(true);
+  });
+
+  test('live termites require the "Active termites present" selection', () => {
+    const understated = validateTypedFindings({
+      type: 'termite_bait_station',
+      values: {
+        stations_checked: '18',
+        termite_activity: 'Previous feeding noted',
+        bait_consumption: 'Light feeding',
+        activity_signs: 'Live termites in station',
+      },
+      expectedType: 'termite_bait_station',
+      enforceRequired: true,
+    });
+    expect(understated.ok).toBe(false);
+    expect(understated.errors.join(' ')).toMatch(/Active termites present/);
+
+    const active = validateTypedFindings({
+      type: 'termite_bait_station',
+      values: {
+        stations_checked: '18',
+        termite_activity: 'Active termites present',
+        bait_consumption: 'Heavy feeding',
+        activity_signs: 'Live termites in station',
+        stations_with_activity: '1',
+      },
+      expectedType: 'termite_bait_station',
+      enforceRequired: true,
+    });
+    expect(active.ok).toBe(true);
   });
 
   test('snapshot includes derived gauge and customer value labels', () => {
