@@ -109,6 +109,15 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
   };
 }
 
+// Same-phone wizard re-runs may refresh ONLY the wizard's own open draft.
+// Estimates from any other source (admin/tech/lead automation) or already
+// promoted past draft keep the duplicate hard-block.
+function shouldRefreshWizardDraft(duplicateBlock) {
+  return !!duplicateBlock
+    && duplicateBlock.existingSource === 'quote_wizard'
+    && duplicateBlock.existingStatus === 'draft';
+}
+
 function normalizePublicQuotePestFrequency(value) {
   const raw = String(value || '')
     .trim()
@@ -731,7 +740,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
           const duplicateBlock = await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx });
           if (duplicateBlock) {
-            logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
+            // A wizard re-run by the same phone lands here with a NEW lead
+            // id (the lead_id-keyed lookup above only matches re-submits of
+            // the same lead). If the open estimate is the wizard's own
+            // draft, refresh it with this run instead of discarding it —
+            // otherwise the pipeline keeps the stale draft (e.g. a
+            // commercial divert) and silently loses the newer priced quote
+            // (owner-hit, 2026-06-12). Anything else — admin/tech estimate,
+            // or a wizard draft already promoted to sent/viewed — keeps the
+            // hard block so wizard data never clobbers a working estimate.
+            if (shouldRefreshWizardDraft(duplicateBlock)) {
+              await trx('estimates')
+                .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
+                .update({ ...estFields, updated_at: new Date() });
+              logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
+            } else {
+              logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
+            }
           } else {
             await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' });
           }
@@ -1080,4 +1105,5 @@ module.exports._internals = {
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
+  shouldRefreshWizardDraft,
 };
