@@ -129,7 +129,7 @@ INTRO: greeting "Hey there!" energy — NEVER include a name or name placeholder
 
 HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep). Max ~90 words. Genuinely useful, not salesy — the brand sell in this newsletter is ZERO; this tip is the only Waves-adjacent content and it must stand on its own. Voice it like the themed issues: **bold the facts**, _italicize the jokes_, anthropomorphize the pest/plant when it lands ("that mosquito keeping you up at night? Probably a mom-to-be"), urgency biological/seasonal, never commercial. May end with a "Hot tip:" one-liner.
 
-CLOSING: closingText = 1-2 short paragraphs that CALL BACK to this issue's actual events in an absurd triad ("Whether you end up juggling pineapples, dancing to swamp funk, or sobbing quietly to Schubert — we fully support your weekend choices."). closingChecklist: 3-4 short ✔️-style reminders mixing practical + absurd ("Hydrate like it's your job", "Don't underestimate the power of a funnel cake").
+CLOSING: closingText = 1-2 short paragraphs that CALL BACK to this issue's actual events in an absurd triad ("Whether you end up juggling pineapples, dancing to swamp funk, or sobbing quietly to Schubert — we fully support your weekend choices."). closingChecklist: 3-4 short ✔️-style reminders mixing practical + absurd ("Hydrate like it's your job", "Don't underestimate the power of a funnel cake"). Do NOT include the ✔️ itself in the items — the renderer adds it.
 
 SIGN-OFF: "${voice.signoff}"
 
@@ -641,6 +641,18 @@ function psBodyText(text) {
   return String(text || '').replace(/^\s*(?:p\.\s?s\.?|ps[.:])[\s:,.—–-]*/i, '').trim();
 }
 
+// The renderer prepends the "✔️ " marker to checklist items, so strip any
+// leading checkmark the model writes anyway — items never double
+// ("✔️ ✔️ ..." shipped once). The prompt's "✔️-style reminders" wording
+// invites the prefix, and older persisted drafts still carry it. Only
+// checkmark-genre emoji are stripped (unlike plainBulletText): a checklist
+// item legitimately opening with any other emoji is content, not a marker.
+function checklistItemText(text) {
+  // ✅ U+2705, ✓ U+2713, ✔ U+2714, ☑ U+2611 — each optionally followed by
+  // the emoji variation selector (U+FE0F), repeated ("✔️ ✔️ item" strips fully).
+  return String(text || '').replace(/^\s*(?:[\u2705\u2713\u2714\u2611]\uFE0F?\s*)+/, '').trim();
+}
+
 // Exact inverse of escapeHtml, for deriving the plain-text part from the
 // assembled HTML. Text content in the body only ever passes through
 // escapeHtml/markdownToHtml, so after tags are stripped these five
@@ -1051,7 +1063,7 @@ async function assembleBeehiivNewsletter(draft) {
     // ✔️ checklist — practical + absurd reminders (Beehiiv outro device).
     if (Array.isArray(draft.closingChecklist) && draft.closingChecklist.length) {
       const items = draft.closingChecklist.slice(0, 5).map((item) =>
-        `<li style="margin:0 0 6px 0;font-size:14px;line-height:1.6;">✔️ ${markdownToHtml(item)}</li>`
+        `<li style="margin:0 0 6px 0;font-size:14px;line-height:1.6;">✔️ ${markdownToHtml(checklistItemText(item))}</li>`
       ).join('\n');
       parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${items}</ul>`);
     }
@@ -1385,4 +1397,6 @@ module.exports = {
   // P.S. label-doubling guard + plain-text entity decode (escapeHtml inverse)
   psBodyText,
   decodeEscapedEntities,
+  // ✔️ checklist marker-doubling guard (same genre as psBodyText)
+  checklistItemText,
 };
