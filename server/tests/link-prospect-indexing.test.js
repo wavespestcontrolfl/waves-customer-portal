@@ -38,11 +38,12 @@ const rawOf = (p) => (p && p.quality_signals && p.quality_signals.__raw) || '';
 // The atomic claim is the only write that SETS omega_inflight.
 const claimUpdate = () => updates.find((p) => rawOf(p).includes("'{omega_inflight}'"));
 // Result writes touch only omega_* keys on the live column via jsonb_set/delete.
-const successWrite = () => updates.find((p) => rawOf(p).includes("'{omega_submitted}'"));
+const successWrite = () => updates.find((p) => rawOf(p).includes("'{omega_submitted_url}'"));
 const failureWrite = () => updates.find((p) => rawOf(p).includes("'{omega_attempts}'"));
 const releaseWrite = () => updates.find((p) => rawOf(p) === "quality_signals - 'omega_inflight'");
 
 const NOW = new Date('2026-06-12T08:00:00Z');
+const URL = 'https://showmysites.com/x/';
 const base = { id: 'p1', status: 'placed', indexing_status: 'not_checked', target_domain: 'showmysites.com', quality_signals: null };
 
 beforeEach(() => { jest.clearAllMocks(); isEnabled.mockReturnValue(true); });
@@ -57,18 +58,18 @@ describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () 
     expect(updates).toHaveLength(0);
   });
 
-  test('claims then submits a dofollow link and marks omega_submitted on success', async () => {
+  test('claims then submits a dofollow link and records the submitted URL on success', async () => {
     wireDb();
     omega.submit.mockResolvedValue({ ok: true, status: 200 });
-    const out = await pushForIndexing(base, 'https://showmysites.com/x/', true, NOW);
+    const out = await pushForIndexing(base, URL, true, NOW);
     expect(out).toBe(true);
     expect(claimUpdate()).toBeTruthy(); // atomic claim happened before the call
-    expect(omega.submit).toHaveBeenCalledWith('showmysites.com', ['https://showmysites.com/x/']);
+    expect(omega.submit).toHaveBeenCalledWith('showmysites.com', [URL]);
     const w = successWrite();
     expect(w).toBeTruthy();
-    // stamps omega_submitted with NOW and clears attempts/error/inflight, all via
-    // jsonb_set/delete on the live column (no snapshot clobber).
-    expect(w.quality_signals.bindings).toContain(NOW.toISOString());
+    // records omega_submitted_url = the exact URL and clears per-URL attempt/error/
+    // inflight keys, all via jsonb_set/delete on the live column (no snapshot clobber).
+    expect(w.quality_signals.bindings).toContain(URL);
     expect(w.quality_signals.__raw).toMatch(/- 'omega_attempts'/);
     expect(w.quality_signals.__raw).toMatch(/- 'omega_inflight'/);
     expect(failureWrite()).toBeUndefined();
@@ -99,31 +100,52 @@ describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () 
     expect(omega.submit).not.toHaveBeenCalled();
   });
 
-  test('a failed submit does NOT set omega_submitted — it stays retryable', async () => {
+  test('a failed submit does NOT record omega_submitted_url — it stays retryable', async () => {
     wireDb();
     omega.submit.mockResolvedValue({ ok: false, error: 'boom' });
-    const out = await pushForIndexing(base, 'https://showmysites.com/x/', true, NOW);
+    const out = await pushForIndexing(base, URL, true, NOW);
     expect(out).toBe(false);
-    expect(successWrite()).toBeUndefined(); // <-- the P1 fix: never marks submitted
+    expect(successWrite()).toBeUndefined(); // never marks the URL submitted
     const w = failureWrite();
     expect(w).toBeTruthy();
-    expect(w.quality_signals.bindings).toEqual([1, 'boom']); // attempts=1, error
+    expect(w.quality_signals.bindings).toEqual([1, URL, 'boom']); // attempts, url, error
     expect(w.quality_signals.__raw).toMatch(/- 'omega_inflight'/); // claim released
   });
 
-  test('already-submitted link is never re-pushed (no claim, no call)', async () => {
+  test('the SAME already-submitted URL is never re-pushed (no claim, no call)', async () => {
     wireDb();
-    const p = { ...base, quality_signals: { omega_submitted: '2026-06-01T00:00:00Z' } };
-    const out = await pushForIndexing(p, 'https://showmysites.com/x/', true, NOW);
+    const p = { ...base, quality_signals: { omega_submitted_url: URL } };
+    const out = await pushForIndexing(p, URL, true, NOW);
     expect(out).toBe(false);
     expect(omega.submit).not.toHaveBeenCalled();
     expect(updates).toHaveLength(0);
   });
 
-  test('stops retrying after the attempt cap (no claim, no call)', async () => {
+  test('a MOVED URL is submitted even though the old URL was indexed (URL-scoped dedupe)', async () => {
     wireDb();
-    const p = { ...base, quality_signals: { omega_attempts: 5 } };
-    const out = await pushForIndexing(p, 'https://showmysites.com/x/', true, NOW);
+    omega.submit.mockResolvedValue({ ok: true });
+    const p = { ...base, quality_signals: { omega_submitted_url: 'https://showmysites.com/OLD/' } };
+    const movedUrl = 'https://showmysites.com/NEW/';
+    const out = await pushForIndexing(p, movedUrl, true, NOW);
+    expect(out).toBe(true);
+    expect(omega.submit).toHaveBeenCalledWith('showmysites.com', [movedUrl]);
+    expect(successWrite().quality_signals.bindings).toContain(movedUrl);
+  });
+
+  test('attempt cap is per-URL: a moved URL resets the budget', async () => {
+    wireDb();
+    omega.submit.mockResolvedValue({ ok: true });
+    // 5 failures recorded against the OLD url; the new url should NOT be capped.
+    const p = { ...base, quality_signals: { omega_attempts: 5, omega_attempt_url: 'https://showmysites.com/OLD/' } };
+    const out = await pushForIndexing(p, 'https://showmysites.com/NEW/', true, NOW);
+    expect(out).toBe(true);
+    expect(omega.submit).toHaveBeenCalled();
+  });
+
+  test('stops retrying after the cap for the SAME URL (no claim, no call)', async () => {
+    wireDb();
+    const p = { ...base, quality_signals: { omega_attempts: 5, omega_attempt_url: URL } };
+    const out = await pushForIndexing(p, URL, true, NOW);
     expect(out).toBe(false);
     expect(omega.submit).not.toHaveBeenCalled();
   });
@@ -131,7 +153,7 @@ describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () 
   test('skipped (no API key) releases the claim and burns no attempt', async () => {
     wireDb();
     omega.submit.mockResolvedValue({ ok: false, skipped: true, error: 'OMEGA_INDEXER_API_KEY not set' });
-    const out = await pushForIndexing(base, 'https://showmysites.com/x/', true, NOW);
+    const out = await pushForIndexing(base, URL, true, NOW);
     expect(out).toBe(false);
     expect(omega.submit).toHaveBeenCalledTimes(1);
     // no success/failure write; just a raw inflight-release update

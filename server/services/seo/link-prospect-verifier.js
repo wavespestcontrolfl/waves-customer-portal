@@ -129,14 +129,20 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
   if (!liveUrl || isDofollow === false) return false;
   if (prospect.status === 'indexed' || prospect.indexing_status === 'indexed') return false;
   const quality = parseQuality(prospect.quality_signals);
-  if (quality.omega_submitted) return false; // already accepted — never re-push
-  if ((quality.omega_attempts || 0) >= OMEGA_MAX_ATTEMPTS) return false;
+  // Dedupe is URL-scoped, not row-scoped: if the backlink moved to a new URL
+  // (discovered by the domain reconcile), the new URL must still be indexed even
+  // though the OLD one already was.
+  if (quality.omega_submitted_url === liveUrl) return false; // this exact URL already accepted
+  // Failed-attempt budget is likewise per-URL — a moved URL starts fresh.
+  const priorAttempts = quality.omega_attempt_url === liveUrl ? (quality.omega_attempts || 0) : 0;
+  if (priorAttempts >= OMEGA_MAX_ATTEMPTS) return false;
 
-  // Atomic claim: win only if not submitted and not currently (freshly) in-flight.
+  // Atomic claim: win only if THIS url isn't already submitted and not currently
+  // (freshly) in-flight.
   const inflightCutoff = new Date(now.getTime() - OMEGA_INFLIGHT_TTL_MS).toISOString();
   const claimed = await db('seo_link_prospects')
     .where({ id: prospect.id })
-    .whereRaw("(quality_signals->>'omega_submitted') IS NULL")
+    .whereRaw("(quality_signals->>'omega_submitted_url') IS DISTINCT FROM ?", [liveUrl])
     .whereRaw("COALESCE((quality_signals->>'omega_inflight')::timestamptz, to_timestamp(0)) < ?", [inflightCutoff])
     .update({
       quality_signals: db.raw(
@@ -145,7 +151,7 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
       ),
       updated_at: new Date(),
     });
-  if (!claimed) return false; // another run owns it, or it was just submitted
+  if (!claimed) return false; // another run owns it, or this URL was just submitted
 
   const res = await omega.submit(prospect.target_domain, [liveUrl]);
 
@@ -162,22 +168,23 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
   }
 
   if (res && res.ok === true) {
+    // Record the exact URL we indexed; clear the per-URL attempt/error/in-flight keys.
     await db('seo_link_prospects').where({ id: prospect.id }).update({
       quality_signals: db.raw(
-        "jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{omega_submitted}', to_jsonb(?::text), true) - 'omega_attempts' - 'omega_error' - 'omega_inflight'",
-        [now.toISOString()],
+        "jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{omega_submitted_url}', to_jsonb(?::text), true) - 'omega_attempts' - 'omega_attempt_url' - 'omega_error' - 'omega_inflight'",
+        [liveUrl],
       ),
       updated_at: new Date(),
     });
     return true;
   }
 
-  const attempts = (quality.omega_attempts || 0) + 1; // safe: we hold the claim
+  const attempts = priorAttempts + 1; // safe: we hold the claim
   const errStr = (res && res.error) || `status ${res && res.status}`;
   await db('seo_link_prospects').where({ id: prospect.id }).update({
     quality_signals: db.raw(
-      "jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{omega_attempts}', to_jsonb(?::int), true), '{omega_error}', to_jsonb(?::text), true) - 'omega_inflight'",
-      [attempts, errStr],
+      "jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{omega_attempts}', to_jsonb(?::int), true), '{omega_attempt_url}', to_jsonb(?::text), true), '{omega_error}', to_jsonb(?::text), true) - 'omega_inflight'",
+      [attempts, liveUrl, errStr],
     ),
     updated_at: new Date(),
   });
