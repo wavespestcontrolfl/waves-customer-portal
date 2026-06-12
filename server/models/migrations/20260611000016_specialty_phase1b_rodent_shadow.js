@@ -33,6 +33,7 @@
 
 const KEY = 'rodent_trapping';
 const PROJECT_TYPE = 'rodent_trapping';
+const ACCEPTED_TYPES = [PROJECT_TYPE, 'rodent_exclusion'];
 const MARKER_RE = / ?\[phase1b_action=[^\]]*\]/;
 
 function withMarker(notes, action) {
@@ -53,7 +54,7 @@ exports.up = async function up(knex) {
     return;
   }
 
-  if (row && row.completion_mode === 'service_report' && row.project_type === PROJECT_TYPE) {
+  if (row && row.completion_mode === 'service_report' && ACCEPTED_TYPES.includes(row.project_type)) {
     if (row.delivery_mode !== 'internal_only') {
       // Record the prior delivery_mode so down() can restore exactly it.
       await knex('service_completion_profiles')
@@ -70,7 +71,7 @@ exports.up = async function up(knex) {
     return;
   }
 
-  if (row && row.completion_mode === 'project_required' && row.project_type === PROJECT_TYPE) {
+  if (row && row.completion_mode === 'project_required' && ACCEPTED_TYPES.includes(row.project_type)) {
     await knex('service_completion_profiles')
       .where({ service_key: KEY })
       .update({
