@@ -1168,13 +1168,55 @@ function initScheduledJobs() {
             });
           }
         } catch (err) {
-          await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: new Date() });
           logger.error(`[scheduled-sms] Failed: ${err.message}`);
-          const failedMeta = await readFreshMeta().catch(() => ({}));
-          await require('./sms-suggest-mode').reopenScheduledSuggestions({
-            decisionIds: [failedMeta.agent_decision_id, ...(Array.isArray(failedMeta.parked_decision_ids) ? failedMeta.parked_decision_ids : [])],
-            reason: 'Scheduled send failed — suggestion reopened.',
-          });
+          try {
+            // Ambiguous failure: Twilio may have ACCEPTED before the
+            // exception (e.g. the queued-row update threw). A provider row
+            // tagged with this row's id proves the send — settle as sent
+            // and resolve the decisions; reopening here would resurface a
+            // card on an answered thread and invite a duplicate reply.
+            const providerRow = await db('sms_log')
+              .where({ direction: 'outbound' })
+              .whereIn('status', ['queued', 'sent', 'delivered'])
+              .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(msg.id)])
+              .first('id');
+            const failedAt = new Date();
+            if (providerRow) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'sent',
+                created_at: failedAt,
+                updated_at: failedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
+              });
+              const recoveredMeta = await readFreshMeta();
+              const suggest = require('./sms-suggest-mode');
+              if (recoveredMeta.agent_decision_id) {
+                await suggest.resolveSuggestionAfterSend({
+                  decisionId: recoveredMeta.agent_decision_id,
+                  sentBody: msg.message_body,
+                  reviewedBy: msg.admin_user_id || 'Admin',
+                });
+              }
+              if (Array.isArray(recoveredMeta.parked_decision_ids) && recoveredMeta.parked_decision_ids.length) {
+                await suggest.ignoreParkedSuggestions({
+                  decisionIds: recoveredMeta.parked_decision_ids,
+                  reviewedBy: msg.admin_user_id || 'Admin',
+                });
+              }
+              logger.warn(`[scheduled-sms] Settled ${msg.id} as sent after post-accept error`);
+            } else {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: failedAt });
+              const failedMeta = await readFreshMeta().catch(() => ({}));
+              await require('./sms-suggest-mode').reopenScheduledSuggestions({
+                decisionIds: [failedMeta.agent_decision_id, ...(Array.isArray(failedMeta.parked_decision_ids) ? failedMeta.parked_decision_ids : [])],
+                reason: 'Scheduled send failed — suggestion reopened.',
+              });
+            }
+          } catch (recoverErr) {
+            // Leave the row in 'sending' — recoverStaleScheduledSmsClaims
+            // settles or retries it with the same provider-row proof.
+            logger.error(`[scheduled-sms] Post-failure recovery errored for ${msg.id}: ${recoverErr.message}`);
+          }
         }
       }
     } catch (err) {
