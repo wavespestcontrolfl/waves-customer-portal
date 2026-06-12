@@ -227,8 +227,19 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     if (!primaryPattern || !companionPattern || primaryPattern !== companionPattern) continue;
     // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
     // are coarse, so explicit visit counts are the cadence truth when known.
-    const primaryVisits = visitsPerYearForRecurringService(primary);
-    const companionVisits = visitsPerYearForRecurringService(companion);
+    // A count that CONTRADICTS the line's resolved cadence is stale quote
+    // debris — it neither blocks nor rides (an accepted quarterly plan with
+    // a stale 12-visit pest line must still combine — pre-push P1).
+    const primaryVisitsRaw = visitsPerYearForRecurringService(primary);
+    const companionVisitsRaw = visitsPerYearForRecurringService(companion);
+    const primaryVisits = primaryVisitsRaw
+      && RecurringAppointmentSeeder.patternFromVisitsPerYear(primaryVisitsRaw) === primaryPattern
+      ? primaryVisitsRaw
+      : null;
+    const companionVisits = companionVisitsRaw
+      && RecurringAppointmentSeeder.patternFromVisitsPerYear(companionVisitsRaw) === companionPattern
+      ? companionVisitsRaw
+      : null;
     if (primaryVisits && companionVisits && primaryVisits !== companionVisits) continue;
     if (route.requireVisitsMatch && !(primaryVisits && companionVisits)) continue;
     // Remove combined lines from remaining (higher index first so the lower
