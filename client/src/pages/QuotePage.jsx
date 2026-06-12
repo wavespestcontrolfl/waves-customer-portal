@@ -718,8 +718,13 @@ export default function QuotePage({ serviceSlug = '' }) {
       if (!r.ok) throw new Error(d.error || 'Could not add to your plan.');
       // Merge server's canonical service_interest so the result screen reflects
       // the plan the customer just confirmed, not the pre-upsell snapshot.
+      // The add-on was never priced into the original calculation, so the
+      // single-service per_application caption no longer describes the full
+      // plan — drop it and let the caption fall back to the annual line.
       if (d.service_interest) {
-        setResult(prev => prev ? { ...prev, service_interest: d.service_interest } : prev);
+        setResult(prev => prev
+          ? { ...prev, service_interest: d.service_interest, per_application: null, visits_per_year: null }
+          : prev);
       }
       setStage('result');
     } catch (e) {
