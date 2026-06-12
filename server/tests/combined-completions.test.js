@@ -134,6 +134,40 @@ describe('serializeProfile companion parsing', () => {
     ]);
   });
 
+  test('duplicate companion types keep only the first entry (Codex P2)', () => {
+    // Two entries for one type would ship two schemas for the same section;
+    // the client submits both and /complete 409s companion_duplicate_type on
+    // every attempt — admin-mutable JSONB must degrade fail-safe instead of
+    // stranding the tech until the row is hand-fixed.
+    const profile = serializeProfile({
+      service_key: 'lawn_tree_shrub_combo',
+      completion_mode: 'service_report',
+      active: true,
+      companion_types: [
+        { type: 'tree_shrub', delivery: 'auto_send' },
+        { type: 'tree_shrub', delivery: 'internal_only' },
+        { type: 'rodent_bait_station', delivery: 'internal_only' },
+      ],
+    });
+    expect(profile.companions).toEqual([
+      { type: 'tree_shrub', delivery: 'auto_send' },
+      { type: 'rodent_bait_station', delivery: 'internal_only' },
+    ]);
+  });
+
+  test('a disabled entry claims its type — a stale duplicate cannot resurrect the section', () => {
+    const profile = serializeProfile({
+      service_key: 'k',
+      completion_mode: 'service_report',
+      active: true,
+      companion_types: [
+        { type: 'termite_bait_station', delivery: 'disabled' },
+        { type: 'termite_bait_station', delivery: 'auto_send' },
+      ],
+    });
+    expect(profile.companions).toEqual([]);
+  });
+
   test('non-array / garbage companion_types degrade to []', () => {
     for (const garbage of [42, 'not json {', { type: 'termite_bait_station' }, true]) {
       const profile = serializeProfile({

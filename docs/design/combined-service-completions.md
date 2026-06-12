@@ -23,7 +23,10 @@ companion below it. Billing, scheduling, and the primary flow are untouched.
   entries with an unknown typed findings type are dropped; missing/invalid
   delivery coerces to `internal_only` (never accidentally customer-facing);
   an entry duplicating the profile's own `findingsType` is dropped; `disabled`
-  entries are dropped at serialization (section fully off).
+  entries are dropped at serialization (section fully off); duplicate
+  companion types are dropped (first entry wins — two schemas for one type
+  would strand /complete on `companion_duplicate_type`; a `disabled` entry
+  claims its type so a stale duplicate can't resurrect it).
 
 ## Delivery semantics (the shadow rule)
 
@@ -82,6 +85,11 @@ New payload field `companionFindings`:
   reusing the existing TodaysResultCard / TypedFindingsCard / ActivityCard
   with the companion snapshot. Internal-only sections render the existing
   internal-review treatment and only for staff viewers.
+- Staff reads never count as customer engagement: the /data route skips
+  `report_viewed_at` + activity logging when the staff JWT resolves, and the
+  payload carries `staffViewer: true` so the client posts NO interaction
+  events for that token (the /events endpoint is unauthenticated — the gate
+  has to ride the payload).
 - PDF renders the customer view of the same page — no separate work.
 
 ## Completion panel

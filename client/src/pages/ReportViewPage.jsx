@@ -42,6 +42,9 @@ const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
 const PRESSURE_INDEX_DISPLAY_FLOOR = 0.3;
 const DEFAULT_PORTAL_DESCRIPTION = 'Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service.';
 const sentReportEvents = new Set();
+// Tokens whose /data payload came back flagged staffViewer: trackReportEvent
+// drops every event for them so staff QA never pollutes customer analytics.
+const staffViewTokens = new Set();
 const REVIEW_LOCATIONS = [
   {
     key: 'parrish',
@@ -435,6 +438,11 @@ function positiveNumber(value) {
 
 function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
+  // Staff reads (data payload flagged staffViewer — the /data fetch carried
+  // the portal JWT) post NO interaction events: this endpoint is
+  // unauthenticated, so a staff QA pass would otherwise record as customer
+  // analytics (report_viewed and every tap after it).
+  if (staffViewTokens.has(token)) return;
   const key = `${token}:${eventName}:${JSON.stringify(metadata)}`;
   if (sentReportEvents.has(key)) return;
   sentReportEvents.add(key);
@@ -7435,6 +7443,9 @@ export default function ReportViewPage() {
     })
       .then((r) => r.json())
       .then((d) => {
+        // Must register BEFORE setData: the view-event effect fires on first
+        // render of the report, and a staff read may never post events.
+        if (d && d.staffViewer) staffViewTokens.add(token);
         if (!cancelled) setData(d);
       })
       .catch(() => {

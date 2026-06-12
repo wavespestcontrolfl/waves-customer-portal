@@ -229,10 +229,16 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // auto_send) and the plain <a> download can't carry the staff JWT anyway,
   // so null the pdfUrl and flag the payload: the viewer swaps the
   // download/share bar for an internal-review notice instead of dead controls.
+  // staffViewer is echoed to the client so ReportViewPage suppresses ALL
+  // report-interaction event posts for the session (Codex P2): the /events
+  // endpoint is unauthenticated (the client's POST carries no JWT — only the
+  // /data fetch does), so the staff signal can't be re-derived server-side
+  // and the analytics gate has to ride the payload. Flag only when true —
+  // customer payloads stay byte-identical.
   if (suppressedTypedReport(service)) {
-    return { ...data, dynamicContext, pdfUrl: null, internalOnly: true };
+    return { ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) };
   }
-  return { ...data, dynamicContext };
+  return { ...data, dynamicContext, ...(staffViewer ? { staffViewer: true } : {}) };
 }
 
 async function findProjectByReportSegment(segment) {

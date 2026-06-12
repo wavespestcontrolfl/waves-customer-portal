@@ -54,6 +54,12 @@ const COMPANION_DELIVERY_MODES = new Set(['auto_send', 'internal_only']);
  *    (an unknown type has no schema, no validation, no snapshot builder)
  *  - entries duplicating the profile's own findingsType → dropped (the
  *    primary already owns that section)
+ *  - duplicate companion types → first entry wins, later duplicates dropped.
+ *    Two entries for one type would put two schemas for the same section on
+ *    the completion form; the client submits both and /complete 409s every
+ *    attempt (companion_duplicate_type), stranding the tech until the DB row
+ *    is hand-fixed. A 'disabled' entry claims its type too, so a stale
+ *    duplicate can't resurrect a section the admin turned off.
  *  - delivery 'disabled' → dropped (section fully off)
  *  - missing/invalid delivery → coerced to 'internal_only' (never
  *    accidentally customer-facing)
@@ -65,12 +71,15 @@ function parseCompanionTypes(raw, ownFindingsType = null) {
   }
   if (!Array.isArray(entries)) return [];
   const companions = [];
+  const seenTypes = new Set();
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const type = typeof entry.type === 'string' ? entry.type.trim() : '';
     if (!type || !isTypedFindingsType(type)) continue;
     if (COMPANION_EXCLUDED_TYPES.has(type)) continue;
     if (ownFindingsType && type === ownFindingsType) continue;
+    if (seenTypes.has(type)) continue;
+    seenTypes.add(type);
     if (entry.delivery === 'disabled') continue;
     companions.push({
       type,
