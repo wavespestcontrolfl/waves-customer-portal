@@ -15,6 +15,8 @@ const {
   nextStepRequiredForType,
   validateTypedFindings,
   validateNextStepChips,
+  validateActivityScoreConsistency,
+  findingsSchemaForType,
   buildTodaysResult,
   buildTypedReportSnapshot,
 } = require('../services/service-report/activity-indicators');
@@ -316,6 +318,33 @@ describe('validation', () => {
       const result = validateTypedFindings({ type, values, expectedType: type, enforceRequired: true });
       expect({ type, ok: result.ok, errors: result.errors, missing: result.missing })
         .toEqual({ type, ok: true, errors: [], missing: [] });
+    }
+  });
+});
+
+describe('conditional requirement served to the client (flea precedent)', () => {
+  test('palmetto activity_locations carries requiredUnless in the schema slice', () => {
+    const slice = findingsSchemaForType('palmetto_roach_knockdown');
+    const locations = slice.fields.find((f) => f.key === 'activity_locations');
+    expect(locations.required).toBe(false);
+    expect(locations.requiredUnless).toEqual({ field: 'activity_level', value: 'None observed' });
+    expect(slice.fields.find((f) => f.key === 'activity_level').requiredUnless).toBeNull();
+  });
+});
+
+describe('final score vs cleared boundary (flea precedent)', () => {
+  test('pinned knockdown scores cannot cross the cleared boundary', () => {
+    for (const type of ['german_roach_knockdown', 'palmetto_roach_knockdown']) {
+      const values = type === 'german_roach_knockdown' ? GERMAN_VALUES : PALMETTO_VALUES;
+      const pinnedUp = validateActivityScoreConsistency(type,
+        { ...values, activity_level: 'None observed' }, 2);
+      expect({ type, ok: pinnedUp.ok }).toEqual({ type, ok: false });
+      const pinnedDown = validateActivityScoreConsistency(type, values, 0);
+      expect({ type, ok: pinnedDown.ok }).toEqual({ type, ok: false });
+      // Agreement and in-range overrides stay legal.
+      expect(validateActivityScoreConsistency(type,
+        { ...values, activity_level: 'None observed' }, 0).ok).toBe(true);
+      expect(validateActivityScoreConsistency(type, values, 4).ok).toBe(true);
     }
   });
 });

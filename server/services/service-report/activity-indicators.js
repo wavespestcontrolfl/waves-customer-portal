@@ -1291,6 +1291,8 @@ function validateNextStepChips(chips, projectType = null, values = null) {
 // types can add their cleared-select boundary.
 const SCORE_CLEARED_SELECT = {
   flea: { field: 'evidence_level', cleared: 'None observed' },
+  german_roach_knockdown: { field: 'activity_level', cleared: 'None observed' },
+  palmetto_roach_knockdown: { field: 'activity_level', cleared: 'None observed' },
 };
 
 function validateActivityScoreConsistency(type, values = {}, score = null) {

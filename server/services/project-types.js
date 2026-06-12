@@ -231,7 +231,10 @@ const PROJECT_TYPES = {
       { key: 'roach_type', label: 'Roach type', type: 'select', section: 'Activity', options: ['Palmetto', 'American', 'Smoky brown', 'Unknown large roach'] },
       // 'None observed' = the cleared state for revisits (gauge contract).
       { key: 'activity_level', label: 'Activity level', type: 'select', section: 'Activity', options: ['None observed', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'activity_locations', label: 'Activity locations', type: 'chips', section: 'Activity', options: [
+      // Conditionally required: a cleared visit has no truthful location to
+      // name. requiredUnless is served in the schema slice so the client
+      // pre-submit gate mirrors the server enforcement (flea precedent).
+      { key: 'activity_locations', label: 'Activity locations', type: 'chips', section: 'Activity', requiredUnless: { field: 'activity_level', value: 'None observed' }, options: [
         'Kitchen', 'Bathrooms', 'Garage', 'Laundry', 'Lanai', 'Attic',
         'Exterior perimeter', 'Entry doors', 'Mulch / landscape beds', 'Drains',
       ] },

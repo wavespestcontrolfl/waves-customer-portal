@@ -4562,6 +4562,25 @@ export function typedNextStepChipConflict(schemaType, chip, values) {
       return `"No action needed" conflicts with the recorded evidence level (${level})`;
     }
   }
+  if (schemaType === "german_roach_knockdown") {
+    const followupRequired = String(values?.followup_required ?? "").trim();
+    const window = String(values?.followup_window ?? "").trim();
+    const recommendsFollowup =
+      chip === "Follow-up recommended" || chip === "Follow-up in 10–14 days";
+    if (followupRequired === "No" && recommendsFollowup) {
+      return `"${chip}" conflicts with "Follow-up required: No"`;
+    }
+    if (chip === "Follow-up in 10–14 days" && window && window !== "10–14 days") {
+      return `"Follow-up in 10–14 days" conflicts with the selected follow-up window (${window})`;
+    }
+  }
+  if (
+    schemaType === "palmetto_roach_knockdown" &&
+    chip === "Follow-up recommended" &&
+    String(values?.followup_needed ?? "").trim() === "No"
+  ) {
+    return `"Follow-up recommended" conflicts with "Follow-up needed: No"`;
+  }
   return null;
 }
 
@@ -4572,6 +4591,8 @@ export function typedNextStepChipConflict(schemaType, chip, values) {
 // the findings card. Returns the conflict message or null.
 const TYPED_SCORE_CLEARED_SELECT = {
   flea: { field: "evidence_level", cleared: "None observed" },
+  german_roach_knockdown: { field: "activity_level", cleared: "None observed" },
+  palmetto_roach_knockdown: { field: "activity_level", cleared: "None observed" },
 };
 export function typedActivityScoreConflict(schemaType, values, score) {
   if (score == null) return null;
