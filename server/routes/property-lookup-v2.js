@@ -17,8 +17,10 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
+  attachFloodZoneToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -118,6 +120,25 @@ async function performPropertyLookup(address, options = {}) {
   if (!options.refresh) {
     const cached = await getCachedLookup(address);
     if (cached) {
+      // Flood-zone backfill (#1698 review): rows cached before the FEMA
+      // provider shipped carry no _floodZone for up to the 180-day TTL.
+      // Query once on hit, attach for this response, and patch the stored
+      // record (atomic jsonb merge) so later hits skip the query. Fail-open
+      // like the live path; a null result is NOT persisted — an outage must
+      // not write "no zone" for the TTL — it simply retries next hit.
+      if (
+        cached.property_record
+        && cached.property_record._floodZone === undefined
+        && Number.isFinite(Number(cached.lat))
+        && Number.isFinite(Number(cached.lng))
+      ) {
+        const floodZone = await lookupFloodZoneByPoint(Number(cached.lat), Number(cached.lng))
+          .catch(() => null);
+        if (floodZone) {
+          cached.property_record._floodZone = floodZone;
+          await attachFloodZoneToCachedLookup(address, floodZone);
+        }
+      }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
@@ -172,6 +193,16 @@ async function performPropertyLookup(address, options = {}) {
   if (aiProperty) {
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
+
+    // FEMA NFHL flood-zone evidence (point query, fail-open, evidence-only).
+    // Rides the merged property record so cache hits keep it. Skipped on
+    // partial-match geocodes (low-trust point) and when no record exists to
+    // carry it. Zone polygons are large, so ROOFTOP precision isn't required
+    // the way it is for parcel matching.
+    if (geo && !geo.partialMatch && Number.isFinite(geo.lat) && Number.isFinite(geo.lng)) {
+      const floodZone = await lookupFloodZoneByPoint(geo.lat, geo.lng).catch(() => null);
+      if (floodZone) result.propertyRecord._floodZone = floodZone;
+    }
   }
 
   // Tech-verified corrections beat every remote source — applied before the
@@ -1095,6 +1126,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     nearWater: waterProximity,
     waterProximity,
     waterDistance,
+    // FEMA NFHL flood-zone evidence (cached with the record). Evidence-only:
+    // wiring this into inferFoundation (its documented "properties in flood
+    // zones" exception) moves the termite/WDO modifiers, so that promotion
+    // is a later, gated step.
+    floodZone: rc?._floodZone?.floodZone || null,
+    floodZoneSubtype: rc?._floodZone?.floodZoneSubtype || null,
+    inSpecialFloodHazardArea: rc?._floodZone?.sfha ?? null,
 
     // ── ENVIRONMENT ──
     woodedAdjacency: ai?.woodedAdjacency || 'NONE',
