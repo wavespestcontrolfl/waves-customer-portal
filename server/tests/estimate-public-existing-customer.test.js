@@ -95,8 +95,50 @@ describe('existing-customer public estimate page', () => {
   test('member card shows per-application savings for the new service', () => {
     const html = renderPage('existing-token-2', lawnEstimate(), lawnEstimateData(), donMembership());
 
-    expect(html).toContain('$9.30/application off');
-    expect(html).not.toContain('$6.98/mo off');
+    expect(html).toContain('save $9.30 per application');
+    expect(html).not.toContain('save $6.98/mo');
+  });
+
+  test('member card reads as savings copy — upgrade callout + remaining-visit savings', () => {
+    const html = renderPage('existing-token-copy', lawnEstimate(), lawnEstimateData(), donMembership());
+
+    expect(html).toContain('Welcome back, Don');
+    expect(html).toContain('what your WaveGuard membership saves you on this estimate');
+    expect(html).toContain('bumps your membership from <strong>Bronze</strong>');
+    expect(html).toContain('up to <strong>Silver</strong>');
+    expect(html).toContain('including the ones you already have');
+    expect(html).toContain('save $11.70/visit on your 3 remaining visits');
+  });
+
+  test('no-benefit membership (combined Bronze, 0% discount) renders no member card', () => {
+    const membership = {
+      isExistingCustomer: true,
+      firstName: 'Dan',
+      tier: 'bronze',
+      tierLabel: 'Bronze',
+      tierDiscountPct: 0,
+      upgrade: null,
+      existingServiceKeys: [],
+      existingServices: [],
+      newServices: [{
+        key: 'lawn_care',
+        label: 'Lawn Care',
+        discountPct: 0,
+        monthlySavings: 0,
+        perApplicationSavings: 0,
+      }],
+    };
+    const html = renderPage('bronze-token', lawnEstimate({ tier: 'Bronze' }), lawnEstimateData(), membership);
+
+    // No card (the class still appears in the static stylesheet) — and never
+    // a "$0.00 off" / "Member pricing" row.
+    expect(html).not.toContain('<section class="card wg-member-card">');
+    expect(html).not.toContain('Welcome back');
+    expect(html).not.toContain('Member pricing');
+    expect(html).not.toContain('save $0.00');
+    // The snapshot still drives the existing-customer billing treatment.
+    expect(html).toContain('<s>$99</s> $0');
+    expect(html).toContain("you're already a Waves customer");
   });
 
   test('cross-sell skips services the customer already has — seasonal mosquito first', () => {

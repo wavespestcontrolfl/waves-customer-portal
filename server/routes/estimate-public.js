@@ -2492,6 +2492,21 @@ ${shellTopBar()}
 function renderMembershipBlockHtml(membership) {
   if (!membership || !membership.isExistingCustomer) return '';
   const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+
+  // Only rows with a real, non-zero benefit render. A combined Bronze tier
+  // (one qualifying service, 0% discount) produces rows whose savings compute
+  // to $0.00 — advertising "member benefits" worth nothing reads as broken,
+  // so those rows are dropped and a card with no upgrade and no rows left is
+  // skipped entirely. The snapshot itself still flows: the setup-fee waiver
+  // and cross-sell pick read it independently of this card.
+  const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
+    .filter((s) => Number(s.extraDiscountPct) > 0);
+  const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
+    .filter((s) => Number(s.discountPct) > 0
+      || Number(s.perApplicationSavings) > 0
+      || Number(s.monthlySavings) > 0);
+  if (!membership.upgrade && existing.length === 0 && added.length === 0) return '';
+
   const hello = membership.firstName
     ? `Welcome back, ${escapeHtml(membership.firstName)}`
     : 'Welcome back';
@@ -2499,12 +2514,12 @@ function renderMembershipBlockHtml(membership) {
   const upgradeHtml = membership.upgrade ? `
     <div class="wg-upgrade">
       Adding ${escapeHtml(membership.upgrade.addedServiceLabels.join(' & ') || 'this service')}
-      moves you from <strong>${escapeHtml(membership.upgrade.fromLabel)}</strong>
-      to <strong>${escapeHtml(membership.upgrade.toLabel)}</strong>
-      &mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service.
+      bumps your membership from <strong>${escapeHtml(membership.upgrade.fromLabel)}</strong>
+      up to <strong>${escapeHtml(membership.upgrade.toLabel)}</strong>
+      &mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service,
+      including the ones you already have.
     </div>` : '';
 
-  const existing = Array.isArray(membership.existingServices) ? membership.existingServices : [];
   const existingHtml = existing.length ? `
     <div class="wg-section">
       <div class="wg-section-title">Your existing services</div>
@@ -2512,16 +2527,15 @@ function renderMembershipBlockHtml(membership) {
         <div class="wg-row">
           <span class="wg-row-label">${escapeHtml(s.label)}</span>
           <span class="wg-row-val">
-            +${s.extraDiscountPct}% off${s.perVisitSavings != null
-              ? ` &middot; ${money(s.perVisitSavings)}/visit`
-              : ''}${(s.perVisitSavings != null && s.remainingVisits > 0)
-              ? ` on ${s.remainingVisits} ${s.prepaid ? 'remaining prepaid' : 'remaining'} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+            +${s.extraDiscountPct}% off${Number(s.perVisitSavings) > 0
+              ? ` &middot; save ${money(s.perVisitSavings)}/visit${s.remainingVisits > 0
+                ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+                : ''}`
               : ''}
           </span>
         </div>`).join('')}
     </div>` : '';
 
-  const added = Array.isArray(membership.newServices) ? membership.newServices : [];
   const addedHtml = added.length ? `
     <div class="wg-section">
       <div class="wg-section-title">This estimate</div>
@@ -2529,9 +2543,9 @@ function renderMembershipBlockHtml(membership) {
         <div class="wg-row">
           <span class="wg-row-label">${escapeHtml(s.label)}</span>
           <span class="wg-row-val">
-            ${s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}${s.perApplicationSavings != null
-              ? ` &middot; ${money(s.perApplicationSavings)}/application off`
-              : (s.monthlySavings != null ? ` &middot; ${money(s.monthlySavings)}/mo off` : '')}
+            ${s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}${Number(s.perApplicationSavings) > 0
+              ? ` &middot; save ${money(s.perApplicationSavings)} per application`
+              : (Number(s.monthlySavings) > 0 ? ` &middot; save ${money(s.monthlySavings)}/mo` : '')}
           </span>
         </div>`).join('')}
     </div>` : '';
@@ -2541,7 +2555,7 @@ function renderMembershipBlockHtml(membership) {
     <div class="wg-member-header">
       <div>
         <h2>${hello}</h2>
-        <p class="ai-blurb">Here are the WaveGuard member benefits on this estimate.</p>
+        <p class="ai-blurb">Here&rsquo;s what your WaveGuard membership saves you on this estimate.</p>
       </div>
       <span class="wg-tier-badge wg-tier-${escapeHtml(membership.tier)}">WaveGuard ${escapeHtml(membership.tierLabel)}</span>
     </div>

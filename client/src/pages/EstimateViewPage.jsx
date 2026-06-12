@@ -540,8 +540,16 @@ function MembershipCard({ membership }) {
     platinum: { bg: '#EDEFF2', fg: '#2B3340' },
   };
   const tc = TIER_COLORS[membership.tier] || TIER_COLORS.bronze;
-  const existing = Array.isArray(membership.existingServices) ? membership.existingServices : [];
-  const added = Array.isArray(membership.newServices) ? membership.newServices : [];
+  // Mirrors renderMembershipBlockHtml in routes/estimate-public.js: only rows
+  // with a real, non-zero benefit render, and a card with no upgrade and no
+  // rows left (combined Bronze tier — 0% discount, $0.00 savings) is skipped.
+  const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
+    .filter((s) => Number(s.extraDiscountPct) > 0);
+  const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
+    .filter((s) => Number(s.discountPct) > 0
+      || Number(s.perApplicationSavings) > 0
+      || Number(s.monthlySavings) > 0);
+  if (!membership.upgrade && existing.length === 0 && added.length === 0) return null;
   const hello = membership.firstName ? `Welcome back, ${membership.firstName}` : 'Welcome back';
 
   const rowStyle = {
@@ -565,7 +573,7 @@ function MembershipCard({ membership }) {
             {hello}
           </h2>
           <p style={{ margin: '6px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.55 }}>
-            Here are your WaveGuard member benefits on this estimate.
+            Here&rsquo;s what your WaveGuard membership saves you on this estimate.
           </p>
         </div>
         <span style={{
@@ -584,9 +592,9 @@ function MembershipCard({ membership }) {
           borderLeft: `4px solid ${COLORS.blueBright}`, borderRadius: 10, padding: '12px 14px',
           color: ESTIMATE_TEXT, fontSize: 15, lineHeight: 1.5,
         }}>
-          Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} moves you from{' '}
-          <strong>{membership.upgrade.fromLabel}</strong> to <strong>{membership.upgrade.toLabel}</strong>
-          {' '}— an extra {membership.upgrade.deltaPct}% off every qualifying service.
+          Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} bumps your membership from{' '}
+          <strong>{membership.upgrade.fromLabel}</strong> up to <strong>{membership.upgrade.toLabel}</strong>
+          {' '}— an extra {membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.
         </div>
       ) : null}
 
@@ -598,9 +606,9 @@ function MembershipCard({ membership }) {
               <span style={labelStyle}>{s.label}</span>
               <span style={valStyle}>
                 +{s.extraDiscountPct}% off
-                {s.perVisitSavings != null ? ` · ${money(s.perVisitSavings)}/visit` : ''}
-                {(s.perVisitSavings != null && s.remainingVisits > 0)
-                  ? ` on ${s.remainingVisits} ${s.prepaid ? 'remaining prepaid' : 'remaining'} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+                {Number(s.perVisitSavings) > 0 ? ` · save ${money(s.perVisitSavings)}/visit` : ''}
+                {(Number(s.perVisitSavings) > 0 && s.remainingVisits > 0)
+                  ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
                   : ''}
               </span>
             </div>
@@ -616,9 +624,9 @@ function MembershipCard({ membership }) {
               <span style={labelStyle}>{s.label}</span>
               <span style={valStyle}>
                 {s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}
-                {s.perApplicationSavings != null
-                  ? ` · ${money(s.perApplicationSavings)}/application off`
-                  : (s.monthlySavings != null ? ` · ${money(s.monthlySavings)}/mo off` : '')}
+                {Number(s.perApplicationSavings) > 0
+                  ? ` · save ${money(s.perApplicationSavings)} per application`
+                  : (Number(s.monthlySavings) > 0 ? ` · save ${money(s.monthlySavings)}/mo` : '')}
               </span>
             </div>
           ))}
