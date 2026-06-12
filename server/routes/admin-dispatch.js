@@ -1510,6 +1510,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       activityScoreSource = null,
       nextStepChips = null,
       completionTelemetry = null,
+      typedPhotoSummary = null,
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -1549,6 +1550,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'completion_photos_too_many',
       });
     }
+    // Photo captions and the photo summary land on the customer report —
+    // sanitize to the column/snapshot budgets here; banned-copy validation
+    // joins the typed customerCopySources check below.
+    if (Array.isArray(completionPhotos)) {
+      for (const photo of completionPhotos) {
+        if (photo && photo.caption != null) {
+          photo.caption = String(photo.caption).trim().slice(0, 200) || null;
+        }
+      }
+    }
+    const photoSummaryText = typeof typedPhotoSummary === 'string'
+      ? typedPhotoSummary.trim().slice(0, 600)
+      : '';
     const isIncompleteVisit = visitOutcome === 'incomplete';
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
@@ -1732,6 +1746,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...taggedCompletionNoteLines(technicianNotes, ['next']),
           ...taggedCompletionNoteLines(technicianNotes, ['found']),
           ...Object.values(structuredFindings?.values || {}).filter((v) => typeof v === 'string'),
+          // Photo copy is customer-facing too: the summary persists in the
+          // snapshot, captions render under each photo on the report.
+          ...(photoSummaryText ? [photoSummaryText] : []),
+          ...(Array.isArray(completionPhotos)
+            ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
         ];
         const copyViolations = [...new Set(
           customerCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
@@ -2275,6 +2295,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               serviceLabel: completionProfile?.serviceName || svc.service_type || null,
               visitSequence: typedVisitSequence,
               activity: typedActivity,
+              photoSummary: photoSummaryText || null,
             });
           }
           const [priorVisitCountRow] = serviceRecordCols.visit_number
@@ -4366,6 +4387,100 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
   } catch (err) {
     logger.warn(`[dispatch] findings-recap draft failed for ${req.params.serviceId}: ${err.message}`);
     res.status(502).json({ error: 'Draft generation failed' });
+  }
+});
+
+// POST /:serviceId/photo-analysis/draft — AI-describe the attached
+// completion photos for the customer report (owner spec 2026-06-12).
+// Photos arrive as data-URLs straight from the panel (they only reach S3
+// at submit), so the analysis needs no storage round-trip. Same trust
+// shape as findings-recap/draft: assigned tech only, typed profile
+// authoritative, output banned-copy validated with one retry, never in
+// the critical path — a 502 just means the tech writes (or skips) the
+// photo copy manually.
+router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    const { photos, structuredFindings } = req.body || {};
+    if (!Array.isArray(photos) || !photos.length) {
+      return res.status(400).json({ error: 'photos array is required', code: 'photos_required' });
+    }
+    if (photos.length > 5) {
+      return res.status(400).json({ error: 'At most 5 photos can be analyzed', code: 'too_many_photos' });
+    }
+    const findingsType = structuredFindings?.type;
+    if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
+      return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
+    }
+    const schema = ActivityIndicators.findingsSchemaForType(findingsType);
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'customer_id', 'service_type', 'service_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const photoProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+    if (photoProfile?.findingsType !== findingsType) {
+      return res.status(409).json({
+        error: 'This service does not use that findings form.',
+        code: 'findings_type_mismatch',
+      });
+    }
+    // Decode with the same size cap the completion upload enforces — a
+    // photo too big to persist is too big to analyze.
+    const { decodeDataUrlPhoto } = require('../services/service-photos');
+    const imageBlocks = [];
+    for (const photo of photos) {
+      const decoded = decodeDataUrlPhoto(photo?.data);
+      imageBlocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: decoded.mimeType,
+          data: decoded.buffer.toString('base64'),
+        },
+      });
+    }
+    const PhotoAnalysis = require('../services/service-report/photo-analysis');
+    const basePrompt = PhotoAnalysis.buildPhotoAnalysisPrompt({
+      schema,
+      values: structuredFindings?.values || {},
+      photoCount: photos.length,
+      serviceType: svc.service_type,
+    });
+    const Anthropic = require('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    let result = { ok: false };
+    for (let attempt = 0; attempt < 2 && !result.ok; attempt += 1) {
+      const msg = await anthropic.messages.create({
+        model: MODELS.VISION,
+        max_tokens: 700,
+        temperature: 0.2,
+        messages: [{
+          role: 'user',
+          content: [
+            ...imageBlocks,
+            {
+              type: 'text',
+              text: attempt === 0 || !result.violations?.length
+                ? basePrompt
+                : `${basePrompt}\n\nYour previous response used prohibited wording (${result.violations.join(', ')}). Rewrite without any absolute or promissory claims — describe only what is visible.`,
+            },
+          ],
+        }],
+      });
+      result = PhotoAnalysis.parsePhotoAnalysisResponse(
+        msg.content?.[0]?.text,
+        { photoCount: photos.length },
+      );
+    }
+    if (!result.ok) {
+      logger.warn(`[dispatch] photo analysis failed for ${req.params.serviceId}: ${result.error}${result.violations?.length ? ` (${result.violations.join(', ')})` : ''}`);
+      return res.status(502).json({ error: 'Photo analysis failed the customer-copy quality check — caption the photos manually or skip.' });
+    }
+    res.json({ photoSummary: result.photoSummary, captions: result.captions });
+  } catch (err) {
+    logger.warn(`[dispatch] photo analysis failed for ${req.params.serviceId}: ${err.message}`);
+    res.status(502).json({ error: 'Photo analysis failed' });
   }
 });
 

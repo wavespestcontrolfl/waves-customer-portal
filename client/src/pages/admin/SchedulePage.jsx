@@ -6184,6 +6184,12 @@ export function CompletionPanel({
   // — they can carry PII, so the box starts unchecked.
   const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(false);
   const [typedAiDraftUsed, setTypedAiDraftUsed] = useState(false);
+  // AI photo analysis (optional, never blocks submit): summary is editable,
+  // captions attach to the photo entries. Not draft-persisted — photos
+  // themselves aren't, and a summary without its photos would be stale.
+  const [typedPhotoSummary, setTypedPhotoSummary] = useState("");
+  const [photoAnalyzing, setPhotoAnalyzing] = useState(false);
+  const [photoAiError, setPhotoAiError] = useState("");
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.
   const completionTelemetryRef = useRef({
@@ -7797,6 +7803,8 @@ export function CompletionPanel({
           photoType: "after",
           sortOrder: index,
           capturedAt: photo.capturedAt || null,
+          caption: photo.caption || null,
+          ...(photo.captionSource === "ai" ? { aiTags: { captionSource: "ai" } } : {}),
         })),
       };
       if (isCustomerConcernInteraction(customerInteraction) && customerConcern) {
@@ -7823,6 +7831,9 @@ export function CompletionPanel({
             : "derived";
         }
         body.nextStepChips = typedNextStepChips;
+        if (typedPhotoSummary.trim() && servicePhotos.length) {
+          body.typedPhotoSummary = typedPhotoSummary.trim();
+        }
         body.completionTelemetry = {
           ...completionTelemetryRef.current,
           submitClickedAt: new Date().toISOString(),
@@ -8040,6 +8051,47 @@ export function CompletionPanel({
       setTypedAiError("AI draft unavailable — write manually or skip.");
     }
     setTypedAiDrafting(false);
+  }
+  // Optional AI photo analysis — sends the attached photos (still local
+  // data-URLs pre-submit) for a customer-facing summary + per-photo
+  // captions. Failures surface inline and never block submit.
+  async function handlePhotoAnalyze() {
+    if (photoAnalyzing || !typedFindingsSchema || !servicePhotos.length) return;
+    setPhotoAiError("");
+    setPhotoAnalyzing(true);
+    try {
+      const r = await adminFetch(
+        `/admin/dispatch/${service.id}/photo-analysis/draft`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            photos: servicePhotos.map((photo, index) => ({
+              data: photo.data,
+              name: photo.name || `service-photo-${index + 1}.jpg`,
+            })),
+            structuredFindings: {
+              type: typedFindingsSchema.type,
+              values: findingsValues,
+            },
+          }),
+        },
+      );
+      if (r?.photoSummary) {
+        setTypedPhotoSummary(r.photoSummary);
+        setServicePhotos((prev) =>
+          prev.map((photo, i) =>
+            r.captions?.[i]
+              ? { ...photo, caption: r.captions[i], captionSource: "ai" }
+              : photo,
+          ),
+        );
+      } else {
+        setPhotoAiError("Photo analysis unavailable — caption manually or skip.");
+      }
+    } catch {
+      setPhotoAiError("Photo analysis unavailable — caption manually or skip.");
+    }
+    setPhotoAnalyzing(false);
   }
   // ────────────────────────────────────────────────────────────────────
   // Mobile admin render — follows reference_waves_admin_ui_system.md
@@ -9215,7 +9267,7 @@ export function CompletionPanel({
                     {servicePhotos.map((photo, i) => (
                       <div
                         key={i}
-                        style={{ position: "relative", width: 80, height: 80 }}
+                        style={{ position: "relative", width: 80 }}
                       >
                         {" "}
                         <img
@@ -9253,8 +9305,71 @@ export function CompletionPanel({
                         >
                           ×
                         </button>{" "}
+                        {photo.caption && (
+                          <div
+                            style={{
+                              fontSize: 14,
+                              color: M.ink4,
+                              marginTop: 4,
+                              width: 80,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                            title={photo.caption}
+                          >
+                            {photo.caption}
+                          </div>
+                        )}
                       </div>
                     ))}
+                  </div>
+                )}
+                {/* AI photo analysis — typed services only (the summary
+                    persists via the typedReportSnapshot). */}
+                {isTypedFindings && servicePhotos.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <button
+                      type="button"
+                      onClick={handlePhotoAnalyze}
+                      disabled={photoAnalyzing}
+                      style={{
+                        ...secondaryPill,
+                        opacity: photoAnalyzing ? 0.5 : 1,
+                        cursor: photoAnalyzing ? "wait" : "pointer",
+                      }}
+                    >
+                      {photoAnalyzing ? "Analyzing…" : "Analyze photos with AI"}
+                    </button>
+                    {photoAiError && (
+                      <div style={{ fontSize: 14, color: "#C2410C", marginTop: 6 }}>
+                        {photoAiError}
+                      </div>
+                    )}
+                    {typedPhotoSummary !== "" && (
+                      <div style={{ marginTop: 10 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: M.ink, marginBottom: 4 }}>
+                          Photo summary (appears on the customer report)
+                        </div>
+                        <textarea
+                          value={typedPhotoSummary}
+                          onChange={(e) => setTypedPhotoSummary(e.target.value)}
+                          rows={3}
+                          maxLength={600}
+                          style={{
+                            width: "100%",
+                            boxSizing: "border-box",
+                            background: M.card,
+                            color: M.ink,
+                            border: `1px solid ${M.hairline}`,
+                            borderRadius: 10,
+                            padding: 10,
+                            fontSize: 14,
+                            resize: "vertical",
+                          }}
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
               </Field>
@@ -11144,7 +11259,7 @@ export function CompletionPanel({
                   {servicePhotos.map((photo, i) => (
                     <div
                       key={i}
-                      style={{ position: "relative", width: 80, height: 80 }}
+                      style={{ position: "relative", width: 80 }}
                     >
                       {" "}
                       <img
@@ -11181,8 +11296,76 @@ export function CompletionPanel({
                       >
                         &times;
                       </button>{" "}
+                      {photo.caption && (
+                        <div
+                          style={{
+                            fontSize: 14,
+                            color: D.muted,
+                            marginTop: 4,
+                            width: 80,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={photo.caption}
+                        >
+                          {photo.caption}
+                        </div>
+                      )}
                     </div>
                   ))}
+                </div>
+              )}
+              {/* AI photo analysis — typed services only (the summary
+                  persists via the typedReportSnapshot). */}
+              {isTypedFindings && servicePhotos.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    onClick={handlePhotoAnalyze}
+                    disabled={photoAnalyzing}
+                    style={{
+                      background: "transparent",
+                      color: D.teal,
+                      border: `1px solid ${D.teal}`,
+                      borderRadius: 8,
+                      padding: "8px 14px",
+                      fontSize: 14,
+                      cursor: photoAnalyzing ? "wait" : "pointer",
+                      opacity: photoAnalyzing ? 0.5 : 1,
+                    }}
+                  >
+                    {photoAnalyzing ? "Analyzing…" : "Analyze photos with AI"}
+                  </button>
+                  {photoAiError && (
+                    <div style={{ fontSize: 14, color: D.red, marginTop: 6 }}>
+                      {photoAiError}
+                    </div>
+                  )}
+                  {typedPhotoSummary !== "" && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: D.text, marginBottom: 4 }}>
+                        Photo summary (appears on the customer report)
+                      </div>
+                      <textarea
+                        value={typedPhotoSummary}
+                        onChange={(e) => setTypedPhotoSummary(e.target.value)}
+                        rows={3}
+                        maxLength={600}
+                        style={{
+                          width: "100%",
+                          boxSizing: "border-box",
+                          background: D.card,
+                          color: D.text,
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 10,
+                          padding: 10,
+                          fontSize: 14,
+                          resize: "vertical",
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
