@@ -42,6 +42,11 @@ const SUGGEST_AGENT_NAME = 'House Voice Drafter';
 const SUGGEST_DECISION_VERSION = 'house_voice_suggest_v1';
 const EXPIRY_HOURS = 48;
 
+// Human-authored/approved outbounds that really left the system — the same
+// ground-truth allowlists the shadow judge pairs against (sms-shadow-judge).
+const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised'];
+const SENT_STATUSES = ['queued', 'sent', 'delivered'];
+
 function isEscalationIntent(intent) {
   return ESCALATION_INTENTS.has(String(intent || ''));
 }
@@ -182,6 +187,19 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
 
       const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at');
       if (!inbound?.created_at) return null;
+
+      // A fast human reply can land while the draft is still generating, and
+      // the post-send ignore sweep can't resolve a decision row that doesn't
+      // exist yet. If a human-authored outbound already answered this
+      // inbound, don't publish: the draft stays shadow and the judge scores
+      // it against that very reply.
+      const answered = await trx('sms_log')
+        .where({ customer_id: customerId, direction: 'outbound' })
+        .whereIn('message_type', HUMAN_REPLY_TYPES)
+        .whereIn('status', SENT_STATUSES)
+        .where('created_at', '>', inbound.created_at)
+        .first('id');
+      if (answered) return null;
 
       const pending = await trx('agent_decisions as ad')
         .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
