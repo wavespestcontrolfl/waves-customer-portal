@@ -17,6 +17,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
   applyVerifiedOverrides,
@@ -172,6 +173,16 @@ async function performPropertyLookup(address, options = {}) {
   if (aiProperty) {
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
+
+    // FEMA NFHL flood-zone evidence (point query, fail-open, evidence-only).
+    // Rides the merged property record so cache hits keep it. Skipped on
+    // partial-match geocodes (low-trust point) and when no record exists to
+    // carry it. Zone polygons are large, so ROOFTOP precision isn't required
+    // the way it is for parcel matching.
+    if (geo && !geo.partialMatch && Number.isFinite(geo.lat) && Number.isFinite(geo.lng)) {
+      const floodZone = await lookupFloodZoneByPoint(geo.lat, geo.lng).catch(() => null);
+      if (floodZone) result.propertyRecord._floodZone = floodZone;
+    }
   }
 
   // Tech-verified corrections beat every remote source — applied before the
@@ -1095,6 +1106,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     nearWater: waterProximity,
     waterProximity,
     waterDistance,
+    // FEMA NFHL flood-zone evidence (cached with the record). Evidence-only:
+    // wiring this into inferFoundation (its documented "properties in flood
+    // zones" exception) moves the termite/WDO modifiers, so that promotion
+    // is a later, gated step.
+    floodZone: rc?._floodZone?.floodZone || null,
+    floodZoneSubtype: rc?._floodZone?.floodZoneSubtype || null,
+    inSpecialFloodHazardArea: rc?._floodZone?.sfha ?? null,
 
     // ── ENVIRONMENT ──
     woodedAdjacency: ai?.woodedAdjacency || 'NONE',
