@@ -54,6 +54,10 @@ const {
   resolveProjectCompletionBilling,
   projectFollowupSuggestion,
 } = require('../services/project-completion');
+// German knockdown follow-up window → suggestion interval (owner spec §8B).
+// 'As needed' intentionally absent: it keeps the profile's default interval
+// (the report copy for it is interval-free, so no date can contradict it).
+const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 };
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -3989,10 +3993,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // German knockdown: the tech's explicit follow-up selection wins over
       // the profile's standing ALERT policy — a "No" must not leave the
       // success overlay demanding a follow-up the customer report says is
-      // not needed (Codex P2 round 3).
-      if (followupSuggestion?.required && typedFindingsType === 'german_roach_knockdown'
-        && String(typedFindings.values?.followup_required || '') === 'No') {
-        followupSuggestion = { ...followupSuggestion, required: false, reason: 'tech_marked_not_required' };
+      // not needed, and the selected window drives the suggested date so
+      // the CTA can never book a date the report copy contradicts (Codex
+      // P2 rounds 3–4).
+      if (followupSuggestion?.required && typedFindingsType === 'german_roach_knockdown') {
+        if (String(typedFindings.values?.followup_required || '') === 'No') {
+          followupSuggestion = { ...followupSuggestion, required: false, reason: 'tech_marked_not_required' };
+        } else {
+          const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(typedFindings.values?.followup_window || '')];
+          if (windowDays && windowDays !== followupSuggestion.days) {
+            followupSuggestion = projectFollowupSuggestion({
+              scheduledService: svc,
+              project: {},
+              profile: { ...completionProfile, followupPolicy: 'alert', defaultFollowupDays: windowDays },
+            });
+          }
+        }
       }
       // Palmetto knockdown: the profile policy is 'none', but when the
       // checklist says a follow-up IS needed the overlay must offer the
@@ -4342,13 +4358,25 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     if (followupRequired && profile.findingsType === 'cockroach') {
       if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
     }
-    // Knockdown typed-value overrides mirror /complete (Codex P2 round 3):
-    // the stored snapshot's explicit German "No" wins over the profile's
-    // ALERT policy, and a palmetto "Yes" earns the CTA the none-policy
-    // profile would withhold (same 14-day default interval as German).
-    if (followupRequired && profile.findingsType === 'german_roach_knockdown'
-      && String(snapshot?.values?.followup_required || '') === 'No') {
-      followupRequired = false;
+    // Knockdown typed-value overrides mirror /complete (Codex P2 rounds
+    // 3–4): the stored snapshot's explicit German "No" wins over the
+    // profile's ALERT policy, the selected window drives the bookable date,
+    // and a palmetto "Yes" earns the CTA the none-policy profile would
+    // withhold (same 14-day default interval as German).
+    if (followupRequired && profile.findingsType === 'german_roach_knockdown') {
+      if (String(snapshot?.values?.followup_required || '') === 'No') {
+        followupRequired = false;
+      } else {
+        const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(snapshot?.values?.followup_window || '')];
+        if (windowDays && windowDays !== suggestion?.days) {
+          suggestion = projectFollowupSuggestion({
+            scheduledService: svc,
+            project: {},
+            profile: { ...profile, followupPolicy: 'alert', defaultFollowupDays: windowDays },
+          });
+          followupRequired = !!suggestion?.required;
+        }
+      }
     }
     if (!followupRequired && profile.findingsType === 'palmetto_roach_knockdown'
       && String(snapshot?.values?.followup_needed || '') === 'Yes') {
