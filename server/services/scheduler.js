@@ -1013,9 +1013,18 @@ function initScheduledJobs() {
       } catch { return; /* scheduled_for column may not exist yet */ }
 
       for (const msg of scheduled) {
-        const rowMeta = typeof msg.metadata === 'string'
-          ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
-          : (msg.metadata || {});
+        // Decision linkage is read FRESH after each terminal update, not
+        // from the claim snapshot: the cancel route can transfer parked
+        // decision ids onto this row while the provider send is in flight,
+        // and those must still be resolved/reopened here.
+        const readFreshMeta = async () => {
+          const fresh = await db('sms_log').where({ id: msg.id }).first('metadata');
+          const raw = fresh?.metadata;
+          if (typeof raw === 'string') {
+            try { return JSON.parse(raw); } catch { return {}; }
+          }
+          return raw || {};
+        };
         try {
           const purpose = purposeForScheduledMessageType(msg.message_type);
           const smsResult = await sendCustomerMessage({
@@ -1059,18 +1068,19 @@ function initScheduledJobs() {
             // the queued reply resolve as ignored (their drafts return to
             // the judge). Internal catches: a resolution failure must not
             // flip a SENT row to failed.
-            if (rowMeta.agent_decision_id) {
+            const sentMeta = await readFreshMeta();
+            if (sentMeta.agent_decision_id) {
               const { resolveSuggestionAfterSend } = require('./sms-suggest-mode');
               await resolveSuggestionAfterSend({
-                decisionId: rowMeta.agent_decision_id,
+                decisionId: sentMeta.agent_decision_id,
                 sentBody: msg.message_body,
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
-            if (Array.isArray(rowMeta.parked_decision_ids) && rowMeta.parked_decision_ids.length) {
+            if (Array.isArray(sentMeta.parked_decision_ids) && sentMeta.parked_decision_ids.length) {
               const { ignoreParkedSuggestions } = require('./sms-suggest-mode');
               await ignoreParkedSuggestions({
-                decisionIds: rowMeta.parked_decision_ids,
+                decisionIds: sentMeta.parked_decision_ids,
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
@@ -1086,16 +1096,18 @@ function initScheduledJobs() {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
             // The customer was never answered — used + parked cards return.
+            const blockedMeta = await readFreshMeta();
             await require('./sms-suggest-mode').reopenScheduledSuggestions({
-              decisionIds: [rowMeta.agent_decision_id, ...(Array.isArray(rowMeta.parked_decision_ids) ? rowMeta.parked_decision_ids : [])],
+              decisionIds: [blockedMeta.agent_decision_id, ...(Array.isArray(blockedMeta.parked_decision_ids) ? blockedMeta.parked_decision_ids : [])],
               reason: 'Scheduled send was blocked — suggestion reopened.',
             });
           }
         } catch (err) {
           await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: new Date() });
           logger.error(`[scheduled-sms] Failed: ${err.message}`);
+          const failedMeta = await readFreshMeta().catch(() => ({}));
           await require('./sms-suggest-mode').reopenScheduledSuggestions({
-            decisionIds: [rowMeta.agent_decision_id, ...(Array.isArray(rowMeta.parked_decision_ids) ? rowMeta.parked_decision_ids : [])],
+            decisionIds: [failedMeta.agent_decision_id, ...(Array.isArray(failedMeta.parked_decision_ids) ? failedMeta.parked_decision_ids : [])],
             reason: 'Scheduled send failed — suggestion reopened.',
           });
         }

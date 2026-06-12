@@ -1223,10 +1223,15 @@ router.delete('/scheduled/:id', async (req, res, next) => {
             // the customer — reopening now would put an actionable card on
             // top of it. Re-park the decisions behind the surviving row:
             // its fire ignores them, its cancel/failure reopens them.
+            // Prefer a still-'scheduled' sibling: a 'sending' one has been
+            // claimed by the cron, which now re-reads metadata after every
+            // terminal update — so a transfer onto it still resolves, but
+            // an unclaimed row avoids even that window.
             const sibling = await trx('sms_log')
               .whereIn('status', ['scheduled', 'sending'])
               .whereIn('message_type', HUMAN_REPLY_TYPES)
               .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+              .orderByRaw("CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END")
               .orderBy('scheduled_for', 'asc')
               .first('id');
             if (sibling) {
