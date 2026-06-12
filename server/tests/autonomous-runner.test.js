@@ -2112,43 +2112,61 @@ describe('runNext post-publish bookkeeping', () => {
 describe('runCatchUp (mid-day catch-up pass)', () => {
   afterEach(() => { delete process.env.AUTONOMOUS_CONTENT_CATCHUP; });
 
-  function catchUpRunner({ blogStarted = false, claimable = true } = {}) {
+  function catchUpRunner({ blogStarted = false, claimable = true, lockHeld = false } = {}) {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
+    runner._withEngineLock = jest.fn((label, fn) => (lockHeld
+      ? { outcome: 'skipped_locked', skipped: true, reason: 'engine_locked', count: 0, runs: [] }
+      : fn()));
     runner._blogStartedToday = jest.fn(async () => blogStarted);
     runner._queueHasClaimable = jest.fn(async () => claimable);
-    runner.runDaily = jest.fn(async ({ limit } = {}) => ({ outcome: 'completed_published', count: 1, limit, runs: [] }));
+    runner._sendBlogDroughtSms = jest.fn(async () => {});
+    runner._runDailyInner = jest.fn(async ({ limit, actionType } = {}) => ({ outcome: 'completed_published', count: 1, limit, actionType, runs: [] }));
     return runner;
   }
 
-  test('runs the normal batch when no blog started today and the queue has claimable work', async () => {
+  test('runs a BLOG-SCOPED batch under the engine lock when no blog started and a blog row is claimable', async () => {
     const runner = catchUpRunner();
     const result = await runner.runCatchUp({ limit: 2 });
-    expect(runner.runDaily).toHaveBeenCalledWith({ limit: 2 });
+    expect(runner._withEngineLock).toHaveBeenCalledWith('runCatchUp', expect.any(Function));
+    // Scoped claim: a finite unscoped batch could spend every slot on
+    // higher-scored non-blog rows and still miss the claimable blog.
+    expect(runner._runDailyInner).toHaveBeenCalledWith({ limit: 2, actionType: 'new_supporting_blog' });
     expect(result).toMatchObject({ outcome: 'completed_published', count: 1 });
+  });
+
+  test('lock held by a live morning batch → skips without touching queue state', async () => {
+    const runner = catchUpRunner({ lockHeld: true });
+    const result = await runner.runCatchUp();
+    // Stale-claim recovery must never run outside the lock — it would
+    // reset claims a slow-but-alive batch is actively working.
+    expect(runner._blogStartedToday).not.toHaveBeenCalled();
+    expect(runner._queueHasClaimable).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: 'skipped_locked', skipped: true });
   });
 
   test('skips when a blog already started today (DB-backed — survives a dead morning process)', async () => {
     const runner = catchUpRunner({ blogStarted: true });
     const result = await runner.runCatchUp();
-    expect(runner.runDaily).not.toHaveBeenCalled();
+    expect(runner._runDailyInner).not.toHaveBeenCalled();
     expect(result).toMatchObject({ outcome: 'skipped_blog_already_started', skipped: true, count: 0 });
   });
 
-  test('skips when the queue has nothing claimable (one drought SMS per day, not two)', async () => {
+  test('nothing claimable → still ensures the drought alert (morning may have died pre-SMS)', async () => {
     const runner = catchUpRunner({ claimable: false });
     const result = await runner.runCatchUp();
-    expect(runner.runDaily).not.toHaveBeenCalled();
+    expect(runner._runDailyInner).not.toHaveBeenCalled();
+    // The 06-12 shape: batch killed before its end-of-batch alert ran.
+    // The sms_log day-dedupe inside the sender bounds this to one text/day.
+    expect(runner._sendBlogDroughtSms).toHaveBeenCalledWith([]);
     expect(result).toMatchObject({ outcome: 'skipped_no_claimable', skipped: true, count: 0 });
   });
 
-  test('kill switch AUTONOMOUS_CONTENT_CATCHUP=false short-circuits before any check', async () => {
+  test('kill switch AUTONOMOUS_CONTENT_CATCHUP=false short-circuits before the lock', async () => {
     process.env.AUTONOMOUS_CONTENT_CATCHUP = 'false';
     const runner = catchUpRunner();
     const result = await runner.runCatchUp();
-    expect(runner._blogStartedToday).not.toHaveBeenCalled();
-    expect(runner._queueHasClaimable).not.toHaveBeenCalled();
-    expect(runner.runDaily).not.toHaveBeenCalled();
+    expect(runner._withEngineLock).not.toHaveBeenCalled();
     expect(result).toMatchObject({ outcome: 'skipped_disabled', skipped: true, count: 0 });
   });
 

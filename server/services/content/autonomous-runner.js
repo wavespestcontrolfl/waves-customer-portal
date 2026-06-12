@@ -147,7 +147,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [] } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -165,7 +165,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore, excludeIds });
+      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}) });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -910,11 +910,11 @@ class AutonomousRunner {
    * batch bounded: review generation can scale, while publish canaries still
    * cap actual live output per action type.
    */
-  async runDaily({ limit = null } = {}) {
+  async runDaily({ limit = null, actionType = null } = {}) {
     // Serialize the whole batch behind the engine lock so a long batch that
     // spills past the next cron, a manual --live run, or another instance can't
     // publish concurrently and blow past the per-day/week caps.
-    return this._withEngineLock('runDaily', () => this._runDailyInner({ limit }));
+    return this._withEngineLock('runDaily', () => this._runDailyInner({ limit, actionType }));
   }
 
   /**
@@ -938,16 +938,40 @@ class AutonomousRunner {
     if (!envBool('AUTONOMOUS_CONTENT_CATCHUP', true)) {
       return { outcome: 'skipped_disabled', skipped: true, reason: 'catchup_disabled', count: 0, runs: [] };
     }
+    // Everything below runs under the engine lock (Codex r2): stale-claim
+    // recovery inside the probe MUTATES queue state, and recovering while a
+    // slow-but-alive 9am batch still holds the lock would reset claims that
+    // runner is actively working — duplicating work or stranding its
+    // publishes for reconciliation. Lock held → the morning batch is alive
+    // and owns the rest of the day (including its own end-of-batch alerts).
+    return this._withEngineLock('runCatchUp', () => this._runCatchUpInner({ limit }));
+  }
+
+  // Runs INSIDE the engine lock — calls _runDailyInner directly because
+  // pg advisory locks are session-scoped, not re-entrant: runDaily() would
+  // try to re-acquire on a different pooled connection and skip itself.
+  async _runCatchUpInner({ limit = null } = {}) {
     if (await this._blogStartedToday()) {
       logger.info('[autonomous-runner] catch-up skipped: a blog post already started today');
       return { outcome: 'skipped_blog_already_started', skipped: true, reason: 'blog_already_started', count: 0, runs: [] };
     }
     if (!(await this._queueHasClaimable())) {
-      logger.info('[autonomous-runner] catch-up skipped: no claimable opportunities (the morning drought alert already covered supply)');
+      // The morning batch may have died BEFORE its own drought SMS went out
+      // (the 06-12 zero-alert shape, Codex r2) — re-trigger the alert rather
+      // than stay silent; the sms_log day-dedupe inside _sendBlogDroughtSms
+      // keeps it to one text per ET day no matter how many passes run.
+      await this._sendBlogDroughtSms([]).catch((err) => {
+        logger.warn(`[autonomous-runner] catch-up drought SMS failed: ${err.message}`);
+      });
+      logger.info('[autonomous-runner] catch-up skipped: no claimable blog opportunities (drought alert ensured)');
       return { outcome: 'skipped_no_claimable', skipped: true, reason: 'no_claimable_opportunities', count: 0, runs: [] };
     }
-    logger.info('[autonomous-runner] catch-up running: no blog started today and the queue has claimable work');
-    return this.runDaily({ limit });
+    logger.info('[autonomous-runner] catch-up running: no blog started today and a blog row is claimable');
+    // Blog-scoped batch (Codex r2): the catch-up exists to rescue the BLOG
+    // cadence — unscoped, a finite batch could spend every slot on
+    // higher-scored non-blog rows, miss the claimable blog, and still
+    // alert a drought.
+    return this._runDailyInner({ limit, actionType: 'new_supporting_blog' });
   }
 
   /**
@@ -1023,7 +1047,7 @@ class AutonomousRunner {
     }
   }
 
-  async _runDailyInner({ limit = null } = {}) {
+  async _runDailyInner({ limit = null, actionType = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
     // the whole batch, leaving the rest of the day's queue untouched. Instead,
@@ -1042,7 +1066,10 @@ class AutonomousRunner {
     // the next cron, where its claim was released to pending).
     const failedOppIds = [];
     for (let i = 0; i < batchLimit; i += 1) {
-      const run = await this.runNext({ excludeIds: [...failedOppIds] });
+      // actionType (when set, e.g. the blog-scoped catch-up pass) flows
+      // through to claimNext; spread conditionally so the unscoped daily
+      // batch's claim args stay byte-identical.
+      const run = await this.runNext({ excludeIds: [...failedOppIds], ...(actionType ? { actionType } : {}) });
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
@@ -1135,6 +1162,27 @@ class AutonomousRunner {
       && (r.outcome === 'completed_published'
         || (r.outcome === 'completed_pending_review' && r.skip_reason === 'astro_pr_pending_merge')));
     if (blogStarted) return;
+
+    // Day-dedupe via sms_log (Codex r2): the 1pm catch-up re-triggers this
+    // alert when the morning batch died before ITS send — without a
+    // persisted marker that either double-texts on every drought day or
+    // (worse) stays silent on the zero-alert days it exists to catch. Max
+    // one drought text per ET day no matter how many passes run. Fail-open:
+    // a dedupe lookup error must never suppress the alert.
+    try {
+      const dup = await db('sms_log')
+        .where('message_type', 'internal_alert')
+        .where('direction', 'outbound')
+        .where('created_at', '>=', startOfEtDay())
+        .where('message_body', 'like', 'Waves content engine: NO blog post today%')
+        .first('id');
+      if (dup) {
+        logger.info('[autonomous-runner] blog drought SMS already sent today; skipping duplicate');
+        return;
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-runner] drought SMS dedupe lookup failed (${err.message}); sending anyway`);
+    }
 
     const blogAttempts = real.filter((r) => r.action_type === 'new_supporting_blog');
     let why;

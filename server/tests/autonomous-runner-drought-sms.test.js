@@ -10,11 +10,18 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 
+const db = require('../models/db');
 const twilio = require('../services/twilio');
 const runner = require('../services/content/autonomous-runner');
 
+// db is a bare jest.fn() in this suite: the sms_log day-dedupe lookup
+// throws synchronously (db('sms_log') → undefined.where) and the sender
+// fails OPEN — which is exactly the prod contract (a dedupe lookup error
+// must never suppress the alert). Tests below that exercise the dedupe
+// give db a chainable implementation, then reset it.
 afterEach(() => {
   jest.clearAllMocks();
+  db.mockReset();
   delete process.env.AUTONOMOUS_BLOG_DROUGHT_ALERT;
 });
 
@@ -110,4 +117,37 @@ test('no reviewer_notes on any attempt: body unchanged (no Detail clause)', asyn
 
   const [, body] = twilio.sendSMS.mock.calls[0];
   expect(body).not.toMatch(/Detail:/);
+});
+
+test('day-dedupe: a drought SMS already in sms_log today suppresses the duplicate', async () => {
+  const chain = {
+    where: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue({ id: 7 }),
+  };
+  db.mockImplementation(() => chain);
+
+  await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
+
+  expect(twilio.sendSMS).not.toHaveBeenCalled();
+  expect(chain.where).toHaveBeenCalledWith('message_body', 'like', 'Waves content engine: NO blog post today%');
+});
+
+test('day-dedupe: no prior SMS in sms_log today → alert sends', async () => {
+  const chain = {
+    where: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue(undefined),
+  };
+  db.mockImplementation(() => chain);
+
+  await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
+
+  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
+});
+
+test('day-dedupe lookup failure fails OPEN — the alert still sends', async () => {
+  db.mockImplementation(() => { throw new Error('db down'); });
+
+  await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
+
+  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
 });
