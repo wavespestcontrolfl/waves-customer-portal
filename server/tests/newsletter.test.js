@@ -1228,6 +1228,52 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     expect(html).toContain('✔️ Hydrate like it&#39;s your job');
     expect(html).toContain('— The Waves Pest Control Team');
   });
+
+  test('P.S. label never doubles when the model writes the prefix itself; label-only ps renders nothing', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      events: [{ ...baseEvent }],
+      ps: 'P.S. If you loved this, forward it to a friend who owns a tutu. 🤡',
+    });
+    expect(html).toContain('<strong>P.S.</strong>');
+    expect(html).not.toMatch(/P\.S\.<\/strong>\s*<em>\s*p\.?\s?s/i);
+    expect(html.match(/P\.S\./g)).toHaveLength(1);
+
+    const labelOnly = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      events: [{ ...baseEvent }],
+      ps: 'P.S.',
+    });
+    expect(labelOnly).not.toContain('<strong>P.S.</strong>');
+  });
+});
+
+describe('newsletter P.S. body + plain-text entity decode helpers', () => {
+  const { psBodyText, decodeEscapedEntities } = require('../services/newsletter-draft');
+
+  test('psBodyText strips the leading P.S./PS marker in its common spellings', () => {
+    expect(psBodyText('P.S. Forward this to a friend. 🎪')).toBe('Forward this to a friend. 🎪');
+    expect(psBodyText('P.S. — blame the clown')).toBe('blame the clown');
+    expect(psBodyText('ps: blame the clown')).toBe('blame the clown');
+    expect(psBodyText('  p.s. blame the clown')).toBe('blame the clown');
+  });
+
+  test('psBodyText leaves prose that merely starts with PS-ish words intact', () => {
+    expect(psBodyText('PSA: bring sunscreen')).toBe('PSA: bring sunscreen');
+    expect(psBodyText('Psst — over here')).toBe('Psst — over here');
+    expect(psBodyText('Forward this to a friend.')).toBe('Forward this to a friend.');
+    expect(psBodyText(null)).toBe('');
+  });
+
+  test('decodeEscapedEntities is the exact inverse of escapeHtml', () => {
+    expect(decodeEscapedEntities('it&#39;s &amp; &lt;them&gt; &quot;hi&quot;')).toBe('it\'s & <them> "hi"');
+    expect(decodeEscapedEntities(null)).toBe('');
+  });
+
+  test('a double-escaped literal entity round-trips back to literal text, not a character', () => {
+    expect(decodeEscapedEntities('wait &amp;#39; what')).toBe('wait &#39; what');
+    expect(decodeEscapedEntities('dots &amp;hellip; here')).toBe('dots &hellip; here');
+  });
 });
 
 describe('newsletter greeting personalization + render polish', () => {

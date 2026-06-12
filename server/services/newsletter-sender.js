@@ -15,11 +15,13 @@ const logger = require('./logger');
 const crypto = require('crypto');
 const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
-const { GREETING_NAME_TOKEN, greetingNameValueFor, stripGreetingNameToken } = require('./newsletter-draft');
+const { GREETING_NAME_TOKEN, greetingNameValueFor, stripGreetingNameToken, decodeEscapedEntities } = require('./newsletter-draft');
 
 function stripHtml(html) {
   if (!html) return '';
-  return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  // Decode the escapeHtml entities after tag-stripping so the recorded
+  // touchpoint body reads "don't", not "don&#39;t".
+  return decodeEscapedEntities(html.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
 }
 
 // Suppression types that block delivery on EVERY send stream, mirroring

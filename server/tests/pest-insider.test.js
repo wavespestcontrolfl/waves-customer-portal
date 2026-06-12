@@ -132,6 +132,15 @@ describe('pest-insider assemblePestInsiderNewsletter', () => {
     expect(html).toContain('<strong>P.S.</strong>');
   });
 
+  test('P.S. label never doubles when the model writes the prefix itself', async () => {
+    const html = await assemblePestInsiderNewsletter({
+      ...baseDraft,
+      ps: 'P.S. Forward this to the friend who attracts every mosquito.',
+    });
+    expect(html).toContain('<strong>P.S.</strong>');
+    expect(html.match(/P\.S\./g)).toHaveLength(1);
+  });
+
   test('escapes injected markup in ID-card content', async () => {
     const html = await assemblePestInsiderNewsletter({
       ...baseDraft,

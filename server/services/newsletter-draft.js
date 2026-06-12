@@ -133,7 +133,7 @@ CLOSING: closingText = 1-2 short paragraphs that CALL BACK to this issue's actua
 
 SIGN-OFF: "${voice.signoff}"
 
-P.S. JOKE: "If you loved this, forward it to a friend who [hyper-specific persona — e.g. 'owns both a tutu *and* a folding lawn chair']. If you didn't... [reverse-blame punchline — e.g. 'blame the clown']." End with thematic emoji. Reference this issue's actual events.
+P.S. JOKE: "If you loved this, forward it to a friend who [hyper-specific persona — e.g. 'owns both a tutu *and* a folding lawn chair']. If you didn't... [reverse-blame punchline — e.g. 'blame the clown']." End with thematic emoji. Reference this issue's actual events. Do NOT write the "P.S." label itself — the renderer adds it.
 
 Return STRICT JSON (no HTML, no prose outside the JSON):
 {
@@ -166,7 +166,7 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
   "closingText": "string (callback triad wrapping the week)",
   "closingChecklist": ["string (3-4 short reminders, practical + absurd)"] or null,
   "signoff": "string",
-  "ps": "string or null"
+  "ps": "string or null (no 'P.S.' prefix — the renderer adds the label)"
 }`;
 }
 
@@ -321,7 +321,7 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
   "closingText": "string (voice returns; include the quarterly tie-in sentence)",
   "ctaLine": "string (one line ending in the call prompt — the renderer attaches the phone number)",
   "signoff": "string",
-  "ps": "string or null (forwardable nudge)"
+  "ps": "string or null (forwardable nudge, no 'P.S.' prefix — the renderer adds the label)"
 }`;
 }
 
@@ -476,7 +476,10 @@ async function assemblePestInsiderNewsletter(draft) {
   const signoffText = draft.signoff || '— Adam, Waves Pest Control';
   parts.push(`<p style="margin:20px 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
   if (draft.ps) {
-    parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(draft.ps)}</em></p>`);
+    const psText = psBodyText(draft.ps);
+    if (psText) {
+      parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(psText)}</em></p>`);
+    }
   }
 
   return parts.join('\n\n');
@@ -627,6 +630,32 @@ function plainBulletText(text) {
     // leading literal bullet/dash markers the model might add
     .replace(/^[•·▪◦*–—-]+\s*/, '')
     .trim();
+}
+
+// The renderer prepends the bold "P.S." label, so strip any leading
+// P.S./PS marker the model writes into the ps field anyway — the label
+// never doubles ("P.S. P.S. ..." shipped once). The prompt forbids it,
+// but older persisted drafts still carry the prefix. Bare "PS" with no
+// dot/colon is left alone: it could open a real word ("PSA...").
+function psBodyText(text) {
+  return String(text || '').replace(/^\s*(?:p\.\s?s\.?|ps[.:])[\s:,.—–-]*/i, '').trim();
+}
+
+// Exact inverse of escapeHtml, for deriving the plain-text part from the
+// assembled HTML. Text content in the body only ever passes through
+// escapeHtml/markdownToHtml, so after tags are stripped these five
+// entities are the only ones a clean render contains — left undecoded,
+// the text part ships a literal "&#39;" wherever an apostrophe appears.
+// No generic entity table on purpose: a model-written literal entity
+// ("&hellip;") was double-escaped to "&amp;hellip;" and must round-trip
+// back to its literal text form — which is also why &amp; decodes last.
+function decodeEscapedEntities(text) {
+  return String(text ?? '')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
 }
 
 /**
@@ -1035,7 +1064,10 @@ async function assembleBeehiivNewsletter(draft) {
 
   // ── P.S. ──
   if (draft.ps) {
-    parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(draft.ps)}</em></p>`);
+    const psText = psBodyText(draft.ps);
+    if (psText) {
+      parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(psText)}</em></p>`);
+    }
   }
 
   // ── Share Banner ──
@@ -1254,7 +1286,9 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   }
 
   if (!draft.textBody && draft.htmlBody) {
-    draft.textBody = draft.htmlBody.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    draft.textBody = decodeEscapedEntities(draft.htmlBody.replace(/<[^>]+>/g, ''))
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   // 5. Run voice validation
@@ -1348,4 +1382,7 @@ module.exports = {
   greetingNameValueFor,
   stripGreetingNameToken,
   plainBulletText,
+  // P.S. label-doubling guard + plain-text entity decode (escapeHtml inverse)
+  psBodyText,
+  decodeEscapedEntities,
 };
