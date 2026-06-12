@@ -63,12 +63,12 @@ const PHASE1_KEYS = [
   { key: 'lawn_fungicide', from: ['one_time_lawn_treatment', 'pest_inspection'], to: 'one_time_lawn_treatment' },
   { key: 'lawn_insect_control', from: ['one_time_lawn_treatment', 'pest_inspection'], to: 'one_time_lawn_treatment' },
   { key: 'lawn_inspection', from: ['one_time_lawn_treatment', 'pest_inspection'], to: 'one_time_lawn_treatment' },
-  { key: 'bee_wasp_removal', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
-  { key: 'fire_ant', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
-  { key: 'mud_dauber_removal', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
-  { key: 'pest_initial_cleanout', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
-  { key: 'pest_re_service', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
-  { key: 'tick_control', from: 'one_time_pest_treatment', to: 'one_time_pest_treatment' },
+  { key: 'bee_wasp_removal', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'one_time_pest_treatment' },
+  { key: 'fire_ant', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'one_time_pest_treatment' },
+  { key: 'mud_dauber_removal', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'one_time_pest_treatment' },
+  { key: 'pest_initial_cleanout', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'one_time_pest_treatment' },
+  { key: 'pest_re_service', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'one_time_pest_treatment' },
+  { key: 'tick_control', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'one_time_pest_treatment' },
 ];
 
 exports.up = async function up(knex) {
