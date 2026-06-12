@@ -4576,11 +4576,26 @@ function TypedFindingsSection({
     color: textColor,
     marginBottom: 6,
   };
+  const sectionHeaderStyle = {
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    color: mutedColor,
+    margin: "16px 0 8px",
+    paddingBottom: 4,
+    borderBottom: `1px solid ${hairline}`,
+  };
   return (
     <div style={{ marginBottom: 20 }}>
       <label style={labelCss}>Service findings</label>
-      {(schema.fields || []).map((field) => (
+      {(schema.fields || []).map((field, index) => (
         <div key={field.key} style={{ marginBottom: 12 }}>
+          {/* Sectioned schemas (rodent trapping): header above the first
+              field of each section so the checklist scans in groups. */}
+          {field.section && field.section !== schema.fields[index - 1]?.section && (
+            <div style={sectionHeaderStyle}>{field.section}</div>
+          )}
           <div style={fieldLabelStyle}>
             {field.label}
             {field.required && (
@@ -4643,7 +4658,12 @@ function TypedFindingsSection({
         </div>
       )}
       <div style={{ marginBottom: 12 }}>
-        <div style={fieldLabelStyle}>Next steps (up to 4)</div>
+        <div style={fieldLabelStyle}>
+          Next steps (up to 4)
+          {schema.nextStepRequired && (
+            <span style={{ color: requiredColor }}> *</span>
+          )}
+        </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {(schema.nextStepChips || []).map((chip) => {
             const selected = nextStepChips.includes(chip);

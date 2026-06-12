@@ -142,14 +142,55 @@ const PROJECT_TYPES = {
     description: 'Active trapping setup, trap checks, activity findings, and follow-up plan.',
     requiresFollowup: true,
     photoCategories: ['trap_placement', 'entry_point', 'droppings', 'damage', 'attic', 'garage', 'crawlspace', 'other'],
+    // Sectioned tap-to-fill checklists (owner spec, 2026-06-12): the tech
+    // checks what they saw/did instead of thumb-typing prose; the report
+    // narrative is composed from these selections. `chips` fields store a
+    // comma-joined string (multi_select convention); only `species` is
+    // required — everything else is optional quick-checks.
     findingsFields: [
-      { key: 'species', label: 'Species', type: 'select', options: ['Roof rat', 'Norway rat', 'House mouse', 'Mixed', 'Unknown'] },
-      { key: 'activity_found', label: 'Activity found', type: 'textarea', placeholder: 'Droppings, rub marks, noises, entry trails, nesting evidence…' },
-      { key: 'traps_set', label: 'Traps set (count + locations)', type: 'textarea', placeholder: '6 snap traps in attic, 2 glue boards in garage…' },
-      { key: 'bait_or_products_used', label: 'Bait / products used', type: 'textarea' },
-      { key: 'entry_points_observed', label: 'Entry points observed', type: 'textarea' },
-      { key: 'sanitation_or_damage_notes', label: 'Sanitation / damage notes', type: 'textarea' },
-      { key: 'followup_plan', label: 'Trap-check / follow-up plan', type: 'textarea', placeholder: 'Return in 3 days to check/reset traps; extend if activity continues.' },
+      { key: 'species', label: 'Species', type: 'select', section: 'Evidence observed', options: ['Roof rat', 'Norway rat', 'House mouse', 'Mixed', 'Unknown'] },
+      { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', section: 'Evidence observed', options: [
+        'Droppings', 'Urine staining', 'Gnaw marks', 'Rub marks / grease trails',
+        'Nesting material', 'Noises reported by customer', 'Odor', 'Burrows / runways',
+        'Damaged insulation, wiring, or stored items',
+      ] },
+      { key: 'traps_checked', label: 'Traps checked', type: 'count', section: 'Trap activity' },
+      { key: 'captures', label: 'Captures', type: 'count', section: 'Trap activity' },
+      { key: 'trap_actions', label: 'Trap actions', type: 'chips', section: 'Trap activity', options: [
+        'Traps reset', 'Traps moved', 'Traps replaced', 'New traps added',
+        'Bait/lure refreshed', 'Damaged or missing traps found',
+      ] },
+      { key: 'trap_activity_locations', label: 'Locations with activity', type: 'text', section: 'Trap activity', placeholder: 'Attic near A/C plenum, garage corner…' },
+      { key: 'trap_quiet_locations', label: 'Locations with no activity', type: 'text', section: 'Trap activity', placeholder: 'Soffit traps, crawlspace…' },
+      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'chips', section: 'Conducive conditions', options: [
+        'Gaps under doors', 'Garage door seal gaps', 'A/C line penetrations', 'Roof returns',
+        'Soffit / fascia gaps', 'Weep holes', 'Utility penetrations', 'Vents / screens',
+        'Vegetation touching structure', 'Pet food / bird seed accessible', 'Trash / clutter',
+        'Open water source',
+      ] },
+      { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
+        'Traps checked', 'Captures removed', 'Traps reset', 'Trap locations adjusted',
+        'New traps added', 'Bait/lure replaced', 'Exterior inspection completed',
+        'Entry points photographed', 'Recommendations reviewed with customer',
+      ] },
+      { key: 'sanitation_recommendations', label: 'Sanitation recommendations', type: 'chips', section: 'Recommendations', options: [
+        'Remove pet food overnight', 'Store seed in sealed containers',
+        'Clean droppings only with proper PPE', 'Reduce garage clutter',
+        'Trim vegetation off roofline', 'Seal or secure food sources', 'Keep trash bins closed',
+      ] },
+      { key: 'exclusion_recommendation', label: 'Exclusion', type: 'select', section: 'Recommendations', options: [
+        'Not needed at this time', 'Recommended after activity stops',
+        'Quote provided — awaiting approval', 'Approved — scheduling', 'Completed previously',
+      ] },
+      { key: 'exclusion_notes', label: 'Entry points to seal', type: 'text', section: 'Recommendations', placeholder: 'A/C line gap, garage door corner…' },
+      { key: 'customer_reported', label: 'Customer reported', type: 'chips', section: 'Customer communication', options: [
+        'Heard noises in attic', 'Heard noises in walls', 'Saw a rodent', 'Smelled odor',
+        'No activity noticed since last visit',
+      ] },
+      { key: 'customer_discussed', label: 'Discussed with customer', type: 'chips', section: 'Customer communication', options: [
+        'Informed of capture(s)', 'Explained current trap activity', 'Reviewed exclusion recommendation',
+        'Approved follow-up visit', 'Approved exclusion quote',
+      ] },
     ],
   },
 

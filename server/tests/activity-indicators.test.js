@@ -1,7 +1,10 @@
 const {
   ACTIVITY_INDICATORS,
   REQUIRED_FINDINGS_FIELDS,
+  SCHEMA_VERSION,
   SCORE_LEVEL_WORDS,
+  findBannedCustomerCopy,
+  nextStepRequiredForType,
   deriveActivityScore,
   validateTypedFindings,
   validateNextStepChips,
@@ -198,7 +201,7 @@ describe('buildTypedReportSnapshot', () => {
         trendWord: null,
       },
     });
-    expect(snapshot.schemaVersion).toBe(1);
+    expect(snapshot.schemaVersion).toBe(SCHEMA_VERSION);
     expect(snapshot.reportTypeLabel).toBe('Cockroach Control Service Summary');
     expect(snapshot.todaysResult.headline).toBe('Cockroach activity was moderate today.');
     expect(snapshot.todaysResult.body).toContain('Gel bait placements');
@@ -390,5 +393,147 @@ describe('banned customer copy', () => {
     expect(findBannedCustomerCopy('Activity has decreased since our last visit.')).toEqual([]);
     expect(findBannedCustomerCopy('Keep counters clear of food debris.')).toEqual([]);
     expect(findBannedCustomerCopy('Keep vegetation clear of the foundation.')).toEqual([]);
+  });
+});
+
+describe('rodent trapping sectioned checklist (schema v2)', () => {
+  const V2_VALUES = {
+    species: 'Roof rat',
+    evidence_observed: 'Droppings, Gnaw marks, Noises reported by customer',
+    traps_checked: '8',
+    captures: '2',
+    trap_actions: 'Traps reset, Bait/lure refreshed',
+    trap_activity_locations: 'Attic near A/C plenum',
+    trap_quiet_locations: 'Garage, crawlspace',
+    conducive_conditions: 'A/C line penetrations, Garage door seal gaps, Pet food / bird seed accessible',
+    work_completed: 'Traps checked, Captures removed, Exterior inspection completed',
+    sanitation_recommendations: 'Remove pet food overnight, Reduce garage clutter',
+    exclusion_recommendation: 'Recommended after activity stops',
+    exclusion_notes: 'A/C line gap, garage door corner',
+    customer_reported: 'Heard noises in attic',
+    customer_discussed: 'Informed of capture(s), Reviewed exclusion recommendation',
+  };
+
+  test('chips fields validate each element against options', () => {
+    const ok = validateTypedFindings({
+      type: 'rodent_trapping',
+      values: V2_VALUES,
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    });
+    expect(ok.ok).toBe(true);
+
+    const bad = validateTypedFindings({
+      type: 'rodent_trapping',
+      values: { ...V2_VALUES, evidence_observed: 'Droppings, Customer was rude' },
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    });
+    expect(bad.ok).toBe(false);
+    expect(bad.errors.join(' ')).toContain('Customer was rude');
+  });
+
+  test('count fields reject non-integers and negatives', () => {
+    for (const invalid of ['-1', '2.5', 'eight', '10000']) {
+      const result = validateTypedFindings({
+        type: 'rodent_trapping',
+        values: { species: 'Roof rat', traps_checked: invalid },
+        expectedType: 'rodent_trapping',
+        enforceRequired: true,
+      });
+      expect(result.ok).toBe(false);
+    }
+    const zero = validateTypedFindings({
+      type: 'rodent_trapping',
+      values: { species: 'Roof rat', captures: '0' },
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    });
+    expect(zero.ok).toBe(true);
+  });
+
+  test('snapshot composes trap sentence from counts + actions, maps exclusion copy', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      serviceKey: 'rodent_trapping_check',
+      serviceLabel: 'Rodent Trapping',
+      values: V2_VALUES,
+      nextStepChips: ['Continue trapping', 'Await exclusion approval'],
+      visitSequence: 2,
+      activity: {
+        indicatorKey: 'rodent_activity',
+        label: 'Rodent Activity',
+        score: 2,
+        source: 'tech',
+        trend: 'improving',
+        trendWord: 'decreased',
+      },
+    });
+    expect(snapshot.todaysResult.headline).toBe('Rodent activity has decreased since our last visit.');
+    expect(snapshot.todaysResult.body).toContain('checked 8 traps');
+    expect(snapshot.todaysResult.body).toContain('removed 2 captures');
+    expect(snapshot.todaysResult.body).toContain('refreshed the bait');
+    expect(snapshot.todaysResult.nextStep).toContain('Trapping will continue until activity is reduced.');
+
+    const exclusion = snapshot.findings.find((f) => f.fieldKey === 'exclusion_recommendation');
+    expect(exclusion.customerValueLabel).toBe('Exclusion repairs are recommended to reduce rodent access once trapping activity stops.');
+    expect(exclusion.customerValueLabel).not.toMatch(/rodent[\s-]?proof/i);
+
+    const evidence = snapshot.findings.find((f) => f.fieldKey === 'evidence_observed');
+    expect(evidence.customerLabel).toBe('Evidence observed today');
+    expect(evidence.customerValueLabel).toBe('Droppings, Gnaw marks, Noises reported by customer');
+
+    for (const item of snapshot.findings) {
+      expect(findBannedCustomerCopy(String(item.customerValueLabel))).toEqual([]);
+    }
+    expect(findBannedCustomerCopy(snapshot.todaysResult.headline)).toEqual([]);
+    expect(findBannedCustomerCopy(snapshot.todaysResult.body)).toEqual([]);
+  });
+
+  test('zero captures reads as "found no new captures" alongside checked traps', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      serviceKey: 'rodent_trapping_check',
+      serviceLabel: 'Rodent Trapping',
+      values: { species: 'Roof rat', traps_checked: '6', captures: '0' },
+      nextStepChips: ['Monitor after no activity'],
+      visitSequence: 3,
+      activity: {
+        indicatorKey: 'rodent_activity',
+        label: 'Rodent Activity',
+        score: 0,
+        source: 'tech',
+        trend: 'improving',
+        trendWord: 'decreased',
+      },
+    });
+    expect(snapshot.todaysResult.body).toContain('checked 6 traps');
+    expect(snapshot.todaysResult.body).toContain('found no new captures');
+  });
+
+  test('"rodent-proof" is banned customer copy in every spelling', () => {
+    expect(findBannedCustomerCopy('Your home is now rodent-proof.')).not.toEqual([]);
+    expect(findBannedCustomerCopy('This makes the home rodent proof.')).not.toEqual([]);
+    expect(findBannedCustomerCopy('We will rodentproof the soffits.')).not.toEqual([]);
+    expect(findBannedCustomerCopy('Exclusion repairs are recommended to reduce rodent access.')).toEqual([]);
+  });
+
+  test('schema slice carries sections and the required next step flag', () => {
+    const schema = findingsSchemaForType('rodent_trapping');
+    expect(schema.nextStepRequired).toBe(true);
+    expect(nextStepRequiredForType('cockroach')).toBe(false);
+    const sections = [...new Set(schema.fields.map((f) => f.section))];
+    expect(sections).toEqual([
+      'Evidence observed', 'Trap activity', 'Conducive conditions',
+      'Work completed', 'Recommendations', 'Customer communication',
+    ]);
+    expect(schema.nextStepChips).toContain('Continue trapping');
+    expect(schema.nextStepChips).toContain('Remove traps after inactivity');
+    const chips = schema.fields.filter((f) => f.type === 'chips');
+    expect(chips.length).toBeGreaterThanOrEqual(6);
+    for (const field of chips) {
+      expect(Array.isArray(field.options)).toBe(true);
+      expect(field.options.length).toBeGreaterThan(0);
+    }
   });
 });

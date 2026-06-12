@@ -1708,6 +1708,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (!chipsValidation.ok) {
           return { status: 400, body: { error: chipsValidation.error, code: 'next_step_chips_invalid' } };
         }
+        // Owner spec: trapping reports always end with a clear next action.
+        if (ActivityIndicators.nextStepRequiredForType(typedFindingsType) && !chipsValidation.chips.length) {
+          return {
+            status: 422,
+            body: { error: 'Select at least one next step.', code: 'next_step_required' },
+          };
+        }
         typedChips = chipsValidation.chips;
         typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
 

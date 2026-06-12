@@ -1,0 +1,156 @@
+{
+ "fixture": "rodent_trap_check_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "chips_customer_mapping",
+  "trap_sentence_from_counts",
+  "exclusion_access_wording",
+  "required_next_step"
+ ],
+ "typedReportSnapshot": {
+  "type": "rodent_trapping",
+  "typeLabel": "Rodent Trapping",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "rodent_trapping_check",
+  "serviceLabel": "Rodent Trapping",
+  "reportTypeLabel": "Rodent Program — Progress Visit",
+  "visitSequence": 2,
+  "values": {
+   "species": "Roof rat",
+   "evidence_observed": "Droppings, Gnaw marks, Noises reported by customer",
+   "traps_checked": "8",
+   "captures": "2",
+   "trap_actions": "Traps reset, Bait/lure refreshed",
+   "trap_activity_locations": "Attic near A/C plenum",
+   "trap_quiet_locations": "Garage, crawlspace",
+   "conducive_conditions": "A/C line penetrations, Garage door seal gaps, Pet food / bird seed accessible",
+   "work_completed": "Traps checked, Captures removed, Exterior inspection completed",
+   "sanitation_recommendations": "Remove pet food overnight, Reduce garage clutter",
+   "exclusion_recommendation": "Recommended after activity stops",
+   "exclusion_notes": "A/C line gap, garage door corner",
+   "customer_reported": "Heard noises in attic",
+   "customer_discussed": "Informed of capture(s), Reviewed exclusion recommendation"
+  },
+  "nextStepChips": [
+   "Continue trapping",
+   "Await exclusion approval"
+  ],
+  "todaysResult": {
+   "headline": "Rodent activity has decreased since our last visit.",
+   "body": "We checked 8 traps, removed 2 captures, reset the traps, refreshed the bait and completed an exterior inspection today. Trapping will continue until activity is reduced. Entry-point sealing will be scheduled once the exclusion quote is approved.",
+   "nextStep": "Trapping will continue until activity is reduced. Entry-point sealing will be scheduled once the exclusion quote is approved."
+  },
+  "findings": [
+   {
+    "fieldKey": "species",
+    "technicianLabel": "Species",
+    "customerLabel": "What we found",
+    "value": "Roof rat",
+    "customerValueLabel": "Roof rats"
+   },
+   {
+    "fieldKey": "evidence_observed",
+    "technicianLabel": "Evidence observed",
+    "customerLabel": "Evidence observed today",
+    "value": "Droppings, Gnaw marks, Noises reported by customer",
+    "customerValueLabel": "Droppings, Gnaw marks, Noises reported by customer"
+   },
+   {
+    "fieldKey": "traps_checked",
+    "technicianLabel": "Traps checked",
+    "customerLabel": "Traps checked",
+    "value": "8",
+    "customerValueLabel": "8"
+   },
+   {
+    "fieldKey": "captures",
+    "technicianLabel": "Captures",
+    "customerLabel": "Captures",
+    "value": "2",
+    "customerValueLabel": "2"
+   },
+   {
+    "fieldKey": "trap_actions",
+    "technicianLabel": "Trap actions",
+    "customerLabel": "Trap service performed",
+    "value": "Traps reset, Bait/lure refreshed",
+    "customerValueLabel": "Traps reset, Bait/lure refreshed"
+   },
+   {
+    "fieldKey": "trap_activity_locations",
+    "technicianLabel": "Locations with activity",
+    "customerLabel": "Areas with trap activity",
+    "value": "Attic near A/C plenum",
+    "customerValueLabel": "Attic near A/C plenum"
+   },
+   {
+    "fieldKey": "trap_quiet_locations",
+    "technicianLabel": "Locations with no activity",
+    "customerLabel": "Areas with no trap activity",
+    "value": "Garage, crawlspace",
+    "customerValueLabel": "Garage, crawlspace"
+   },
+   {
+    "fieldKey": "conducive_conditions",
+    "technicianLabel": "Conducive conditions",
+    "customerLabel": "Conditions to address",
+    "value": "A/C line penetrations, Garage door seal gaps, Pet food / bird seed accessible",
+    "customerValueLabel": "A/C line penetrations, Garage door seal gaps, Pet food / bird seed accessible"
+   },
+   {
+    "fieldKey": "work_completed",
+    "technicianLabel": "Work completed today",
+    "customerLabel": "Work completed today",
+    "value": "Traps checked, Captures removed, Exterior inspection completed",
+    "customerValueLabel": "Traps checked, Captures removed, Exterior inspection completed"
+   },
+   {
+    "fieldKey": "sanitation_recommendations",
+    "technicianLabel": "Sanitation recommendations",
+    "customerLabel": "Sanitation recommendations",
+    "value": "Remove pet food overnight, Reduce garage clutter",
+    "customerValueLabel": "Remove pet food overnight, Reduce garage clutter"
+   },
+   {
+    "fieldKey": "exclusion_recommendation",
+    "technicianLabel": "Exclusion",
+    "customerLabel": "Exclusion",
+    "value": "Recommended after activity stops",
+    "customerValueLabel": "Exclusion repairs are recommended to reduce rodent access once trapping activity stops."
+   },
+   {
+    "fieldKey": "exclusion_notes",
+    "technicianLabel": "Entry points to seal",
+    "customerLabel": "Entry points to seal",
+    "value": "A/C line gap, garage door corner",
+    "customerValueLabel": "A/C line gap, garage door corner"
+   },
+   {
+    "fieldKey": "customer_reported",
+    "technicianLabel": "Customer reported",
+    "customerLabel": "What you told us",
+    "value": "Heard noises in attic",
+    "customerValueLabel": "Heard noises in attic"
+   },
+   {
+    "fieldKey": "customer_discussed",
+    "technicianLabel": "Discussed with customer",
+    "customerLabel": "What we discussed",
+    "value": "Informed of capture(s), Reviewed exclusion recommendation",
+    "customerValueLabel": "Informed of capture(s), Reviewed exclusion recommendation"
+   }
+  ],
+  "activity": {
+   "indicatorKey": "rodent_activity",
+   "label": "Rodent Activity",
+   "score": 2,
+   "levelWord": "Low activity",
+   "source": "tech",
+   "derivedFrom": null,
+   "trend": "improving",
+   "trendWord": "decreased"
+  }
+ }
+}
