@@ -70,12 +70,6 @@ function setupDb({ customer }) {
 describe('deposit credit is after-tax prior payment, never a discount', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  const depositLine = {
-    description: 'Deposit credit (paid at acceptance)',
-    quantity: 1,
-    unit_price: -70,
-    category: 'deposit_credit',
-  };
   const serviceLine = {
     description: 'First service application',
     quantity: 1,
@@ -89,8 +83,9 @@ describe('deposit credit is after-tax prior payment, never a discount', () => {
     await InvoiceService.create({
       customerId: 'cust-1',
       title: 'First Service Application',
-      lineItems: [serviceLine, depositLine],
+      lineItems: [serviceLine],
       taxRate: 0.07,
+      depositCredit: { amount: 70 },
     });
     const row = getInsertedInvoice();
     expect(row.subtotal).toBe(200);
@@ -108,13 +103,31 @@ describe('deposit credit is after-tax prior payment, never a discount', () => {
     await InvoiceService.create({
       customerId: 'cust-1',
       title: 'First Service Application',
-      lineItems: [serviceLine, depositLine],
+      lineItems: [serviceLine],
+      depositCredit: { amount: 70 },
     });
     const row = getInsertedInvoice();
     expect(row.subtotal).toBe(200);
     expect(row.discount_amount).toBe(0);
     expect(row.tax_amount).toBe(0);
     expect(row.total).toBe(130);
+  });
+
+  it('caller-supplied deposit_credit LINE ITEMS are rejected — only the ledger-backed param may mint one (P1)', async () => {
+    setupDb({ customer: { id: 'cust-1', property_type: 'residential' } });
+    // Admin manual/batch invoice routes pass request line items straight
+    // through; a hand-crafted deposit_credit line would subtract real
+    // dollars with no estimate_deposits ledger backing.
+    await expect(InvoiceService.create({
+      customerId: 'cust-1',
+      title: 'First Service Application',
+      lineItems: [serviceLine, {
+        description: 'Deposit credit (paid at acceptance)',
+        quantity: 1,
+        unit_price: -70,
+        category: 'deposit_credit',
+      }],
+    })).rejects.toThrow(/depositCredit parameter/);
   });
 
   it('depositCredit REQUEST is capped at the POST-discount invoice value — discounted dollars never consume ledger money (P1)', async () => {

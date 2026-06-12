@@ -786,6 +786,29 @@ async function consumeDepositCredit({ estimateId, amount, invoiceId, trx = db })
   return (requestedCents - remainingCents) / 100;
 }
 
+// payment_intent.canceled on a deposit PI: a canceled intent can never
+// succeed again, so its pending row goes terminal ('failed'). This also
+// advances the idempotency retry generation — without it, a retry inside
+// Stripe's idempotency window would be handed the same canceled
+// client_secret until the window expired. Monotonic: ONLY pending rows
+// flip. payment_intent.payment_failed deliberately does NOT land here — a
+// declined attempt leaves the PI live and retryable, and flipping its row
+// terminal would orphan money if a later attempt on the same PI succeeded.
+async function handleDepositIntentCanceled(paymentIntent) {
+  if (paymentIntent?.metadata?.purpose !== 'estimate_deposit' || !paymentIntent.id) {
+    return { handled: false };
+  }
+  const updated = await db('estimate_deposits')
+    .where({ stripe_payment_intent_id: paymentIntent.id, status: 'pending' })
+    .update({ status: 'failed', updated_at: db.fn.now() });
+  if (updated) {
+    logger.info('[estimate-deposits] canceled deposit intent marked failed — retries will mint a fresh PI', {
+      paymentIntentId: paymentIntent.id,
+    });
+  }
+  return { handled: true };
+}
+
 // Reverse a voided invoice's deposit consumption. The voided invoice's own
 // deposit_credit line items are the application record — each is stamped
 // with its estimate_id by InvoiceService.create(). Per-row attribution is
@@ -865,6 +888,7 @@ module.exports = {
   ensureDepositSatisfied,
   handleDepositChargeReversed,
   handleDepositDisputeClosed,
+  handleDepositIntentCanceled,
   handleDepositIntentSucceeded,
   isDepositEnforced,
   pendingDepositCredit,

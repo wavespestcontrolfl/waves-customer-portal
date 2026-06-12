@@ -1119,3 +1119,50 @@ describe('restoreDepositCreditForVoidedInvoice — void returns consumed dollars
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 });
+
+describe('handleDepositIntentCanceled — canceled PIs go terminal so retries mint fresh intents (P1)', () => {
+  const { handleDepositIntentCanceled } = require('../services/estimate-deposits');
+
+  function canceledDb({ updates = [], updateResult = 1 } = {}) {
+    return (table) => {
+      if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
+      return {
+        where(criteria) {
+          return {
+            update: async (payload) => {
+              updates.push({ criteria, payload });
+              return updateResult;
+            },
+          };
+        },
+      };
+    };
+  }
+
+  it('flips ONLY the pending row to failed — the terminal row advances the retry generation', async () => {
+    const updates = [];
+    mockDbHandler = canceledDb({ updates });
+    const result = await handleDepositIntentCanceled({
+      id: 'pi_dead',
+      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
+    });
+    expect(result.handled).toBe(true);
+    expect(updates[0].criteria).toMatchObject({ stripe_payment_intent_id: 'pi_dead', status: 'pending' });
+    expect(updates[0].payload.status).toBe('failed');
+  });
+
+  it('non-deposit PIs and received/credited rows are untouched', async () => {
+    mockDbHandler = () => { throw new Error('should not query'); };
+    expect((await handleDepositIntentCanceled({ id: 'pi_x', metadata: {} })).handled).toBe(false);
+    // A row already received/credited simply does not match the conditional
+    // (status: pending) — the cancellation echo cannot un-receive money.
+    const updates = [];
+    mockDbHandler = canceledDb({ updates, updateResult: 0 });
+    const result = await handleDepositIntentCanceled({
+      id: 'pi_paid',
+      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
+    });
+    expect(result.handled).toBe(true);
+    expect(updates[0].criteria).toMatchObject({ status: 'pending' });
+  });
+});

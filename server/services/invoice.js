@@ -767,17 +767,18 @@ const InvoiceService = {
       }
       return { row: d, dollars: Math.round(dollars * 100) / 100 };
     });
-    // Deposit credits are PRIOR PAYMENT, not price reductions: they must not
-    // shrink the tax base or fold into discount reporting. Excluded from the
-    // discount machinery here and subtracted AFTER tax below. The lines stay
-    // in line_items for display.
-    const depositCreditTotal =
-      Math.round(
-        items
-          .filter((item) => item.category === "deposit_credit")
-          .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
-          100,
-      ) / 100;
+    // Deposit credits are PRIOR PAYMENT backed dollar-for-dollar by consumed
+    // estimate_deposits ledger rows — only the `depositCredit` param below
+    // may mint one (create() caps it and the caller consumes the ledger in
+    // the same transaction). A caller-supplied deposit_credit line item
+    // (admin manual/batch invoice routes pass request line items straight
+    // through) would subtract real dollars from the total with NO ledger
+    // backing.
+    if (items.some((item) => item?.category === "deposit_credit")) {
+      throw new Error(
+        "deposit_credit line items are ledger-backed and cannot be supplied directly — use the depositCredit parameter",
+      );
+    }
     const lineItemDiscountIds = items
       .filter((item) => Number(item.amount) < 0 && item.discount_id)
       .map((item) => item.discount_id);
@@ -956,15 +957,14 @@ const InvoiceService = {
       }
     }
     // Deposit credit applies AFTER tax — prior payment, not a discount.
-    // Line-item credits arrive pre-capped by their callers (discount-free
-    // paths); the `depositCredit` param is capped HERE against the actual
-    // after-tax value so no requested dollar is consumed without appearing
-    // in the total. The floor guards rounding edges.
+    // The `depositCredit` param is capped HERE against the actual after-tax
+    // value so no requested dollar is consumed without appearing in the
+    // total. The floor guards rounding edges.
     let appliedDepositCredit = 0;
     if (depositCredit && Number(depositCredit.amount) > 0) {
       const ceilingCents = Math.max(
         0,
-        Math.round((afterDiscount + taxAmount - depositCreditTotal) * 100),
+        Math.round((afterDiscount + taxAmount) * 100),
       );
       const appliedCents = Math.min(
         Math.round(Number(depositCredit.amount) * 100),
@@ -988,7 +988,7 @@ const InvoiceService = {
     const total = Math.max(
       0,
       Math.round(
-        (afterDiscount + taxAmount - depositCreditTotal - appliedDepositCredit) * 100,
+        (afterDiscount + taxAmount - appliedDepositCredit) * 100,
       ) / 100,
     );
 
