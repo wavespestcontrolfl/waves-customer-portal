@@ -379,13 +379,13 @@ async function markSuggestionScheduled({ decisionId, scheduledFor }, dbh = db) {
  */
 async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = db) {
   if (!phoneLast10) return [];
+  // Suggest-workflow decisions always link the INBOUND sms_log row, where
+  // from_phone is the customer and to_phone is the Waves line — matching
+  // to_phone would park every suggestion that arrived on that line.
   const pendingQuery = dbh('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
     .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
-    .andWhere(function byPhone() {
-      this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10])
-        .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10]);
-    });
+    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10]);
   if (excludeDecisionId) pendingQuery.whereNot('ad.id', excludeDecisionId);
   const pending = await pendingQuery.select('ad.id');
   if (!pending.length) return [];

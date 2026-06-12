@@ -266,6 +266,10 @@ router.post('/sms', async (req, res, next) => {
         original_message_type: messageType || 'manual',
         adminUserId: req.technicianId,
         agentDecisionId: verifiedAgentDecision?.id || undefined,
+        // Parked ids ride into the provider-created sms_log row (same as
+        // the scheduled path) so a crash between Twilio's accept and the
+        // post-send resolution recovers as ignored, not reopened.
+        parkedDecisionIds: parkedThreadIds.length ? parkedThreadIds : undefined,
         agentDraft: verifiedAgentDraft || undefined,
         suggestedReply: verifiedAgentDraft || undefined,
         fromNumber: fromNumber || undefined,
@@ -331,14 +335,14 @@ router.post('/sms', async (req, res, next) => {
           // the (now committed) outbound in its answered guard.
           await lockSuggestThread(trx, ignoredPhoneLast10);
 
+          // s is always the suggestion's INBOUND row — from_phone is the
+          // customer; matching to_phone (the Waves line) would sweep every
+          // suggestion that arrived on that line.
           const staleQuery = trx('agent_decisions as ad')
             .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
             .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
             .where('s.created_at', '<', sendStartedAt)
-            .andWhere(function byPhone() {
-              this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10])
-                .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
-            });
+            .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
           if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
           const stale = await staleQuery.select('ad.id', 'ad.entity_id');
           if (stale.length) {
