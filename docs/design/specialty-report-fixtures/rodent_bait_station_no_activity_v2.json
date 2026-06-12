@@ -1,0 +1,85 @@
+{
+ "fixture": "rodent_bait_station_no_activity_v2",
+ "proves": [
+  "zero_state_scoped_wording",
+  "no_activity_headline"
+ ],
+ "typedReportSnapshot": {
+  "type": "rodent_bait_station",
+  "typeLabel": "Rodent Bait Station Check",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "rodent_bait_quarterly",
+  "serviceLabel": "Quarterly Rodent Bait Station Service",
+  "reportTypeLabel": "Quarterly Rodent Bait Station Service Summary",
+  "visitSequence": 1,
+  "values": {
+   "total_stations": "4",
+   "stations_checked": "4",
+   "station_actions": "Secured, Reset",
+   "bait_consumption": "None",
+   "bait_replaced": "No"
+  },
+  "nextStepChips": [
+   "Continue bait station service"
+  ],
+  "todaysResult": {
+   "headline": "No bait consumption or visible rodent evidence was observed today.",
+   "body": "We checked and serviced 4 exterior rodent bait stations today. We will continue your scheduled bait station service.",
+   "nextStep": "We will continue your scheduled bait station service."
+  },
+  "photoSummary": null,
+  "findings": [
+   {
+    "fieldKey": "total_stations",
+    "technicianLabel": "Total stations on property",
+    "customerLabel": "Stations on property",
+    "value": "4",
+    "customerValueLabel": "4"
+   },
+   {
+    "fieldKey": "stations_checked",
+    "technicianLabel": "Stations checked",
+    "customerLabel": "Stations checked",
+    "value": "4",
+    "customerValueLabel": "4"
+   },
+   {
+    "fieldKey": "station_actions",
+    "technicianLabel": "Station service performed",
+    "customerLabel": "Station service performed",
+    "value": "Secured, Reset",
+    "customerValueLabel": "Secured, Reset"
+   },
+   {
+    "fieldKey": "bait_consumption",
+    "technicianLabel": "Bait consumption level",
+    "customerLabel": "Bait consumption",
+    "value": "None",
+    "customerValueLabel": "No bait consumption observed today"
+   },
+   {
+    "fieldKey": "bait_replaced",
+    "technicianLabel": "Bait replaced",
+    "customerLabel": "Bait replaced",
+    "value": "No",
+    "customerValueLabel": "No replacement needed"
+   }
+  ],
+  "activity": {
+   "indicatorKey": "rodent_bait_activity",
+   "label": "Bait Station Activity",
+   "score": 0,
+   "levelWord": "No active signs observed today",
+   "source": "derived",
+   "derivedFrom": {
+    "field": "bait_consumption",
+    "value": "None",
+    "initialDerivedScore": 0
+   },
+   "trend": null,
+   "trendWord": null
+  }
+ }
+}

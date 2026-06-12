@@ -86,7 +86,11 @@ const SERVICE_KEY_ALIASES = {
   mosquito: ['mosquito_monthly'],
   termite_bait: ['termite_bait'],
   termite_bait_installation: ['termite_bait'],
-  rodent_bait: ['rodent_monitoring'],
+  // The estimator sells rodent bait at 4 visits/year ("Quarterly monitoring")
+  // — route accepted lines to the profile-backed quarterly service so they
+  // complete through the typed rodent_bait_station flow; the monthly
+  // monitoring service stays as fallback for catalogs without the new row.
+  rodent_bait: ['rodent_bait_quarterly', 'rodent_monitoring'],
   rodent_monitoring: ['rodent_monitoring'],
   rodent_trapping: ['rodent_exclusion'],
   rodent_exclusion: ['rodent_exclusion'],
@@ -179,10 +183,14 @@ function serviceCatalogMatch(line, serviceIndex) {
 
   const text = `${rawKey} ${labelKey}`.replace(/_/g, ' ');
   const pick = (key) => serviceIndex.byKey.get(key);
-  if (/termite|bait/.test(text) && /install|station|bait/.test(text)) return pick('termite_bait');
+  // Termite picks require the word "termite" — bare "bait"/"station" text
+  // used to satisfy both halves of this test, swallowing rodent bait lines
+  // before the rodent branches below could run.
+  if (/termite/.test(text) && /install|station|bait/.test(text)) return pick('termite_bait');
   if (/termite|wdo/.test(text) && /inspect|letter/.test(text)) return pick('wdo_inspection');
   if (/termite|trench|liquid/.test(text)) return pick('termite_liquid');
-  if (/rodent|rat|mouse/.test(text) && /monitor|bait|monthly/.test(text)) return pick('rodent_monitoring');
+  if (/rodent|rat|mouse/.test(text) && /monthly/.test(text)) return pick('rodent_monitoring') || pick('rodent_bait_quarterly');
+  if (/rodent|rat|mouse/.test(text) && /monitor|bait/.test(text)) return pick('rodent_bait_quarterly') || pick('rodent_monitoring');
   if (/rodent|rat|mouse|exclusion|trapping/.test(text)) return pick('rodent_exclusion');
   if (/tree|shrub|ornamental/.test(text)) return pick('tree_shrub_program');
   if (/mosquito/.test(text)) return pick('mosquito_monthly');
@@ -2219,12 +2227,14 @@ router._private = {
   compactServiceContactSlots,
   customerSearchTerms,
   hasMembership,
+  indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
   scheduleLinesFromEstimate,
+  serviceCatalogMatch,
 };
 
 module.exports = router;

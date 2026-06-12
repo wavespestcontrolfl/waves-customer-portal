@@ -231,6 +231,52 @@ const PROJECT_TYPES = {
     ],
   },
 
+  // Exterior bait station program (owner spec 2026-06-12) — DISTINCT from
+  // trapping: trapping reports focus on captures, station reports focus on
+  // bait consumption (= exterior pressure) and station condition. Wording
+  // rule: consumption indicates EXTERIOR activity — never claim interior
+  // infestation from a station check.
+  rodent_bait_station: {
+    label: 'Rodent Bait Station Check',
+    short: 'Bait Station',
+    description: 'Quarterly exterior rodent bait station service: consumption, evidence, station condition, attractants.',
+    requiresFollowup: false,
+    photoCategories: ['station', 'droppings', 'harborage', 'entry_point', 'exterior', 'other'],
+    findingsFields: [
+      { key: 'total_stations', label: 'Total stations on property', type: 'count', section: 'Station inspection' },
+      { key: 'stations_checked', label: 'Stations checked', type: 'count', section: 'Station inspection' },
+      { key: 'stations_inaccessible', label: 'Stations inaccessible', type: 'count', section: 'Station inspection' },
+      { key: 'station_actions', label: 'Station service performed', type: 'chips', section: 'Station inspection', options: [
+        'Cleaned', 'Refilled', 'Reset', 'Secured', 'Relocated', 'Replaced', 'New station added',
+      ] },
+      { key: 'bait_consumption', label: 'Bait consumption level', type: 'select', section: 'Bait & activity', options: [
+        'None', 'Light', 'Moderate', 'Heavy', 'Empty',
+      ] },
+      { key: 'bait_replaced', label: 'Bait replaced', type: 'select', section: 'Bait & activity', options: ['Yes', 'No'] },
+      { key: 'highest_activity_location', label: 'Highest-activity station / location', type: 'text', section: 'Bait & activity', placeholder: 'Rear-left near A/C pad…' },
+      { key: 'bait_issues', label: 'Bait / station contents', type: 'chips', section: 'Bait & activity', options: [
+        'Moldy / deteriorated bait', 'Non-target disturbance', 'Insects in station', 'Water intrusion',
+      ] },
+      { key: 'evidence_observed', label: 'Rodent evidence nearby', type: 'chips', section: 'Rodent evidence', options: [
+        'Droppings', 'Gnaw marks', 'Rub marks', 'Burrows', 'Runways', 'Tracks',
+        'Nesting material', 'Odor', 'Exterior harborage',
+      ] },
+      { key: 'station_issues', label: 'Station condition issues', type: 'chips', section: 'Station condition', options: [
+        'Station damaged', 'Station missing', 'Station unlocked / open', 'Anchor damaged', 'Needs replacement',
+      ] },
+      { key: 'conducive_conditions', label: 'Attractants / harborage', type: 'chips', section: 'Conducive conditions', options: [
+        'Pet food outside', 'Bird seed accessible', 'Fallen fruit', 'Trash bins open',
+        'Compost', 'Dense vegetation', 'Woodpile', 'Stored items / clutter',
+        'Garage door gaps', 'Crawlspace / utility gaps', 'Standing water', 'Livestock or chicken feed',
+      ] },
+      { key: 'sanitation_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+        'Store pet food / bird seed in sealed containers', 'Remove fallen fruit', 'Keep trash lids closed',
+        'Reduce clutter', 'Trim vegetation off structure', 'Do not move bait stations',
+        'Keep stations accessible', 'Notify office if a station is damaged',
+      ] },
+    ],
+  },
+
   wildlife_trapping: {
     label: 'Wildlife Trapping',
     short: 'Wildlife',
@@ -430,6 +476,61 @@ const PROJECT_TYPES = {
       { key: 'linear_feet_or_stations', label: 'Linear feet / stations', type: 'textarea' },
       { key: 'gallons_or_amount', label: 'Gallons / amount applied', type: 'textarea' },
       { key: 'followup_plan', label: 'Follow-up / warranty plan', type: 'textarea' },
+    ],
+  },
+
+  // Bait station monitoring (owner spec 2026-06-12) — inspection/compliance
+  // style, not treatment style: station condition, termite activity, bait
+  // status, conducive conditions, next monitoring step. Wording rule: absence
+  // claims are scoped to the ACCESSIBLE stations inspected today — never
+  // "no termites on property".
+  termite_bait_station: {
+    label: 'Termite Bait Station Inspection',
+    short: 'Termite Bait',
+    description: 'Bait station monitoring visit: station-by-station inspection, activity, bait condition, and next monitoring step.',
+    requiresFollowup: false,
+    photoCategories: ['station', 'activity', 'foundation', 'conducive_condition', 'exterior', 'other'],
+    findingsFields: [
+      { key: 'total_stations', label: 'Total stations on property', type: 'count', section: 'Station inspection' },
+      { key: 'stations_checked', label: 'Stations checked', type: 'count', section: 'Station inspection' },
+      { key: 'stations_inaccessible', label: 'Stations inaccessible', type: 'count', section: 'Station inspection' },
+      { key: 'stations_with_activity', label: 'Stations with termite activity', type: 'count', section: 'Station inspection' },
+      { key: 'termite_activity', label: 'Termite activity', type: 'select', section: 'Termite activity', options: [
+        'None observed', 'Active termites present', 'Previous feeding noted',
+      ] },
+      { key: 'activity_signs', label: 'Activity signs', type: 'chips', section: 'Termite activity', options: [
+        'Live termites in station', 'Mud tubing in station', 'Bait feeding',
+        'Previous feeding evidence', 'Favorable moisture / soil conditions',
+      ] },
+      { key: 'active_station_location', label: 'Active station number / location', type: 'text', section: 'Termite activity', placeholder: 'Station #7, rear exterior wall…' },
+      { key: 'bait_consumption', label: 'Bait consumption', type: 'select', section: 'Bait condition', options: [
+        'None — bait intact', 'Light feeding', 'Moderate feeding', 'Heavy feeding',
+      ] },
+      { key: 'bait_actions', label: 'Bait service performed', type: 'chips', section: 'Bait condition', options: [
+        'Bait replaced', 'Bait added', 'Monitor cartridge replaced', 'Station cleaned',
+      ] },
+      { key: 'bait_issues', label: 'Bait condition issues', type: 'chips', section: 'Bait condition', options: [
+        'Excess moisture in station', 'Mold / deterioration',
+      ] },
+      { key: 'station_issues', label: 'Station condition issues', type: 'chips', section: 'Station condition', options: [
+        'Cap damaged', 'Station missing', 'Station flooded', 'Station buried',
+        'Station obstructed', 'Mower damage', 'Needs replacement',
+      ] },
+      { key: 'station_actions', label: 'Station service performed', type: 'chips', section: 'Station condition', options: [
+        'Obstruction removed', 'Re-secured', 'Relocated', 'Replaced',
+      ] },
+      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'chips', section: 'Conducive conditions', options: [
+        'Wood-to-ground contact', 'Mulch against foundation', 'Moisture near foundation',
+        'Irrigation hitting structure', 'Downspout drainage issues', 'Stacked firewood near structure',
+        'Tree roots / stumps', 'Soil grade above slab', 'Dense vegetation', 'Leaking hose bib',
+      ] },
+      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+        'Keep stations visible and accessible', 'Unlock gate on service day',
+        'Do not cover stations with mulch or rock', 'Do not remove station caps',
+        'Pull mulch back from foundation', 'Reduce moisture near foundation',
+        'Move firewood away from structure', 'Trim vegetation off walls',
+        'Correct irrigation spraying the structure',
+      ] },
     ],
   },
 
