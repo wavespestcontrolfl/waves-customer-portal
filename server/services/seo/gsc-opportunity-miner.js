@@ -303,8 +303,16 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
 // The companion INHERITS the parent's score instead of re-deriving it:
 // the demand signal is identical, and re-scoring under a new bucket
 // multiplier would let a parent clear persistAll's floor while its
-// companion silently missed it. gscOpportunityScore is never consulted
-// for this bucket.
+// companion silently missed it. For the same reason mineAll derives
+// AFTER _applyFactsReadinessBoost — a facts-ready decay refresh lifted
+// over the floor must lift its companion too. gscOpportunityScore is
+// never consulted for this bucket.
+//
+// excludeKeys rotates the per-run cap: dedupe keys whose queue rows are
+// claimed / done / pending_review are skipped BEFORE capping — persistAll's
+// upsert refuses to re-open those statuses, so emitting them again would
+// burn cap slots on rows that can't change while lower-scoring qualifying
+// pages starve behind them.
 
 const LINK_BOOST_SOURCE_ACTIONS = new Set(['rewrite_title_meta', 'refresh_existing_page']);
 const DEFAULT_LINK_BOOST_MAX_PER_RUN = 10;
@@ -314,7 +322,7 @@ function linkBoostCap() {
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_LINK_BOOST_MAX_PER_RUN;
 }
 
-function deriveLinkBoost(parents = [], { cap = linkBoostCap() } = {}) {
+function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new Set() } = {}) {
   if (!cap) return [];
   const byKey = new Map();
   for (const parent of parents) {
@@ -335,6 +343,7 @@ function deriveLinkBoost(parents = [], { cap = linkBoostCap() } = {}) {
     };
     opp.action_type = actionForOpportunity(opp);
     opp.dedupe_key = dedupeKey(opp);
+    if (excludeKeys.has(opp.dedupe_key)) continue;
     // Multiple parents (several low-CTR queries, or ctr_rewrite + decay on
     // the same page) collapse to one companion per dedupe key; keep the
     // strongest signal.
@@ -395,24 +404,35 @@ class GscOpportunityMiner {
       }
     }
 
+    // Facts-readiness boost — applied before persistAll so well-supported
+    // rewrite opportunities can clear the global minScoreToAct floor.
+    const minedOpportunities = Object.values(buckets).flat();
+    await this._applyFactsReadinessBoost(minedOpportunities);
+
     // Derived bucket — no GSC query of its own. Underperforming pages get an
     // inbound internal-link companion alongside their rewrite/refresh.
+    // Runs AFTER the facts boost so companions inherit the boosted parent
+    // score, and with already-occupied queue rows excluded so the per-run
+    // cap rotates to lower-scoring pages (see deriveLinkBoost docs).
     try {
-      buckets.link_boost = deriveLinkBoost([
-        ...(buckets.ctr_rewrite || []),
-        ...(buckets.decay_refresh || []),
-      ]);
+      const occupied = await this._loadOccupiedLinkBoostKeys().catch((err) => {
+        // Fail-open to pre-rotation behavior: re-emitting occupied rows is
+        // harmless (persistAll freezes their status); dropping the lane on a
+        // transient query error is not.
+        logger.warn(`[gsc-opp-miner] occupied link_boost keys load failed: ${err.message}`);
+        return new Set();
+      });
+      buckets.link_boost = deriveLinkBoost(
+        [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])],
+        { excludeKeys: occupied }
+      );
     } catch (err) {
       logger.warn(`[gsc-opp-miner] link_boost failed: ${err.message}`);
       errors.link_boost = err.message;
       buckets.link_boost = [];
     }
 
-    const allOpportunities = Object.values(buckets).flat();
-
-    // Facts-readiness boost — applied before persistAll so well-supported
-    // rewrite opportunities can clear the global minScoreToAct floor.
-    await this._applyFactsReadinessBoost(allOpportunities);
+    const allOpportunities = [...minedOpportunities, ...buckets.link_boost];
 
     const counts = Object.fromEntries(
       Object.entries(buckets).map(([k, v]) => [k, v.length])
@@ -471,6 +491,17 @@ class GscOpportunityMiner {
         opp.score_breakdown.factsReady = WEIGHTS.factsReady;
       }
     }
+  }
+
+  // dedupe keys of link_boost rows persistAll's upsert would refuse to
+  // re-open (claimed / done / pending_review) — emitting those again only
+  // burns per-run cap slots on rows whose status can't change.
+  async _loadOccupiedLinkBoostKeys() {
+    const rows = await db('opportunity_queue')
+      .where('bucket', 'link_boost')
+      .whereIn('status', ['claimed', 'done', 'pending_review'])
+      .select('dedupe_key');
+    return new Set(rows.map((r) => r.dedupe_key));
   }
 
   // ── own-page resolution helper ─────────────────────────────────────

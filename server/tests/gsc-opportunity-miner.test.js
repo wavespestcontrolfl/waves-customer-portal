@@ -437,4 +437,31 @@ describe('deriveLinkBoost', () => {
     const [opp] = deriveLinkBoost([ctrParent({ query: 'exterminator near me sarasota' })], { cap: 10 });
     expect(opp.action_type).toBe('add_internal_links');
   });
+
+  test('excludeKeys rotates the cap past occupied rows instead of starving lower-scoring pages', () => {
+    const parents = [
+      ctrParent({ page_url: '/a/', score: 95 }),
+      ctrParent({ page_url: '/b/', score: 85 }),
+      ctrParent({ page_url: '/c/', score: 70 }),
+    ];
+    // First run: cap 2 → the top two pages.
+    const firstRun = deriveLinkBoost(parents, { cap: 2 });
+    expect(firstRun.map((o) => o.page_url)).toEqual(['/a/', '/b/']);
+    // Next run: those rows are claimed/done/pending_review → the cap is
+    // spent on the next qualifying page rather than re-emitting them.
+    const occupied = new Set(firstRun.map((o) => o.dedupe_key));
+    const secondRun = deriveLinkBoost(parents, { cap: 2, excludeKeys: occupied });
+    expect(secondRun.map((o) => o.page_url)).toEqual(['/c/']);
+  });
+
+  test('companions derived after the facts boost inherit the boosted parent score', () => {
+    // mineAll boosts parent scores in place BEFORE deriving (Codex P2):
+    // mutate the parent like _applyFactsReadinessBoost does, then derive.
+    const parent = decayParent({ score: 65, score_breakdown: { base: 65 } });
+    parent.score += 15;
+    parent.score_breakdown.factsReady = 15;
+    const [opp] = deriveLinkBoost([parent], { cap: 10 });
+    expect(opp.score).toBe(80);
+    expect(opp.score_breakdown.factsReady).toBe(15);
+  });
 });
