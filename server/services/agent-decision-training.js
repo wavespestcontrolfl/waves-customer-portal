@@ -209,6 +209,10 @@ module.exports = {
   evaluateFixture,
   evaluateFixtureDocument,
   fixtureFromDecision,
+  // Shared PII redaction — the voice-corpus miner rides these so corpus
+  // rows and decision fixtures redact identically (one source of truth).
+  redactText,
+  redactValue,
   _test: {
     arrayFrom,
     evaluateDecisionForWorkflow,

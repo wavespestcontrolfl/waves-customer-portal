@@ -509,6 +509,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:45AM ET — Voice-corpus miner (SMS brand-voice loop, Phase A).
+  // Mines human-authored SMS replies (on a 7-day-delayed band so each
+  // pair's outcome window has closed before the row freezes) + recent
+  // consent-gated labeled call transcripts into voice_corpus_examples
+  // (redacted). Overlapping 3-day bands + insert-ignore = idempotent, so
+  // a missed night self-heals on the next run.
+  // =========================================================================
+  cron.schedule('45 2 * * *', async () => {
+    if (!isEnabled('voiceCorpusMiner')) return;
+    logger.info('Running: Voice-corpus miner');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { mineVoiceCorpus } = require('./sms-voice-corpus-miner');
+      await runExclusive('voice-corpus-miner', () => mineVoiceCorpus({ sinceDays: 3 }));
+    } catch (err) {
+      logger.error(`Voice-corpus miner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
   // Stripe's retry window is 72h max, so anything past 90d is just historical
   // noise; the table grows ~50–500 rows/day and never shrinks otherwise.
