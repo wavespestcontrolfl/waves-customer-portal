@@ -95,6 +95,11 @@ const CITY_PATTERNS = {
   parrish: /parrish/i,
   lakewood_ranch: /lakewood\s*ranch/i,
   palmetto: /palmetto/i,
+  // north_port must precede port_charlotte — first match wins in the
+  // classification loop, and "north port" must not fall through on "port".
+  north_port: /north\s*port/i,
+  port_charlotte: /port\s*charlotte/i,
+  englewood: /englewood/i,
 };
 
 // Service mapping for query classification
