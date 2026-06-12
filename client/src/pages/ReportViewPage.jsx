@@ -7317,6 +7317,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">
             <h2>Field photos</h2>
+            {data.typedReport?.photoSummary && (
+              <p style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
+                {data.typedReport.photoSummary}
+              </p>
+            )}
             <div className="sr-grid-3">
               {data.photos.map((photo) => (
                 <div className="sr-cell" key={photo.id}>

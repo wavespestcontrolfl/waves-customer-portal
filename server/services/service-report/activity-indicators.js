@@ -929,6 +929,7 @@ function buildTypedReportSnapshot({
   serviceLabel = null,
   visitSequence = 1,
   activity = null,
+  photoSummary = null,
 }) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
@@ -981,6 +982,10 @@ function buildTypedReportSnapshot({
     values,
     nextStepChips,
     todaysResult,
+    // Customer-facing photo summary (AI-drafted, tech-reviewed, banned-copy
+    // validated in the complete path) — renders atop the report's Field
+    // Photos section.
+    photoSummary: photoSummary ? String(photoSummary).slice(0, 600) : null,
     findings: items,
     activity: activity
       ? {

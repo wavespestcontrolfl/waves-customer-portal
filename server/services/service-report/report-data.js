@@ -2108,6 +2108,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         todaysResult: typedSnapshot.todaysResult || null,
         findings: Array.isArray(typedSnapshot.findings) ? typedSnapshot.findings : [],
         nextStepChips: Array.isArray(typedSnapshot.nextStepChips) ? typedSnapshot.nextStepChips : [],
+        photoSummary: typedSnapshot.photoSummary || null,
         schemaVersion: typedSnapshot.schemaVersion || null,
       }
       : null,
