@@ -5352,13 +5352,21 @@ router.put('/:token/accept', async (req, res, next) => {
       const depositPaymentIntentId = typeof req.body?.depositPaymentIntentId === 'string'
         ? req.body.depositPaymentIntentId.trim()
         : null;
-      const depositCheck = await ensureDepositSatisfied({ estimate, depositPaymentIntentId });
+      // requiredAmount enforces the RESOLVED class amount, not mere presence:
+      // a $49 recurring deposit must not unlock a one-time accept that owes
+      // $99 — the accept would proceed under-collected after a mode switch.
+      const depositCheck = await ensureDepositSatisfied({
+        estimate,
+        depositPaymentIntentId,
+        requiredAmount: depositPolicy.amount,
+      });
       if (!depositCheck.satisfied) {
         return res.status(402).json({
           error: 'To confirm your service, a deposit is required and will be applied toward your first visit',
           code: 'DEPOSIT_REQUIRED',
           depositRequired: true,
           depositAmount: depositPolicy.amount,
+          depositReceived: depositCheck.receivedTotal || 0,
         });
       }
     }
@@ -6471,6 +6479,18 @@ router.put('/:token/decline', async (req, res, next) => {
       const freshGuard = resolveEstimateDeclineGuard(fresh);
       if (freshGuard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
       return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+
+    // Refund any acceptance deposit the customer paid before declining \u2014
+    // post-commit and best-effort (the daily terminal-estimate sweep in
+    // estimate-expiration is the self-healing backstop). Without this, a
+    // paid-then-declined deposit has no refund path and strands on the
+    // ledger.
+    try {
+      const { refundUnconsumedDeposits } = require('../services/estimate-deposits');
+      await refundUnconsumedDeposits({ estimateId: estimate.id, reason: 'estimate_declined' });
+    } catch (e) {
+      logger.error(`[estimate-decline] deposit refund sweep failed for estimate ${estimate.id}: ${e.message}`);
     }
 
     // Notify admin of declined estimate

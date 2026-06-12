@@ -132,10 +132,18 @@ function depositIntentMatchesEstimate(paymentIntent, estimateId) {
 
 // Accept-time check: webhook-recorded deposit, else live verification of the
 // PaymentIntent the client just paid (closes the webhook race). Returns
-// { satisfied, receivedTotal }.
-async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null }) {
+// { satisfied, receivedTotal }. requiredAmount enforces the RESOLVED policy
+// amount, not mere presence — a $49 recurring deposit must not unlock a
+// one-time accept that owes $99 (under-collection via mode switch); without
+// it, any positive received money satisfies (legacy semantics).
+async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null, requiredAmount = null }) {
+  const requiredCents = Number.isFinite(Number(requiredAmount)) && Number(requiredAmount) > 0
+    ? Math.round(Number(requiredAmount) * 100)
+    : 1;
   const recorded = await receivedDepositTotal(estimate.id);
-  if (recorded > 0) return { satisfied: true, receivedTotal: recorded };
+  if (Math.round(recorded * 100) >= requiredCents) {
+    return { satisfied: true, receivedTotal: recorded };
+  }
 
   if (depositPaymentIntentId) {
     let paymentIntent = null;
@@ -154,18 +162,27 @@ async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null 
       // Ledger state is the authority, not Stripe's status: a refunded PI
       // still reports succeeded/amount_received, the monotonic mark above
       // touches 0 rows for it, and a refunded deposit must never unlock
-      // acceptance.
+      // acceptance. Re-sum the whole ledger — the live PI may be a top-up
+      // beside an earlier recorded deposit.
       const row = await db('estimate_deposits')
         .where({ stripe_payment_intent_id: paymentIntent.id })
         .first('status', 'amount');
       if (row && ['received', 'credited'].includes(row.status)) {
-        return { satisfied: true, receivedTotal: Number(row.amount) || amountDollars };
+        const total = await receivedDepositTotal(estimate.id);
+        if (Math.round(total * 100) >= requiredCents) {
+          return { satisfied: true, receivedTotal: total };
+        }
+        logger.warn('[estimate-deposits] received deposit is below the required policy amount', {
+          receivedTotal: total,
+          requiredAmount,
+        });
+        return { satisfied: false, receivedTotal: total };
       }
       logger.warn('[estimate-deposits] PI succeeded on Stripe but ledger row is not received/credited — refusing to satisfy');
     }
   }
 
-  return { satisfied: false, receivedTotal: 0 };
+  return { satisfied: false, receivedTotal: recorded };
 }
 
 // Create (or idempotently reuse) the deposit PaymentIntent for an estimate
@@ -377,6 +394,53 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
   return { refunded };
 }
 
+// Lifecycle sweep: refund received-but-never-consumed deposits sitting on
+// TERMINAL estimates (declined/expired). The webhook staleness gate only
+// catches money landing AFTER the estimate went terminal; money received
+// while it was live — customer paid the deposit then closed the browser,
+// the accept request failed, or they later declined — has no other refund
+// path and would strand forever. Accepted estimates are deliberately NOT
+// swept: their unapplied remainder rolls forward to later service invoices.
+// Runs daily from the estimate-expiration worker (self-healing for any
+// terminal flip regardless of origin, including admin-side status changes)
+// and inline from the public decline route for immediacy. Per-estimate
+// failure isolation; refundUnconsumedDeposits owns the claim-first
+// discipline and the reconcile alert on Stripe failure.
+async function sweepTerminalEstimateDeposits() {
+  const rows = await db('estimate_deposits as ed')
+    .join('estimates as e', 'e.id', 'ed.estimate_id')
+    .where('ed.status', 'received')
+    .whereIn('e.status', ['declined', 'expired'])
+    .distinct('ed.estimate_id');
+
+  let estimatesSwept = 0;
+  let refundedTotal = 0;
+  for (const row of rows) {
+    try {
+      const { refunded } = await refundUnconsumedDeposits({
+        estimateId: row.estimate_id,
+        reason: 'terminal_estimate_sweep',
+      });
+      if (refunded > 0) {
+        estimatesSwept += 1;
+        refundedTotal += refunded;
+      }
+    } catch (err) {
+      logger.error('[estimate-deposits] terminal-estimate deposit sweep failed for one estimate', {
+        estimateId: row.estimate_id,
+        error: err.message,
+      });
+    }
+  }
+  if (estimatesSwept > 0) {
+    logger.info('[estimate-deposits] terminal-estimate deposit sweep refunded stranded money', {
+      estimatesSwept,
+      refundedTotal,
+    });
+  }
+  return { estimatesSwept, refundedTotal };
+}
+
 // Webhook entry: a succeeded PaymentIntent whose metadata marks it as an
 // estimate deposit. Routed from stripe-webhook.js BEFORE invoice handling.
 // Replay-safe: rows accept already consumed (received/credited) or already
@@ -441,7 +505,7 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const row = await db('estimate_deposits')
       .where({ stripe_payment_intent_id: paymentIntentId })
-      .first('id', 'status', 'estimate_id', 'credited_amount', 'credited_invoice_id', 'refunded_amount');
+      .first('id', 'status', 'estimate_id', 'amount', 'credited_amount', 'credited_invoice_id', 'refunded_amount');
     if (!row) return { handled: false };
     if (row.status === 'refunded') return { handled: true, replay: true };
 
@@ -453,13 +517,29 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
       return { handled: true, replay: true };
     }
     if (row.status === 'refunding') {
-      // Echo arrived before our own terminal stamp — flip it for us; the
-      // pending stamp's status='refunding' guard makes it a harmless no-op.
+      // Echo arrived before our own terminal stamp — write the SAME terminal
+      // state the refund path would have: a partially credited row keeps its
+      // credit (only the unapplied remainder was refunded; flipping it to
+      // 'refunded' would no-op the refunder's stamp and erase a credit the
+      // invoice still carries), and refunded_amount records the remainder so
+      // later echoes are recognized as replays. The refunder's own pending
+      // stamp is status='refunding'-guarded, so it no-ops harmlessly after us.
+      const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
+      const amountCents = Math.round(Number(row.amount || 0) * 100);
+      const remainderCents = Math.max(amountCents - creditedCents, 0);
       const flipped = await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
-        .update({ status: 'refunded', updated_at: db.fn.now() });
+        .update({
+          status: creditedCents > 0 ? 'credited' : 'refunded',
+          refunded_amount: remainderCents / 100,
+          updated_at: db.fn.now(),
+        });
       if (!flipped) continue;
-      logger.warn('[estimate-deposits] deposit reversal echo landed mid-refund — row flipped to refunded', { context });
+      logger.warn('[estimate-deposits] deposit reversal echo landed mid-refund — terminal state stamped for the in-flight refund', {
+        context,
+        keptCreditedAmount: creditedCents > 0 ? creditedCents / 100 : 0,
+        refundedAmount: remainderCents / 100,
+      });
       return { handled: true };
     }
 
@@ -584,6 +664,7 @@ module.exports = {
   pendingDepositCredit,
   refundUnconsumedDeposits,
   resolveDepositPolicy,
+  sweepTerminalEstimateDeposits,
   _private: {
     claimDepositRowForRefund,
     depositIntentMatchesEstimate,

@@ -41,6 +41,7 @@ const {
   handleEstimateAsk,
   isEstimateAcceptActive,
   isStructuralOneTimeOnlyEstimate,
+  resolveAcceptOneTimeTotal,
   resolveEstimateQuoteRequirement,
   verifyEstimateAskToken,
 } = require('./estimate-public');
@@ -327,8 +328,20 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     }
 
     const membership = await buildEstimateMembershipContext(estimate);
-    const oneTime = req.body?.serviceMode === 'one_time'
-      || isStructuralOneTimeOnlyEstimate(estData, estimate);
+    const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // Mirror accept's one-time availability gate before choosing the amount
+    // class: serviceMode arrives from the client, and a one_time request on
+    // an estimate whose accept would reject one-time mode must not create
+    // the heavier $99 intent — the customer would be overcharged for an
+    // acceptance that can only proceed as recurring ($49).
+    if (req.body?.serviceMode === 'one_time' && !isOneTimeOnly) {
+      const oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundle);
+      const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
+      if (!canChooseOneTime) {
+        return res.status(400).json({ error: 'one-time option is not available for this estimate' });
+      }
+    }
+    const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
     const policy = resolveDepositPolicy({
       estimate,
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,

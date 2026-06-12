@@ -144,7 +144,11 @@ describe('depositIntentMatchesEstimate — the trust boundary', () => {
 });
 
 describe('ensureDepositSatisfied', () => {
-  function depositsTable({ receivedTotal = 0, ledgerRow, upserts = [], statusUpdates = [] } = {}) {
+  // receivedTotals: sequence of ledger sums per call — the live-PI path
+  // re-sums AFTER marking the PI received, so the second value models the
+  // freshly recorded money. Last value repeats.
+  function depositsTable({ receivedTotal = 0, receivedTotals = null, ledgerRow, upserts = [], statusUpdates = [] } = {}) {
+    const totals = Array.isArray(receivedTotals) ? [...receivedTotals] : null;
     return {
       where(criteria) {
         if (criteria && criteria.stripe_payment_intent_id && criteria.status === 'pending') {
@@ -157,7 +161,7 @@ describe('ensureDepositSatisfied', () => {
       },
       whereIn() { return this; },
       sum() { return this; },
-      first: async () => ({ total: receivedTotal }),
+      first: async () => ({ total: totals ? (totals.length > 1 ? totals.shift() : totals[0]) : receivedTotal }),
       insert(payload) {
         return { onConflict: () => ({ ignore: async () => { upserts.push(payload); } }) };
       },
@@ -173,11 +177,13 @@ describe('ensureDepositSatisfied', () => {
 
   it('closes the webhook race via live PI verification and records it', async () => {
     const upserts = [];
-    mockDbHandler = () => depositsTable({
-      receivedTotal: 0,
+    // One shared table: the totals sequence must advance across db() calls.
+    const table = depositsTable({
+      receivedTotals: [0, 70],
       upserts,
       ledgerRow: { status: 'received', amount: '70.00' },
     });
+    mockDbHandler = () => table;
     mockRetrievePaymentIntent.mockResolvedValue({
       id: 'pi_1', status: 'succeeded', amount_received: 7000,
       metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
@@ -219,6 +225,51 @@ describe('ensureDepositSatisfied', () => {
     mockRetrievePaymentIntent.mockRejectedValue(new Error('stripe down'));
     const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_3' });
     expect(result.satisfied).toBe(false);
+  });
+
+  it('the recorded total must MEET the resolved policy amount — $49 never unlocks a $99 one-time accept', async () => {
+    mockDbHandler = () => depositsTable({ receivedTotal: 49 });
+    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, requiredAmount: 99 });
+    expect(result).toEqual({ satisfied: false, receivedTotal: 49 });
+    expect(mockRetrievePaymentIntent).not.toHaveBeenCalled();
+
+    mockDbHandler = () => depositsTable({ receivedTotal: 99 });
+    expect((await ensureDepositSatisfied({ estimate: { id: 'est-1' }, requiredAmount: 99 })).satisfied).toBe(true);
+    // The heavier deposit always covers a switch BACK to the lighter class.
+    mockDbHandler = () => depositsTable({ receivedTotal: 99 });
+    expect((await ensureDepositSatisfied({ estimate: { id: 'est-1' }, requiredAmount: 49 })).satisfied).toBe(true);
+  });
+
+  it('a live PI top-up counts the WHOLE ledger toward the required amount', async () => {
+    const table = depositsTable({
+      receivedTotals: [49, 148],
+      ledgerRow: { status: 'received', amount: '99.00' },
+    });
+    mockDbHandler = () => table;
+    mockRetrievePaymentIntent.mockResolvedValue({
+      id: 'pi_topup', status: 'succeeded', amount_received: 9900,
+      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
+    });
+    const result = await ensureDepositSatisfied({
+      estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_topup', requiredAmount: 99,
+    });
+    expect(result).toEqual({ satisfied: true, receivedTotal: 148 });
+  });
+
+  it('a live-verified PI below the required amount still fails closed', async () => {
+    const table = depositsTable({
+      receivedTotals: [0, 49],
+      ledgerRow: { status: 'received', amount: '49.00' },
+    });
+    mockDbHandler = () => table;
+    mockRetrievePaymentIntent.mockResolvedValue({
+      id: 'pi_light', status: 'succeeded', amount_received: 4900,
+      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
+    });
+    const result = await ensureDepositSatisfied({
+      estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_light', requiredAmount: 99,
+    });
+    expect(result).toEqual({ satisfied: false, receivedTotal: 49 });
   });
 });
 
@@ -535,6 +586,34 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     expect(updates2[0].payload.status).toBe('refunded');
     expect(logger.error).toHaveBeenCalled();
   });
+
+  it('an echo landing MID-refund stamps the refund terminal state — a partial credit survives (P1)', async () => {
+    // $99 deposit, $70 credited to an invoice, our $29 remainder refund is
+    // between the Stripe call and the terminal stamp. The echo must finish
+    // the job the refunder started: keep the credit, record the remainder —
+    // NOT flip to plain refunded (which would erase a credit the invoice
+    // still carries and suppress the reconcile trail).
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'refunding', estimate_id: 'est-1', amount: '99.00', credited_amount: '70.00', refunded_amount: '0.00' },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 2900 });
+    expect(result.handled).toBe(true);
+    expect(updates[0].criteria).toMatchObject({ id: 'd1', status: 'refunding' });
+    expect(updates[0].payload).toMatchObject({ status: 'credited', refunded_amount: 29 });
+    expect(logger.error).not.toHaveBeenCalled();
+
+    // Zero-credit in-flight refund (stale deposit) — plain refunded with the
+    // full amount recorded so later echoes register as replays.
+    const updates2 = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd2', status: 'refunding', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' },
+      updates: updates2,
+    });
+    await handleDepositChargeReversed('pi_2', 'charge.refunded');
+    expect(updates2[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+  });
 });
 
 describe('refundUnconsumedDeposits — exempt-path sweep', () => {
@@ -614,6 +693,80 @@ describe('refundUnconsumedDeposits — exempt-path sweep', () => {
     const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'exempt_accept:prepay_annual' });
     expect(result.refunded).toBe(0);
     expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+  });
+});
+
+describe('sweepTerminalEstimateDeposits — decline/expiry lifecycle refunds (P1)', () => {
+  const { sweepTerminalEstimateDeposits } = require('../services/estimate-deposits');
+
+  // First query (aliased join) finds estimates holding stranded money;
+  // the per-estimate refund then runs the standard sweep queries.
+  function terminalSweepDb({ strandedEstimateIds = [], rows = [] }) {
+    return (table) => {
+      if (table === 'estimate_deposits as ed') {
+        const chain = {
+          join: () => chain,
+          where: () => chain,
+          whereIn: () => chain,
+          distinct: async () => strandedEstimateIds.map((id) => ({ estimate_id: id })),
+        };
+        return chain;
+      }
+      if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
+      const q = { criteria: {} };
+      const chain = {
+        where(c) { Object.assign(q.criteria, c); return chain; },
+        select: async () => rows
+          .filter((r) => r.status === q.criteria.status && r.estimate_id === q.criteria.estimate_id)
+          .map((r) => ({ ...r })),
+        update: async (payload) => {
+          const target = rows.find((r) => r.id === q.criteria.id);
+          if (!target) return 0;
+          if (q.criteria.status && target.status !== q.criteria.status) return 0;
+          if (q.criteria.credited_amount !== undefined && String(target.credited_amount) !== String(q.criteria.credited_amount)) return 0;
+          Object.assign(target, payload);
+          return 1;
+        },
+      };
+      return chain;
+    };
+  }
+
+  it('refunds received deposits stranded on declined/expired estimates — paid-then-abandoned money comes back', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const rows = [
+      { id: 'd1', estimate_id: 'est-9', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', refunded_amount: 0 },
+    ];
+    mockDbHandler = terminalSweepDb({ strandedEstimateIds: ['est-9'], rows });
+
+    const result = await sweepTerminalEstimateDeposits();
+    expect(result).toEqual({ estimatesSwept: 1, refundedTotal: 49 });
+    expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 4900 });
+    expect(rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+  });
+
+  it('nothing stranded = no Stripe calls', async () => {
+    mockDbHandler = terminalSweepDb({ strandedEstimateIds: [], rows: [] });
+    const result = await sweepTerminalEstimateDeposits();
+    expect(result).toEqual({ estimatesSwept: 0, refundedTotal: 0 });
+    expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  it('one estimate failing does not stop the sweep for the rest', async () => {
+    mockRefundPaymentIntent
+      .mockRejectedValueOnce(new Error('stripe down'))
+      .mockResolvedValueOnce({ id: 're_2' });
+    const rows = [
+      { id: 'd1', estimate_id: 'est-a', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', refunded_amount: 0 },
+      { id: 'd2', estimate_id: 'est-b', stripe_payment_intent_id: 'pi_b', status: 'received', amount: '99.00', credited_amount: '0.00', refunded_amount: 0 },
+    ];
+    mockDbHandler = terminalSweepDb({ strandedEstimateIds: ['est-a', 'est-b'], rows });
+
+    const result = await sweepTerminalEstimateDeposits();
+    expect(result).toEqual({ estimatesSwept: 1, refundedTotal: 99 });
+    // The failed estimate's row reverted to received for the next daily run.
+    expect(rows[0].status).toBe('received');
+    expect(rows[1].status).toBe('refunded');
   });
 });
 

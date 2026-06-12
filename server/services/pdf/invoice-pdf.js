@@ -188,6 +188,22 @@ function lineItemsTable(doc, lineItems, x, y, width) {
   return y;
 }
 
+// Acceptance-deposit credit lines are prior payments, not discounts — the
+// item table hides them (negative lines), so the totals block must surface
+// the amount or the visible rows won't reconcile to the total.
+function depositCreditTotalFromLineItems(lineItems) {
+  let items = lineItems;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = []; }
+  }
+  return (Array.isArray(items) ? items : [])
+    .filter((item) => item?.category === 'deposit_credit')
+    .reduce((sum, item) => {
+      const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
+      return sum + (Number.isFinite(amount) ? Math.abs(amount) : 0);
+    }, 0);
+}
+
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const { highlightTotal = true, paidStamp = false, refundAmount = 0, customer = null } = opts;
   doc.save();
@@ -217,6 +233,8 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   // customer — we still hide the line in that case; the stored total is
   // authoritative since the customer already agreed to it.
   if (tax > 0 && isCommercial) row(`Tax (${(Number(invoice.tax_rate || 0) * 100).toFixed(2)}%)`, currency(tax));
+  const depositCredit = depositCreditTotalFromLineItems(invoice.line_items);
+  if (depositCredit > 0) row('Deposit paid at acceptance', `− ${currency(depositCredit)}`);
 
   y += 2;
   doc.moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();

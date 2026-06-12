@@ -168,6 +168,19 @@ function isDiscountLineItem(item) {
   return item?._kind === 'discount' || item?.discount_for || amount < 0;
 }
 
+// Acceptance-deposit credit lines are prior payments, not discounts — they
+// stay out of the item table but MUST surface in the totals block, or the
+// visible rows won't reconcile to the total (subtotal $100 → total $51 with
+// nothing explaining the gap).
+function depositCreditTotalFromLineItems(lineItems) {
+  return (lineItems || [])
+    .filter((item) => item?.category === 'deposit_credit')
+    .reduce((sum, item) => {
+      const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
+      return sum + (Number.isFinite(amount) ? Math.abs(amount) : 0);
+    }, 0);
+}
+
 function fmtDate(d) {
   return formatInvoiceDate(d);
 }
@@ -1145,6 +1158,7 @@ export default function PayPageV2() {
 
   const { invoice, service, customer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
+  const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
@@ -1403,6 +1417,9 @@ export default function PayPageV2() {
               )}
               {invoice.taxAmount > 0 && customer?.isCommercial && (
                 <SummaryRow label={`Tax (${(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)`} value={fmtCurrency(invoice.taxAmount)} />
+              )}
+              {depositCreditTotal > 0 && (
+                <SummaryRow label="Deposit paid at acceptance" value={`− ${fmtCurrency(depositCreditTotal)}`} />
               )}
               <SummaryRow label="Total due" value={fmtCurrency(invoice.total)} strong />
             </div>
