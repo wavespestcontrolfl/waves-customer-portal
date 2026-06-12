@@ -10,8 +10,12 @@ Codex on a UI-touching PR:
 
 ## Procedure
 
-1. Run the app (`npm run dev` in background) and navigate to the changed
-   page with the Chrome DevTools MCP (`new_page`/`navigate_page`).
+1. Run the app in the background and navigate to the changed page with the
+   Chrome DevTools MCP (`new_page`/`navigate_page`). For client-only changes
+   use `npm run dev:client` — the full `npm run dev` has a `predev` hook
+   that runs `db:migrate` and fails without a `DATABASE_URL` (and agent
+   sessions must not point one at prod). Reserve full `npm run dev` for
+   server-rendered or backend-dependent pages, against a dev/preview DB.
 2. Screenshot at TWO widths minimum: desktop (~1440) and mobile (390 —
    Virginia and the techs live on phones). `resize_page` then
    `take_screenshot`.

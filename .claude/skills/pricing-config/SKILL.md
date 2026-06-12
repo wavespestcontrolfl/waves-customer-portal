@@ -20,12 +20,13 @@ environment that carries the row (prod does), **editing
 3. **Admin seed** — if the value is admin-editable, make sure the admin
    seed/panel (`client/src/components/admin/PricingLogicPanel.jsx`) reflects
    the new shape.
-4. **Client mirrors** — grep for static copies in the client estimators and
+4. **Client mirrors** — search for static copies in the client estimators and
    update them manually; they do NOT read pricing_config. Known offender
    class: `TechEstimatorPage` keeps static option tables (e.g. `TS_OPTS`).
+   Use ripgrep (recursive `grep` is banned in this monorepo):
 
    ```
-   grep -rn "<the old value or constant name>" client/src server/services
+   rg -n "<the old value or constant name>" client/src server/services
    ```
 
 5. **Verify after deploy** — confirm the migration ran and the live

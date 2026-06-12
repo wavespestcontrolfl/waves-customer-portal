@@ -7,14 +7,21 @@ description: Use whenever running knex commands, writing migrations, querying th
 
 ## 1. Always pass the knexfile
 
-Every knex CLI invocation MUST be:
+Every knex CLI invocation MUST name the knexfile explicitly, with the path
+relative to your current working directory:
 
 ```
+# from the repo root:
 npx knex <command> --knexfile server/knexfile.js
+
+# from server/:
+npx knex <command> --knexfile knexfile.js
 ```
 
 Without `--knexfile`, knex's default discovery picks the wrong config (or
-none) depending on cwd, and has silently mis-targeted prod before. This
+none) depending on cwd, and has silently mis-targeted prod before. The flag
+is resolved against cwd too — `--knexfile server/knexfile.js` run from
+inside `server/` fails looking for `server/server/knexfile.js`. This
 applies to `migrate:latest`, `migrate:make`, `seed:run` — all of it.
 
 ## 2. The timestamptz window leak
@@ -43,15 +50,18 @@ writes against prod from a local machine.
 
 Prod access is **break-glass**: owner-authorized for the specific task,
 read-only (SELECT), and through a restricted role when one exists for the
-domain (e.g. `newsletter_verifier`) instead of the full-write URL. When
-authorized, the private `DATABASE_URL` is unreachable from outside Railway —
-use the public URL from the **Postgres service** (the app service's env does
-NOT carry a usable one; connecting with it fails with SSL errors):
+domain (e.g. `newsletter_verifier`) instead of the full-write URL. This
+skill deliberately ships no copy/paste prod connection command — get the
+credential for the restricted role from the owner at authorization time.
 
-```
-PUB=$(railway variables -s Postgres --json | python3 -c "import json,sys; print(json.load(sys.stdin)['DATABASE_PUBLIC_URL'])")
-DATABASE_URL="$PUB" node <read-only script>
-```
+When authorized, two operational facts (not a recipe):
+- The private `DATABASE_URL` is unreachable from outside Railway; the
+  public endpoint lives in the **Postgres service's** env, not the app
+  service's (the app service's value fails with SSL errors).
+- Export the credential under a task-specific name (e.g. `PROD_RO_URL`)
+  and have the script read that name explicitly — never set `DATABASE_URL`
+  in your shell, so stray knex/node tooling that defaults to
+  `DATABASE_URL` cannot silently target prod.
 
 Never print the URL or paste it into logs/PRs.
 
