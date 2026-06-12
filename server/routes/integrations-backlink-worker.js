@@ -27,7 +27,9 @@ router.get('/claim', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /report — { prospect_id, outcome: placed|failed|skipped, live_url, claimed_anchor, evidence_url, notes }
+// POST /report — { prospect_id, outcome: placed|failed|skipped, live_url, claimed_anchor, evidence_url, cost, notes, pending }
+//   pending:true on a placed report = submitted to a slow-moderation directory;
+//   live_url may be omitted and the verifier's domain reconcile tracks approval.
 router.post('/report', async (req, res, next) => {
   try {
     const { prospect_id, outcome } = req.body || {};
