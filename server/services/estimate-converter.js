@@ -134,6 +134,11 @@ const COMBINED_SERVICE_ROUTES = [
     companionKey: 'tree_shrub',
     catalogServiceKey: 'lawn_tree_shrub_combo',
     name: 'Lawn + Tree & Shrub',
+    // Pattern equality is NOT enough here: the bimonthly bucket spans 6–11
+    // visits/year, so a 9-app lawn and a 6-visit T&S program would pattern
+    // as equal. Lawn tiers (6/9/12 apps) and the T&S visit mandate (4x/6x)
+    // must agree EXACTLY — both lines need explicit, equal visits-per-year.
+    requireVisitsMatch: true,
   },
 ];
 
@@ -155,6 +160,12 @@ function combineRecurringServicesForScheduling(recurringServices = [], { fallbac
       fallbackFrequency,
     });
     if (!primaryPattern || primaryPattern !== companionPattern) continue;
+    // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
+    // are coarse, so explicit visit counts are the cadence truth when known.
+    const primaryVisits = visitsPerYearForRecurringService(primary);
+    const companionVisits = visitsPerYearForRecurringService(companion);
+    if (primaryVisits && companionVisits && primaryVisits !== companionVisits) continue;
+    if (route.requireVisitsMatch && !(primaryVisits && companionVisits)) continue;
     // Remove higher index first so the lower index stays valid.
     for (const idx of [primaryIdx, companionIdx].sort((a, b) => b - a)) remaining.splice(idx, 1);
     combos.push({

@@ -34,8 +34,8 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(termite.combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
 
     const lawn = combineRecurringServicesForScheduling([
-      { name: 'Lawn Fertilization & Weed Control', frequency: 'bimonthly' },
-      { name: 'Tree & Shrub Care Program', frequency: 'bimonthly' },
+      { name: 'Lawn Fertilization & Weed Control', frequency: 'bimonthly', appsPerYear: 6 },
+      { name: 'Tree & Shrub Care Program', frequency: 'bimonthly', visitsPerYear: 6 },
     ]);
     expect(lawn.combos[0].service.name).toBe('Lawn + Tree & Shrub');
     expect(lawn.remaining).toEqual([]);
@@ -48,6 +48,34 @@ describe('combineRecurringServicesForScheduling', () => {
     ]);
     expect(combos).toEqual([]);
     expect(remaining).toHaveLength(2);
+  });
+
+  test('9-app lawn never combines with a 6-visit T&S program (same bimonthly pattern bucket)', () => {
+    // patternFromVisitsPerYear buckets 6–11 visits as "bimonthly" — explicit
+    // visit counts are the cadence truth (Codex P1).
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Fertilization & Weed Control', appsPerYear: 9 },
+      { name: 'Tree & Shrub Care Program', visitsPerYear: 6 },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('lawn + T&S without explicit visit counts stay separate (visits required for this route)', () => {
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Fertilization & Weed Control', frequency: 'bimonthly' },
+      { name: 'Tree & Shrub Care Program', frequency: 'bimonthly' },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('explicit unequal visit counts block combining on any route', () => {
+    const { combos } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4 },
+      { name: 'Rodent Bait Stations', frequency: 'quarterly', visitsPerYear: 5 },
+    ]);
+    expect(combos).toEqual([]);
   });
 
   test('a pest line combines with at most ONE companion — rodent bait wins, termite stays standalone', () => {
