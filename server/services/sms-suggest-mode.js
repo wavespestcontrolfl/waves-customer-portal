@@ -395,7 +395,7 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
     .where({ status: 'pending_review' })
     .update({
       status: 'scheduled',
-      correction_note: 'A reply to this thread is scheduled — suggestion parked until it fires.',
+      correction_note: 'A staff reply to this thread is queued or in flight — suggestion parked.',
       updated_at: new Date(),
     })
     .returning('id');
@@ -438,7 +438,7 @@ async function ignoreParkedSuggestions({ decisionIds, reviewedBy }) {
         .update({
           status: 'ignored',
           human_verdict: 'ignored',
-          correction_note: 'A scheduled staff reply to this thread was sent.',
+          correction_note: 'A staff reply to this thread was sent.',
           reviewed_by: reviewedBy || 'Admin',
           reviewed_at: new Date(),
           updated_at: new Date(),
@@ -505,8 +505,13 @@ async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) 
  * suggest-mode gate, and a post-claim crash must never strand those rows
  * invisible.
  */
-async function recoverSuggestionHoldingStates({ maxAgeHours = EXPIRY_HOURS } = {}) {
-  const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
+async function recoverSuggestionHoldingStates({ orphanMinutes = 30 } = {}) {
+  // Short window on purpose: an immediate-send claim has NO backing sms_log
+  // row, so a crash mid-send leaves the card hidden until this reopens it —
+  // 30 minutes bounds that, and the NOT EXISTS live-row check below keeps
+  // genuinely queued sends untouched however long they wait. Runs from the
+  // 5-min scheduled-SMS cron as well as the nightly sweep.
+  const cutoff = new Date(Date.now() - orphanMinutes * 60 * 1000);
 
   // Sent-linked first: a 'scheduled' decision whose queued row already went
   // SENT means the cron crashed between its sent-update and resolution. The

@@ -154,6 +154,7 @@ async function resolveSmsLogCustomerFallbacks(rows) {
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
+  let parkedThreadIds = [];
   try {
     const {
       to,
@@ -231,6 +232,26 @@ router.post('/sms', async (req, res, next) => {
       claimedDecisionId = verifiedAgentDecision.id;
     }
 
+    // Park the thread's OTHER pending suggestions before the provider call
+    // (same as the scheduled path): the post-send sweep can't protect the
+    // seconds while Twilio runs, and a parallel admin could still fetch and
+    // send the same card. Success resolves them as ignored; blocked/failed/
+    // exception reopens them; a crash mid-send is bounded by the 30-min
+    // orphan recovery.
+    try {
+      const parkPhoneLast10 = normalizePhoneLast10(to);
+      if (parkPhoneLast10) {
+        parkedThreadIds = await db.transaction(async (trx) => {
+          await lockSuggestThread(trx, parkPhoneLast10);
+          return parkThreadSuggestions(
+            { phoneLast10: parkPhoneLast10, excludeDecisionId: verifiedAgentDecision?.id }, trx
+          );
+        });
+      }
+    } catch (parkErr) {
+      logger.warn(`[sms-suggest] pre-send park failed: ${parkErr.message}`);
+    }
+
     const sendStartedAt = new Date();
     const result = await sendCustomerMessage({
       to,
@@ -254,13 +275,11 @@ router.post('/sms', async (req, res, next) => {
       },
     });
     if (result.blocked || result.sent === false) {
-      // The reply never left — release the claim so the card returns.
-      if (claimedDecisionId) {
-        await reopenScheduledSuggestions({
-          decisionIds: [claimedDecisionId],
-          reason: 'Send was blocked or failed — suggestion reopened.',
-        });
-      }
+      // The reply never left — release the claim and the parked cards.
+      await reopenScheduledSuggestions({
+        decisionIds: [claimedDecisionId, ...parkedThreadIds],
+        reason: 'Send was blocked or failed — suggestion reopened.',
+      });
       return res.status(422).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
@@ -288,18 +307,21 @@ router.post('/sms', async (req, res, next) => {
       }
     }
 
-    // A successful staff send resolves any OTHER pending house-voice
-    // suggestion on this thread as 'ignored' — the operator saw the card
-    // and chose their own reply. (The suggestion they used, if any, was
-    // just marked accepted/corrected above.) Ignored rate per intent is a
-    // graduation input for the brand-voice loop, so this must not stay
-    // pending forever. Phone-scoped through the suggestion's inbound
-    // sms_log row — the same ownership match the composer card fetch uses.
-    // The unused drafts return to the judge pool: the reply that was just
-    // sent is exactly the human ground truth Phase C scores against.
-    // Cutoff on the INBOUND's timestamp vs send start: a suggestion for a
-    // customer message that arrived while the send was in flight was never
-    // on the operator's screen and must keep its card.
+    // Suggestions parked before the provider call resolve as ignored — the
+    // operator saw them and chose their own reply; their drafts return to
+    // the judge pool against the reply that just went out.
+    if (parkedThreadIds.length) {
+      await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
+    }
+
+    // Belt-and-braces sweep for cards published BETWEEN the park commit and
+    // send completion (the thread lock releases when the park transaction
+    // commits, and a publish can land while Twilio runs). Phone-scoped
+    // through the suggestion's inbound sms_log row — the same ownership
+    // match the composer card fetch uses. Cutoff on the INBOUND's timestamp
+    // vs send start: a suggestion for a customer message that arrived while
+    // the send was in flight was never on the operator's screen and must
+    // keep its card.
     try {
       const ignoredPhoneLast10 = normalizePhoneLast10(to);
       if (ignoredPhoneLast10) {
@@ -345,11 +367,11 @@ router.post('/sms', async (req, res, next) => {
 
     res.json(result);
   } catch (err) {
-    // Guarded reopen: if the send actually resolved the decision before the
-    // throw, the status is no longer 'scheduled' and this no-ops.
-    if (claimedDecisionId) {
+    // Guarded reopen: anything the send actually resolved before the throw
+    // is no longer 'scheduled' and no-ops here.
+    if (claimedDecisionId || parkedThreadIds.length) {
       await reopenScheduledSuggestions({
-        decisionIds: [claimedDecisionId],
+        decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send errored — suggestion reopened.',
       });
     }

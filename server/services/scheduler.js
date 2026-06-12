@@ -1223,6 +1223,14 @@ function initScheduledJobs() {
           }
         }
       }
+
+      // Fast holding-state recovery (30-min orphan window): an
+      // immediate-send claim has no backing sms_log row, so a crash
+      // mid-send would otherwise hide the composer card until the nightly
+      // sweep. Guarded updates — racing the nightly run is harmless.
+      await require('./sms-suggest-mode').recoverSuggestionHoldingStates().catch((recErr) => {
+        logger.warn(`[sms-suggest] fast recovery failed: ${recErr.message}`);
+      });
     } catch (err) {
       logger.error(`Scheduled SMS processing failed: ${err.message}`);
     }
