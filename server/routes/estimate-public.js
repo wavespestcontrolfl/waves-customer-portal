@@ -56,6 +56,12 @@ const {
 const {
   createEstimateAddServiceRequest,
 } = require('../services/estimate-add-service-request');
+const featureGates = require('../config/feature-gates');
+const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
+const {
+  parcelOverlayEnabled,
+  buildParcelOverlayParam,
+} = require('./property-lookup-v2');
 
 const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
   || config.jwt.secret
@@ -2434,6 +2440,126 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   };
 }
 
+// ── "Show your work" trust block (estimateShowYourWork gate) ───────
+// Customer-facing explanation of WHERE the property facts behind the
+// quote came from. Built from the wizard lookup profile persisted at
+// estimate_data.enriched — admin/tech estimates without it return null
+// and the section stays hidden. Friendly labels only: raw provider
+// names, evidence URLs, scores, and parcel IDs never reach the page.
+const SHOW_YOUR_WORK_SOURCE_LABELS = {
+  verified: 'Verified on-site',
+  county: 'County records',
+  cadastral: 'County records',
+  permit: 'Permit records',
+};
+
+function showYourWorkSourceLabel(sourceType) {
+  return SHOW_YOUR_WORK_SOURCE_LABELS[String(sourceType || '').trim().toLowerCase()]
+    || 'Satellite AI analysis';
+}
+
+function showYourWorkCountyName(county) {
+  return String(county || '')
+    .trim()
+    .toLowerCase()
+    .replace(/(^|[\s-])([a-z])/g, (m, sep, ch) => sep + ch.toUpperCase());
+}
+
+// Parcel-outline satellite image for the AI card. The polygon never
+// persists on the estimate row — it only lives in the property_lookups
+// cache — so this re-reads the cached row by address and reuses the
+// estimator's own Static Maps overlay builder. Read-only: ANY miss or
+// error returns null so the page falls back to the stored satellite_url,
+// and nothing here logs the address/parcel/coords (public-route PII rule).
+async function resolveShowYourWorkOverlayUrl(estimate = {}) {
+  try {
+    if (!parcelOverlayEnabled()) return null;
+    const address = estimate.address || null;
+    if (!address) return null;
+    const googleKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
+    if (!googleKey) return null;
+    const row = await getCachedLookup(address);
+    if (!row) return null;
+    let parcel = row.parcel;
+    if (typeof parcel === 'string') {
+      try { parcel = JSON.parse(parcel); } catch { parcel = null; }
+    }
+    const lat = Number(row.lat);
+    const lng = Number(row.lng);
+    if (!parcel?.polygon || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const overlayParam = buildParcelOverlayParam(parcel.polygon);
+    if (!overlayParam) return null;
+    return `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&${overlayParam}&key=${googleKey}`;
+  } catch {
+    return null;
+  }
+}
+
+async function buildShowYourWork(estimate = {}, estData = {}) {
+  let parsedData = estData;
+  if (typeof parsedData === 'string') {
+    try { parsedData = JSON.parse(parsedData); } catch { parsedData = {}; }
+  }
+  const enriched = parsedData && typeof parsedData === 'object' ? parsedData.enriched : null;
+  if (!enriched || typeof enriched !== 'object') return null;
+
+  const evidence = enriched.fieldEvidence && typeof enriched.fieldEvidence === 'object'
+    ? enriched.fieldEvidence
+    : {};
+  const sourceFor = (field) => showYourWorkSourceLabel(evidence[field]?.sourceType);
+
+  const homeSqFt = firstPositiveNumber(enriched.homeSqFt);
+  const lotSqFt = firstPositiveNumber(enriched.lotSqFt);
+  const stories = firstPositiveNumber(enriched.stories);
+  const yearBuilt = firstPositiveNumber(enriched.yearBuilt);
+  const poolState = normalizeFeaturePresence(enriched.pool);
+  const poolCageSqft = firstPositiveNumber(enriched.poolCageSqft);
+  const turfSqFt = firstPositiveNumber(enriched.estimatedTurfSf);
+
+  // Pool provenance: fieldEvidence.hasPool when the lookup recorded it,
+  // otherwise the merged poolSource ('verified'/'county' map to the same
+  // friendly labels; 'vision' falls through to Satellite AI analysis).
+  const poolSourceType = evidence.hasPool?.sourceType
+    || (['verified', 'county'].includes(enriched.poolSource) ? enriched.poolSource : null);
+
+  const facts = [
+    homeSqFt ? { label: 'Home size', value: `${Math.round(homeSqFt).toLocaleString()} sq ft`, source: sourceFor('squareFootage') } : null,
+    lotSqFt ? { label: 'Lot size', value: `${Math.round(lotSqFt).toLocaleString()} sq ft`, source: sourceFor('lotSize') } : null,
+    stories ? { label: 'Stories', value: `${Math.round(stories)} ${Math.round(stories) === 1 ? 'story' : 'stories'}`, source: sourceFor('stories') } : null,
+    yearBuilt ? { label: 'Year built', value: String(Math.round(yearBuilt)), source: sourceFor('yearBuilt') } : null,
+    poolState === 'yes' || poolState === 'possible'
+      ? { label: 'Pool', value: poolState === 'yes' ? 'Yes' : 'Possible', source: showYourWorkSourceLabel(poolSourceType) }
+      : null,
+    // poolCageSqft only ever comes from the county extra-features roll
+    // (no fieldEvidence entry exists for it), so the label is fixed.
+    poolCageSqft
+      ? { label: 'Screen enclosure', value: `About ${Math.round(poolCageSqft).toLocaleString()} sq ft`, source: 'County records' }
+      : null,
+    turfSqFt ? {
+      label: 'Treatable turf',
+      value: `${Math.round(turfSqFt).toLocaleString()} sq ft${enriched.turfCappedToParcel === true ? ' (bounded by your county parcel area)' : ''}`,
+      source: sourceFor('estimatedTurfSf'),
+    } : null,
+  ].filter(Boolean);
+
+  // Parcel match line — county + assessed area only, never the parcel id.
+  const parcel = enriched.parcel && typeof enriched.parcel === 'object' ? enriched.parcel : null;
+  const parcelCounty = parcel ? showYourWorkCountyName(parcel.county) : '';
+  const parcelArea = parcel ? firstPositiveNumber(parcel.areaSqft) : null;
+  const parcelLine = parcelCounty
+    ? `Matched to ${parcelCounty} County parcel records${parcelArea ? ` — ${Math.round(parcelArea).toLocaleString()} sq ft parcel` : ''}.`
+    : null;
+
+  const qualityNote = enriched.propertyDataQuality?.level === 'low'
+    ? "A few of these details were hard to confirm remotely — we'll confirm them on-site before treatment."
+    : null;
+
+  if (!facts.length && !parcelLine) return null;
+
+  const overlaySatelliteUrl = await resolveShowYourWorkOverlayUrl(estimate);
+  return { facts, parcelLine, qualityNote, overlaySatelliteUrl };
+}
+
 function renderExpiredPage(estimate) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Estimate Expired — Waves</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
@@ -2552,8 +2678,11 @@ function renderMembershipBlockHtml(membership) {
   </section>`;
 }
 
-function renderPage(token, estimate, estData, membership) {
+function renderPage(token, estimate, estData, membership, opts = {}) {
   const est = estimate;
+  // "Show your work" payload — built (gate-checked) by the caller; null
+  // keeps every byte of the rendered page identical to the pre-gate HTML.
+  const showYourWork = opts.showYourWork || null;
   const estimateAskToken = signEstimateAskToken(est, token);
   const tier = est.tier || 'Bronze';
   const firstName = escapeHtml((est.customerName || '').split(' ')[0] || 'there');
@@ -3236,6 +3365,36 @@ function renderPage(token, estimate, estData, membership) {
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
   const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+  // "Show your work" extension of the same card: parcel-outline satellite
+  // image swaps in for the plain one when available, and the facts /
+  // parcel-match / quality-note block lands after the metrics grid. All
+  // three fragments are '' when showYourWork is null (gate off) so the
+  // card output stays byte-identical to today.
+  const aiSatelliteSrc = showYourWork?.overlaySatelliteUrl
+    || (intelligence ? intelligence.satelliteUrl : null);
+  const aiSatelliteCaptionHtml = showYourWork?.overlaySatelliteUrl ? `
+    <p class="ai-satellite-caption">Red outline: your property boundary from county records.</p>` : '';
+  const showYourWorkHtml = showYourWork ? `
+    <div class="ai-show-work">
+      <div class="ai-show-work-title">Where these details came from</div>
+      ${showYourWork.facts.length ? `<div class="ai-fact-list">
+        ${showYourWork.facts.map((f) => `<div class="ai-fact"><div><div class="ai-fact-label">${escapeHtml(f.label)}</div><div class="ai-fact-val">${escapeHtml(f.value)}</div></div><span class="ai-fact-source">${escapeHtml(f.source)}</span></div>`).join('')}
+      </div>` : ''}
+      ${showYourWork.parcelLine ? `<p class="ai-parcel-line">${escapeHtml(showYourWork.parcelLine)}</p>` : ''}
+      ${showYourWork.qualityNote ? `<p class="ai-quality-note">${escapeHtml(showYourWork.qualityNote)}</p>` : ''}
+    </div>` : '';
+  const showYourWorkCss = showYourWork ? `
+  .ai-satellite-caption{margin:6px 0 0;font-size:12px;color:#6B7280;line-height:1.45}
+  .ai-show-work{display:grid;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid #E7E2D7}
+  .ai-show-work-title{font-size:13px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .ai-fact-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  @media(max-width:720px){.ai-fact-list{grid-template-columns:1fr}}
+  .ai-fact{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
+  .ai-fact-label{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+  .ai-fact-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
+  .ai-fact-source{flex:none;padding:5px 9px;border-radius:999px;background:#E3F5FD;color:#065A8C;font:800 11px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .ai-parcel-line{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}
+  .ai-quality-note{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}` : '';
   const aiBlockHtml = intelligence ? `
   <section class="card ai-card waveguard-ai-card">
     <div class="intelligence-header">
@@ -3245,10 +3404,10 @@ function renderPage(token, estimate, estData, membership) {
       <span class="intelligence-badge">${escapeHtml(intelligence.eyebrow || 'Waves AI')}</span>
     </div>
     <p class="ai-blurb">${escapeHtml(intelligence.body)}</p>
-    ${intelligence.satelliteUrl ? `<img class="ai-satellite" src="${escapeHtml(intelligence.satelliteUrl)}" alt="Satellite view of ${escapeHtml(est.address || 'your property')}" loading="lazy"/>` : ''}
+    ${aiSatelliteSrc ? `<img class="ai-satellite" src="${escapeHtml(aiSatelliteSrc)}" alt="Satellite view of ${escapeHtml(est.address || 'your property')}" loading="lazy"/>` : ''}${aiSatelliteCaptionHtml}
     ${intelligence.metrics.length ? `<div class="ai-grid">
       ${intelligence.metrics.map((m) => `<div class="ai-metric"><div class="ai-metric-label">${escapeHtml(m.label)}</div><div class="ai-metric-val">${escapeHtml(m.value)}</div></div>`).join('')}
-    </div>` : ''}
+    </div>` : ''}${showYourWorkHtml}
     ${intelligence.signals.length ? `<div class="intelligence-signals">
       ${intelligence.signals.map((signal) => `<div class="intelligence-signal">${escapeHtml(signal)}</div>`).join('')}
     </div>` : ''}
@@ -3437,7 +3596,7 @@ function renderPage(token, estimate, estData, membership) {
   .intelligence-header h2{margin-bottom:0}
   .intelligence-badge{flex:none;align-self:flex-start;padding:6px 10px;border-radius:999px;background:#E3F5FD;color:#065A8C;font-size:12px;font-weight:800;line-height:1;letter-spacing:0;text-transform:uppercase}
   .ai-blurb{margin:0 0 14px;color:#3F4A65;font-size:14px;line-height:1.55}
-  .ai-satellite{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:10px;border:1px solid #E7E2D7;margin-top:0;background:#F7F5EE}
+  .ai-satellite{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:10px;border:1px solid #E7E2D7;margin-top:0;background:#F7F5EE}${showYourWorkCss}
   .ai-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}
   @media(max-width:720px){.ai-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .ai-metric{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
@@ -5254,13 +5413,13 @@ ${shellQuestionsBar()}
 </body></html>`;
 }
 
-function sendEstimatePage(res, token, estimate, estData, membership) {
+function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) {
   res
     .set('Cache-Control', 'no-cache, no-store, must-revalidate')
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
     .set('Content-Type', 'text/html; charset=utf-8')
-    .send(renderPage(token, estimate, estData, membership));
+    .send(renderPage(token, estimate, estData, membership, opts));
 }
 
 async function handleEstimateView(req, res, next) {
@@ -5369,6 +5528,14 @@ async function handleEstimateView(req, res, next) {
       oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
     });
 
+    // "Show your work" trust block — wizard estimates only (needs
+    // estimate_data.enriched). With the gate off this stays null and the
+    // rendered HTML is byte-identical to today's page.
+    let showYourWork = null;
+    if (featureGates.isEnabled('estimateShowYourWork')) {
+      showYourWork = await buildShowYourWork(estimate, estData);
+    }
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       status: estimate.status === 'accepted'
@@ -5401,7 +5568,7 @@ async function handleEstimateView(req, res, next) {
         recurringAmount: computeDepositAmount({ oneTime: false }),
         oneTimeAmount: computeDepositAmount({ oneTime: true }),
       } : { enforced: false, required: false },
-    }, estData, membership);
+    }, estData, membership, { showYourWork });
   } catch (err) { next(err); }
 }
 
@@ -9743,7 +9910,16 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
     });
 
+    // "Show your work" trust payload for the React estimate view. The key
+    // only exists while the estimateShowYourWork gate is on, so gate-off
+    // responses stay byte-identical; null means no enriched lookup data.
+    const showYourWorkEnabled = featureGates.isEnabled('estimateShowYourWork');
+    const showYourWork = showYourWorkEnabled
+      ? await buildShowYourWork(estimate, estimateDataForIntelligence)
+      : null;
+
     res.json({
+      ...(showYourWorkEnabled ? { showYourWork } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
         required: depositPolicy.required,
@@ -9865,6 +10041,7 @@ module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
+module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
