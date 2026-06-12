@@ -380,6 +380,9 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       requiredAmount: intent.requiredAmount,
       receivedTotal: intent.receivedTotal,
       paymentIntentId: intent.paymentIntentId,
+      // Both estimate UIs bootstrap Stripe Elements from this response —
+      // the public estimate pages have no other authenticated key source.
+      publishableKey: require('../config/stripe-config').publishableKey,
     });
   } catch (err) {
     logger.error(`[estimate-slots-public:deposit-intent] ${err.message}`, { stack: err.stack });
