@@ -1,0 +1,102 @@
+{
+ "fixture": "cockroach_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "german_prep_copy",
+  "cockroach_work_sentence"
+ ],
+ "typedReportSnapshot": {
+  "type": "cockroach",
+  "typeLabel": "Cockroach Treatment",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "cockroach_treatment",
+  "serviceLabel": "Cockroach Treatment",
+  "reportTypeLabel": "Cockroach Treatment Summary",
+  "visitSequence": 1,
+  "values": {
+   "species": "German",
+   "activity_level": "Moderate",
+   "activity_locations": "Under sink, Behind refrigerator, Cabinet hinges",
+   "evidence_observed": "Live roaches, Droppings, Egg cases",
+   "conducive_conditions": "Moisture / leaks, Food debris",
+   "work_completed": "Bait placement, Insect growth regulator, Crack & crevice treatment, Monitoring stations placed",
+   "customer_prep": "No over-the-counter sprays, Remove food debris, Do not disturb bait placements"
+  },
+  "nextStepChips": [
+   "Follow-up in 10–14 days",
+   "No store-bought sprays"
+  ],
+  "todaysResult": {
+   "headline": "Cockroach activity was moderate today.",
+   "body": "We placed targeted bait, applied an insect growth regulator, treated cracks and crevices and placed monitoring stations today. A follow-up visit in 10–14 days is recommended to stay ahead of newly hatching activity. Please avoid store-bought sprays — they interfere with the bait placements.",
+   "nextStep": "A follow-up visit in 10–14 days is recommended to stay ahead of newly hatching activity. Please avoid store-bought sprays — they interfere with the bait placements."
+  },
+  "findings": [
+   {
+    "fieldKey": "species",
+    "technicianLabel": "Species",
+    "customerLabel": "What we found",
+    "value": "German",
+    "customerValueLabel": "German cockroaches"
+   },
+   {
+    "fieldKey": "activity_level",
+    "technicianLabel": "Activity level",
+    "customerLabel": "Activity observed",
+    "value": "Moderate",
+    "customerValueLabel": "Moderate activity"
+   },
+   {
+    "fieldKey": "activity_locations",
+    "technicianLabel": "Where activity was noted",
+    "customerLabel": "Where activity was noted",
+    "value": "Under sink, Behind refrigerator, Cabinet hinges",
+    "customerValueLabel": "Under sink, Behind refrigerator, Cabinet hinges"
+   },
+   {
+    "fieldKey": "evidence_observed",
+    "technicianLabel": "Evidence observed",
+    "customerLabel": "Evidence observed today",
+    "value": "Live roaches, Droppings, Egg cases",
+    "customerValueLabel": "Live roaches, Droppings, Egg cases"
+   },
+   {
+    "fieldKey": "conducive_conditions",
+    "technicianLabel": "Conducive conditions",
+    "customerLabel": "Conditions to address",
+    "value": "Moisture / leaks, Food debris",
+    "customerValueLabel": "Moisture / leaks, Food debris"
+   },
+   {
+    "fieldKey": "work_completed",
+    "technicianLabel": "Work completed today",
+    "customerLabel": "Work completed today",
+    "value": "Bait placement, Insect growth regulator, Crack & crevice treatment, Monitoring stations placed",
+    "customerValueLabel": "Bait placement, Insect growth regulator, Crack & crevice treatment, Monitoring stations placed"
+   },
+   {
+    "fieldKey": "customer_prep",
+    "technicianLabel": "How the customer can help",
+    "customerLabel": "How you can help",
+    "value": "No over-the-counter sprays, Remove food debris, Do not disturb bait placements",
+    "customerValueLabel": "No over-the-counter sprays, Remove food debris, Do not disturb bait placements"
+   }
+  ],
+  "activity": {
+   "indicatorKey": "roach_activity",
+   "label": "Roach Activity",
+   "score": 3,
+   "levelWord": "Moderate activity",
+   "source": "derived",
+   "derivedFrom": {
+    "field": "activity_level",
+    "value": "Moderate",
+    "initialDerivedScore": 3
+   },
+   "trend": null,
+   "trendWord": null
+  }
+ }
+}

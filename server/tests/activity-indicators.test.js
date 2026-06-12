@@ -521,7 +521,7 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
   test('schema slice carries sections and the required next step flag', () => {
     const schema = findingsSchemaForType('rodent_trapping');
     expect(schema.nextStepRequired).toBe(true);
-    expect(nextStepRequiredForType('cockroach')).toBe(false);
+    expect(nextStepRequiredForType('one_time_pest_treatment')).toBe(false);
     const sections = [...new Set(schema.fields.map((f) => f.section))];
     expect(sections).toEqual([
       'Evidence observed', 'Trap activity', 'Conducive conditions',
