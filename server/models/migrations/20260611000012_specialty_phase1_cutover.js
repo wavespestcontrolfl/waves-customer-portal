@@ -41,7 +41,10 @@
  *  - termite_*               — Phase 3, after FS 482.226 / FAC 5E-14 signoff.
  */
 
-// { key, from: expected current pointer, to: pointer after cutover }.
+// { key, from: expected current pointer(s), to: pointer after cutover }.
+// `from` may be an array when environments have drifted: canonical pre-cutover
+// pointer FIRST, accepted drift states after. up() accepts any listed value;
+// down() restores the canonical (first) pointer — never a drift value.
 // mosquito_one_time is the one pointer correction: it fell into the generic
 // pest fallback at profile seeding, but its work content (areas treated,
 // breeding sources) is the mosquito_event report family — and the generic
@@ -161,9 +164,14 @@ exports.down = async function down(knex) {
       // Healed rows (inserted by up()) also revert to project_required here —
       // they become valid pre-cutover rows the environment was missing, which
       // is the safe direction for a rollback.
+      // Array-valued `from` lists the canonical pointer first, then accepted
+      // drift states; restore the canonical one — writing the array itself
+      // would corrupt the string column, and restoring a drift value would
+      // re-create the drift up() exists to absorb.
+      const rollbackPointer = Array.isArray(from) ? from[0] : from;
       await trx('service_completion_profiles')
         .where({ service_key: key, project_type: to, completion_mode: 'service_report' })
-        .update({ completion_mode: 'project_required', project_type: from, updated_at: trx.fn.now() });
+        .update({ completion_mode: 'project_required', project_type: rollbackPointer, updated_at: trx.fn.now() });
     }
     console.log('[phase1-cutover] rolled back — Phase-1 keys restored to project_required');
   });
