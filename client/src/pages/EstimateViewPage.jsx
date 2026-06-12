@@ -1298,7 +1298,122 @@ function ExistingAppointmentCard({ appointment }) {
   );
 }
 
-function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, serviceMode }) {
+// Stripe.js loader for the acceptance-deposit modal. Mirrors PayPageV2's
+// pattern — script injected on demand, single shared promise.
+let depositStripeJsPromise = null;
+function loadStripeJs() {
+  if (window.Stripe) return Promise.resolve(window.Stripe);
+  if (depositStripeJsPromise) return depositStripeJsPromise;
+  depositStripeJsPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://js.stripe.com/v3/';
+    s.async = true;
+    s.onload = () => resolve(window.Stripe);
+    s.onerror = () => { depositStripeJsPromise = null; reject(new Error('stripe.js failed to load')); };
+    document.head.appendChild(s);
+  });
+  return depositStripeJsPromise;
+}
+
+// Acceptance-deposit Payment Element modal (flat $49/$99, PR #1660).
+// `intent` is the POST /deposit-intent response: clientSecret, amount,
+// requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
+// card-only server-side, so the Payment Element renders card fields only.
+function DepositModal({ intent, onSuccess, onCancel }) {
+  const mountRef = useRef(null);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadStripeJs().then((StripeCtor) => {
+      if (cancelled || !mountRef.current) return;
+      const stripe = StripeCtor(intent.publishableKey);
+      const elements = stripe.elements({
+        clientSecret: intent.clientSecret,
+        appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
+      });
+      const paymentElement = elements.create('payment');
+      paymentElement.mount(mountRef.current);
+      paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      stripeRef.current = stripe;
+      elementsRef.current = elements;
+    }).catch(() => {
+      if (!cancelled) setError('Could not load the secure payment form. Check your connection and try again.');
+    });
+    return () => { cancelled = true; };
+  }, [intent]);
+
+  const handlePay = useCallback(async () => {
+    if (!stripeRef.current || !elementsRef.current) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await stripeRef.current.confirmPayment({
+        elements: elementsRef.current,
+        confirmParams: { return_url: window.location.href },
+        redirect: 'if_required',
+      });
+      if (result.error) {
+        setError(result.error.message || 'Payment did not go through. Try another card.');
+        setSubmitting(false);
+        return;
+      }
+      const pi = result.paymentIntent;
+      if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) {
+        onSuccess(pi.id);
+        return;
+      }
+      setError('Payment is still pending. Try again in a moment.');
+      setSubmitting(false);
+    } catch {
+      setError('Payment did not go through. Try again.');
+      setSubmitting(false);
+    }
+  }, [onSuccess]);
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
+      <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Reserve your appointment</div>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '6px 0 14px' }}>
+          A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to your first invoice.
+          {Number(intent.receivedTotal) > 0 ? ` (${fmtMoney(intent.receivedTotal)} already received.)` : ''}
+        </div>
+        <div ref={mountRef} />
+        {error ? (
+          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 10 }}>{error}</div>
+        ) : null}
+        <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+          <button
+            type="button"
+            onClick={handlePay}
+            disabled={!ready || submitting}
+            style={{
+              padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
+              border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
+              opacity: !ready || submitting ? 0.6 : 1,
+            }}
+          >{submitting ? 'Processing…' : `Pay ${fmtMoney(intent.amount)} deposit`}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={submitting}
+            style={{
+              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            }}
+          >Not now</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, serviceMode, depositNote }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   const paymentLabel = invoiceMode
@@ -1353,6 +1468,11 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
         {confirmSub ? (
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
             {confirmSub}
+          </div>
+        ) : null}
+        {depositNote ? (
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
+            {depositNote}
           </div>
         ) : null}
         {!usingExistingAppointment ? (
@@ -1669,6 +1789,12 @@ export default function EstimateViewPage() {
   const [reservation, setReservation] = useState(null);
   const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
+  // Acceptance deposit (flat $49/$99). depositIntent holds the live
+  // POST /deposit-intent response while the Payment Element modal is open;
+  // the ref carries the paid PI id into accept (server live-verifies it —
+  // the id is flow plumbing, not trust).
+  const [depositIntent, setDepositIntent] = useState(null);
+  const depositPaymentIntentIdRef = useRef(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -1681,6 +1807,24 @@ export default function EstimateViewPage() {
   useEffect(() => {
     selectedRef.current = selected;
   }, [selected]);
+
+  // 3DS redirect return: Stripe sends the customer back with
+  // ?payment_intent=...&redirect_status=succeeded after a challenge.
+  // Carry the paid PI forward and scrub the params from the URL.
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const piFromRedirect = params.get('payment_intent');
+      if (piFromRedirect && params.get('redirect_status') === 'succeeded') {
+        depositPaymentIntentIdRef.current = piFromRedirect;
+      }
+      if (piFromRedirect) {
+        ['payment_intent', 'payment_intent_client_secret', 'redirect_status'].forEach((k) => params.delete(k));
+        const qs = params.toString();
+        window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
+      }
+    } catch { /* non-fatal */ }
+  }, []);
 
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
@@ -1893,7 +2037,7 @@ export default function EstimateViewPage() {
     setSlotsRefreshSignal((v) => v + 1);
   }, [services]);
 
-  const handleConfirm = useCallback(async () => {
+  const performAccept = useCallback(async () => {
     setCtaPhase('submitting');
     setError(null);
     try {
@@ -1906,10 +2050,17 @@ export default function EstimateViewPage() {
           paymentMethodPreference: paymentPreference,
           serviceMode,
           selectedFrequency,
+          depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
         }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
+        if (r.status === 402 && body.code === 'DEPOSIT_REQUIRED') {
+          // Ledger disagrees with what we collected (refund or partial under
+          // us) — drop the cached PI; the next confirm mints a fresh top-up.
+          depositPaymentIntentIdRef.current = null;
+          throw new Error(body.error || 'A deposit is required to confirm your booking.');
+        }
         if (r.status === 409) {
           if (/estimate is no longer active/i.test(body.error || '')) {
             setCtaPhase('configure');
@@ -1938,6 +2089,49 @@ export default function EstimateViewPage() {
       setCtaPhase('review');
     }
   }, [existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
+
+  // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
+  // requires a deposit and none is collected yet, mint the intent and open
+  // the Payment Element modal; accept continues from the modal's onSuccess.
+  // Dark-safe: depositPolicy.required is false while ESTIMATE_DEPOSIT_REQUIRED
+  // is off, so this falls straight through to performAccept.
+  const handleConfirm = useCallback(async () => {
+    const depositPolicy = data?.depositPolicy;
+    if (depositPolicy?.required && paymentPreference !== 'prepay_annual' && !depositPaymentIntentIdRef.current) {
+      setCtaPhase('submitting');
+      setError(null);
+      try {
+        const r = await fetch(`/api/public/estimates/${token}/deposit-intent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.exemptReason) {
+          // Policy says nothing owed — fall through to accept.
+        } else if (!r.ok) {
+          throw new Error(body.error || 'Could not start the deposit. Please try again.');
+        } else if (!body.alreadySatisfied) {
+          setDepositIntent(body);
+          setCtaPhase('review');
+          return; // modal takes over; accept continues from onSuccess
+        }
+      } catch (err) {
+        setError(err.message);
+        setCtaPhase('review');
+        return;
+      }
+    }
+    await performAccept();
+  }, [data, paymentPreference, serviceMode, token, performAccept]);
+
+  const handleDepositSuccess = useCallback(async (paymentIntentId) => {
+    depositPaymentIntentIdRef.current = paymentIntentId;
+    setDepositIntent(null);
+    await performAccept();
+  }, [performAccept]);
+
+  const handleDepositCancel = useCallback(() => setDepositIntent(null), []);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
@@ -2103,7 +2297,17 @@ export default function EstimateViewPage() {
             onCancel={handleReviewCancel}
             invoiceMode={!!estimate.billByInvoice}
             serviceMode={serviceMode}
+            depositNote={data?.depositPolicy?.required && paymentPreference !== 'prepay_annual'
+              ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
+              : null}
           />
+          {depositIntent ? (
+            <DepositModal
+              intent={depositIntent}
+              onSuccess={handleDepositSuccess}
+              onCancel={handleDepositCancel}
+            />
+          ) : null}
           {aiPanelBlock}
         </>
       ) : (
