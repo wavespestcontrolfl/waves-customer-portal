@@ -5,7 +5,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { evaluate, MIN_TOTAL_SCORE } = require('../services/content/content-quality-gate');
+const { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor } = require('../services/content/content-quality-gate');
 const {
   checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
@@ -285,12 +285,174 @@ describe('evaluate (full gate)', () => {
     );
     expect(r.hard_failures.some((f) => f.name === 'localbusiness_service_schema')).toBe(true);
   });
-  test('MIN_TOTAL_SCORE exposed and reachable', () => {
-    // 55/73 = ~75% of the achievable ceiling (city-service: 36 page-
-    // specific + 37 common = 73). 75 absolute would be unreachable.
-    // MIN = floor(MAX_ACHIEVABLE * 0.75). With city-service as the
-    // ceiling (common 37 + city-service 36 = 73), this resolves to 54.
-    expect(MIN_TOTAL_SCORE).toBe(54);
+  test('MIN_TOTAL_SCORES is per page type: 75% of own ceiling, floored at one worst-case soft miss', () => {
+    // Common hard checks sum to 37; base = floor((37 + page bundle) *
+    // 0.75), raised to (ceiling - largest soft weight) when the formula
+    // lands at or below the bundle's hard sum — a threshold the hard
+    // checks alone satisfy would let a draft miss EVERY soft check. The
+    // old single global threshold (city-service-derived 54) made smaller
+    // bundles unpassable: refresh maxes at 47.
+    expect(MIN_TOTAL_SCORES['city-service']).toBe(54); // 75% formula (hard sum 43)
+    expect(MIN_TOTAL_SCORES['customer-question']).toBe(59); // all-hard bundle
+    expect(MIN_TOTAL_SCORES.refresh).toBe(47); // all-hard bundle
+    expect(MIN_TOTAL_SCORES['supporting-blog']).toBe(51); // 57 - voice 6
+    expect(MIN_TOTAL_SCORES.metadata).toBe(57); // 63 - keyword 6
+    expect(MIN_TOTAL_SCORES.none).toBe(37); // common-only
+  });
+  test('every threshold demands more than its hard checks alone (no all-soft-miss pass)', () => {
+    const { HARD_CHECKS, PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
+    const commonSum = HARD_CHECKS.reduce((s, c) => s + c.weight, 0);
+    for (const [pageType, checks] of Object.entries(PAGE_TYPE_CHECKS)) {
+      const hardSum = commonSum + checks.filter((c) => c.isHard).reduce((s, c) => s + c.weight, 0);
+      const softChecks = checks.filter((c) => !c.isHard);
+      // With >= 2 soft checks the threshold must demand soft compliance
+      // beyond the hard checks; a single-soft bundle's one-worst-miss
+      // floor legitimately equals its hard sum (that one soft may miss).
+      if (softChecks.length >= 2) {
+        expect(MIN_TOTAL_SCORES[pageType]).toBeGreaterThan(hardSum);
+      } else {
+        expect(MIN_TOTAL_SCORES[pageType]).toBeGreaterThanOrEqual(hardSum);
+      }
+    }
+  });
+  test('minTotalScoreFor reports the common-only threshold for unknown/prototype-chain page types', () => {
+    expect(minTotalScoreFor('refresh')).toBe(47);
+    expect(minTotalScoreFor('some-future-type')).toBe(MIN_TOTAL_SCORES.none);
+    expect(minTotalScoreFor(undefined)).toBe(MIN_TOTAL_SCORES.none);
+    expect(minTotalScoreFor('constructor')).toBe(MIN_TOTAL_SCORES.none);
+  });
+  test('unknown page type hard-fails the gate (fail closed), even with all commons passing', () => {
+    // A typo'd or legacy page_type must not bypass its real bundle's hard
+    // checks by gating on commons alone (37 >= the 27 'none' threshold).
+    for (const bad of ['blog', 'Refresh', 'constructor']) {
+      const r = evaluate(
+        fullDraft(),
+        brief({ page_type: bad }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      expect(r.hard_failures.some((f) => f.name === 'known_page_type' && f.reason === `unknown_page_type:${bad}`)).toBe(true);
+      expect(r.ok).toBe(false);
+    }
+    // The explicit empty bundles stay common-only and still pass.
+    const links = evaluate(fullDraft(), brief({ page_type: 'links' }), { previewBuildSuccess: true, sitemapHasUrl: true });
+    expect(links.hard_failures).toEqual([]);
+    expect(links.ok).toBe(true);
+  });
+  test('every page type\'s threshold is reachable from its own ceiling', () => {
+    const { HARD_CHECKS, PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
+    const commonSum = HARD_CHECKS.reduce((s, c) => s + c.weight, 0);
+    for (const [pageType, checks] of Object.entries(PAGE_TYPE_CHECKS)) {
+      const ceiling = commonSum + checks.reduce((s, c) => s + c.weight, 0);
+      expect(MIN_TOTAL_SCORES[pageType]).toBeLessThanOrEqual(ceiling);
+    }
+  });
+  test('refresh that fails improvement_over_prior hard-fails (content-gutting edits to live pages block)', () => {
+    // improvement_over_prior must be HARD: a refresh that loses >20% of
+    // prior content, or has no prior version to compare, must never pass
+    // regardless of how the threshold math evolves.
+    const lost = evaluate(
+      fullDraft({ body: 'x'.repeat(700) }),
+      brief({ page_type: 'refresh' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true, previousVersion: { body: 'x'.repeat(1000) } }
+    );
+    expect(lost.total_score).toBe(37);
+    expect(lost.hard_failures.some((f) => f.name === 'improvement_over_prior')).toBe(true);
+    expect(lost.ok).toBe(false);
+
+    const noPrior = evaluate(
+      fullDraft({ body: 'x'.repeat(1500) }),
+      brief({ page_type: 'refresh' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(noPrior.hard_failures.some((f) => f.name === 'improvement_over_prior')).toBe(true);
+    expect(noPrior.ok).toBe(false);
+  });
+  test('perfect refresh draft passes its own threshold (prod 2026-06-12: 47/47 gate-failed under global 54)', () => {
+    const r = evaluate(
+      fullDraft({ body: 'x'.repeat(1500) }),
+      brief({ page_type: 'refresh' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true, previousVersion: { body: 'x'.repeat(1000) } }
+    );
+    expect(r.hard_failures).toEqual([]);
+    expect(r.total_score).toBe(47);
+    expect(r.min_total_score).toBe(47);
+    expect(r.ok).toBe(true);
+  });
+  test('supporting-blog survives one 6-point soft miss (sank under global 54: A1 scored 51)', () => {
+    // Passes hub/cities/FAQ and all common checks but misses voice_match:
+    // 57 - 6 = 51 >= 51. Under the old global threshold this score shape
+    // failed (51 < 54) even though only one soft check missed.
+    const r = evaluate(
+      fullDraft({
+        body: 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.',
+      }),
+      brief({ page_type: 'supporting-blog' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.checks.voice_match.ok).toBe(false);
+    expect(r.hard_failures).toEqual([]);
+    expect(r.total_score).toBe(51);
+    expect(r.min_total_score).toBe(51);
+    expect(r.ok).toBe(true);
+  });
+  test('supporting-blog with two+ soft misses fails: hub-only (43) must not auto-publish', () => {
+    // Hub link present but cities/FAQ/voice ALL miss → 37 + 6 = 43 < 51.
+    // Under the formula-only threshold (42) this hub-only shape passed,
+    // publishing a supporting blog with none of the local-quality
+    // signals.
+    const r = evaluate(
+      fullDraft({
+        body: 'Termites are insects. Read our [pest control services](/pest-control-services/) page.',
+      }),
+      brief({ page_type: 'supporting-blog' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.hard_failures).toEqual([]);
+    expect(r.total_score).toBe(43);
+    expect(r.min_total_score).toBe(51);
+    expect(r.ok).toBe(false);
+  });
+  test('supporting-blog with no hub link hard-fails even above threshold (A1 shape must block, not pass)', () => {
+    // hub_link_present must be HARD: as a 6-pt soft miss this draft
+    // scores 51 >= 42 and would auto-publish without the hub link the
+    // writer instructions promise the gate enforces.
+    const r = evaluate(
+      fullDraft({
+        body: 'Termite swarmers show up after rain in Bradenton and Sarasota. Your sandy soil and afternoon storms create perfect conditions. You should check your baseboards; your garage and your lanai matter too.\n\nFAQ\n- Do swarmers bite?\n- No.',
+      }),
+      brief({ page_type: 'supporting-blog' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.total_score).toBe(51);
+    expect(r.total_score).toBeGreaterThanOrEqual(r.min_total_score);
+    expect(r.hard_failures.some((f) => f.name === 'hub_link_present')).toBe(true);
+    expect(r.ok).toBe(false);
+  });
+  test('customer-question missing both answer-up-front and internal link hard-fails', () => {
+    // Both checks must be HARD: under the original 75%-formula threshold
+    // (44), commons (37) + redaction (8) = 45 passed with a page that
+    // neither answers the question up front nor links anywhere internal.
+    const r = evaluate(
+      fullDraft({
+        body: 'Many homeowners ask about this every spring.\n\nLonger detail follows here without any links at all.',
+      }),
+      brief({ page_type: 'customer-question' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.total_score).toBe(45);
+    expect(r.hard_failures.some((f) => f.name === 'answer_in_first_paragraph')).toBe(true);
+    expect(r.hard_failures.some((f) => f.name === 'source_internal_link')).toBe(true);
+    expect(r.ok).toBe(false);
+
+    const good = evaluate(
+      fullDraft({
+        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
+      }),
+      brief({ page_type: 'customer-question' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(good.hard_failures).toEqual([]);
+    expect(good.ok).toBe(true);
   });
   test('throws on missing inputs', () => {
     expect(() => evaluate(null, brief())).toThrow();

@@ -25,34 +25,60 @@
  *                         no duplicate title across site
  *
  * Pure functions. The gate scores each check 0..n (per a weight map)
- * and pass/fail. Total score is sum; gate requires score >= 75 AND
- * zero hard-check failures.
+ * and pass/fail. Total score is sum; gate requires zero hard-check
+ * failures AND score >= the page type's threshold: 75% of its own
+ * achievable ceiling, floored so it always tolerates at most one
+ * worst-case soft-check miss beyond the hard checks.
  */
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
-// Compute the achievable maximum score from the weight map so the
-// pass threshold is always a reachable fraction of it. The v3.1 plan
-// wanted "min total ~75%" — apply that as a percentage of the real
-// ceiling rather than a hardcoded literal (a hardcoded 75 was
-// unreachable: common hard checks = 37, largest page-specific
-// bundle = city-service at 36, so absolute max = 73).
+// Compute the achievable maximum score PER PAGE TYPE so the pass
+// threshold is always a reachable fraction of that page type's own
+// ceiling. The v3.1 plan wanted "min total ~75%" — an earlier global
+// threshold derived from the LARGEST bundle (common 37 + city-service
+// 36 = 73 → 54) made the gate unpassable for smaller bundles: refresh
+// maxes at 47, so a PERFECT refresh scored 47/54 and gate-failed
+// (prod, 2026-06-12), and supporting-blog maxes at 57, so any single
+// soft miss worth >3 points sank the post.
 const PASS_THRESHOLD_PCT = 0.75;
 
-function computeMaxAchievableScore(hardChecks, pageTypeChecks) {
+function computeMinTotalScores(hardChecks, pageTypeChecks) {
   const commonSum = hardChecks.reduce((s, c) => s + c.weight, 0);
-  let maxPageTypeSum = 0;
-  for (const checks of Object.values(pageTypeChecks)) {
-    const sum = checks.reduce((s, c) => s + c.weight, 0);
-    if (sum > maxPageTypeSum) maxPageTypeSum = sum;
+  const thresholds = {};
+  for (const [pageType, checks] of Object.entries(pageTypeChecks)) {
+    const ceiling = commonSum + checks.reduce((s, c) => s + c.weight, 0);
+    let min = Math.floor(ceiling * PASS_THRESHOLD_PCT);
+    // The threshold must demand more than the hard checks alone — ok
+    // already requires zero hard failures, so a threshold at or below
+    // the hard sum tolerates a draft missing EVERY soft check (e.g.
+    // supporting-blog: 37 common + 6 hub = 43 >= the formula's 42 with
+    // cities/FAQ/voice all failed). When the percentage formula lands
+    // there, raise it to "one worst-case soft miss": ceiling minus the
+    // largest single soft weight (= ceiling itself for all-hard bundles).
+    const hardSum = commonSum + checks.filter((c) => c.isHard).reduce((s, c) => s + c.weight, 0);
+    const maxSoftWeight = checks.filter((c) => !c.isHard).reduce((m, c) => Math.max(m, c.weight), 0);
+    if (min <= hardSum) min = ceiling - maxSoftWeight;
+    thresholds[pageType] = min;
   }
-  return commonSum + maxPageTypeSum; // ceiling for any single page type
+  return thresholds;
 }
 
 // Computed below after the check arrays are defined.
-let MIN_TOTAL_SCORE;
+let MIN_TOTAL_SCORES;
+
+// Unknown page types HARD-FAIL in evaluate() (fail closed — a typo'd
+// or legacy page_type must not bypass its real bundle's hard checks by
+// gating on commons alone). The .none fallback here only keeps the
+// reported min_total_score sane on that failure path. hasOwnProperty
+// guards against prototype-chain keys ('constructor' etc.).
+function minTotalScoreFor(pageType) {
+  return Object.prototype.hasOwnProperty.call(MIN_TOTAL_SCORES, pageType)
+    ? MIN_TOTAL_SCORES[pageType]
+    : MIN_TOTAL_SCORES.none;
+}
 
 // Each check carries (name, weight, isHard, evaluate(draft, brief)).
 // Hard checks are pass/fail and short-circuit publishing on failure.
@@ -80,15 +106,28 @@ const PAGE_TYPE_CHECKS = {
     { name: 'localbusiness_service_schema', weight: 6, isHard: true, evaluate: checkLocalBusinessServiceSchema },
   ],
   'customer-question': [
-    { name: 'answer_in_first_paragraph', weight: 8, evaluate: checkAnswerInFirstParagraph },
-    { name: 'source_internal_link', weight: 6, evaluate: checkSourceInternalLink },
+    // Both hard: commons (37) + redaction (8) = 45 already clears this
+    // type's threshold (44), so as soft checks a question page that
+    // neither answers up front nor links anywhere internal would pass.
+    // Answer-up-front is what a customer-question page IS; a page with
+    // zero internal links is an orphan dead-end.
+    { name: 'answer_in_first_paragraph', weight: 8, isHard: true, evaluate: checkAnswerInFirstParagraph },
+    { name: 'source_internal_link', weight: 6, isHard: true, evaluate: checkSourceInternalLink },
     { name: 'redaction_passed', weight: 8, isHard: true, evaluate: checkRedactionPassed },
   ],
   refresh: [
-    { name: 'improvement_over_prior', weight: 10, evaluate: checkImprovementOverPrior },
+    // Hard: refresh edits an EXISTING prod page, and the common checks
+    // alone (37, all hard) clear refresh's threshold (35) — if this were
+    // soft, a refresh that guts >20% of prior content or has no prior
+    // version to compare would still pass on common points alone.
+    { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
   ],
   'supporting-blog': [
-    { name: 'hub_link_present', weight: 6, evaluate: checkHubLinkPresent },
+    // Hard: hub links are the point of a supporting blog (hub-and-spoke
+    // link equity), and the writer instructions promise the gate enforces
+    // them. As a 6-pt soft miss, a hubless draft scores 51 >= 42 and
+    // auto-publishes — the exact A1 first-batch failure shape.
+    { name: 'hub_link_present', weight: 6, isHard: true, evaluate: checkHubLinkPresent },
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
@@ -104,11 +143,18 @@ const PAGE_TYPE_CHECKS = {
   none: [],
 };
 
-// Resolve MIN_TOTAL_SCORE now that check arrays are defined.
-// MAX_ACHIEVABLE = 37 common + 36 city-service = 73.
-// MIN_TOTAL_SCORE = floor(73 * 0.75) = 54.
-const MAX_ACHIEVABLE_SCORE = computeMaxAchievableScore(HARD_CHECKS, PAGE_TYPE_CHECKS);
-MIN_TOTAL_SCORE = Math.floor(MAX_ACHIEVABLE_SCORE * PASS_THRESHOLD_PCT);
+// Resolve per-page-type thresholds now that check arrays are defined.
+// Common hard checks sum to 37. Ceiling → threshold per page type
+// (75% of ceiling, floored at one-worst-case-soft-miss — see
+// computeMinTotalScores):
+//   city-service      37+36 = 73 → 54 (75% formula; hard sum 43)
+//   customer-question 37+22 = 59 → 59 (all-hard bundle)
+//   refresh           37+10 = 47 → 47 (all-hard bundle)
+//   supporting-blog   37+20 = 57 → 51 (= 57 - voice 6; formula's 42 sat
+//                                      below the 43 hard sum)
+//   metadata          37+26 = 63 → 57 (= 63 - keyword 6)
+//   links/gbp/none    37+0  = 37 → 37 (common-only)
+MIN_TOTAL_SCORES = computeMinTotalScores(HARD_CHECKS, PAGE_TYPE_CHECKS);
 
 // ── main API ────────────────────────────────────────────────────────
 
@@ -131,22 +177,33 @@ MIN_TOTAL_SCORE = Math.floor(MAX_ACHIEVABLE_SCORE * PASS_THRESHOLD_PCT);
  *
  * ok requires:
  *   - zero hard_failures
- *   - total_score >= MIN_TOTAL_SCORE (75)
+ *   - total_score >= the page type's threshold (see computeMinTotalScores)
  */
 function evaluate(draft, brief, context = {}) {
   if (!draft) throw new Error('content-quality-gate: draft required');
   if (!brief) throw new Error('content-quality-gate: brief required');
 
   const pageType = brief.page_type || 'none';
+  // Fail closed on unrecognized page types: every known type maps to a
+  // bundle here ('links'/'gbp'/'none' are EXPLICIT empty bundles), so an
+  // unknown value means a typo, a legacy alias, or drift — and silently
+  // gating it on commons alone (37 vs the 27 'none' threshold) would
+  // bypass that type's real hard checks (hub_link_present,
+  // answer_in_first_paragraph, improvement_over_prior).
+  const knownPageType = Object.prototype.hasOwnProperty.call(PAGE_TYPE_CHECKS, pageType);
   const allChecks = [
     ...HARD_CHECKS.map((c) => ({ ...c, isHard: true })),
-    ...(PAGE_TYPE_CHECKS[pageType] || []),
+    ...(knownPageType ? PAGE_TYPE_CHECKS[pageType] : []),
   ];
 
   const results = {};
   const hardFailures = [];
   const softFailures = [];
   let totalScore = 0;
+
+  if (!knownPageType) {
+    hardFailures.push({ name: 'known_page_type', reason: `unknown_page_type:${pageType}` });
+  }
 
   for (const check of allChecks) {
     let result;
@@ -163,11 +220,12 @@ function evaluate(draft, brief, context = {}) {
     results[check.name] = result;
   }
 
-  const ok = hardFailures.length === 0 && totalScore >= MIN_TOTAL_SCORE;
+  const minTotalScore = minTotalScoreFor(pageType);
+  const ok = hardFailures.length === 0 && totalScore >= minTotalScore;
   return {
     ok,
     total_score: totalScore,
-    min_total_score: MIN_TOTAL_SCORE,
+    min_total_score: minTotalScore,
     hard_failures: hardFailures,
     soft_failures: softFailures,
     checks: results,
@@ -580,11 +638,11 @@ function checkNoDuplicateTitle(draft, _brief, context) {
   return { ok: true };
 }
 
-module.exports = { evaluate, MIN_TOTAL_SCORE };
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
-  MIN_TOTAL_SCORE,
+  MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
   isOperatorAuthoredBrief, isCompetitorGapBrief,
