@@ -1206,6 +1206,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Property-lookup parser canary — nightly, one golden parcel per county
+  // through the real by-parcel pipeline; alerts when a county PAO layout
+  // change silently breaks the scrape-based parsers.
+  // See server/services/property-lookup-canary.js.
+  // =========================================================================
+  cron.schedule('17 4 * * *', async () => {
+    try {
+      const { runPropertyLookupCanary } = require('./property-lookup-canary');
+      const result = await runPropertyLookupCanary();
+      if (result.failures?.length) {
+        logger.warn(`[property-lookup-canary] ${result.failures.length} failing check(s)`);
+      }
+    } catch (err) {
+      logger.error(`Property-lookup canary cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WaveGuard lawn readiness — route-morning protocol preflight snapshot.
   // Stores the readiness ledger and opens an admin alert when appointments
   // are blocked by assignment, calibration, inventory, or property gates.
