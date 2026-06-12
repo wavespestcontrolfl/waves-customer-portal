@@ -44,9 +44,9 @@ const AGENT_ICONS = {
 };
 
 function statusTone(status) {
-  if (status === "blocked") return { bg: "#FEE2E2", fg: D.red, label: "Blocked" };
-  if (status === "needs_review") return { bg: "#FEF3C7", fg: D.amber, label: "Needs review" };
-  if (status === "active") return { bg: "#DBEAFE", fg: D.blue, label: "Active" };
+  if (status === "blocked") return { bg: "#FEE2E2", fg: D.red, label: "Blocked", pulse: true };
+  if (status === "needs_review") return { bg: "#FEF3C7", fg: D.amber, label: "Needs review", pulse: true };
+  if (status === "active") return { bg: "#DBEAFE", fg: D.blue, label: "Active", pulse: true };
   return { bg: D.bg, fg: D.muted, label: "Idle" };
 }
 
@@ -65,6 +65,7 @@ function sourceTone(status) {
 function Chip({ children, tone }) {
   return (
     <span
+      className={tone.pulse ? "agent-status-pulse" : undefined}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -384,6 +385,14 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
         .agent-ops-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
         .agent-ops-main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
         .lead-agent-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+        .agent-status-pulse { animation: agent-status-pulse 2.6s ease-in-out infinite; }
+        @keyframes agent-status-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.6; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .agent-status-pulse { animation: none; }
+        }
         @media (max-width: 1180px) {
           .agent-ops-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .agent-ops-main { grid-template-columns: 1fr; }
