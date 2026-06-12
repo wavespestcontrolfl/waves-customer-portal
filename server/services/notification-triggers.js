@@ -363,7 +363,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Pest Insider draft ready',
       body: `Autopilot drafted the ${p.month || 'monthly'} Pest Insider: "${p.subject || 'Untitled'}". Review and send when ready.`,
-      link: '/admin/newsletter?tab=compose',
+      // autopilotType deep-links Compose to the Pest Insider lane —
+      // without it, hydration defaults to the weekly flagship draft.
+      link: '/admin/newsletter?tab=compose&autopilotType=pest-insider-monthly',
     }),
   },
   event_sources_unhealthy: {

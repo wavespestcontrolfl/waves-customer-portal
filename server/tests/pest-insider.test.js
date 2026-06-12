@@ -153,6 +153,43 @@ describe('pest-insider assemblePestInsiderNewsletter', () => {
   });
 });
 
+describe('pest-insider claim validation at the send gates', () => {
+  const { validateNewsletterDraft } = require('../services/newsletter-validator');
+  const { requiresClaimValidation } = require('../config/newsletter-types');
+  const baseSend = {
+    subject: 'PSA: Mosquitoes Are Back',
+    html_body: '<h2>What\'s Crawling</h2><p>Mosquito season is here. Call us.</p>',
+    text_body: 'Mosquito season is here.',
+    preview_text: 'Bite me? Nope.',
+    newsletter_type: 'pest-insider-monthly',
+  };
+
+  test('AI-generated lanes require claim validation; manual types stay exempt', () => {
+    expect(requiresClaimValidation('pest-insider-monthly')).toBe(true);
+    expect(requiresClaimValidation('local-weekly-fresh-events')).toBe(true);
+    expect(requiresClaimValidation('service-promo')).toBe(false);
+    expect(requiresClaimValidation('free-form')).toBe(false);
+  });
+
+  test('a hallucinated efficacy or price claim hard-blocks a Pest Insider send', () => {
+    const efficacy = { ...baseSend, html_body: baseSend.html_body + '<p>Our treatment is pet-safe and 100% effective!</p>' };
+    expect(
+      validateNewsletterDraft(efficacy, { recipientCount: 100 }).errors
+        .some((e) => e.includes('Hallucinated claim')),
+    ).toBe(true);
+    const price = { ...baseSend, subject: 'Mosquito season special: $99' };
+    expect(
+      validateNewsletterDraft(price, { recipientCount: 100 }).errors
+        .some((e) => e.includes('Hallucinated claim')),
+    ).toBe(true);
+  });
+
+  test('a clean Pest Insider draft passes without flagship-only structure warnings blocking', () => {
+    const { errors } = validateNewsletterDraft(baseSend, { recipientCount: 100 });
+    expect(errors).toEqual([]);
+  });
+});
+
 describe('pest-insider cron guards', () => {
   test('isFirstTuesdayET: first Tuesday yes; second Tuesday and other weekdays no', () => {
     expect(isFirstTuesdayET(new Date('2026-06-02T11:05:00Z'))).toBe(true);  // Tue Jun 2, 7:05am ET

@@ -7,6 +7,7 @@
 // EmailAutomationsPanelV2 — imported directly by NewsletterPage.
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   CalendarClock,
@@ -180,6 +181,11 @@ export function ComposeView({
   onPendingEventConsumed,
   onSendComplete,
 } = {}) {
+  // Autopilot notifications deep-link their lane (?autopilotType=…) so
+  // the monthly Pest Insider notification hydrates ITS draft, not the
+  // weekly one.
+  const [searchParams] = useSearchParams();
+  const autopilotTypeParam = searchParams.get("autopilotType");
   const [draftId, setDraftId] = useState(null);
   const [subject, setSubject] = useState("");
   const [subjectB, setSubjectB] = useState("");
@@ -329,7 +335,13 @@ export function ComposeView({
   useEffect(() => {
     if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
     let cancelled = false;
-    adminFetch("/admin/newsletter/sends/latest-autopilot")
+    // ?autopilotType= comes from autopilot notifications (e.g. the monthly
+    // Pest Insider) so the click lands on THAT lane's draft instead of the
+    // weekly default.
+    const laneParam = autopilotTypeParam === "pest-insider-monthly"
+      ? "?type=pest-insider-monthly"
+      : "";
+    adminFetch(`/admin/newsletter/sends/latest-autopilot${laneParam}`)
       .then((d) => {
         if (cancelled || pendingEventRef.current || userHasEdited.current) return;
         if (!d?.draft) return;
@@ -340,7 +352,8 @@ export function ComposeView({
         setHtmlBody(ap.html_body || "");
         setTextBody(ap.text_body || "");
         setAutoShareSocial(ap.auto_share_social !== false);
-        setSelectedTemplate("weekend");
+        const tplForType = TEMPLATES.find((t) => t.newsletterType === ap.newsletter_type);
+        setSelectedTemplate(tplForType?.key || "weekend");
         setAutopilotBanner(true);
       })
       .catch(() => { /* no autopilot draft — nothing to do */ });
@@ -1481,7 +1494,13 @@ function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }
     setLoading(true);
     setErr("");
     try {
-      const effectiveTemplate = initialNewsletterType === 'free-form' ? null : 'weekend';
+      // Map the active newsletter type back to its template card so the
+      // server's /draft-ai routes to the matching structured flow (a Pest
+      // Insider compose must NOT fall back to the weekend/flagship path).
+      const tplForType = TEMPLATES.find((t) => t.newsletterType === initialNewsletterType);
+      const effectiveTemplate = initialNewsletterType === 'free-form'
+        ? null
+        : (tplForType?.key || 'weekend');
       await onDraft({
         prompt,
         template: effectiveTemplate,

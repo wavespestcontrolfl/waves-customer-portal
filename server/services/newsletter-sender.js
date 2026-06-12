@@ -553,7 +553,7 @@ async function resumeCampaign(sendId) {
  * can't stampede the others.
  */
 async function processScheduledSends() {
-  const { isFlagshipType } = require('../config/newsletter-types');
+  const { requiresClaimValidation } = require('../config/newsletter-types');
   const { validateNewsletterDraft } = require('../services/newsletter-validator');
 
   const due = await db('newsletter_sends')
@@ -568,8 +568,8 @@ async function processScheduledSends() {
   let processed = 0;
   for (const row of due) {
     try {
-      // Validate flagship sends before dispatching
-      if (isFlagshipType(row.newsletter_type)) {
+      // Validate AI-generated sends (flagship + Pest Insider) before dispatching
+      if (requiresClaimValidation(row.newsletter_type)) {
         const recipientCount = Number(
           (await buildSubscriberQuery(row.segment_filter).count('* as c').first())?.c || 0
         );
