@@ -33,6 +33,25 @@ describe('shadow judge — reply pairing', () => {
     const reply = { id: 'fast', customer_id: 'c1', message_body: 'Quick human', created_at: new Date(base - 60 * 1000).toISOString() };
     expect(pairDraftWithHumanReply(draft, [reply]).id).toBe('fast');
   });
+
+  test('anchors on the inbound timestamp, not the slow drafter row (Codex P2)', () => {
+    // Inbound 9:00, human replied 9:02, but the async drafter took 5 min —
+    // draft row created_at 9:05. Anchoring on created_at would drop the
+    // reply as "before the window".
+    const slowDraft = { id: 'd1', customer_id: 'c1', inbound_at: at(0), created_at: at(5 / 60) };
+    const reply = { id: 'o1', customer_id: 'c1', message_body: 'Fast human reply', created_at: at(2 / 60) };
+    expect(pairDraftWithHumanReply({ ...slowDraft, created_at: at(5 / 60) }, [reply]).id).toBe('o1');
+  });
+
+  test('one reply is never reused across a burst — window ends at next inbound (Codex P2)', () => {
+    // Customer texts at 9:00 and 9:30; Virginia replies once at 9:45.
+    // The reply answers the 9:30 message: the 9:00 draft must NOT claim it.
+    const reply = { id: 'o1', customer_id: 'c1', message_body: 'Answering your latest text', created_at: at(0.75) };
+    const draftA = { id: 'dA', customer_id: 'c1', inbound_at: at(0), created_at: at(0) };
+    const draftB = { id: 'dB', customer_id: 'c1', inbound_at: at(0.5), created_at: at(0.5) };
+    expect(pairDraftWithHumanReply(draftA, [reply], { nextInboundAt: at(0.5) })).toBeNull();
+    expect(pairDraftWithHumanReply(draftB, [reply], { nextInboundAt: null }).id).toBe('o1');
+  });
 });
 
 describe('shadow judge — deterministic verdicts (no LLM spend)', () => {

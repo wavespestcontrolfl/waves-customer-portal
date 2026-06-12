@@ -108,12 +108,30 @@ function parseJudgeResponse(text) {
  * Pair one shadow draft with the first human (manual) outbound to the same
  * customer inside the reply window. Pure: takes the draft and a pre-fetched
  * list of that customer's manual outbounds sorted ascending by created_at.
- * A reply must land at/after the inbound (small negative slack covers clock
- * skew between the webhook insert and the draft row).
+ *
+ * The window ANCHOR is the inbound SMS timestamp (draft.inbound_at),
+ * falling back to the draft row's created_at only when the sms_log link is
+ * missing — the async drafter can take minutes (context + Anthropic call)
+ * before its row lands, and a fast human reply must not fall "before" the
+ * window (Codex P2). Small slack still covers residual clock skew.
+ *
+ * The window END is capped at the customer's NEXT inbound (nextInboundAt):
+ * in a burst of inbound texts, one human reply addresses the latest
+ * message — it must not be reused as ground truth for every earlier draft
+ * (Codex P2). A draft whose window closes before any reply lands is
+ * human_no_reply for ITS message; the reply pairs with the draft of the
+ * inbound it actually answered.
  */
-function pairDraftWithHumanReply(draft, manualOutbounds = [], { windowHours = REPLY_WINDOW_HOURS, slackMs = 2 * 60 * 1000 } = {}) {
-  const anchor = new Date(draft.created_at).getTime();
-  const windowEnd = anchor + windowHours * 3600 * 1000;
+function pairDraftWithHumanReply(
+  draft,
+  manualOutbounds = [],
+  { windowHours = REPLY_WINDOW_HOURS, slackMs = 2 * 60 * 1000, nextInboundAt = null } = {}
+) {
+  const anchor = new Date(draft.inbound_at || draft.created_at).getTime();
+  let windowEnd = anchor + windowHours * 3600 * 1000;
+  if (nextInboundAt) {
+    windowEnd = Math.min(windowEnd, new Date(nextInboundAt).getTime());
+  }
   for (const reply of manualOutbounds) {
     const t = new Date(reply.created_at).getTime();
     if (t < anchor - slackMs) continue;
@@ -201,13 +219,15 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
 
   const drafts = await db('message_drafts')
     .leftJoin('shadow_draft_judgments', 'message_drafts.id', 'shadow_draft_judgments.draft_id')
+    .leftJoin('sms_log as inbound_sms', 'message_drafts.sms_log_id', 'inbound_sms.id')
     .whereNull('shadow_draft_judgments.id')
     .where('message_drafts.status', 'shadow')
     .where('message_drafts.created_at', '<', eligibleBefore)
     .select(
       'message_drafts.id', 'message_drafts.customer_id', 'message_drafts.inbound_message',
       'message_drafts.draft_response', 'message_drafts.intent', 'message_drafts.context_summary',
-      'message_drafts.created_at'
+      'message_drafts.created_at', 'message_drafts.sms_log_id',
+      'inbound_sms.created_at as inbound_at'
     )
     .orderBy('message_drafts.created_at', 'asc')
     .limit(batchLimit);
@@ -218,12 +238,15 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
   }
 
   const customerIds = [...new Set(drafts.map((d) => d.customer_id).filter(Boolean))];
-  const earliest = drafts[0].created_at;
+  const anchorOf = (d) => new Date(d.inbound_at || d.created_at).getTime();
+  const earliestAnchor = Math.min(...drafts.map(anchorOf));
+  const prefetchFrom = new Date(earliestAnchor - 5 * 60 * 1000);
+
   const outbounds = await db('sms_log')
     .where('direction', 'outbound')
     .where('message_type', 'manual')
     .whereIn('customer_id', customerIds)
-    .where('created_at', '>=', new Date(new Date(earliest).getTime() - 5 * 60 * 1000))
+    .where('created_at', '>=', prefetchFrom)
     .whereNotIn('status', ['failed', 'undelivered', 'scheduled'])
     .select('id', 'customer_id', 'message_body', 'created_at')
     .orderBy('created_at', 'asc');
@@ -233,11 +256,36 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
     outboundsByCustomer.get(o.customer_id).push(o);
   }
 
+  // Burst boundaries: each draft's reply window ends at the customer's
+  // next real inbound (reactions/opt keywords don't end a window).
+  const inboundBoundaries = await db('sms_log')
+    .where('direction', 'inbound')
+    .whereIn('customer_id', customerIds)
+    .whereNotIn('message_type', ['opt_out', 'opt_in', 'sms_reaction'])
+    .where('created_at', '>=', prefetchFrom)
+    .select('id', 'customer_id', 'created_at')
+    .orderBy('created_at', 'asc');
+  const inboundsByCustomer = new Map();
+  for (const m of inboundBoundaries) {
+    if (!inboundsByCustomer.has(m.customer_id)) inboundsByCustomer.set(m.customer_id, []);
+    inboundsByCustomer.get(m.customer_id).push(m);
+  }
+  const nextInboundAfter = (draft) => {
+    const anchor = anchorOf(draft);
+    for (const m of inboundsByCustomer.get(draft.customer_id) || []) {
+      if (m.id === draft.sms_log_id) continue;
+      if (new Date(m.created_at).getTime() > anchor) return m.created_at;
+    }
+    return null;
+  };
+
   const byVerdict = {};
   let judged = 0;
   for (const draft of drafts) {
     try {
-      const humanReply = pairDraftWithHumanReply(draft, outboundsByCustomer.get(draft.customer_id) || []);
+      const humanReply = pairDraftWithHumanReply(draft, outboundsByCustomer.get(draft.customer_id) || [], {
+        nextInboundAt: nextInboundAfter(draft),
+      });
       const judgment = await judgeOne(draft, humanReply);
       if (!judgment) continue;
       await db('shadow_draft_judgments').insert(judgment).onConflict('draft_id').ignore();
