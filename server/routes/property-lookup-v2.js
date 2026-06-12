@@ -18,9 +18,11 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const MODELS = require('../config/models');
 const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
+const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
   attachFloodZoneToCachedLookup,
+  attachPoolPermitsToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -139,6 +141,23 @@ async function performPropertyLookup(address, options = {}) {
           await attachFloodZoneToCachedLookup(address, floodZone);
         }
       }
+      // Permit-evidence backfill, same pattern: query once on hit, persist
+      // even when empty (a checked marker), retry only on provider failure.
+      if (
+        cached.property_record
+        && cached.property_record._poolPermits === undefined
+        && cached.property_record._parcel?.paoParcelId
+        && cached.property_record._parcel?.county
+      ) {
+        const permits = await lookupPoolPermitsByParcel({
+          county: cached.property_record._parcel.county,
+          parcelId: cached.property_record._parcel.paoParcelId,
+        }).catch(() => null);
+        if (permits) {
+          cached.property_record._poolPermits = permits;
+          await attachPoolPermitsToCachedLookup(address, permits);
+        }
+      }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
@@ -202,6 +221,19 @@ async function performPropertyLookup(address, options = {}) {
     if (geo && !geo.partialMatch && Number.isFinite(geo.lat) && Number.isFinite(geo.lng)) {
       const floodZone = await lookupFloodZoneByPoint(geo.lat, geo.lng).catch(() => null);
       if (floodZone) result.propertyRecord._floodZone = floodZone;
+    }
+
+    // County pool/enclosure permit evidence (positive-only, fail-open) —
+    // keyed on the GIS parcel identity; rides the cached record like
+    // _floodZone. A successful empty check is stored too, so permit-less
+    // parcels aren't re-queried on cache hits.
+    const parcelMeta = result.propertyRecord._parcel;
+    if (parcelMeta?.paoParcelId && parcelMeta?.county) {
+      const permits = await lookupPoolPermitsByParcel({
+        county: parcelMeta.county,
+        parcelId: parcelMeta.paoParcelId,
+      }).catch(() => null);
+      if (permits) result.propertyRecord._poolPermits = permits;
     }
   }
 
@@ -1079,6 +1111,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     poolCageSize: classifyPoolCageSize(rc?.poolCageSqft) || normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
     poolCageSizeInferred: !rc?.poolCageSqft
       && ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
+    // County permit evidence (positive-only; _poolPermits rides the cached
+    // record). A permit proves a pool/cage the annual roll hasn't caught up
+    // to; absence proves nothing — open-permit layers, new-construction-only
+    // coverage, unpermitted pools, and Sarasota has no permit service.
+    poolPermit: rc?._poolPermits?.poolPermit || null,
+    enclosurePermit: rc?._poolPermits?.enclosurePermit || null,
 
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',
@@ -1993,6 +2031,23 @@ function buildFieldVerifyFlags(rc, ai) {
       field: 'vegetation',
       reason: 'Significant vegetation touching structure — pest bridge, recommend cutting back',
       priority: 'MEDIUM'
+    });
+  }
+
+  // Pool permit on record but no assessed pool: brand-new construction the
+  // annual roll hasn't caught up to — verify on site (changes mosquito/lawn
+  // quoting context). Positive-only: no permit never flags. Skipped when a
+  // pool flag already exists so one field isn't double-prompted.
+  if (
+    rc?._poolPermits?.poolPermit
+    && rc?.hasPool !== true
+    && !flags.some((f) => f.field === 'pool')
+  ) {
+    const issued = rc._poolPermits.poolPermit.issuedAt;
+    flags.push({
+      field: 'pool',
+      reason: `County pool permit on record${issued ? ` (issued ${issued})` : ''} but no assessed pool — likely new construction`,
+      priority: 'HIGH'
     });
   }
 

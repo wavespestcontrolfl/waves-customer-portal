@@ -195,23 +195,41 @@ async function getVerifiedOverrides(address) {
 // fresh data, so override-invalidation and expiry stay anchored to the
 // original lookup. (jsonb ? / || operators verified read-only against prod
 // 2026-06-12.)
-async function attachFloodZoneToCachedLookup(address, floodZone) {
-  if (isCacheDisabled() || !floodZone) return;
+// Whitelisted evidence keys -> precomposed key-absence guards. Literal key
+// strings keep the raw fragment exactly the prod-verified shape; the
+// whitelist means no caller-supplied text ever reaches SQL.
+const EVIDENCE_BACKFILL_KEYS = {
+  _floodZone: "NOT (property_record \? '_floodZone')",
+  _poolPermits: "NOT (property_record \? '_poolPermits')",
+};
+
+async function attachEvidenceToCachedLookup(address, key, value) {
+  if (isCacheDisabled() || !value) return;
+  const guard = EVIDENCE_BACKFILL_KEYS[key];
+  if (!guard) return;
   try {
     const { hash } = addressKey(address);
     await db('property_lookups')
       .where({ address_hash: hash })
       .whereNotNull('property_record')
-      .whereRaw("NOT (property_record \? '_floodZone')")
+      .whereRaw(guard)
       .update({
         property_record: db.raw('property_record || ?::jsonb', [
-          JSON.stringify({ _floodZone: floodZone }),
+          JSON.stringify({ [key]: value }),
         ]),
         updated_at: db.fn.now(),
       });
   } catch (err) {
-    logger.warn('[lookup-cache] flood-zone backfill failed', { error: err.message });
+    logger.warn('[lookup-cache] evidence backfill failed', { key, error: err.message });
   }
+}
+
+async function attachFloodZoneToCachedLookup(address, floodZone) {
+  return attachEvidenceToCachedLookup(address, '_floodZone', floodZone);
+}
+
+async function attachPoolPermitsToCachedLookup(address, poolPermits) {
+  return attachEvidenceToCachedLookup(address, '_poolPermits', poolPermits);
 }
 
 async function saveLookup(address, result) {
@@ -373,6 +391,7 @@ module.exports = {
   getVerifiedOverrides,
   isCacheDisabled,
   attachFloodZoneToCachedLookup,
+  attachPoolPermitsToCachedLookup,
   saveLookup,
   saveVerifiedOverride,
   VERIFIABLE_FIELDS,
