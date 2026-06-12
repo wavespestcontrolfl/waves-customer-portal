@@ -612,6 +612,33 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] SMS reaction detected; skipping legacy AI draft');
     }
 
+    // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
+    // the house-voice AI would have replied. status='shadow' rows never send
+    // and never enter the approval queue; a later judge pass scores them
+    // against the reply Virginia actually sent. The AI number is excluded
+    // (findByNumber reports it as type 'location', but its traffic is
+    // already AI-handled — there is no human reply to judge against).
+    // Scheduling-intent messages ARE shadowed: a shadow row can't send, and
+    // the high-stakes class is exactly where the judge needs data.
+    if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location' && isEnabled('smsShadowDrafts')) {
+      try {
+        const { classifyCustomerSmsTriageIntent } = require('../services/estimate-conversion-agent');
+        const triage = classifyCustomerSmsTriageIntent(Body, { customer });
+        if (triage?.intent === 'no_reply_needed') {
+          logger.info('[sms-shadow] courtesy acknowledgement; skipping shadow draft');
+        } else {
+          void require('../services/sms-shadow-drafter').draftShadowReply({
+            inboundMessage: Body,
+            fromPhone: From,
+            customer,
+            smsLogId: smsLogEntry?.id || null,
+            intent: triage,
+            schedulingIntent,
+          }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
+        }
+      } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
+    }
+
     // Return empty TwiML — Adam approves drafts before sending
     res.type('text/xml').send('<Response></Response>');
   } catch (err) {
