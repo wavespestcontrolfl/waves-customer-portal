@@ -7092,18 +7092,48 @@ export function CompletionPanel({
     setTreeShrubCloseout(
       normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
     );
-    // Drafts saved before a schema cutover carry keys/chips the current
-    // schema no longer has; submit sends the whole object and the server
-    // rejects unknown keys, stranding the draft. Prune restored typed state
-    // to what the schema in effect actually accepts.
+    // Drafts saved before a schema cutover carry values the current schema
+    // no longer accepts; submit sends the whole object and the server
+    // validation strands the draft. Key presence alone isn't enough — a
+    // field can keep its key while changing type (textarea → chips), so
+    // each restored value is validated against the field's CURRENT
+    // definition: chips keep only allowlisted tokens, selects must match
+    // an option, counts must be digit-only. Free-text fields keep anything.
     const restoredFindings =
       savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
         ? savedDraft.findingsValues
         : {};
     if (typedFindingsSchema?.fields) {
-      const knownKeys = new Set(typedFindingsSchema.fields.map((f) => f.key));
-      for (const key of Object.keys(restoredFindings)) {
-        if (!knownKeys.has(key)) delete restoredFindings[key];
+      const fieldByKey = new Map(
+        typedFindingsSchema.fields.map((f) => [f.key, f]),
+      );
+      for (const [key, raw] of Object.entries(restoredFindings)) {
+        const field = fieldByKey.get(key);
+        if (!field) {
+          delete restoredFindings[key];
+        } else if (field.type === "chips" && Array.isArray(field.options)) {
+          const kept = String(raw || "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => field.options.includes(s));
+          if (kept.length) restoredFindings[key] = kept.join(", ");
+          else delete restoredFindings[key];
+        } else if (
+          field.type === "select" &&
+          Array.isArray(field.options) &&
+          field.options.length &&
+          !field.options.includes(String(raw))
+        ) {
+          delete restoredFindings[key];
+        } else if (field.type === "count") {
+          const str =
+            typeof raw === "number"
+              ? String(raw)
+              : typeof raw === "string"
+                ? raw.trim()
+                : "";
+          if (!/^\d{1,4}$/.test(str)) delete restoredFindings[key];
+        }
       }
     }
     setFindingsValues(restoredFindings);
@@ -7543,12 +7573,17 @@ export function CompletionPanel({
       // without one and the derive field can't fill it.
       const typedScoreMissing =
         !!typedFindingsSchema.activity && typedActivityScore == null;
-      if (missingTypedRequired.length || typedScoreMissing) {
+      // Mirror the server's next_step_required 422 pre-submit so the tech
+      // gets the same inline validation as other required fields.
+      const nextStepMissing =
+        !!typedFindingsSchema.nextStepRequired && !typedNextStepChips.length;
+      if (missingTypedRequired.length || typedScoreMissing || nextStepMissing) {
         completionTelemetryRef.current.requiredFieldErrorCount += 1;
         alert(
           `Complete the required service findings before submitting: ${[
             ...missingTypedRequired,
             ...(typedScoreMissing ? [typedFindingsSchema.activity.label] : []),
+            ...(nextStepMissing ? ["Next steps (select at least one)"] : []),
           ].join(", ")}.`,
         );
         return;
