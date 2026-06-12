@@ -255,30 +255,30 @@ async function verifyOne(prospect) {
 
   // 1 & 2 need a known live_url. Pending placements (null live_url) skip straight
   // to the domain reconcile below.
+  let lostBacklinkId = null;
   if (prospect.live_url) {
     // 1. Profile reconcile (free)
     const link = await reconcileFromProfile(prospect);
-    if (link) {
-      if (link.status === 'lost') {
-        await db('seo_link_prospects').where({ id: prospect.id }).update({
-          status: 'lost', last_live_check: now, backlink_id: link.id, updated_at: now,
-        });
-        return 'lost';
-      }
+    if (link && link.status !== 'lost') {
       return markLive(prospect, {
         isDofollow: link.is_dofollow, anchorText: link.anchor_text, backlinkId: link.id,
       }, now);
     }
+    // A 'lost' exact-URL row does NOT short-circuit to lost: the page may still
+    // carry our link (stale DataForSEO) or have moved to a new URL on the same
+    // domain. Fall through to the crawl + domain reconcile before concluding lost.
+    if (link) lostBacklinkId = link.id;
 
-    // 2. Crawl fallback (fresh links not yet in DataForSEO)
+    // 2. Crawl fallback (fresh links not yet in DataForSEO, or a false 'lost')
     const crawl = await crawlForLink(prospect.live_url, prospect.target_page);
     if (crawl.found) {
       return markLive(prospect, { isDofollow: crawl.isDofollow, anchorText: crawl.anchorText }, now);
     }
   }
 
-  // 3. Domain reconcile — covers pending placements with no known live_url, and
-  // fresh links DataForSEO has now indexed under a URL we didn't predict.
+  // 3. Domain reconcile — covers pending placements with no known live_url, a
+  // moved/renamed profile on the same domain, and fresh links DataForSEO has now
+  // indexed under a URL we didn't predict.
   const byDom = await reconcileByDomain(prospect);
   if (byDom) {
     return markLive(prospect, {
@@ -287,11 +287,12 @@ async function verifyOne(prospect) {
     }, now);
   }
 
-  // Not found anywhere. Regression if it used to be live; otherwise just touch the check.
-  if (wasLive) {
-    await db('seo_link_prospects').where({ id: prospect.id }).update({
-      status: 'lost', last_live_check: now, updated_at: now,
-    });
+  // Not found anywhere. Regression if it used to be live OR the exact-URL row is
+  // gone; otherwise just touch the check.
+  if (wasLive || lostBacklinkId) {
+    const patch = { status: 'lost', last_live_check: now, updated_at: now };
+    if (lostBacklinkId) patch.backlink_id = lostBacklinkId;
+    await db('seo_link_prospects').where({ id: prospect.id }).update(patch);
     return 'lost';
   }
   await db('seo_link_prospects').where({ id: prospect.id }).update({ last_live_check: now, updated_at: now });
