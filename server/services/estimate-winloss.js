@@ -157,10 +157,12 @@ async function winLossSlices({ days = 90 } = {}) {
   }));
 
   for (const row of rows) {
-    // Mirror PipelineAnalytics' archived semantics exactly: archived WINS
-    // still count (won = won forever), archived LOSSES are housekeeping and
-    // never count — the client never even fetches them.
-    if (row.archived_at && row.status !== 'accepted') continue;
+    // This card reports RATES, so archived rows drop symmetrically —
+    // PipelineAnalytics computes close-rate from activeRows (non-archived)
+    // for exactly this reason: archived losses are never fetched, so
+    // counting archived wins would skew rates upward. (Its archived-accepted
+    // carve-out feeds only the VOLUME funnel/MRR KPIs, not rates.)
+    if (row.archived_at) continue;
     const resolvedAt = resolutionDateMs(row);
     if (resolvedAt == null || resolvedAt < cutoffMs) continue;
     const isWon = row.status === 'accepted';

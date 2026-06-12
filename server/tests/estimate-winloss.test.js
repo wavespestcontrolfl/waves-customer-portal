@@ -171,11 +171,15 @@ describe('winLossSlices', () => {
     expect(result.byPriceBand.recurring.every((b) => b.total === 0)).toBe(true);
   });
 
-  test('archived semantics mirror PipelineAnalytics: archived wins count, archived losses never do', async () => {
+  test('archived rows drop symmetrically — rates come from active rows only', async () => {
+    // PipelineAnalytics computes close-rate from non-archived rows because
+    // archived losses are never fetched; counting archived wins here would
+    // inflate every win-rate slice.
     mockDbHandler = estimatesTable([
-      row({ id: 'win-archived', archived_at: daysAgo(1) }), // accepted + archived → counts
+      row({ id: 'win-archived', archived_at: daysAgo(1) }), // excluded from rates
       row({ id: 'loss-archived', status: 'declined', accepted_at: null, declined_at: daysAgo(2), archived_at: daysAgo(1) }), // excluded
       row({ id: 'loss-live', status: 'declined', accepted_at: null, declined_at: daysAgo(2) }),
+      row({ id: 'win-live' }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
@@ -183,6 +187,7 @@ describe('winLossSlices', () => {
     expect(result.resolved).toBe(2);
     expect(result.won).toBe(1);
     expect(result.lost).toBe(1);
+    expect(result.winRatePct).toBe(50);
   });
 
   test('zero resolved rows returns null win rates, not divide-by-zero', async () => {
