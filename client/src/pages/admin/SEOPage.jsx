@@ -9,6 +9,7 @@ import {
   Filter,
   Globe,
   LayoutDashboard,
+  LineChart,
   Link,
   Search,
   Sparkles,
@@ -161,6 +162,7 @@ const TABS = [
   { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard },
   { key: "advisor", label: "SEO Advisor", Icon: Sparkles },
   { key: "rankings", label: "Rankings", Icon: TrendingUp },
+  { key: "rankings-monitor", label: "Rankings Monitor", Icon: LineChart },
   { key: "backlinks", label: "Backlinks & Citations", Icon: Link },
   { key: "content-qa", label: "Content QA", Icon: FileCheck2 },
   { key: "ai-overview", label: "AI Overview", Icon: Bot },
@@ -881,6 +883,298 @@ function RankingsTab() {
           </table>{" "}
         </div>{" "}
       </Card>{" "}
+    </div>
+  );
+}
+
+// ── Rankings Monitor — per-page position before/now + change chips ──
+
+const CHIP_COLORS = {
+  META: D.amber,
+  CONTENT: D.teal,
+  LINKS: D.green,
+  SCHEMA: D.muted,
+};
+const CHIP_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+function chipDateLabel(date) {
+  const [, m, d] = String(date || "").split("-");
+  if (!m || !d) return date || "";
+  return `${parseInt(d, 10)} ${CHIP_MONTHS[parseInt(m, 10) - 1] || ""}`;
+}
+
+function pagePath(url) {
+  return String(url || "").replace(/^https?:\/\/[^/]+/i, "") || "/";
+}
+
+function pageHost(url) {
+  const m = String(url || "").match(/^https?:\/\/(?:www\.)?([^/]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function AnnotationChip({ ann }) {
+  const color = CHIP_COLORS[ann.type] || D.muted;
+  const verdict =
+    ann.status === "accepted" ? " ✓" : ann.status === "rejected" ? " ✗" : "";
+  const title = `${ann.type.toLowerCase()} change on ${ann.date}${ann.count > 1 ? ` (×${ann.count})` : ""} — source: ${(ann.sources || []).join(", ")}${ann.status ? ` · experiment ${ann.status}` : ""}`;
+  return (
+    <span
+      title={title}
+      style={{
+        display: "inline-block",
+        padding: "1px 7px",
+        borderRadius: 4,
+        border: `1px solid ${color}`,
+        color,
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: "0.5px",
+        fontFamily: MONO,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {ann.type} · {chipDateLabel(ann.date)}
+      {ann.count > 1 ? ` ×${ann.count}` : ""}
+      {verdict}
+    </span>
+  );
+}
+
+function beforeAfter(before, now, suffix = "") {
+  if (before == null) return <span>{now}{suffix}</span>;
+  return (
+    <span>
+      <span style={{ color: D.muted }}>{before}{suffix} → </span>
+      {now}{suffix}
+    </span>
+  );
+}
+
+function MonitorTable({ title, rows, accent }) {
+  if (!rows.length) return null;
+  return (
+    <Card style={{ padding: 0 }}>
+      <div
+        style={{
+          padding: "14px 16px",
+          fontSize: 13,
+          fontWeight: 600,
+          color: accent || D.heading,
+          borderBottom: `1px solid ${D.border}`,
+        }}
+      >
+        {title} ({rows.length})
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Page</th>
+              <th style={thR}>Pos Before</th>
+              <th style={thR}>Pos Now</th>
+              <th style={thR}>Change</th>
+              <th style={thR}>Clicks</th>
+              <th style={thR}>Imp</th>
+              <th style={thR}>CTR</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p, i) => {
+              const host = pageHost(p.page_url);
+              const isHub = !host || host === "wavespestcontrol.com";
+              return (
+                <tr key={`${p.domain || ""}-${p.page_url}-${i}`}>
+                  <td style={{ ...tdStyle, fontFamily: "inherit", maxWidth: 420 }}>
+                    <div
+                      style={{
+                        color: D.heading,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={p.page_url}
+                    >
+                      {!isHub && (
+                        <span style={{ color: D.muted, fontSize: 11 }}>{host}</span>
+                      )}
+                      {pagePath(p.page_url)}
+                    </div>
+                    {p.annotations?.length > 0 && (
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                        {p.annotations.map((a, j) => (
+                          <AnnotationChip key={j} ann={a} />
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td style={tdR}>{p.pos_before ?? "—"}</td>
+                  <td style={{ ...tdR, color: D.heading }}>{p.pos_now ?? "—"}</td>
+                  <td
+                    style={{
+                      ...tdR,
+                      fontWeight: 600,
+                      color:
+                        p.change == null
+                          ? D.muted
+                          : p.change < 0
+                            ? D.green
+                            : p.change > 0
+                              ? D.red
+                              : D.muted,
+                    }}
+                  >
+                    {p.change == null ? "NEW" : p.change > 0 ? `+${p.change}` : p.change}
+                  </td>
+                  <td style={tdR}>{beforeAfter(p.clicks_before, p.clicks_now)}</td>
+                  <td style={tdR}>
+                    {beforeAfter(
+                      p.impressions_before == null ? null : p.impressions_before.toLocaleString(),
+                      p.impressions_now.toLocaleString()
+                    )}
+                  </td>
+                  <td style={tdR}>{beforeAfter(p.ctr_before, p.ctr_now, "%")}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function RankingsMonitorTab() {
+  const [period, setPeriod] = useState(90);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    adminFetch(`/admin/seo/rankings-monitor?period=${period}`)
+      .then((d) => {
+        setData(d);
+        setLoading(false);
+      })
+      .catch((e) => {
+        setError(e.message);
+        setLoading(false);
+      });
+  }, [period]);
+
+  if (loading)
+    return (
+      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+        Loading rankings monitor...
+      </div>
+    );
+  if (error)
+    return (
+      <Card style={{ padding: 40, textAlign: "center" }}>
+        <div style={{ color: D.red }}>{error}</div>
+      </Card>
+    );
+  if (!data?.pages?.length)
+    return (
+      <Card style={{ padding: 40, textAlign: "center" }}>
+        <div style={{ color: D.muted }}>
+          No page data in this window yet. GSC syncs daily at 6am ET; data
+          publishes with a ~3 day lag.
+        </div>
+      </Card>
+    );
+
+  const s = data.summary || {};
+  const wins = data.pages.filter((p) => p.movement === "win");
+  const losses = data.pages.filter((p) => p.movement === "loss");
+  const fresh = data.pages.filter((p) => p.movement === "new");
+  const deltaSub = (delta, invert = false) => {
+    if (delta == null || delta === 0) return null;
+    const good = invert ? delta < 0 : delta > 0;
+    return {
+      text: `${delta > 0 ? "+" : ""}${typeof delta === "number" ? delta.toLocaleString() : delta}`,
+      color: good ? D.green : D.red,
+    };
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 4,
+            background: D.bg,
+            borderRadius: 8,
+            padding: 3,
+          }}
+        >
+          {[7, 28, 90].map((p) => (
+            <button
+              key={p}
+              onClick={() => setPeriod(p)}
+              style={{
+                padding: "6px 14px",
+                borderRadius: 6,
+                border: "none",
+                cursor: "pointer",
+                fontSize: 12,
+                background: period === p ? D.teal : "transparent",
+                color: period === p ? D.white : D.muted,
+              }}
+            >
+              {p === 7 ? "7 Days" : p === 28 ? "28 Days" : "3 Months"}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
+          {data.window?.current?.from} → {data.window?.current?.to} vs{" "}
+          {data.window?.prior?.from} → {data.window?.prior?.to}
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: D.muted }}>
+        Google Search Console publishes data with a ~3 day lag — the most
+        recent days shown will be 2–3 days behind today. Chips mark shipped
+        page changes: META = title/description rewrite, CONTENT =
+        refresh/new page, LINKS = inbound internal links, SCHEMA = structured
+        data.
+      </div>
+      <div
+        className="seo-kpi-grid-4"
+        style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}
+      >
+        <KpiCard
+          label="Clicks"
+          value={(s.clicks || 0).toLocaleString()}
+          sub={deltaSub(s.clicks_delta)}
+        />
+        <KpiCard
+          label="Impressions"
+          value={(s.impressions || 0).toLocaleString()}
+          sub={deltaSub(s.impressions_delta)}
+        />
+        <KpiCard
+          label="Avg Position"
+          value={s.avg_position ?? "—"}
+          sub={deltaSub(s.avg_position_delta, true)}
+        />
+        <KpiCard
+          label="Pages Tracked"
+          value={(s.pages_tracked || 0).toLocaleString()}
+          sub={deltaSub(s.pages_tracked_delta)}
+        />
+      </div>
+      <MonitorTable title="Position Wins" rows={wins} accent={D.green} />
+      <MonitorTable title="Position Losses" rows={losses} accent={D.red} />
+      <MonitorTable title="New Pages" rows={fresh} />
+      {wins.length + losses.length + fresh.length === 0 && (
+        <Card style={{ padding: 40, textAlign: "center" }}>
+          <div style={{ color: D.muted }}>
+            No position movement past ±0.5 in this window.
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
@@ -4997,6 +5291,7 @@ export default function SEOPage() {
       )}
       {tab === "advisor" && <AdvisorTab />}
       {tab === "rankings" && <RankingsTab />}
+      {tab === "rankings-monitor" && <RankingsMonitorTab />}
       {tab === "backlinks" && <BacklinksTab />}
       {tab === "content-qa" && <ContentQATab />}
       {tab === "ai-overview" && <AIOverviewTab />}

@@ -77,6 +77,29 @@ router.get('/queries', async (req, res, next) => {
 });
 
 // =========================================================================
+// RANKINGS MONITOR — per-page position before/now + change annotations
+// =========================================================================
+
+// GET /api/admin/seo/rankings-monitor?period=90&domain=&type=&limit=200
+//
+// Current window (last `period` ET days) vs the equal prior window, per
+// canonical page URL, with META/CONTENT/LINKS/SCHEMA chips joined from the
+// content-engine and SEO-action history. Read-only.
+router.get('/rankings-monitor', async (req, res, next) => {
+  try {
+    const RankingsMonitor = require('../services/seo/rankings-monitor');
+    const period = Math.min(Math.max(parseInt(req.query.period, 10) || 90, 7), 180);
+    const result = await RankingsMonitor.build({
+      periodDays: period,
+      domain: normalizeDomain(req.query.domain) || null,
+      type: req.query.type || null,
+      limit: req.query.limit,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
 // PAGES
 // =========================================================================
 
