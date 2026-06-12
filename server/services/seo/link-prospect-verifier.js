@@ -98,8 +98,9 @@ async function reconcileByDomain(prospect) {
   const dom = comparableDomain(prospect.target_domain);
   if (!dom) return null;
   const rows = await db('seo_backlinks')
+    // Active only — never promote/index from a 'disavowed' (or 'lost') link.
+    .where({ status: 'active' })
     .whereRaw("lower(regexp_replace(source_domain, '^www\\.', '')) = ?", [dom])
-    .whereNot('status', 'lost')
     .orderBy('last_checked', 'desc')
     .limit(25);
   return rows.find((row) => backlinkTargetsProspect(row, prospect)) || null;

@@ -37,14 +37,19 @@ async function indexProspects(prospects, targetCache = new Map()) {
       const linkIdx = await dataforseo.checkIndexed(p.live_url); // indexed|not_indexed|unknown
       const tgt = await targetIndexed(p.target_page);
 
-      const quality = { ...(p.quality_signals || {}) };
-      if (tgt !== null) quality.target_indexed = tgt;
-
       const patch = {
         last_index_check: now,
-        quality_signals: JSON.stringify(quality),
         updated_at: now,
       };
+      // Patch ONLY target_indexed on the live jsonb value — never a wholesale
+      // snapshot write — so a concurrent verifier/Omega run can't have its
+      // omega_* dedupe keys erased by this overlapping update.
+      if (tgt !== null) {
+        patch.quality_signals = db.raw(
+          "jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{target_indexed}', to_jsonb(?::boolean), true)",
+          [tgt],
+        );
+      }
 
       if (linkIdx !== 'unknown') {
         patch.indexing_status = linkIdx; // 'indexed' | 'not_indexed'
