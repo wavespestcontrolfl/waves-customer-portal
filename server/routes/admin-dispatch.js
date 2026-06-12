@@ -1550,17 +1550,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'completion_photos_too_many',
       });
     }
-    // Photo captions and the photo summary land on the customer report —
-    // sanitize to the column/snapshot budgets here; banned-copy validation
-    // joins the typed customerCopySources check below.
+    // Photo captions land on the customer report for EVERY completion
+    // (caption || stateBadge under each photo), typed or not — sanitize to
+    // the column budget and banned-copy validate them HERE, not just in the
+    // typed customerCopySources block, or a legacy completion could carry
+    // banned wording onto a report.
     if (Array.isArray(completionPhotos)) {
+      const captionViolations = new Set();
       for (const photo of completionPhotos) {
         if (photo && photo.caption != null) {
           photo.caption = String(photo.caption).trim().slice(0, 200) || null;
+          if (photo.caption) {
+            for (const v of ActivityIndicators.findBannedCustomerCopy(photo.caption)) {
+              captionViolations.add(v);
+            }
+          }
         }
       }
+      if (captionViolations.size) {
+        return res.status(422).json({
+          error: `Photo captions contain wording we can't put on a customer report (${[...captionViolations].join(', ')}).`,
+          code: 'photo_caption_banned_copy',
+          violations: [...captionViolations],
+        });
+      }
     }
+    // The summary renders inside the Field Photos section — without photos
+    // it would persist invisibly in the immutable snapshot, so drop it.
     const photoSummaryText = typeof typedPhotoSummary === 'string'
+      && Array.isArray(completionPhotos) && completionPhotos.length
       ? typedPhotoSummary.trim().slice(0, 600)
       : '';
     const isIncompleteVisit = visitOutcome === 'incomplete';
