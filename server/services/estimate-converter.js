@@ -235,6 +235,15 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     // stays valid); a supplement was never in remaining.
     const removeIdxs = [primaryIdx, companionIdx].filter((idx) => idx !== -1).sort((a, b) => b - a);
     for (const idx of removeIdxs) remaining.splice(idx, 1);
+    // Only carry a visit count that AGREES with the resolved cadence — when
+    // the accepted pattern overrode a stale line, that line's count would
+    // over-seed follow-ups (12 visits at quarterly spacing — pre-push P1).
+    // Omitted, the seeder uses the pattern's own visit default.
+    const candidateVisits = firstPositiveNumber(primaryVisits, companionVisits);
+    const consistentVisits = candidateVisits
+      && RecurringAppointmentSeeder.patternFromVisitsPerYear(candidateVisits) === primaryPattern
+      ? candidateVisits
+      : null;
     combos.push({
       route,
       frequency: primaryPattern,
@@ -246,10 +255,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
         name: route.name,
         frequency: primaryPattern,
         combinedCatalogServiceKey: route.catalogServiceKey,
-        visitsPerYear: firstPositiveNumber(
-          visitsPerYearForRecurringService(primary),
-          visitsPerYearForRecurringService(companion),
-        ),
+        ...(consistentVisits ? { visitsPerYear: consistentVisits } : {}),
       },
     });
   }

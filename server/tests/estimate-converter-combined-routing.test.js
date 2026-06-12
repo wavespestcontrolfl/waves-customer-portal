@@ -147,6 +147,22 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(combos).toEqual([]);
   });
 
+  test('stale line visit counts never ride a combo whose cadence the selection overrode (Codex P1)', () => {
+    // Stale monthly line (12 visits) + accepted quarterly plan: the combo is
+    // quarterly and must NOT carry visitsPerYear 12 — the seeder would plan
+    // 12 follow-ups at quarterly spacing.
+    const { combos } = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control', visitsPerYear: 12 },
+        { name: 'Rodent Bait Stations', service: 'rodent_bait' },
+      ],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.frequency).toBe('quarterly');
+    expect(combos[0].service.visitsPerYear).toBeUndefined();
+  });
+
   test('a primary with no cadence anywhere never combines', () => {
     // Pest line has no service-level cadence and no accepted frequency was
     // passed — the platform's "pest defaults quarterly" must NOT bypass the
