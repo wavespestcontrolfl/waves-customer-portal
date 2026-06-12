@@ -123,3 +123,36 @@ describe('snapshot photoSummary', () => {
     expect(without.photoSummary).toBeNull();
   });
 });
+
+describe('parsePhotoAnalysisResponse shape strictness', () => {
+  test('rejects non-string photoSummary and non-string captions', () => {
+    const objSummary = parsePhotoAnalysisResponse(
+      JSON.stringify({ photoSummary: { text: 'nested' }, captions: ['ok'] }),
+      { photoCount: 1 },
+    );
+    expect(objSummary.ok).toBe(false);
+    expect(objSummary.error).toBe('invalid_shape');
+
+    const objCaption = parsePhotoAnalysisResponse(
+      JSON.stringify({ photoSummary: 'Fine summary.', captions: [{ text: 'nested' }] }),
+      { photoCount: 1 },
+    );
+    expect(objCaption.ok).toBe(false);
+    expect(objCaption.error).toBe('invalid_shape');
+
+    const numericCaption = parsePhotoAnalysisResponse(
+      JSON.stringify({ photoSummary: 'Fine summary.', captions: [42] }),
+      { photoCount: 1 },
+    );
+    expect(numericCaption.ok).toBe(false);
+  });
+
+  test('null captions are tolerated as empty', () => {
+    const result = parsePhotoAnalysisResponse(
+      JSON.stringify({ photoSummary: 'Fine summary.', captions: [null, 'Trap photo'] }),
+      { photoCount: 2 },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.captions).toEqual(['', 'Trap photo']);
+  });
+});

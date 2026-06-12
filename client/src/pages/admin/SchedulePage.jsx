@@ -6190,6 +6190,13 @@ export function CompletionPanel({
   const [typedPhotoSummary, setTypedPhotoSummary] = useState("");
   const [photoAnalyzing, setPhotoAnalyzing] = useState(false);
   const [photoAiError, setPhotoAiError] = useState("");
+  // Mirror of servicePhotos for the post-await staleness check — reading
+  // state captured before the await (or a side effect inside a setState
+  // updater) is not reliable.
+  const servicePhotosRef = useRef([]);
+  useEffect(() => {
+    servicePhotosRef.current = servicePhotos;
+  }, [servicePhotos]);
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.
   const completionTelemetryRef = useRef({
@@ -8087,17 +8094,21 @@ export function CompletionPanel({
         },
       );
       if (r?.photoSummary) {
-        let setUnchanged = true;
-        setServicePhotos((prev) => {
-          setUnchanged = prev.length === analyzed.length
-            && analyzed.every((photo) => prev.includes(photo));
-          return prev.map((photo) => {
+        // Captions anchor to the analyzed photo objects — safe under any
+        // interleaving. The summary describes the SET, so it only saves
+        // when the current set (via ref — state captured before the await
+        // is stale) is exactly what was analyzed.
+        const current = servicePhotosRef.current;
+        const setUnchanged = current.length === analyzed.length
+          && analyzed.every((photo) => current.includes(photo));
+        setServicePhotos((prev) =>
+          prev.map((photo) => {
             const idx = analyzed.indexOf(photo);
             return idx !== -1 && r.captions?.[idx]
               ? { ...photo, caption: r.captions[idx], captionSource: "ai" }
               : photo;
-          });
-        });
+          }),
+        );
         if (setUnchanged) {
           setTypedPhotoSummary(r.photoSummary);
         } else {

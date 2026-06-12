@@ -2842,6 +2842,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.warn(
           `[dispatch] ${completionPhotoUploadResult.failed} completion photo upload(s) failed for service_record ${record.id}`
         );
+        // The photo summary was frozen into the snapshot before these
+        // best-effort uploads ran — if any photo is missing, the summary
+        // can describe photos the report doesn't show. Strip it rather
+        // than ship copy about absent images.
+        const sd = parseJsonObject(record.service_data);
+        if (sd?.typedReportSnapshot?.photoSummary) {
+          sd.typedReportSnapshot.photoSummary = null;
+          await db('service_records').where({ id: record.id }).update({
+            service_data: serializeJsonb(sd),
+          }).then(() => {
+            record.service_data = sd;
+          }).catch((stripErr) => {
+            logger.warn(`[dispatch] photo summary strip failed for ${record.id}: ${stripErr.message}`);
+          });
+        }
       }
       const latestNotes = parseJsonObject(record.structured_notes);
       const photoNotes = {

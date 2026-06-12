@@ -64,10 +64,19 @@ function parsePhotoAnalysisResponse(text, { photoCount = 0 } = {}) {
       return { ok: false, error: 'unparseable' };
     }
   }
-  const photoSummary = String(parsed?.photoSummary || '').trim().slice(0, MAX_PHOTO_SUMMARY_CHARS);
-  const captions = (Array.isArray(parsed?.captions) ? parsed.captions : [])
+  // Strict shapes only: String() coercion would turn {"photoSummary":
+  // {"text": "..."}} into "[object Object]" on a customer report.
+  if (typeof parsed?.photoSummary !== 'string') {
+    return { ok: false, error: 'invalid_shape' };
+  }
+  const rawCaptions = Array.isArray(parsed?.captions) ? parsed.captions : [];
+  if (rawCaptions.some((c) => c != null && typeof c !== 'string')) {
+    return { ok: false, error: 'invalid_shape' };
+  }
+  const photoSummary = parsed.photoSummary.trim().slice(0, MAX_PHOTO_SUMMARY_CHARS);
+  const captions = rawCaptions
     .slice(0, photoCount)
-    .map((c) => String(c || '').trim().slice(0, MAX_PHOTO_CAPTION_CHARS));
+    .map((c) => (c || '').trim().slice(0, MAX_PHOTO_CAPTION_CHARS));
   if (!photoSummary) return { ok: false, error: 'empty_summary' };
   while (captions.length < photoCount) captions.push('');
   const violations = [...new Set([
