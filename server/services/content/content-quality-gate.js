@@ -239,9 +239,25 @@ function checkSerpBriefAttached(_draft, brief) {
   return { ok: true };
 }
 
+// competitor_gap briefs (competitor-gap-miner) have zero GSC footprint by
+// construction — the gap IS the opportunity. Their evidence is the
+// competitor's ranking + search volume, persisted into gsc_signal by the
+// brief builder. Keyed on the persisted gsc_signal.bucket (same
+// anti-spoofing rationale as isOperatorAuthoredBrief); the evidence fields
+// must actually be present, so a competitor_gap row that somehow lost its
+// provenance still hard-fails.
+function isCompetitorGapBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'competitor_gap'
+    && s.competitor_position != null && s.search_volume != null;
+}
+
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
+  }
+  if (isCompetitorGapBrief(brief)) {
+    return { ok: true, reason: 'competitor_gap_evidence' };
   }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
@@ -567,7 +583,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORE,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
-  isOperatorAuthoredBrief,
+  isOperatorAuthoredBrief, isCompetitorGapBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,

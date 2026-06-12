@@ -291,6 +291,22 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // QUARTERLY (Jan/Apr/Jul/Oct 1st, 4AM) — Competitor keyword gap mining.
+  // Pulls tracked competitors' ranked keywords from DataForSEO Labs, diffs
+  // against our rankings + live sitemap, enqueues blog gaps the GSC/AEO
+  // miners structurally can't see (zero-footprint topics). ~$1.30/run.
+  // runExclusive: the Labs pulls cost real money — never double-run.
+  cron.schedule('0 4 1 1,4,7,10 *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: Competitor keyword gap mining (quarterly)');
+    try {
+      await runExclusive('competitor-gap-miner', async () => {
+        const miner = require('./seo/competitor-gap-miner');
+        await miner.mineAll();
+      });
+    } catch (err) { logger.error(`Competitor gap mining failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // WEEKLY SUNDAY 4:30AM — Terminate stale outreach rows for soft-deleted
   // customers. The cron-side deleted_at filters only SKIP these rows, and

@@ -76,6 +76,15 @@ describe('hard checks: schema/canonical/indexable', () => {
     expect(checkGscSignalAttached({}, { gsc_signal: { impressions: 1 } }).ok).toBe(true);
     expect(checkGscSignalAttached({}, { gsc_signal: {} }).ok).toBe(false);
   });
+  test('gsc_signal_attached accepts competitor evidence for competitor_gap bucket', () => {
+    const evidence = { bucket: 'competitor_gap', impressions: null, competitor_position: 5, search_volume: 12000 };
+    expect(checkGscSignalAttached({}, { gsc_signal: evidence }).ok).toBe(true);
+    expect(checkGscSignalAttached({}, { gsc_signal: evidence }).reason).toBe('competitor_gap_evidence');
+    // a competitor_gap row that lost its provenance still hard-fails
+    expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'competitor_gap', impressions: null } }).ok).toBe(false);
+    // the exemption is keyed on the bucket — other buckets can't ride competitor fields past the check
+    expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'striking_distance', competitor_position: 5, search_volume: 100 } }).ok).toBe(false);
+  });
   test('no_duplicate_intent fails on cannibalization human_review reason', () => {
     expect(checkNoDuplicateIntent({}, { human_review_required: true, human_review_reason: 'cannibalization bucket' }).ok).toBe(false);
     expect(checkNoDuplicateIntent({}, { human_review_required: true, human_review_reason: 'first publish trust-build' }).ok).toBe(true);
