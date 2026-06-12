@@ -1179,6 +1179,23 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     }
   }
 
+  // Knockdown zero states must not contradict the recorded evidence — the
+  // gauge derives 0 from 'None observed' alone, so live evidence beside it
+  // would persist a zero score under findings that say otherwise (same
+  // guard as termite stations; Codex P2 round 3).
+  if (type === 'german_roach_knockdown' && String(values.activity_level) === 'None observed') {
+    const evidence = [];
+    if (String(values.live_roaches_observed) === 'Yes') evidence.push('live roaches observed');
+    if (String(values.droppings_egg_cases) === 'Yes') evidence.push('droppings / egg cases observed');
+    if (evidence.length) {
+      errors.push(`Activity level "None observed" contradicts the recorded evidence (${evidence.join('; ')}) — update the activity level or the evidence fields`);
+    }
+  }
+  if (type === 'palmetto_roach_knockdown' && String(values.activity_level) === 'None observed'
+    && String(values.interior_activity) === 'Yes') {
+    errors.push('Activity level "None observed" contradicts "Interior activity: Yes" — update the activity level or the interior activity field');
+  }
+
   if (enforceRequired) {
     // chips store a comma-joined selection — a value like "," has no real
     // selections but a plain trim check would accept it (Codex P2). A

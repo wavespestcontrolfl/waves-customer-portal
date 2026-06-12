@@ -3986,6 +3986,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         && String(typedFindings.values?.species || '') !== 'German') {
         followupSuggestion = { ...followupSuggestion, required: false, reason: 'species_not_german' };
       }
+      // German knockdown: the tech's explicit follow-up selection wins over
+      // the profile's standing ALERT policy — a "No" must not leave the
+      // success overlay demanding a follow-up the customer report says is
+      // not needed (Codex P2 round 3).
+      if (followupSuggestion?.required && typedFindingsType === 'german_roach_knockdown'
+        && String(typedFindings.values?.followup_required || '') === 'No') {
+        followupSuggestion = { ...followupSuggestion, required: false, reason: 'tech_marked_not_required' };
+      }
+      // Palmetto knockdown: the profile policy is 'none', but when the
+      // checklist says a follow-up IS needed the overlay must offer the
+      // scheduling CTA — same 14-day default interval as German.
+      if (typedFindingsType === 'palmetto_roach_knockdown'
+        && String(typedFindings.values?.followup_needed || '') === 'Yes'
+        && !followupSuggestion?.required) {
+        followupSuggestion = {
+          ...projectFollowupSuggestion({
+            scheduledService: svc,
+            project: {},
+            profile: { ...completionProfile, followupPolicy: 'alert', defaultFollowupDays: completionProfile?.defaultFollowupDays ?? 14 },
+          }),
+          reason: 'tech_marked_needed',
+        };
+      }
     }
 
     const finalRecordNotes = parseJsonObject(record.structured_notes);
@@ -4314,10 +4337,27 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
         code: 'followup_no_typed_completion',
       });
     }
-    const suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
+    let suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
     let followupRequired = !!suggestion?.required;
     if (followupRequired && profile.findingsType === 'cockroach') {
       if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
+    }
+    // Knockdown typed-value overrides mirror /complete (Codex P2 round 3):
+    // the stored snapshot's explicit German "No" wins over the profile's
+    // ALERT policy, and a palmetto "Yes" earns the CTA the none-policy
+    // profile would withhold (same 14-day default interval as German).
+    if (followupRequired && profile.findingsType === 'german_roach_knockdown'
+      && String(snapshot?.values?.followup_required || '') === 'No') {
+      followupRequired = false;
+    }
+    if (!followupRequired && profile.findingsType === 'palmetto_roach_knockdown'
+      && String(snapshot?.values?.followup_needed || '') === 'Yes') {
+      suggestion = projectFollowupSuggestion({
+        scheduledService: svc,
+        project: {},
+        profile: { ...profile, followupPolicy: 'alert', defaultFollowupDays: profile.defaultFollowupDays ?? 14 },
+      });
+      followupRequired = !!suggestion?.required;
     }
     if (!followupRequired) {
       return res.status(409).json({

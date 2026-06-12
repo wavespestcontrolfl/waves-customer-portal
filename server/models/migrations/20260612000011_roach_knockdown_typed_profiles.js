@@ -52,6 +52,17 @@ exports.up = async function up(knex) {
       console.warn(`[roach-knockdown] ${target.key}: profile row is INACTIVE — skipping (runtime ignores inactive rows)`);
       continue;
     }
+    // German's pre-existing profile (20260531000003) carries the ALERT
+    // policy but never set default_followup_days — without an interval the
+    // CTA has no suggestedDate and follow-up booking is rejected (Codex P2
+    // round 3). Heal the interval on the update AND already-at-target
+    // paths; a null interval was a defect, so down() does not revert it.
+    if (row && target.defaultFollowupDays != null && row.default_followup_days == null) {
+      await knex('service_completion_profiles')
+        .where({ service_key: target.key })
+        .update({ default_followup_days: target.defaultFollowupDays, updated_at: knex.fn.now() });
+      console.log(`[roach-knockdown] ${target.key}: default_followup_days healed → ${target.defaultFollowupDays}`);
+    }
     if (!row) {
       await knex('service_completion_profiles').insert({
         service_key: target.key,

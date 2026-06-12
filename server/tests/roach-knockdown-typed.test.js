@@ -243,6 +243,39 @@ describe('validation', () => {
     expect(result.missing).toEqual(expect.arrayContaining(['primary_harborage', 'treatment_completed']));
   });
 
+  test('"None observed" cannot contradict recorded live evidence (Codex P2 round 3)', () => {
+    for (const extra of [
+      { live_roaches_observed: 'Yes', droppings_egg_cases: 'No' },
+      { live_roaches_observed: 'No', droppings_egg_cases: 'Yes' },
+    ]) {
+      const result = validateTypedFindings({
+        type: 'german_roach_knockdown',
+        values: { ...GERMAN_VALUES, activity_level: 'None observed', followup_required: 'No', ...extra },
+        expectedType: 'german_roach_knockdown',
+        enforceRequired: true,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.join(' ')).toMatch(/None observed/);
+    }
+    // A truthful cleared revisit passes.
+    const cleared = validateTypedFindings({
+      type: 'german_roach_knockdown',
+      values: { ...GERMAN_VALUES, activity_level: 'None observed', live_roaches_observed: 'No', droppings_egg_cases: 'No', followup_required: 'No' },
+      expectedType: 'german_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(cleared.ok).toBe(true);
+
+    const palmetto = validateTypedFindings({
+      type: 'palmetto_roach_knockdown',
+      values: { ...PALMETTO_VALUES, activity_level: 'None observed', interior_activity: 'Yes' },
+      expectedType: 'palmetto_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(palmetto.ok).toBe(false);
+    expect(palmetto.errors.join(' ')).toMatch(/Interior activity/);
+  });
+
   test('full owner submissions validate clean', () => {
     for (const [type, values] of [
       ['german_roach_knockdown', GERMAN_VALUES],
