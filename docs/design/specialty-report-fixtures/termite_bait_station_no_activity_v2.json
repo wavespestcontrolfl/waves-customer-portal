@@ -1,0 +1,127 @@
+{
+ "fixture": "termite_bait_station_no_activity_v2",
+ "proves": [
+  "accessible_stations_scoped_zero_state",
+  "inaccessible_station_sentence",
+  "required_next_step"
+ ],
+ "typedReportSnapshot": {
+  "type": "termite_bait_station",
+  "typeLabel": "Termite Bait Station Inspection",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "termite_bait",
+  "serviceLabel": "Termite Bait Station Service",
+  "reportTypeLabel": "Termite Bait Station Service Summary",
+  "visitSequence": 1,
+  "values": {
+   "total_stations": "18",
+   "stations_checked": "17",
+   "stations_inaccessible": "1",
+   "stations_with_activity": "0",
+   "termite_activity": "None observed",
+   "bait_consumption": "None — bait intact",
+   "station_issues": "Station obstructed",
+   "station_actions": "Obstruction removed",
+   "conducive_conditions": "Mulch against foundation",
+   "customer_recommendations": "Keep stations visible and accessible, Pull mulch back from foundation, Unlock gate on service day"
+  },
+  "nextStepChips": [
+   "Continue scheduled monitoring",
+   "Return when access available"
+  ],
+  "todaysResult": {
+   "headline": "No termite activity was observed in the accessible bait stations today.",
+   "body": "We inspected 17 termite bait stations around the exterior perimeter today. 1 station was not accessible and will be checked when access is available. We will continue your scheduled bait station monitoring. We will check the inaccessible station once access is available.",
+   "nextStep": "We will continue your scheduled bait station monitoring. We will check the inaccessible station once access is available."
+  },
+  "photoSummary": null,
+  "findings": [
+   {
+    "fieldKey": "total_stations",
+    "technicianLabel": "Total stations on property",
+    "customerLabel": "Stations on property",
+    "value": "18",
+    "customerValueLabel": "18"
+   },
+   {
+    "fieldKey": "stations_checked",
+    "technicianLabel": "Stations checked",
+    "customerLabel": "Stations checked",
+    "value": "17",
+    "customerValueLabel": "17"
+   },
+   {
+    "fieldKey": "stations_inaccessible",
+    "technicianLabel": "Stations inaccessible",
+    "customerLabel": "Stations not accessible today",
+    "value": "1",
+    "customerValueLabel": "1"
+   },
+   {
+    "fieldKey": "stations_with_activity",
+    "technicianLabel": "Stations with termite activity",
+    "customerLabel": "Stations with termite activity",
+    "value": "0",
+    "customerValueLabel": "0"
+   },
+   {
+    "fieldKey": "termite_activity",
+    "technicianLabel": "Termite activity",
+    "customerLabel": "Termite activity",
+    "value": "None observed",
+    "customerValueLabel": "No termite activity was observed in the accessible stations during today’s inspection"
+   },
+   {
+    "fieldKey": "bait_consumption",
+    "technicianLabel": "Bait consumption",
+    "customerLabel": "Bait consumption",
+    "value": "None — bait intact",
+    "customerValueLabel": "Bait intact — no feeding observed"
+   },
+   {
+    "fieldKey": "station_issues",
+    "technicianLabel": "Station condition issues",
+    "customerLabel": "Station condition notes",
+    "value": "Station obstructed",
+    "customerValueLabel": "Station obstructed"
+   },
+   {
+    "fieldKey": "station_actions",
+    "technicianLabel": "Station service performed",
+    "customerLabel": "Station service performed",
+    "value": "Obstruction removed",
+    "customerValueLabel": "Obstruction removed"
+   },
+   {
+    "fieldKey": "conducive_conditions",
+    "technicianLabel": "Conducive conditions",
+    "customerLabel": "Conditions to address",
+    "value": "Mulch against foundation",
+    "customerValueLabel": "Mulch against foundation"
+   },
+   {
+    "fieldKey": "customer_recommendations",
+    "technicianLabel": "Customer recommendations",
+    "customerLabel": "What you can do",
+    "value": "Keep stations visible and accessible, Pull mulch back from foundation, Unlock gate on service day",
+    "customerValueLabel": "Keep stations visible and accessible, Pull mulch back from foundation, Unlock gate on service day"
+   }
+  ],
+  "activity": {
+   "indicatorKey": "termite_activity",
+   "label": "Termite Activity",
+   "score": 0,
+   "levelWord": "No active signs observed today",
+   "source": "derived",
+   "derivedFrom": {
+    "field": "termite_activity",
+    "value": "None observed",
+    "initialDerivedScore": 0
+   },
+   "trend": null,
+   "trendWord": null
+  }
+ }
+}

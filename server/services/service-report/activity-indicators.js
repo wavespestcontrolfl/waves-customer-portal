@@ -131,6 +131,44 @@ const ACTIVITY_INDICATORS = {
     pestNoun: 'Termite',
     derive: null,
   },
+  // Station monitoring shares the termite program's indicator so quarterly
+  // checks extend the same trend line as inspections/treatments.
+  termite_bait_station: {
+    indicatorKey: 'termite_activity',
+    label: 'Termite Activity',
+    pestNoun: 'Termite',
+    derive: {
+      field: 'termite_activity',
+      scores: {
+        'None observed': 0,
+        'Previous feeding noted': 1,
+        'Active termites present': 4,
+      },
+    },
+  },
+  // Exterior pressure is a DIFFERENT signal than interior trapping — own
+  // indicator key so station trends never mix with trap-capture trends.
+  // pestNoun 'Bait station' keeps headlines honest: "Bait station activity
+  // was moderate today", never wording that implies interior infestation.
+  rodent_bait_station: {
+    indicatorKey: 'rodent_bait_activity',
+    label: 'Bait Station Activity',
+    pestNoun: 'Bait station',
+    // Title-case noun for the progress-visit report label ("Rodent Bait
+    // Station Program — Progress Visit"); pestNoun stays sentence-shaped
+    // for headlines ("Bait station activity was moderate today").
+    programNoun: 'Rodent Bait Station',
+    derive: {
+      field: 'bait_consumption',
+      scores: {
+        None: 0,
+        Light: 2,
+        Moderate: 3,
+        Heavy: 4,
+        Empty: 5,
+      },
+    },
+  },
 };
 
 // Technician registry label → customer report label. Fields not listed fall
@@ -195,6 +233,20 @@ const CUSTOMER_FIELD_LABELS = {
   exclusion_notes: 'Entry points to seal',
   customer_reported: 'What you told us',
   customer_discussed: 'What we discussed',
+  total_stations: 'Stations on property',
+  stations_checked: 'Stations checked',
+  stations_inaccessible: 'Stations not accessible today',
+  stations_with_activity: 'Stations with termite activity',
+  station_actions: 'Station service performed',
+  bait_consumption: 'Bait consumption',
+  bait_replaced: 'Bait replaced',
+  highest_activity_location: 'Highest activity at',
+  bait_issues: 'Bait condition notes',
+  bait_actions: 'Bait service performed',
+  station_issues: 'Station condition notes',
+  termite_activity: 'Termite activity',
+  activity_signs: 'Activity signs observed',
+  active_station_location: 'Active station location',
   activity_locations: 'Where activity was noted',
   treatment_completed: 'Treatment completed',
   treatment_zones: 'Areas we treated',
@@ -324,6 +376,34 @@ const CUSTOMER_VALUE_LABELS = {
     Partial: 'Prep partially completed — see the prep list below',
     'Not started': 'Prep not yet started — see the prep list below',
   },
+  // Owner wording rules (bait stations): termite absence claims stay scoped
+  // to the accessible stations inspected today — never "no termites on
+  // property". Rodent consumption = EXTERIOR pressure, never an interior
+  // infestation claim.
+  termite_activity: {
+    'None observed': 'No termite activity was observed in the accessible stations during today’s inspection',
+    'Active termites present': 'Active termite feeding was observed — see the station details below',
+    'Previous feeding noted': 'Previous feeding was noted — no live termite activity was observed today',
+  },
+  // Shared field key, type-distinct VALUES: rodent uses None/Light/…/Empty
+  // (exterior-pressure wording), termite uses 'None — bait intact' /
+  // '* feeding' (colony-feeding wording). Keep the value sets disjoint or
+  // one type's copy will leak onto the other's reports.
+  bait_consumption: {
+    None: 'No bait consumption observed today',
+    Light: 'Light consumption — indicates some exterior rodent activity',
+    Moderate: 'Moderate consumption — indicates exterior rodent activity',
+    Heavy: 'Heavy consumption — indicates strong exterior rodent pressure',
+    Empty: 'Bait fully consumed — indicates strong exterior rodent pressure',
+    'None — bait intact': 'Bait intact — no feeding observed',
+    'Light feeding': 'Light termite feeding on the bait',
+    'Moderate feeding': 'Moderate termite feeding on the bait',
+    'Heavy feeding': 'Heavy termite feeding on the bait',
+  },
+  bait_replaced: {
+    Yes: 'Bait was replaced today',
+    No: 'No replacement needed',
+  },
 };
 
 // Required service-specific fields per type (contract §4; budget ≤4 except
@@ -349,6 +429,8 @@ const REQUIRED_FINDINGS_FIELDS = {
     'linear_feet_or_stations',
     'gallons_or_amount',
   ],
+  termite_bait_station: ['stations_checked', 'termite_activity', 'bait_consumption'],
+  rodent_bait_station: ['stations_checked', 'bait_consumption'],
 };
 
 // Next-step chips per type (contract §7). Each chip maps to the
@@ -411,6 +493,16 @@ const NEXT_STEP_CHIPS = {
   'Re-check scheduled': 'We will re-check the treated areas on the scheduled visit.',
   'Retreatment scheduled': 'Retreatment is scheduled to keep protection current.',
   'Monitor fronds for change': 'Monitor the fronds for change and let us know what you see.',
+  'Continue scheduled monitoring': 'We will continue your scheduled bait station monitoring.',
+  'Recheck active station sooner': 'We will recheck the active station ahead of the normal monitoring interval.',
+  'Replace damaged station': 'The damaged station will be replaced.',
+  'Return when access available': 'We will check the inaccessible station once access is available.',
+  'Moisture correction recommended': 'Correcting the noted moisture condition will reduce termite-conducive conditions near the structure.',
+  'Continue bait station service': 'We will continue your scheduled bait station service.',
+  'Recheck high-consumption station': 'We will recheck bait levels at the high-activity station on the next visit.',
+  'Add station': 'An additional bait station is recommended for better coverage.',
+  'Rodent inspection recommended': 'A full rodent inspection is recommended based on the activity observed.',
+  'Customer action needed': 'Your help with the recommendations above will reduce activity before our next visit.',
 };
 
 const MAX_NEXT_STEP_CHIPS = 4;
@@ -422,6 +514,7 @@ const MAX_NEXT_STEP_CHIPS = 4;
 const REQUIRED_NEXT_STEP_TYPES = new Set([
   'rodent_trapping', 'mosquito_event', 'palm_injection', 'one_time_lawn_treatment',
   'pest_inspection', 'cockroach', 'wildlife_trapping', 'bed_bug',
+  'termite_bait_station', 'rodent_bait_station',
 ]);
 
 function nextStepRequiredForType(projectType) {
@@ -489,6 +582,16 @@ const TYPE_NEXT_STEP_CHIPS = {
   ],
   termite_inspection: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
   termite_treatment: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
+  termite_bait_station: [
+    'Continue scheduled monitoring', 'Recheck active station sooner', 'Replace damaged station',
+    'Return when access available', 'Moisture correction recommended',
+    'Follow-up recommended', 'No action needed',
+  ],
+  rodent_bait_station: [
+    'Continue bait station service', 'Recheck high-consumption station', 'Add station',
+    'Replace damaged station', 'Rodent inspection recommended', 'Exclusion recommended',
+    'Customer action needed', 'Monitor activity',
+  ],
 };
 
 function chipsForType(projectType) {
@@ -788,6 +891,25 @@ const WORK_PHRASE_FIELDS = {
   },
 };
 
+// Deterministic "what we did" sentence for bait station checks, composed
+// from the station counts + service chips. Accessibility is part of what
+// the customer needs to know (owner spec), so inaccessible stations get a
+// sentence of their own. Returns null when no station count was recorded.
+function baitStationSentence(projectType, values = {}) {
+  const checked = Number(values.stations_checked);
+  if (!Number.isInteger(checked) || checked <= 0) return null;
+  const plural = checked === 1 ? '' : 's';
+  const serviced = String(values.station_actions || values.bait_actions || '').trim().length > 0;
+  let sentence = projectType === 'termite_bait_station'
+    ? `We inspected ${checked} termite bait station${plural} around the exterior perimeter today.`
+    : `We checked${serviced ? ' and serviced' : ''} ${checked} exterior rodent bait station${plural} today.`;
+  const inaccessible = Number(values.stations_inaccessible);
+  if (Number.isInteger(inaccessible) && inaccessible > 0) {
+    sentence += ` ${inaccessible} station${inaccessible === 1 ? ' was' : 's were'} not accessible and will be checked when access is available.`;
+  }
+  return sentence;
+}
+
 function composedWorkSentence(projectType, values = {}) {
   // Inspection visits compose from the areas covered instead of work chips.
   if (projectType === 'pest_inspection') {
@@ -826,13 +948,30 @@ function buildTodaysResult({
   // The free-text keys stay in the fallback chain so pre-v2 drafts still
   // produce a sentence.
   const isTrappingType = projectType === 'rodent_trapping' || projectType === 'wildlife_trapping';
+  const isBaitStationType = projectType === 'termite_bait_station' || projectType === 'rodent_bait_station';
   const whatWeDid = (isTrappingType && trapActivitySentence(values))
+    || (isBaitStationType && baitStationSentence(projectType, values))
     || composedWorkSentence(projectType, values)
     || firstSentenceFrom(
       values.treatment_performed || values.exclusion_completed || values.areas_treated || values.traps_set,
       'We completed the scheduled service.'
     );
   const nextStep = nextStepSentence(chips);
+
+  // Bait station zero states use the owner's required scoped wording —
+  // accessible-stations-only for termite, consumption+evidence for rodent —
+  // in place of the generic "No active signs of X activity" line. Trend
+  // headlines on later visits still come from the generic indicator block.
+  if (isBaitStationType && activity && activity.score === 0
+    && !(visitSequence > 1 && activity.trendWord)) {
+    return {
+      headline: projectType === 'termite_bait_station'
+        ? 'No termite activity was observed in the accessible bait stations today.'
+        : 'No bait consumption or visible rodent evidence was observed today.',
+      body: `${whatWeDid} ${nextStep}`,
+      nextStep,
+    };
+  }
 
   // Mosquito has no 0-5 gauge (not a trend type) but the owner template
   // leads with the observed level: "Mosquito activity was light today."
@@ -938,7 +1077,7 @@ function buildTypedReportSnapshot({
     ? `${serviceLabel} Summary`
     : `${config.label} Summary`;
   const resolvedReportTypeLabel = visitSequence > 1 && ACTIVITY_INDICATORS[projectType]
-    ? `${ACTIVITY_INDICATORS[projectType].pestNoun} Program — Progress Visit`
+    ? `${ACTIVITY_INDICATORS[projectType].programNoun || ACTIVITY_INDICATORS[projectType].pestNoun} Program — Progress Visit`
     : reportTypeLabel;
 
   const items = [];
@@ -1063,6 +1202,10 @@ const BANNED_CUSTOMER_COPY = [
   // Owner rule: never claim a home is or will be made "-proof" against
   // anything — exclusion copy says "reduce access".
   /\b(?:rodent|wildlife|pest|bug|mosquito|critter|animal)[\s-]?proof/i,
+  // Owner rule (bait stations): absence claims are scoped to the accessible
+  // stations inspected today — a property-wide "no termites" claim is never
+  // supportable from a station check.
+  /\bno termites? (?:on|at) (?:the |this |your )?(?:property|home|house)\b/i,
 ];
 
 function findBannedCustomerCopy(text) {

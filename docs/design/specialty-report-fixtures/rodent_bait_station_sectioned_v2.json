@@ -1,0 +1,129 @@
+{
+ "fixture": "rodent_bait_station_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "consumption_derived_score",
+  "exterior_pressure_wording",
+  "station_sentence_from_counts",
+  "required_next_step"
+ ],
+ "typedReportSnapshot": {
+  "type": "rodent_bait_station",
+  "typeLabel": "Rodent Bait Station Check",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "rodent_bait_quarterly",
+  "serviceLabel": "Quarterly Rodent Bait Station Service",
+  "reportTypeLabel": "Quarterly Rodent Bait Station Service Summary",
+  "visitSequence": 1,
+  "values": {
+   "total_stations": "4",
+   "stations_checked": "4",
+   "stations_inaccessible": "0",
+   "station_actions": "Cleaned, Refilled, Secured",
+   "bait_consumption": "Moderate",
+   "bait_replaced": "Yes",
+   "highest_activity_location": "Rear-left station near A/C pad",
+   "evidence_observed": "Droppings, Exterior harborage",
+   "conducive_conditions": "Bird seed accessible, Fallen fruit",
+   "sanitation_recommendations": "Store pet food / bird seed in sealed containers, Remove fallen fruit"
+  },
+  "nextStepChips": [
+   "Continue bait station service",
+   "Recheck high-consumption station"
+  ],
+  "todaysResult": {
+   "headline": "Bait station activity was moderate today.",
+   "body": "We checked and serviced 4 exterior rodent bait stations today. We will continue your scheduled bait station service. We will recheck bait levels at the high-activity station on the next visit.",
+   "nextStep": "We will continue your scheduled bait station service. We will recheck bait levels at the high-activity station on the next visit."
+  },
+  "photoSummary": null,
+  "findings": [
+   {
+    "fieldKey": "total_stations",
+    "technicianLabel": "Total stations on property",
+    "customerLabel": "Stations on property",
+    "value": "4",
+    "customerValueLabel": "4"
+   },
+   {
+    "fieldKey": "stations_checked",
+    "technicianLabel": "Stations checked",
+    "customerLabel": "Stations checked",
+    "value": "4",
+    "customerValueLabel": "4"
+   },
+   {
+    "fieldKey": "stations_inaccessible",
+    "technicianLabel": "Stations inaccessible",
+    "customerLabel": "Stations not accessible today",
+    "value": "0",
+    "customerValueLabel": "0"
+   },
+   {
+    "fieldKey": "station_actions",
+    "technicianLabel": "Station service performed",
+    "customerLabel": "Station service performed",
+    "value": "Cleaned, Refilled, Secured",
+    "customerValueLabel": "Cleaned, Refilled, Secured"
+   },
+   {
+    "fieldKey": "bait_consumption",
+    "technicianLabel": "Bait consumption level",
+    "customerLabel": "Bait consumption",
+    "value": "Moderate",
+    "customerValueLabel": "Moderate consumption — indicates exterior rodent activity"
+   },
+   {
+    "fieldKey": "bait_replaced",
+    "technicianLabel": "Bait replaced",
+    "customerLabel": "Bait replaced",
+    "value": "Yes",
+    "customerValueLabel": "Bait was replaced today"
+   },
+   {
+    "fieldKey": "highest_activity_location",
+    "technicianLabel": "Highest-activity station / location",
+    "customerLabel": "Highest activity at",
+    "value": "Rear-left station near A/C pad",
+    "customerValueLabel": "Rear-left station near A/C pad"
+   },
+   {
+    "fieldKey": "evidence_observed",
+    "technicianLabel": "Rodent evidence nearby",
+    "customerLabel": "Evidence observed today",
+    "value": "Droppings, Exterior harborage",
+    "customerValueLabel": "Droppings, Exterior harborage"
+   },
+   {
+    "fieldKey": "conducive_conditions",
+    "technicianLabel": "Attractants / harborage",
+    "customerLabel": "Conditions to address",
+    "value": "Bird seed accessible, Fallen fruit",
+    "customerValueLabel": "Bird seed accessible, Fallen fruit"
+   },
+   {
+    "fieldKey": "sanitation_recommendations",
+    "technicianLabel": "Customer recommendations",
+    "customerLabel": "Sanitation recommendations",
+    "value": "Store pet food / bird seed in sealed containers, Remove fallen fruit",
+    "customerValueLabel": "Store pet food / bird seed in sealed containers, Remove fallen fruit"
+   }
+  ],
+  "activity": {
+   "indicatorKey": "rodent_bait_activity",
+   "label": "Bait Station Activity",
+   "score": 3,
+   "levelWord": "Moderate activity",
+   "source": "derived",
+   "derivedFrom": {
+    "field": "bait_consumption",
+    "value": "Moderate",
+    "initialDerivedScore": 3
+   },
+   "trend": null,
+   "trendWord": null
+  }
+ }
+}

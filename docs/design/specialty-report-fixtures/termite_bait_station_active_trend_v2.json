@@ -1,0 +1,110 @@
+{
+ "fixture": "termite_bait_station_active_trend_v2",
+ "proves": [
+  "active_feeding_progress_visit",
+  "trend_headline",
+  "program_noun_report_label"
+ ],
+ "typedReportSnapshot": {
+  "type": "termite_bait_station",
+  "typeLabel": "Termite Bait Station Inspection",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "termite_bait",
+  "serviceLabel": "Termite Bait Station Service",
+  "reportTypeLabel": "Termite Program — Progress Visit",
+  "visitSequence": 3,
+  "values": {
+   "total_stations": "18",
+   "stations_checked": "18",
+   "stations_with_activity": "1",
+   "termite_activity": "Active termites present",
+   "activity_signs": "Live termites in station, Bait feeding",
+   "active_station_location": "Station #7, rear exterior wall",
+   "bait_consumption": "Moderate feeding",
+   "bait_actions": "Bait replaced"
+  },
+  "nextStepChips": [
+   "Recheck active station sooner"
+  ],
+  "todaysResult": {
+   "headline": "Termite activity has increased since our last visit.",
+   "body": "We inspected 18 termite bait stations around the exterior perimeter today. We will recheck the active station ahead of the normal monitoring interval.",
+   "nextStep": "We will recheck the active station ahead of the normal monitoring interval."
+  },
+  "photoSummary": null,
+  "findings": [
+   {
+    "fieldKey": "total_stations",
+    "technicianLabel": "Total stations on property",
+    "customerLabel": "Stations on property",
+    "value": "18",
+    "customerValueLabel": "18"
+   },
+   {
+    "fieldKey": "stations_checked",
+    "technicianLabel": "Stations checked",
+    "customerLabel": "Stations checked",
+    "value": "18",
+    "customerValueLabel": "18"
+   },
+   {
+    "fieldKey": "stations_with_activity",
+    "technicianLabel": "Stations with termite activity",
+    "customerLabel": "Stations with termite activity",
+    "value": "1",
+    "customerValueLabel": "1"
+   },
+   {
+    "fieldKey": "termite_activity",
+    "technicianLabel": "Termite activity",
+    "customerLabel": "Termite activity",
+    "value": "Active termites present",
+    "customerValueLabel": "Active termite feeding was observed — see the station details below"
+   },
+   {
+    "fieldKey": "activity_signs",
+    "technicianLabel": "Activity signs",
+    "customerLabel": "Activity signs observed",
+    "value": "Live termites in station, Bait feeding",
+    "customerValueLabel": "Live termites in station, Bait feeding"
+   },
+   {
+    "fieldKey": "active_station_location",
+    "technicianLabel": "Active station number / location",
+    "customerLabel": "Active station location",
+    "value": "Station #7, rear exterior wall",
+    "customerValueLabel": "Station #7, rear exterior wall"
+   },
+   {
+    "fieldKey": "bait_consumption",
+    "technicianLabel": "Bait consumption",
+    "customerLabel": "Bait consumption",
+    "value": "Moderate feeding",
+    "customerValueLabel": "Moderate termite feeding on the bait"
+   },
+   {
+    "fieldKey": "bait_actions",
+    "technicianLabel": "Bait service performed",
+    "customerLabel": "Bait service performed",
+    "value": "Bait replaced",
+    "customerValueLabel": "Bait replaced"
+   }
+  ],
+  "activity": {
+   "indicatorKey": "termite_activity",
+   "label": "Termite Activity",
+   "score": 4,
+   "levelWord": "High activity",
+   "source": "derived",
+   "derivedFrom": {
+    "field": "termite_activity",
+    "value": "Active termites present",
+    "initialDerivedScore": 4
+   },
+   "trend": "worsening",
+   "trendWord": "increased since our last visit"
+  }
+ }
+}
