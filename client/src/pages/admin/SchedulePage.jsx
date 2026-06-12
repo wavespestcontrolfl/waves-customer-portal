@@ -4574,12 +4574,22 @@ export function typedNextStepChipConflict(schemaType, chip, values) {
       return `"Follow-up in 10–14 days" conflicts with the selected follow-up window (${window})`;
     }
   }
-  if (
-    schemaType === "palmetto_roach_knockdown" &&
-    chip === "Follow-up recommended" &&
-    String(values?.followup_needed ?? "").trim() === "No"
-  ) {
-    return `"Follow-up recommended" conflicts with "Follow-up needed: No"`;
+  if (schemaType === "palmetto_roach_knockdown") {
+    if (
+      chip === "Follow-up recommended" &&
+      String(values?.followup_needed ?? "").trim() === "No"
+    ) {
+      return `"Follow-up recommended" conflicts with "Follow-up needed: No"`;
+    }
+    if (chip === "No action needed") {
+      const level = String(values?.activity_level ?? "").trim();
+      if (level && level !== "None observed") {
+        return `"No action needed" conflicts with the recorded activity level (${level})`;
+      }
+      if (String(values?.followup_needed ?? "").trim() === "Yes") {
+        return `"No action needed" conflicts with "Follow-up needed: Yes"`;
+      }
+    }
   }
   return null;
 }

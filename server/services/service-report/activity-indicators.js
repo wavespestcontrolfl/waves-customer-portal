@@ -1151,11 +1151,24 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   }
   // German knockdown: the follow-up window is only meaningful (and only
   // required) once a follow-up is actually required — owner spec §8B,
-  // "10–14 days preferred".
-  if (type === 'german_roach_knockdown' && enforceRequired
-    && String(values.followup_required) === 'Yes'
-    && (values.followup_window == null || String(values.followup_window).trim() === '')) {
-    missing.push('followup_window');
+  // "10–14 days preferred". A stale window left behind after switching the
+  // answer to "No" is a contradiction, not noise: the immutable snapshot
+  // would render "No follow-up visit required" beside a follow-up window
+  // (Codex P2 round 6). Same for a monitor treatment chip beside
+  // "Monitors placed: No" — the report would claim both.
+  if (type === 'german_roach_knockdown') {
+    const window = String(values.followup_window ?? '').trim();
+    if (enforceRequired && String(values.followup_required) === 'Yes' && !window) {
+      missing.push('followup_window');
+    }
+    if (String(values.followup_required) === 'No' && window) {
+      errors.push('A follow-up window cannot be recorded with "Follow-up required: No" — update the follow-up answer or clear the window');
+    }
+    const treatments = String(values.treatment_completed || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (treatments.includes('Monitors / glue boards') && String(values.monitors_placed) === 'No') {
+      errors.push('"Monitors / glue boards" in the completed treatments contradicts "Monitors placed: No" — update the monitor answer or remove the treatment chip');
+    }
   }
   // "Inspection only" treatment can't ride with applied treatments (owner
   // spec §5 — the report tells one coherent story), and activity areas are
@@ -1274,10 +1287,24 @@ function validateNextStepChips(chips, projectType = null, values = null) {
       }
     }
   }
-  if (values && projectType === 'palmetto_roach_knockdown'
-    && String(values.followup_needed || '') === 'No'
-    && normalized.includes('Follow-up recommended')) {
-    return { ok: false, error: 'Next-step chip "Follow-up recommended" contradicts "Follow-up needed: No" — update the follow-up answer or remove the chip' };
+  if (values && projectType === 'palmetto_roach_knockdown') {
+    if (String(values.followup_needed || '') === 'No'
+      && normalized.includes('Follow-up recommended')) {
+      return { ok: false, error: 'Next-step chip "Follow-up recommended" contradicts "Follow-up needed: No" — update the follow-up answer or remove the chip' };
+    }
+    // "No action needed" stays available for cleared/no-follow-up visits but
+    // contradicts recorded activity or a requested follow-up (Codex P2
+    // round 6) — the chip sentence would deny the action the findings/CTA
+    // call for.
+    if (normalized.includes('No action needed')) {
+      const level = String(values.activity_level || '').trim();
+      if (level && level !== 'None observed') {
+        return { ok: false, error: `Next-step chip "No action needed" contradicts the recorded activity level (${level}) — remove the chip or update the activity level` };
+      }
+      if (String(values.followup_needed || '') === 'Yes') {
+        return { ok: false, error: 'Next-step chip "No action needed" contradicts "Follow-up needed: Yes" — remove the chip or update the follow-up answer' };
+      }
+    }
   }
   return { ok: true, chips: normalized };
 }

@@ -213,7 +213,10 @@ const PROJECT_TYPES = {
       ] },
       { key: 'monitors_placed', label: 'Monitors placed', type: 'select', section: 'Treatment', options: ['Yes', 'No'] },
       { key: 'followup_required', label: 'Follow-up required', type: 'select', section: 'Follow-up', options: ['Yes', 'No'] },
-      { key: 'followup_window', label: 'Follow-up window', type: 'select', section: 'Follow-up', options: ['10–14 days', '2–3 weeks', 'As needed'] },
+      // Conditionally required: only meaningful once a follow-up is required
+      // ('Yes' is the only non-'No' answer). requiredUnless is served in the
+      // schema slice so the client pre-submit gate mirrors the server.
+      { key: 'followup_window', label: 'Follow-up window', type: 'select', section: 'Follow-up', requiredUnless: { field: 'followup_required', value: 'No' }, options: ['10–14 days', '2–3 weeks', 'As needed'] },
     ],
   },
 

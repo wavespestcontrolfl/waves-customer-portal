@@ -260,10 +260,11 @@ describe('validation', () => {
       expect(result.ok).toBe(false);
       expect(result.errors.join(' ')).toMatch(/None observed/);
     }
-    // A truthful cleared revisit passes.
+    // A truthful cleared revisit passes (window cleared with the "No" —
+    // a stale window is its own rejection, tested below).
     const cleared = validateTypedFindings({
       type: 'german_roach_knockdown',
-      values: { ...GERMAN_VALUES, activity_level: 'None observed', live_roaches_observed: 'No', droppings_egg_cases: 'No', followup_required: 'No' },
+      values: { ...GERMAN_VALUES, activity_level: 'None observed', live_roaches_observed: 'No', droppings_egg_cases: 'No', followup_required: 'No', followup_window: '' },
       expectedType: 'german_roach_knockdown',
       enforceRequired: true,
     });
@@ -329,6 +330,66 @@ describe('conditional requirement served to the client (flea precedent)', () => 
     expect(locations.required).toBe(false);
     expect(locations.requiredUnless).toEqual({ field: 'activity_level', value: 'None observed' });
     expect(slice.fields.find((f) => f.key === 'activity_level').requiredUnless).toBeNull();
+  });
+
+  test('German followup_window carries requiredUnless in the schema slice (Codex P2 round 6)', () => {
+    const slice = findingsSchemaForType('german_roach_knockdown');
+    const window = slice.fields.find((f) => f.key === 'followup_window');
+    expect(window.required).toBe(false);
+    expect(window.requiredUnless).toEqual({ field: 'followup_required', value: 'No' });
+  });
+});
+
+describe('cross-field contradictions (Codex P2 round 6)', () => {
+  test('a stale follow-up window is rejected once the answer is No', () => {
+    for (const enforceRequired of [true, false]) {
+      const stale = validateTypedFindings({
+        type: 'german_roach_knockdown',
+        values: { ...GERMAN_VALUES, followup_required: 'No' },
+        expectedType: 'german_roach_knockdown',
+        enforceRequired,
+      });
+      expect({ enforceRequired, ok: stale.ok }).toEqual({ enforceRequired, ok: false });
+      expect(stale.errors.join(' ')).toMatch(/follow-up window/i);
+    }
+  });
+
+  test('the monitor treatment chip cannot ride with "Monitors placed: No"', () => {
+    const contradicted = validateTypedFindings({
+      type: 'german_roach_knockdown',
+      values: {
+        ...GERMAN_VALUES,
+        treatment_completed: 'Gel bait, Monitors / glue boards',
+        monitors_placed: 'No',
+      },
+      expectedType: 'german_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(contradicted.ok).toBe(false);
+    expect(contradicted.errors.join(' ')).toMatch(/Monitors/);
+
+    const agreeing = validateTypedFindings({
+      type: 'german_roach_knockdown',
+      values: { ...GERMAN_VALUES, treatment_completed: 'Gel bait, Monitors / glue boards' },
+      expectedType: 'german_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect({ ok: agreeing.ok, errors: agreeing.errors }).toEqual({ ok: true, errors: [] });
+  });
+
+  test('palmetto "No action needed" chip requires a truly settled visit', () => {
+    const activeVisit = validateNextStepChips(['No action needed'], 'palmetto_roach_knockdown', PALMETTO_VALUES);
+    expect(activeVisit.ok).toBe(false);
+    expect(activeVisit.error).toMatch(/activity level/);
+
+    const wantsFollowup = validateNextStepChips(['No action needed'], 'palmetto_roach_knockdown',
+      { ...PALMETTO_VALUES, activity_level: 'None observed', interior_activity: 'No', activity_locations: '', followup_needed: 'Yes' });
+    expect(wantsFollowup.ok).toBe(false);
+    expect(wantsFollowup.error).toMatch(/Follow-up needed: Yes/);
+
+    const settled = validateNextStepChips(['No action needed'], 'palmetto_roach_knockdown',
+      { ...PALMETTO_VALUES, activity_level: 'None observed', interior_activity: 'No', activity_locations: '' });
+    expect(settled).toEqual({ ok: true, chips: ['No action needed'] });
   });
 });
 
