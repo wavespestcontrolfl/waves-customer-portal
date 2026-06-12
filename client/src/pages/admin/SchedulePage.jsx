@@ -4537,6 +4537,57 @@ function CPChip({ selected, onClick, children, dot }) {
   );
 }
 
+// Whether a typed findings field is required for the CURRENT values —
+// static `required` plus the schema's conditional `requiredUnless`
+// metadata ({ field, value }: required exactly when the named sibling
+// field holds a non-empty value other than `value`). Mirrors the server's
+// conditional enforcement so the tech gets the normal pre-submit prompt
+// instead of a post-submit 422 (Codex P2).
+export function typedFieldRequiredNow(field, values) {
+  if (field?.required) return true;
+  const rule = field?.requiredUnless;
+  if (!rule?.field) return false;
+  const driver = String(values?.[rule.field] ?? "").trim();
+  return !!driver && driver !== rule.value;
+}
+
+// Mirrors the server's chips-vs-values rules (validateNextStepChips) so a
+// conflicting chip is disabled in the panel and blocked pre-submit instead
+// of failing with a post-submit 400 (Codex P3). Returns the conflict
+// message for the chip under the current values, or null when selectable.
+export function typedNextStepChipConflict(schemaType, chip, values) {
+  if (schemaType === "flea" && chip === "No action needed") {
+    const level = String(values?.evidence_level ?? "").trim();
+    if (level && level !== "None observed") {
+      return `"No action needed" conflicts with the recorded evidence level (${level})`;
+    }
+  }
+  return null;
+}
+
+// Mirrors the server's final-score vs findings cleared-boundary rule
+// (validateActivityScoreConsistency / activity_score_inconsistent): a
+// pinned nonzero score beside cleared evidence — or a pinned 0 beside
+// positive evidence — would publish a headline that says the opposite of
+// the findings card. Returns the conflict message or null.
+const TYPED_SCORE_CLEARED_SELECT = {
+  flea: { field: "evidence_level", cleared: "None observed" },
+};
+export function typedActivityScoreConflict(schemaType, values, score) {
+  if (score == null) return null;
+  const rule = TYPED_SCORE_CLEARED_SELECT[schemaType];
+  if (!rule) return null;
+  const selected = String(values?.[rule.field] ?? "").trim();
+  if (!selected) return null;
+  if (selected === rule.cleared && score > 0) {
+    return `Activity score ${score} conflicts with "${rule.cleared}" — set the score to 0 or update the recorded level`;
+  }
+  if (selected !== rule.cleared && score === 0) {
+    return `Activity score 0 conflicts with the recorded level (${selected}) — select "${rule.cleared}" or use a nonzero score`;
+  }
+  return null;
+}
+
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -4598,7 +4649,7 @@ function TypedFindingsSection({
           )}
           <div style={fieldLabelStyle}>
             {field.label}
-            {field.required && (
+            {typedFieldRequiredNow(field, values) && (
               <span style={{ color: requiredColor }}> *</span>
             )}
           </div>
@@ -4667,12 +4718,20 @@ function TypedFindingsSection({
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {(schema.nextStepChips || []).map((chip) => {
             const selected = nextStepChips.includes(chip);
+            // A chip that conflicts with the recorded findings is disabled
+            // (server would reject it) — but a stale selection stays
+            // tappable so the tech can deselect it after changing a value.
+            const conflict = typedNextStepChipConflict(schema.type, chip, values);
+            const disabled = !!conflict && !selected;
             return (
               <button
                 key={chip}
                 type="button"
-                onClick={() => onToggleChip(chip)}
+                onClick={disabled ? undefined : () => onToggleChip(chip)}
                 aria-pressed={selected}
+                aria-disabled={disabled}
+                disabled={disabled}
+                title={conflict || undefined}
                 style={{
                   height: 36,
                   padding: "0 14px",
@@ -4686,7 +4745,8 @@ function TypedFindingsSection({
                   border: `1px solid ${selected ? accent : hairline}`,
                   fontSize: 14,
                   fontWeight: 500,
-                  cursor: "pointer",
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  opacity: disabled ? 0.45 : 1,
                   whiteSpace: "nowrap",
                 }}
               >
@@ -7583,7 +7643,8 @@ export function CompletionPanel({
       const missingTypedRequired = (typedFindingsSchema.fields || [])
         .filter(
           (f) =>
-            f.required && String(findingsValues[f.key] ?? "").trim() === "",
+            typedFieldRequiredNow(f, findingsValues) &&
+            String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
       // Gauge types require a score on any completed-side outcome — the
@@ -7604,6 +7665,37 @@ export function CompletionPanel({
             ...(nextStepMissing ? ["Next steps (select at least one)"] : []),
           ].join(", ")}.`,
         );
+        return;
+      }
+      // A selected chip can go stale when a findings value changes after the
+      // tap (the panel disables conflicting chips, but not ones already
+      // selected). Mirror the server's rejection pre-submit (Codex P3).
+      const chipConflicts = typedNextStepChips
+        .map((chip) =>
+          typedNextStepChipConflict(
+            typedFindingsSchema.type,
+            chip,
+            findingsValues,
+          ),
+        )
+        .filter(Boolean);
+      if (chipConflicts.length) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(
+          `Fix the next-step selections before submitting: ${chipConflicts.join("; ")}.`,
+        );
+        return;
+      }
+      // A pinned gauge score can likewise go stale when the evidence select
+      // changes after the tap. Mirror activity_score_inconsistent pre-submit.
+      const scoreConflict = typedActivityScoreConflict(
+        typedFindingsSchema.type,
+        findingsValues,
+        typedActivityScore,
+      );
+      if (scoreConflict) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(`Fix the activity score before submitting: ${scoreConflict}.`);
         return;
       }
     }

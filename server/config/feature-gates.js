@@ -10,6 +10,7 @@
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
+ *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
@@ -40,6 +41,14 @@ const gates = {
   // alerts from inbound customer SMS. Off by default in prod until the
   // approval workflow is ready.
   legacyAiDrafts: isProd ? process.env.GATE_LEGACY_AI_DRAFTS === 'true' : true,
+
+  // SMS Shadow Drafter (brand-voice loop, Phase B) — silently records what
+  // the house-voice AI would have replied to inbound customer SMS as
+  // message_drafts status='shadow' rows. Never sends, never alerts, never
+  // enters the approval queue; a later judge pass scores drafts against the
+  // reply a human actually sent. Burns one Anthropic call per inbound
+  // customer SMS, so prod requires explicit opt-in.
+  smsShadowDrafts: isProd ? process.env.GATE_SMS_SHADOW_DRAFTS === 'true' : true,
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into

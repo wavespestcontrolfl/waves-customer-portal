@@ -13,6 +13,14 @@ class ContextAggregator {
 
     if (!customer) return { known: false, phone: clean, summary: 'Unknown number — no customer record.' };
 
+    return this.getContextForCustomer(customer);
+  }
+
+  // Build context from an already-matched customer row. Callers like the
+  // inbound SMS webhook resolve a single active customer with deleted_at and
+  // shared-number protection — re-looking up by phone here could silently
+  // pick a different (or deleted) account that shares the number.
+  async getContextForCustomer(customer) {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
