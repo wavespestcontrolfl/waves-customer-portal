@@ -289,6 +289,10 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     copyIfPresent(row, parent, [
       'create_invoice_on_complete',
       'annual_prepay_term_id',
+      // Catalog link: follow-ups must resolve the same completion profile
+      // as their parent (combined services especially — name matching alone
+      // breaks if the catalog row is ever renamed).
+      'service_id',
       'lat',
       'lng',
       'address',

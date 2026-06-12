@@ -10,8 +10,9 @@ const {
   durationMinutesForRecurringService,
   recurringServiceKey,
   reservedRowComboRewrites,
+  supplementalCompanionLines,
 } = require('../services/estimate-converter');
-const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
+const { serviceKeyFor, buildRecurringFollowUpRows } = require('../services/recurring-appointment-seeder');
 
 describe('combineRecurringServicesForScheduling', () => {
   test('pest + rodent bait at matching cadence combine into Pest & Rodent Control', () => {
@@ -120,15 +121,86 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(combos[0].service.frequency).toBe('quarterly');
   });
 
-  test('lines without their own cadence never combine', () => {
-    // 'Rodent Bait Stations' carries no frequency/visits → pattern is
-    // unresolvable at the service level → stays a separate row.
+  test('a primary with no cadence anywhere never combines', () => {
+    // Pest line has no service-level cadence and no accepted frequency was
+    // passed — the platform's "pest defaults quarterly" must NOT bypass the
+    // gate (Codex P2). The rodent companion's program default alone cannot
+    // create a combo.
     const { remaining, combos } = combineRecurringServicesForScheduling([
       { name: 'Pest Control' },
       { name: 'Rodent Bait Stations' },
     ]);
     expect(combos).toEqual([]);
     expect(remaining).toHaveLength(2);
+  });
+
+  test('the ACCEPTED frequency is the primary cadence when the line omits one', () => {
+    // Real server-priced accept: pest line carries no frequency; the
+    // customer selected the quarterly plan. Companion defaults to its
+    // quarterly program → combine.
+    const quarterly = combineRecurringServicesForScheduling(
+      [{ name: 'Pest Control', service: 'pest_control' }, { name: 'Rodent Bait Stations', service: 'rodent_bait' }],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(quarterly.combos).toHaveLength(1);
+    expect(quarterly.combos[0].service.frequency).toBe('quarterly');
+
+    // Legacy monthly pest plan: accepted monthly ≠ quarterly bait program →
+    // stays separate (Codex P2 regression).
+    const monthly = combineRecurringServicesForScheduling(
+      [{ name: 'Pest Control', service: 'pest_control' }, { name: 'Rodent Bait Stations', service: 'rodent_bait' }],
+      { acceptFrequency: 'monthly' },
+    );
+    expect(monthly.combos).toEqual([]);
+  });
+
+  test('termite bait with no persisted cadence combines via its quarterly program default (Codex P2)', () => {
+    // v1-legacy-mapper persists "Termite Bait" with no frequency/visits.
+    const { combos } = combineRecurringServicesForScheduling([
+      { name: 'Pest Control', service: 'pest_control', visitsPerYear: 4 },
+      { name: 'Termite Bait', service: 'termite_bait' },
+    ]);
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(combos[0].service.frequency).toBe('quarterly');
+  });
+
+  test('rodent bait supplements (rodentBaitMo) join the match — server-priced estimates never put them in services (Codex P2)', () => {
+    const supplements = supplementalCompanionLines({
+      result: { recurring: { rodentBaitMo: 39 } },
+    });
+    expect(supplements).toHaveLength(1);
+    expect(recurringServiceKey(supplements[0])).toBe('rodent_bait');
+
+    const { remaining, combos } = combineRecurringServicesForScheduling(
+      [{ name: 'Pest Control', service: 'pest_control', frequency: 'quarterly' }],
+      { supplementalCompanions: supplements },
+    );
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.name).toBe('Pest & Rodent Control');
+    expect(remaining).toEqual([]);
+  });
+
+  test('supplemental extraction reads both persisted shapes', () => {
+    expect(supplementalCompanionLines({ recurring: { rodentBaitMo: 25 } })).toHaveLength(1);
+    expect(supplementalCompanionLines({ result: { results: { rodBaitMo: 25 } } })).toHaveLength(1);
+    expect(supplementalCompanionLines({ result: { recurring: {} } })).toEqual([]);
+    expect(supplementalCompanionLines({})).toEqual([]);
+  });
+
+  test('combined follow-up rows inherit the parent service_id (Codex P2)', () => {
+    const rows = buildRecurringFollowUpRows(
+      {
+        id: 'parent-1',
+        customer_id: 'cust-1',
+        scheduled_date: '2026-06-20',
+        service_type: 'Pest & Rodent Control',
+        service_id: 'catalog-uuid-1',
+      },
+      { pattern: 'quarterly' },
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(row.service_id).toBe('catalog-uuid-1');
   });
 });
 
