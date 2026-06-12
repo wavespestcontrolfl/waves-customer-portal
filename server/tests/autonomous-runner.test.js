@@ -2106,3 +2106,115 @@ describe('runNext post-publish bookkeeping', () => {
     }
   });
 });
+
+// ── runCatchUp (mid-day catch-up pass) ──────────────────────────────
+
+describe('runCatchUp (mid-day catch-up pass)', () => {
+  afterEach(() => { delete process.env.AUTONOMOUS_CONTENT_CATCHUP; });
+
+  function catchUpRunner({ blogStarted = false, claimable = true, lockHeld = false } = {}) {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._withEngineLock = jest.fn((label, fn) => (lockHeld
+      ? { outcome: 'skipped_locked', skipped: true, reason: 'engine_locked', count: 0, runs: [] }
+      : fn()));
+    runner._blogStartedToday = jest.fn(async () => blogStarted);
+    runner._queueHasClaimable = jest.fn(async () => claimable);
+    runner._sendBlogDroughtSms = jest.fn(async () => {});
+    runner._runDailyInner = jest.fn(async ({ limit, actionType } = {}) => ({ outcome: 'completed_published', count: 1, limit, actionType, runs: [] }));
+    return runner;
+  }
+
+  test('runs a BLOG-SCOPED batch under the engine lock when no blog started and a blog row is claimable', async () => {
+    const runner = catchUpRunner();
+    const result = await runner.runCatchUp({ limit: 2 });
+    expect(runner._withEngineLock).toHaveBeenCalledWith('runCatchUp', expect.any(Function));
+    // Scoped claim: a finite unscoped batch could spend every slot on
+    // higher-scored non-blog rows and still miss the claimable blog.
+    expect(runner._runDailyInner).toHaveBeenCalledWith({ limit: 2, actionType: 'new_supporting_blog' });
+    expect(result).toMatchObject({ outcome: 'completed_published', count: 1 });
+  });
+
+  test('lock held by a live morning batch → skips without touching queue state', async () => {
+    const runner = catchUpRunner({ lockHeld: true });
+    const result = await runner.runCatchUp();
+    // Stale-claim recovery must never run outside the lock — it would
+    // reset claims a slow-but-alive batch is actively working.
+    expect(runner._blogStartedToday).not.toHaveBeenCalled();
+    expect(runner._queueHasClaimable).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: 'skipped_locked', skipped: true });
+  });
+
+  test('skips when a blog already started today (DB-backed — survives a dead morning process)', async () => {
+    const runner = catchUpRunner({ blogStarted: true });
+    const result = await runner.runCatchUp();
+    expect(runner._runDailyInner).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: 'skipped_blog_already_started', skipped: true, count: 0 });
+  });
+
+  test('nothing claimable → still ensures the drought alert (morning may have died pre-SMS)', async () => {
+    const runner = catchUpRunner({ claimable: false });
+    const result = await runner.runCatchUp();
+    expect(runner._runDailyInner).not.toHaveBeenCalled();
+    // The 06-12 shape: batch killed before its end-of-batch alert ran.
+    // The sms_log day-dedupe inside the sender bounds this to one text/day.
+    expect(runner._sendBlogDroughtSms).toHaveBeenCalledWith([]);
+    expect(result).toMatchObject({ outcome: 'skipped_no_claimable', skipped: true, count: 0 });
+  });
+
+  test('kill switch AUTONOMOUS_CONTENT_CATCHUP=false short-circuits before the lock', async () => {
+    process.env.AUTONOMOUS_CONTENT_CATCHUP = 'false';
+    const runner = catchUpRunner();
+    const result = await runner.runCatchUp();
+    expect(runner._withEngineLock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: 'skipped_disabled', skipped: true, count: 0 });
+  });
+
+  test('module singleton exposes runCatchUp', () => {
+    const mod = require('../services/content/autonomous-runner');
+    expect(typeof mod.runCatchUp).toBe('function');
+  });
+});
+
+describe('_queueHasClaimable (catch-up probe)', () => {
+  // Same fresh-registry + doMock pattern as the runNext harness above:
+  // module identity is NOT stable across this file's tests (resetModules),
+  // so the queue must be mocked into the registry the runner will require.
+  function probeSetup({ peekRows = [], recover = jest.fn().mockResolvedValue(0) } = {}) {
+    jest.resetModules();
+    const mockQueue = { recoverStaleClaims: recover, peek: jest.fn().mockResolvedValue(peekRows) };
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/content/opportunity-queue', () => mockQueue);
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    return { runner: new AutonomousRunner(), mockQueue };
+  }
+
+  test('recovers stale claims FIRST, then peeks blog rows only', async () => {
+    const { runner, mockQueue } = probeSetup({ peekRows: [{ id: 'opp_blog' }], recover: jest.fn().mockResolvedValue(1) });
+
+    await expect(runner._queueHasClaimable()).resolves.toBe(true);
+
+    // Blog-scoped: a pending non-blog row must not re-trigger the batch
+    // (and a second drought SMS) on a blog-supply-drought day.
+    expect(mockQueue.peek).toHaveBeenCalledWith({ limit: 1, minScore: DEFAULT_MIN_SCORE, actionType: 'new_supporting_blog' });
+    // Recovery precedes the probe: a morning batch that died HOLDING the
+    // only blog row's claim must read as claimable here, like claimNext.
+    expect(mockQueue.recoverStaleClaims.mock.invocationCallOrder[0])
+      .toBeLessThan(mockQueue.peek.mock.invocationCallOrder[0]);
+  });
+
+  test('no claimable blog rows → false', async () => {
+    const { runner } = probeSetup({ peekRows: [] });
+    await expect(runner._queueHasClaimable()).resolves.toBe(false);
+  });
+
+  test('recovery failure degrades to the plain probe instead of throwing', async () => {
+    const { runner, mockQueue } = probeSetup({
+      peekRows: [{ id: 'opp_blog' }],
+      recover: jest.fn().mockRejectedValue(new Error('db down')),
+    });
+    await expect(runner._queueHasClaimable()).resolves.toBe(true);
+    expect(mockQueue.peek).toHaveBeenCalled();
+  });
+});
