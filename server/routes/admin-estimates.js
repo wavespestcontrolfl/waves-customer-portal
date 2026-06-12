@@ -654,6 +654,22 @@ router.get('/actuals-variance', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/estimates/win-loss-slices — resolved-only win/loss rates
+// sliced by the property-lookup profile's fieldVerifyFlags (clean vs
+// flagged, per flag field, per priority) and by price band, plus the
+// recurring-band × flag cross. Won = accepted; lost = declined/expired —
+// same semantics as the client's PipelineAnalytics. Read-only analytics.
+router.get('/win-loss-slices', async (req, res, next) => {
+  try {
+    const days = Math.min(365, Math.max(7, parseInt(req.query.days, 10) || 90));
+    const { winLossSlices } = require('../services/estimate-winloss');
+    const slices = await winLossSlices({ days });
+    res.json({ success: true, ...slices });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {
