@@ -1,0 +1,97 @@
+{
+ "fixture": "pest_inspection_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "areas_sentence",
+  "limitations_copy"
+ ],
+ "typedReportSnapshot": {
+  "type": "pest_inspection",
+  "typeLabel": "Pest Inspection",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "pest_inspection",
+  "serviceLabel": "Pest Inspection",
+  "reportTypeLabel": "Pest Inspection Summary",
+  "visitSequence": 1,
+  "values": {
+   "inspection_type": "General pest inspection",
+   "areas_inspected": "Exterior perimeter, Garage, Kitchen, Bathrooms, Lanai",
+   "severity": "Low",
+   "pests_identified": "Ghost ants (rear patio)",
+   "findings_observed": "Active pest activity, Entry points found",
+   "conducive_conditions": "Vegetation touching structure, Gaps / unsealed penetrations",
+   "access_limitations": "Stored items limited inspection",
+   "customer_recommendations": "Seal entry gaps, Trim vegetation"
+  },
+  "nextStepChips": [
+   "Treatment recommended",
+   "Seal entry gaps"
+  ],
+  "todaysResult": {
+   "headline": "Pest Inspection completed today.",
+   "body": "We inspected the exterior perimeter, garage, kitchen, bathrooms and lanai. A treatment program is recommended — we will help you get it scheduled. Sealing the noted entry gaps will help prevent re-entry.",
+   "nextStep": "A treatment program is recommended — we will help you get it scheduled. Sealing the noted entry gaps will help prevent re-entry."
+  },
+  "findings": [
+   {
+    "fieldKey": "inspection_type",
+    "technicianLabel": "Inspection type",
+    "customerLabel": "Inspection type",
+    "value": "General pest inspection",
+    "customerValueLabel": "General pest inspection"
+   },
+   {
+    "fieldKey": "areas_inspected",
+    "technicianLabel": "Areas inspected",
+    "customerLabel": "Areas we checked",
+    "value": "Exterior perimeter, Garage, Kitchen, Bathrooms, Lanai",
+    "customerValueLabel": "Exterior perimeter, Garage, Kitchen, Bathrooms, Lanai"
+   },
+   {
+    "fieldKey": "severity",
+    "technicianLabel": "Severity",
+    "customerLabel": "Activity observed",
+    "value": "Low",
+    "customerValueLabel": "Low activity"
+   },
+   {
+    "fieldKey": "pests_identified",
+    "technicianLabel": "Pests identified",
+    "customerLabel": "What we found",
+    "value": "Ghost ants (rear patio)",
+    "customerValueLabel": "Ghost ants (rear patio)"
+   },
+   {
+    "fieldKey": "findings_observed",
+    "technicianLabel": "What we observed",
+    "customerLabel": "What we observed",
+    "value": "Active pest activity, Entry points found",
+    "customerValueLabel": "Active pest activity, Entry points found"
+   },
+   {
+    "fieldKey": "conducive_conditions",
+    "technicianLabel": "Conducive conditions",
+    "customerLabel": "Conditions to address",
+    "value": "Vegetation touching structure, Gaps / unsealed penetrations",
+    "customerValueLabel": "Vegetation touching structure, Gaps / unsealed penetrations"
+   },
+   {
+    "fieldKey": "access_limitations",
+    "technicianLabel": "Access limitations",
+    "customerLabel": "Inspection access notes",
+    "value": "Stored items limited inspection",
+    "customerValueLabel": "Stored items limited inspection"
+   },
+   {
+    "fieldKey": "customer_recommendations",
+    "technicianLabel": "Customer recommendations",
+    "customerLabel": "What you can do",
+    "value": "Seal entry gaps, Trim vegetation",
+    "customerValueLabel": "Seal entry gaps, Trim vegetation"
+   }
+  ],
+  "activity": null
+ }
+}

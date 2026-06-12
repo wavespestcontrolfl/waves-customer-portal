@@ -1,0 +1,121 @@
+{
+ "fixture": "lawn_one_time_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "pressure_selects",
+  "lawn_work_sentence"
+ ],
+ "typedReportSnapshot": {
+  "type": "one_time_lawn_treatment",
+  "typeLabel": "One-Time Lawn Treatment",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "lawn_care_one_time",
+  "serviceLabel": "One-Time Lawn Treatment",
+  "reportTypeLabel": "One-Time Lawn Treatment Summary",
+  "visitSequence": 1,
+  "values": {
+   "turf_type": "St. Augustine",
+   "lawn_condition": "Fair",
+   "turf_color": "Moderate",
+   "weed_pressure": "Light",
+   "insect_pressure": "None observed",
+   "disease_pressure": "None observed",
+   "turf_issues": "Sedge, Drought stress",
+   "irrigation_mowing": "Dry zones, Poor coverage, Mowing too low",
+   "work_completed": "Iron / micronutrients applied, Spot treatment completed",
+   "spot_treatment_areas": "Front right lawn",
+   "customer_recommendations": "Adjust irrigation coverage, Avoid mowing too low, Keep pets off until dry"
+  },
+  "nextStepChips": [
+   "Continue lawn program",
+   "Irrigation correction needed"
+  ],
+  "todaysResult": {
+   "headline": "One-Time Lawn Treatment completed today.",
+   "body": "We applied iron and micronutrients and spot-treated the noted areas today. We will continue your lawn care program. Correcting the noted irrigation issue will help the lawn recover.",
+   "nextStep": "We will continue your lawn care program. Correcting the noted irrigation issue will help the lawn recover."
+  },
+  "findings": [
+   {
+    "fieldKey": "turf_type",
+    "technicianLabel": "Turf type",
+    "customerLabel": "Lawn type",
+    "value": "St. Augustine",
+    "customerValueLabel": "St. Augustine"
+   },
+   {
+    "fieldKey": "lawn_condition",
+    "technicianLabel": "Lawn condition",
+    "customerLabel": "Lawn condition",
+    "value": "Fair",
+    "customerValueLabel": "Fair"
+   },
+   {
+    "fieldKey": "turf_color",
+    "technicianLabel": "Turf color",
+    "customerLabel": "Turf color",
+    "value": "Moderate",
+    "customerValueLabel": "Moderate"
+   },
+   {
+    "fieldKey": "weed_pressure",
+    "technicianLabel": "Weed pressure",
+    "customerLabel": "Weed pressure",
+    "value": "Light",
+    "customerValueLabel": "Light"
+   },
+   {
+    "fieldKey": "insect_pressure",
+    "technicianLabel": "Insect pressure",
+    "customerLabel": "Insect pressure",
+    "value": "None observed",
+    "customerValueLabel": "No signs observed today"
+   },
+   {
+    "fieldKey": "disease_pressure",
+    "technicianLabel": "Disease pressure",
+    "customerLabel": "Disease pressure",
+    "value": "None observed",
+    "customerValueLabel": "No signs observed today"
+   },
+   {
+    "fieldKey": "turf_issues",
+    "technicianLabel": "Issues observed",
+    "customerLabel": "Issues observed",
+    "value": "Sedge, Drought stress",
+    "customerValueLabel": "Sedge, Drought stress"
+   },
+   {
+    "fieldKey": "irrigation_mowing",
+    "technicianLabel": "Irrigation & mowing notes",
+    "customerLabel": "Irrigation & mowing notes",
+    "value": "Dry zones, Poor coverage, Mowing too low",
+    "customerValueLabel": "Dry zones, Poor coverage, Mowing too low"
+   },
+   {
+    "fieldKey": "work_completed",
+    "technicianLabel": "Work completed today",
+    "customerLabel": "Work completed today",
+    "value": "Iron / micronutrients applied, Spot treatment completed",
+    "customerValueLabel": "Iron / micronutrients applied, Spot treatment completed"
+   },
+   {
+    "fieldKey": "spot_treatment_areas",
+    "technicianLabel": "Spot-treated areas",
+    "customerLabel": "Spot-treated areas",
+    "value": "Front right lawn",
+    "customerValueLabel": "Front right lawn"
+   },
+   {
+    "fieldKey": "customer_recommendations",
+    "technicianLabel": "Customer recommendations",
+    "customerLabel": "What you can do",
+    "value": "Adjust irrigation coverage, Avoid mowing too low, Keep pets off until dry",
+    "customerValueLabel": "Adjust irrigation coverage, Avoid mowing too low, Keep pets off until dry"
+   }
+  ],
+  "activity": null
+ }
+}

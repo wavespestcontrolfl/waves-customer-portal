@@ -1,0 +1,138 @@
+{
+ "fixture": "mosquito_event_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "mosquito_level_headline",
+  "standing_water_copy",
+  "sensitive_area_copy"
+ ],
+ "typedReportSnapshot": {
+  "type": "mosquito_event",
+  "typeLabel": "Mosquito Event Spray",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "mosquito_event",
+  "serviceLabel": "Mosquito Event Spray",
+  "reportTypeLabel": "Mosquito Event Spray Summary",
+  "visitSequence": 1,
+  "values": {
+   "activity_level": "Light",
+   "activity_locations": "Shaded vegetation, Pool cage",
+   "treatment_completed": "Barrier treatment, Larvicide applied",
+   "treatment_zones": "Backyard, Fence lines, Shaded vegetation, Pool cage perimeter",
+   "standing_water": "Yes",
+   "breeding_sources": "Plant saucers, Buckets",
+   "source_reduction": "Emptied standing water, Flipped containers",
+   "sensitive_areas": "Blooming plants / pollinators",
+   "sensitive_areas_avoided": "Avoided",
+   "weather_conditions": "Calm conditions",
+   "customer_recommendations": "Empty standing water weekly, Trim dense vegetation",
+   "customer_reported": "Mosquitoes near lanai, Evening activity",
+   "customer_discussed": "Standing water findings, Dry-time guidance"
+  },
+  "nextStepChips": [
+   "Continue mosquito program",
+   "Customer action — remove standing water"
+  ],
+  "todaysResult": {
+   "headline": "Mosquito activity was light today.",
+   "body": "We completed a mosquito barrier treatment and applied larvicide to water-holding areas today. We will continue your regular mosquito service. Removing the noted standing water will make a big difference before the next visit.",
+   "nextStep": "We will continue your regular mosquito service. Removing the noted standing water will make a big difference before the next visit."
+  },
+  "findings": [
+   {
+    "fieldKey": "activity_level",
+    "technicianLabel": "Mosquito activity level",
+    "customerLabel": "Activity observed",
+    "value": "Light",
+    "customerValueLabel": "Light activity"
+   },
+   {
+    "fieldKey": "activity_locations",
+    "technicianLabel": "Where activity was noted",
+    "customerLabel": "Where activity was noted",
+    "value": "Shaded vegetation, Pool cage",
+    "customerValueLabel": "Shaded vegetation, Pool cage"
+   },
+   {
+    "fieldKey": "treatment_completed",
+    "technicianLabel": "Treatment completed",
+    "customerLabel": "Treatment completed",
+    "value": "Barrier treatment, Larvicide applied",
+    "customerValueLabel": "Barrier treatment, Larvicide applied"
+   },
+   {
+    "fieldKey": "treatment_zones",
+    "technicianLabel": "Treatment zones",
+    "customerLabel": "Areas we treated",
+    "value": "Backyard, Fence lines, Shaded vegetation, Pool cage perimeter",
+    "customerValueLabel": "Backyard, Fence lines, Shaded vegetation, Pool cage perimeter"
+   },
+   {
+    "fieldKey": "standing_water",
+    "technicianLabel": "Standing water found",
+    "customerLabel": "Standing water",
+    "value": "Yes",
+    "customerValueLabel": "Standing water was found — see the breeding sources noted below"
+   },
+   {
+    "fieldKey": "breeding_sources",
+    "technicianLabel": "Breeding sources noted",
+    "customerLabel": "Breeding sources noted",
+    "value": "Plant saucers, Buckets",
+    "customerValueLabel": "Plant saucers, Buckets"
+   },
+   {
+    "fieldKey": "source_reduction",
+    "technicianLabel": "Source reduction completed",
+    "customerLabel": "Source reduction completed",
+    "value": "Emptied standing water, Flipped containers",
+    "customerValueLabel": "Emptied standing water, Flipped containers"
+   },
+   {
+    "fieldKey": "sensitive_areas",
+    "technicianLabel": "Sensitive areas present",
+    "customerLabel": "Sensitive areas on site",
+    "value": "Blooming plants / pollinators",
+    "customerValueLabel": "Blooming plants / pollinators"
+   },
+   {
+    "fieldKey": "sensitive_areas_avoided",
+    "technicianLabel": "Sensitive-area handling",
+    "customerLabel": "Sensitive-area handling",
+    "value": "Avoided",
+    "customerValueLabel": "Sensitive areas were avoided during treatment"
+   },
+   {
+    "fieldKey": "weather_conditions",
+    "technicianLabel": "Weather conditions",
+    "customerLabel": "Weather at service time",
+    "value": "Calm conditions",
+    "customerValueLabel": "Calm conditions"
+   },
+   {
+    "fieldKey": "customer_recommendations",
+    "technicianLabel": "Customer recommendations",
+    "customerLabel": "What you can do",
+    "value": "Empty standing water weekly, Trim dense vegetation",
+    "customerValueLabel": "Empty standing water weekly, Trim dense vegetation"
+   },
+   {
+    "fieldKey": "customer_reported",
+    "technicianLabel": "Customer reported",
+    "customerLabel": "What you told us",
+    "value": "Mosquitoes near lanai, Evening activity",
+    "customerValueLabel": "Mosquitoes near lanai, Evening activity"
+   },
+   {
+    "fieldKey": "customer_discussed",
+    "technicianLabel": "Discussed with customer",
+    "customerLabel": "What we discussed",
+    "value": "Standing water findings, Dry-time guidance",
+    "customerValueLabel": "Standing water findings, Dry-time guidance"
+   }
+  ],
+  "activity": null
+ }
+}
