@@ -33,6 +33,13 @@
 
 const KEY = 'rodent_trapping';
 const PROJECT_TYPE = 'rodent_trapping';
+// Production's rodent_trapping row drifted to project_type='rodent_exclusion'
+// via admin catalog mutations. up() accepts the drifted pointer but always
+// normalizes it back to PROJECT_TYPE: serializeProfile exposes project_type as
+// findingsType for service_report profiles, so leaving the drift in place
+// would render the Rodent Exclusion schema/chips on rodent_trapping visits.
+// down() never restores a drift value (same rule as 20260611000012).
+const ACCEPTED_TYPES = [PROJECT_TYPE, 'rodent_exclusion'];
 const MARKER_RE = / ?\[phase1b_action=[^\]]*\]/;
 
 function withMarker(notes, action) {
@@ -53,33 +60,41 @@ exports.up = async function up(knex) {
     return;
   }
 
-  if (row && row.completion_mode === 'service_report' && row.project_type === PROJECT_TYPE) {
+  if (row && row.completion_mode === 'service_report' && ACCEPTED_TYPES.includes(row.project_type)) {
+    const pointerFix = row.project_type === PROJECT_TYPE ? {} : { project_type: PROJECT_TYPE };
     if (row.delivery_mode !== 'internal_only') {
       // Record the prior delivery_mode so down() can restore exactly it.
       await knex('service_completion_profiles')
         .where({ service_key: KEY })
         .update({
+          ...pointerFix,
           delivery_mode: 'internal_only',
           notes: withMarker(row.notes, `delivery_forced:${row.delivery_mode || 'auto_send'}`),
           updated_at: knex.fn.now(),
         });
-      console.log(`[phase1b-shadow] ${KEY}: already service_report — delivery_mode ${row.delivery_mode} → internal_only (prior recorded)`);
+      console.log(`[phase1b-shadow] ${KEY}: already service_report — delivery_mode ${row.delivery_mode} → internal_only (prior recorded)${pointerFix.project_type ? `; pointer normalized ${row.project_type} → ${PROJECT_TYPE}` : ''}`);
+    } else if (pointerFix.project_type) {
+      await knex('service_completion_profiles')
+        .where({ service_key: KEY })
+        .update({ ...pointerFix, updated_at: knex.fn.now() });
+      console.log(`[phase1b-shadow] ${KEY}: already service_report + internal_only — pointer normalized ${row.project_type} → ${PROJECT_TYPE}`);
     } else {
       console.log(`[phase1b-shadow] ${KEY}: already service_report + internal_only — no-op`);
     }
     return;
   }
 
-  if (row && row.completion_mode === 'project_required' && row.project_type === PROJECT_TYPE) {
+  if (row && row.completion_mode === 'project_required' && ACCEPTED_TYPES.includes(row.project_type)) {
     await knex('service_completion_profiles')
       .where({ service_key: KEY })
       .update({
         completion_mode: 'service_report',
         delivery_mode: 'internal_only',
+        project_type: PROJECT_TYPE,
         notes: withMarker(row.notes, 'flipped'),
         updated_at: knex.fn.now(),
       });
-    console.log(`[phase1b-shadow] ${KEY} flipped to service_report + internal_only (no customer sends)`);
+    console.log(`[phase1b-shadow] ${KEY} flipped to service_report + internal_only (no customer sends)${row.project_type !== PROJECT_TYPE ? `; pointer normalized ${row.project_type} → ${PROJECT_TYPE}` : ''}`);
     return;
   }
 
