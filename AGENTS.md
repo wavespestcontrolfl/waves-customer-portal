@@ -264,7 +264,14 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/service-outlines/:token` (approved/sent/viewed packets only,
   43-char base64url token format gate, 60 req/min read limit, 120 req/min
   CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-  generic 404 for missing, draft, revoked, or malformed tokens).
+  generic 404 for missing, draft, revoked, or malformed tokens),
+  `/api/public/estimates/:token/deposit-intent` (required acceptance
+  deposit; estimate token format gate, generic 404, 10 req/min limit,
+  terminal/expired rejection, mirrors the accept-time quote gate so money
+  is never collected for an estimate accept would reject, 409 for exempt
+  policies, PaymentIntent idempotent per estimate+amount with
+  metadata-pinned purpose/estimate id; dark behind
+  ESTIMATE_DEPOSIT_REQUIRED).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

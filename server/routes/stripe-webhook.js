@@ -546,6 +546,15 @@ router.post(
 async function handlePaymentIntentSucceeded(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
+
+  // Estimate-acceptance deposits are not invoice payments — route them to
+  // the deposit ledger BEFORE any invoice/tender logic runs against them.
+  if (paymentIntent.metadata?.purpose === 'estimate_deposit') {
+    const { handleDepositIntentSucceeded } = require('../services/estimate-deposits');
+    await handleDepositIntentSucceeded(paymentIntent);
+    return;
+  }
+
   const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
   const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
   const details = await paymentDetailsFromIntent(paymentIntent);
@@ -1184,6 +1193,19 @@ async function handleChargeRefunded(charge) {
   const chargeId = charge.id;
   logger.info(`[stripe-webhook] Charge refunded: ${chargeId}`);
 
+  // Estimate deposits have no payments row — a dashboard refund (or the
+  // webhook echo of our own refunds: stale deposit, exempt-path sweep,
+  // unapplied remainder) must flip the deposit ledger so reversed money can
+  // never satisfy acceptance or be credited, then skip the payments path
+  // entirely. The cumulative refunded amount lets the handler recognize the
+  // echo of a refund it already stamped (a partial remainder refund must not
+  // flip a legitimately credited row).
+  const { handleDepositChargeReversed } = require('../services/estimate-deposits');
+  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
+    amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
+  });
+  if (depositReversal.handled) return;
+
   const latestRefund = Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null;
   const refundId = latestRefund?.id || charge.latest_refund || null;
   const refundDate = latestRefund?.created ? new Date(latestRefund.created * 1000) : new Date();
@@ -1809,6 +1831,12 @@ async function handleDisputeCreated(dispute) {
   const amount = (dispute.amount / 100).toFixed(2);
   logger.warn(`[stripe-webhook] Dispute created: ${dispute.id} on charge ${chargeId} — $${amount} (${reason})`);
 
+  // Deposit PIs have no payments row — flip the deposit ledger (disputed
+  // money can never satisfy acceptance) and skip the payments path.
+  const { handleDepositChargeReversed } = require('../services/estimate-deposits');
+  const depositReversal = await handleDepositChargeReversed(dispute.payment_intent, 'dispute.created');
+  if (depositReversal.handled) return;
+
   // Revert payment + invoice
   // These are critical ledger writes: no .catch — a failure must
   // propagate so the event is NOT marked processed and Stripe retries.
@@ -1895,6 +1923,13 @@ async function handleDisputeClosed(dispute) {
   const status = dispute.status;
   const amount = (dispute.amount / 100).toFixed(2);
   logger.info(`[stripe-webhook] Dispute closed: ${dispute.id} status=${status}`);
+
+  // Deposit PIs settle on the deposit ledger, not the payments table.
+  // Lost = row already refunded (dispute.created flipped it). Won = funds
+  // reinstated but the row stays refunded; flagged for manual restore.
+  const { handleDepositDisputeClosed } = require('../services/estimate-deposits');
+  const depositDispute = await handleDepositDisputeClosed(dispute.payment_intent, status);
+  if (depositDispute.handled) return;
 
   // Critical ledger writes: no .catch — failures must propagate so the
   // event is NOT marked processed and Stripe retries.

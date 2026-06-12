@@ -44,6 +44,18 @@ async function runEstimateExpiration() {
 
   logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedResult} dateExpired=${dateResult}`);
 
+  // Refund acceptance deposits stranded on terminal estimates — money
+  // received while the estimate was live (paid then abandoned, or paid then
+  // declined) has no other refund path once the row goes declined/expired.
+  // Self-healing daily sweep: covers today's flips AND any prior strand
+  // (failed inline decline sweep, admin-side terminal status change).
+  try {
+    const { sweepTerminalEstimateDeposits } = require('./estimate-deposits');
+    await sweepTerminalEstimateDeposits();
+  } catch (e) {
+    logger.error(`[estimate-expiration] terminal-estimate deposit sweep failed: ${e.message}`);
+  }
+
   // Fire a single batched notification when anything flipped — one ping per
   // cron run, not per estimate, so Virginia doesn't get 5 bells at 6am.
   const total = (agedResult || 0) + (dateResult || 0);

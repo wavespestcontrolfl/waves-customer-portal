@@ -456,8 +456,20 @@ async function calculateUpdateFinancials({
   const lineItemDiscountRowById = new Map(
     lineItemDiscountRows.map((row) => [String(row.id), row]),
   );
+  // Deposit credits are prior payment, not discounts — keep them out of the
+  // discount/tax base on edits too, or an admin save would silently convert
+  // an after-tax credit into a pre-tax discount. Mirrors create().
+  const updateDepositCreditTotal =
+    Math.round(
+      items
+        .filter((item) => item.category === "deposit_credit")
+        .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
+        100,
+    ) / 100;
   const lineItemDiscountAmount = items
-    .filter((item) => Number(item.amount) < 0)
+    .filter(
+      (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
+    )
     .reduce((sum, item) => {
       const row = item.discount_id
         ? lineItemDiscountRowById.get(String(item.discount_id))
@@ -509,7 +521,12 @@ async function calculateUpdateFinancials({
     discount_label: labelParts.length ? labelParts.join(" + ") : null,
     tax_rate: rate,
     tax_amount: taxAmount,
-    total: Math.round((afterDiscount + taxAmount) * 100) / 100,
+    total: Math.max(
+      0,
+      Math.round(
+        (afterDiscount + taxAmount - updateDepositCreditTotal) * 100,
+      ) / 100,
+    ),
   };
 }
 
@@ -596,6 +613,14 @@ const InvoiceService = {
     discountIds,
     serviceDate,
     trustedStoredDiscountSources = [],
+    // Deposit credit REQUEST: create() caps it against its own
+    // post-discount, after-tax total and appends the line item itself —
+    // callers that compute the cap from raw line items get it wrong as soon
+    // as discounts or commercial tax are in play (the cap must see the same
+    // math that produces `total`). The amount actually applied is returned
+    // on the invoice as `applied_deposit_credit`; consume exactly that from
+    // the ledger, never the requested amount.
+    depositCredit = null,
   }) {
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
@@ -742,6 +767,17 @@ const InvoiceService = {
       }
       return { row: d, dollars: Math.round(dollars * 100) / 100 };
     });
+    // Deposit credits are PRIOR PAYMENT, not price reductions: they must not
+    // shrink the tax base or fold into discount reporting. Excluded from the
+    // discount machinery here and subtracted AFTER tax below. The lines stay
+    // in line_items for display.
+    const depositCreditTotal =
+      Math.round(
+        items
+          .filter((item) => item.category === "deposit_credit")
+          .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
+          100,
+      ) / 100;
     const lineItemDiscountIds = items
       .filter((item) => Number(item.amount) < 0 && item.discount_id)
       .map((item) => item.discount_id);
@@ -761,7 +797,10 @@ const InvoiceService = {
       lineItemDiscountRows.map((row) => [String(row.id), row]),
     );
     const lineItemDiscounts = items
-      .filter((item) => Number(item.amount) < 0)
+      .filter(
+        (item) =>
+          Number(item.amount) < 0 && item.category !== "deposit_credit",
+      )
       .map((item) => {
         const row = item.discount_id
           ? lineItemDiscountRowById.get(String(item.discount_id))
@@ -916,7 +955,38 @@ const InvoiceService = {
         taxAmount = Math.round(afterDiscount * rate * 100) / 100;
       }
     }
-    const total = Math.round((afterDiscount + taxAmount) * 100) / 100;
+    // Deposit credit applies AFTER tax — prior payment, not a discount.
+    // Line-item credits arrive pre-capped by their callers (discount-free
+    // paths); the `depositCredit` param is capped HERE against the actual
+    // after-tax value so no requested dollar is consumed without appearing
+    // in the total. The floor guards rounding edges.
+    let appliedDepositCredit = 0;
+    if (depositCredit && Number(depositCredit.amount) > 0) {
+      const ceilingCents = Math.max(
+        0,
+        Math.round((afterDiscount + taxAmount - depositCreditTotal) * 100),
+      );
+      const appliedCents = Math.min(
+        Math.round(Number(depositCredit.amount) * 100),
+        ceilingCents,
+      );
+      appliedDepositCredit = appliedCents / 100;
+      if (appliedDepositCredit > 0) {
+        items.push({
+          description: depositCredit.description || "Deposit credit (paid at acceptance)",
+          quantity: 1,
+          unit_price: -appliedDepositCredit,
+          amount: -appliedDepositCredit,
+          category: "deposit_credit",
+        });
+      }
+    }
+    const total = Math.max(
+      0,
+      Math.round(
+        (afterDiscount + taxAmount - depositCreditTotal - appliedDepositCredit) * 100,
+      ) / 100,
+    );
 
     const token = generateToken();
     let invoice = null;
@@ -992,6 +1062,9 @@ const InvoiceService = {
     logger.info(
       `[invoice] Created ${invoiceNumber} for customer ${customerId}: $${total}`,
     );
+    // Not a column — the effective deposit credit rides back to the caller
+    // so the ledger consume matches what the invoice actually absorbed.
+    invoice.applied_deposit_credit = appliedDepositCredit;
     return invoice;
   },
 
@@ -1119,7 +1192,7 @@ const InvoiceService = {
           },
         ];
 
-    return this.create({
+    const createParams = {
       customerId: sr.customer_id,
       serviceRecordId,
       scheduledServiceId: sr.scheduled_service_id || undefined,
@@ -1130,7 +1203,94 @@ const InvoiceService = {
       trustedStoredDiscountSources: scheduledInvoice
         ? ["scheduled_service"]
         : [],
-    });
+    };
+
+    // Estimate-deposit roll-forward: when this service traces back to an
+    // accepted estimate (scheduled_services.source_estimate_id) that still
+    // holds unapplied deposit money, credit it against this invoice. This is
+    // how one-time pay-at-visit deposits get applied — their first invoice
+    // IS the completed-visit invoice — and how any remainder a cheap first
+    // invoice couldn't absorb reaches the next visit instead of stranding.
+    // Same atomic discipline as the converter: credit line exists IFF the
+    // ledger consumed exactly that amount in the same transaction; a
+    // mismatch rolls back and one retry re-reads the fresh balance. Deposit
+    // machinery failures NEVER block visit invoicing — fall back to the
+    // plain create and alert for manual reconciliation.
+    let sourceEstimateId = null;
+    if (sr.scheduled_service_id) {
+      try {
+        const ss = await db("scheduled_services")
+          .where({ id: sr.scheduled_service_id })
+          .first("source_estimate_id");
+        sourceEstimateId = ss?.source_estimate_id || null;
+      } catch (err) {
+        logger.warn(
+          `[invoice] source-estimate lookup failed for service ${serviceRecordId}: ${err.message}`,
+        );
+      }
+    }
+    if (sourceEstimateId) {
+      const {
+        pendingDepositCredit,
+        consumeDepositCredit,
+      } = require("./estimate-deposits");
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let depositCredit = null;
+        try {
+          depositCredit = await pendingDepositCredit(sourceEstimateId);
+        } catch {
+          break; // ledger unreadable — invoice proceeds uncredited
+        }
+        const requested = depositCredit ? depositCredit.amount : 0;
+        if (!(requested > 0)) break;
+        try {
+          return await db.transaction(async (trx) => {
+            // Request the full unapplied balance; create() caps it against
+            // its own post-discount, after-tax total (a pre-discount cap
+            // here consumed ledger dollars the discounted invoice never
+            // reflected) and reports the effective amount back.
+            const created = await this.create({
+              ...createParams,
+              database: trx,
+              depositCredit: { amount: requested },
+            });
+            const effective = Number(created?.applied_deposit_credit) || 0;
+            if (created?.id && effective > 0) {
+              const allocated = await consumeDepositCredit({
+                estimateId: sourceEstimateId,
+                amount: effective,
+                invoiceId: created.id,
+                trx,
+              });
+              if (Math.round(allocated * 100) !== Math.round(effective * 100)) {
+                throw new Error(
+                  `deposit allocation mismatch (applied ${effective}, allocated ${allocated})`,
+                );
+              }
+            }
+            return created;
+          });
+        } catch (err) {
+          logger.warn(
+            `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
+          );
+          if (attempt === 1) {
+            try {
+              const { triggerNotification } = require("./notification-triggers");
+              await triggerNotification("estimate_deposit_reconcile_needed", {
+                estimateId: sourceEstimateId,
+              });
+            } catch (notifyErr) {
+              logger.error(
+                `[invoice] failed to raise deposit reconcile alert: ${notifyErr.message}`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    return this.create(createParams);
   },
 
   /**

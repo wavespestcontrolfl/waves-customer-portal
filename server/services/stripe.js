@@ -326,6 +326,72 @@ const StripeService = {
     return stripe.paymentIntents.cancel(paymentIntentId, options);
   },
 
+  /**
+   * PaymentIntent for a required estimate-acceptance deposit. Not linked to
+   * any invoice — the webhook and accept-time verification route on
+   * metadata.purpose, and the deposit is later credited against the first
+   * invoice as a negative line item. Idempotency keyed on estimate+amount so
+   * retrying the deposit step reuses the same intent instead of stacking
+   * duplicate authorizations — which is also why every create param below
+   * must be deterministic from (estimateId, amountCents): a mutable field
+   * (e.g. receipt_email) under the same key makes Stripe reject the retry
+   * as a key reuse with different parameters. The payer's receipt comes
+   * from the Payment Element's collected email, not from this intent.
+   */
+  async createEstimateDepositIntent({ estimateId, amountDollars }) {
+    const stripe = getStripe();
+    if (!stripe) return null;
+    const amountCents = Math.round(Number(amountDollars) * 100);
+    if (!Number.isFinite(amountCents) || amountCents <= 0) {
+      throw new Error('Invalid deposit amount');
+    }
+    return stripe.paymentIntents.create({
+      amount: amountCents,
+      currency: 'usd',
+      // Instant tenders only. The accept gate requires the PI to be
+      // `succeeded` BEFORE acceptance commits — a delayed method (ACH bank
+      // debit) would sit in `processing`, bounce the accept with 402, and
+      // then succeed days later against an unaccepted estimate.
+      payment_method_types: ['card'],
+      description: 'Waves service deposit — applied toward your first visit',
+      metadata: {
+        purpose: 'estimate_deposit',
+        estimate_id: String(estimateId),
+        // DELIBERATELY surcharge-exempt: the deposit is a flat per-service-
+        // class commitment device ($49 recurring / $99 one-time),
+        // charged at face value with no card surcharge,
+        // and the invoice credit equals exactly the amount received. This
+        // metadata marks the exemption explicitly so webhook surcharge
+        // quarantine logic can distinguish it from an under-collected
+        // invoice payment.
+        surcharge_policy: 'deposit_exempt',
+      },
+    }, { idempotencyKey: `estimate_deposit_${estimateId}_${amountCents}` });
+  },
+
+  /**
+   * Raw refund of a PaymentIntent — for money that should never have been
+   * collected (a stale estimate deposit that succeeded after the estimate
+   * became unacceptable) or the unapplied remainder of a deposit (partial,
+   * via amountCents). The payments-table refund() flow doesn't apply:
+   * deposits have no payments row. Idempotency-keyed on the PI (plus the
+   * amount for partials) so webhook replays can't double-refund.
+   */
+  async refundPaymentIntent(paymentIntentId, { reason = 'requested_by_customer', amountCents = null } = {}) {
+    if (!paymentIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    const partial = Number.isFinite(Number(amountCents)) && Number(amountCents) > 0;
+    return stripe.refunds.create(
+      {
+        payment_intent: paymentIntentId,
+        reason,
+        ...(partial ? { amount: Math.round(Number(amountCents)) } : {}),
+      },
+      { idempotencyKey: partial ? `refund_pi_${paymentIntentId}_${Math.round(Number(amountCents))}` : `refund_pi_${paymentIntentId}` },
+    );
+  },
+
   // =========================================================================
   // REMOVE CARD
   // =========================================================================

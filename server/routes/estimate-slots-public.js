@@ -37,10 +37,19 @@ const logger = require('../services/logger');
 const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const {
+  buildPricingBundle,
   handleEstimateAsk,
+  isEstimateAcceptActive,
   isStructuralOneTimeOnlyEstimate,
+  resolveAcceptOneTimeTotal,
+  resolveEstimateQuoteRequirement,
   verifyEstimateAskToken,
 } = require('./estimate-public');
+const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const {
+  createDepositIntentForEstimate,
+  resolveDepositPolicyForEstimate,
+} = require('../services/estimate-deposits');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
@@ -140,6 +149,16 @@ const askLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many questions. Please try again in a minute.' },
+});
+
+// Deposit PaymentIntent creation — writes + a Stripe call per request, so
+// it rides the same tight 10/min budget as /reserve.
+const depositLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
 // Bound the Waves AI date/time search (each call spends one cheap model call).
@@ -276,6 +295,95 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   } catch (err) {
     logger.error(`[estimate-slots-public:reserve] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to reserve slot', retry: true });
+  }
+});
+
+// POST /:token/deposit-intent — Stripe PaymentIntent for the required
+// acceptance deposit (flat $49 recurring / $99 one-time, pricing_config-
+// authoritative; ESTIMATE_DEPOSIT_REQUIRED rollout switch). Gates mirror
+// accept exactly: estimate-token format gate, terminal/expired rejection,
+// the accept-time quote gate (never collect money for an estimate accept
+// will reject), and the deposit policy itself (prepay-annual choice and
+// existing plan customers owe nothing). serviceMode picks the amount class —
+// one-time accepts pay the heavier flat amount, credited against their
+// completed-visit invoice. The client pays the intent, then calls accept
+// with depositPaymentIntentId; the intent is idempotent per estimate+amount,
+// so retries reuse it.
+router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const estData = parseEstimateData(estimate);
+    const pricingBundle = await buildPricingBundle(estimate);
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
+    if (quoteRequirement.quoteRequired) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+
+    const membership = await buildEstimateMembershipContext(estimate);
+    const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // Mirror accept's one-time availability gate before choosing the amount
+    // class: serviceMode arrives from the client, and a one_time request on
+    // an estimate whose accept would reject one-time mode must not create
+    // the heavier $99 intent — the customer would be overcharged for an
+    // acceptance that can only proceed as recurring ($49).
+    if (req.body?.serviceMode === 'one_time' && !isOneTimeOnly) {
+      const oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundle);
+      const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
+      if (!canChooseOneTime) {
+        return res.status(400).json({ error: 'one-time option is not available for this estimate' });
+      }
+    }
+    const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
+    // The ForEstimate wrapper adds the LIVE plan-customer fallback — legacy
+    // customer-linked estimates have no membershipSnapshot, and minting an
+    // intent here would charge a current WaveGuard member who owes nothing.
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate,
+      paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+      membership,
+      oneTime,
+    });
+    if (!policy.required) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
+    }
+
+    const intent = await createDepositIntentForEstimate(estimate, { oneTime });
+    if (!intent) {
+      return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+    }
+    // Ledger already covers the policy amount (e.g. paid the one-time $99,
+    // then switched back to recurring) — nothing to charge; the client can
+    // proceed straight to accept.
+    if (intent.alreadySatisfied) {
+      return res.json({
+        success: true,
+        alreadySatisfied: true,
+        amount: 0,
+        requiredAmount: intent.requiredAmount,
+        receivedTotal: intent.receivedTotal,
+      });
+    }
+    return res.json({
+      success: true,
+      clientSecret: intent.clientSecret,
+      // `amount` is the top-up this intent charges; requiredAmount is the
+      // full policy amount the gate will verify against the ledger.
+      amount: intent.amount,
+      requiredAmount: intent.requiredAmount,
+      receivedTotal: intent.receivedTotal,
+      paymentIntentId: intent.paymentIntentId,
+    });
+  } catch (err) {
+    logger.error(`[estimate-slots-public:deposit-intent] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'Something went wrong' });
   }
 });
 
