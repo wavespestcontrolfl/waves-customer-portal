@@ -81,10 +81,14 @@ function backlinkTargetsProspect(link, prospect) {
   return candidates.some((candidate) => matchesTargetUrl(candidate, expected));
 }
 
-// Find an active inbound link in seo_backlinks that corresponds to this prospect's live_url.
+// Find an ACTIVE inbound link in seo_backlinks that corresponds to this prospect's
+// live_url. Active-only: a 'disavowed' or 'lost' row must not promote a prospect to
+// live (loss is then detected by the crawl/wasLive fallback in verifyOne, which is
+// more authoritative than a possibly-stale scan row).
 async function reconcileFromProfile(prospect) {
   const liveStripped = normalizeComparableUrl(prospect.live_url);
   const rows = await db('seo_backlinks')
+    .where({ status: 'active' })
     .whereRaw(`${SOURCE_URL_COMPARABLE_SQL} = ?`, [liveStripped.toLowerCase()])
     .orderBy('last_checked', 'desc')
     .limit(10);
@@ -122,7 +126,7 @@ const OMEGA_INFLIGHT_TTL_MS = 10 * 60 * 1000;
 // conditional jsonb update (sets omega_inflight only if not submitted and not
 // already in-flight). Overlapping verifier runs can't both submit the same URL —
 // the loser's update affects 0 rows and bails.
-async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
+async function pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowConfirmed = false, crawlFn = crawlForLink } = {}) {
   // Paid call — gated with the other SEO API spend so disabling SEO Intelligence
   // (GATE_SEO_INTELLIGENCE) halts Omega submissions, same as DataForSEO.
   if (!isEnabled('seoIntelligence')) return false;
@@ -152,6 +156,19 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
       updated_at: new Date(),
     });
   if (!claimed) return false; // another run owns it, or this URL was just submitted
+
+  // Authoritatively confirm the link is present AND dofollow before spending an
+  // Omega credit. DataForSEO's is_dofollow is unreliable (defaults true), so we
+  // trust it only when a crawl already parsed the rel attribute (dofollowConfirmed).
+  if (!dofollowConfirmed) {
+    const c = await crawlFn(liveUrl, prospect.target_page);
+    if (!c.found || c.isDofollow === false) {
+      // Not dofollow (or not reachable right now): release the claim, don't spend.
+      await db('seo_link_prospects').where({ id: prospect.id })
+        .update({ quality_signals: db.raw("quality_signals - 'omega_inflight'"), updated_at: new Date() });
+      return false;
+    }
+  }
 
   const res = await omega.submit(prospect.target_domain, [liveUrl]);
 
@@ -230,7 +247,10 @@ async function crawlForLink(liveUrl, targetPage) {
 
 // Apply a live transition + fire indexing for a confirmed link. `discoveredUrl`
 // is set only by the domain reconcile, which learns the real URL on approval.
-async function markLive(prospect, { isDofollow, anchorText, backlinkId, discoveredUrl }, now) {
+// `dofollowConfirmed` is true only when a crawl parsed the rel attribute — the
+// DataForSEO reconcile paths leave it false so pushForIndexing crawl-confirms
+// before spending an Omega credit.
+async function markLive(prospect, { isDofollow, anchorText, backlinkId, discoveredUrl, dofollowConfirmed = false }, now) {
   const liveUrl = discoveredUrl || prospect.live_url;
   const patch = {
     is_dofollow: isDofollow,
@@ -252,7 +272,7 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   // pushForIndexing reads omega_* from its own atomic claim against the live
   // column, so passing the original snapshot is safe (and the pending key it may
   // still carry is irrelevant to indexing).
-  await pushForIndexing(prospect, liveUrl, isDofollow, now);
+  await pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowConfirmed });
   return 'live';
 }
 
@@ -262,30 +282,29 @@ async function verifyOne(prospect) {
 
   // 1 & 2 need a known live_url. Pending placements (null live_url) skip straight
   // to the domain reconcile below.
-  let lostBacklinkId = null;
   if (prospect.live_url) {
-    // 1. Profile reconcile (free)
+    // 1. Profile reconcile (free, ACTIVE backlinks only). DataForSEO dofollow is
+    // advisory here — pushForIndexing crawl-confirms before any paid submit.
     const link = await reconcileFromProfile(prospect);
-    if (link && link.status !== 'lost') {
+    if (link) {
       return markLive(prospect, {
         isDofollow: link.is_dofollow, anchorText: link.anchor_text, backlinkId: link.id,
       }, now);
     }
-    // A 'lost' exact-URL row does NOT short-circuit to lost: the page may still
-    // carry our link (stale DataForSEO) or have moved to a new URL on the same
-    // domain. Fall through to the crawl + domain reconcile before concluding lost.
-    if (link) lostBacklinkId = link.id;
 
-    // 2. Crawl fallback (fresh links not yet in DataForSEO, or a false 'lost')
+    // 2. Crawl fallback — fresh links, or a moved/false-lost page. The crawl parses
+    // the real rel attribute, so its dofollow verdict is authoritative.
     const crawl = await crawlForLink(prospect.live_url, prospect.target_page);
     if (crawl.found) {
-      return markLive(prospect, { isDofollow: crawl.isDofollow, anchorText: crawl.anchorText }, now);
+      return markLive(prospect, {
+        isDofollow: crawl.isDofollow, anchorText: crawl.anchorText, dofollowConfirmed: true,
+      }, now);
     }
   }
 
   // 3. Domain reconcile — covers pending placements with no known live_url, a
   // moved/renamed profile on the same domain, and fresh links DataForSEO has now
-  // indexed under a URL we didn't predict.
+  // indexed under a URL we didn't predict (ACTIVE only).
   const byDom = await reconcileByDomain(prospect);
   if (byDom) {
     return markLive(prospect, {
@@ -294,12 +313,11 @@ async function verifyOne(prospect) {
     }, now);
   }
 
-  // Not found anywhere. Regression if it used to be live OR the exact-URL row is
-  // gone; otherwise just touch the check.
-  if (wasLive || lostBacklinkId) {
-    const patch = { status: 'lost', last_live_check: now, updated_at: now };
-    if (lostBacklinkId) patch.backlink_id = lostBacklinkId;
-    await db('seo_link_prospects').where({ id: prospect.id }).update(patch);
+  // Not found active anywhere. Regression if it used to be live; otherwise touch.
+  if (wasLive) {
+    await db('seo_link_prospects').where({ id: prospect.id }).update({
+      status: 'lost', last_live_check: now, updated_at: now,
+    });
     return 'lost';
   }
   await db('seo_link_prospects').where({ id: prospect.id }).update({ last_live_check: now, updated_at: now });
