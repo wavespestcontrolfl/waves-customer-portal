@@ -10,6 +10,7 @@ import {
   Globe,
   LayoutDashboard,
   Link,
+  Network,
   Search,
   Sparkles,
   TrendingUp,
@@ -166,6 +167,7 @@ const TABS = [
   { key: "ai-overview", label: "AI Overview", Icon: Bot },
   { key: "funnel", label: "Funnel", Icon: Filter },
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
+  { key: "by-site", label: "By Site", Icon: Network },
   { key: "url-intel", label: "URL Intel", Icon: Database },
   { key: "actions", label: "Actions", Icon: CheckSquare },
   { key: "indexation", label: "Indexation", Icon: Globe },
@@ -2671,6 +2673,271 @@ function FunnelTab() {
   );
 }
 
+// ── By Site — inbound calls + leads per fleet domain ──
+function BySiteTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState(30);
+  useEffect(() => {
+    setLoading(true);
+    adminFetch(`/admin/seo/site-rollup?days=${days}`)
+      .then((d) => {
+        setData(d);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [days]);
+  if (loading)
+    return (
+      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+        Loading site rollup...
+      </div>
+    );
+  if (!data)
+    return (
+      <Card style={{ padding: 40, textAlign: "center" }}>
+        <div style={{ color: D.muted }}>No rollup data yet.</div>
+      </Card>
+    );
+  const t = data.totals || {};
+  const sites = data.sites || [];
+  const nonSite = data.nonSiteLines || [];
+  const other = data.otherSources || [];
+  const un = data.unattributed || {};
+  const num = (v) => Number(v || 0).toLocaleString();
+  const cell = (v) => (v ? num(v) : "—");
+  const hubChip = (
+    <span
+      style={{
+        fontSize: 9,
+        padding: "1px 5px",
+        borderRadius: 3,
+        background: D.teal + "22",
+        color: D.teal,
+        marginLeft: 6,
+      }}
+    >
+      HUB
+    </span>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="seo-analytics-period" style={{ display: "flex", gap: 8 }}>
+        {[7, 30, 90].map((d) => (
+          <button
+            key={d}
+            onClick={() => setDays(d)}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 8,
+              border: "none",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              background: days === d ? D.teal : D.card,
+              color: days === d ? D.white : D.muted,
+            }}
+          >
+            {d}d
+          </button>
+        ))}
+      </div>
+      <div
+        className="seo-kpi-grid-4"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(4, 1fr)",
+          gap: 12,
+        }}
+      >
+        <KpiCard
+          label="Inbound Calls"
+          value={num(t.calls)}
+          sub={{
+            text: `${num(t.missedCalls)} missed`,
+            color: t.missedCalls > 0 ? D.amber : undefined,
+          }}
+        />
+        <KpiCard
+          label="Leads"
+          value={num(t.leads)}
+          sub={{ text: `${num(t.won)} won`, color: D.green }}
+        />
+        <KpiCard
+          label="Site Calls"
+          value={num(t.siteCalls)}
+          sub={{ text: "attributed to a fleet domain" }}
+        />
+        <KpiCard
+          label="Site Leads"
+          value={num(t.siteLeads)}
+          sub={{ text: "attributed to a fleet domain" }}
+        />
+      </div>
+      <Card>
+        <div
+          style={{
+            fontSize: 15,
+            fontWeight: 600,
+            color: D.heading,
+            marginBottom: 12,
+          }}
+        >
+          Calls + Leads by Site
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Site</th>
+                <th style={thStyle}>Lane</th>
+                <th style={thR}>Calls</th>
+                <th style={thR}>Missed</th>
+                <th style={thR}>Form Leads</th>
+                <th style={thR}>Call Leads</th>
+                <th style={thR}>Leads</th>
+                <th style={thR}>Won</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sites.map((s) => (
+                <tr key={s.domain}>
+                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                    {s.domain}
+                    {s.kind === "hub" && hubChip}
+                  </td>
+                  <td style={{ ...tdStyle, fontFamily: "inherit", color: D.muted }}>
+                    {s.lane}
+                  </td>
+                  <td style={tdR}>{cell(s.calls)}</td>
+                  <td style={{ ...tdR, color: s.missedCalls ? D.amber : D.text }}>
+                    {cell(s.missedCalls)}
+                  </td>
+                  <td style={tdR}>{cell(s.formLeads)}</td>
+                  <td style={tdR}>{cell(s.callLeads)}</td>
+                  <td style={tdR}>{cell(s.leads)}</td>
+                  <td style={{ ...tdR, color: s.won ? D.green : D.text }}>
+                    {cell(s.won)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize: 11, color: D.muted, marginTop: 10 }}>
+          Calls attribute by tracking number; leads by lead source. Call Leads
+          are calls that became pipeline entries, so they overlap with Calls.
+        </div>
+      </Card>
+      {(nonSite.length > 0 || other.length > 0 || un.leads > 0) && (
+        <div
+          className="seo-kpi-grid-3"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 12,
+            alignItems: "start",
+          }}
+        >
+          {nonSite.length > 0 && (
+            <Card>
+              <div
+                style={{
+                  fontSize: 15,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 12,
+                }}
+              >
+                Non-Site Lines
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th style={thStyle}>Line</th>
+                      <th style={thR}>Calls</th>
+                      <th style={thR}>Missed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {nonSite.map((l) => (
+                      <tr key={l.label}>
+                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                          {l.label}
+                        </td>
+                        <td style={tdR}>{cell(l.calls)}</td>
+                        <td style={{ ...tdR, color: l.missedCalls ? D.amber : D.text }}>
+                          {cell(l.missedCalls)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+          {(other.length > 0 || un.leads > 0) && (
+            <Card>
+              <div
+                style={{
+                  fontSize: 15,
+                  fontWeight: 600,
+                  color: D.heading,
+                  marginBottom: 12,
+                }}
+              >
+                Non-Site Lead Sources
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th style={thStyle}>Source</th>
+                      <th style={thR}>Leads</th>
+                      <th style={thR}>Won</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {other.map((s) => (
+                      <tr key={s.name}>
+                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                          {s.name}
+                        </td>
+                        <td style={tdR}>{cell(s.leads)}</td>
+                        <td style={{ ...tdR, color: s.won ? D.green : D.text }}>
+                          {cell(s.won)}
+                        </td>
+                      </tr>
+                    ))}
+                    {un.leads > 0 && (
+                      <tr>
+                        <td
+                          style={{
+                            ...tdStyle,
+                            fontFamily: "inherit",
+                            color: D.muted,
+                          }}
+                        >
+                          No source attributed
+                        </td>
+                        <td style={tdR}>{cell(un.leads)}</td>
+                        <td style={{ ...tdR, color: un.won ? D.green : D.text }}>
+                          {cell(un.won)}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CitationsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -5002,6 +5269,7 @@ export default function SEOPage() {
       {tab === "ai-overview" && <AIOverviewTab />}
       {tab === "funnel" && <FunnelTab />}
       {tab === "analytics" && <AnalyticsTab />}
+      {tab === "by-site" && <BySiteTab />}
       {tab === "url-intel" && <UrlIntelTab domain={PRIMARY_DOMAIN} />}
       {tab === "actions" && <ActionsTab domain={PRIMARY_DOMAIN} />}
       {tab === "indexation" && <IndexationTab domain={PRIMARY_DOMAIN} />}

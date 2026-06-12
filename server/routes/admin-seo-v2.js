@@ -390,6 +390,7 @@ const CannibalizationDetector = require('../services/seo/cannibalization');
 const ContentDecayDetector = require('../services/seo/content-decay');
 const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
+const SiteRollup = require('../services/seo/site-rollup');
 
 // Auto-seed SEO keywords if table is empty
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
@@ -663,6 +664,13 @@ router.get('/funnel', async (req, res, next) => {
   try {
     const data = await ConversionFunnel.getDashboard(parseInt(req.query.days || 30));
     res.json(data);
+  } catch (err) { next(err); }
+});
+
+// Per-site rollup — inbound calls + leads by fleet domain
+router.get('/site-rollup', async (req, res, next) => {
+  try {
+    res.json(await SiteRollup.getRollup(req.query.days));
   } catch (err) { next(err); }
 });
 
