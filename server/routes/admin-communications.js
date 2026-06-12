@@ -151,6 +151,7 @@ async function resolveSmsLogCustomerFallbacks(rows) {
 
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
+  let claimedDecisionId = null;
   try {
     const {
       to,
@@ -208,6 +209,26 @@ router.post('/sms', async (req, res, next) => {
       ? verifiedAgentDecision.suggested_message
       : null;
 
+    if (verifiedAgentDecision) {
+      // Claim BEFORE the provider send — verification alone lets two admins
+      // pass on the same pending card and both text the customer. The
+      // guarded single UPDATE is the atomic claim; the loser 409s.
+      // 'scheduled' = claimed-for-send: reopened below on blocked/failed/
+      // exception, resolved accepted/corrected on success, and the orphan
+      // sweep reopens it if the process dies in between.
+      const claimed = await db('agent_decisions')
+        .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
+        .update({
+          status: 'scheduled',
+          correction_note: 'Claimed for an immediate send from the SMS inbox.',
+          updated_at: new Date(),
+        });
+      if (!claimed) {
+        return res.status(409).json({ error: 'This Agent Review draft was just handled elsewhere — refresh the thread before sending.' });
+      }
+      claimedDecisionId = verifiedAgentDecision.id;
+    }
+
     const sendStartedAt = new Date();
     const result = await sendCustomerMessage({
       to,
@@ -231,6 +252,13 @@ router.post('/sms', async (req, res, next) => {
       },
     });
     if (result.blocked || result.sent === false) {
+      // The reply never left — release the claim so the card returns.
+      if (claimedDecisionId) {
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId],
+          reason: 'Send was blocked or failed — suggestion reopened.',
+        });
+      }
       return res.status(422).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
@@ -241,7 +269,8 @@ router.post('/sms', async (req, res, next) => {
       const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
       try {
         await db('agent_decisions')
-          .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
+          .where({ id: verifiedAgentDecision.id })
+          .whereIn('status', ['scheduled', 'pending_review'])
           .update({
             status: draftMatched ? 'accepted' : 'corrected',
             human_verdict: draftMatched ? 'accepted' : 'corrected',
@@ -314,6 +343,14 @@ router.post('/sms', async (req, res, next) => {
 
     res.json(result);
   } catch (err) {
+    // Guarded reopen: if the send actually resolved the decision before the
+    // throw, the status is no longer 'scheduled' and this no-ops.
+    if (claimedDecisionId) {
+      await reopenScheduledSuggestions({
+        decisionIds: [claimedDecisionId],
+        reason: 'Send errored — suggestion reopened.',
+      });
+    }
     notifyTwilioFailure({
       channel: 'sms',
       direction: 'outbound',
