@@ -7234,6 +7234,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top { position: static; }
           .sr-actions,
           .report-action-bar { display: none; }
+          /* Staff-only companion sections never print — the printed page
+             must match the customer artifact (the internal warning header
+             is hidden in print, so the body must go with it). */
+          .companion-internal { display: none; }
           .service-report-v1 { background: #fff; }
           .sr-shell { padding: 0; }
           .service-status-card,
@@ -7314,9 +7318,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             first, then one block per companion — heading, Today's Result,
             findings, and the activity gauge, all rendered from the
             companion's frozen snapshot. The server already filtered
-            internal_only entries out of customer payloads. */}
+            internal_only entries out of customer payloads; the
+            companion-internal wrapper additionally excludes staff-only
+            sections from PRINT (the print stylesheet hides the warning
+            header, so a staff print must match the customer artifact). */}
         {(data.companionReports || []).map((companion) => (
-          <Fragment key={companion.type}>
+          <div
+            key={companion.type}
+            className={companion.internalOnly ? 'companion-internal' : undefined}
+          >
             <CompanionSectionHeader companion={companion} />
             <TodaysResultCard
               typedReport={companion}
@@ -7332,7 +7342,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 sectionId={`companion-${companion.type}-activity`}
               />
             )}
-          </Fragment>
+          </div>
         ))}
 
         <QuickNavigationAndAsk
