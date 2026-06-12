@@ -4890,27 +4890,43 @@ ${shellQuestionsBar()}
         const paymentElement = elements.create('payment');
         paymentElement.mount('#deposit-payment-element');
         paymentElement.on('ready', function () { payBtn.disabled = false; });
+        // Accept-gate contract: ensureDepositSatisfied live-verifies the PI
+        // and only honors status === 'succeeded' — a processing PI would 402
+        // at accept. So only succeeded advances; processing shows a pending
+        // message, and re-taps re-check the PI status instead of
+        // re-confirming an in-flight intent.
+        const succeedWith = function (pi) {
+          if (!pi || pi.status !== 'succeeded') return false;
+          bookingState.depositPaymentIntentId = pi.id;
+          updateDepositNote();
+          closeDepositOverlay();
+          resolve({ ok: true });
+          return true;
+        };
+        const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
         payBtn.addEventListener('click', function () {
           payBtn.disabled = true;
           if (errEl) errEl.style.display = 'none';
-          stripe.confirmPayment({
-            elements: elements,
-            confirmParams: { return_url: window.location.href },
-            redirect: 'if_required',
-          }).then(function (result) {
-            if (result.error) {
-              showError(result.error.message || 'Payment did not go through. Try another card.');
-              return;
+          stripe.retrievePaymentIntent(intent.clientSecret).then(function (existing) {
+            if (existing && succeedWith(existing.paymentIntent)) return null;
+            if (existing && existing.paymentIntent && existing.paymentIntent.status === 'processing') {
+              showError(PROCESSING_MSG);
+              return null;
             }
-            const pi = result.paymentIntent;
-            if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) {
-              bookingState.depositPaymentIntentId = pi.id;
-              updateDepositNote();
-              closeDepositOverlay();
-              resolve({ ok: true });
-              return;
-            }
-            showError('Payment is still pending. Try again in a moment.');
+            return stripe.confirmPayment({
+              elements: elements,
+              confirmParams: { return_url: window.location.href },
+              redirect: 'if_required',
+            }).then(function (result) {
+              if (result.error) {
+                showError(result.error.message || 'Payment did not go through. Try another card.');
+                return;
+              }
+              if (succeedWith(result.paymentIntent)) return;
+              showError(result.paymentIntent && result.paymentIntent.status === 'processing'
+                ? PROCESSING_MSG
+                : 'Payment is still pending. Try again in a moment.');
+            });
           }).catch(function () {
             showError('Payment did not go through. Try again.');
           });

@@ -1347,11 +1347,27 @@ function DepositModal({ intent, onSuccess, onCancel }) {
     return () => { cancelled = true; };
   }, [intent]);
 
+  // Accept-gate contract: ensureDepositSatisfied live-verifies the PI and
+  // only honors status === 'succeeded' — a processing PI would 402 at
+  // accept. So only succeeded advances; processing shows a pending message,
+  // and re-taps re-check the PI status instead of re-confirming an
+  // in-flight intent.
+  const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
   const handlePay = useCallback(async () => {
     if (!stripeRef.current || !elementsRef.current) return;
     setSubmitting(true);
     setError(null);
     try {
+      const existing = await stripeRef.current.retrievePaymentIntent(intent.clientSecret);
+      if (existing?.paymentIntent?.status === 'succeeded') {
+        onSuccess(existing.paymentIntent.id);
+        return;
+      }
+      if (existing?.paymentIntent?.status === 'processing') {
+        setError(PROCESSING_MSG);
+        setSubmitting(false);
+        return;
+      }
       const result = await stripeRef.current.confirmPayment({
         elements: elementsRef.current,
         confirmParams: { return_url: window.location.href },
@@ -1363,17 +1379,17 @@ function DepositModal({ intent, onSuccess, onCancel }) {
         return;
       }
       const pi = result.paymentIntent;
-      if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) {
+      if (pi && pi.status === 'succeeded') {
         onSuccess(pi.id);
         return;
       }
-      setError('Payment is still pending. Try again in a moment.');
+      setError(pi && pi.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
       setSubmitting(false);
     } catch {
       setError('Payment did not go through. Try again.');
       setSubmitting(false);
     }
-  }, [onSuccess]);
+  }, [intent, onSuccess]);
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
