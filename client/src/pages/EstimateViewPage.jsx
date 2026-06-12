@@ -2117,7 +2117,7 @@ export default function EstimateViewPage() {
       setCtaPhase('submitting');
       setError(null);
       try {
-        const r = await fetch(`/api/public/estimates/${token}/deposit-intent`, {
+        const r = await fetch(`${API_BASE}/public/estimates/${token}/deposit-intent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
