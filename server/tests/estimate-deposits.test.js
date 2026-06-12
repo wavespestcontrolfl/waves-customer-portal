@@ -160,8 +160,12 @@ describe('ensureDepositSatisfied', () => {
         return this;
       },
       whereIn() { return this; },
-      sum() { return this; },
-      first: async () => ({ total: totals ? (totals.length > 1 ? totals.shift() : totals[0]) : receivedTotal }),
+      // receivedDepositTotal reads rows and nets refunded_amount out of each;
+      // one synthetic row carries the modeled total.
+      select: async () => {
+        const total = totals ? (totals.length > 1 ? totals.shift() : totals[0]) : receivedTotal;
+        return total > 0 ? [{ amount: total, refunded_amount: 0 }] : [];
+      },
       insert(payload) {
         return { onConflict: () => ({ ignore: async () => { upserts.push(payload); } }) };
       },
@@ -274,11 +278,20 @@ describe('ensureDepositSatisfied', () => {
 });
 
 describe('createDepositIntentForEstimate', () => {
-  it('creates the PI at the computed amount and tracks it pending', async () => {
-    const upserts = [];
-    mockDbHandler = () => ({
+  // ledgerRows feed receivedDepositTotal — the intent charges only the
+  // missing slice of the policy amount.
+  function intentDb({ ledgerRows = [], upserts = [] } = {}) {
+    return () => ({
+      where() { return this; },
+      whereIn() { return this; },
+      select: async () => ledgerRows.map((r) => ({ ...r })),
       insert(payload) { return { onConflict: () => ({ merge: async () => { upserts.push(payload); } }) }; },
     });
+  }
+
+  it('creates the PI at the computed amount and tracks it pending', async () => {
+    const upserts = [];
+    mockDbHandler = intentDb({ upserts });
     mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_9', client_secret: 'cs_9' });
 
     const result = await createDepositIntentForEstimate({ id: 'est-1', onetime_total: 280, customer_email: 'x@y.com' });
@@ -288,14 +301,14 @@ describe('createDepositIntentForEstimate', () => {
     expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
       estimateId: 'est-1', amountDollars: 49,
     });
-    expect(result).toEqual({ clientSecret: 'cs_9', amount: 49, paymentIntentId: 'pi_9' });
+    expect(result).toEqual({
+      clientSecret: 'cs_9', amount: 49, paymentIntentId: 'pi_9', requiredAmount: 49, receivedTotal: 0,
+    });
     expect(upserts[0].status).toBe('pending');
   });
 
   it('one-time service class mints the heavier flat amount', async () => {
-    mockDbHandler = () => ({
-      insert() { return { onConflict: () => ({ merge: async () => {} }) }; },
-    });
+    mockDbHandler = intentDb({});
     mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_10', client_secret: 'cs_10' });
     const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
     expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
@@ -304,7 +317,37 @@ describe('createDepositIntentForEstimate', () => {
     expect(result.amount).toBe(99);
   });
 
+  it('charges only the MISSING amount after a mode switch — $49 paid + one-time selected = $50 top-up (P2)', async () => {
+    mockDbHandler = intentDb({ ledgerRows: [{ amount: '49.00', refunded_amount: '0.00' }] });
+    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_topup', client_secret: 'cs_t' });
+    const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
+    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
+      estimateId: 'est-1', amountDollars: 50,
+    });
+    expect(result).toMatchObject({ amount: 50, requiredAmount: 99, receivedTotal: 49 });
+  });
+
+  it('an already-covering ledger mints NOTHING — switch back to the lighter class owes $0', async () => {
+    mockDbHandler = intentDb({ ledgerRows: [{ amount: '99.00', refunded_amount: '0.00' }] });
+    const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: false });
+    expect(mockCreateEstimateDepositIntent).not.toHaveBeenCalled();
+    expect(result).toEqual({ alreadySatisfied: true, amount: 0, requiredAmount: 49, receivedTotal: 99 });
+  });
+
+  it('partially refunded money does not count toward the missing amount', async () => {
+    // $99 paid but $50 already refunded from the dashboard — only $49 is
+    // really held, so a one-time policy needs a $50 top-up.
+    mockDbHandler = intentDb({ ledgerRows: [{ amount: '99.00', refunded_amount: '50.00' }] });
+    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_t2', client_secret: 'cs_t2' });
+    const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
+    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
+      estimateId: 'est-1', amountDollars: 50,
+    });
+    expect(result.receivedTotal).toBe(49);
+  });
+
   it('returns null when Stripe is unconfigured', async () => {
+    mockDbHandler = intentDb({});
     mockCreateEstimateDepositIntent.mockResolvedValue(null);
     expect(await createDepositIntentForEstimate({ id: 'est-1' })).toBeNull();
   });
@@ -502,7 +545,7 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
   it('a received deposit flips to refunded (can never satisfy acceptance again)', async () => {
     const updates = [];
     mockDbHandler = reversalDb({
-      row: { id: 'd1', status: 'received', estimate_id: 'est-1', credited_amount: '0.00' },
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00' },
       updates,
     });
     const result = await handleDepositChargeReversed('pi_1', 'charge.refunded');
@@ -510,10 +553,35 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     expect(updates[0].payload.status).toBe('refunded');
   });
 
+  it('a PARTIAL dashboard refund keeps the row live — the remainder still satisfies and credits (P2)', async () => {
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '99.00', credited_amount: '0.00', refunded_amount: null },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 5000 });
+    expect(result.handled).toBe(true);
+    // No status flip — only the cumulative refund is recorded; $49 stays
+    // available for the gate and for invoice credit.
+    expect(updates[0].payload.status).toBeUndefined();
+    expect(updates[0].payload.refunded_amount).toBe(50);
+    expect(logger.error).not.toHaveBeenCalled();
+
+    // A SECOND partial refund grows the cumulative record; covering the full
+    // amount flips the row terminal.
+    const updates2 = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '99.00', credited_amount: '0.00', refunded_amount: '50.00' },
+      updates: updates2,
+    });
+    await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 9900 });
+    expect(updates2[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 99 });
+  });
+
   it('an already-credited deposit flips AND flags for manual reconciliation', async () => {
     const updates = [];
     mockDbHandler = reversalDb({
-      row: { id: 'd1', status: 'credited', estimate_id: 'est-1', credited_amount: '70.00', credited_invoice_id: 'inv-1' },
+      row: { id: 'd1', status: 'credited', estimate_id: 'est-1', amount: '70.00', credited_amount: '70.00', credited_invoice_id: 'inv-1' },
       updates,
     });
     const result = await handleDepositChargeReversed('pi_1', 'dispute.created');
@@ -578,7 +646,7 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     // and flags for manual reconciliation as before.
     const updates2 = [];
     mockDbHandler = reversalDb({
-      row: { id: 'd1', status: 'credited', estimate_id: 'est-1', credited_amount: '70.00', refunded_amount: '29.00', credited_invoice_id: 'inv-1' },
+      row: { id: 'd1', status: 'credited', estimate_id: 'est-1', amount: '99.00', credited_amount: '70.00', refunded_amount: '29.00', credited_invoice_id: 'inv-1' },
       updates: updates2,
     });
     const bigger = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 9900 });
@@ -836,5 +904,27 @@ describe('consumeDepositCredit — partial application tracking', () => {
   it('zero/negative amounts are no-ops', async () => {
     mockDbHandler = () => { throw new Error('should not query'); };
     expect(await consumeDepositCredit({ estimateId: 'est-1', amount: 0, invoiceId: 'inv-1' })).toBe(0);
+  });
+
+  it('partially refunded rows expose only the unrefunded remainder (P2)', async () => {
+    const updates = [];
+    // $99 deposit, $50 already returned via dashboard partial refund — only
+    // $49 may ever be credited, and credit+refund together exhaust the row.
+    mockDbHandler = consumeDb({
+      rows: [{ id: 'd1', amount: '99.00', credited_amount: '0.00', refunded_amount: '50.00' }],
+      updates,
+    });
+    const allocated = await consumeDepositCredit({ estimateId: 'est-1', amount: 80, invoiceId: 'inv-1' });
+    expect(allocated).toBe(49);
+    expect(updates[0].payload).toMatchObject({ credited_amount: 49, status: 'credited', credited_invoice_id: 'inv-1' });
+    expect(updates[0].criteria).toMatchObject({ refunded_amount: '50.00' });
+  });
+
+  it('pendingDepositCredit nets partial refunds out of the available balance (P2)', async () => {
+    mockDbHandler = consumeDb({
+      rows: [{ id: 'd1', amount: '99.00', credited_amount: '20.00', refunded_amount: '50.00' }],
+    });
+    const credit = await pendingDepositCredit('est-1');
+    expect(credit.amount).toBe(29);
   });
 });

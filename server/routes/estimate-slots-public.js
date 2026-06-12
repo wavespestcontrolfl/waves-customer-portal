@@ -356,7 +356,28 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }
-    return res.json({ success: true, clientSecret: intent.clientSecret, amount: intent.amount, paymentIntentId: intent.paymentIntentId });
+    // Ledger already covers the policy amount (e.g. paid the one-time $99,
+    // then switched back to recurring) — nothing to charge; the client can
+    // proceed straight to accept.
+    if (intent.alreadySatisfied) {
+      return res.json({
+        success: true,
+        alreadySatisfied: true,
+        amount: 0,
+        requiredAmount: intent.requiredAmount,
+        receivedTotal: intent.receivedTotal,
+      });
+    }
+    return res.json({
+      success: true,
+      clientSecret: intent.clientSecret,
+      // `amount` is the top-up this intent charges; requiredAmount is the
+      // full policy amount the gate will verify against the ledger.
+      amount: intent.amount,
+      requiredAmount: intent.requiredAmount,
+      receivedTotal: intent.receivedTotal,
+      paymentIntentId: intent.paymentIntentId,
+    });
   } catch (err) {
     logger.error(`[estimate-slots-public:deposit-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });

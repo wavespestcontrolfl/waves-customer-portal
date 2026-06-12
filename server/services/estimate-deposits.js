@@ -83,13 +83,17 @@ function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, o
   };
 }
 
+// Money the customer has paid and still holds with us: received/credited
+// rows MINUS any partial refunds already returned (a dashboard refund of
+// half a deposit must not keep satisfying the accept gate at full value).
 async function receivedDepositTotal(estimateId) {
-  const row = await db('estimate_deposits')
+  const rows = await db('estimate_deposits')
     .where({ estimate_id: estimateId })
     .whereIn('status', ['received', 'credited'])
-    .sum({ total: 'amount' })
-    .first();
-  return Number(row?.total) || 0;
+    .select('amount', 'refunded_amount');
+  const totalCents = rows.reduce((sum, row) => sum + Math.max(0,
+    Math.round(Number(row.amount || 0) * 100) - Math.round(Number(row.refunded_amount || 0) * 100)), 0);
+  return totalCents / 100;
 }
 
 // Mark a deposit PaymentIntent received — idempotent on the unique PI id, so
@@ -186,10 +190,23 @@ async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null,
 }
 
 // Create (or idempotently reuse) the deposit PaymentIntent for an estimate
-// and track it as pending. Returns { clientSecret, amount } for the payment
-// UI, or null when Stripe isn't configured.
+// and track it as pending. Charges only the MISSING amount: money already
+// received counts toward the policy (the gate sums the ledger the same
+// way), so a customer who paid the $49 recurring deposit and then switched
+// to one-time owes a $50 top-up, not a fresh $99 — and a switch the other
+// way owes nothing. The Stripe idempotency key includes the amount, so a
+// changed balance mints a new intent while retries at the same balance
+// reuse the old one. Returns { clientSecret, amount } for the payment UI,
+// { alreadySatisfied: true } when the ledger already covers the policy, or
+// null when Stripe isn't configured.
 async function createDepositIntentForEstimate(estimate, { oneTime = false } = {}) {
-  const amount = computeDepositAmount({ oneTime });
+  const requiredAmount = computeDepositAmount({ oneTime });
+  const receivedTotal = await receivedDepositTotal(estimate.id);
+  const missingCents = Math.round(requiredAmount * 100) - Math.round(receivedTotal * 100);
+  if (missingCents <= 0) {
+    return { alreadySatisfied: true, amount: 0, requiredAmount, receivedTotal };
+  }
+  const amount = missingCents / 100;
   const paymentIntent = await StripeService.createEstimateDepositIntent({
     estimateId: estimate.id,
     amountDollars: amount,
@@ -208,7 +225,13 @@ async function createDepositIntentForEstimate(estimate, { oneTime = false } = {}
     .onConflict('stripe_payment_intent_id')
     .merge({ updated_at: db.fn.now() });
 
-  return { clientSecret: paymentIntent.client_secret, amount, paymentIntentId: paymentIntent.id };
+  return {
+    clientSecret: paymentIntent.client_secret,
+    amount,
+    paymentIntentId: paymentIntent.id,
+    requiredAmount,
+    receivedTotal,
+  };
 }
 
 function parseEstimateDataBlob(estimate) {
@@ -344,16 +367,23 @@ async function refundStaleDeposit(paymentIntent, estimateId, reason) {
 async function refundUnconsumedDeposits({ estimateId, reason }) {
   const rows = await db('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
-    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount');
+    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount');
 
   let refunded = 0;
   for (const row of rows) {
+    const priorRefundedCents = Math.round(Number(row.refunded_amount || 0) * 100);
     const remainderCents = Math.round(Number(row.amount || 0) * 100)
-      - Math.round(Number(row.credited_amount || 0) * 100);
+      - Math.round(Number(row.credited_amount || 0) * 100)
+      - priorRefundedCents;
     if (remainderCents <= 0) continue;
 
     const claimedCount = await db('estimate_deposits')
-      .where({ id: row.id, status: 'received', credited_amount: row.credited_amount })
+      .where({
+        id: row.id,
+        status: 'received',
+        credited_amount: row.credited_amount,
+        refunded_amount: row.refunded_amount,
+      })
       .update({ status: 'refunding', updated_at: db.fn.now() });
     if (!claimedCount) continue; // consumed or reversed mid-sweep — their win
 
@@ -366,7 +396,9 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
         .where({ id: row.id, status: 'refunding' })
         .update({
           status: creditedCents > 0 ? 'credited' : 'refunded',
-          refunded_amount: remainderCents / 100,
+          // Cumulative across partial refunds — this sweep returns only the
+          // remainder on top of anything a dashboard refund already took.
+          refunded_amount: (priorRefundedCents + remainderCents) / 100,
           updated_at: db.fn.now(),
         });
       refunded += remainderCents / 100;
@@ -516,39 +548,72 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
       // only the unapplied remainder was returned.
       return { handled: true, replay: true };
     }
+    const amountCents = Math.round(Number(row.amount || 0) * 100);
+    const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
+    // Unknown refund size (dispute path) = treat as a full reversal — fail
+    // toward the loud path, never toward silently keeping money available.
+    const refundCents = amountRefundedCents != null
+      ? Math.min(amountRefundedCents, amountCents)
+      : amountCents;
+    const fullyRefunded = refundCents >= amountCents;
+    // Does the cumulative refund reach past the unapplied remainder into
+    // money an invoice already absorbed? That always needs a human.
+    const refundTouchesCredit = creditedCents > 0
+      && refundCents > Math.max(amountCents - creditedCents, 0);
+
     if (row.status === 'refunding') {
       // Echo arrived before our own terminal stamp — write the SAME terminal
       // state the refund path would have: a partially credited row keeps its
-      // credit (only the unapplied remainder was refunded; flipping it to
-      // 'refunded' would no-op the refunder's stamp and erase a credit the
-      // invoice still carries), and refunded_amount records the remainder so
-      // later echoes are recognized as replays. The refunder's own pending
-      // stamp is status='refunding'-guarded, so it no-ops harmlessly after us.
-      const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
-      const amountCents = Math.round(Number(row.amount || 0) * 100);
-      const remainderCents = Math.max(amountCents - creditedCents, 0);
+      // credit when the refund covers only the unapplied remainder (flipping
+      // it to 'refunded' would no-op the refunder's stamp and erase a credit
+      // the invoice still carries), and refunded_amount records the
+      // cumulative refund so later echoes are recognized as replays. The
+      // refunder's own pending stamp is status='refunding'-guarded, so it
+      // no-ops harmlessly after us.
       const flipped = await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
         .update({
-          status: creditedCents > 0 ? 'credited' : 'refunded',
-          refunded_amount: remainderCents / 100,
+          status: !refundTouchesCredit && creditedCents > 0 ? 'credited' : 'refunded',
+          refunded_amount: refundCents / 100,
           updated_at: db.fn.now(),
         });
       if (!flipped) continue;
-      logger.warn('[estimate-deposits] deposit reversal echo landed mid-refund — terminal state stamped for the in-flight refund', {
-        context,
-        keptCreditedAmount: creditedCents > 0 ? creditedCents / 100 : 0,
-        refundedAmount: remainderCents / 100,
-      });
+      if (refundTouchesCredit) {
+        logger.error('[estimate-deposits] reversed deposit was ALREADY credited to an invoice — manual reconciliation required', {
+          estimateId: row.estimate_id,
+          invoiceId: row.credited_invoice_id || null,
+          context,
+        });
+      } else {
+        logger.warn('[estimate-deposits] deposit reversal echo landed mid-refund — terminal state stamped for the in-flight refund', {
+          context,
+          keptCreditedAmount: creditedCents > 0 ? creditedCents / 100 : 0,
+          refundedAmount: refundCents / 100,
+        });
+      }
       return { handled: true };
     }
 
+    // PARTIAL reversal of a live row (dashboard refund of part of a
+    // deposit): record the cumulative refund and KEEP the status — the
+    // unrefunded remainder must stay able to satisfy acceptance and roll
+    // forward as credit. Only a refund covering the full amount flips the
+    // row terminal.
     const flippedCount = await db('estimate_deposits')
-      .where({ id: row.id, status: row.status, credited_amount: row.credited_amount })
-      .update({ status: 'refunded', updated_at: db.fn.now() });
+      .where({
+        id: row.id,
+        status: row.status,
+        credited_amount: row.credited_amount,
+        refunded_amount: row.refunded_amount,
+      })
+      .update({
+        ...(fullyRefunded ? { status: 'refunded' } : {}),
+        refunded_amount: refundCents / 100,
+        updated_at: db.fn.now(),
+      });
     if (!flippedCount) continue;
 
-    if (row.status === 'credited' || Number(row.credited_amount) > 0) {
+    if (refundTouchesCredit) {
       // Money already applied to an invoice as a negative line — the customer
       // now holds both the refund and the credit. Needs a human.
       logger.error('[estimate-deposits] reversed deposit was ALREADY credited to an invoice — manual reconciliation required', {
@@ -556,8 +621,13 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
         invoiceId: row.credited_invoice_id || null,
         context,
       });
-    } else {
+    } else if (fullyRefunded) {
       logger.warn('[estimate-deposits] deposit reversed — ledger row flipped to refunded', { context });
+    } else {
+      logger.warn('[estimate-deposits] deposit partially reversed — remainder stays available', {
+        context,
+        refundedAmount: refundCents / 100,
+      });
     }
     return { handled: true };
   }
@@ -586,15 +656,18 @@ async function handleDepositDisputeClosed(paymentIntentId, disputeStatus) {
 }
 
 // UNAPPLIED deposit balance for the first invoice: received rows minus
-// whatever prior invoices already consumed (credited_amount), so a partial
-// application can never be credited twice. Accepts a trx so accept-time
-// reads share the consuming transaction's snapshot.
+// whatever prior invoices already consumed (credited_amount) AND whatever
+// was already returned to the customer (refunded_amount — partial dashboard
+// refunds), so neither slice can ever be credited. Accepts a trx so
+// accept-time reads share the consuming transaction's snapshot.
 async function pendingDepositCredit(estimateId, trx = db) {
   const rows = await trx('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
-    .select('id', 'amount', 'credited_amount');
+    .select('id', 'amount', 'credited_amount', 'refunded_amount');
   const totalCents = rows.reduce((sum, row) => sum + Math.max(0,
-    Math.round(Number(row.amount || 0) * 100) - Math.round(Number(row.credited_amount || 0) * 100)), 0);
+    Math.round(Number(row.amount || 0) * 100)
+      - Math.round(Number(row.credited_amount || 0) * 100)
+      - Math.round(Number(row.refunded_amount || 0) * 100)), 0);
   if (!(totalCents > 0)) return null;
   const total = totalCents / 100;
   return {
@@ -622,24 +695,33 @@ async function consumeDepositCredit({ estimateId, amount, invoiceId, trx = db })
   const rows = await trx('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
     .orderBy('created_at', 'asc')
-    .select('id', 'amount', 'credited_amount');
+    .select('id', 'amount', 'credited_amount', 'refunded_amount');
 
   for (const row of rows) {
     if (remainingCents <= 0) break;
+    const refundedCents = Math.round(Number(row.refunded_amount || 0) * 100);
     const availableCents = Math.round(Number(row.amount || 0) * 100)
-      - Math.round(Number(row.credited_amount || 0) * 100);
+      - Math.round(Number(row.credited_amount || 0) * 100)
+      - refundedCents;
     if (availableCents <= 0) continue;
     const takeCents = Math.min(availableCents, remainingCents);
     const newCreditedCents = Math.round(Number(row.credited_amount || 0) * 100) + takeCents;
-    const fullyConsumed = newCreditedCents >= Math.round(Number(row.amount || 0) * 100);
+    // Consumable ceiling shrinks by what was already refunded — a row is
+    // exhausted when credit + refund together cover the full amount.
+    const fullyConsumed = newCreditedCents + refundedCents >= Math.round(Number(row.amount || 0) * 100);
     // CONDITIONAL transition: the update applies only if the row is still in
     // the exact state the allocation was computed from — a refund/dispute
-    // webhook can flip it between select and update, and an unconditional
-    // by-id write would mark refunded money credited. A lost row simply
-    // doesn't count toward `allocated`; callers compare allocated to applied
-    // and roll back / re-read on mismatch.
+    // webhook can flip it (or grow refunded_amount) between select and
+    // update, and an unconditional by-id write would mark refunded money
+    // credited. A lost row simply doesn't count toward `allocated`; callers
+    // compare allocated to applied and roll back / re-read on mismatch.
     const updatedCount = await trx('estimate_deposits')
-      .where({ id: row.id, status: 'received', credited_amount: row.credited_amount })
+      .where({
+        id: row.id,
+        status: 'received',
+        credited_amount: row.credited_amount,
+        refunded_amount: row.refunded_amount,
+      })
       .update({
         credited_amount: newCreditedCents / 100,
         ...(fullyConsumed ? { status: 'credited', credited_invoice_id: invoiceId } : {}),

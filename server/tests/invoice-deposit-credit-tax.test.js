@@ -117,6 +117,69 @@ describe('deposit credit is after-tax prior payment, never a discount', () => {
     expect(row.total).toBe(130);
   });
 
+  it('depositCredit REQUEST is capped at the POST-discount invoice value — discounted dollars never consume ledger money (P1)', async () => {
+    const { getInsertedInvoice } = setupDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+    });
+    const invoice = await InvoiceService.create({
+      customerId: 'cust-1',
+      title: 'Discounted first visit',
+      lineItems: [
+        { description: 'Service', quantity: 1, unit_price: 100 },
+        { description: 'Promo', quantity: 1, unit_price: -80 }, // pre-tax discount
+      ],
+      depositCredit: { amount: 99 },
+    });
+    const row = getInsertedInvoice();
+    // $100 − $80 discount = $20 of invoice value. Only $20 of the requested
+    // $99 applies; create() reports the effective amount so the caller
+    // consumes exactly that and the other $79 stays on the ledger.
+    expect(invoice.applied_deposit_credit).toBe(20);
+    expect(row.total).toBe(0);
+    const credit = JSON.parse(row.line_items).find((i) => i.category === 'deposit_credit');
+    expect(credit.unit_price).toBe(-20);
+    expect(row.discount_amount).toBe(80);
+  });
+
+  it('depositCredit REQUEST on a commercial invoice caps at the after-tax value, not the pre-tax subtotal', async () => {
+    const { getInsertedInvoice } = setupDb({
+      customer: { id: 'cust-1', property_type: 'commercial' },
+    });
+    const invoice = await InvoiceService.create({
+      customerId: 'cust-1',
+      title: 'Discounted first visit',
+      lineItems: [
+        { description: 'Service', quantity: 1, unit_price: 100 },
+        { description: 'Promo', quantity: 1, unit_price: -80 },
+      ],
+      taxRate: 0.07,
+      depositCredit: { amount: 99 },
+    });
+    const row = getInsertedInvoice();
+    // After-discount $20 + 7% tax $1.40 = $21.40 of absorbable value.
+    expect(invoice.applied_deposit_credit).toBe(21.4);
+    expect(row.total).toBe(0);
+  });
+
+  it('a zero-value invoice applies NO depositCredit — the full balance rolls forward', async () => {
+    const { getInsertedInvoice } = setupDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+    });
+    const invoice = await InvoiceService.create({
+      customerId: 'cust-1',
+      title: 'Fully discounted visit',
+      lineItems: [
+        { description: 'Service', quantity: 1, unit_price: 100 },
+        { description: 'Promo', quantity: 1, unit_price: -100 },
+      ],
+      depositCredit: { amount: 99 },
+    });
+    const row = getInsertedInvoice();
+    expect(invoice.applied_deposit_credit).toBe(0);
+    expect(JSON.parse(row.line_items).some((i) => i.category === 'deposit_credit')).toBe(false);
+    expect(row.total).toBe(0);
+  });
+
   it('REGRESSION GUARD: a plain negative line WITHOUT the category still behaves as a pre-tax discount', async () => {
     const { getInsertedInvoice } = setupDb({
       customer: { id: 'cust-1', property_type: 'commercial' },
@@ -207,7 +270,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     );
   });
 
-  it('caps the credit at the invoice subtotal — the remainder stays on the ledger for the next visit', async () => {
+  it('caps the credit at the invoice value — the remainder stays on the ledger for the next visit', async () => {
     const { getInsertedInvoice } = setupServiceDb();
     mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
     mockConsumeDepositCredit.mockResolvedValue(60);
