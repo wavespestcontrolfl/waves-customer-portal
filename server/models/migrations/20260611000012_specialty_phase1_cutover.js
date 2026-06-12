@@ -45,16 +45,19 @@
 // `from` may be an array when environments have drifted: canonical pre-cutover
 // pointer FIRST, accepted drift states after. up() accepts any listed value;
 // down() restores the canonical (first) pointer — never a drift value.
-// mosquito_one_time is the one pointer correction: it fell into the generic
-// pest fallback at profile seeding, but its work content (areas treated,
-// breeding sources) is the mosquito_event report family — and the generic
-// schema's required activity gauge doesn't fit mosquito work.
+// mosquito_one_time and palm_injection are pointer corrections: they fell into
+// the generic pest fallback at profile seeding. mosquito_one_time's work
+// content (areas treated, breeding sources) belongs to the mosquito_event
+// report family — the generic schema's required activity gauge doesn't fit
+// mosquito work. palm_injection similarly drifted to pest_inspection in
+// environments where the catalog seeded before the palm_injection profile
+// type was registered.
 const PHASE1_KEYS = [
   { key: 'pest_inspection', from: 'pest_inspection', to: 'pest_inspection' },
   { key: 'new_customer_inspection', from: 'pest_inspection', to: 'pest_inspection' },
   { key: 'mosquito_event', from: ['mosquito_event', 'pest_inspection'], to: 'mosquito_event' },
   { key: 'mosquito_one_time', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'mosquito_event' },
-  { key: 'palm_injection', from: 'palm_injection', to: 'palm_injection' },
+  { key: 'palm_injection', from: ['palm_injection', 'pest_inspection'], to: 'palm_injection' },
   { key: 'lawn_aeration', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
   { key: 'lawn_care_one_time', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
   { key: 'lawn_fungicide', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
