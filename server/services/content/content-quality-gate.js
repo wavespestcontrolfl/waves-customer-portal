@@ -476,8 +476,14 @@ function checkImprovementOverPrior(draft, _brief, context) {
 
 function checkHubLinkPresent(draft, brief) {
   const body = String(draft.body || '');
-  // Per v3.1 — supporting blogs must link to the relevant hub.
-  const hubs = ['/pest-control-services/', '/waveguard-memberships/', '/pest-library/', '/lawn-care/', '/mosquito-control/'];
+  // Per v3.1 — supporting blogs must link to the relevant hub. The accepted
+  // set derives from the brief builder's SERVICE_HUB_LINKS (single source of
+  // truth): a service the builder steers toward its hub (termite →
+  // /termite-inspection/, rodent → /rodent-control/) must never fail the
+  // gate for linking exactly where it was told to. Lazy require avoids any
+  // load-order coupling with content-brief-builder.
+  const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
+  const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
   if (!hubs.some((h) => body.includes(h))) {
     return { ok: false, reason: 'no_hub_link_found' };
   }
