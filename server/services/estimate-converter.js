@@ -629,6 +629,12 @@ const EstimateConverter = {
     const monthlyRate = parseFloat(estimate.monthly_total || 0);
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
       || inferFrequencyKeyFromEstimateData(estimateData);
+    // Combined routing only trusts the customer's REAL accepted selection —
+    // inferFrequencyKeyFromEstimateData is a guess that can derive from a
+    // companion or unrelated line, and must never be treated as the pest
+    // plan cadence (pre-push P1). Absent a real selection, explicit line
+    // cadence decides and cadence-less pest lines don't combine.
+    const acceptedPlanFrequency = estimateData.customerSelection?.frequency || null;
     const billingCadence = inferredFrequencyKey
       ? resolveBillingCadence({
           monthlyRate,
@@ -704,7 +710,7 @@ const EstimateConverter = {
       let reservedSeedSvc = null;
       try {
         const { combos } = combineRecurringServicesForScheduling(recurringServices, {
-          acceptFrequency: inferredFrequencyKey,
+          acceptFrequency: acceptedPlanFrequency,
           supplementalCompanions: supplementalCompanionLines(estimateData),
         });
         for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
@@ -775,7 +781,7 @@ const EstimateConverter = {
       // Combined-service routing: matching-cadence pairs schedule as ONE
       // combined service; everything else flows through unchanged.
       const { remaining, combos } = combineRecurringServicesForScheduling(recurringServices, {
-        acceptFrequency: inferredFrequencyKey,
+        acceptFrequency: acceptedPlanFrequency,
         supplementalCompanions: supplementalCompanionLines(estimateData),
       });
       const scheduleUnits = [
