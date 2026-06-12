@@ -239,13 +239,15 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // sitting in the scheduled-send queue. /schedule-sms couldn't park a
       // decision that didn't exist yet (the drafter was mid-generation), so
       // publishing now would put an actionable card on top of the queued
-      // reply. No timestamp filter on purpose — any live queued staff reply
-      // answers the thread soon.
+      // reply. Only replies QUEUED AFTER this inbound count — a reply
+      // composed before the customer's newest message can't be answering
+      // it, and that newer message still deserves its card.
       const replyInFlight = await trx('sms_log')
         .where({ direction: 'outbound' })
         .where(byThread('to_phone'))
         .whereIn('message_type', HUMAN_REPLY_TYPES)
         .whereIn('status', ['scheduled', 'sending'])
+        .where('created_at', '>', inbound.created_at)
         .first('id');
       if (replyInFlight) return null;
 
