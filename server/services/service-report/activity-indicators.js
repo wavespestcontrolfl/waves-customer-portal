@@ -492,8 +492,14 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       }
     }
     if (field.type === 'count') {
-      const n = Number(value);
-      if (!Number.isInteger(n) || n < 0 || n > 9999) {
+      // Validate shape BEFORE coercion: Number(false) / Number([]) /
+      // Number('  ') all coerce to 0 and would persist bogus counts into
+      // the immutable snapshot (hook P1). Only integer numbers and
+      // digit-only strings count.
+      const str = typeof value === 'number'
+        ? String(value)
+        : (typeof value === 'string' ? value.trim() : null);
+      if (str == null || !/^\d{1,4}$/.test(str)) {
         errors.push(`Invalid count for ${field.key}: ${value}`);
       }
     }

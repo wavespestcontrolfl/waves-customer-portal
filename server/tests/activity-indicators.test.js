@@ -434,7 +434,7 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
   });
 
   test('count fields reject non-integers and negatives', () => {
-    for (const invalid of ['-1', '2.5', 'eight', '10000']) {
+    for (const invalid of ['-1', '2.5', 'eight', '10000', false, true, [], {}, '  ', '1e2']) {
       const result = validateTypedFindings({
         type: 'rodent_trapping',
         values: { species: 'Roof rat', traps_checked: invalid },
