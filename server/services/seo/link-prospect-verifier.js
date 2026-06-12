@@ -232,11 +232,16 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   if (!['live', 'indexed'].includes(prospect.status)) patch.status = 'live';
   if (!prospect.first_live_at) patch.first_live_at = now;
   if (!prospect.placement_date) patch.placement_date = etDateString();
-  // Clear the pending marker now that the link is confirmed live.
-  const quality = parseQuality(prospect.quality_signals);
-  if (quality.pending) { delete quality.pending; patch.quality_signals = JSON.stringify(quality); }
+  // Clear the pending marker IN PLACE (jsonb delete on the live column) — never a
+  // snapshot write — so a concurrent run's omega_* dedupe keys aren't erased.
+  if (parseQuality(prospect.quality_signals).pending) {
+    patch.quality_signals = db.raw("quality_signals - 'pending'");
+  }
   await db('seo_link_prospects').where({ id: prospect.id }).update(patch);
-  await pushForIndexing({ ...prospect, quality_signals: patch.quality_signals || prospect.quality_signals }, liveUrl, isDofollow, now);
+  // pushForIndexing reads omega_* from its own atomic claim against the live
+  // column, so passing the original snapshot is safe (and the pending key it may
+  // still carry is irrelevant to indexing).
+  await pushForIndexing(prospect, liveUrl, isDofollow, now);
   return 'live';
 }
 
