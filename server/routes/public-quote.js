@@ -109,6 +109,34 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
   };
 }
 
+// Per-application price for the wizard result screen (owner request,
+// 2026-06-12: lead with "$432/yr" wanted "$108 per application"). Only
+// derivable when the quote has exactly ONE recurring line (counted by
+// positive monthly, NOT by per-app fields — a multi-service quote where
+// only one line exposes perApp must not present that line's per-app
+// price as the whole quote's). Cadence comes from visitsPerYear (pest;
+// its `frequency` is a string like 'quarterly') or numeric `frequency`
+// (lawn exposes apps/year there and has no visitsPerYear). Anything
+// underivable falls back to the annual caption client-side.
+function derivePerApplication(estimate) {
+  const recurring = (estimate?.lineItems || []).filter(
+    (item) => Number(item?.monthlyAfterDiscount ?? item?.monthly) > 0
+  );
+  if (recurring.length !== 1) return null;
+  const line = recurring[0];
+  if (!(Number(line.perApp) > 0)) return null;
+  const visits = Number(line.visitsPerYear) > 0
+    ? Number(line.visitsPerYear)
+    : Number(line.frequency) > 0
+      ? Number(line.frequency)
+      : null;
+  if (!visits) return null;
+  return {
+    amount: Math.round(Number(line.perApp)),
+    visitsPerYear: visits,
+  };
+}
+
 // Same-phone wizard re-runs may refresh ONLY the wizard's own open draft.
 // Estimates from any other source (admin/tech/lead automation) or already
 // promoted past draft keep the duplicate hard-block.
@@ -821,14 +849,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // Post-quote orchestration — customer self-serves with price + booking link.
     // The outbound-admin-call pattern is reserved for the no-price divert flow
     // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
-    // Customer SMS: estimate_accepted_onetime template (DB-editable).
+    // Customer SMS: quote_wizard_booking_invite template (DB-editable).
+    // NOT estimate_accepted_onetime — that copy ("Thanks for booking your
+    // {service_label}") belongs to the estimate-acceptance moment; at the
+    // quote moment nothing is booked yet, so leads were thanked for a
+    // booking that doesn't exist (owner report, 2026-06-12).
     if (normalizedPhone && !quoteRequired && !isOneTimeOnly) {
       try {
         const wantsPest = !!services?.pest;
         const wantsLawn = !!services?.lawn;
         const serviceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
         const customerBody = await renderTemplate(
-          'estimate_accepted_onetime',
+          'quote_wizard_booking_invite',
           { first_name: contactFirstName, service_label: serviceLabel, booking_url: bookingUrl },
           {
             workflow: 'public_quote',
@@ -837,7 +869,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           },
         );
         if (!customerBody) {
-          logger.warn(`[public-quote] estimate_accepted_onetime template missing/disabled; booking SMS skipped for lead ${lead.id}`);
+          logger.warn(`[public-quote] quote_wizard_booking_invite template missing/disabled; booking SMS skipped for lead ${lead.id}`);
         } else {
           const smsResult = await sendCustomerMessage({
             to: normalizedPhone,
@@ -989,6 +1021,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (oneTimeTotal > 0) {
       response.one_time_total = Math.round(oneTimeTotal);
     }
+    const perApplication = derivePerApplication(estimate);
+    if (perApplication) {
+      response.per_application = perApplication.amount;
+      response.visits_per_year = perApplication.visitsPerYear;
+    }
     res.json(response);
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
@@ -1105,5 +1142,6 @@ module.exports._internals = {
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
+  derivePerApplication,
   shouldRefreshWizardDraft,
 };

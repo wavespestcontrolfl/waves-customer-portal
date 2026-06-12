@@ -718,8 +718,13 @@ export default function QuotePage({ serviceSlug = '' }) {
       if (!r.ok) throw new Error(d.error || 'Could not add to your plan.');
       // Merge server's canonical service_interest so the result screen reflects
       // the plan the customer just confirmed, not the pre-upsell snapshot.
+      // The add-on was never priced into the original calculation, so the
+      // single-service per_application caption no longer describes the full
+      // plan — drop it and let the caption fall back to the annual line.
       if (d.service_interest) {
-        setResult(prev => prev ? { ...prev, service_interest: d.service_interest } : prev);
+        setResult(prev => prev
+          ? { ...prev, service_interest: d.service_interest, per_application: null, visits_per_year: null }
+          : prev);
       }
       setStage('result');
     } catch (e) {
@@ -1194,7 +1199,11 @@ export default function QuotePage({ serviceSlug = '' }) {
                       {result.confidence === 'low' && (
                         <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
                       )}
-                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${Number(result.annual_total).toLocaleString()}/yr · {result.service_interest}</div>
+                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>
+                        {Number(result.per_application) > 0
+                          ? `$${Number(result.per_application).toLocaleString()} per application · ${result.service_interest}`
+                          : `$${Number(result.annual_total).toLocaleString()}/yr · ${result.service_interest}`}
+                      </div>
                       {result.has_setup_fee && (
                         <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
                           + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
