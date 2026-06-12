@@ -1028,8 +1028,10 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   }
   // "Inspection only" treatment can't ride with applied treatments (owner
   // spec §5 — the report tells one coherent story), and activity areas are
-  // required exactly when there was activity to locate ('None observed'
-  // visits have no truthful area to name — Codex P2).
+  // required exactly when there was activity to locate: a 'None observed'
+  // visit has no truthful area to name, so recorded areas beside it are a
+  // contradiction, not optional detail — the snapshot would render "Where
+  // activity was noted" under a no-active-signs headline (Codex P2 ×2).
   if (type === 'flea') {
     const treatments = String(values.treatment_completed || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
@@ -1037,10 +1039,13 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       errors.push('"Inspection only" cannot be combined with applied treatments');
     }
     const evidence = String(values.evidence_level || '');
-    if (enforceRequired && evidence && evidence !== 'None observed') {
-      const areas = String(values.activity_areas ?? '')
-        .split(',').map((s) => s.trim()).filter(Boolean);
-      if (!areas.length) missing.push('activity_areas');
+    const areas = String(values.activity_areas ?? '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (evidence === 'None observed' && areas.length) {
+      errors.push('Activity areas cannot be recorded with evidence level "None observed" — update the evidence level or clear the areas');
+    }
+    if (enforceRequired && evidence && evidence !== 'None observed' && !areas.length) {
+      missing.push('activity_areas');
     }
   }
 

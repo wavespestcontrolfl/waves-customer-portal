@@ -4551,6 +4551,20 @@ export function typedFieldRequiredNow(field, values) {
   return !!driver && driver !== rule.value;
 }
 
+// Mirrors the server's chips-vs-values rules (validateNextStepChips) so a
+// conflicting chip is disabled in the panel and blocked pre-submit instead
+// of failing with a post-submit 400 (Codex P3). Returns the conflict
+// message for the chip under the current values, or null when selectable.
+export function typedNextStepChipConflict(schemaType, chip, values) {
+  if (schemaType === "flea" && chip === "No action needed") {
+    const level = String(values?.evidence_level ?? "").trim();
+    if (level && level !== "None observed") {
+      return `"No action needed" conflicts with the recorded evidence level (${level})`;
+    }
+  }
+  return null;
+}
+
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -4681,12 +4695,20 @@ function TypedFindingsSection({
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {(schema.nextStepChips || []).map((chip) => {
             const selected = nextStepChips.includes(chip);
+            // A chip that conflicts with the recorded findings is disabled
+            // (server would reject it) — but a stale selection stays
+            // tappable so the tech can deselect it after changing a value.
+            const conflict = typedNextStepChipConflict(schema.type, chip, values);
+            const disabled = !!conflict && !selected;
             return (
               <button
                 key={chip}
                 type="button"
-                onClick={() => onToggleChip(chip)}
+                onClick={disabled ? undefined : () => onToggleChip(chip)}
                 aria-pressed={selected}
+                aria-disabled={disabled}
+                disabled={disabled}
+                title={conflict || undefined}
                 style={{
                   height: 36,
                   padding: "0 14px",
@@ -4700,7 +4722,8 @@ function TypedFindingsSection({
                   border: `1px solid ${selected ? accent : hairline}`,
                   fontSize: 14,
                   fontWeight: 500,
-                  cursor: "pointer",
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  opacity: disabled ? 0.45 : 1,
                   whiteSpace: "nowrap",
                 }}
               >
@@ -7618,6 +7641,25 @@ export function CompletionPanel({
             ...(typedScoreMissing ? [typedFindingsSchema.activity.label] : []),
             ...(nextStepMissing ? ["Next steps (select at least one)"] : []),
           ].join(", ")}.`,
+        );
+        return;
+      }
+      // A selected chip can go stale when a findings value changes after the
+      // tap (the panel disables conflicting chips, but not ones already
+      // selected). Mirror the server's rejection pre-submit (Codex P3).
+      const chipConflicts = typedNextStepChips
+        .map((chip) =>
+          typedNextStepChipConflict(
+            typedFindingsSchema.type,
+            chip,
+            findingsValues,
+          ),
+        )
+        .filter(Boolean);
+      if (chipConflicts.length) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(
+          `Fix the next-step selections before submitting: ${chipConflicts.join("; ")}.`,
         );
         return;
       }

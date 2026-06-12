@@ -181,6 +181,21 @@ describe('validation', () => {
     });
     expect({ ok: cleared.ok, errors: cleared.errors, missing: cleared.missing })
       .toEqual({ ok: true, errors: [], missing: [] });
+
+    // Areas left behind after flipping the level to 'None observed' are a
+    // contradiction, not optional detail — the snapshot would render them
+    // under a no-active-signs headline (Codex P2 round 3). Enforced even
+    // pre-cutover (enforceRequired false): it is a contradiction either way.
+    for (const enforceRequired of [true, false]) {
+      const stale = validateTypedFindings({
+        type: 'flea',
+        values: { ...FLEA_VALUES, evidence_level: 'None observed' },
+        expectedType: 'flea',
+        enforceRequired,
+      });
+      expect({ enforceRequired, ok: stale.ok }).toEqual({ enforceRequired, ok: false });
+      expect(stale.errors.join(' ')).toMatch(/Activity areas/);
+    }
   });
 
   test('required chips with only empty parts count as missing (Codex P2)', () => {
