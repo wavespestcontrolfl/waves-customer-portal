@@ -475,11 +475,15 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
   return db.transaction(async (trx) => {
     // Orphaned holding states first: a 'scheduled' decision whose queued
     // sms_log row no longer exists in a live state (cancelled outside the
-    // cancel route, or stale-claim recovery marked it failed) would hang
-    // forever — reopen it, and the created_at-keyed expiry below gives it a
-    // terminal state if it's already past the window.
+    // cancel route, stale-claim recovery marked it failed, or the process
+    // died mid-immediate-send) would hang forever — reopen it, and the
+    // created_at-keyed expiry below gives it a terminal state if it's
+    // already past the window. Deliberately NOT workflow-scoped: the
+    // composer claim/park paths put ANY SMS Agent Review decision (lead
+    // workflows included) into 'scheduled', and nothing else writes that
+    // status — those must recover too, back into their own lifecycles.
     const reopened = await trx('agent_decisions as ad')
-      .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'scheduled' })
+      .where({ 'ad.source_channel': 'sms', 'ad.status': 'scheduled' })
       .where('ad.updated_at', '<', cutoff)
       .whereRaw(`NOT EXISTS (
         SELECT 1 FROM sms_log sl
