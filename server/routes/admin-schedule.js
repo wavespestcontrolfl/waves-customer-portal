@@ -1022,9 +1022,11 @@ async function loadProjectCompletionContextByServiceId(services) {
         : null,
       // Companion section schemas (combined-service-completions.md),
       // embedded beside findingsSchema for the same no-registry-fetch reason.
+      // serviceKey scoping applies to companions too — a pest + rodent-bait
+      // combo must not expose exclusion/sanitation module fields (Codex P2).
       companionSchemas: completionProfile
         ? (completionProfile.companions || [])
-          .map((c) => ActivityIndicators.findingsSchemaForType(c.type))
+          .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey }))
           .filter(Boolean)
         : null,
       linkedProject: linkedProjectsByServiceId.get(service.id) || null,

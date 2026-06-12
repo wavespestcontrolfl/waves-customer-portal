@@ -1007,7 +1007,7 @@ router.get('/:date?', async (req, res, next) => {
         // completion must never block on a registry fetch.
         companionSchemas: completionProfile
           ? (completionProfile.companions || [])
-            .map((c) => ActivityIndicators.findingsSchemaForType(c.type))
+            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey }))
             .filter(Boolean)
           : null,
         linkedProject: linkedProject ? {
@@ -2516,7 +2516,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 values: companion.values,
                 nextStepChips: companion.chips,
                 serviceKey: completionProfile?.serviceKey || null,
-                serviceLabel: completionProfile?.serviceName || svc.service_type || null,
+                // The companion section speaks for ITS work, not the whole
+                // combined service — null falls back to the type's own label
+                // so "Lawn + Tree & Shrub" copy never claims the lawn visit
+                // (Codex P2).
+                serviceLabel: null,
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,

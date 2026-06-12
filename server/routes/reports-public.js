@@ -841,20 +841,24 @@ router.get('/:token/data', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
+    // Staff browsers attach their portal JWT on this fetch (ReportViewPage)
+    // — the same signal that opens suppressed shadow reports also unlocks
+    // internal_only companion sections. Resolved BEFORE view tracking: a
+    // staff read of a customer-visible report (reviewing a shadowed
+    // companion section) must not stamp report_viewed_at or log a customer
+    // report_viewed activity (Codex P2).
+    const staffViewer = await staffCanViewSuppressed(req);
+
     // Suppressed-report access is enforced by the router.param('token')
-    // gate; a suppressed record here means a staff viewer — don't count
-    // their shadow reviews as customer report views.
-    if (mode === 'live' && !suppressedTypedReport(service)) {
+    // gate; a suppressed record here means a staff viewer. Staff reads of
+    // customer-visible reports skip tracking the same way.
+    if (mode === 'live' && !staffViewer && !suppressedTypedReport(service)) {
       await trackServiceReportView(service);
     }
 
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      // Staff browsers attach their portal JWT on this fetch (ReportViewPage)
-      // — the same signal that opens suppressed shadow reports also unlocks
-      // internal_only companion sections, flagged for the per-section badge.
-      const staffViewer = await staffCanViewSuppressed(req);
       return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer }));
     }
 
