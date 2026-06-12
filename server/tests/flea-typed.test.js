@@ -32,7 +32,7 @@ describe('flea schema', () => {
     const byKey = Object.fromEntries(PROJECT_TYPES.flea.findingsFields.map((f) => [f.key, f]));
     expect(byKey.evidence_level.options).toEqual(['None observed', 'Suspected', 'Light', 'Moderate', 'Heavy']);
     expect(byKey.customer_prep.options).toContain('Treat pets through veterinarian');
-    expect(REQUIRED_FINDINGS_FIELDS.flea).toEqual(['evidence_level', 'activity_areas', 'treatment_completed', 'customer_prep']);
+    expect(REQUIRED_FINDINGS_FIELDS.flea).toEqual(['evidence_level', 'treatment_completed', 'customer_prep']);
     expect(nextStepRequiredForType('flea')).toBe(true);
     for (const chip of TYPE_NEXT_STEP_CHIPS.flea) {
       expect({ chip, hasSentence: !!NEXT_STEP_CHIPS[chip] }).toEqual({ chip, hasSentence: true });
@@ -115,16 +115,72 @@ describe('flea report', () => {
     expect(result.headline).toBe('Flea activity was high today.');
     expect(result.headline).not.toContain('light');
   });
+
+  test('a tech score of 1 on a confirmed finding never reads as "suspected" (Codex P2)', () => {
+    const confirmed = buildTodaysResult({
+      projectType: 'flea',
+      reportTypeLabel: 'Flea Service Summary',
+      values: FLEA_VALUES, // evidence_level: Moderate — confirmed activity
+      chips: ['Monitor activity'],
+      activity: { score: 1, source: 'technician' },
+      visitSequence: 1,
+    });
+    expect(confirmed.headline).toBe('Flea activity was very low today.');
+    expect(confirmed.headline).not.toContain('suspected');
+
+    // A Suspected selection the tech re-scored away from 1 follows the score.
+    const rescored = buildTodaysResult({
+      projectType: 'flea',
+      reportTypeLabel: 'Flea Service Summary',
+      values: { ...FLEA_VALUES, evidence_level: 'Suspected' },
+      chips: ['Monitor activity'],
+      activity: { score: 3, source: 'technician' },
+      visitSequence: 1,
+    });
+    expect(rescored.headline).toBe('Flea activity was moderate today.');
+  });
 });
 
 describe('validation', () => {
   test('aftercare core enforced; full submission passes clean', () => {
     const empty = validateTypedFindings({ type: 'flea', values: {}, expectedType: 'flea', enforceRequired: true });
     expect(empty.ok).toBe(false);
-    expect(empty.missing).toEqual(expect.arrayContaining(['evidence_level', 'activity_areas', 'treatment_completed', 'customer_prep']));
+    expect(empty.missing).toEqual(expect.arrayContaining(['evidence_level', 'treatment_completed', 'customer_prep']));
 
     const full = validateTypedFindings({ type: 'flea', values: FLEA_VALUES, expectedType: 'flea', enforceRequired: true });
     expect({ ok: full.ok, errors: full.errors, missing: full.missing }).toEqual({ ok: true, errors: [], missing: [] });
+  });
+
+  test('activity areas required exactly when there was activity to locate (Codex P2)', () => {
+    const withActivity = validateTypedFindings({
+      type: 'flea',
+      values: { ...FLEA_VALUES, activity_areas: '' },
+      expectedType: 'flea',
+      enforceRequired: true,
+    });
+    expect(withActivity.ok).toBe(false);
+    expect(withActivity.missing).toContain('activity_areas');
+
+    // A truthful cleared visit has no activity area to name.
+    const cleared = validateTypedFindings({
+      type: 'flea',
+      values: { ...FLEA_VALUES, evidence_level: 'None observed', activity_areas: '' },
+      expectedType: 'flea',
+      enforceRequired: true,
+    });
+    expect({ ok: cleared.ok, errors: cleared.errors, missing: cleared.missing })
+      .toEqual({ ok: true, errors: [], missing: [] });
+  });
+
+  test('required chips with only empty parts count as missing (Codex P2)', () => {
+    const result = validateTypedFindings({
+      type: 'flea',
+      values: { ...FLEA_VALUES, treatment_completed: ',', customer_prep: ' , ' },
+      expectedType: 'flea',
+      enforceRequired: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.missing).toEqual(expect.arrayContaining(['treatment_completed', 'customer_prep']));
   });
 
   test('"Inspection only" cannot ride with applied treatments', () => {

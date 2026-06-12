@@ -559,8 +559,10 @@ const REQUIRED_FINDINGS_FIELDS = {
   one_time_lawn_treatment: ['lawn_condition'],
   cockroach: ['species', 'activity_level'],
   // Owner spec §5: flea cooperation must be unmistakable — the aftercare
-  // chips are part of the required core (4 fields, within budget).
-  flea: ['evidence_level', 'activity_areas', 'treatment_completed', 'customer_prep'],
+  // chips are part of the required core. activity_areas is conditionally
+  // required in validateTypedFindings (any evidence level except 'None
+  // observed') — a truthful cleared visit has no activity area to name.
+  flea: ['evidence_level', 'treatment_completed', 'customer_prep'],
   rodent_trapping: ['species'],
   // Owner spec §1/§2/§4 mark the full checklists required — all fast taps.
   // Exceeds the ≤4 budget by owner instruction. Inspection adds conditional
@@ -1575,7 +1577,11 @@ function buildTodaysResult({
     const score = activity && Number.isInteger(activity.score) ? activity.score : null;
     const select = String(values.evidence_level);
     const cleared = score != null ? score === 0 : select === 'None observed';
-    const suspected = !cleared && (score != null ? score === 1 : select === 'Suspected');
+    // "Suspected" wording comes from the SELECT only — a tech pinning the
+    // gauge to 1 on a confirmed Moderate finding must read as "very low",
+    // never as "no live activity was confirmed" (Codex P2). A Suspected
+    // selection the tech re-scored away from 1 follows the score word.
+    const suspected = !cleared && select === 'Suspected' && (score == null || score === 1);
     let headline;
     if (visitSequence > 1 && activity && activity.trendWord) {
       headline = activity.trend === 'stable'
