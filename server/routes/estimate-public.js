@@ -3412,13 +3412,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const showYourWorkCss = showYourWork ? `
   .ai-satellite-caption{margin:6px 0 0;font-size:12px;color:#6B7280;line-height:1.45}
   .ai-show-work{display:grid;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid #E7E2D7}
-  .ai-show-work-title{font-size:13px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .ai-show-work-title{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
   .ai-fact-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   @media(max-width:720px){.ai-fact-list{grid-template-columns:1fr}}
   .ai-fact{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
   .ai-fact-label{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-fact-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
-  .ai-fact-source{flex:none;padding:5px 9px;border-radius:999px;background:#E3F5FD;color:#065A8C;font:800 11px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .ai-fact-source{flex:none;padding:5px 9px;border-radius:999px;background:#E3F5FD;color:#065A8C;font:800 14px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
   .ai-parcel-line{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}
   .ai-quality-note{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}` : '';
   const aiBlockHtml = intelligence ? `

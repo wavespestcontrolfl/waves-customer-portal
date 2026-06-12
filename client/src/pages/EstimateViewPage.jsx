@@ -518,7 +518,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           borderTop: `1px solid ${ESTIMATE_BORDER}`,
         }}>
           <div style={{
-            fontSize: 13,
+            fontSize: 14,
             color: ESTIMATE_MUTED,
             textTransform: 'uppercase',
             letterSpacing: '0.08em',
@@ -571,7 +571,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                     borderRadius: 999,
                     background: '#E3F5FD',
                     color: '#065A8C',
-                    fontSize: 11,
+                    fontSize: 14,
                     fontWeight: 800,
                     lineHeight: 1,
                     textTransform: 'uppercase',
