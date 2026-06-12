@@ -105,16 +105,33 @@ async function reconcileByDomain(prospect) {
   return rows.find((row) => backlinkTargetsProspect(row, prospect)) || null;
 }
 
+// After how many failed Omega attempts we stop retrying a single URL.
+const OMEGA_MAX_ATTEMPTS = 5;
+
 // Force-index a confirmed-live page via Omega Indexer. No-ops for nofollow (no
-// equity to index) and dedups via quality_signals.omega_submitted so a URL is
-// pushed once. Records the submission marker on the prospect row.
+// equity to index). Dedups via quality_signals.omega_submitted — which is set
+// ONLY on a confirmed-accepted submission, so a transient failure (skip/429/5xx/
+// network) is retried on the next verifier run rather than silently dropped.
+// Failures bump omega_attempts and stop after OMEGA_MAX_ATTEMPTS.
 async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
   if (!liveUrl || isDofollow === false) return false;
   const quality = parseQuality(prospect.quality_signals);
-  if (quality.omega_submitted) return false;
+  if (quality.omega_submitted) return false; // already accepted — never re-push
+  if ((quality.omega_attempts || 0) >= OMEGA_MAX_ATTEMPTS) return false;
+
   const res = await omega.submit(prospect.target_domain, [liveUrl]);
-  quality.omega_submitted = now.toISOString();
-  if (res && res.ok === false && !res.skipped && res.error) quality.omega_error = res.error;
+  // skipped = no key / no url (non-prod). Pure no-op: don't burn an attempt or
+  // write the row — it retries naturally once a key is present.
+  if (res && res.skipped) return false;
+
+  if (res && res.ok === true) {
+    quality.omega_submitted = now.toISOString();
+    delete quality.omega_attempts;
+    delete quality.omega_error;
+  } else {
+    quality.omega_attempts = (quality.omega_attempts || 0) + 1;
+    quality.omega_error = (res && res.error) || `status ${res && res.status}`;
+  }
   await db('seo_link_prospects').where({ id: prospect.id })
     .update({ quality_signals: JSON.stringify(quality), updated_at: new Date() });
   return res ? res.ok === true : false;
