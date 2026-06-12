@@ -170,6 +170,19 @@ describe('lookupParcelByPoint', () => {
     expect(calledUrl).toContain('esriSpatialRelIntersects');
   });
 
+  it('rethrowErrors surfaces provider failures while the default still swallows to null', async () => {
+    const boom = new Error('FDOR cadastral 503');
+    global.fetch = jest.fn(async () => { throw boom; });
+    // Default: null-on-error (production callers degrade to address search).
+    expect(await lookupParcelByPoint(27.5, -82.5)).toBeNull();
+    // Canary contract: the same failure propagates with rethrowErrors.
+    await expect(lookupParcelByPoint(27.5, -82.5, { rethrowErrors: true })).rejects.toBe(boom);
+    // A genuine no-parcel miss stays a clean null even with rethrowErrors —
+    // only provider failures throw.
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ features: [] }) }));
+    expect(await lookupParcelByPoint(27.5, -82.5, { rethrowErrors: true })).toBeNull();
+  });
+
   it('returns null on empty result, out-of-area county, error payload, and timeout', async () => {
     global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ features: [] }) }));
     expect(await lookupParcelByPoint(27.5, -82.5)).toBeNull();

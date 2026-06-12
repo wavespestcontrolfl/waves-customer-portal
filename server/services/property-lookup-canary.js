@@ -78,10 +78,19 @@ async function runPropertyLookupCanaryInner() {
   });
   const failures = [];
 
-  const parcel = await lookupParcelByPoint(GOLDEN_POINT.lat, GOLDEN_POINT.lng, { timeoutMs: CANARY_TIMEOUT_MS })
-    .catch(() => null);
+  // Throws are tracked separately from clean nulls so the alert reads as
+  // "network/timeout blip" (watch tomorrow's run) vs "parser regression"
+  // (act now) — the 2026-06-12 first run fired on a transient county-site
+  // error indistinguishable from a real regression. Only the error
+  // code/name is recorded: err.message can embed the lookup URL, and the
+  // PII rule (county-only labels) applies to logs and failure text alike.
+  let pointErrCode = null;
+  const parcel = await lookupParcelByPoint(GOLDEN_POINT.lat, GOLDEN_POINT.lng, { timeoutMs: CANARY_TIMEOUT_MS, rethrowErrors: true })
+    .catch((err) => { pointErrCode = (err && (err.code || err.name)) || 'network/timeout'; return null; });
   if (!parcel || parcel.county !== GOLDEN_POINT.expectCounty) {
-    failures.push('FDOR cadastral layer: golden point no longer resolves to a parcel');
+    failures.push(pointErrCode
+      ? `FDOR cadastral layer: golden point lookup threw (${pointErrCode})`
+      : 'FDOR cadastral layer: golden point no longer resolves to a parcel');
   } else if (parcel.paoParcelId !== GOLDEN_POINT.expectPaoParcelId) {
     failures.push('FDOR cadastral layer: golden point resolves to the wrong PAO parcel id');
   }
@@ -89,10 +98,17 @@ async function runPropertyLookupCanaryInner() {
   // Sequential on purpose — three polite hits a night, and a shared-cause
   // outage reads as three clean failure lines instead of a thundering herd.
   for (const golden of GOLDEN_PARCELS) {
+    let errCode = null;
     const record = await lookupPropertyFromCountyByParcel(golden.parcel, golden.parcel.situsAddress, {
       timeoutMs: CANARY_TIMEOUT_MS,
-    }).catch(() => null);
-    failures.push(...evaluateGoldenRecord(golden.label, record));
+      rethrowErrors: true,
+    }).catch((err) => { errCode = (err && (err.code || err.name)) || 'network/timeout'; return null; });
+    if (errCode) {
+      logger.warn('[property-lookup-canary] by-parcel lookup threw', { label: golden.label, code: errCode });
+      failures.push(`${golden.label}: by-parcel lookup threw (${errCode})`);
+    } else {
+      failures.push(...evaluateGoldenRecord(golden.label, record));
+    }
   }
 
   if (failures.length) {

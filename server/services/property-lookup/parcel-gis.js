@@ -297,6 +297,10 @@ async function lookupParcelByPoint(lat, lng, options = {}) {
       error: err?.message || String(err),
       elapsedMs: Date.now() - t0,
     });
+    // Production callers want null-on-error (lookup degrades to address
+    // search). The canary passes rethrowErrors to distinguish a provider
+    // failure from a genuine no-parcel-at-point miss.
+    if (options.rethrowErrors) throw err;
     return null;
   } finally {
     clearTimeout(timer);

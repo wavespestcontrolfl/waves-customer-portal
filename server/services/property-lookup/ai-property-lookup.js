@@ -393,7 +393,7 @@ async function lookupPropertyFromManateePAO(address, options = {}) {
 // Detail half of the Manatee lookup: takes a search match ({ parcelId,
 // situsAddress, city }) from either the PAO address search or a GIS parcel
 // match and turns it into a shaped county record.
-async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.now()) {
+async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.now(), opts = {}) {
   const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
   if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
 
@@ -402,8 +402,11 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
     fetchManateePaoJson(`${MANATEE_PAO_BUILDINGS_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
     // Pool/cage/spa evidence only — a features failure must never sink the
     // core record, so it degrades to "no pool signal" (hasPool stays null).
+    // The canary's rethrowErrors is the exception: a swallowed features
+    // outage would read as "pool not found on extra-features roll" — a
+    // parser-regression label — instead of a provider failure.
     fetchManateePaoJson(`${MANATEE_PAO_FEATURES_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs)
-      .catch(() => null),
+      .catch((err) => { if (opts.rethrowErrors) throw err; return null; }),
   ]);
 
   const parsed = parseManateePaoRecord({ address, search, land, buildings, features });
@@ -464,12 +467,16 @@ async function lookupPropertyFromSarasotaPAO(address, options = {}) {
 // Detail half of the Sarasota lookup: takes a search match ({ parcelId,
 // situsAddress, city, detailUrl, html }) — html is the parcel detail page —
 // from either the PAO address search or a GIS parcel match.
-async function fetchSarasotaParcelDetails(search, address, timeoutMs, t0 = Date.now()) {
+async function fetchSarasotaParcelDetails(search, address, timeoutMs, t0 = Date.now(), opts = {}) {
   const buildingDetailHtml = await fetchSarasotaPrimaryBuildingDetail(search.html, timeoutMs, t0).catch((err) => {
     logger.warn('[county-property] Sarasota PAO building detail fetch failed', {
       elapsedMs: Date.now() - t0,
       error: summarizeProviderError(err),
     });
+    // Canary exception (rethrowErrors): a swallowed building-detail outage
+    // would read as missing-squareFootage — a parser-regression label —
+    // instead of a provider failure.
+    if (opts.rethrowErrors) throw err;
     return null;
   });
   const parsed = parseSarasotaPaoRecord({
@@ -533,7 +540,7 @@ async function lookupPropertyFromCharlottePAO(address, options = {}) {
 // Detail half of the Charlotte lookup: takes a search match ({ parcelId,
 // situsAddress, city, zipCode }) from either the GIS address search or a
 // statewide-cadastral parcel match.
-async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date.now()) {
+async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date.now(), opts = {}) {
   const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
   if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
 
@@ -553,6 +560,10 @@ async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date
       elapsedMs: Date.now() - t0,
       error: summarizeProviderError(ownershipResult.reason),
     });
+    // Canary exception (rethrowErrors): ownership GIS is Charlotte's ONLY
+    // lotSize source, so a swallowed outage would read as "lotSize not
+    // parsed" — a parser-regression label — instead of a provider failure.
+    if (opts.rethrowErrors) throw ownershipResult.reason;
   }
 
   const parsed = parseCharlottePaoRecord({
@@ -654,13 +665,18 @@ async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
   const t0 = Date.now();
 
   try {
+    // The address-search callers of these helpers never pass opts — only
+    // the by-parcel path threads rethrowErrors so the canary sees nested
+    // provider failures (Manatee features, Sarasota building detail,
+    // Charlotte ownership GIS) as throws instead of degraded-parse nulls.
+    const helperOpts = { rethrowErrors: !!options.rethrowErrors };
     let record = null;
     if (parcel.county === 'Manatee') {
       record = await fetchManateeParcelDetails({
         parcelId: parcel.paoParcelId,
         situsAddress: parcel.situsAddress,
         city: parcel.situsCity,
-      }, address, timeoutMs, t0);
+      }, address, timeoutMs, t0, helperOpts);
     } else if (parcel.county === 'Sarasota') {
       const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
       if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
@@ -675,14 +691,14 @@ async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
         city: parcel.situsCity || extractCountyResultCity(situsAddress),
         detailUrl,
         html: detailHtml,
-      }, address, timeoutMs, t0);
+      }, address, timeoutMs, t0, helperOpts);
     } else if (parcel.county === 'Charlotte') {
       record = await fetchCharlotteParcelDetails({
         parcelId: parcel.paoParcelId,
         situsAddress: parcel.situsAddress,
         city: parcel.situsCity,
         zipCode: parcel.situsZip,
-      }, address, timeoutMs, t0);
+      }, address, timeoutMs, t0, helperOpts);
     }
 
     if (record) {
@@ -705,6 +721,10 @@ async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
       elapsedMs: Date.now() - t0,
       error: summarizeProviderError(err),
     });
+    // Production callers want null-on-error (caller falls back to other
+    // providers). The canary passes rethrowErrors so a transient county-site
+    // failure reads differently from a parsed-but-empty result.
+    if (options.rethrowErrors) throw err;
     return null;
   }
 }
