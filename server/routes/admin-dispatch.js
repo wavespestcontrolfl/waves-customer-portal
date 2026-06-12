@@ -2486,6 +2486,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // companion, each carrying its frozen delivery posture. Trend
           // resolution mirrors the primary's (same queries, same trx);
           // photos / photo AI / pest pressure stay primary-only in v1.
+          // Activity scores insert REGARDLESS of delivery — deliberately
+          // identical to the standalone shadow semantic (Phase 1b): the
+          // shadow gates customer COPY, not observations of the customer's
+          // own property, so a graduated section trends against its
+          // shadow-era baseline instead of resetting to "first marker".
           const companionActivityInserts = [];
           if (validatedCompanions.length) {
             const companionSnapshots = [];
