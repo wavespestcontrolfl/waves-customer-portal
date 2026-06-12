@@ -275,8 +275,8 @@ function classifySendVerdict(sentBody, suggestedMessage) {
  * be used twice and can't expire out from under a queued send. Reopened on
  * cancel/failure; resolved (accepted/corrected) when the send fires.
  */
-async function markSuggestionScheduled({ decisionId, scheduledFor }) {
-  return db('agent_decisions')
+async function markSuggestionScheduled({ decisionId, scheduledFor }, dbh = db) {
+  return dbh('agent_decisions')
     .where({ id: decisionId, status: 'pending_review' })
     .update({
       status: 'scheduled',
@@ -285,19 +285,86 @@ async function markSuggestionScheduled({ decisionId, scheduledFor }) {
     });
 }
 
-/** Cancel/failure path: the customer was never answered — the card returns. */
-async function reopenScheduledSuggestion({ decisionId, reason }) {
-  if (!decisionId) return 0;
+/**
+ * Park every OTHER pending house-voice suggestion on the thread while a
+ * scheduled reply waits in the queue — otherwise the composer keeps the
+ * card actionable and the suggestion can be sent on top of the queued
+ * reply. Phone-scoped like the post-send ignore sweep; returns the parked
+ * decision ids so the scheduled row can record them (fire = ignored,
+ * cancel/failure = reopened).
+ */
+async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = db) {
+  if (!phoneLast10) return [];
+  const pendingQuery = dbh('agent_decisions as ad')
+    .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+    .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+    .andWhere(function byPhone() {
+      this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10])
+        .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10]);
+    });
+  if (excludeDecisionId) pendingQuery.whereNot('ad.id', excludeDecisionId);
+  const pending = await pendingQuery.select('ad.id');
+  if (!pending.length) return [];
+
+  const parked = await dbh('agent_decisions')
+    .whereIn('id', pending.map((r) => r.id))
+    .where({ status: 'pending_review' })
+    .update({
+      status: 'scheduled',
+      correction_note: 'A reply to this thread is scheduled — suggestion parked until it fires.',
+      updated_at: new Date(),
+    })
+    .returning('id');
+  return parked.map((r) => r.id);
+}
+
+/** Cancel/failure path: the customer was never answered — the cards return. */
+async function reopenScheduledSuggestions({ decisionIds, reason }) {
+  const ids = (Array.isArray(decisionIds) ? decisionIds : [decisionIds]).filter(Boolean);
+  if (!ids.length) return 0;
   try {
     return await db('agent_decisions')
-      .where({ id: decisionId, status: 'scheduled' })
+      .whereIn('id', ids)
+      .where({ status: 'scheduled' })
       .update({
         status: 'pending_review',
         correction_note: reason || 'Scheduled send did not go out — suggestion reopened.',
         updated_at: new Date(),
       });
   } catch (err) {
-    logger.warn(`[sms-suggest] reopen failed (decision ${decisionId}): ${err.message}`);
+    logger.warn(`[sms-suggest] reopen failed (${ids.length} decisions): ${err.message}`);
+    return 0;
+  }
+}
+
+/**
+ * A fired scheduled reply answers the thread: suggestions parked behind it
+ * resolve as ignored — the operator chose their own (or another) reply —
+ * and their drafts return to the judge pool, exactly like the immediate
+ * send path's ignore sweep.
+ */
+async function ignoreParkedSuggestions({ decisionIds, reviewedBy }) {
+  const ids = (Array.isArray(decisionIds) ? decisionIds : [decisionIds]).filter(Boolean);
+  if (!ids.length) return 0;
+  try {
+    return await db.transaction(async (trx) => {
+      const ignored = await trx('agent_decisions')
+        .whereIn('id', ids)
+        .where({ status: 'scheduled' })
+        .update({
+          status: 'ignored',
+          human_verdict: 'ignored',
+          correction_note: 'A scheduled staff reply to this thread was sent.',
+          reviewed_by: reviewedBy || 'Admin',
+          reviewed_at: new Date(),
+          updated_at: new Date(),
+        })
+        .returning(['id', 'entity_id']);
+      await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
+      return ignored.length;
+    });
+  } catch (err) {
+    logger.warn(`[sms-suggest] parked-ignore failed (${ids.length} decisions): ${err.message}`);
     return 0;
   }
 }
@@ -358,7 +425,14 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
     const reopened = await trx('agent_decisions as ad')
       .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'scheduled' })
       .where('ad.updated_at', '<', cutoff)
-      .whereRaw("NOT EXISTS (SELECT 1 FROM sms_log sl WHERE sl.metadata->>'agent_decision_id' = ad.id::text AND sl.status IN ('scheduled', 'sending'))")
+      .whereRaw(`NOT EXISTS (
+        SELECT 1 FROM sms_log sl
+        WHERE sl.status IN ('scheduled', 'sending')
+          AND (
+            sl.metadata->>'agent_decision_id' = ad.id::text
+            OR jsonb_exists(COALESCE(sl.metadata->'parked_decision_ids', '[]'::jsonb), ad.id::text)
+          )
+      )`)
       .update({
         status: 'pending_review',
         correction_note: 'Scheduled send never fired — suggestion reopened by the expiry sweep.',
@@ -406,7 +480,9 @@ module.exports = {
   publishSuggestion,
   revertDraftsToShadow,
   markSuggestionScheduled,
-  reopenScheduledSuggestion,
+  parkThreadSuggestions,
+  reopenScheduledSuggestions,
+  ignoreParkedSuggestions,
   resolveSuggestionAfterSend,
   expireStaleSuggestions,
 };

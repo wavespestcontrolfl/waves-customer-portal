@@ -14,7 +14,14 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
-const { SUGGEST_WORKFLOW, revertDraftsToShadow, markSuggestionScheduled, reopenScheduledSuggestion } = require('../services/sms-suggest-mode');
+const { isEnabled } = require('../config/feature-gates');
+const {
+  SUGGEST_WORKFLOW,
+  revertDraftsToShadow,
+  markSuggestionScheduled,
+  parkThreadSuggestions,
+  reopenScheduledSuggestions,
+} = require('../services/sms-suggest-mode');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -548,7 +555,14 @@ router.get('/agent-draft', async (req, res, next) => {
       .where('ad.source_channel', 'sms')
       .where('ad.status', 'pending_review')
       .whereNotNull('ad.suggested_message')
-      .whereRaw("NULLIF(TRIM(ad.suggested_message), '') IS NOT NULL")
+      .whereRaw("NULLIF(TRIM(ad.suggested_message), '') IS NOT NULL");
+
+    // Fail closed on rollback: with the suggest-mode gate off, existing
+    // pending house-voice cards must stop surfacing too — not just stop
+    // being created.
+    if (!isEnabled('smsSuggestMode')) q = q.whereNot('ad.workflow', SUGGEST_WORKFLOW);
+
+    q = q
       .select(
         'ad.id',
         'ad.workflow',
@@ -1033,42 +1047,55 @@ router.post('/schedule-sms', async (req, res, next) => {
     // verified decision id on the scheduled row so the 5-min dispatch cron
     // resolves it (accepted/corrected) when the send actually fires —
     // otherwise the suggestion stays pending and gets miscounted as
-    // ignored/expired despite a human-approved send. Cancelling the
-    // scheduled row leaves the decision pending, which is correct: the
-    // customer was never answered and the card should return.
+    // ignored/expired despite a human-approved send.
     let scheduledAgentDecision = null;
     if (agentDecisionId && agentDraft) {
       scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
     }
 
-    const [row] = await db('sms_log')
-      .insert({
-        customer_id: trustedCustomerId,
-        direction: 'outbound',
-        from_phone: chosenFrom,
-        to_phone: to,
-        message_body: cleanBody,
-        status: 'scheduled',
-        message_type: messageType || 'manual',
-        admin_user_id: req.technicianId || null,
-        scheduled_for: sendAt,
-        metadata: scheduledAgentDecision
-          ? JSON.stringify({ agent_decision_id: scheduledAgentDecision.id })
-          : null,
-      })
-      .returning(['id', 'scheduled_for']);
-
-    // Park the decision in 'scheduled' so the composer can't surface (and
-    // re-send) the same suggestion while the queued send waits, and the
-    // expiry sweep can't expire it out from under the cron. Reopened on
-    // cancel/failure; resolved when the send fires.
-    if (row?.id && scheduledAgentDecision) {
-      try {
-        await markSuggestionScheduled({ decisionId: scheduledAgentDecision.id, scheduledFor: sendAt });
-      } catch (parkErr) {
-        logger.warn(`[agent-review] failed to park scheduled draft decision: ${parkErr.message}`);
+    // Queue + park in ONE transaction: the used decision AND every other
+    // pending house-voice suggestion on this thread move to 'scheduled', so
+    // nothing stays actionable in the composer while the queued reply
+    // waits. Fire resolves the used one and ignores the parked ones;
+    // cancel/failure reopens them all. A park failure rolls the queue
+    // insert back — never a queued send with a still-actionable card.
+    const row = await db.transaction(async (trx) => {
+      let usedDecisionId = null;
+      if (scheduledAgentDecision) {
+        const parkedUsed = await markSuggestionScheduled(
+          { decisionId: scheduledAgentDecision.id, scheduledFor: sendAt }, trx
+        );
+        // 0 rows = concurrently resolved elsewhere — queue the text the
+        // operator approved, but nothing to resolve at fire time.
+        if (parkedUsed > 0) usedDecisionId = scheduledAgentDecision.id;
       }
-    }
+      const parkedIds = await parkThreadSuggestions(
+        { phoneLast10: normalizePhoneLast10(to), excludeDecisionId: scheduledAgentDecision?.id }, trx
+      );
+
+      const metadata = (usedDecisionId || parkedIds.length)
+        ? JSON.stringify({
+          agent_decision_id: usedDecisionId || undefined,
+          parked_decision_ids: parkedIds.length ? parkedIds : undefined,
+        })
+        : null;
+
+      const [inserted] = await trx('sms_log')
+        .insert({
+          customer_id: trustedCustomerId,
+          direction: 'outbound',
+          from_phone: chosenFrom,
+          to_phone: to,
+          message_body: cleanBody,
+          status: 'scheduled',
+          message_type: messageType || 'manual',
+          admin_user_id: req.technicianId || null,
+          scheduled_for: sendAt,
+          metadata,
+        })
+        .returning(['id', 'scheduled_for']);
+      return inserted;
+    });
 
     res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });
   } catch (err) { next(err); }
@@ -1099,15 +1126,13 @@ router.delete('/scheduled/:id', async (req, res, next) => {
     const row = await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).first('id', 'metadata');
     await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).del();
 
-    // The send was composed from an Agent Review draft — the customer was
-    // never answered, so the suggestion card returns to the composer.
+    // The customer was never answered — the used suggestion AND any parked
+    // behind the queued send return to the composer.
     const meta = parseJson(row?.metadata, {});
-    if (meta.agent_decision_id) {
-      await reopenScheduledSuggestion({
-        decisionId: meta.agent_decision_id,
-        reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
-      });
-    }
+    await reopenScheduledSuggestions({
+      decisionIds: [meta.agent_decision_id, ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : [])],
+      reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
+    });
 
     res.json({ success: true });
   } catch (err) { next(err); }

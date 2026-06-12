@@ -1034,13 +1034,22 @@ function initScheduledJobs() {
 
             // A scheduled send composed from an Agent Review draft resolves
             // its decision now that the message actually left — schedule-sms
-            // stashed the verified id on the row. Internal catch: a
-            // resolution failure must not flip a SENT row to failed.
+            // stashed the verified id on the row. Suggestions parked behind
+            // the queued reply resolve as ignored (their drafts return to
+            // the judge). Internal catches: a resolution failure must not
+            // flip a SENT row to failed.
             if (rowMeta.agent_decision_id) {
               const { resolveSuggestionAfterSend } = require('./sms-suggest-mode');
               await resolveSuggestionAfterSend({
                 decisionId: rowMeta.agent_decision_id,
                 sentBody: msg.message_body,
+                reviewedBy: msg.admin_user_id || 'Admin',
+              });
+            }
+            if (Array.isArray(rowMeta.parked_decision_ids) && rowMeta.parked_decision_ids.length) {
+              const { ignoreParkedSuggestions } = require('./sms-suggest-mode');
+              await ignoreParkedSuggestions({
+                decisionIds: rowMeta.parked_decision_ids,
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
@@ -1055,23 +1064,19 @@ function initScheduledJobs() {
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-            // The customer was never answered — the suggestion card returns.
-            if (rowMeta.agent_decision_id) {
-              await require('./sms-suggest-mode').reopenScheduledSuggestion({
-                decisionId: rowMeta.agent_decision_id,
-                reason: 'Scheduled send was blocked — suggestion reopened.',
-              });
-            }
+            // The customer was never answered — used + parked cards return.
+            await require('./sms-suggest-mode').reopenScheduledSuggestions({
+              decisionIds: [rowMeta.agent_decision_id, ...(Array.isArray(rowMeta.parked_decision_ids) ? rowMeta.parked_decision_ids : [])],
+              reason: 'Scheduled send was blocked — suggestion reopened.',
+            });
           }
         } catch (err) {
           await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: new Date() });
           logger.error(`[scheduled-sms] Failed: ${err.message}`);
-          if (rowMeta.agent_decision_id) {
-            await require('./sms-suggest-mode').reopenScheduledSuggestion({
-              decisionId: rowMeta.agent_decision_id,
-              reason: 'Scheduled send failed — suggestion reopened.',
-            });
-          }
+          await require('./sms-suggest-mode').reopenScheduledSuggestions({
+            decisionIds: [rowMeta.agent_decision_id, ...(Array.isArray(rowMeta.parked_decision_ids) ? rowMeta.parked_decision_ids : [])],
+            reason: 'Scheduled send failed — suggestion reopened.',
+          });
         }
       }
     } catch (err) {
