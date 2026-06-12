@@ -736,9 +736,14 @@ const EstimateConverter = {
           } catch (reminderErr) {
             logger.warn(`[estimate-converter] reminder relabel failed for reserved row ${row.id}: ${reminderErr.message}`);
           }
+          // Mirror EVERY rewritten field onto the in-memory row —
+          // follow-up seeding copies service_id and duration from the
+          // parent OBJECT, not the DB (pre-push P1). reservedStart is the
+          // same object reference when ids match.
           row.service_type = combo.route.name;
+          if (update.service_id) row.service_id = update.service_id;
+          if (update.estimated_duration_minutes) row.estimated_duration_minutes = update.estimated_duration_minutes;
           if (reservedStart && row.id === reservedStart.id) {
-            reservedStart.service_type = combo.route.name;
             reservedSeedSvc = combo.service;
           }
           logger.info(`[estimate-converter] reserved row ${row.id} combined → "${combo.route.name}" (picked slot preserved)`);
