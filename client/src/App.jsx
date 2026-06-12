@@ -158,8 +158,7 @@ const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
 const AutonomousContentReviewPage = lazyWithRetry(() => import('./pages/admin/AutonomousContentReviewPage'));
 const ContentRegistryPage = lazyWithRetry(() => import('./pages/admin/ContentRegistryPage'));
 const DataHygienePage = lazyWithRetry(() => import('./pages/admin/DataHygienePage'));
-const AgentOpsPage = lazyWithRetry(() => import('./pages/admin/AgentOpsPage'));
-const AgentDecisionsPage = lazyWithRetry(() => import('./pages/admin/AgentDecisionsPage'));
+const AgentsHubPage = lazyWithRetry(() => import('./pages/admin/AgentsHubPage'));
 const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
@@ -328,8 +327,8 @@ export default function App() {
             <Route path="content-engine" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading content engine...</div>}><AutonomousContentReviewPage /></Suspense>} />
             <Route path="content-registry" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading content registry...</div>}><ContentRegistryPage /></Suspense>} />
             <Route path="data-hygiene" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading data hygiene...</div>}><DataHygienePage /></Suspense>} />
-            <Route path="agents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading agent ops...</div>}><AgentOpsPage /></Suspense>} />
-            <Route path="agent-decisions" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading agent decisions...</div>}><AgentDecisionsPage /></Suspense>} />
+            <Route path="agents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading agents...</div>}><AgentsHubPage /></Suspense>} />
+            <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
             <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
             <Route path="referrals" element={<AdminReferralsPage />} />

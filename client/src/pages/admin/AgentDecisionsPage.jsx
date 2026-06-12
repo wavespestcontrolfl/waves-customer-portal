@@ -117,7 +117,7 @@ function Panel({ icon: Icon, title, children }) {
   );
 }
 
-export default function AgentDecisionsPage() {
+export default function AgentDecisionsPage({ embedded = false } = {}) {
   const [status, setStatus] = useState("pending_review");
   const [data, setData] = useState({ decisions: [], metrics: null });
   const [selectedId, setSelectedId] = useState(null);
@@ -259,11 +259,13 @@ export default function AgentDecisionsPage() {
 
   return (
     <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
-      <AdminCommandHeader
-        title="Agent Review"
-        subtitle="Shadow decisions from customer communication agents."
-        icon={Bot}
-      />
+      {!embedded && (
+        <AdminCommandHeader
+          title="Agent Review"
+          subtitle="Shadow decisions from customer communication agents."
+          icon={Bot}
+        />
+      )}
 
       <div style={{ padding: "0 24px 32px", display: "grid", gap: 16 }}>
         {data.missingTable && (
