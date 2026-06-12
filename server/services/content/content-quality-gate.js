@@ -249,7 +249,11 @@ function checkSerpBriefAttached(_draft, brief) {
 function isCompetitorGapBrief(brief) {
   const s = brief?.gsc_signal;
   return !!s && s.bucket === 'competitor_gap'
-    && s.competitor_position != null && s.search_volume != null;
+    && s.competitor_position != null && s.search_volume != null
+    // The domain is part of the provenance contract — without it the
+    // reviewer can't audit the competitor source, so the gate must not
+    // waive GSC evidence on numbers alone.
+    && !!s.competitor_domain;
 }
 
 function checkGscSignalAttached(_draft, brief) {

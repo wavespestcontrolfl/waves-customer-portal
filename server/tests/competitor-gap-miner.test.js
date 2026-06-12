@@ -48,6 +48,15 @@ describe('competitor-gap-miner internals', () => {
     expect(coveredBySitemap('sand fleas', sets)).toBe(false);
   });
 
+  test('coveredBySitemap never suppresses single-token topics', () => {
+    // "rats in florida" collapses to ['rat'] after stopword removal — a
+    // rat how-to slug must not suppress the distinct species-guide intent
+    const sets = slugSets(['get-rid-of-rats-bradenton', 'rodent-control-sarasota-fl']);
+    expect(coveredBySitemap('rats in florida', sets)).toBe(false);
+    // zero meaningful tokens still drops (can't dedupe)
+    expect(coveredBySitemap('the in of', sets)).toBe(true);
+  });
+
   test('keywordTokens drops stopwords and singularizes', () => {
     expect(keywordTokens('what do cockroach eggs look like')).toEqual(['cockroach', 'egg', 'look', 'like']);
     expect(keywordTokens('brown widow vs black widow')).toEqual(['brown', 'widow', 'black', 'widow']);

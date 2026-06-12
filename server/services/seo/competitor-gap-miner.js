@@ -37,11 +37,11 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
+const sitemapManager = require('./sitemap-manager');
 const { isEnabled } = require('../../config/feature-gates');
 const { minScoreToActFor, isTransactionalQuery, CITIES } = require('../content/scoring-config');
 
 const BUCKET = 'competitor_gap';
-const SITEMAP_URL = 'https://www.wavespestcontrol.com/sitemap-0.xml';
 
 // Audit-derived default set (2026-06-11): 8 Sarasota–Bradenton locals with
 // Waves' service mix + 3 FL regionals + 1 FL content-publisher benchmark.
@@ -155,20 +155,26 @@ function classifyService(keyword) {
 // A sitemap slug "covers" a keyword when every meaningful keyword token
 // appears as a whole (singularized) slug segment — substring matching is
 // not enough ('roach' would false-match 'cockroach-control-palmetto-fl').
+// Single-token topics are NEVER marked covered: stopword removal can
+// collapse a distinct intent onto one generic token ("rats in florida" →
+// ['rat']), and any rat-slugged how-to page would then wrongly suppress
+// the species-guide gap. One-token duplicates are rare and the runner's
+// uniqueness/redundancy gates are the backstop there.
 function coveredBySitemap(keyword, slugSegmentSets) {
   const tokens = keywordTokens(keyword).slice(0, 3);
   if (!tokens.length) return true; // nothing meaningful left — drop, can't dedupe
+  if (tokens.length < 2) return false;
   return slugSegmentSets.some((segs) => tokens.every((t) => segs.has(t)));
 }
 
-async function fetchSitemapSlugSets(fetchImpl = global.fetch) {
-  const res = await fetchImpl(SITEMAP_URL, {
-    headers: { 'user-agent': 'WavesPestControl-SeoIntelligence/1.0 (+https://www.wavespestcontrol.com)' },
-  });
-  if (!res.ok) throw new Error(`sitemap fetch ${res.status}`);
-  const xml = await res.text();
-  const slugs = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)]
-    .map((m) => m[1].replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, ''));
+// Live page inventory via sitemap-manager: honors SITEMAP_URL, expands
+// sitemap indexes recursively, and caches — the hardcoded-child-sitemap
+// version missed URLs the moment the site splits sitemaps (Codex P2).
+async function fetchSitemapSlugSets() {
+  const urls = await sitemapManager.listUrls();
+  const slugs = (urls || [])
+    .map((u) => String(u).replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, ''))
+    .filter(Boolean);
   if (!slugs.length) throw new Error('sitemap parsed to zero URLs');
   return slugs.map((slug) => new Set(slug.split(/[/-]/).filter(Boolean).map(singular)));
 }
@@ -227,7 +233,7 @@ class CompetitorGapMiner {
    *   serviceIntentCandidates: [...] } — the last two are operator-review
    * material (comparison pages / city-service gaps), never auto-enqueued.
    */
-  async mineAll({ persist = true, fetchImpl = global.fetch } = {}) {
+  async mineAll({ persist = true } = {}) {
     if (!isEnabled('seoIntelligence')) {
       logger.info('[competitor-gap-miner] GATE_SEO_INTELLIGENCE off — skipping');
       return null;
@@ -239,7 +245,7 @@ class CompetitorGapMiner {
 
     // Live sitemap is the page-existence ground truth; without it we'd
     // enqueue topics existing pages already cover. Abort, don't guess.
-    const slugSegmentSets = await fetchSitemapSlugSets(fetchImpl);
+    const slugSegmentSets = await fetchSitemapSlugSets();
 
     const own = parseRankedKeywords(await dataforseo.rankedKeywords('wavespestcontrol.com'));
     if (!own.length) {
