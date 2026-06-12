@@ -23,6 +23,17 @@ function isSafePublicUrl(rawUrl) {
 async function autoUnsubscribe(email) {
   const fromDomain = email.from_address?.split('@')[1] || '';
 
+  // Belt-and-braces: NEVER unsubscribe from mail sent by Waves-owned or
+  // operational domains, regardless of how the caller classified it. A
+  // one-click POST on our own newsletter's List-Unsubscribe header
+  // enrolls the shared inbox in SendGrid's suppression group — this
+  // exact failure silently knocked contact@ off our own list twice.
+  const { isOperationalDomain, domainFromAddress } = require('./spam-blocker');
+  if (isOperationalDomain(domainFromAddress(email.from_address))) {
+    logger.info(`[unsubscribe] Refused: operational sender ${email.from_address}`);
+    return { method: 'none', note: 'operational sender — never unsubscribe' };
+  }
+
   // Method 1: Check List-Unsubscribe header (stored in extracted_data or label_ids context)
   // We need the raw headers — check if they were stored
   const listUnsub = email.list_unsubscribe || null;

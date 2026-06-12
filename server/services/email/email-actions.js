@@ -1,9 +1,34 @@
 const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
+const { isOperationalDomain, domainFromAddress } = require('./spam-blocker');
+
+/**
+ * Destructive auto-actions (trash, archive, one-click UNSUBSCRIBE) must
+ * never fire on mail from Waves-owned or operational domains. Our own
+ * newsletter test sends land in the shared inbox, get classified as
+ * marketing_newsletter, and the agent was archiving them AND one-click
+ * unsubscribing — which silently enrolled contact@ in SendGrid's
+ * newsletter suppression group (twice). The same guard protects Google
+ * security notices etc. from a spam/newsletter misclassification.
+ * Non-destructive handlers (leads, vendor invoices) are unaffected.
+ */
+const DESTRUCTIVE_CATEGORIES = new Set(['spam', 'marketing_newsletter']);
+function shouldSkipAutoAction(category, fromAddress) {
+  return DESTRUCTIVE_CATEGORIES.has(category)
+    && isOperationalDomain(domainFromAddress(fromAddress));
+}
 
 async function executeAutoAction(email, classification) {
   try {
+    if (shouldSkipAutoAction(classification.category, email.from_address)) {
+      await db('emails').where({ id: email.id }).update({
+        auto_action: 'operational_sender_skipped',
+        updated_at: new Date(),
+      });
+      logger.info(`[email-actions] Skipped ${classification.category} auto-action for operational sender ${email.from_address} ("${email.subject}")`);
+      return;
+    }
     switch (classification.category) {
       case 'spam':
         await handleSpam(email);
@@ -229,4 +254,8 @@ async function handleVendorComm(email) {
   });
 }
 
-module.exports = { executeAutoAction };
+module.exports = {
+  executeAutoAction,
+  // Exported for unit testing the operational-sender guard
+  shouldSkipAutoAction,
+};
