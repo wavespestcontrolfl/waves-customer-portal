@@ -10,6 +10,10 @@ jest.mock('../services/invoice-followups', () => ({
 jest.mock('../services/annual-prepay-renewals', () => ({
   syncTermForInvoicePayment: jest.fn(async () => undefined),
 }));
+const mockRestoreDepositCredit = jest.fn(async () => 0);
+jest.mock('../services/estimate-deposits', () => ({
+  restoreDepositCreditForVoidedInvoice: (...args) => mockRestoreDepositCredit(...args),
+}));
 
 const db = require('../models/db');
 const FollowUps = require('../services/invoice-followups');
@@ -36,6 +40,8 @@ function invoice(overrides = {}) {
 describe('InvoiceService.voidInvoice follow-up cleanup', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Pass-through transaction — the void + ledger restore share it.
+    db.transaction = jest.fn(async (fn) => fn(db));
   });
 
   test('stops the invoice follow-up sequence after voiding an invoice', async () => {
@@ -58,5 +64,44 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
     expect(FollowUps.stopSequence).toHaveBeenCalledWith('inv-1', {
       reason: 'invoice_voided',
     });
+  });
+
+  test('restores deposit credits inside the void transaction (P1)', async () => {
+    const voided = invoice({
+      status: 'void',
+      line_items: JSON.stringify([
+        { description: 'Service', quantity: 1, unit_price: 100 },
+        { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -49, amount: -49, category: 'deposit_credit', estimate_id: 'est-1' },
+      ]),
+    });
+    db
+      .mockReturnValueOnce(chain({ first: invoice() }))
+      .mockReturnValueOnce(chain({ returning: [voided] }));
+
+    await InvoiceService.voidInvoice('inv-1');
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockRestoreDepositCredit).toHaveBeenCalledWith({ invoice: voided, trx: db });
+  });
+
+  test('a restore failure rolls the void back — blocked void beats stranded deposit money (P1)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: invoice() }))
+      .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }));
+    mockRestoreDepositCredit.mockRejectedValueOnce(new Error('ledger unavailable'));
+
+    await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow('ledger unavailable');
+    // The throw propagates out of db.transaction, so the void never commits;
+    // no post-void side effects run either.
+    expect(FollowUps.stopSequence).not.toHaveBeenCalled();
+  });
+
+  test('a lost conditional void (status changed mid-flight) throws instead of restoring twice', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: invoice() }))
+      .mockReturnValueOnce(chain({ returning: [] }));
+
+    await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow(/changed while voiding/);
+    expect(mockRestoreDepositCredit).not.toHaveBeenCalled();
   });
 });

@@ -978,6 +978,10 @@ const InvoiceService = {
           unit_price: -appliedDepositCredit,
           amount: -appliedDepositCredit,
           category: "deposit_credit",
+          // The line is the application record: voiding this invoice reads
+          // the stamp to return the consumed dollars to the right ledger
+          // (restoreDepositCreditForVoidedInvoice).
+          ...(depositCredit.estimateId ? { estimate_id: depositCredit.estimateId } : {}),
         });
       }
     }
@@ -1252,7 +1256,7 @@ const InvoiceService = {
             const created = await this.create({
               ...createParams,
               database: trx,
-              depositCredit: { amount: requested },
+              depositCredit: { amount: requested, estimateId: sourceEstimateId },
             });
             const effective = Number(created?.applied_deposit_credit) || 0;
             if (created?.id && effective > 0) {
@@ -2183,10 +2187,25 @@ const InvoiceService = {
       await stopInvoiceFollowupSequence(id, "invoice_voided");
       return current;
     }
-    const [invoice] = await db("invoices")
-      .where({ id })
-      .update({ status: "void", updated_at: new Date() })
-      .returning("*");
+    // Void + deposit-ledger restore commit TOGETHER: a committed void beside
+    // a still-consumed deposit strands the customer's money — the credit can
+    // no longer roll forward or refund (a restore failure rolls the void
+    // back; a blocked void beats stranded money). The status-conditional
+    // update makes a concurrent void/payment lose cleanly, so the restore
+    // can never run twice for one invoice.
+    let invoice = null;
+    await db.transaction(async (trx) => {
+      const [updated] = await trx("invoices")
+        .where({ id, status: current.status })
+        .update({ status: "void", updated_at: new Date() })
+        .returning("*");
+      if (!updated) {
+        throw new Error("Invoice status changed while voiding — re-check and retry");
+      }
+      const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
+      await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });
+      invoice = updated;
+    });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {
       await require("./annual-prepay-renewals").syncTermForInvoicePayment(
@@ -2323,6 +2342,13 @@ const InvoiceService = {
               .update({ status: "void", updated_at: new Date() })
               .returning("*");
             if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
+            // Same-transaction ledger restore, matching voidInvoice: a
+            // cancelled job's pre-minted first invoice may carry the
+            // estimate's deposit credit, which must become available again
+            // (roll-forward or terminal sweep) once this invoice stops
+            // billing.
+            const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
+            await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice, trx });
             return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
           });
 

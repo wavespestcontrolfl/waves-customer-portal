@@ -38,6 +38,7 @@ const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-s
 const slotReservation = require('../services/slot-reservation');
 const {
   buildPricingBundle,
+  findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
   isStructuralOneTimeOnlyEstimate,
@@ -350,9 +351,24 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
       membership,
       oneTime,
+      oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
     });
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
+    }
+    // Mirror accept's appointment gate BEFORE collecting money: a one-time
+    // uninvoiced accept with no booking is rejected (APPOINTMENT_REQUIRED at
+    // accept), so minting the PI first would charge $99 for an acceptance
+    // that cannot complete — the same live-reservation / linked-appointment
+    // lookup accept validates against must succeed here first.
+    if (policy.slotRequired) {
+      const booking = await findLinkedUpcomingAppointment(estimate, estData);
+      if (!booking) {
+        return res.status(400).json({
+          error: 'Please pick your first appointment before paying the deposit',
+          code: 'APPOINTMENT_REQUIRED',
+        });
+      }
     }
 
     const intent = await createDepositIntentForEstimate(estimate, { oneTime });
