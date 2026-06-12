@@ -141,6 +141,19 @@ describe('existing-customer public estimate page', () => {
     expect(html).toContain("you're already a Waves customer");
   });
 
+  test('Silver re-quote with no upgrade and no rows renders no member card', () => {
+    const membership = donMembership({
+      upgrade: null,
+      existingServices: [],
+      newServices: [],
+    });
+    const html = renderPage('silver-requote-token', lawnEstimate(), lawnEstimateData(), membership);
+
+    expect(html).not.toContain('<section class="card wg-member-card">');
+    expect(html).not.toContain('Welcome back');
+    expect(html).toContain("you're already a Waves customer");
+  });
+
   test('cross-sell skips services the customer already has — seasonal mosquito first', () => {
     const html = renderPage('existing-token-3', lawnEstimate(), lawnEstimateData(), donMembership());
 

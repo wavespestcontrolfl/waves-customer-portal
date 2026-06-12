@@ -2491,20 +2491,21 @@ ${shellTopBar()}
 // there is no membership context (leads, or any error upstream).
 function renderMembershipBlockHtml(membership) {
   if (!membership || !membership.isExistingCustomer) return '';
-  const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
 
-  // Only rows with a real, non-zero benefit render. A combined Bronze tier
-  // (one qualifying service, 0% discount) produces rows whose savings compute
-  // to $0.00 — advertising "member benefits" worth nothing reads as broken,
-  // so those rows are dropped and a card with no upgrade and no rows left is
-  // skipped entirely. The snapshot itself still flows: the setup-fee waiver
-  // and cross-sell pick read it independently of this card.
-  const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
-    .filter((s) => Number(s.extraDiscountPct) > 0);
-  const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
-    .filter((s) => Number(s.discountPct) > 0
-      || Number(s.perApplicationSavings) > 0
-      || Number(s.monthlySavings) > 0);
+  // Bronze carries no tier discount, so there are no member benefits to show:
+  // gate the whole card on the snapshot's combined tier. This must be the
+  // snapshot tier (the one that priced this estimate at save), NOT a live
+  // customers.waveguard_tier read — the record only updates on acceptance, so
+  // it would hide the upgrade story for a Bronze customer whose estimate is
+  // priced at Silver. The snapshot itself still flows regardless: the
+  // setup-fee waiver and cross-sell pick read it independently of this card.
+  if (!(Number(membership.tierDiscountPct) > 0)) return '';
+
+  const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+  const existing = Array.isArray(membership.existingServices) ? membership.existingServices : [];
+  const added = Array.isArray(membership.newServices) ? membership.newServices : [];
+  // Nothing to say (e.g. a re-quote of a service the member already has) —
+  // skip rather than render a header-and-badge-only card.
   if (!membership.upgrade && existing.length === 0 && added.length === 0) return '';
 
   const hello = membership.firstName
