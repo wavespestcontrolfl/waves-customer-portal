@@ -121,6 +121,41 @@ describe('owner risk wording', () => {
     expect(result.body).toContain('We checked and serviced 4 exterior rodent bait stations today.');
   });
 
+  test('rodent zero score with evidence chips never claims "no evidence" (hook P1)', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_bait_station',
+      reportTypeLabel: 'Quarterly Rodent Bait Station Service Summary',
+      values: { stations_checked: '4', bait_consumption: 'None', evidence_observed: 'Droppings, Gnaw marks' },
+      chips: ['Rodent inspection recommended'],
+      activity: { score: 0 },
+      visitSequence: 1,
+    });
+    expect(result.headline).toBe('No bait consumption was observed today, but rodent evidence was noted nearby.');
+    expect(result.headline).not.toContain('no visible rodent evidence');
+  });
+
+  test('termite zero score with live-activity signs never claims "no activity"', () => {
+    const result = buildTodaysResult({
+      projectType: 'termite_bait_station',
+      reportTypeLabel: 'Termite Bait Station Service Summary',
+      values: { stations_checked: '18', termite_activity: 'None observed', activity_signs: 'Mud tubing in station' },
+      chips: ['Recheck active station sooner'],
+      activity: { score: 0 },
+      visitSequence: 1,
+    });
+    expect(result.headline).toBe('Termite activity signs were observed in the bait stations today — see the details below.');
+    // Non-live signs (conducive conditions, previous feeding) do NOT trip it.
+    const benign = buildTodaysResult({
+      projectType: 'termite_bait_station',
+      reportTypeLabel: 'Termite Bait Station Service Summary',
+      values: { stations_checked: '18', termite_activity: 'None observed', activity_signs: 'Favorable moisture / soil conditions, Previous feeding evidence' },
+      chips: ['Continue scheduled monitoring'],
+      activity: { score: 0 },
+      visitSequence: 1,
+    });
+    expect(benign.headline).toBe('No termite activity was observed in the accessible bait stations today.');
+  });
+
   test('trend headlines still win on progress visits', () => {
     const result = buildTodaysResult({
       projectType: 'rodent_bait_station',

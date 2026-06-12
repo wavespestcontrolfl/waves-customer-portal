@@ -962,11 +962,28 @@ function buildTodaysResult({
   // accessible-stations-only for termite, consumption+evidence for rodent —
   // in place of the generic "No active signs of X activity" line. Trend
   // headlines on later visits still come from the generic indicator block.
+  // The zero score derives from consumption / the activity select ALONE, so
+  // a "nothing observed" headline must also be consistent with the evidence
+  // chips — otherwise the headline contradicts the findings list right
+  // below it (hook P1). When evidence exists, the headline says so.
   if (isBaitStationType && activity && activity.score === 0
     && !(visitSequence > 1 && activity.trendWord)) {
+    if (projectType === 'termite_bait_station') {
+      const liveSigns = String(values.activity_signs || '')
+        .split(',').map((s) => s.trim())
+        .filter((s) => ['Live termites in station', 'Mud tubing in station', 'Bait feeding'].includes(s));
+      return {
+        headline: liveSigns.length
+          ? 'Termite activity signs were observed in the bait stations today — see the details below.'
+          : 'No termite activity was observed in the accessible bait stations today.',
+        body: `${whatWeDid} ${nextStep}`,
+        nextStep,
+      };
+    }
+    const rodentEvidence = String(values.evidence_observed || '').trim();
     return {
-      headline: projectType === 'termite_bait_station'
-        ? 'No termite activity was observed in the accessible bait stations today.'
+      headline: rodentEvidence
+        ? 'No bait consumption was observed today, but rodent evidence was noted nearby.'
         : 'No bait consumption or visible rodent evidence was observed today.',
       body: `${whatWeDid} ${nextStep}`,
       nextStep,
