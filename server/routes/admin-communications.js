@@ -17,6 +17,7 @@ const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../serv
 const { isEnabled } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
+  HUMAN_REPLY_TYPES,
   revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
@@ -1202,17 +1203,54 @@ router.delete('/scheduled/:id', async (req, res, next) => {
     // fire-time resolution owns the decisions.
     const deleted = await db('sms_log')
       .where({ id: req.params.id, status: 'scheduled' })
-      .del(['id', 'metadata']);
+      .del(['id', 'metadata', 'to_phone']);
 
     const row = deleted?.[0];
     if (row) {
-      // The customer was never answered — the used suggestion AND any
-      // parked behind the queued send return to the composer.
       const meta = parseJson(row.metadata, {});
-      await reopenScheduledSuggestions({
-        decisionIds: [meta.agent_decision_id, ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : [])],
-        reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
-      });
+      const decisionIds = [
+        meta.agent_decision_id,
+        ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : []),
+      ].filter(Boolean);
+
+      if (decisionIds.length) {
+        const threadLast10 = normalizePhoneLast10(row.to_phone);
+        let transferred = false;
+        if (threadLast10) {
+          await db.transaction(async (trx) => {
+            await lockSuggestThread(trx, threadLast10);
+            // Another queued staff reply on this thread will still answer
+            // the customer — reopening now would put an actionable card on
+            // top of it. Re-park the decisions behind the surviving row:
+            // its fire ignores them, its cancel/failure reopens them.
+            const sibling = await trx('sms_log')
+              .whereIn('status', ['scheduled', 'sending'])
+              .whereIn('message_type', HUMAN_REPLY_TYPES)
+              .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+              .orderBy('scheduled_for', 'asc')
+              .first('id');
+            if (sibling) {
+              await trx('sms_log')
+                .where({ id: sibling.id })
+                .update({
+                  metadata: trx.raw(
+                    `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{parked_decision_ids}', COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) || ?::jsonb)`,
+                    [JSON.stringify(decisionIds)]
+                  ),
+                });
+              transferred = true;
+            }
+          });
+        }
+        if (!transferred) {
+          // No surviving queued reply — the customer was never answered,
+          // the cards return to the composer.
+          await reopenScheduledSuggestions({
+            decisionIds,
+            reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
+          });
+        }
+      }
     }
 
     res.json({ success: true });

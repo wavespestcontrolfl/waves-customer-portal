@@ -207,14 +207,19 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // card instead of staying silent. Escalation intents, scheduling-intent
     // messages, and anything without a customer + inbound link stay shadow.
     const suggestMode = require('./sms-suggest-mode');
-    const status = await suggestMode.resolveDraftStatus({
+    const wantsSuggestion = (await suggestMode.resolveDraftStatus({
       reply: parsed.reply,
       customerId: customer?.id || null,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
-    });
+    })) === suggestMode.SUGGESTED_STATUS;
 
+    // ALWAYS insert as shadow: the flip to 'suggested' happens atomically
+    // with the decision insert inside publishSuggestion's locked
+    // transaction. A crash between this insert and the publish leaves a
+    // plain shadow row the judge still covers — never a 'suggested' draft
+    // with no composer card behind it.
     const [row] = await db('message_drafts')
       .insert({
         sms_log_id: smsLogId || null,
@@ -225,7 +230,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         intent_confidence: intent?.confidence ?? null,
         context_summary: context.summary || null,
         flags: JSON.stringify(context.flags || []),
-        status,
+        status: SHADOW_STATUS,
         drafter: DRAFTER,
         model: MODELS.FLAGSHIP,
         prompt_version: PROMPT_VERSION,
@@ -238,7 +243,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       })
       .returning('id');
 
-    if (row?.id && status === suggestMode.SUGGESTED_STATUS) {
+    let published = false;
+    if (row?.id && wantsSuggestion) {
       const decisionId = await suggestMode.publishSuggestion({
         draftId: row.id,
         customerId: customer.id,
@@ -250,15 +256,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         model: MODELS.FLAGSHIP,
         promptVersion: PROMPT_VERSION,
       });
-      if (!decisionId) {
-        // No composer card means no accepted/ignored telemetry — fall the
-        // draft back to shadow so the nightly judge still covers it.
-        await db('message_drafts').where({ id: row.id }).update({ status: SHADOW_STATUS });
-      }
+      published = Boolean(decisionId);
     }
 
     logger.info(
-      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${status} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
+      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${published ? suggestMode.SUGGESTED_STATUS : SHADOW_STATUS} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
     );
     return row?.id || null;
   } catch (err) {

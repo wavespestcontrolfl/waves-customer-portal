@@ -310,7 +310,18 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
         .onConflict('idempotency_key')
         .ignore()
         .returning('id');
-      return row?.id || null;
+      if (!row?.id) return null;
+
+      // Atomic with the decision insert (and under the thread lock): the
+      // draft only leaves the judge pool once its composer card exists. The
+      // drafter inserts every draft as shadow first — a crash anywhere
+      // before this commit leaves a judged shadow row, never an orphaned
+      // 'suggested' draft with no card.
+      await trx('message_drafts')
+        .where({ id: draftId, status: 'shadow' })
+        .update({ status: SUGGESTED_STATUS });
+
+      return row.id;
     });
   } catch (err) {
     logger.warn(`[sms-suggest] publish failed (draft ${draftId}): ${err.message}`);
@@ -472,6 +483,42 @@ async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) 
  */
 async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
   const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
+
+  // Recovery first: a 'scheduled' decision whose queued row already went
+  // SENT means the cron crashed between its sent-update and resolution. The
+  // customer WAS texted — reopening would resurface a card on an answered
+  // thread (and house-voice rows would later miscount as expired). Resolve
+  // the used decision against the sent body; ignore the parked ones. Both
+  // helpers are guarded, so racing a live cron iteration double-resolves to
+  // the same verdict.
+  try {
+    const sentUsed = await db('agent_decisions as ad')
+      .joinRaw("JOIN sms_log sl ON sl.metadata->>'agent_decision_id' = ad.id::text AND sl.status = 'sent'")
+      .where({ 'ad.status': 'scheduled', 'ad.source_channel': 'sms' })
+      .select('ad.id', 'sl.message_body', 'sl.admin_user_id');
+    for (const row of sentUsed) {
+      await resolveSuggestionAfterSend({
+        decisionId: row.id,
+        sentBody: row.message_body,
+        reviewedBy: row.admin_user_id || 'Admin',
+      });
+    }
+
+    const sentParked = await db('agent_decisions as ad')
+      .joinRaw("JOIN sms_log sl ON jsonb_exists(COALESCE(sl.metadata->'parked_decision_ids', '[]'::jsonb), ad.id::text) AND sl.status = 'sent'")
+      .where({ 'ad.status': 'scheduled', 'ad.source_channel': 'sms' })
+      .distinct('ad.id')
+      .pluck('ad.id');
+    if (sentParked.length) {
+      await ignoreParkedSuggestions({ decisionIds: sentParked, reviewedBy: 'Admin' });
+    }
+    if (sentUsed.length || sentParked.length) {
+      logger.info(`[sms-suggest] recovered ${sentUsed.length} used + ${sentParked.length} parked decisions behind already-sent rows`);
+    }
+  } catch (recoverErr) {
+    logger.warn(`[sms-suggest] sent-linked recovery failed: ${recoverErr.message}`);
+  }
+
   return db.transaction(async (trx) => {
     // Orphaned holding states first: a 'scheduled' decision whose queued
     // sms_log row no longer exists in a live state (cancelled outside the
@@ -528,6 +575,7 @@ module.exports = {
   SUGGEST_AGENT_NAME,
   SUGGEST_DECISION_VERSION,
   EXPIRY_HOURS,
+  HUMAN_REPLY_TYPES,
   isEscalationIntent,
   suggestionEligible,
   validateModeChange,
