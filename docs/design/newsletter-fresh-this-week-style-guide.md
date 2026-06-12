@@ -98,15 +98,48 @@ afternoon-thunderstorm dodging).
 
 The Beehiiv archive has two non-event lanes, each its own content tag:
 
-**🦟 Pest Watch** (e.g. the Feb 2025 mosquito PSA — the most sales-forward
-issue that exists, and it's still only ~3.5/10):
-- Structure: edutainment facts (~60% of words: "So yeah, that mosquito
-  keeping you up at night? Probably a mom-to-be.") → ONE earnest
-  feature-benefit pitch section (~25%) → voice-y close (~15%).
+**🦟 Pest Insider** (BUILT — type `pest-insider-monthly`, auto-drafts the
+first Tuesday of each month, 7am ET). Derived from the Feb 2025 mosquito
+PSA — the most sales-forward issue that exists, still only ~3.5/10:
 - The **humor sandwich**: irreverence lives in headers/captions/kickers;
   the pitch bullets themselves are sincere. No product name, no price,
   no discount, phone CTA only. Urgency is biological/seasonal ("By March
   they're out in full force"), never commercial.
+- **Four jobs in priority order**: retention (every section quietly says
+  "this is why your quarterly visit matters now") → tier upgrades (the
+  ONE pitch matches the season: May–Jun mosquito, Feb–Apr termite, Aug
+  chinch/lawn, Oct–Nov rodent) → referrals (one nudge line per issue) →
+  eventual conversion of tip-subscribers.
+- **Repeatable issue skeleton** (train the reader): "What's Crawling This
+  Month" lead story → Pest of the Month ID card (where/threat/DIY/when
+  to call) → The Lawn Corner (the most underused angle — we have a lawn
+  division) → Myth-Buster (forwardable) → the ONE pitch → close with
+  quarterly tie-in + call CTA + referral line.
+- Signed by a real person ("— Adam, Waves Pest Control 🌊"), not "The
+  Team" — reviews mention Adam by name constantly; that's an asset.
+- Subjects: specific + local + honest alert framing beats clever
+  ("🐜 Termites are swarming in Sarasota this week" >> "Your March Pest
+  Insider").
+
+**Pest Insider follow-up ideas** (need data plumbing or real submissions
+— specced, not built):
+- *SWFL Pest Pressure Index* — monthly low/med/high gauge per pest per
+  city; the portal's Pest Pressure engine already computes this. The
+  glanceable, screenshot-able open-the-email reason.
+- *Neighborhood Watch* — anonymized tech ground-truth by area ("first
+  termite swarmers spotted in Venice") from job/service data.
+- *From the Field / Ask the Tech / Photo ID Corner / Win of the Month /
+  Tech Spotlight* — need real anecdotes, questions, reader photos,
+  review stories; never let the model invent these (hard rule in the
+  prompt).
+- *Alert sends* — off-cycle issues for genuinely urgent events (early
+  swarms, hurricane prep); highest open rates of the year.
+- *Segmentation* — customers vs prospects at minimum, then tier and
+  service area ("Venice edition" subjects outperform).
+- *Annual fridge PDF* — "The SWFL Homeowner's Pest Calendar" as the
+  signup incentive, re-sent every January.
+- *Metrics that prove it pays*: open trend, referral clicks, add-on
+  quotes within 7 days of send, churn among subscribers vs non.
 
 **🌞 Landscaping That Gets SWFL** (e.g. "9 SWFL Plants That Don't Need
 You"): anthropomorphized-personality listicle, per item: emoji H2 with

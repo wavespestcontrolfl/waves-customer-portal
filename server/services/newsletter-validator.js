@@ -2,7 +2,7 @@
  * Newsletter validation gate — pre-send checks for the content engine.
  */
 
-const { getNewsletterType, isFlagshipType } = require('../config/newsletter-types');
+const { getNewsletterType, isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
 const { validateVoice } = require('../config/voice-profiles');
 
 // Phrases the flagship draft is NOT allowed to make up. The events_raw
@@ -114,12 +114,18 @@ function validateNewsletterDraft(send, opts = {}) {
         warnings.push('No event structure detected');
       }
     }
-    // Scan ALL customer-facing copy — SendGrid delivers text_body to
-    // text-only clients, so a clean HTML body with a hallucinated claim
-    // in the plain-text fallback must still hard-block the send. Subject
-    // and preview text are scanned too: they're the first copy a
-    // subscriber sees, and an unverifiable "$500 prize" in the subject
-    // would otherwise sail through a body-only gate.
+  }
+
+  // Scan ALL customer-facing copy on every AI-generated type (flagship +
+  // Pest Insider — `claimValidation` in newsletter-types.js), not just
+  // the flagship. SendGrid delivers text_body to text-only clients, so a
+  // clean HTML body with a hallucinated claim in the plain-text fallback
+  // must still hard-block the send. Subject and preview text are scanned
+  // too: they're the first copy a subscriber sees, and an unverifiable
+  // "$500 prize" in the subject would otherwise sail through a body-only
+  // gate. Manually-authored types (service-promo) stay exempt — they
+  // quote prices legitimately.
+  if (requiresClaimValidation(send.newsletter_type)) {
     const combinedBody = [send.subject, send.preview_text, send.html_body, send.text_body]
       .filter(Boolean).join('\n');
     if (combinedBody) errors.push(...findHallucinatedClaims(combinedBody));

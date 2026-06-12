@@ -546,6 +546,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // TUESDAYS 7AM ET — Pest Insider monthly autopilot. Fires every Tuesday;
+  // runPestInsiderAutopilot's first-Tuesday ET gate + per-month idempotency
+  // keep it to one draft a month (node-cron's dom×dow semantics aren't
+  // portable, so the gate lives in code). Drafts only — admin reviews and
+  // sends manually, same contract as the weekly autopilot. runExclusive:
+  // deploy-overlap ticks must not double-draft (the idempotency check is
+  // read-then-act).
+  // =========================================================================
+  cron.schedule('0 7 * * 2', async () => {
+    try {
+      await runExclusive('pest-insider-autopilot', async () => {
+        const { runPestInsiderAutopilot } = require('./pest-insider-autopilot');
+        const result = await runPestInsiderAutopilot();
+        logger.info(`[pest-insider-autopilot] ${result.skipped ? 'skipped' : 'drafted'}: ${result.reason || result.sendId}`);
+      });
+    } catch (err) {
+      logger.error(`[pest-insider-autopilot] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY THURSDAY 7AM ET — Newsletter autopilot
   // Auto-drafts the weekly flagship digest from approved events. Never
   // auto-sends — creates a draft for admin review. Skips if fewer than 3

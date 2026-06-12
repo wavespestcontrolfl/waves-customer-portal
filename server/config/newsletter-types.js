@@ -45,6 +45,11 @@ const NEWSLETTER_TYPES = {
       'homeowner_minute',
       'waves_cta',
     ],
+    // AI-generated customer copy → the hallucinated-claim hard-block
+    // (prices, free-admission, safety/efficacy) runs at the send gates.
+    // Manually-authored types (service-promo etc.) stay exempt — they
+    // quote prices legitimately (owner decision 2026-05-29).
+    claimValidation: true,
     sourceRequirements: {
       minVerifiedFreshEvents: 5,
       minSourceDiversity: 2,
@@ -57,6 +62,33 @@ const NEWSLETTER_TYPES = {
       requiresDateTime: true,
       requiresFactsBankForHomeownerMinute: true,
     },
+    autonomy: {
+      aiDraftAllowed: true,
+      autoScheduleAllowed: true,
+      autoSendAllowed: false,
+      humanApprovalRequired: true,
+    },
+  },
+
+  'pest-insider-monthly': {
+    key: 'pest-insider-monthly',
+    label: 'Pest Insider (Monthly)',
+    flagship: false,
+    cadence: 'monthly',
+    // Auto-drafts the first Tuesday of the month at 7am ET (scheduler.js)
+    // — Thursdays stay owned by the weekly events guide.
+    defaultSendDay: 'Tuesday',
+    voiceProfile: 'waves_phase_3_local',
+    coverage: null,
+    // The humor-sandwich structure from the shipped Beehiiv "Pest Watch"
+    // issues (see docs/design/newsletter-fresh-this-week-style-guide.md):
+    // ~60% edutainment facts → ONE sincere pitch section → voice-y close.
+    requiredSections: ['seasonal_hook', 'pest_facts', 'featured_service', 'cta_close'],
+    // AI-generated like the flagship → same hallucinated-claim hard-block
+    // at the send gates (the prompt forbids prices/efficacy claims; this
+    // is the defense when the model slips anyway).
+    claimValidation: true,
+    sourceRequirements: null,
     autonomy: {
       aiDraftAllowed: true,
       autoScheduleAllowed: true,
@@ -145,6 +177,7 @@ const NEWSLETTER_TYPES = {
  */
 const TEMPLATE_TO_TYPE = {
   weekend: 'local-weekly-fresh-events',
+  pest_insider: 'pest-insider-monthly',
   pest_concern: 'pest-education',
   local_spotlight: 'local-spotlight',
   service_promo: 'service-promo',
@@ -165,6 +198,12 @@ function isFlagshipType(key) {
   return key === FLAGSHIP_TYPE_KEY;
 }
 
+// Types whose customer copy is AI-generated and must pass the
+// hallucinated-claim hard-block before sending.
+function requiresClaimValidation(key) {
+  return NEWSLETTER_TYPES[key]?.claimValidation === true;
+}
+
 module.exports = {
   NEWSLETTER_TYPES,
   TEMPLATE_TO_TYPE,
@@ -172,4 +211,5 @@ module.exports = {
   getNewsletterType,
   getFlagshipType,
   isFlagshipType,
+  requiresClaimValidation,
 };

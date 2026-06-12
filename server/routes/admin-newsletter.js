@@ -19,7 +19,7 @@ const NewsletterSender = require('../services/newsletter-sender');
 const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
-const { isFlagshipType } = require('../config/newsletter-types');
+const { isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt, weekLockKey } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
@@ -277,17 +277,31 @@ router.delete('/subscribers/:id', async (req, res, next) => {
 // "latest-autopilot" as an :id param.
 router.get('/sends/latest-autopilot', async (req, res, next) => {
   try {
-    // Only return drafts from the current Thursday-anchored week so stale
-    // autopilot drafts from previous weeks don't resurface in the compose UI.
     const now = new Date();
     const nowET = etParts(now);
-    const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
-    const weekStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
+
+    // ?type= selects which autopilot lane to hydrate (default: weekly
+    // flagship). Each lane gets a freshness window matched to its cadence
+    // so stale drafts from previous cycles don't resurface in Compose.
+    const type = req.query.type === 'pest-insider-monthly'
+      ? 'pest-insider-monthly'
+      : 'local-weekly-fresh-events';
+
+    let windowStart;
+    if (type === 'pest-insider-monthly') {
+      // Current ET month.
+      const mm = String(nowET.month).padStart(2, '0');
+      windowStart = parseETDateTime(`${nowET.year}-${mm}-01T00:00:00`);
+    } else {
+      // Current Thursday-anchored week.
+      const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
+      windowStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
+    }
 
     const draft = await db('newsletter_sends')
-      .where({ newsletter_type: 'local-weekly-fresh-events', status: 'draft' })
+      .where({ newsletter_type: type, status: 'draft' })
       .whereNull('created_by')
-      .where('created_at', '>=', weekStart)
+      .where('created_at', '>=', windowStart)
       .orderBy('created_at', 'desc')
       .first();
     res.json({ draft: draft || null });
@@ -617,10 +631,11 @@ router.post('/sends/:id/send', async (req, res) => {
       }
     }
 
-    // Server-side validation gate for flagship sends. Hard errors
-    // (no subject, no body) always block. force=true skips only the
-    // 0-recipient check (existing contract) — not structural errors.
-    if (isFlagshipType(send.newsletter_type)) {
+    // Server-side validation gate for AI-generated sends (flagship +
+    // Pest Insider). Hard errors (no subject, no body, hallucinated
+    // claims) always block. force=true skips only the 0-recipient check
+    // (existing contract) — not structural errors.
+    if (requiresClaimValidation(send.newsletter_type)) {
       const recipientCount = force ? 1 : Number(
         (await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first())?.c || 0
       );
@@ -856,6 +871,22 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
       // the /sends save (the saved row needs them for times_featured tracking).
       const lockedEventIds = (draft.events || []).map((e) => e.eventId).filter(Boolean);
       return res.json({ success: true, draft, eventIds: lockedEventIds });
+    }
+
+    // ── Pest Insider flow: structured humor-sandwich draft ────────────
+    // Same shared service as the monthly autopilot (persist:false preview)
+    // so manual Compose drafts get the identical prompt, sanitization, and
+    // assembler instead of the legacy free-form flow below.
+    if (newsletterType === 'pest-insider-monthly') {
+      const { draft } = await createNewsletterDraft({
+        prompt,
+        newsletterType,
+        audience,
+        tone,
+        includeCTA,
+        persist: false,
+      });
+      return res.json({ success: true, draft });
     }
 
     // ── Legacy flow: template-guided or free-form ─────────────────────
