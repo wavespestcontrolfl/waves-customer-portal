@@ -142,7 +142,7 @@ const COMBINED_SERVICE_ROUTES = [
   },
 ];
 
-function combineRecurringServicesForScheduling(recurringServices = [], { fallbackFrequency = null } = {}) {
+function combineRecurringServicesForScheduling(recurringServices = []) {
   const remaining = Array.isArray(recurringServices) ? recurringServices.slice() : [];
   const combos = [];
   for (const route of COMBINED_SERVICE_ROUTES) {
@@ -151,14 +151,14 @@ function combineRecurringServicesForScheduling(recurringServices = [], { fallbac
     if (primaryIdx === -1 || companionIdx === -1) continue;
     const primary = remaining[primaryIdx];
     const companion = remaining[companionIdx];
-    const primaryPattern = RecurringAppointmentSeeder.inferRecurringPattern({
-      service: primary,
-      fallbackFrequency,
-    });
-    const companionPattern = RecurringAppointmentSeeder.inferRecurringPattern({
-      service: companion,
-      fallbackFrequency,
-    });
+    // Combine eligibility reads SERVICE-LEVEL cadence only — the accept-level
+    // billing fallback must never override an explicit 4x/6x program
+    // (inferRecurringPattern consults fallbackFrequency before visit counts,
+    // so passing it here turned quarterly pest+termite into a monthly combo
+    // under monthly billing — pre-push P1). Lines without their own
+    // frequency/visits don't combine.
+    const primaryPattern = RecurringAppointmentSeeder.inferRecurringPattern({ service: primary });
+    const companionPattern = RecurringAppointmentSeeder.inferRecurringPattern({ service: companion });
     if (!primaryPattern || primaryPattern !== companionPattern) continue;
     // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
     // are coarse, so explicit visit counts are the cadence truth when known.
@@ -628,9 +628,7 @@ const EstimateConverter = {
       // follow-up it seeds resolve the companion profile.
       let reservedSeedSvc = null;
       try {
-        const { combos } = combineRecurringServicesForScheduling(recurringServices, {
-          fallbackFrequency: inferredFrequencyKey,
-        });
+        const { combos } = combineRecurringServicesForScheduling(recurringServices);
         for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
           const update = { service_type: combo.route.name, updated_at: new Date() };
           try {
@@ -648,6 +646,18 @@ const EstimateConverter = {
             logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
           }
           await database('scheduled_services').where({ id: row.id }).update(update);
+          // The public accept route registers the 72h/24h reminder BEFORE
+          // convertEstimate runs and appointment_reminders persists its own
+          // service_type — relabel it too or the reminder texts the
+          // standalone name (pre-push P1). Fail-soft: a reminder row may
+          // legitimately not exist yet.
+          try {
+            await database('appointment_reminders')
+              .where({ scheduled_service_id: row.id })
+              .update({ service_type: combo.route.name, updated_at: new Date() });
+          } catch (reminderErr) {
+            logger.warn(`[estimate-converter] reminder relabel failed for reserved row ${row.id}: ${reminderErr.message}`);
+          }
           row.service_type = combo.route.name;
           if (reservedStart && row.id === reservedStart.id) {
             reservedStart.service_type = combo.route.name;
@@ -681,9 +691,7 @@ const EstimateConverter = {
 
       // Combined-service routing: matching-cadence pairs schedule as ONE
       // combined service; everything else flows through unchanged.
-      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServices, {
-        fallbackFrequency: inferredFrequencyKey,
-      });
+      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServices);
       const scheduleUnits = [
         ...combos.map((combo) => ({ svc: combo.service, combo })),
         ...remaining.map((svc) => ({ svc })),

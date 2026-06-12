@@ -109,13 +109,26 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(combineRecurringServicesForScheduling(undefined)).toEqual({ remaining: [], combos: [] });
   });
 
-  test('fallback frequency resolves cadence when lines omit it', () => {
-    const { combos } = combineRecurringServicesForScheduling(
-      [{ name: 'Pest Control' }, { name: 'Rodent Bait Stations' }],
-      { fallbackFrequency: 'quarterly' },
-    );
+  test('explicit visit counts drive the combo cadence — billing-level frequency never leaks in (Codex P1)', () => {
+    // 4x pest + 4x termite under monthly billing must combine as QUARTERLY:
+    // the combine decision reads service-level cadence only.
+    const { combos } = combineRecurringServicesForScheduling([
+      { name: 'Pest Control', visitsPerYear: 4 },
+      { name: 'Termite Bait Station System', visitsPerYear: 4 },
+    ]);
     expect(combos).toHaveLength(1);
     expect(combos[0].service.frequency).toBe('quarterly');
+  });
+
+  test('lines without their own cadence never combine', () => {
+    // 'Rodent Bait Stations' carries no frequency/visits → pattern is
+    // unresolvable at the service level → stays a separate row.
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Pest Control' },
+      { name: 'Rodent Bait Stations' },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
   });
 });
 
