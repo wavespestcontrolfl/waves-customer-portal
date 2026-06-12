@@ -424,7 +424,7 @@ async function fetchBlogPublishAnnotations(sinceDate) {
   return out;
 }
 
-async function fetchAllAnnotations({ sinceDateString, sinceDate }) {
+async function fetchAllAnnotations({ sinceDateString, sinceDate, untilDateString = null }) {
   const sources = [
     ['experiments', () => fetchExperimentAnnotations(sinceDateString)],
     ['autonomous_runs', () => fetchAutonomousRunAnnotations(sinceDate)],
@@ -439,7 +439,15 @@ async function fetchAllAnnotations({ sinceDateString, sinceDate }) {
       logger.warn(`[rankings-monitor] annotation source ${name} failed: ${err.message}`);
     }
   }
-  return out;
+  return capAnnotations(out, untilDateString);
+}
+
+// Filter on the CHIP date (what's displayed) so no source can attach a
+// change dated after the displayed window end. ISO strings compare
+// lexicographically.
+function capAnnotations(annotations = [], untilDateString = null) {
+  if (!untilDateString) return annotations;
+  return annotations.filter((ann) => ann.date <= untilDateString);
 }
 
 // ── window queries ──────────────────────────────────────────────────
@@ -454,12 +462,15 @@ async function fetchAllAnnotations({ sinceDateString, sinceDate }) {
  * dropping them is correct.)
  */
 function pageWindowQuery({ periodDays, phase, domain = null, type = null }) {
+  // The anchor subquery carries the SAME domain/type filters as the outer
+  // query — a sparse type (e.g. blogs with no impressions on the site's
+  // newest dates) must anchor to its own latest data, or the typed window
+  // holds a partial period and disagrees with the caption's type anchor.
+  let anchorQuery = db('gsc_pages').select('domain').max('date as anchor').groupBy('domain');
+  if (domain) anchorQuery = anchorQuery.where('domain', domain);
+  if (type) anchorQuery = anchorQuery.where('page_type', type);
   let query = db('gsc_pages as g')
-    .join(
-      db('gsc_pages').select('domain').max('date as anchor').groupBy('domain').as('a'),
-      'a.domain',
-      'g.domain'
-    )
+    .join(anchorQuery.as('a'), 'a.domain', 'g.domain')
     .select(db.raw(`${CANON_URL_SQL} as page_url`), 'g.domain')
     .max('g.page_type as page_type')
     .sum('g.clicks as clicks')
@@ -495,14 +506,18 @@ async function domainAnchors({ domain = null, type = null } = {}) {
   };
 }
 
-// Annotation lookback boundaries, derived from the same anchored window
-// math as the metrics — a wall-clock `now` lookback shifted the net by the
-// GSC sync lag and dropped chips from the start of the prior window.
-function annotationBoundaries(anchorDateString, periodDays) {
-  const priorSince = windowBounds(periodDays, anchorDateString).prior_since;
+// Annotation boundaries, derived from the same anchored window math as the
+// metrics — a wall-clock `now` lookback shifted the net by the GSC sync lag
+// and dropped chips from the start of the prior window. The upper bound is
+// the newest anchor (the displayed window end): GSC lags a few days, so a
+// chip shipped today would otherwise sit beside movement measured only
+// through the older anchor and falsely imply it caused that movement.
+function annotationBoundaries(oldestAnchor, newestAnchor, periodDays) {
+  const priorSince = windowBounds(periodDays, oldestAnchor).prior_since;
   return {
     sinceDateString: priorSince,
     sinceDate: parseETDateTime(`${priorSince}T00:00`),
+    untilDateString: newestAnchor,
   };
 }
 
@@ -541,9 +556,10 @@ async function build({
   const rows = buildRows(currentRows, priorRows, { minImpressions });
   // Annotations span both windows: a change made in the prior window is
   // exactly what explains movement between them. Bounded from the OLDEST
-  // domain anchor's window start so a lagging domain's chips aren't cut.
+  // domain anchor's window start (a lagging domain's chips aren't cut) up
+  // to the NEWEST anchor (no chips dated after the displayed data ends).
   const annotations = await fetchAllAnnotations(
-    annotationBoundaries(anchors.oldest || anchor, periodDays)
+    annotationBoundaries(anchors.oldest || anchor, anchor, periodDays)
   );
   attachAnnotations(rows, annotations);
 
@@ -576,6 +592,7 @@ module.exports._internals = {
   addDaysToDateString,
   windowBounds,
   annotationBoundaries,
+  capAnnotations,
   sortRows,
   toMetric,
   classifyMovement,

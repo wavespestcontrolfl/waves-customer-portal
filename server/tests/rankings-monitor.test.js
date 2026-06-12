@@ -18,6 +18,7 @@ const {
   addDaysToDateString,
   windowBounds,
   annotationBoundaries,
+  capAnnotations,
   sortRows,
   classifyMovement,
   mergeWindowRows,
@@ -117,10 +118,24 @@ describe('windowBounds', () => {
 
 describe('annotationBoundaries', () => {
   test('lookback starts at the anchored prior-window start, not wall-clock now (Codex r2)', () => {
-    const b = annotationBoundaries('2026-06-09', 7);
-    expect(b.sinceDateString).toBe('2026-05-27'); // anchor - 13d = prior window start
+    const b = annotationBoundaries('2026-06-09', '2026-06-10', 7);
+    expect(b.sinceDateString).toBe('2026-05-27'); // oldest anchor - 13d = prior window start
     // timestamp boundary = ET midnight of that day (EDT = UTC-4 in June)
     expect(b.sinceDate.toISOString()).toBe('2026-05-27T04:00:00.000Z');
+    // upper bound = newest anchor (displayed window end), not today (Codex r3)
+    expect(b.untilDateString).toBe('2026-06-10');
+  });
+});
+
+describe('capAnnotations', () => {
+  test('drops chips dated after the displayed window end — a change shipped today must not imply it caused movement measured through an older anchor (Codex r3)', () => {
+    const anns = [
+      { date: '2026-06-09', type: 'META' },
+      { date: '2026-06-10', type: 'LINKS' },
+      { date: '2026-06-12', type: 'CONTENT' }, // after the anchor — GSC hasn't seen it
+    ];
+    expect(capAnnotations(anns, '2026-06-10').map((a) => a.date)).toEqual(['2026-06-09', '2026-06-10']);
+    expect(capAnnotations(anns, null)).toHaveLength(3);
   });
 });
 
