@@ -1027,6 +1027,9 @@ function initScheduledJobs() {
         };
         try {
           const purpose = purposeForScheduledMessageType(msg.message_type);
+          const claimMeta = typeof msg.metadata === 'string'
+            ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
+            : (msg.metadata || {});
           const smsResult = await sendCustomerMessage({
             to: msg.to_phone,
             body: msg.message_body,
@@ -1045,6 +1048,13 @@ function initScheduledJobs() {
               scheduled_sms_log_id: msg.id,
               fromNumber: msg.from_phone || undefined,
               adminUserId: msg.admin_user_id || undefined,
+              // Decision linkage rides into the provider-created sms_log row
+              // so the nightly sweep can recover the claims if the process
+              // dies between Twilio's accept and the resolution below.
+              agentDecisionId: claimMeta.agent_decision_id || undefined,
+              parkedDecisionIds: Array.isArray(claimMeta.parked_decision_ids) && claimMeta.parked_decision_ids.length
+                ? claimMeta.parked_decision_ids
+                : undefined,
             },
           });
           const completedAt = new Date();

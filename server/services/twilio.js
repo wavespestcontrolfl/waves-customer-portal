@@ -477,15 +477,19 @@ const TwilioService = {
           status: "sent",
           message_type: options.messageType || "manual",
           admin_user_id: options.adminUserId || null,
-          // agent_decision_id makes the sent row recoverable: if the process
-          // dies after Twilio accepts but before the composer marks the
-          // Agent Review decision accepted/corrected, the nightly suggest
-          // sweep resolves it from this linkage instead of reopening a card
-          // on an answered thread.
-          metadata: (options.media || options.agentDecisionId)
+          // Decision linkage makes the sent row recoverable: if the process
+          // dies after Twilio accepts but before the caller resolves the
+          // Agent Review decisions (composer send or scheduled-SMS cron),
+          // the nightly suggest sweep resolves the used decision and ignores
+          // the parked ones from this linkage instead of reopening cards on
+          // an answered thread.
+          metadata: (options.media || options.agentDecisionId || (Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length))
             ? JSON.stringify({
               ...(options.media ? { media: options.media } : {}),
               ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
+              ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
+                ? { parked_decision_ids: options.parkedDecisionIds }
+                : {}),
             })
             : null,
         });
