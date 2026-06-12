@@ -41,7 +41,10 @@
  *  - termite_*               — Phase 3, after FS 482.226 / FAC 5E-14 signoff.
  */
 
-// { key, from: expected current pointer, to: pointer after cutover }.
+// { key, from: expected current pointer(s), to: pointer after cutover }.
+// `from` may be an array when environments have drifted: canonical pre-cutover
+// pointer FIRST, accepted drift states after. up() accepts any listed value;
+// down() restores the canonical (first) pointer — never a drift value.
 // mosquito_one_time is the one pointer correction: it fell into the generic
 // pest fallback at profile seeding, but its work content (areas treated,
 // breeding sources) is the mosquito_event report family — and the generic
@@ -49,7 +52,7 @@
 const PHASE1_KEYS = [
   { key: 'pest_inspection', from: 'pest_inspection', to: 'pest_inspection' },
   { key: 'new_customer_inspection', from: 'pest_inspection', to: 'pest_inspection' },
-  { key: 'mosquito_event', from: 'mosquito_event', to: 'mosquito_event' },
+  { key: 'mosquito_event', from: ['mosquito_event', 'pest_inspection'], to: 'mosquito_event' },
   { key: 'mosquito_one_time', from: 'one_time_pest_treatment', to: 'mosquito_event' },
   { key: 'palm_injection', from: 'palm_injection', to: 'palm_injection' },
   { key: 'lawn_aeration', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
@@ -88,7 +91,8 @@ exports.up = async function up(knex) {
         continue;
       }
 
-      if (row && row.completion_mode === 'project_required' && row.project_type === from) {
+      const fromList = Array.isArray(from) ? from : [from];
+      if (row && row.completion_mode === 'project_required' && fromList.includes(row.project_type)) {
         await trx('service_completion_profiles')
           .where({ service_key: key })
           .update({ completion_mode: 'service_report', project_type: to, updated_at: trx.fn.now() });
@@ -101,7 +105,7 @@ exports.up = async function up(knex) {
         // migration must not paper over.
         throw new Error(
           `[phase1-cutover] ${key}: unexpected profile state ` +
-          `(mode=${row.completion_mode}, pointer=${row.project_type}, expected ${from}→${to}) ` +
+          `(mode=${row.completion_mode}, pointer=${row.project_type}, expected ${fromList.join('|')}→${to}) ` +
           `— aborting, nothing flipped`,
         );
       }
@@ -160,9 +164,14 @@ exports.down = async function down(knex) {
       // Healed rows (inserted by up()) also revert to project_required here —
       // they become valid pre-cutover rows the environment was missing, which
       // is the safe direction for a rollback.
+      // Array-valued `from` lists the canonical pointer first, then accepted
+      // drift states; restore the canonical one — writing the array itself
+      // would corrupt the string column, and restoring a drift value would
+      // re-create the drift up() exists to absorb.
+      const rollbackPointer = Array.isArray(from) ? from[0] : from;
       await trx('service_completion_profiles')
         .where({ service_key: key, project_type: to, completion_mode: 'service_report' })
-        .update({ completion_mode: 'project_required', project_type: from, updated_at: trx.fn.now() });
+        .update({ completion_mode: 'project_required', project_type: rollbackPointer, updated_at: trx.fn.now() });
     }
     console.log('[phase1-cutover] rolled back — Phase-1 keys restored to project_required');
   });
