@@ -13,7 +13,7 @@ const GLOBAL = {
   DRIVE_TIME: 20,             // minutes per visit
   ADMIN_ANNUAL: 51,           // $/service/yr (billing, scheduling, CRM)
   MARGIN_FLOOR: 0.35,         // 35% minimum contribution margin. TODO(v4.4): document rationale for 35% threshold (vs 30%/40%) — the single most load-bearing policy value in the engine.
-  DIRECT_COST_RATIO_TARGET_TS: 0.43, // Tree & Shrub direct-cost ratio target, not margin.
+  MARGIN_TARGET_TS: 0.45,     // Tree & Shrub target margin (admin-INCLUSIVE): price = (direct + ADMIN_ANNUAL) / (1 - target).
   CONDITIONAL_CEILING: 60,    // $/property/yr max conditional material before reprice
 };
 
@@ -311,26 +311,56 @@ const SHADE_RULES = {
 // ============================================================
 // TREE & SHRUB
 //
-// Pricing model:
+// Pricing model (v4.6 reprice, June 2026):
 //   onSiteMin           = max(25, 20 + bedArea/500 + treeCount*1.5 + accessMin)
-//   annualMaterialCost  = max(frequency * 10, bedArea * materialRate)
+//   annualMaterialCost  = max(frequency * 10,
+//                             (fixedAnnual + perTreeAnnual*treeCount
+//                              + perSqFtAnnual*bedArea) * tierFactor)
 //   laborPerVisit       = $35/hr loaded * (onSiteMin + 10) / 60
 //   directCost          = annualMaterialCost + laborPerVisit * frequency
-//   baseAnnual          = directCost / directCostRatioTarget    // NOT margin
+//   baseAnnual          = (directCost + ADMIN_ANNUAL) / (1 - marginTarget)
 //   monthly             = max(monthlyFloor, baseAnnual / 12)    // pre-discount
 //   annual              = monthly * 12
 //   displayed margin    = (annual - directCost - ADMIN_ANNUAL) / annual
+//                         (= marginTarget exactly whenever the floor is not binding)
 //
 // Key semantics — do not get these wrong:
-//   - materialRate is an ANNUAL $/sqft for the tier/program. Do NOT multiply
-//     by `frequency` again; it's already amortized across the year.
-//   - directCostRatioTarget (0.43) means price = directCost / 0.43, i.e. we
-//     target direct costs at 43% of price. It is NOT a 43% margin target;
-//     the displayed margin is a different (admin-cost-inclusive) calculation.
-//   - monthlyFloor is a PRE-DISCOUNT list-price floor. The WaveGuard
-//     post-discount margin guard (discount-engine.js#applyMarginGuard) may
-//     take the collected price below this floor only as far as the 35%
-//     displayed-margin floor allows.
+//   - The material model is ANNUAL and protocol-derived (bottom-up from the
+//     "10/10 SWFL Tree & Shrub Protocol" at June-2026 products_catalog
+//     prices). Do NOT multiply any term by `frequency`; the per-visit menus
+//     are already amortized across the year:
+//       fixedAnnual   $15  minimum foliar/micros program load (SuffOil-X,
+//                          IGR, micros at small-property spray volumes)
+//       perTreeAnnual $4   8-2-12 palm/ornamental fert @ 1.5 lb/100 sqft
+//                          canopy x 3 in-window apps x ~$0.93/lb (LESCO
+//                          50 lb invoice)
+//       perSqFtAnnual $0.055  Snapshot 2.5TG quarterly (~$0.034/sqft-yr at
+//                          2.875 lb/1,000 avg) + 13-0-13 + spray-volume
+//                          scaling on foliar visits
+//       lightFactor   0.75 the 4-visit program runs ~75% of the material
+//                          spend (Snapshot stays quarterly on granular
+//                          visits; foliar menu shrinks)
+//     The pre-v4.6 flat materialRate (0.110 $/sqft) had no bottom-up basis
+//     and over-modeled protocol cost by 36-66%, growing with bed size —
+//     see pricing_changelog entry tree_shrub_reprice_45_margin.
+//   - marginTarget (0.45) is an admin-INCLUSIVE margin: price =
+//     (directCost + ADMIN_ANNUAL) / (1 - 0.45). This replaces the v4.x
+//     directCostRatioTarget (0.43) divisor, which produced ~57% pre-admin
+//     margins on top of the inflated material rate.
+//   - monthlyFloor is a PRE-DISCOUNT list-price floor and a BACKSTOP, not
+//     the expected price: with the v4.6 model the formula prices nearly all
+//     real properties above it. Light's floor must stay <= 2/3 of
+//     Standard's so a floored Light never exceeds Standard per month.
+//     The WaveGuard post-discount margin guard
+//     (discount-engine.js#applyMarginGuard) may take the collected price
+//     below this floor only as far as the 35% displayed-margin floor
+//     allows. Note: at a 45% list margin, Platinum's 20% discount computes
+//     to a 31.25% collected margin, so the guard intentionally clamps
+//     Platinum on T&S (Gold's 15% lands at 35.3% and survives).
+//   - treeCount drives BOTH labor minutes and the per-tree material term.
+//     When treeCount is missing entirely, treeDensityCounts maps the
+//     property's treeDensity enum to an estimated count (with a warning)
+//     instead of silently pricing zero trees.
 //   - The 6-visit Standard program is the MANDATED default (matches the
 //     "10/10 SWFL Tree & Shrub Protocol" six_x cadence in
 //     server/config/protocols.json). Light (4x) maps to the protocol four_x
@@ -340,23 +370,23 @@ const SHADE_RULES = {
 //     6 visits, so pricing 9/12 visits charged for visits we don't run.
 //     Legacy `enhanced` / `premium` requests map to `standard` with a
 //     warning. See service-pricing.js#normalizeTreeShrubTier.
-//
-// Material rates are ANNUAL $/sqft per tier. Standard (0.110) is from the
-// April 2026 vendor cost audit (prior 0.063, under what wholesalers were
-// invoicing). Light (0.075) ≈ 4/6 of the Standard rate, since material
-// spend scales with the number of applications. The deprecated 9x/12x
-// rates (0.190 / 0.220) remain in legacy pricing_config seeds but are not
-// instantiated as active tiers.
 // ============================================================
 const TREE_SHRUB = {
   tiers: {
-    light:     { label: 'Light', frequency: 4, materialRate: 0.075, monthlyFloor: r(40) },
-    standard:  { label: 'Standard', frequency: 6, materialRate: 0.110, monthlyFloor: r(50) },
+    light:     { label: 'Light', frequency: 4, monthlyFloor: r(22) },
+    standard:  { label: 'Standard', frequency: 6, monthlyFloor: r(35) },
   },
   defaultTier: 'standard',
   recommendedTier: 'standard',
   accessMinutes: { easy: 0, moderate: 8, difficult: 15 },
-  directCostRatioTarget: 0.43,
+  materialModel: {
+    fixedAnnual: 15,
+    perTreeAnnual: 4,
+    perSqFtAnnual: 0.055,
+    lightFactor: 0.75,
+  },
+  treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
+  marginTarget: 0.45,
   marginFloor: 0.35,
 };
 

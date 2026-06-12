@@ -719,8 +719,17 @@ async function syncConstantsFromDB(dbInstance) {
       constants.TREE_SHRUB.marginFloor = config.global_margin_floor.value;
     }
     if (config.global_margin_target_ts?.value) {
-      constants.GLOBAL.DIRECT_COST_RATIO_TARGET_TS = config.global_margin_target_ts.value;
-      constants.TREE_SHRUB.directCostRatioTarget = config.global_margin_target_ts.value;
+      // v4.6 semantics change: the value is now an admin-INCLUSIVE margin
+      // target, not a direct-cost ratio. A pre-migration row (0.43, ratio
+      // semantics) applied as a margin would silently misprice, so the
+      // migration stamps `semantics` and the bridge only honors rows that
+      // carry the marker; unstamped rows fall back to the constants default.
+      const tsTarget = Number(config.global_margin_target_ts.value);
+      const tsSemanticsOk = config.global_margin_target_ts.semantics === 'margin_admin_inclusive';
+      if (tsSemanticsOk && tsTarget > 0 && tsTarget < 1) {
+        constants.GLOBAL.MARGIN_TARGET_TS = tsTarget;
+        constants.TREE_SHRUB.marginTarget = tsTarget;
+      }
     }
     if (config.global_conditional_ceiling?.value) constants.GLOBAL.CONDITIONAL_CEILING = config.global_conditional_ceiling.value;
 
@@ -800,14 +809,18 @@ async function syncConstantsFromDB(dbInstance) {
     // ── Tree & Shrub ─────────────────────────────────────────
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
-      if (rates['4x_light'] && constants.TREE_SHRUB.tiers.light) {
-        constants.TREE_SHRUB.tiers.light.materialRate = rates['4x_light'];
+      const model = constants.TREE_SHRUB.materialModel;
+      // v4.6 material model keys. The legacy flat-rate keys ('4x_light' /
+      // '6x_standard' $/sqft, plus retired 9x/12x) are ignored — a
+      // pre-migration row simply leaves the constants defaults in place.
+      if (model) {
+        if (Number(rates.fixed) > 0) model.fixedAnnual = Number(rates.fixed);
+        if (Number(rates.per_tree) > 0) model.perTreeAnnual = Number(rates.per_tree);
+        if (Number(rates.per_sqft) > 0) model.perSqFtAnnual = Number(rates.per_sqft);
+        if (Number(rates.light_factor) > 0 && Number(rates.light_factor) <= 1) {
+          model.lightFactor = Number(rates.light_factor);
+        }
       }
-      if (rates['6x_standard'] && constants.TREE_SHRUB.tiers.standard) {
-        constants.TREE_SHRUB.tiers.standard.materialRate = rates['6x_standard'];
-      }
-      // 9x_enhanced / 12x_premium rates may persist in legacy seeds but the
-      // Enhanced (9x) and Premium (12x) tiers are retired — ignore them.
     }
     if (config.ts_monthly_floors) {
       for (const [tier, val] of Object.entries(config.ts_monthly_floors)) {

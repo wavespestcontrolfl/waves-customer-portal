@@ -3,26 +3,26 @@
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1377,
-      "annualAfterDiscount": 1330.2,
-      "monthlyTotal": 110.85,
-      "savings": 46.8,
+      "annualBeforeDiscount": 1269,
+      "annualAfterDiscount": 1142.1,
+      "monthlyTotal": 95.18,
+      "savings": 126.9,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 51.5,
+          "mo": 45,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 75.75,
+          "mo": 66.75,
           "recommended": true,
           "name": "9 Applications"
         },
         {
-          "mo": 101,
+          "mo": 84,
           "recommended": false,
           "name": "12 Applications"
         }
@@ -58,34 +58,34 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1429.2,
-      "year2": 1330.2
+      "year1": 1241.1,
+      "year2": 1142.1
     }
   },
   "v1adapter_platinum_bundle_4_services_zone_a": {
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 4065,
-      "annualAfterDiscount": 3525.6,
-      "monthlyTotal": 293.8,
-      "savings": 539.4,
+      "annualBeforeDiscount": 3204,
+      "annualAfterDiscount": 2563.2,
+      "monthlyTotal": 213.6,
+      "savings": 640.8,
       "serviceCount": 4
     },
     "results": {
       "lawn": [
         {
-          "mo": 58,
+          "mo": 48,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 85.5,
+          "mo": 74.25,
           "recommended": false,
           "name": "9 Applications"
         },
         {
-          "mo": 114,
+          "mo": 94,
           "recommended": true,
           "name": "12 Applications"
         }
@@ -112,23 +112,23 @@
       ],
       "ts": [
         {
-          "mo": 55.75,
+          "mo": 40,
           "recommended": false,
-          "name": "Standard"
+          "name": "Light"
         },
         {
-          "mo": 90.83,
+          "mo": 50,
           "recommended": true,
-          "name": "Enhanced"
+          "name": "Standard"
         }
       ],
       "mq": [
         {
-          "mo": 108,
+          "mo": 64.5,
           "recommended": false
         },
         {
-          "mo": 125,
+          "mo": 79,
           "recommended": true
         }
       ],
@@ -141,8 +141,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 3624.6,
-      "year2": 3525.6
+      "year1": 2662.2,
+      "year2": 2563.2
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -267,7 +267,7 @@
       "items": [],
       "specItems": [
         {
-          "name": "Bed Bug Hybrid Heat + Residual Program \u2014 3 room(s)",
+          "name": "Bed Bug Hybrid Heat + Residual Program — 3 room(s)",
           "price": 2950
         }
       ]
@@ -484,26 +484,26 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 2192.7,
-      "annualAfterDiscount": 2002.85,
-      "monthlyTotal": 166.9,
-      "savings": 189.85,
+      "annualBeforeDiscount": 2006.7,
+      "annualAfterDiscount": 1705.7,
+      "monthlyTotal": 142.14,
+      "savings": 301,
       "serviceCount": 3
     },
     "results": {
       "lawn": [
         {
-          "mo": 51,
+          "mo": 50,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 77.25,
+          "mo": 67.5,
           "recommended": true,
           "name": "9 Applications"
         },
         {
-          "mo": 96,
+          "mo": 87,
           "recommended": false,
           "name": "12 Applications"
         }
@@ -530,14 +530,14 @@
       ],
       "ts": [
         {
-          "mo": 55.75,
+          "mo": 40,
           "recommended": false,
-          "name": "Standard"
+          "name": "Light"
         },
         {
-          "mo": 90.83,
+          "mo": 50,
           "recommended": true,
-          "name": "Enhanced"
+          "name": "Standard"
         }
       ],
       "mq": [],
@@ -550,34 +550,34 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2101.85,
-      "year2": 2002.85
+      "year1": 1804.7,
+      "year2": 1705.7
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1260,
-      "annualAfterDiscount": 1213.2,
-      "monthlyTotal": 101.1,
-      "savings": 46.8,
+      "annualBeforeDiscount": 1128,
+      "annualAfterDiscount": 1015.2,
+      "monthlyTotal": 84.6,
+      "savings": 112.8,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 48.5,
+          "mo": 40,
           "recommended": false,
           "name": "6 Applications"
         },
         {
-          "mo": 66,
+          "mo": 55,
           "recommended": true,
           "name": "9 Applications"
         },
         {
-          "mo": 83,
+          "mo": 78,
           "recommended": false,
           "name": "12 Applications"
         }
@@ -613,8 +613,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1312.2,
-      "year2": 1213.2
+      "year1": 1114.2,
+      "year2": 1015.2
     }
   }
 }

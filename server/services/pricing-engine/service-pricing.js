@@ -2145,9 +2145,28 @@ function priceTreeShrub(property, options = {}) {
   const warnings = [];
   const warningCodes = [];
   const access = normalizeTreeShrubEnum(options.access || property.access || property.features?.access, 'easy');
-  const treeCount = Math.max(0, Number(
-    options.treeCount ?? property.treeCount ?? property.features?.treeCount ?? 0
-  ) || 0);
+  // treeCount drives labor minutes AND the per-tree material term (v4.6).
+  // When no count is supplied at all, fall back to an estimate from the
+  // property's treeDensity enum instead of silently pricing zero trees.
+  const treeCountRaw = options.treeCount ?? property.treeCount ?? property.features?.treeCount;
+  let treeCount;
+  let treeCountSource = 'explicit';
+  if (treeCountRaw === undefined || treeCountRaw === null || String(treeCountRaw).trim() === '') {
+    const treeDensity = normalizeTreeShrubEnum(
+      property.treeDensity || property.features?.trees || property.features?.treeDensity, ''
+    );
+    const densityCount = TREE_SHRUB.treeDensityCounts?.[treeDensity];
+    if (densityCount !== undefined && densityCount > 0) {
+      treeCount = densityCount;
+      treeCountSource = 'density_estimate';
+      warnings.push(`Tree count was not provided; estimated ${densityCount} trees from ${treeDensity} tree density.`);
+    } else {
+      treeCount = 0;
+      treeCountSource = treeDensity ? 'density_estimate' : 'default_zero';
+    }
+  } else {
+    treeCount = Math.max(0, Number(treeCountRaw) || 0);
+  }
   const recommendationInput = {
     ...property,
     access,
@@ -2168,20 +2187,29 @@ function priceTreeShrub(property, options = {}) {
   const bedAreaCapped = !!bedAreaInfo.capped;
 
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
-  // Formula uses materialRate as an ANNUAL $/sqft (per tier); do NOT multiply
-  // by frequency again. See constants.js TREE_SHRUB block for full notes.
   const onSiteMin = Math.max(25, 20 + Math.round(bedArea / 500) + Math.round(treeCount * 1.5) + accessMin);
 
   const frequency = tierConfig.frequency;
-  const materialRate = tierConfig.materialRate;
-  const materialCost = Math.max(frequency * 10, bedArea * materialRate);
+  // Protocol-derived ANNUAL material model (v4.6); every term is already
+  // amortized across the year — do NOT multiply by frequency. See
+  // constants.js TREE_SHRUB block for the per-term derivation.
+  const materialModel = TREE_SHRUB.materialModel || {};
+  const tierMaterialFactor = tier === 'light' ? (materialModel.lightFactor ?? 0.75) : 1;
+  const modeledMaterialCost = (
+    (materialModel.fixedAnnual ?? 15)
+    + (materialModel.perTreeAnnual ?? 4) * treeCount
+    + (materialModel.perSqFtAnnual ?? 0.055) * bedArea
+  ) * tierMaterialFactor;
+  const materialCost = Math.max(frequency * 10, modeledMaterialCost);
 
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + 10) / 60);
   const laborAnnual = laborPerVisit * frequency;
 
   const annualDirectCost = materialCost + laborAnnual;
-  const directCostRatioTarget = TREE_SHRUB.directCostRatioTarget || GLOBAL.DIRECT_COST_RATIO_TARGET_TS || 0.43;
-  const baseAnnualPrice = annualDirectCost / directCostRatioTarget;
+  // Admin-INCLUSIVE margin target (v4.6): price = (direct + admin) / (1 - target).
+  // The displayed margin below equals marginTarget exactly when no floor binds.
+  const marginTarget = TREE_SHRUB.marginTarget ?? GLOBAL.MARGIN_TARGET_TS ?? 0.45;
+  const baseAnnualPrice = (annualDirectCost + GLOBAL.ADMIN_ANNUAL) / (1 - marginTarget);
   const monthlyCalc = baseAnnualPrice / 12;
   // Monthly floor is a PRE-DISCOUNT list-price floor — discounts may take the
   // collected price below this floor, but only as far as the post-discount
@@ -2244,9 +2272,15 @@ function priceTreeShrub(property, options = {}) {
     pricingConfidence: bedAreaInfo.pricingConfidence,
     bedAreaConfidence: bedAreaInfo.pricingConfidence,
     treeCount,
+    treeCountSource,
     access,
     onSiteMin,
-    materialRate,
+    materialModel: {
+      fixedAnnual: materialModel.fixedAnnual ?? 15,
+      perTreeAnnual: materialModel.perTreeAnnual ?? 4,
+      perSqFtAnnual: materialModel.perSqFtAnnual ?? 0.055,
+      tierFactor: tierMaterialFactor,
+    },
     monthly,
     annual,
     internalPerVisitRevenue,
@@ -2259,7 +2293,7 @@ function priceTreeShrub(property, options = {}) {
       totalWithAdmin: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),
       total: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),
     },
-    directCostRatioTarget,
+    marginTarget,
     baseMargin,
     margin: baseMargin,
     marginFloorOk: baseMarginRaw >= (TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR),

@@ -1692,7 +1692,17 @@ export function calculateEstimate(inputs) {
       eb = Math.min(12000, Math.round(lotSqFt * bp));
       fieldVerify.push('bed area');
     }
-    let et = treeCount || (treeDensity === 'HEAVY' ? 12 : treeDensity === 'MODERATE' ? 5 : 2);
+    // Tree count mirrors server v4.6 semantics: an explicit count (including
+    // 0) is authoritative; only a MISSING count falls back to a treeDensity
+    // estimate (heavy 10 / moderate 6 / light 3 / none 0 — constants.js
+    // TREE_SHRUB.treeDensityCounts).
+    let et;
+    if (_treeCount === '' || _treeCount === null || _treeCount === undefined) {
+      et = treeDensity === 'HEAVY' ? 10 : treeDensity === 'MODERATE' ? 6 : treeDensity === 'LIGHT' ? 3 : 0;
+      if (et > 0) fieldVerify.push('tree count');
+    } else {
+      et = treeCount;
+    }
     // v1.5: access difficulty adds time for gate access, narrow side yards, split beds
     const accessMin = accessDifficulty === 'DIFFICULT' ? 15 : accessDifficulty === 'MODERATE' ? 8 : 0;
     const osm = Math.max(25, 20 + Math.round(eb / 500) + Math.round(et * 1.5) + accessMin);
@@ -1700,21 +1710,27 @@ export function calculateEstimate(inputs) {
     // Tiers mirror the server engine (constants.js TREE_SHRUB): 6-visit
     // Standard is the mandated default (protocol six_x); 4-visit Light
     // (protocol four_x) is the downsell for clean / low-pest-history beds.
-    // 9x Enhanced and 12x Premium are retired. Material rates are annual
-    // $/sqft; Light ≈ 4/6 of the Standard rate (scales with applications).
-    const mps = { 4: 0.075, 6: 0.110 };
+    // 9x Enhanced and 12x Premium are retired.
+    // v4.6 material model is ANNUAL and protocol-derived:
+    //   (fixed $15 + $4/tree + $0.055/bed sqft) * tierFactor (Light 0.75)
+    // and price targets a 45% admin-INCLUSIVE margin:
+    //   annual = (materials + labor + $51 admin) / (1 - 0.45)
+    // Floors are backstops only (Light $22/mo, Standard $35/mo) and Light's
+    // floor must stay <= 2/3 of Standard's.
+    const TS_ADMIN_ANNUAL = 51;
     const tst = [
-      { n: 'Light', v: 4, f: 40 },
-      { n: 'Standard', v: 6, f: 50 },
+      { n: 'Light', v: 4, f: 22, mf: 0.75 },
+      { n: 'Standard', v: 6, f: 35, mf: 1 },
     ];
     R.ts = [];
     R.tsMeta = { eb, et, bedAreaIsEstimated };
     tst.forEach((t, i) => {
-      let mc = Math.max(t.v * 10, eb * mps[t.v]);
-      let lc = lpv * t.v;
-      let ann = Math.round((mc + lc) / 0.43 * 100) / 100;
-      let mo = Math.round(ann / 12 * 100) / 100;
-      if (mo < t.f) { mo = t.f; ann = t.f * 12; }
+      const mc = Math.max(t.v * 10, (15 + 4 * et + 0.055 * eb) * t.mf);
+      const lc = lpv * t.v;
+      // Mirror server rounding exactly: round monthly first, annual = mo*12.
+      const baseAnn = (mc + lc + TS_ADMIN_ANNUAL) / 0.55;
+      const mo = Math.max(t.f, Math.round(baseAnn / 12 * 100) / 100);
+      const ann = Math.round(mo * 12 * 100) / 100;
       const pa = Math.round(ann / t.v * 100) / 100;
       // Standard (index 1) is the mandated default recommendation.
       const rec = i === 1, dim = i !== 1;

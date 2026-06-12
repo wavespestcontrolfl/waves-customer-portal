@@ -38,10 +38,12 @@ const MOSQUITO_OPTS = [
 
 const TS_OPTS = [
   // Monthly minimums aligned to the engine's Tree & Shrub floors
-  // (constants.js TREE_SHRUB: Light 4-visit $40, Standard 6-visit $50) so
-  // field quick-quotes never land below the pre-discount floor.
-  { label: '4 Treatments', monthly: 40 },
-  { label: '6 Treatments', monthly: 50 },
+  // (constants.js TREE_SHRUB v4.6: Light 4-visit $22, Standard 6-visit $35)
+  // so field quick-quotes never land below the pre-discount floor. v4.6
+  // floors are backstops — the formula prices most real properties above
+  // them, so treat these as starting points, not typical quotes.
+  { label: '4 Treatments', monthly: 22 },
+  { label: '6 Treatments', monthly: 35 },
 ];
 
 const RODENT_OPTS = [
