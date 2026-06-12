@@ -109,7 +109,7 @@ describe('runIncidentEval semantics', () => {
     expect(h.notifications).toEqual([]);
   });
 
-  test('fail-open gate (checked=false) is inconclusive, never a pass', async () => {
+  test('fail-open gate (checked=false) is inconclusive, never a pass — and a fully-inconclusive suite alerts even when the other suite is green', async () => {
     const h = harness({
       evaluate: async () => ({ pass: true, checked: false, findings: [], skipped: 'api_error' }),
       classify: classifyBySender(),
@@ -117,7 +117,25 @@ describe('runIncidentEval semantics', () => {
     const result = await runIncidentEval(h.opts);
     const fc = result.results.filter((r) => r.suite === 'fact-check');
     expect(fc.every((r) => r.status === 'inconclusive')).toBe(true);
-    // Not a regression — no regression notification
+    expect(result.unverifiedSuites).toEqual(['fact-check']);
+    // Not a regression, but the fact-check component verified NOTHING this
+    // run — that gets its own could-not-verify notification.
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0].title).toMatch(/could not verify: fact-check/);
+  });
+
+  test('a lone inconclusive case does not alert (suite still partially verified)', async () => {
+    const healthyClassify = classifyBySender();
+    const h = harness({
+      evaluate: healthyEvaluate,
+      classify: async (email) => {
+        if (email.from_address === 'billing@swflchemsupply.com') throw new Error('one-off blip');
+        return healthyClassify(email);
+      },
+    });
+    const result = await runIncidentEval(h.opts);
+    expect(result.inconclusive).toBe(1);
+    expect(result.unverifiedSuites).toEqual([]);
     expect(h.notifications).toEqual([]);
   });
 
@@ -166,15 +184,16 @@ describe('runIncidentEval semantics', () => {
     expect(h.notifications).toHaveLength(1);
   });
 
-  test('classifier API errors are inconclusive; all-inconclusive raises the could-not-run notification', async () => {
+  test('classifier API errors are inconclusive; all suites down raises ONE could-not-verify notification naming both', async () => {
     const h = harness({
       evaluate: async () => { throw new Error('api down'); },
       classify: async () => { throw new Error('api down'); },
     });
     const result = await runIncidentEval(h.opts);
     expect(result.inconclusive).toBe(result.total);
+    expect(result.unverifiedSuites).toEqual(['fact-check', 'inbox']);
     expect(h.notifications).toHaveLength(1);
-    expect(h.notifications[0].title).toMatch(/could not run/);
+    expect(h.notifications[0].title).toMatch(/could not verify: fact-check, inbox/);
   });
 
   test('suites filter narrows the run', async () => {

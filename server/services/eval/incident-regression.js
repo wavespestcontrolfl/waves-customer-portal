@@ -25,9 +25,10 @@
  *     category + the shouldSkipAutoAction guard; it NEVER executes actions
  *     (classifyEmailContent is the pure classification path — no emails-row
  *     update, no executeAutoAction).
- *   - Regressions raise ONE admin notification per run; a run where every
- *     case is inconclusive raises a "could not run" notification (that's
- *     signal too — the eval silently not running is how this rots).
+ *   - Regressions raise ONE admin notification per run; a run where ANY
+ *     suite comes back entirely inconclusive raises a "could not verify"
+ *     notification naming the suite (that's signal too — one component's
+ *     eval silently not running is how this rots).
  */
 
 const fs = require('fs');
@@ -139,8 +140,12 @@ async function defaultNotify(row) {
 async function runIncidentEval(opts = {}) {
   const evaluate = opts.evaluate
     || require('../content/fact-check-gate').evaluate;
+  // Lazy: email-classifier constructs its Anthropic client at module load
+  // and THROWS without an API key. Resolving it per-call routes that failure
+  // into the inconclusive → could-not-verify path instead of killing the
+  // whole run (which would alert nobody).
   const classify = opts.classify
-    || require('../email/email-classifier').classifyEmailContent;
+    || ((email) => require('../email/email-classifier').classifyEmailContent(email));
   const shouldSkip = opts.shouldSkip
     || require('../email/email-actions').shouldSkipAutoAction;
   const notify = opts.notify || defaultNotify;
@@ -161,12 +166,24 @@ async function runIncidentEval(opts = {}) {
     }
   }
 
+  // A suite whose every case is inconclusive verified NOTHING about its
+  // component this run — that must alert even when the other suite is green
+  // (e.g. the classifier's vendor-context lookup failing for all inbox cases
+  // while fact-check passes). A lone inconclusive case stays notification-
+  // free: weekly + retry already absorbs transient hiccups, and alerting on
+  // every blip trains the reader to ignore the category.
+  const unverifiedSuites = suites
+    .map((s) => s.name)
+    .filter((name) => results.filter((r) => r.suite === name)
+      .every((r) => r.status === 'inconclusive'));
+
   const summary = {
     total: results.length,
     passed: results.filter((r) => r.status === 'pass').length,
     failed: results.filter((r) => r.status === 'fail').length,
     inconclusive: results.filter((r) => r.status === 'inconclusive').length,
     flaky: results.filter((r) => r.flaky).length,
+    unverifiedSuites,
     results,
   };
 
@@ -182,15 +199,18 @@ async function runIncidentEval(opts = {}) {
       link: '/admin/dashboard',
       metadata: JSON.stringify({ summary: { total: summary.total, passed: summary.passed, failed: summary.failed, inconclusive: summary.inconclusive }, failures: lines }),
     });
-  } else if (summary.inconclusive === summary.total) {
+  } else if (unverifiedSuites.length > 0) {
+    const details = results
+      .filter((r) => unverifiedSuites.includes(r.suite))
+      .map((r) => `${r.suite}/${r.id}: ${r.detail}`);
     await notify({
       recipient_type: 'admin',
       category: 'eval_regression',
-      title: 'Incident eval could not run (all cases inconclusive)',
-      body: 'Every case came back inconclusive — likely API key/model availability. The eval did NOT verify anything this week.',
+      title: `Incident eval could not verify: ${unverifiedSuites.join(', ')}`,
+      body: `Every case in ${unverifiedSuites.join(' and ')} came back inconclusive — likely API/DB availability. Those components were NOT verified this week.\n\n${details.join('\n').slice(0, 1200)}`,
       icon: '🧪',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ summary: { total: summary.total, inconclusive: summary.inconclusive } }),
+      metadata: JSON.stringify({ summary: { total: summary.total, inconclusive: summary.inconclusive }, unverifiedSuites }),
     });
   }
 

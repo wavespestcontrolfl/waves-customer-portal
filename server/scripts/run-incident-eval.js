@@ -13,8 +13,13 @@
  *
  * Needs ANTHROPIC_API_KEY and a DATABASE_URL (the inbox classifier reads
  * vendor_email_domains for prompt context).
+ *
+ * Exit codes: 0 = all selected suites verified clean; 1 = regression(s);
+ * 3 = no regressions but a selected suite was entirely inconclusive (it
+ * verified NOTHING — automation must not treat that as green).
  */
 
+const logger = require('../services/logger');
 const { runIncidentEval } = require('../services/eval/incident-regression');
 
 const ARGS = Object.fromEntries(
@@ -27,6 +32,10 @@ const ARGS = Object.fromEntries(
 
 (async function main() {
   try {
+    // Winston's console transport writes info logs to stdout; in --json mode
+    // stdout must be pure JSON for consumers, so silence the logger.
+    if (ARGS.json) logger.transports.forEach((t) => { t.silent = true; });
+
     const opts = {};
     if (!ARGS.notify) opts.notify = async () => {};
     if (ARGS.suite) {
@@ -47,10 +56,16 @@ const ARGS = Object.fromEntries(
         const mark = r.status === 'pass' ? '✓' : r.status === 'fail' ? '✗' : '?';
         console.log(`${mark} [${r.suite}] ${r.id}${r.flaky ? ' (flaky)' : ''}${r.detail ? ` — ${r.detail}` : ''}`);
       }
-      console.log(`\nPassed ${summary.passed}/${summary.total} · failed ${summary.failed} · inconclusive ${summary.inconclusive}\n`);
+      console.log(`\nPassed ${summary.passed}/${summary.total} · failed ${summary.failed} · inconclusive ${summary.inconclusive}`);
+      if (summary.unverifiedSuites.length) {
+        console.log(`NOT VERIFIED (all cases inconclusive): ${summary.unverifiedSuites.join(', ')}`);
+      }
+      console.log('');
     }
 
-    process.exit(summary.failed > 0 ? 1 : 0);
+    if (summary.failed > 0) process.exit(1);
+    if (summary.unverifiedSuites.length > 0) process.exit(3);
+    process.exit(0);
   } catch (err) {
     console.error(`Incident eval failed to run: ${err.message}`);
     process.exit(2);
