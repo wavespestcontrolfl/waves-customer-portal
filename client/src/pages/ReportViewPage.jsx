@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -1817,11 +1817,11 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   return (
-    <section className="report-card" data-section="todays-result" id="todays-result">
+    <section className="report-card" data-section="todays-result" id={sectionId}>
       <div className="section-eyebrow">
         {typedReport.isProgressVisit ? typedReport.reportTypeLabel : "Today's result"}
       </div>
@@ -1844,11 +1844,11 @@ function TodaysResultCard({ typedReport }) {
  * Zero-state values ("No active signs observed today") are results and
  * render like any other finding.
  */
-function TypedFindingsCard({ typedReport }) {
+function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
   const items = typedReport?.findings;
   if (!Array.isArray(items) || !items.length) return null;
   return (
-    <section className="sr-section" id="typed-findings" data-section="typed-findings">
+    <section className="sr-section" id={sectionId} data-section="typed-findings">
       <h2>What we found & did</h2>
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
@@ -1864,6 +1864,35 @@ function TypedFindingsCard({ typedReport }) {
           </div>
         ))}
       </dl>
+    </section>
+  );
+}
+
+/**
+ * Heading for a companion typed section (combined-service-completions.md) —
+ * combined services complete once and render the primary content first,
+ * then one block per companion. internal-only entries only ever arrive for
+ * STAFF viewers (the server omits them from customer payloads entirely);
+ * they reuse the InternalReviewBar visual treatment as a per-section notice.
+ */
+function CompanionSectionHeader({ companion }) {
+  const title = companion.typeLabel || companion.reportTypeLabel || 'Additional service';
+  if (companion.internalOnly) {
+    return (
+      <section className="report-action-bar" aria-label="Internal review notice">
+        <div className="section-eyebrow">Internal Review</div>
+        <h2 className="report-action-title">{title}</h2>
+        <p className="report-action-copy">
+          This section is stored for staff review only. The customer copy of
+          this report does not include it.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section className="sr-section" data-section="companion-heading">
+      <div className="section-eyebrow">Also completed this visit</div>
+      <h2 style={{ margin: 0 }}>{title}</h2>
     </section>
   );
 }
@@ -7280,6 +7309,31 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {data.activity
           ? <ActivityCard data={data.activity} />
           : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />}
+
+        {/* Companion typed sections (combined services): primary content
+            first, then one block per companion — heading, Today's Result,
+            findings, and the activity gauge, all rendered from the
+            companion's frozen snapshot. The server already filtered
+            internal_only entries out of customer payloads. */}
+        {(data.companionReports || []).map((companion) => (
+          <Fragment key={companion.type}>
+            <CompanionSectionHeader companion={companion} />
+            <TodaysResultCard
+              typedReport={companion}
+              sectionId={`companion-${companion.type}-todays-result`}
+            />
+            <TypedFindingsCard
+              typedReport={companion}
+              sectionId={`companion-${companion.type}-findings`}
+            />
+            {companion.activity && (
+              <ActivityCard
+                data={companion.activity}
+                sectionId={`companion-${companion.type}-activity`}
+              />
+            )}
+          </Fragment>
+        ))}
 
         <QuickNavigationAndAsk
           mode={mode}

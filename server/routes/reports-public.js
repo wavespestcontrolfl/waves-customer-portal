@@ -200,8 +200,13 @@ async function recordServiceReportEvent(service, eventName, channel, req, metada
   });
 }
 
-async function buildServiceReportV1ResponseData(service, token, { mode = 'live', pestPressureConfig } = {}) {
-  const data = await buildReportV1Data(service, token, db, { pestPressureConfig });
+async function buildServiceReportV1ResponseData(service, token, { mode = 'live', pestPressureConfig, staffViewer = false } = {}) {
+  // staffViewer gates internal_only companion sections (combined-service
+  // completions): report-data omits them from customer payloads entirely.
+  // Only the /data route resolves it (staffCanViewSuppressed — the same
+  // staff-JWT signal as the Phase-1b suppressed-report gate); PDF, ask, and
+  // every other caller stays a customer view.
+  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
   // buildPestPressureCustomerView returns null only when Pest Pressure
@@ -846,7 +851,11 @@ router.get('/:token/data', async (req, res, next) => {
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode }));
+      // Staff browsers attach their portal JWT on this fetch (ReportViewPage)
+      // — the same signal that opens suppressed shadow reports also unlocks
+      // internal_only companion sections, flagged for the per-section badge.
+      const staffViewer = await staffCanViewSuppressed(req);
+      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer }));
     }
 
     res.json({

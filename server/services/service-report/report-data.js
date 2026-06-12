@@ -1822,6 +1822,37 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? await loadActivityCustomerView(knex, { snapshot: typedSnapshot, service }).catch(() => null)
     : null;
 
+  // Companion typed sections (combined-service-completions.md): each stored
+  // snapshot froze its own delivery posture at completion. Server-side
+  // filtering here is the privacy boundary — the CUSTOMER payload must not
+  // contain internal_only sections at all; staff viewers (opts.staffViewer,
+  // resolved by the route with the same staff-JWT signal the Phase-1b
+  // suppressed-report read path uses) get every section, flagged
+  // internalOnly. Per-entry activity-history failures are non-fatal — a
+  // bad history must not take down the report.
+  const staffViewer = opts.staffViewer === true;
+  const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type)
+    : [];
+  const companionReports = await Promise.all(
+    companionSnapshots
+      .filter((snapshot) => staffViewer || snapshot.delivery === 'auto_send')
+      .map(async (snapshot) => ({
+        type: snapshot.type,
+        typeLabel: snapshot.typeLabel || null,
+        reportTypeLabel: snapshot.reportTypeLabel || null,
+        visitSequence: snapshot.visitSequence || 1,
+        isProgressVisit: (snapshot.visitSequence || 1) > 1,
+        todaysResult: snapshot.todaysResult || null,
+        findings: Array.isArray(snapshot.findings) ? snapshot.findings : [],
+        nextStepChips: Array.isArray(snapshot.nextStepChips) ? snapshot.nextStepChips : [],
+        photoSummary: snapshot.photoSummary || null,
+        schemaVersion: snapshot.schemaVersion || null,
+        internalOnly: snapshot.delivery !== 'auto_send',
+        activity: await loadActivityCustomerView(knex, { snapshot, service }).catch(() => null),
+      })),
+  );
+
   // buildPestPressureCustomerView returns null ONLY when Pest Pressure is
   // hidden from the customer (feature off, showOnCustomerReport off, scope
   // excludes the report). When that's the case, the legacy pressureIndex
@@ -2112,6 +2143,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         schemaVersion: typedSnapshot.schemaVersion || null,
       }
       : null,
+    // Companion sections, ordered as stored (declared profile order),
+    // already viewer-filtered above — customers never receive
+    // internal_only entries.
+    companionReports,
     metrics,
     mapSvg,
     mapSvgUrl: `/api/reports/${token}/map.svg`,

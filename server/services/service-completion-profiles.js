@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { isTypedFindingsType } = require('./service-report/activity-indicators');
 
 // Project types that must NEVER route through the generic typed
 // service-report (Specialty V1) completion flow, no matter what
@@ -32,10 +33,50 @@ const DEFAULT_SERVICE_REPORT_PROFILE = {
   requiresProject: false,
   findingsType: null,
   deliveryMode: 'auto_send',
+  companions: [],
 };
 
+const COMPANION_DELIVERY_MODES = new Set(['auto_send', 'internal_only']);
+
+/**
+ * Parse a profile row's companion_types JSONB into [{type, delivery}],
+ * FAIL-SAFE (combined-service-completions.md): the column is admin-mutable
+ * data and every bad entry must degrade toward "less customer exposure",
+ * never toward an unvalidated section or an accidental customer send.
+ *  - non-array / unparseable / garbage → []
+ *  - entries whose type isn't a registered typed findings type → dropped
+ *    (an unknown type has no schema, no validation, no snapshot builder)
+ *  - entries duplicating the profile's own findingsType → dropped (the
+ *    primary already owns that section)
+ *  - delivery 'disabled' → dropped (section fully off)
+ *  - missing/invalid delivery → coerced to 'internal_only' (never
+ *    accidentally customer-facing)
+ */
+function parseCompanionTypes(raw, ownFindingsType = null) {
+  let entries = raw;
+  if (typeof entries === 'string') {
+    try { entries = JSON.parse(entries); } catch { return []; }
+  }
+  if (!Array.isArray(entries)) return [];
+  const companions = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const type = typeof entry.type === 'string' ? entry.type.trim() : '';
+    if (!type || !isTypedFindingsType(type)) continue;
+    if (ownFindingsType && type === ownFindingsType) continue;
+    if (entry.delivery === 'disabled') continue;
+    companions.push({
+      type,
+      delivery: COMPANION_DELIVERY_MODES.has(entry.delivery) ? entry.delivery : 'internal_only',
+    });
+  }
+  return companions;
+}
+
 function serializeProfile(row = null) {
-  if (!row) return { ...DEFAULT_SERVICE_REPORT_PROFILE };
+  // Fresh companions array per call — the constant's [] must never become a
+  // shared mutable reference across resolved profiles.
+  if (!row) return { ...DEFAULT_SERVICE_REPORT_PROFILE, companions: [] };
   if (row.completion_mode === 'service_report' && V1_EXCLUDED_PROJECT_TYPES.has(row.project_type)) {
     logger.warn(
       `[completion-profiles] profile ${row.service_key || row.id} claims service_report completion for excluded project type "${row.project_type}" — coercing to special_project (compliance-gated flow)`,
@@ -67,10 +108,14 @@ function serializeProfile(row = null) {
       specialProject: true,
       requiresProject: true,
       deliveryMode: 'auto_send',
+      // Fail-closed branch: a flagged-bad row gets NO companion sections —
+      // they're behavior, and every behavior field here resets fail-closed.
+      companions: [],
     };
   }
   const completionMode = row.completion_mode || 'service_report';
   const projectBacked = completionMode === 'project_required' || completionMode === 'special_project';
+  const findingsType = completionMode === 'service_report' ? (row.project_type || null) : null;
   return {
     serviceKey: row.service_key || null,
     serviceName: row.service_name_snapshot || null,
@@ -83,7 +128,7 @@ function serializeProfile(row = null) {
     // value is exposed as findingsType when the mode is service_report:
     // that's the typed-findings schema pointer for specialty completions.
     projectType: projectBacked ? (row.project_type || null) : null,
-    findingsType: completionMode === 'service_report' ? (row.project_type || null) : null,
+    findingsType,
     createsServiceRecord: row.creates_service_record !== false,
     portalVisibility: row.portal_visibility || 'customer_portal',
     portalAttachPolicy: row.portal_attach_policy || 'active_portal_customer',
@@ -95,6 +140,10 @@ function serializeProfile(row = null) {
     specialProject: completionMode === 'special_project',
     requiresProject: projectBacked,
     deliveryMode: row.delivery_mode || 'auto_send',
+    // Companion typed sections (combined-service-completions.md) — typed
+    // findings sections that ride this service's primary completion flow,
+    // each with its own frozen-at-completion delivery posture.
+    companions: parseCompanionTypes(row.companion_types, findingsType),
   };
 }
 
@@ -149,6 +198,7 @@ async function resolveCompletionProfileForScheduledService(scheduledService = {}
 
   return {
     ...DEFAULT_SERVICE_REPORT_PROFILE,
+    companions: [],
     serviceKey: service?.service_key || null,
     serviceName: service?.name || scheduledService.service_type || scheduledService.serviceType || null,
     category: service?.category || null,

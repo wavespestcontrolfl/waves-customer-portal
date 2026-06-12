@@ -24,7 +24,7 @@ const TREND_KEY_MAP = {
   worsening: 'increasing',
 };
 
-export default function ActivityCard({ data }) {
+export default function ActivityCard({ data, sectionId = 'activity' }) {
   if (!data || data.score === null || data.score === undefined) return null;
 
   const trendKey = data.isBaseline
@@ -33,7 +33,7 @@ export default function ActivityCard({ data }) {
 
   return (
     <section
-      id="activity"
+      id={sectionId}
       data-section="activity"
       style={{
         background: '#FFFFFF',
