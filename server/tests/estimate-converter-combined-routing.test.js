@@ -51,6 +51,21 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(remaining).toHaveLength(2);
   });
 
+  test('lawn/T&S ignores the billing-cadence selection — explicit visits rule (Codex P1)', () => {
+    // Lawn plans commonly BILL monthly while visiting bimonthly; the
+    // accept-frequency override is a pest-route semantic only.
+    const { combos } = combineRecurringServicesForScheduling(
+      [
+        { name: 'Lawn Fertilization & Weed Control', appsPerYear: 6 },
+        { name: 'Tree & Shrub Care Program', visitsPerYear: 6 },
+      ],
+      { acceptFrequency: 'monthly' },
+    );
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.name).toBe('Lawn + Tree & Shrub');
+    expect(combos[0].service.frequency).toBe('bimonthly');
+  });
+
   test('9-app lawn never combines with a 6-visit T&S program (same bimonthly pattern bucket)', () => {
     // patternFromVisitsPerYear buckets 6–11 visits as "bimonthly" — explicit
     // visit counts are the cadence truth (Codex P1).

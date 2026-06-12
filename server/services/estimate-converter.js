@@ -126,6 +126,11 @@ const COMBINED_SERVICE_ROUTES = [
     // (rodent_bait_quarterly); server-priced estimates persist the line
     // with no cadence of its own.
     companionDefaultPattern: 'quarterly',
+    // For PEST plans the accepted customerSelection.frequency IS the visit
+    // cadence the customer chose (quarterly/bimonthly/monthly plan) and
+    // beats stale quote-time line cadence. NOT true for lawn, where the
+    // selection stores the BILLING cadence.
+    primaryUsesAcceptFrequency: true,
   },
   {
     primaryKey: 'pest_control',
@@ -135,6 +140,7 @@ const COMBINED_SERVICE_ROUTES = [
     // Termite bait station checks are quarterly (termite_active_bait_*);
     // the v1 mapper persists "Termite Bait" with no frequency/visits.
     companionDefaultPattern: 'quarterly',
+    primaryUsesAcceptFrequency: true,
   },
   {
     primaryKey: 'lawn_care',
@@ -202,16 +208,21 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const companion = companionIdx !== -1 ? remaining[companionIdx] : companionFromSupplement;
     if (!companion) continue;
     // Cadence resolution is role-aware:
-    //  - PRIMARY: the ACCEPTED plan selection wins when present — it is the
-    //    customer's FINAL cadence choice, and the persisted line can carry
-    //    stale quote-time frequency/visits (a quarterly quote switched to
-    //    monthly at accept must not combine quarterly — pre-push P1). Line
-    //    cadence is the fallback when no selection was recorded.
+    //  - PEST PRIMARY (primaryUsesAcceptFrequency): the ACCEPTED plan
+    //    selection wins — it is the customer's FINAL visit-cadence choice,
+    //    and the persisted line can carry stale quote-time frequency/visits
+    //    (a quarterly quote switched to monthly at accept must not combine
+    //    quarterly — pre-push P1). Line cadence is the fallback.
+    //  - LAWN PRIMARY: explicit line cadence/visits ONLY —
+    //    customerSelection.frequency stores the BILLING cadence for lawn
+    //    tiers (commonly monthly), not the visit cadence (pre-push P1).
     //  - COMPANION: explicit line cadence, else the route's program default
     //    (bait-station programs are quarterly regardless of how the pest
     //    plan bills) — NEVER the accepted selection.
     //  - nothing resolvable → no combine.
-    const primaryPattern = acceptPattern || explicitServiceCadence(primary);
+    const primaryPattern = (route.primaryUsesAcceptFrequency && acceptPattern)
+      ? acceptPattern
+      : explicitServiceCadence(primary);
     const companionPattern = explicitServiceCadence(companion) || route.companionDefaultPattern || null;
     if (!primaryPattern || !companionPattern || primaryPattern !== companionPattern) continue;
     // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
