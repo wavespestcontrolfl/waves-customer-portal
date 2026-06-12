@@ -165,6 +165,13 @@ function detectServiceLine(serviceType) {
   if (/\bpalmetto\b/.test(text)) return 'pest';
   if (/\bpalm(s)?\b/.test(text)) return 'palm';
 
+  // Combined services ("Pest & Rodent Control", "Quarterly Pest + Termite
+  // Bait Station"): an explicit "pest" mention is the PRIMARY line — the
+  // rodent/termite token names the companion section, not the report
+  // layout. Lawn/turf and mosquito mentions still win ("Lawn Pest
+  // Treatment" stays lawn); names without "pest" are untouched.
+  if (/\bpest\b/.test(text) && !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(text)) return 'pest';
+
   const directCategory = detectExistingServiceCategory ? detectExistingServiceCategory(serviceType) : null;
   if (directCategory === 'lawn') return 'lawn';
   if (directCategory === 'mosquito') return 'mosquito';

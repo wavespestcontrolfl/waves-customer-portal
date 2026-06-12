@@ -784,6 +784,21 @@ describe('service report v1', () => {
     expect(detectServiceLine('Every 6 Weeks Tree & Shrub Care Service')).toBe('tree_shrub');
     expect(methodFromProduct({ product_category: 'bait' }, 'pest')).toBe('bait_placement');
     expect(methodFromProduct({ product_category: 'bait' }, 'rodent')).toBe('bait_placement');
+  });
+
+  test('combined-service names detect their PRIMARY line (cutover)', () => {
+    // An explicit "pest" mention beats the companion's rodent/termite token —
+    // the combined report renders the pest layout (pest pressure, pest copy)
+    // with the companion as a section, not a rodent/termite report.
+    expect(detectServiceLine('Pest & Rodent Control')).toBe('pest');
+    expect(detectServiceLine('Quarterly Pest + Termite Bait Station')).toBe('pest');
+    expect(detectServiceLine('Lawn + Tree & Shrub')).toBe('lawn');
+    // Names without "pest" keep their standalone lines.
+    expect(detectServiceLine('Quarterly Rodent Bait Station Service')).toBe('rodent');
+    expect(detectServiceLine('Termite Bait Station System')).toBe('termite');
+    // Lawn/turf and mosquito mentions still beat an explicit "pest".
+    expect(detectServiceLine('Lawn Pest Treatment')).toBe('lawn');
+    expect(detectServiceLine('Mosquito & Pest Bundle')).toBe('mosquito');
     expect(methodFromProduct({ product_category: 'insecticide' }, 'tree_shrub')).toBe('foliar_spray');
     expect(methodFromProduct({ product_category: 'insecticide' }, 'palm')).toBe('foliar_spray');
   });
