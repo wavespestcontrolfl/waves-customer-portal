@@ -74,7 +74,7 @@ exports.up = async function (knex) {
       version_from: 'v4.5',
       version_to: 'v4.6',
       changed_by: 'claude-code',
-      category: 'rate',
+      category: 'cost',
       summary: 'Tree & Shrub reprice: protocol-derived material model (fixed + per-tree + per-sqft) replaces the flat 0.110 $/sqft rate; 45% admin-inclusive margin target replaces the 0.43 direct-cost divisor; floors drop to backstops (light $22/mo, standard $35/mo).',
       affected_services: JSON.stringify(['tree_shrub']),
       before_value: JSON.stringify({
