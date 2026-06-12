@@ -1,0 +1,119 @@
+{
+  "set": "competitor-gap-audit",
+  "version": "v1",
+  "notes": "Curated output of the competitor keyword gap audit 2026-06-11 (report: ~/waves-competitor-keyword-gap-audit-2026-06-11.md). Every topic verified: competitor ranks top-20 in DataForSEO Labs US database, Waves has no top-30 rank, no covering sitemap page, zero/trace GSC impressions. Scores are operator priority order — all clear the 45 blog floor; palmetto cluster first. Topics deliberately EXCLUDE optimize-existing candidates (house centipedes, fruit flies, no-see-ums, mosquito repellent — existing pages cover those) and competitor-brand comparison pages (operator-authored lane).",
+  "topics": [
+    {
+      "query": "palmetto bugs vs cockroaches",
+      "service": "pest",
+      "score": 72,
+      "search_volume": 12000,
+      "volume_note": "cluster: palmetto roaches/roach/cockroach 3600x3 + vs-variants 320x2 + tail",
+      "competitor_domain": "masseyservices.com",
+      "competitor_position": 5,
+      "competitor_url": "/palmetto-bugs-vs-cockroaches/",
+      "angle": "Identification + why Floridians use the euphemism; smoky-brown vs American vs German; when sightings signal an infestation. Internal-link to cockroach-control city spokes."
+    },
+    {
+      "query": "banana spiders in florida",
+      "service": "pest",
+      "score": 64,
+      "search_volume": 4400,
+      "competitor_domain": "kellerspestcontrol.com",
+      "competitor_position": 6,
+      "competitor_url": "/banana-spiders-florida/",
+      "angle": "Golden-silk orb weaver ID, are they dangerous, where they show up in SWFL yards."
+    },
+    {
+      "query": "sand fleas",
+      "service": "pest",
+      "score": 62,
+      "search_volume": 110000,
+      "competitor_domain": "alluneedpest.com",
+      "competitor_position": 8,
+      "competitor_url": "/blog/sand-fleas-what-are-they/",
+      "angle": "What they actually are (often not fleas), Gulf-coast beach angle, bites vs no-see-ums."
+    },
+    {
+      "query": "brown widow vs black widow",
+      "service": "pest",
+      "score": 62,
+      "search_volume": 60500,
+      "competitor_domain": "nativepestmanagement.com",
+      "competitor_position": 3,
+      "competitor_url": "/blog/2024/september/black-widow-vs-brown-widow-what-s-the-difference-/",
+      "angle": "Florida has both; ID comparison, venom/danger reality check, where each hides."
+    },
+    {
+      "query": "rats in florida",
+      "service": "rodent",
+      "score": 60,
+      "search_volume": 1600,
+      "competitor_domain": "kellerspestcontrol.com",
+      "competitor_position": 3,
+      "competitor_url": "/rats-in-florida/",
+      "angle": "Species guide (roof/Norway/wood rat). Internal-links INTO rodent-control city spokes — feeds the 12k-impression rodent authority play from the 2026-05-28 audit."
+    },
+    {
+      "query": "red ants vs fire ants",
+      "service": "pest",
+      "score": 58,
+      "search_volume": 74000,
+      "competitor_domain": "pestdefense.com",
+      "competitor_position": 9,
+      "competitor_url": "/blog/red-ants-vs-fire-ants/",
+      "angle": "Comparison intent — distinct from the existing get-rid-of-fire-ants guide; cross-link both ways."
+    },
+    {
+      "query": "what do cockroach eggs look like",
+      "service": "pest",
+      "score": 58,
+      "search_volume": 49500,
+      "competitor_domain": "alluneedpest.com",
+      "competitor_position": 8,
+      "competitor_url": "/blog/what-do-cockroach-eggs-look-like-identification-next-steps/",
+      "angle": "Ootheca identification by species, what finding one means, next steps."
+    },
+    {
+      "query": "cellar spider vs daddy long legs",
+      "service": "pest",
+      "score": 58,
+      "search_volume": 5300,
+      "volume_note": "cluster: webs variants 2400 + vs 1900 + harvestmen 1000x2",
+      "competitor_domain": "kellerspestcontrol.com",
+      "competitor_position": 7,
+      "competitor_url": "/cellar-spiders-vs-daddy-long-legs/",
+      "angle": "One post covers the cluster: do daddy long legs make webs, cellar spider vs harvestman ID."
+    },
+    {
+      "query": "dangerous ants in florida",
+      "service": "pest",
+      "score": 56,
+      "search_volume": 1300,
+      "competitor_domain": "kellerspestcontrol.com",
+      "competitor_position": 4,
+      "competitor_url": "/dangerous-ants-florida/",
+      "angle": "Which FL ants actually hurt you (fire/twig/carpenter), which are harmless."
+    },
+    {
+      "query": "plaster bagworms",
+      "service": "pest",
+      "score": 56,
+      "search_volume": 1000,
+      "competitor_domain": "kellerspestcontrol.com",
+      "competitor_position": 11,
+      "competitor_url": "/plaster-bagworms/",
+      "angle": "Extremely Florida household topic, low competition; the dangling-case-on-the-wall ID moment."
+    },
+    {
+      "query": "do bumblebees sting",
+      "service": "pest",
+      "score": 54,
+      "search_volume": 49500,
+      "competitor_domain": "alluneedpest.com",
+      "competitor_position": 10,
+      "competitor_url": "/blog/do-bumblebees-sting/",
+      "angle": "Sting facts vs honeybees/wasps; pollinator-respectful framing (no bee-killing pitch)."
+    }
+  ]
+}

@@ -518,6 +518,13 @@ class ContentBriefBuilder {
         ctr: opportunity.signal_metadata?.ctr || null,
         decay_pct: opportunity.signal_metadata?.decay_pct || null,
         growth_pct: opportunity.signal_metadata?.growth_pct || null,
+        // competitor_gap rows have zero GSC footprint by construction —
+        // their provenance is the competitor's ranking. Carried here so the
+        // quality gate's evidence check can verify it after the
+        // content_briefs round-trip (see checkGscSignalAttached).
+        search_volume: opportunity.signal_metadata?.search_volume ?? null,
+        competitor_domain: opportunity.signal_metadata?.competitor_domain || null,
+        competitor_position: opportunity.signal_metadata?.competitor_position ?? null,
       },
       customer_signal: signals.customer_signal
         ? {

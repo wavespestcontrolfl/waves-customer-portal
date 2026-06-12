@@ -142,6 +142,44 @@ class DataForSEO {
     }]);
   }
 
+  // DataForSEO Labs — every keyword a domain ranks for (top ~100) in
+  // Google's US database, ordered by search volume. Labs data is
+  // national-level: a domain "not ranking" here means outside the top
+  // ~100, NOT that no page exists — callers must join against the live
+  // sitemap before treating a keyword as a page gap. ~$0.01 base +
+  // $0.0001/row per call. `filters` passes through to the Labs filter
+  // grammar (e.g. [['keyword_data.keyword','like','%sarasota%']]).
+  async rankedKeywords(target, { limit = 1000, filters = null } = {}) {
+    const task = {
+      target,
+      location_code: 2840, // United States — Labs national database
+      language_code: 'en',
+      limit,
+      // Organic only — the Labs default is ['organic','paid'], and a paid
+      // row would read as fake organic evidence downstream (Codex P2,
+      // PR #1645).
+      item_types: ['organic'],
+      order_by: ['keyword_data.keyword_info.search_volume,desc'],
+    };
+    if (filters) task.filters = filters;
+    return this.request('/dataforseo_labs/google/ranked_keywords/live', [task]);
+  }
+
+  // DataForSEO Labs — domains whose organic keyword set overlaps the
+  // target's the most (ordered by intersections). exclude_top_domains
+  // drops Wikipedia-class giants; the count filter drops one-keyword
+  // accidental overlaps.
+  async competitorsDomain(target, { limit = 40, minSharedKeywords = 30 } = {}) {
+    return this.request('/dataforseo_labs/google/competitors_domain/live', [{
+      target,
+      location_code: 2840,
+      language_code: 'en',
+      limit,
+      exclude_top_domains: true,
+      filters: [['metrics.organic.count', '>', minSharedKeywords]],
+    }]);
+  }
+
   // Is an (external) URL in Google's index? Uses a `site:` SERP lookup.
   // Returns 'indexed' | 'not_indexed' | 'unknown' (call failed / not configured).
   async checkIndexed(url) {
