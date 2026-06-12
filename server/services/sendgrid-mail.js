@@ -186,8 +186,11 @@ async function sendBatch({ recipients, fromEmail, fromName, subject, html, text,
         'List-Unsubscribe': `<${r.unsubscribeUrl}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       },
-      // Substitution lets the body footer point at the right URL per recipient.
-      substitutions: { '{{unsubscribe_url}}': r.unsubscribeUrl },
+      // Substitution lets the body footer point at the right URL per
+      // recipient. r.substitutions carries any additional per-recipient
+      // tokens (e.g. the newsletter greeting first-name); spread first so
+      // a caller can never clobber the unsubscribe URL.
+      substitutions: { ...(r.substitutions || {}), '{{unsubscribe_url}}': r.unsubscribeUrl },
       // Per-recipient custom_args travel with every webhook event — used
       // by the newsletter sender to attach delivery_id so events can find
       // the right row when provider_message_id is unknown.

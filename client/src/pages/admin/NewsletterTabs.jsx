@@ -89,6 +89,11 @@ function adminFetch(path, options = {}) {
 // placeholder-y so the operator (or AI Draft) can rewrite them per send —
 // the value here is the structure + voice cues, not literal headlines.
 // Deliberately minimal markup — SendGrid footer is appended automatically.
+// Drafts persist the {{greeting-name}} substitution token (resolved per
+// recipient at send time by SendGrid). Previews have no recipient — strip
+// it so the operator never sees the literal token.
+const stripGreetingToken = (s) => String(s || "").split("{{greeting-name}}").join("");
+
 const TEMPLATES = [
   {
     key: "blank",
@@ -1150,7 +1155,7 @@ function SendConfirmDialog({
   // identical for every campaign, so the operator's review value is
   // entirely in the body. Sandbox tight (no scripts, no same-origin)
   // since the operator authored the HTML and may have pasted anything.
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${htmlBody || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${stripGreetingToken(htmlBody) || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
 
   return (
     <div

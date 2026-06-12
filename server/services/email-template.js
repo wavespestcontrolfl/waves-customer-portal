@@ -91,7 +91,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
             <tr>
               <td align="left">
-                <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;text-decoration:none;" />
+                <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;text-decoration:none;" />
               </td>
               <td align="right" style="font-family:Inter,Arial,sans-serif;font-size:13px;font-weight:800;color:${NAVY};">
                 <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${NAVY};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
@@ -165,7 +165,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;background:${CARD};border-radius:16px;overflow:hidden;border:1px solid ${RULE};box-shadow:none;">
         <tr><td style="background:${CARD};padding:16px 24px;text-align:left;border-bottom:1px solid ${RULE};">
           <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-flex;align-items:center;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;vertical-align:middle;" />
+            <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;vertical-align:middle;" />
           </a>
         </td></tr>
         <tr><td style="padding:30px 30px 8px 30px;font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.58;color:${BODY};">
@@ -222,7 +222,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslette
 
   const headerBlock = isLocalGuide
     ? `<a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="52" height="52" style="display:inline-block;width:52px;height:52px;max-width:52px;border:0;outline:none;" />
+            <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="88" height="88" style="display:inline-block;width:88px;height:88px;max-width:88px;border:0;outline:none;" />
           </a>
           <div style="margin-top:10px;font-family:Inter,Arial,sans-serif;font-size:16px;letter-spacing:-0.01em;color:${NAVY};font-weight:800;">
             Fresh This Week
@@ -231,7 +231,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslette
             A local weekend guide from the Waves crew
           </div>`
     : `<a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:72px;border:0;outline:none;" />
+            <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="88" height="88" style="display:inline-block;width:88px;height:88px;max-width:88px;border:0;outline:none;" />
           </a>
           <div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:12px;letter-spacing:0;text-transform:none;color:${NAVY};font-weight:800;">
             The Waves Newsletter

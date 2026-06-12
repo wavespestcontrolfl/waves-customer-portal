@@ -1196,9 +1196,12 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     expect(html).not.toContain('Tickets &amp; Info');
     // event name inline-linked in the description
     expect(html).toContain('<a href="https://example.com/fin"');
-    // rotating scoop label, bullets carry their own emoji (no injected •)
+    // rotating scoop label; plain "•" bullets with model emojis stripped
+    // (baseEvent highlights deliberately carry leading emojis to prove the
+    // strip — and old persisted drafts still have them)
     expect(html).toContain('Here&#39;s the scoop:');
-    expect(html).not.toMatch(/<li[^>]*>• /);
+    expect(html).toMatch(/<li[^>]*>• Crowd-pleaser setlist</);
+    expect(html).toMatch(/<li[^>]*>• Irish pub vibes</);
     // pro tip label never doubles
     expect(html).toContain('<strong>Pro tip:</strong>');
     expect(html).not.toMatch(/Pro tip:\s*<\/strong>\s*<em>\s*Pro tip/i);
@@ -1224,6 +1227,71 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     expect(html).toContain('✔️ Pack a chair');
     expect(html).toContain('✔️ Hydrate like it&#39;s your job');
     expect(html).toContain('— The Waves Pest Control Team');
+  });
+});
+
+describe('newsletter greeting personalization + render polish', () => {
+  const {
+    GREETING_NAME_TOKEN,
+    greetingWithNameToken,
+    greetingNameValueFor,
+    stripGreetingNameToken,
+    plainBulletText,
+    assembleBeehiivNewsletter,
+  } = require('../services/newsletter-draft');
+
+  test('greetingWithNameToken slots the token inside the sentence, before trailing punctuation', () => {
+    expect(greetingWithNameToken('Hey there!')).toBe(`Hey there${GREETING_NAME_TOKEN}!`);
+    expect(greetingWithNameToken('What a week?!')).toBe(`What a week${GREETING_NAME_TOKEN}?!`);
+    expect(greetingWithNameToken('Hello')).toBe(`Hello${GREETING_NAME_TOKEN}`);
+  });
+
+  test('greetingNameValueFor: ", Name" with no HTML metacharacters, apostrophes kept, empty fallback', () => {
+    expect(greetingNameValueFor('Adam')).toBe(', Adam');
+    expect(greetingNameValueFor("D'Angelo")).toBe(", D'Angelo");
+    expect(greetingNameValueFor('  Mary   Jo  ')).toBe(', Mary Jo');
+    expect(greetingNameValueFor(null)).toBe('');
+    expect(greetingNameValueFor('   ')).toBe('');
+    const hostile = greetingNameValueFor('<img src=x onerror=steal()>&"Adam"');
+    expect(hostile).not.toMatch(/[<>&"=()]/);
+    expect(greetingNameValueFor('x'.repeat(100)).length).toBeLessThanOrEqual(42);
+  });
+
+  test('stripGreetingNameToken removes every occurrence (public archive path)', () => {
+    const html = `<p>Hey there${GREETING_NAME_TOKEN}!</p><p>bye${GREETING_NAME_TOKEN}</p>`;
+    expect(stripGreetingNameToken(html)).toBe('<p>Hey there!</p><p>bye</p>');
+  });
+
+  test('plainBulletText strips leading emojis (incl. VS16/ZWJ sequences) and literal markers', () => {
+    expect(plainBulletText('🤝 Real-human networking (remember those?)')).toBe('Real-human networking (remember those?)');
+    expect(plainBulletText('🗣️ Chamber regulars + curious newcomers')).toBe('Chamber regulars + curious newcomers');
+    expect(plainBulletText('• already bulleted')).toBe('already bulleted');
+    expect(plainBulletText('– dashed lead')).toBe('dashed lead');
+    expect(plainBulletText('Sit-down meal at a Cortez staple')).toBe('Sit-down meal at a Cortez staple');
+  });
+
+  test('assembly: 22px greeting carries the name token; divider renders at 64px', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      greeting: 'Hey there!',
+      events: [{
+        eventId: 'a0000000-0000-4000-8000-000000000009',
+        emoji: '🎸', title: 'A Show', description: 'Come see it.',
+        dateStr: 'Friday, June 12', timeStr: '8:00 PM', clockEmoji: '🕗',
+      }],
+    });
+    expect(html).toContain(`Hey there${GREETING_NAME_TOKEN}!`);
+    expect(html).toMatch(/font-size:22px[^>]*>👋/);
+    expect(html).toContain('width="64"');
+    expect(html).not.toContain('width="100"');
+  });
+
+  test('wrapNewsletter local-guide header uses the 2026 logo at 88px', () => {
+    const { wrapNewsletter } = require('../services/email-template');
+    const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
+    expect(html).toContain('waves-logo-2026.png');
+    expect(html).not.toContain('/waves-logo.png');
+    expect(html).toContain('width="88"');
   });
 });
 
