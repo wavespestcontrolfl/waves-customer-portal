@@ -120,7 +120,10 @@ const PROJECT_TYPES = {
       { key: 'evidence_level', label: 'Evidence / activity level', type: 'select', section: 'Activity', options: [
         'None observed', 'Suspected', 'Light', 'Moderate', 'Heavy',
       ] },
-      { key: 'activity_areas', label: 'Activity areas', type: 'chips', section: 'Activity', options: [
+      // Conditionally required: there is no truthful area to name on a
+      // 'None observed' visit. requiredUnless is served in the schema slice
+      // so the client pre-submit gate mirrors the server enforcement.
+      { key: 'activity_areas', label: 'Activity areas', type: 'chips', section: 'Activity', requiredUnless: { field: 'evidence_level', value: 'None observed' }, options: [
         'Interior', 'Exterior lawn', 'Pet resting area', 'Shaded yard', 'Lanai',
         'Around bedding', 'Carpet / rugs', 'Furniture', 'Garage', 'Other',
       ] },

@@ -1738,7 +1738,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             },
           };
         }
-        const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, typedFindingsType);
+        const chipsValidation = ActivityIndicators.validateNextStepChips(
+          nextStepChips, typedFindingsType, structuredFindings.values || {},
+        );
         if (!chipsValidation.ok) {
           return { status: 400, body: { error: chipsValidation.error, code: 'next_step_chips_invalid' } };
         }
@@ -4439,7 +4441,9 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     // the draft (the complete endpoint enforces them strictly). Validate
     // against THIS type's allowed chips, not the global list, so an off-type
     // chip can't steer the customer-facing draft (Codex P2).
-    const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, draftProfile.findingsType);
+    const chipsValidation = ActivityIndicators.validateNextStepChips(
+      nextStepChips, draftProfile.findingsType, structuredFindings?.values || {},
+    );
     const chips = chipsValidation.ok ? chipsValidation.chips : [];
     const commsContext = includeCustomerComms === true
       ? await loadFindingsRecapCommsContext(svc.customer_id).catch(() => '')

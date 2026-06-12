@@ -4537,6 +4537,20 @@ function CPChip({ selected, onClick, children, dot }) {
   );
 }
 
+// Whether a typed findings field is required for the CURRENT values —
+// static `required` plus the schema's conditional `requiredUnless`
+// metadata ({ field, value }: required exactly when the named sibling
+// field holds a non-empty value other than `value`). Mirrors the server's
+// conditional enforcement so the tech gets the normal pre-submit prompt
+// instead of a post-submit 422 (Codex P2).
+export function typedFieldRequiredNow(field, values) {
+  if (field?.required) return true;
+  const rule = field?.requiredUnless;
+  if (!rule?.field) return false;
+  const driver = String(values?.[rule.field] ?? "").trim();
+  return !!driver && driver !== rule.value;
+}
+
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -4598,7 +4612,7 @@ function TypedFindingsSection({
           )}
           <div style={fieldLabelStyle}>
             {field.label}
-            {field.required && (
+            {typedFieldRequiredNow(field, values) && (
               <span style={{ color: requiredColor }}> *</span>
             )}
           </div>
@@ -7583,7 +7597,8 @@ export function CompletionPanel({
       const missingTypedRequired = (typedFindingsSchema.fields || [])
         .filter(
           (f) =>
-            f.required && String(findingsValues[f.key] ?? "").trim() === "",
+            typedFieldRequiredNow(f, findingsValues) &&
+            String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
       // Gauge types require a score on any completed-side outcome — the

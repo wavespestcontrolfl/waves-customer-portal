@@ -14,6 +14,8 @@ const {
   findBannedCustomerCopy,
   nextStepRequiredForType,
   validateTypedFindings,
+  validateNextStepChips,
+  findingsSchemaForType,
   buildTodaysResult,
   buildTypedReportSnapshot,
 } = require('../services/service-report/activity-indicators');
@@ -37,6 +39,15 @@ describe('flea schema', () => {
     for (const chip of TYPE_NEXT_STEP_CHIPS.flea) {
       expect({ chip, hasSentence: !!NEXT_STEP_CHIPS[chip] }).toEqual({ chip, hasSentence: true });
     }
+  });
+
+  test('conditional activity-areas requirement is served to the client (Codex P2 round 2)', () => {
+    const slice = findingsSchemaForType('flea');
+    const areas = slice.fields.find((f) => f.key === 'activity_areas');
+    expect(areas.required).toBe(false);
+    expect(areas.requiredUnless).toEqual({ field: 'evidence_level', value: 'None observed' });
+    // Unconditional fields carry no rule — the client treats null as static.
+    expect(slice.fields.find((f) => f.key === 'evidence_level').requiredUnless).toBeNull();
   });
 
   test('owner scoring: Suspected sits between cleared and Light', () => {
@@ -192,6 +203,27 @@ describe('validation', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors.join(' ')).toMatch(/Inspection only/);
+  });
+});
+
+describe('next-step chips vs recorded evidence (Codex P2 round 2)', () => {
+  test('"No action needed" is rejected beside confirmed or suspected activity', () => {
+    for (const level of ['Suspected', 'Light', 'Moderate', 'Heavy']) {
+      const result = validateNextStepChips(['No action needed'], 'flea',
+        { ...FLEA_VALUES, evidence_level: level });
+      expect({ level, ok: result.ok }).toEqual({ level, ok: false });
+      expect(result.error).toMatch(/No action needed/);
+    }
+  });
+
+  test('"No action needed" stays available for truthful cleared visits', () => {
+    const cleared = validateNextStepChips(['No action needed'], 'flea',
+      { ...FLEA_VALUES, evidence_level: 'None observed', activity_areas: '' });
+    expect(cleared).toEqual({ ok: true, chips: ['No action needed'] });
+    // Aftercare chips are unaffected by the evidence level.
+    expect(validateNextStepChips(['Vacuum daily for 2 weeks'], 'flea', FLEA_VALUES).ok).toBe(true);
+    // Legacy callers without values keep the allowlist-only behavior.
+    expect(validateNextStepChips(['No action needed'], 'flea').ok).toBe(true);
   });
 });
 

@@ -1061,7 +1061,7 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   return { ok: errors.length === 0 && missing.length === 0, errors, missing };
 }
 
-function validateNextStepChips(chips, projectType = null) {
+function validateNextStepChips(chips, projectType = null, values = null) {
   if (chips == null) return { ok: true, chips: [] };
   if (!Array.isArray(chips)) return { ok: false, error: 'nextStepChips must be an array' };
   if (chips.length > MAX_NEXT_STEP_CHIPS) {
@@ -1076,6 +1076,17 @@ function validateNextStepChips(chips, projectType = null) {
       return { ok: false, error: `Next-step chip not available for this service: ${key}` };
     }
     if (!normalized.includes(key)) normalized.push(key);
+  }
+  // "No action needed" beside confirmed/suspected flea activity contradicts
+  // the report's mandatory aftercare story — the chip sentence ("No further
+  // action is needed right now.") would land verbatim next to body copy
+  // saying home-care steps make the biggest difference (Codex P2). The chip
+  // stays available for truthful 'None observed' cleared visits.
+  if (values && projectType === 'flea'
+    && normalized.includes('No action needed')
+    && String(values.evidence_level || '').trim()
+    && String(values.evidence_level) !== 'None observed') {
+    return { ok: false, error: `Next-step chip "No action needed" contradicts the recorded flea evidence level (${String(values.evidence_level)}) — remove the chip or update the evidence level` };
   }
   return { ok: true, chips: normalized };
 }
@@ -1824,6 +1835,12 @@ function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
         options: f.options || null,
         placeholder: f.placeholder || null,
         required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
+        // Conditional requirement ({ field, value }): required exactly when
+        // the named sibling field holds a non-empty value other than
+        // `value`. Served so the client pre-submit gate mirrors the server
+        // enforcement instead of discovering it as a post-submit 422
+        // (Codex P2).
+        requiredUnless: f.requiredUnless || null,
         // internal fields are tech-facing compliance entries — validated and
         // stored, but excluded from the customer-facing snapshot findings.
         internal: !!f.internal,
