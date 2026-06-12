@@ -547,6 +547,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:10AM ET — Expire stale composer suggestions (brand-voice loop,
+  // Phase D). A pending house-voice suggestion nobody acted on within 48h is
+  // marked 'expired' so it stops surfacing under dead threads and doesn't
+  // skew the per-intent ignored-rate graduation signal.
+  // =========================================================================
+  cron.schedule('10 4 * * *', async () => {
+    if (!isEnabled('smsSuggestMode')) return;
+    logger.info('Running: SMS suggestion expiry sweep');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { expireStaleSuggestions } = require('./sms-suggest-mode');
+      await runExclusive('sms-suggest-expiry', () => expireStaleSuggestions());
+    } catch (err) {
+      logger.error(`SMS suggestion expiry sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
   // Stripe's retry window is 72h max, so anything past 90d is just historical
   // noise; the table grows ~50–500 rows/day and never shrinks otherwise.

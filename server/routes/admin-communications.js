@@ -14,6 +14,7 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
+const { SUGGEST_WORKFLOW, revertDraftsToShadow } = require('../services/sms-suggest-mode');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -232,6 +233,46 @@ router.post('/sms', async (req, res, next) => {
       } catch (reviewErr) {
         logger.warn(`[agent-review] failed to mark inbox draft decision reviewed: ${reviewErr.message}`);
       }
+    }
+
+    // A successful staff send resolves any OTHER pending house-voice
+    // suggestion on this thread as 'ignored' — the operator saw the card
+    // and chose their own reply. (The suggestion they used, if any, was
+    // just marked accepted/corrected above.) Ignored rate per intent is a
+    // graduation input for the brand-voice loop, so this must not stay
+    // pending forever. Phone-scoped through the suggestion's inbound
+    // sms_log row — the same ownership match the composer card fetch uses.
+    // The unused drafts return to the judge pool: the reply that was just
+    // sent is exactly the human ground truth Phase C scores against.
+    try {
+      const ignoredPhoneLast10 = normalizePhoneLast10(to);
+      if (ignoredPhoneLast10) {
+        const staleQuery = db('agent_decisions as ad')
+          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+          .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+          .andWhere(function byPhone() {
+            this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10])
+              .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
+          });
+        if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
+        const stale = await staleQuery.select('ad.id', 'ad.entity_id');
+        if (stale.length) {
+          await db('agent_decisions')
+            .whereIn('id', stale.map((r) => r.id))
+            .where('status', 'pending_review')
+            .update({
+              status: 'ignored',
+              human_verdict: 'ignored',
+              correction_note: 'Staff sent their own reply from the SMS inbox.',
+              reviewed_by: req.technicianId || 'Admin',
+              reviewed_at: new Date(),
+              updated_at: new Date(),
+            });
+          await revertDraftsToShadow(db, stale.map((r) => r.entity_id));
+        }
+      }
+    } catch (ignoreErr) {
+      logger.warn(`[sms-suggest] failed to mark pending suggestions ignored: ${ignoreErr.message}`);
     }
 
     res.json(result);

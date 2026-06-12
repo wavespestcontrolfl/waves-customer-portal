@@ -9,6 +9,11 @@
  * the reply a human actually sent — the data flywheel for SMS auto-reply
  * graduation, per intent class.
  *
+ * Phase D: intents flipped to 'suggest' (sms_intent_modes) get
+ * status='suggested' instead and surface as an Agent Review card in the
+ * comms composer via sms-suggest-mode. Still never sends — a human reads,
+ * optionally edits, and presses Send.
+ *
  * Single Claude call, no tool loop: context arrives pre-aggregated from
  * ContextAggregator (services, billing, SMS history). Actions the live
  * assistant would have taken (escalate, book, payment link) are captured
@@ -197,17 +202,30 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       return null;
     }
 
+    const intentName = intent?.intent || 'GENERAL';
+    // Phase D: intents flipped to 'suggest' surface the draft as a composer
+    // card instead of staying silent. Escalation intents, scheduling-intent
+    // messages, and anything without a customer + inbound link stay shadow.
+    const suggestMode = require('./sms-suggest-mode');
+    const status = await suggestMode.resolveDraftStatus({
+      reply: parsed.reply,
+      customerId: customer?.id || null,
+      smsLogId: smsLogId || null,
+      intent: intentName,
+      schedulingIntent,
+    });
+
     const [row] = await db('message_drafts')
       .insert({
         sms_log_id: smsLogId || null,
         customer_id: customer?.id || null,
         inbound_message: inboundMessage,
         draft_response: parsed.reply,
-        intent: intent?.intent || 'GENERAL',
+        intent: intentName,
         intent_confidence: intent?.confidence ?? null,
         context_summary: context.summary || null,
         flags: JSON.stringify(context.flags || []),
-        status: SHADOW_STATUS,
+        status,
         drafter: DRAFTER,
         model: MODELS.FLAGSHIP,
         prompt_version: PROMPT_VERSION,
@@ -220,8 +238,27 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       })
       .returning('id');
 
+    if (row?.id && status === suggestMode.SUGGESTED_STATUS) {
+      const decisionId = await suggestMode.publishSuggestion({
+        draftId: row.id,
+        customerId: customer.id,
+        smsLogId,
+        inboundMessage,
+        reply: parsed.reply,
+        intent: intentName,
+        confidence: intent?.confidence ?? null,
+        model: MODELS.FLAGSHIP,
+        promptVersion: PROMPT_VERSION,
+      });
+      if (!decisionId) {
+        // No composer card means no accepted/ignored telemetry — fall the
+        // draft back to shadow so the nightly judge still covers it.
+        await db('message_drafts').where({ id: row.id }).update({ status: SHADOW_STATUS });
+      }
+    }
+
     logger.info(
-      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intent?.intent || 'GENERAL'} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
+      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${status} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
     );
     return row?.id || null;
   } catch (err) {

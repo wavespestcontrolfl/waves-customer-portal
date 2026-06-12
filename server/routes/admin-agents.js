@@ -1419,4 +1419,108 @@ router.get('/shadow-scores', async (req, res, next) => {
   }
 });
 
+// GET /intent-modes — per-intent graduation state (shadow vs suggest) plus
+// suggest-mode outcome telemetry (brand-voice loop Phase D). Intents are the
+// union of configured rows and intents actually seen in message_drafts, so
+// a brand-new intent class shows up here before anyone configures it.
+router.get('/intent-modes', async (req, res, next) => {
+  try {
+    const suggestMode = require('../services/sms-suggest-mode');
+    const [rows, seenIntents, suggestedCounts, outcomes] = await Promise.all([
+      suggestMode.listIntentModes(),
+      db('message_drafts').whereNotNull('intent').distinct('intent').pluck('intent'),
+      db('message_drafts').where('status', suggestMode.SUGGESTED_STATUS)
+        .select('intent').count('* as count').groupBy('intent'),
+      db('agent_decisions').where('workflow', suggestMode.SUGGEST_WORKFLOW)
+        .select('detected_intent as intent', 'status').count('* as count')
+        .groupBy('detected_intent', 'status'),
+    ]);
+
+    const byIntent = new Map();
+    const bucket = (intent) => {
+      const key = intent || 'GENERAL';
+      if (!byIntent.has(key)) {
+        byIntent.set(key, {
+          intent: key,
+          mode: 'shadow',
+          locked: suggestMode.isEscalationIntent(key),
+          updatedBy: null,
+          updatedAt: null,
+          reason: null,
+          suggest: { suggested: 0, pending: 0, accepted: 0, corrected: 0, ignored: 0, superseded: 0, expired: 0 },
+        });
+      }
+      return byIntent.get(key);
+    };
+
+    for (const row of rows) {
+      const b = bucket(row.intent);
+      b.mode = b.locked ? 'shadow' : row.mode;
+      b.updatedBy = row.updated_by || null;
+      b.updatedAt = row.updated_at || null;
+      b.reason = row.reason || null;
+    }
+    for (const intent of seenIntents) bucket(intent);
+    for (const row of suggestedCounts) bucket(row.intent).suggest.suggested = asNumber(row.count);
+    for (const row of outcomes) {
+      const b = bucket(row.intent);
+      const key = row.status === 'pending_review' ? 'pending' : row.status;
+      if (key in b.suggest) b.suggest[key] = asNumber(row.count);
+    }
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      gateEnabled: require('../config/feature-gates').isEnabled('smsSuggestMode'),
+      intents: [...byIntent.values()].sort((a, b) => a.intent.localeCompare(b.intent)),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /intent-modes/:intent — flip one intent between shadow and suggest.
+// Escalation intents are locked server-side (validateModeChange rejects);
+// every flip writes an activity_log audit row.
+router.put('/intent-modes/:intent', async (req, res, next) => {
+  try {
+    const suggestMode = require('../services/sms-suggest-mode');
+    const intent = String(req.params.intent || '').trim();
+    const mode = String(req.body?.mode || '').trim();
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
+
+    const prior = await db('sms_intent_modes').where({ intent }).first();
+    let row;
+    try {
+      row = await suggestMode.setIntentMode({ intent, mode, actor: actorName(req), reason });
+    } catch (err) {
+      if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+      throw err;
+    }
+
+    await db('activity_log').insert({
+      admin_user_id: req.technicianId || null,
+      action: 'sms_intent_mode_changed',
+      description: `SMS intent "${intent}" mode: ${prior?.mode || 'shadow'} → ${mode}`,
+      metadata: JSON.stringify({
+        source: 'agents_hub',
+        intent,
+        old_mode: prior?.mode || null,
+        new_mode: mode,
+        reason: reason || null,
+      }),
+    });
+
+    res.json({
+      intent: row.intent,
+      mode: row.mode,
+      locked: suggestMode.isEscalationIntent(row.intent),
+      updatedBy: row.updated_by || null,
+      updatedAt: row.updated_at || null,
+      reason: row.reason || null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
