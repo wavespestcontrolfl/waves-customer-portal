@@ -25,8 +25,10 @@
  *                         no duplicate title across site
  *
  * Pure functions. The gate scores each check 0..n (per a weight map)
- * and pass/fail. Total score is sum; gate requires score >= 75% of the
- * page type's own achievable ceiling AND zero hard-check failures.
+ * and pass/fail. Total score is sum; gate requires zero hard-check
+ * failures AND score >= the page type's threshold: 75% of its own
+ * achievable ceiling, floored so it always tolerates at most one
+ * worst-case soft-check miss beyond the hard checks.
  */
 
 const { THRESHOLDS } = require('./scoring-config');
@@ -48,7 +50,18 @@ function computeMinTotalScores(hardChecks, pageTypeChecks) {
   const thresholds = {};
   for (const [pageType, checks] of Object.entries(pageTypeChecks)) {
     const ceiling = commonSum + checks.reduce((s, c) => s + c.weight, 0);
-    thresholds[pageType] = Math.floor(ceiling * PASS_THRESHOLD_PCT);
+    let min = Math.floor(ceiling * PASS_THRESHOLD_PCT);
+    // The threshold must demand more than the hard checks alone — ok
+    // already requires zero hard failures, so a threshold at or below
+    // the hard sum tolerates a draft missing EVERY soft check (e.g.
+    // supporting-blog: 37 common + 6 hub = 43 >= the formula's 42 with
+    // cities/FAQ/voice all failed). When the percentage formula lands
+    // there, raise it to "one worst-case soft miss": ceiling minus the
+    // largest single soft weight (= ceiling itself for all-hard bundles).
+    const hardSum = commonSum + checks.filter((c) => c.isHard).reduce((s, c) => s + c.weight, 0);
+    const maxSoftWeight = checks.filter((c) => !c.isHard).reduce((m, c) => Math.max(m, c.weight), 0);
+    if (min <= hardSum) min = ceiling - maxSoftWeight;
+    thresholds[pageType] = min;
   }
   return thresholds;
 }
@@ -131,13 +144,16 @@ const PAGE_TYPE_CHECKS = {
 };
 
 // Resolve per-page-type thresholds now that check arrays are defined.
-// Common hard checks sum to 37. Ceiling → threshold per page type:
-//   city-service      37+36 = 73 → 54
-//   customer-question 37+22 = 59 → 44
-//   refresh           37+10 = 47 → 35
-//   supporting-blog   37+20 = 57 → 42
-//   metadata          37+26 = 63 → 47
-//   links/gbp/none    37+0  = 37 → 27
+// Common hard checks sum to 37. Ceiling → threshold per page type
+// (75% of ceiling, floored at one-worst-case-soft-miss — see
+// computeMinTotalScores):
+//   city-service      37+36 = 73 → 54 (75% formula; hard sum 43)
+//   customer-question 37+22 = 59 → 59 (all-hard bundle)
+//   refresh           37+10 = 47 → 47 (all-hard bundle)
+//   supporting-blog   37+20 = 57 → 51 (= 57 - voice 6; formula's 42 sat
+//                                      below the 43 hard sum)
+//   metadata          37+26 = 63 → 57 (= 63 - keyword 6)
+//   links/gbp/none    37+0  = 37 → 37 (common-only)
 MIN_TOTAL_SCORES = computeMinTotalScores(HARD_CHECKS, PAGE_TYPE_CHECKS);
 
 // ── main API ────────────────────────────────────────────────────────
@@ -161,7 +177,7 @@ MIN_TOTAL_SCORES = computeMinTotalScores(HARD_CHECKS, PAGE_TYPE_CHECKS);
  *
  * ok requires:
  *   - zero hard_failures
- *   - total_score >= the page type's threshold (75% of its own ceiling)
+ *   - total_score >= the page type's threshold (see computeMinTotalScores)
  */
 function evaluate(draft, brief, context = {}) {
   if (!draft) throw new Error('content-quality-gate: draft required');
