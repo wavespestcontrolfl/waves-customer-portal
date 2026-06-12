@@ -49,7 +49,7 @@
 const PHASE1_KEYS = [
   { key: 'pest_inspection', from: 'pest_inspection', to: 'pest_inspection' },
   { key: 'new_customer_inspection', from: 'pest_inspection', to: 'pest_inspection' },
-  { key: 'mosquito_event', from: 'mosquito_event', to: 'mosquito_event' },
+  { key: 'mosquito_event', from: ['mosquito_event', 'pest_inspection'], to: 'mosquito_event' },
   { key: 'mosquito_one_time', from: 'one_time_pest_treatment', to: 'mosquito_event' },
   { key: 'palm_injection', from: 'palm_injection', to: 'palm_injection' },
   { key: 'lawn_aeration', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
@@ -88,7 +88,8 @@ exports.up = async function up(knex) {
         continue;
       }
 
-      if (row && row.completion_mode === 'project_required' && row.project_type === from) {
+      const fromList = Array.isArray(from) ? from : [from];
+      if (row && row.completion_mode === 'project_required' && fromList.includes(row.project_type)) {
         await trx('service_completion_profiles')
           .where({ service_key: key })
           .update({ completion_mode: 'service_report', project_type: to, updated_at: trx.fn.now() });
@@ -101,7 +102,7 @@ exports.up = async function up(knex) {
         // migration must not paper over.
         throw new Error(
           `[phase1-cutover] ${key}: unexpected profile state ` +
-          `(mode=${row.completion_mode}, pointer=${row.project_type}, expected ${from}→${to}) ` +
+          `(mode=${row.completion_mode}, pointer=${row.project_type}, expected ${fromList.join('|')}→${to}) ` +
           `— aborting, nothing flipped`,
         );
       }
