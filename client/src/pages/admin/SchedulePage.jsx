@@ -7092,21 +7092,34 @@ export function CompletionPanel({
     setTreeShrubCloseout(
       normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
     );
-    setFindingsValues(
+    // Drafts saved before a schema cutover carry keys/chips the current
+    // schema no longer has; submit sends the whole object and the server
+    // rejects unknown keys, stranding the draft. Prune restored typed state
+    // to what the schema in effect actually accepts.
+    const restoredFindings =
       savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
         ? savedDraft.findingsValues
-        : {},
-    );
+        : {};
+    if (typedFindingsSchema?.fields) {
+      const knownKeys = new Set(typedFindingsSchema.fields.map((f) => f.key));
+      for (const key of Object.keys(restoredFindings)) {
+        if (!knownKeys.has(key)) delete restoredFindings[key];
+      }
+    }
+    setFindingsValues(restoredFindings);
     setTypedActivityScore(
       Number.isInteger(savedDraft.typedActivityScore)
         ? savedDraft.typedActivityScore
         : null,
     );
     setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+    const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
+      ? savedDraft.typedNextStepChips
+      : [];
     setTypedNextStepChips(
-      Array.isArray(savedDraft.typedNextStepChips)
-        ? savedDraft.typedNextStepChips
-        : [],
+      typedFindingsSchema?.nextStepChips
+        ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
+        : restoredChips,
     );
     setTypedRecommendations(savedDraft.typedRecommendations || "");
     setShowDraftPrompt(false);
