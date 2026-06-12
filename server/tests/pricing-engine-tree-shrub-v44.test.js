@@ -702,6 +702,16 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(migrationSrc).toContain("semantics: 'margin_admin_inclusive'");
     });
 
+    test('changelog category satisfies the pricing_changelog_category_check constraint', () => {
+      // Deploy bd3a4b3f failed because category 'rate' violated the DB check
+      // constraint (20260417000004_pricing_changelog.js). Pin the allowed set
+      // so a bad category never takes down a deploy again.
+      const ALLOWED = ['bug', 'leak', 'rule', 'cost', 'architecture', 'documentation', 'infrastructure'];
+      const m = migrationSrc.match(/category:\s*'([a-z]+)'/);
+      expect(m).not.toBeNull();
+      expect(ALLOWED).toContain(m[1]);
+    });
+
     test('admin annual + margin floor match between code and legacy seed', () => {
       expect(legacyValue('ADMIN_ANNUAL')).toBe(constants.GLOBAL.ADMIN_ANNUAL);
       expect(legacyValue('MARGIN_FLOOR')).toBe(constants.GLOBAL.MARGIN_FLOOR);
