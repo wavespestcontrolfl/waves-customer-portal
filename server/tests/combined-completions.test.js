@@ -73,6 +73,24 @@ describe('serializeProfile companion parsing', () => {
     ]);
   });
 
+  test('compliance project types can never become companions (pre-push P1)', () => {
+    // WDO and pre-treat certificates stay in Projects — their FDACS/
+    // signature/PDF gates must not be bypassable via companion JSON.
+    const profile = serializeProfile({
+      service_key: 'k',
+      completion_mode: 'service_report',
+      active: true,
+      companion_types: [
+        { type: 'wdo_inspection', delivery: 'auto_send' },
+        { type: 'pre_treatment_termite_certificate', delivery: 'auto_send' },
+        { type: 'rodent_bait_station', delivery: 'internal_only' },
+      ],
+    });
+    expect(profile.companions).toEqual([
+      { type: 'rodent_bait_station', delivery: 'internal_only' },
+    ]);
+  });
+
   test('missing or invalid delivery coerces to internal_only (never accidentally customer-facing)', () => {
     const profile = serializeProfile({
       service_key: 'k',

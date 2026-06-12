@@ -13,6 +13,12 @@ const { isTypedFindingsType } = require('./service-report/activity-indicators');
 // (serializeProfile coerces the mode back) and at creation gating
 // (appointmentManagedProjectTypes filters it out).
 const V1_EXCLUDED_PROJECT_TYPES = new Set(['wdo_inspection']);
+// Compliance project types stay in Projects (FDACS/signature/PDF gates) —
+// never servable as companion sections either, or a bad profile row could
+// route compliance work through a routine /complete. Superset of the
+// V1 exclusions: pre-treat certificates never had a service_report profile
+// to coerce, but the companion JSON path must still refuse them.
+const COMPANION_EXCLUDED_TYPES = new Set([...V1_EXCLUDED_PROJECT_TYPES, 'pre_treatment_termite_certificate']);
 
 const DEFAULT_SERVICE_REPORT_PROFILE = {
   serviceKey: null,
@@ -63,6 +69,7 @@ function parseCompanionTypes(raw, ownFindingsType = null) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const type = typeof entry.type === 'string' ? entry.type.trim() : '';
     if (!type || !isTypedFindingsType(type)) continue;
+    if (COMPANION_EXCLUDED_TYPES.has(type)) continue;
     if (ownFindingsType && type === ownFindingsType) continue;
     if (entry.delivery === 'disabled') continue;
     companions.push({
