@@ -26,7 +26,7 @@ const {
 const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
 const {
   ensureDepositSatisfied,
-  resolveDepositPolicy,
+  resolveDepositPolicyForEstimate,
 } = require('../services/estimate-deposits');
 const {
   cleanupEstimatePricingCache,
@@ -5336,11 +5336,17 @@ router.put('/:token/accept', async (req, res, next) => {
     // estimate.
     // ─────────────────────────────────────────────
     const acceptMembership = await buildEstimateMembershipContext(estimate);
-    const depositPolicy = resolveDepositPolicy({
+    // resolveDepositPolicyForEstimate adds the LIVE plan-customer fallback
+    // (legacy customer-linked estimates have no membershipSnapshot) and
+    // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
+    // without an appointment there is no source_estimate_id for the
+    // roll-forward to credit the deposit against.
+    const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
       paymentMethodPreference,
       membership: acceptMembership,
       oneTime: treatAsOneTime,
+      oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
     });
     if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
       return res.status(400).json({
@@ -5779,39 +5785,32 @@ router.put('/:token/accept', async (req, res, next) => {
           effectiveBillingCadence,
           selectedFrequency,
         });
-        // Acceptance deposit credits this first invoice as a negative line
-        // item, capped at the invoice amount (never a negative invoice).
-        // Per-row credited_amount tracking means a partial application
-        // leaves only the unapplied remainder available on the ledger.
+        // Acceptance deposit credits this first invoice through create()'s
+        // depositCredit param — create() caps the request against its own
+        // after-tax total (a pre-tax cap here under-applied the credit on
+        // taxed invoices and stranded the difference on the ledger) and
+        // reports the effective amount back as applied_deposit_credit.
         // Read through the accept trx so the consume below shares its
         // snapshot; a read failure degrades to "no credit" (the deposit
         // stays received on the ledger), never to an unbacked discount.
         const { pendingDepositCredit: pendingEstimateDepositCredit, consumeDepositCredit: consumeEstimateDepositCredit } = require('../services/estimate-deposits');
         const invoiceDepositCredit = await pendingEstimateDepositCredit(estimate.id, trx).catch(() => null);
-        const appliedInvoiceDepositCredit = invoiceDepositCredit && Number(invoiceDraft.amount) > 0
-          ? Math.min(invoiceDepositCredit.amount, Number(invoiceDraft.amount))
-          : 0;
-        const invoiceLineItems = appliedInvoiceDepositCredit > 0
-          ? [...invoiceDraft.lineItems, {
-              description: 'Deposit credit (paid at acceptance)',
-              quantity: 1,
-              unit_price: -appliedInvoiceDepositCredit,
-              // Prior payment, not a discount — InvoiceService applies it
-              // AFTER tax and keeps it out of discount reporting.
-              category: 'deposit_credit',
-            }]
-          : invoiceDraft.lineItems;
+        const requestedInvoiceDepositCredit = invoiceDepositCredit ? Number(invoiceDepositCredit.amount) : 0;
         const inv = await InvoiceService.create({
           database: trx,
           customerId,
           title: invoiceDraft.title,
-          lineItems: invoiceLineItems,
+          lineItems: invoiceDraft.lineItems,
           notes: invoiceDraft.notes,
           dueDate: etDateString(),
+          ...(requestedInvoiceDepositCredit > 0
+            ? { depositCredit: { amount: requestedInvoiceDepositCredit } }
+            : {}),
         });
         if (!inv?.id) {
           throw new Error('Invoice-mode acceptance could not create an invoice');
         }
+        const appliedInvoiceDepositCredit = Number(inv.applied_deposit_credit) || 0;
         if (appliedInvoiceDepositCredit > 0) {
           const allocatedDepositCredit = await consumeEstimateDepositCredit({
             estimateId: estimate.id,
@@ -5825,13 +5824,15 @@ router.put('/:token/accept', async (req, res, next) => {
             // leave a discounted invoice beside an unconsumed deposit.
             throw new Error(`deposit allocation mismatch on invoice-mode accept for estimate ${estimate.id} — acceptance rolled back`);
           }
-          if (appliedInvoiceDepositCredit < invoiceDepositCredit.amount) {
+          if (appliedInvoiceDepositCredit < requestedInvoiceDepositCredit) {
             logger.warn(`[estimate-public] deposit partially applied to invoice-mode accept for estimate ${estimate.id} — remainder stays on the ledger`);
           }
         }
         invoiceModeResult = true;
         invoiceIdResult = inv.id;
-        invoiceAmountResult = Math.max(0, Number(invoiceDraft.amount) - appliedInvoiceDepositCredit);
+        // The customer-facing amount is the invoice's actual after-tax,
+        // after-credit total — the same figure the /pay page collects.
+        invoiceAmountResult = Number(inv.total) || 0;
         invoicePayUrlResult = inv.token ? `/pay/${inv.token}` : null;
         invoiceServiceLabelResult = invoiceDraft.serviceLabel;
         invoiceKindResult = invoiceDraft.invoiceKind;
@@ -9512,11 +9513,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           : (estimate.estimate_data || {});
       } catch { return {}; }
     })();
-    const depositPolicy = resolveDepositPolicy({
+    const depositStructuralOneTime = isStructuralOneTimeOnlyEstimate(depositEstData, estimate);
+    const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
       paymentMethodPreference: null,
       membership,
-      oneTime: isStructuralOneTimeOnlyEstimate(depositEstData, estimate),
+      oneTime: depositStructuralOneTime,
+      oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
     });
 
     res.json({

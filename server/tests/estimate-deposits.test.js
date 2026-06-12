@@ -34,6 +34,10 @@ const mockTriggerNotification = jest.fn();
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: (...args) => mockTriggerNotification(...args),
 }));
+const mockLoadExistingRecurringQualifyingRows = jest.fn(async () => []);
+jest.mock('../services/waveguard-existing-services', () => ({
+  loadExistingRecurringQualifyingRows: (...args) => mockLoadExistingRecurringQualifyingRows(...args),
+}));
 
 const {
   computeDepositAmount,
@@ -42,6 +46,7 @@ const {
   handleDepositIntentSucceeded,
   pendingDepositCredit,
   resolveDepositPolicy,
+  resolveDepositPolicyForEstimate,
   _private: { depositIntentMatchesEstimate },
 } = require('../services/estimate-deposits');
 
@@ -99,6 +104,26 @@ describe('resolveDepositPolicy', () => {
     expect(policy.amount).toBe(99);
   });
 
+  it('one-time UNINVOICED accepts must book — no invoice at accept means the roll-forward needs source_estimate_id (P1)', () => {
+    const policy = resolveDepositPolicy({
+      estimate,
+      paymentMethodPreference: 'pay_at_visit',
+      membership: {},
+      oneTime: true,
+      oneTimeUninvoiced: true,
+    });
+    expect(policy.required).toBe(true);
+    expect(policy.slotRequired).toBe(true);
+    // Invoice-mode one-time accepts credit their first invoice inside the
+    // accept transaction — no booking needed for the money to come back.
+    expect(resolveDepositPolicy({
+      estimate,
+      paymentMethodPreference: 'pay_at_visit',
+      membership: {},
+      oneTime: true,
+    }).slotRequired).toBe(false);
+  });
+
   it('prepay-annual is exempt (paying in full)', () => {
     const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: 'prepay_annual', membership: {} });
     expect(policy.required).toBe(false);
@@ -123,6 +148,49 @@ describe('resolveDepositPolicy', () => {
     expect(policy.enforced).toBe(false);
     expect(policy.required).toBe(false);
     expect(policy.slotRequired).toBe(false);
+  });
+});
+
+describe('resolveDepositPolicyForEstimate — live plan-customer fallback (P2)', () => {
+  const linkedEstimate = { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 };
+
+  it('exempts a legacy customer-linked estimate whose CURRENT services qualify (no membershipSnapshot)', async () => {
+    mockLoadExistingRecurringQualifyingRows.mockResolvedValueOnce([{ id: 'svc-1' }]);
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      paymentMethodPreference: 'pay_at_visit',
+      membership: { isExistingCustomer: false },
+    });
+    expect(mockLoadExistingRecurringQualifyingRows).toHaveBeenCalledWith(expect.anything(), 'cust-9');
+    expect(policy.required).toBe(false);
+    expect(policy.exemptReason).toBe('existing_plan_customer');
+    expect(policy.slotRequired).toBe(true);
+  });
+
+  it('no qualifying services or a failed lookup = deposit stays required (fail-closed)', async () => {
+    mockLoadExistingRecurringQualifyingRows.mockResolvedValueOnce([]);
+    expect((await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      membership: {},
+    })).required).toBe(true);
+    mockLoadExistingRecurringQualifyingRows.mockRejectedValueOnce(new Error('db down'));
+    expect((await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      membership: {},
+    })).required).toBe(true);
+  });
+
+  it('no linked customer = no live lookup; snapshot exemption short-circuits it', async () => {
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate: { id: 'est-1', onetime_total: 280 },
+      membership: {},
+    });
+    expect(policy.required).toBe(true);
+    await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      membership: { isExistingCustomer: true },
+    });
+    expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
   });
 });
 
@@ -629,6 +697,12 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     // Non-deposit PIs fall through to the payments path.
     mockDbHandler = reversalDb({ row: null });
     expect((await handleDepositDisputeClosed('pi_9', 'won')).handled).toBe(false);
+  });
+
+  it('warning_closed restores like won — the inquiry ended with the funds still ours (P2)', async () => {
+    mockDbHandler = reversalDb({ row: { id: 'd1', status: 'refunded', estimate_id: 'est-1' } });
+    expect((await handleDepositDisputeClosed('pi_1', 'warning_closed')).handled).toBe(true);
+    expect(logger.error).toHaveBeenCalled();
   });
 
   it('the echo of OUR OWN remainder refund never flips a credited row or false-alarms', async () => {

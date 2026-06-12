@@ -48,7 +48,7 @@ const {
 const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
 const {
   createDepositIntentForEstimate,
-  resolveDepositPolicy,
+  resolveDepositPolicyForEstimate,
 } = require('../services/estimate-deposits');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
@@ -342,7 +342,10 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       }
     }
     const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
-    const policy = resolveDepositPolicy({
+    // The ForEstimate wrapper adds the LIVE plan-customer fallback — legacy
+    // customer-linked estimates have no membershipSnapshot, and minting an
+    // intent here would charge a current WaveGuard member who owes nothing.
+    const policy = await resolveDepositPolicyForEstimate({
       estimate,
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
       membership,

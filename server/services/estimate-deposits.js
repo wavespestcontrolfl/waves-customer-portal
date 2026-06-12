@@ -59,10 +59,15 @@ function computeDepositAmount({ oneTime = false } = {}) {
 // preference. membership comes from buildEstimateMembershipContext —
 // isExistingCustomer means the customer already has qualifying recurring
 // plan services (WaveGuard Bronze+). oneTime selects the service class for
-// the AMOUNT only — one-time accepts are NOT exempt: a one-time pay-at-visit
+// the AMOUNT — one-time accepts are NOT exempt: a one-time pay-at-visit
 // deposit credits against the completed-visit invoice via the
-// createFromService roll-forward.
-function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, oneTime = false }) {
+// createFromService roll-forward. oneTimeUninvoiced (one-time accept on a
+// non-invoice-mode estimate) additionally REQUIRES a booking: no invoice is
+// created at accept, so the credit's only path back to the customer is the
+// roll-forward, which traces scheduled_services.source_estimate_id — an
+// unbooked accept would orphan the paid deposit (accepted estimates are
+// deliberately outside the terminal sweep).
+function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, oneTime = false, oneTimeUninvoiced = false }) {
   if (!isDepositEnforced()) {
     return { enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled' };
   }
@@ -77,10 +82,35 @@ function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, o
   return {
     enforced: true,
     required: true,
-    slotRequired: false,
+    slotRequired: oneTimeUninvoiced,
     exemptReason: null,
     amount: computeDepositAmount({ oneTime }),
   };
+}
+
+// Policy resolution with the LIVE existing-plan-customer fallback. The
+// pricing snapshot (estimate_data.membershipSnapshot) is deliberately frozen
+// at save time and absent on legacy customer-linked estimates, so exempting
+// only on the snapshot would charge a commitment deposit to a current
+// WaveGuard member (and bypass their appointment-only gate). Display pricing
+// stays snapshot-frozen; whether a customer owes a deposit follows their
+// CURRENT qualifying recurring services. A failed live check falls back to
+// requiring the deposit — wrongly charged money still credits forward,
+// while a wrongly granted exemption silently loses the commitment gate.
+async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false }) {
+  let member = membership;
+  if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
+    try {
+      const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+      const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+      if (Array.isArray(rows) && rows.length > 0) {
+        member = { ...(member || {}), isExistingCustomer: true };
+      }
+    } catch (err) {
+      logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });
+    }
+  }
+  return resolveDepositPolicy({ estimate, paymentMethodPreference, membership: member, oneTime, oneTimeUninvoiced });
 }
 
 // Money the customer has paid and still holds with us: received/credited
@@ -279,7 +309,13 @@ async function depositStillRecordable(estimateId) {
     const membership = await buildEstimateMembershipContext(estimate);
     const structuralOneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'
       && gates.isStructuralOneTimeOnlyEstimate(estData, estimate);
-    const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: null, membership, oneTime: structuralOneTime });
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate,
+      paymentMethodPreference: null,
+      membership,
+      oneTime: structuralOneTime,
+      oneTimeUninvoiced: structuralOneTime && estimate.bill_by_invoice !== true,
+    });
     if (!policy.required) return { recordable: false, reason: policy.exemptReason || 'not_required' };
   } catch (err) {
     logger.warn('[estimate-deposits] eligibility recheck errored — recording deposit', { error: err.message });
@@ -637,16 +673,18 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
 }
 
 // Dispute settled on a deposit PI. Lost = money stays gone (the row already
-// flipped on dispute.created). Won/reinstated = funds returned to us, but
-// the row stays refunded — auto-restoring would race acceptance/crediting,
-// so flag for a manual restore instead.
+// flipped on dispute.created). Won / reinstated / warning_closed (an
+// inquiry closed without the money ever leaving — same funds-back outcome
+// the invoice dispute path restores on) = funds are ours again, but the row
+// stays refunded — auto-restoring would race acceptance/crediting, so flag
+// for a manual restore instead.
 async function handleDepositDisputeClosed(paymentIntentId, disputeStatus) {
   if (!paymentIntentId) return { handled: false };
   const row = await db('estimate_deposits')
     .where({ stripe_payment_intent_id: paymentIntentId })
     .first('id', 'status', 'estimate_id');
   if (!row) return { handled: false };
-  if (disputeStatus === 'won' || disputeStatus === 'funds_reinstated') {
+  if (disputeStatus === 'won' || disputeStatus === 'funds_reinstated' || disputeStatus === 'warning_closed') {
     logger.error('[estimate-deposits] deposit dispute resolved in our favor — funds reinstated but ledger row stays refunded; restore manually if the estimate is still live', {
       estimateId: row.estimate_id,
       disputeStatus,
@@ -746,6 +784,7 @@ module.exports = {
   pendingDepositCredit,
   refundUnconsumedDeposits,
   resolveDepositPolicy,
+  resolveDepositPolicyForEstimate,
   sweepTerminalEstimateDeposits,
   _private: {
     claimDepositRowForRefund,
