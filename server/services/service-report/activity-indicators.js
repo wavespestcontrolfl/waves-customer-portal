@@ -283,6 +283,25 @@ const CUSTOMER_FIELD_LABELS = {
   customer_prep: 'How you can help',
   prep_status: 'Prep status',
   rooms_treated: 'Rooms treated',
+  plant_groups: 'What we serviced',
+  landscape_condition: 'Overall landscape condition',
+  observed_conditions: 'What we observed',
+  treatments_completed: 'What we applied',
+  palm_nutrient_stress: 'Palm nutrient health',
+  spear_leaf_condition: 'Spear leaf condition',
+  canopy_density: 'Canopy density',
+  palm_trunk_concern: 'Palm trunk check',
+  ganoderma_conk_observed: 'Ganoderma check',
+  injection_recommended: 'Palm injection',
+  pest_pressure: 'Pest pressure',
+  deficiency_symptoms: 'Nutrient deficiency signs',
+  new_growth_present: 'New growth',
+  pruning_issue_observed: 'Pruning check',
+  irrigation_issue_observed: 'Irrigation check',
+  bed_weed_pressure: 'Bed weed pressure',
+  pre_emergent_applied: 'Pre-emergent bed treatment',
+  mulch_depth_concern: 'Mulch check',
+  weed_breakthrough_areas: 'Weed breakthrough areas',
 };
 
 // Registry select value → customer wording, keyed per field family. Values
@@ -410,6 +429,46 @@ const CUSTOMER_VALUE_LABELS = {
     Yes: 'Bait was replaced today',
     No: 'No replacement needed',
   },
+  // Tree & Shrub Yes/No selects read as findings, not raw booleans —
+  // "Ganoderma check: Yes" would alarm without explaining, and "No" is the
+  // reassurance customers actually want from a palm visit. Absence wording
+  // stays observational ("observed today"), per the banned-copy rules.
+  palm_nutrient_stress: {
+    Yes: 'Nutrient stress signs present — addressed in today’s treatment plan',
+    No: 'No nutrient stress signs observed today',
+  },
+  palm_trunk_concern: {
+    Yes: 'A trunk concern was noted — see recommendations',
+    No: 'No trunk concerns observed today',
+  },
+  ganoderma_conk_observed: {
+    Yes: 'A possible Ganoderma conk was observed — an arborist evaluation is recommended',
+    No: 'No visible Ganoderma conks observed today',
+  },
+  injection_recommended: {
+    Yes: 'A palm injection is recommended',
+    No: 'No injection needed at this time',
+  },
+  new_growth_present: {
+    Yes: 'New growth present',
+    No: 'No new growth observed yet',
+  },
+  pruning_issue_observed: {
+    Yes: 'A pruning issue was observed — see recommendations',
+    No: 'No pruning issues observed today',
+  },
+  irrigation_issue_observed: {
+    Yes: 'An irrigation issue was observed — see recommendations',
+    No: 'No irrigation issues observed today',
+  },
+  pre_emergent_applied: {
+    Yes: 'Pre-emergent was applied to the beds today',
+    No: 'No pre-emergent applied this visit',
+  },
+  mulch_depth_concern: {
+    Yes: 'Mulch depth needs attention — see recommendations',
+    No: 'Mulch depth looks good',
+  },
 };
 
 // Required service-specific fields per type (contract §4; budget ≤4 except
@@ -437,6 +496,11 @@ const REQUIRED_FINDINGS_FIELDS = {
   ],
   termite_bait_station: ['stations_checked', 'termite_activity', 'bait_consumption'],
   rodent_bait_station: ['stations_checked', 'bait_consumption'],
+  // Owner spec §6 lists six enforcement fields — five live here (incl. the
+  // recommendation chips), the sixth is the required next-step selection
+  // (REQUIRED_NEXT_STEP_TYPES). Exceeds the ≤4 budget by owner instruction
+  // ("same enforcement, inside the new checklist model").
+  tree_shrub: ['plant_groups', 'landscape_condition', 'observed_conditions', 'treatments_completed', 'customer_recommendations'],
 };
 
 // Next-step chips per type (contract §7). Each chip maps to the
@@ -468,6 +532,8 @@ const NEXT_STEP_CHIPS = {
   'Customer action — remove standing water': 'Removing the noted standing water will make a big difference before the next visit.',
   'Callback if activity persists': 'If activity stays high after the treatment window, contact us for a callback visit.',
   'Continue palm program': 'We will continue your palm care program.',
+  'Continue Tree & Shrub program': 'We will continue your Tree & Shrub care program.',
+  'Monitor plant response': 'We will monitor plant response over the next visits.',
   'Monitor canopy response': 'We will monitor canopy response over the next visits.',
   'Injection recommended': 'A palm injection is recommended to address the noted deficiency.',
   'Arborist review recommended': 'An arborist evaluation is recommended for the noted concern.',
@@ -520,7 +586,7 @@ const MAX_NEXT_STEP_CHIPS = 4;
 const REQUIRED_NEXT_STEP_TYPES = new Set([
   'rodent_trapping', 'mosquito_event', 'palm_injection', 'one_time_lawn_treatment',
   'pest_inspection', 'cockroach', 'wildlife_trapping', 'bed_bug',
-  'termite_bait_station', 'rodent_bait_station',
+  'termite_bait_station', 'rodent_bait_station', 'tree_shrub',
 ]);
 
 function nextStepRequiredForType(projectType) {
@@ -597,6 +663,13 @@ const TYPE_NEXT_STEP_CHIPS = {
     'Continue bait station service', 'Recheck high-consumption station', 'Add station',
     'Replace damaged station', 'Rodent inspection recommended', 'Exclusion recommended',
     'Customer action needed', 'Monitor activity',
+  ],
+  // Owner template §6: "continue program / monitor / injection recommended /
+  // follow-up needed".
+  tree_shrub: [
+    'Continue Tree & Shrub program', 'Monitor plant response', 'Recheck next visit',
+    'Injection recommended', 'Arborist review recommended', 'Follow-up recommended',
+    'Customer action needed', 'No action needed',
   ],
 };
 
@@ -753,6 +826,58 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     }
   }
 
+  // Cross-field consistency (Tree & Shrub): the report tells one coherent
+  // plant-health story — a "no major issues" claim can't sit beside recorded
+  // issues, "Inspection only" can't sit beside applied treatments, and the
+  // palm module core is required whenever palms were among the serviced
+  // groups (owner spec §6: "use when palms are present").
+  if (type === 'tree_shrub') {
+    const observed = String(values.observed_conditions || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const issueChips = observed.filter((c) => c !== 'No major issues observed' && c !== 'Healthy / new growth');
+    const heavyPressure = ['pest_pressure', 'disease_pressure', 'deficiency_symptoms', 'bed_weed_pressure']
+      .some((key) => ['Moderate', 'Heavy'].includes(String(values[key] || '')));
+    // EVERY issue-flavored Yes toggle contradicts the no-issues claim, not
+    // just the two palm flags (Codex P2 round 2) — "no major issues" next
+    // to "A pruning issue was observed" is incoherent.
+    const issueToggles = [
+      'ganoderma_conk_observed', 'palm_trunk_concern', 'palm_nutrient_stress',
+      'pruning_issue_observed', 'irrigation_issue_observed', 'mulch_depth_concern',
+    ].some((key) => String(values[key] || '') === 'Yes');
+    if (observed.includes('No major issues observed') && (issueChips.length || heavyPressure || issueToggles)) {
+      errors.push('"No major issues observed" contradicts the recorded issues — remove it or the conflicting findings');
+    }
+    const treatments = String(values.treatments_completed || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (treatments.includes('Inspection only') && treatments.length > 1) {
+      errors.push('"Inspection only" cannot be combined with applied treatments');
+    }
+    // pre_emergent_applied is an APPLICATION field — it can't ride an
+    // inspection-only visit either (Codex P2 round 2).
+    if (treatments.includes('Inspection only') && String(values.pre_emergent_applied) === 'Yes') {
+      errors.push('"Inspection only" contradicts "Pre-emergent applied" — record the treatment or clear the bed module field');
+    }
+    const groups = String(values.plant_groups || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    // Palm-module findings without Palms in the service scope would put
+    // palm claims on a report whose scope contradicts them (Codex P2) —
+    // the tech either serviced palms (add the group) or didn't (clear the
+    // fields).
+    const palmModuleFilled = [
+      'palms_serviced', 'palm_condition', 'palm_nutrient_stress', 'spear_leaf_condition',
+      'canopy_density', 'palm_trunk_concern', 'ganoderma_conk_observed', 'injection_recommended',
+    ].filter((key) => values[key] != null && String(values[key]).trim() !== '');
+    if (palmModuleFilled.length && groups.length && !groups.includes('Palms')) {
+      errors.push('Palm module findings were recorded but Palms is not among the serviced plant groups — add Palms or clear the palm fields');
+    }
+    if (enforceRequired && groups.includes('Palms')) {
+      for (const key of ['palm_condition', 'ganoderma_conk_observed']) {
+        const value = values[key];
+        if (value == null || String(value).trim() === '') missing.push(key);
+      }
+    }
+  }
+
   if (enforceRequired) {
     for (const key of REQUIRED_FINDINGS_FIELDS[type] || []) {
       const value = values[key];
@@ -878,6 +1003,23 @@ const WORK_PHRASE_FIELDS = {
       'Palm injection completed': 'completed the palm injection',
       'Soil acidifier applied': 'applied a soil acidifier',
       'Canopy / crown inspection': 'inspected the canopy and crown areas',
+    },
+  },
+  tree_shrub: {
+    field: 'treatments_completed',
+    phrases: {
+      Fertilizer: 'applied ornamental fertilizer',
+      'Palm fertilizer': 'applied palm fertilizer',
+      Micronutrients: 'applied micronutrients',
+      'Insect treatment': 'treated affected plants for insect activity',
+      'Disease / fungicide treatment': 'applied a disease treatment',
+      'Horticultural oil': 'applied horticultural oil',
+      'Soil drench': 'completed a soil drench application',
+      'Foliar treatment': 'completed a foliar treatment',
+      'Pre-emergent bed treatment': 'applied pre-emergent to the beds',
+      'Weed spot treatment': 'spot-treated bed weeds',
+      'Soil amendment / acidifier': 'applied a soil amendment',
+      'Inspection only': 'completed a full landscape inspection',
     },
   },
   one_time_lawn_treatment: {
@@ -1038,6 +1180,51 @@ function buildTodaysResult({
     };
   }
 
+  // Tree & Shrub has no pest gauge — the owner template (§6) leads with the
+  // overall landscape condition and tells the plant-health story: scope,
+  // treatments, palm notes (Ganoderma reassurance/flag), next step.
+  if (projectType === 'tree_shrub' && values.landscape_condition) {
+    const condition = String(values.landscape_condition);
+    const conditionHeadlines = {
+      Excellent: 'Overall landscape condition is excellent.',
+      Good: 'Overall landscape condition is good.',
+      Fair: 'Overall landscape condition is fair.',
+      Poor: 'Overall landscape condition is poor — see the recommendations below.',
+      Declining: 'Overall landscape condition is declining — see the recommendations below.',
+      Recovering: 'Overall landscape condition is recovering.',
+    };
+    const headline = conditionHeadlines[condition];
+    if (headline) {
+      const groups = String(values.plant_groups || '')
+        .split(',').map((s) => s.trim()).filter(Boolean)
+        .filter((g) => g !== 'Other')
+        .map((g) => g.toLowerCase());
+      const scopeSentence = groups.length
+        ? `Completed Tree & Shrub service for the ${joinPhrases(groups)}.`
+        : 'Completed your Tree & Shrub service today.';
+      // Ganoderma is the question palm owners actually have — say the answer
+      // plainly, but ONLY when palms were actually serviced (Codex P2: a
+      // shrub/bed-only visit with stray palm-module values must not claim
+      // palm findings the visit scope contradicts). The "No" sentence
+      // couples trunk decay only when the trunk check also came back clean.
+      let palmNote = '';
+      if (groups.includes('palms')) {
+        if (String(values.ganoderma_conk_observed) === 'Yes') {
+          palmNote = ' A possible Ganoderma conk was observed on a palm — an arborist evaluation is recommended.';
+        } else if (String(values.ganoderma_conk_observed) === 'No') {
+          palmNote = String(values.palm_trunk_concern) === 'No'
+            ? ' No visible Ganoderma conks or trunk decay were observed on the palms today.'
+            : ' No visible Ganoderma conks were observed on the palms today.';
+        }
+      }
+      return {
+        headline,
+        body: `${scopeSentence} ${whatWeDid}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+        nextStep,
+      };
+    }
+  }
+
   // Mosquito has no 0-5 gauge (not a trend type) but the owner template
   // leads with the observed level: "Mosquito activity was light today."
   if (projectType === 'mosquito_event' && values.activity_level) {
@@ -1147,6 +1334,9 @@ function buildTypedReportSnapshot({
 
   const items = [];
   for (const field of config.findingsFields || []) {
+    // internal compliance fields (e.g. pollinator status, IRAC/FRAC) stay in
+    // the stored values for audit but never render on the customer report.
+    if (field.internal) continue;
     const value = values[field.key];
     if (value == null || value === '') continue;
     // chips persist a comma-joined selection — map each element through
@@ -1228,6 +1418,9 @@ function findingsSchemaForType(projectType) {
       options: f.options || null,
       placeholder: f.placeholder || null,
       required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
+      // internal fields are tech-facing compliance entries — validated and
+      // stored, but excluded from the customer-facing snapshot findings.
+      internal: !!f.internal,
     })),
     photoCategories: config.photoCategories || [],
     requiredFields: REQUIRED_FINDINGS_FIELDS[projectType] || [],

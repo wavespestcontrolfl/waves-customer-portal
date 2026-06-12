@@ -44,7 +44,7 @@ const {
   recordLawnProtocolCompletion,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
-const { validateTreeShrubCloseout } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance } = require('../services/tree-shrub-closeout');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
@@ -1844,6 +1844,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const treeShrubCloseoutRequired = !isIncompleteVisit
       && !typedFindingsType
       && ['tree_shrub', 'palm'].includes(reportServiceLine);
+    // Typed T&S completions skip the legacy closeout but keep its
+    // pre-commit photo upload gate (Codex P2): without it, an S3 failure
+    // after commit would let a report send with fewer than the required
+    // photos — the count check on the submitted array alone can't see
+    // upload failures.
+    const treeShrubPhotoGateRequired = treeShrubCloseoutRequired
+      || (typedFindingsType === 'tree_shrub' && !isIncompleteVisit);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -1988,6 +1995,62 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       treeShrubCloseoutSummary = treeShrubValidation.normalized;
       treeShrubCloseoutWarnings = treeShrubValidation.warnings || [];
+    }
+
+    // Typed Tree & Shrub completions replace the legacy closeout UX but keep
+    // its regulatory teeth (owner spec §6 "same enforcement"): N/P fertilizer
+    // summer blackout, bee-active pollinator block, IRAC/FRAC confirmation,
+    // product actuals, photo minimum, and the palm-injection redirect all
+    // still gate completion — driven by the typed values + recorded products.
+    if (claim.action === 'proceed' && typedFindingsType === 'tree_shrub' && typedFindings && !isIncompleteVisit) {
+      // The compliance classifiers need the CATALOG rows (name/category/
+      // IRAC/FRAC/analysis) — degrading to submitted-input-only refs on a
+      // transient DB error would silently skip the blackout/pollinator/
+      // IRAC gates (Codex P1 round 2). Fail closed on lookup failure and
+      // on product ids that don't resolve to catalog rows.
+      const submittedProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
+      let typedProductRows = [];
+      if (submittedProductIds.length) {
+        try {
+          typedProductRows = await db('products_catalog').whereIn('id', submittedProductIds).select('*');
+        } catch (catalogErr) {
+          logger.error(`[dispatch] typed T&S catalog lookup failed for ${svc.id}: ${catalogErr.message}`);
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_catalog_lookup_failed'));
+          return res.status(503).json({
+            error: 'Could not verify the recorded products against the catalog. Try again in a moment.',
+            code: 'tree_shrub_catalog_lookup_failed',
+          });
+        }
+        if (typedProductRows.length < submittedProductIds.length) {
+          const found = new Set(typedProductRows.map((row) => String(row.id)));
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_unknown_products'));
+          return res.status(400).json({
+            error: 'Some recorded products were not found in the catalog — refresh the product list and try again.',
+            code: 'tree_shrub_unknown_products',
+            details: submittedProductIds.filter((id) => !found.has(String(id))),
+          });
+        }
+      }
+      const typedCompliance = validateTreeShrubTypedCompliance({
+        service: svc,
+        serviceDate: serviceDateOnly(svc.scheduled_date),
+        values: typedFindings.values,
+        products: products || [],
+        productRows: typedProductRows,
+        completionPhotos,
+      });
+      if (!typedCompliance.ok) {
+        const complianceErr = new Error('tree_shrub_typed_compliance');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, complianceErr);
+        return res.status(400).json({
+          error: 'Tree & Shrub compliance checks must pass before completion',
+          code: 'tree_shrub_typed_compliance',
+          details: typedCompliance.blocks.map((block) => block.message),
+          blocks: typedCompliance.blocks,
+          warnings: typedCompliance.warnings,
+        });
+      }
+      treeShrubCloseoutWarnings = typedCompliance.warnings || [];
     }
 
     if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
@@ -2687,7 +2750,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .update({ structured_notes: serializeJsonb(record.structured_notes) });
         }
 
-        if (treeShrubCloseoutRequired) {
+        if (treeShrubPhotoGateRequired) {
           completionPhotoUploadResult = await uploadServicePhotoDataUrls({
             serviceRecordId: record.id,
             photos: completionPhotos,
