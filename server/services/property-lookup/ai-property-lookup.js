@@ -32,6 +32,10 @@ const MANATEE_PAO_BASE = 'https://www.manateepao.gov';
 const MANATEE_PAO_SEARCH_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-parcel-search-results.php`;
 const MANATEE_PAO_LAND_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-land.php`;
 const MANATEE_PAO_BUILDINGS_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-buildings.php`;
+// Extra features / out-buildings (XFOB) model — pools, screen cages, spas,
+// decks. Same model family as land/buildings (live-probed 2026-06-12; other
+// guessed names 404 to the WP homepage, this one returns JSON).
+const MANATEE_PAO_FEATURES_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-features.php`;
 const SARASOTA_PAO_BASE = 'https://www.sc-pa.com';
 const SARASOTA_PAO_SEARCH_URL = `${SARASOTA_PAO_BASE}/propertysearch/Result`;
 const SARASOTA_PAO_DETAIL_URL = `${SARASOTA_PAO_BASE}/propertysearch/parcel/details`;
@@ -133,6 +137,11 @@ const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao', 'sarasota_pao',
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
+  // Tri-state: true/false only when a county extra-features table was actually
+  // parsed (pools are assessed improvements, so absence on a parsed roll is
+  // meaningful); null = no signal, and isMissingPropertyValue(null) keeps
+  // null records out of the evidence entirely.
+  'hasPool',
 ];
 
 const SOURCE_TYPE_WEIGHTS = {
@@ -388,12 +397,16 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
   const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
   if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
 
-  const [land, buildings] = await Promise.all([
+  const [land, buildings, features] = await Promise.all([
     fetchManateePaoJson(`${MANATEE_PAO_LAND_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
     fetchManateePaoJson(`${MANATEE_PAO_BUILDINGS_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
+    // Pool/cage/spa evidence only — a features failure must never sink the
+    // core record, so it degrades to "no pool signal" (hasPool stays null).
+    fetchManateePaoJson(`${MANATEE_PAO_FEATURES_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs)
+      .catch(() => null),
   ]);
 
-  const parsed = parseManateePaoRecord({ address, search, land, buildings });
+  const parsed = parseManateePaoRecord({ address, search, land, buildings, features });
   if (!hasAnyPropertyFact(parsed)) {
     logger.info('[county-property] Manatee PAO found parcel but no usable facts', {
       elapsedMs: Date.now() - t0,
@@ -412,6 +425,7 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
     postalCity: search.city,
     land,
     buildings,
+    features,
   };
   record.addressLine1 = search.situsAddress || '';
   record.city = search.city || '';
@@ -1689,7 +1703,70 @@ function escapeArcgisSqlLiteral(value) {
   return String(value || '').replace(/'/g, "''");
 }
 
-function parseManateePaoRecord({ address, search, land, buildings }) {
+// ── County extra features → pool facts ──
+// FL property appraisers assess pools, screen cages, and spas as taxable
+// extra features (XFOB), so their presence on the roll is county-grade
+// evidence — and their ABSENCE on a successfully parsed roll is meaningful
+// too. hasPool is therefore tri-state: true/false only when the county's
+// features table was actually parsed; undefined (→ null on the record) when
+// the table/model was unavailable, so a layout change or fetch failure can
+// never masquerade as "no pool".
+const POOL_FEATURE_RE = /\bPOOL\b/i;
+// Rows that mention POOL but are not the pool itself (deck/heater/cage/etc.
+// can outlive or precede the pool on the roll).
+const POOL_FEATURE_EXCLUDE_RE = /DECK|HEATER|ENCLOS|CAGE|SCREEN|BATH|EQUIP|HOUSE/i;
+const POOL_CAGE_FEATURE_RE = /\bCAGE\b|(?:SCREEN(?:ED)?|POOL)[\s,-]*ENCLOSURE/i;
+const SPA_FEATURE_RE = /\bSPA\b|JACUZZI|HOT\s*TUB|WHIRLPOOL/i;
+
+// features: [{ description, sqft }] from one county's parsed table.
+function poolFactsFromFeatures(features) {
+  if (!Array.isArray(features)) return {};
+  const facts = { hasPool: false, poolAreaSqft: null, poolCageSqft: null, hasSpa: false };
+  for (const item of features) {
+    const description = String(item?.description || '');
+    const sqft = coerceInt(item?.sqft, 1, 100000);
+    if (POOL_FEATURE_RE.test(description) && !POOL_FEATURE_EXCLUDE_RE.test(description)) {
+      facts.hasPool = true;
+      if (sqft && !facts.poolAreaSqft) facts.poolAreaSqft = sqft;
+    } else if (POOL_CAGE_FEATURE_RE.test(description)) {
+      // Largest cage wins when multiple enclosure rows exist.
+      if (sqft && sqft > (facts.poolCageSqft || 0)) facts.poolCageSqft = sqft;
+    } else if (SPA_FEATURE_RE.test(description)) {
+      facts.hasSpa = true;
+    }
+  }
+  return facts;
+}
+
+// Manatee pao-model-features.php rows: Description + Area (sqft).
+function manateePoolFeatures(features) {
+  if (!Array.isArray(features?.cols) || !Array.isArray(features?.rows)) return {};
+  const rows = parsePaoRows(features);
+  return poolFactsFromFeatures(rows.map((row) => ({ description: row.Description, sqft: row.Area })));
+}
+
+// Sarasota detail page "Extra Features" grid (no id/caption — heading only):
+// Description + Units, where Units is sqft only when Unit Type is SF.
+function sarasotaPoolFeatures(detailHtml) {
+  const table = findHtmlTableAfterHeading(detailHtml, 'Extra Features');
+  if (!table) return {};
+  const rows = parseHtmlTableRows(table);
+  return poolFactsFromFeatures(rows.map((row) => ({
+    description: row.Description,
+    sqft: /^SF$/i.test(String(row['Unit Type'] || '').trim()) ? row.Units : null,
+  })));
+}
+
+// Charlotte Show_Parcel "Land Improvement Information" table (oth=T, already
+// requested): Description + Size; sq-ft rows label themselves "(sq. Ft.)".
+function charlottePoolFeatures(detailHtml) {
+  const table = findHtmlTableByCaption(detailHtml, 'Land Improvement Information');
+  if (!table) return {};
+  const rows = parseHtmlTableRows(table);
+  return poolFactsFromFeatures(rows.map((row) => ({ description: row.Description, sqft: row.Size })));
+}
+
+function parseManateePaoRecord({ address, search, land, buildings, features }) {
   const buildingRows = parsePaoRows(buildings);
   const landRows = parsePaoRows(land);
   const primaryBuilding = pickPrimaryManateeBuilding(buildingRows);
@@ -1713,6 +1790,7 @@ function parseManateePaoRecord({ address, search, land, buildings }) {
     confidence: 'high',
     county: 'Manatee',
     formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
+    ...manateePoolFeatures(features),
   };
 }
 
@@ -1742,6 +1820,7 @@ function parseSarasotaPaoRecord({ address, search, detailHtml, buildingDetailHtm
     confidence: 'high',
     county: 'Sarasota',
     formattedAddress: situsAddress || [city, 'FL'].filter(Boolean).join(', ') || address,
+    ...sarasotaPoolFeatures(detailHtml),
   };
 }
 
@@ -1789,6 +1868,7 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
     confidence: 'high',
     county: 'Charlotte',
     formattedAddress: [situsAddress, city, 'FL', zipCode].filter(Boolean).join(', ') || address,
+    ...charlottePoolFeatures(detailHtml),
   };
 }
 
@@ -1890,6 +1970,16 @@ function cleanPaoCell(value) {
 function findHtmlTableById(html, id) {
   const re = new RegExp(`<table\\b(?=[^>]*\\bid=["']${escapeRegex(id)}["'])[^>]*>[\\s\\S]*?<\\/table>`, 'i');
   return String(html || '').match(re)?.[0] || '';
+}
+
+// First <table> after a heading containing the given text — for grids that
+// carry neither an id nor a caption (Sarasota's Extra Features section is an
+// <span class="h2"> heading followed by a bare <table class="grid">).
+function findHtmlTableAfterHeading(html, heading) {
+  const source = String(html || '');
+  const headingMatch = source.match(new RegExp(`>\\s*${escapeRegex(heading)}\\s*<`, 'i'));
+  if (!headingMatch) return '';
+  return source.slice(headingMatch.index).match(/<table\b[\s\S]*?<\/table>/i)?.[0] || '';
 }
 
 function findHtmlTableByCaption(html, caption) {
@@ -2486,7 +2576,12 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     garageSpaces: 0,
     coolingType: '',
     heatingType: '',
-    hasPool: false,
+    // Tri-state: county parsers set true/false from the assessed
+    // extra-features roll; null = no signal (AI web records never set it).
+    hasPool: p.hasPool ?? null,
+    poolAreaSqft: p.poolAreaSqft || null,
+    poolCageSqft: p.poolCageSqft || null,
+    hasSpa: p.hasSpa ?? null,
     unitCount: 1,
     ownerType: null,
     ownerNames: [],
@@ -2842,10 +2937,14 @@ module.exports = {
     manateeAddressSearchCandidates,
     mergePropertyRecords,
     normalizeLookupPropertyType,
+    manateePoolFeatures,
     parseManateePaoRecord,
     parseSarasotaPaoRecord,
     parseCharlottePaoRecord,
     parsePropertyJSON,
+    poolFactsFromFeatures,
+    sarasotaPoolFeatures,
+    charlottePoolFeatures,
     pickManateeSearchResult,
     pickSarasotaPrimaryBuildingLink,
     pickSarasotaSearchResult,
