@@ -4444,11 +4444,12 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       });
     }
     // Decode with the same size cap the completion upload enforces — a
-    // photo too big to persist is too big to analyze.
-    const { decodeDataUrlPhoto } = require('../services/service-photos');
+    // photo too big to persist is too big to analyze (the helper default
+    // is the looser 15MB buffer cap, not the 2MB completion data-URL cap).
+    const { decodeDataUrlPhoto, MAX_COMPLETION_PHOTO_DATA_URL_BYTES } = require('../services/service-photos');
     const imageBlocks = [];
     for (const photo of photos) {
-      const decoded = decodeDataUrlPhoto(photo?.data);
+      const decoded = decodeDataUrlPhoto(photo?.data, { maxBytes: MAX_COMPLETION_PHOTO_DATA_URL_BYTES });
       imageBlocks.push({
         type: 'image',
         source: {
