@@ -56,10 +56,15 @@ function computeMinTotalScores(hardChecks, pageTypeChecks) {
 // Computed below after the check arrays are defined.
 let MIN_TOTAL_SCORES;
 
-// Unknown page types run common checks only (evaluate() falls back to
-// an empty page-type bundle), so they share the common-only threshold.
+// Unknown page types HARD-FAIL in evaluate() (fail closed — a typo'd
+// or legacy page_type must not bypass its real bundle's hard checks by
+// gating on commons alone). The .none fallback here only keeps the
+// reported min_total_score sane on that failure path. hasOwnProperty
+// guards against prototype-chain keys ('constructor' etc.).
 function minTotalScoreFor(pageType) {
-  return MIN_TOTAL_SCORES[pageType] ?? MIN_TOTAL_SCORES.none;
+  return Object.prototype.hasOwnProperty.call(MIN_TOTAL_SCORES, pageType)
+    ? MIN_TOTAL_SCORES[pageType]
+    : MIN_TOTAL_SCORES.none;
 }
 
 // Each check carries (name, weight, isHard, evaluate(draft, brief)).
@@ -163,15 +168,26 @@ function evaluate(draft, brief, context = {}) {
   if (!brief) throw new Error('content-quality-gate: brief required');
 
   const pageType = brief.page_type || 'none';
+  // Fail closed on unrecognized page types: every known type maps to a
+  // bundle here ('links'/'gbp'/'none' are EXPLICIT empty bundles), so an
+  // unknown value means a typo, a legacy alias, or drift — and silently
+  // gating it on commons alone (37 vs the 27 'none' threshold) would
+  // bypass that type's real hard checks (hub_link_present,
+  // answer_in_first_paragraph, improvement_over_prior).
+  const knownPageType = Object.prototype.hasOwnProperty.call(PAGE_TYPE_CHECKS, pageType);
   const allChecks = [
     ...HARD_CHECKS.map((c) => ({ ...c, isHard: true })),
-    ...(PAGE_TYPE_CHECKS[pageType] || []),
+    ...(knownPageType ? PAGE_TYPE_CHECKS[pageType] : []),
   ];
 
   const results = {};
   const hardFailures = [];
   const softFailures = [];
   let totalScore = 0;
+
+  if (!knownPageType) {
+    hardFailures.push({ name: 'known_page_type', reason: `unknown_page_type:${pageType}` });
+  }
 
   for (const check of allChecks) {
     let result;

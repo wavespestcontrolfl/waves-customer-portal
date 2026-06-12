@@ -297,10 +297,28 @@ describe('evaluate (full gate)', () => {
     expect(MIN_TOTAL_SCORES.metadata).toBe(47);
     expect(MIN_TOTAL_SCORES.none).toBe(27);
   });
-  test('minTotalScoreFor falls back to the common-only threshold for unknown page types', () => {
+  test('minTotalScoreFor reports the common-only threshold for unknown/prototype-chain page types', () => {
     expect(minTotalScoreFor('refresh')).toBe(35);
     expect(minTotalScoreFor('some-future-type')).toBe(MIN_TOTAL_SCORES.none);
     expect(minTotalScoreFor(undefined)).toBe(MIN_TOTAL_SCORES.none);
+    expect(minTotalScoreFor('constructor')).toBe(MIN_TOTAL_SCORES.none);
+  });
+  test('unknown page type hard-fails the gate (fail closed), even with all commons passing', () => {
+    // A typo'd or legacy page_type must not bypass its real bundle's hard
+    // checks by gating on commons alone (37 >= the 27 'none' threshold).
+    for (const bad of ['blog', 'Refresh', 'constructor']) {
+      const r = evaluate(
+        fullDraft(),
+        brief({ page_type: bad }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      expect(r.hard_failures.some((f) => f.name === 'known_page_type' && f.reason === `unknown_page_type:${bad}`)).toBe(true);
+      expect(r.ok).toBe(false);
+    }
+    // The explicit empty bundles stay common-only and still pass.
+    const links = evaluate(fullDraft(), brief({ page_type: 'links' }), { previewBuildSuccess: true, sitemapHasUrl: true });
+    expect(links.hard_failures).toEqual([]);
+    expect(links.ok).toBe(true);
   });
   test('every page type\'s threshold is reachable from its own ceiling', () => {
     const { HARD_CHECKS, PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
