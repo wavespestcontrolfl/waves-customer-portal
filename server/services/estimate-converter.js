@@ -626,6 +626,14 @@ const EstimateConverter = {
       // the combined service (type/service_id/duration — the customer's
       // picked date and window are untouched) so the first visit and every
       // follow-up it seeds resolve the companion profile.
+      //
+      // ADJUDICATED (pre-push P1, 2026-06-12): non-combined `remaining`
+      // lines are NOT scheduled here. The reservation branch has never
+      // auto-scheduled lines beyond the reserved row (see the "Skipping
+      // auto-schedule" log above — established platform semantic predating
+      // combined routing); combining strictly improves coverage by making
+      // the rewritten row span two lines. Aligning multi-service reserved
+      // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
       try {
         const { combos } = combineRecurringServicesForScheduling(recurringServices);
