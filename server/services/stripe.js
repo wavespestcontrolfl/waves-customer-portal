@@ -357,8 +357,9 @@ const StripeService = {
       metadata: {
         purpose: 'estimate_deposit',
         estimate_id: String(estimateId),
-        // DELIBERATELY surcharge-exempt: the deposit is a flat $50–$99
-        // commitment device, charged at face value with no card surcharge,
+        // DELIBERATELY surcharge-exempt: the deposit is a flat per-service-
+        // class commitment device ($49 recurring / $99 one-time),
+        // charged at face value with no card surcharge,
         // and the invoice credit equals exactly the amount received. This
         // metadata marks the exemption explicitly so webhook surcharge
         // quarantine logic can distinguish it from an under-collected
@@ -369,19 +370,25 @@ const StripeService = {
   },
 
   /**
-   * Raw full refund of a PaymentIntent — for money that should never have
-   * been collected (e.g. a stale estimate deposit that succeeded after the
-   * estimate became unacceptable). The payments-table refund() flow doesn't
-   * apply: deposits have no payments row. Idempotency-keyed on the PI so
-   * webhook replays can't double-refund.
+   * Raw refund of a PaymentIntent — for money that should never have been
+   * collected (a stale estimate deposit that succeeded after the estimate
+   * became unacceptable) or the unapplied remainder of a deposit (partial,
+   * via amountCents). The payments-table refund() flow doesn't apply:
+   * deposits have no payments row. Idempotency-keyed on the PI (plus the
+   * amount for partials) so webhook replays can't double-refund.
    */
-  async refundPaymentIntent(paymentIntentId, { reason = 'requested_by_customer' } = {}) {
+  async refundPaymentIntent(paymentIntentId, { reason = 'requested_by_customer', amountCents = null } = {}) {
     if (!paymentIntentId) return null;
     const stripe = getStripe();
     if (!stripe) return null;
+    const partial = Number.isFinite(Number(amountCents)) && Number(amountCents) > 0;
     return stripe.refunds.create(
-      { payment_intent: paymentIntentId, reason },
-      { idempotencyKey: `refund_pi_${paymentIntentId}` },
+      {
+        payment_intent: paymentIntentId,
+        reason,
+        ...(partial ? { amount: Math.round(Number(amountCents)) } : {}),
+      },
+      { idempotencyKey: partial ? `refund_pi_${paymentIntentId}_${Math.round(Number(amountCents))}` : `refund_pi_${paymentIntentId}` },
     );
   },
 

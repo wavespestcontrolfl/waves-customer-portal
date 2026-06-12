@@ -1194,11 +1194,16 @@ async function handleChargeRefunded(charge) {
   logger.info(`[stripe-webhook] Charge refunded: ${chargeId}`);
 
   // Estimate deposits have no payments row — a dashboard refund (or the
-  // webhook echo of our own stale-deposit refund) must flip the deposit
-  // ledger so reversed money can never satisfy acceptance or be credited,
-  // then skip the payments path entirely.
+  // webhook echo of our own refunds: stale deposit, exempt-path sweep,
+  // unapplied remainder) must flip the deposit ledger so reversed money can
+  // never satisfy acceptance or be credited, then skip the payments path
+  // entirely. The cumulative refunded amount lets the handler recognize the
+  // echo of a refund it already stamped (a partial remainder refund must not
+  // flip a legitimately credited row).
   const { handleDepositChargeReversed } = require('../services/estimate-deposits');
-  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded');
+  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
+    amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
+  });
   if (depositReversal.handled) return;
 
   const latestRefund = Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null;

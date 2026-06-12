@@ -298,14 +298,16 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
 });
 
 // POST /:token/deposit-intent — Stripe PaymentIntent for the required
-// acceptance deposit (25% of first visit, $50–$99; ESTIMATE_DEPOSIT_REQUIRED
-// rollout switch). Gates mirror accept exactly: estimate-token format gate,
-// terminal/expired rejection, the accept-time quote gate (never collect
-// money for an estimate accept will reject), and the deposit policy itself
-// (prepay-annual choice, existing plan customers, and uninvoiced one-time
-// accepts owe nothing). The client pays the intent, then calls accept with
-// depositPaymentIntentId; the intent is idempotent per estimate+amount, so
-// retries reuse it.
+// acceptance deposit (flat $49 recurring / $99 one-time, pricing_config-
+// authoritative; ESTIMATE_DEPOSIT_REQUIRED rollout switch). Gates mirror
+// accept exactly: estimate-token format gate, terminal/expired rejection,
+// the accept-time quote gate (never collect money for an estimate accept
+// will reject), and the deposit policy itself (prepay-annual choice and
+// existing plan customers owe nothing). serviceMode picks the amount class —
+// one-time accepts pay the heavier flat amount, credited against their
+// completed-visit invoice. The client pays the intent, then calls accept
+// with depositPaymentIntentId; the intent is idempotent per estimate+amount,
+// so retries reuse it.
 router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
@@ -325,20 +327,19 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     }
 
     const membership = await buildEstimateMembershipContext(estimate);
-    const requestedOneTime = req.body?.serviceMode === 'one_time';
-    const oneTimeUninvoiced = (requestedOneTime || isStructuralOneTimeOnlyEstimate(estData, estimate))
-      && estimate.bill_by_invoice !== true;
+    const oneTime = req.body?.serviceMode === 'one_time'
+      || isStructuralOneTimeOnlyEstimate(estData, estimate);
     const policy = resolveDepositPolicy({
       estimate,
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
       membership,
-      oneTimeUninvoiced,
+      oneTime,
     });
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
     }
 
-    const intent = await createDepositIntentForEstimate(estimate);
+    const intent = await createDepositIntentForEstimate(estimate, { oneTime });
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }

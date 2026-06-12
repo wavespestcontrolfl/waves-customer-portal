@@ -1,10 +1,12 @@
 // Required estimate-acceptance deposits (dark until ESTIMATE_DEPOSIT_REQUIRED
 // is enabled): one row per Stripe PaymentIntent created for an estimate's
-// deposit. The deposit is 25% of the first visit clamped to $50–$99, charged
-// before acceptance commits, and credited as a negative line item on the
-// first invoice. Status flow: pending → received → credited (or failed /
-// refunded). stripe_payment_intent_id uniqueness makes webhook + accept-time
-// verification idempotent against each other.
+// deposit. The deposit is a flat per-service-class amount ($49 recurring /
+// $99 one-time, pricing_config-authoritative), charged before acceptance
+// commits, and credited as a negative line item on the first invoice — any
+// unapplied remainder rolls forward to later service invoices for the same
+// estimate. Status flow: pending → received → credited (or refunding →
+// refunded / failed). stripe_payment_intent_id uniqueness makes webhook +
+// accept-time verification idempotent against each other.
 exports.up = async function up(knex) {
   const exists = await knex.schema.hasTable('estimate_deposits');
   if (exists) return;
@@ -19,6 +21,11 @@ exports.up = async function up(knex) {
     // consumed slice here, so only the unapplied balance stays available.
     // status flips to 'credited' only when credited_amount reaches amount.
     t.decimal('credited_amount', 10, 2).notNullable().defaultTo(0);
+    // Dollars WE refunded on this PI (stale deposit, exempt-path sweep, or an
+    // unapplied remainder). The charge.refunded webhook echo of our own
+    // refund compares against this to distinguish itself from a genuine
+    // dashboard refund of credited money.
+    t.decimal('refunded_amount', 10, 2).notNullable().defaultTo(0);
     t.string('stripe_payment_intent_id', 100).notNullable().unique();
     t.string('status', 20).notNullable().defaultTo('pending');
     t.timestamp('received_at', { useTz: true });

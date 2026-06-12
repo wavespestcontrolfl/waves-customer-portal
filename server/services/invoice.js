@@ -1156,7 +1156,7 @@ const InvoiceService = {
           },
         ];
 
-    return this.create({
+    const createParams = {
       customerId: sr.customer_id,
       serviceRecordId,
       scheduledServiceId: sr.scheduled_service_id || undefined,
@@ -1167,7 +1167,112 @@ const InvoiceService = {
       trustedStoredDiscountSources: scheduledInvoice
         ? ["scheduled_service"]
         : [],
-    });
+    };
+
+    // Estimate-deposit roll-forward: when this service traces back to an
+    // accepted estimate (scheduled_services.source_estimate_id) that still
+    // holds unapplied deposit money, credit it against this invoice. This is
+    // how one-time pay-at-visit deposits get applied — their first invoice
+    // IS the completed-visit invoice — and how any remainder a cheap first
+    // invoice couldn't absorb reaches the next visit instead of stranding.
+    // Same atomic discipline as the converter: credit line exists IFF the
+    // ledger consumed exactly that amount in the same transaction; a
+    // mismatch rolls back and one retry re-reads the fresh balance. Deposit
+    // machinery failures NEVER block visit invoicing — fall back to the
+    // plain create and alert for manual reconciliation.
+    let sourceEstimateId = null;
+    if (sr.scheduled_service_id) {
+      try {
+        const ss = await db("scheduled_services")
+          .where({ id: sr.scheduled_service_id })
+          .first("source_estimate_id");
+        sourceEstimateId = ss?.source_estimate_id || null;
+      } catch (err) {
+        logger.warn(
+          `[invoice] source-estimate lookup failed for service ${serviceRecordId}: ${err.message}`,
+        );
+      }
+    }
+    if (sourceEstimateId) {
+      const {
+        pendingDepositCredit,
+        consumeDepositCredit,
+      } = require("./estimate-deposits");
+      const positiveSubtotal =
+        Math.round(
+          lineItems.reduce((sum, item) => {
+            const line = Number(
+              item.amount ??
+                Number(item.quantity || 1) * Number(item.unit_price || 0),
+            );
+            return sum + (Number.isFinite(line) && line > 0 ? line : 0);
+          }, 0) * 100,
+        ) / 100;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let depositCredit = null;
+        try {
+          depositCredit = await pendingDepositCredit(sourceEstimateId);
+        } catch {
+          break; // ledger unreadable — invoice proceeds uncredited
+        }
+        const applied =
+          depositCredit && positiveSubtotal > 0
+            ? Math.min(depositCredit.amount, positiveSubtotal)
+            : 0;
+        if (!(applied > 0)) break;
+        try {
+          return await db.transaction(async (trx) => {
+            const created = await this.create({
+              ...createParams,
+              database: trx,
+              lineItems: [
+                ...lineItems,
+                {
+                  description: "Deposit credit (paid at acceptance)",
+                  quantity: 1,
+                  unit_price: -applied,
+                  // Prior payment, not a discount — InvoiceService applies
+                  // it AFTER tax and keeps it out of discount reporting.
+                  category: "deposit_credit",
+                },
+              ],
+            });
+            if (created?.id) {
+              const allocated = await consumeDepositCredit({
+                estimateId: sourceEstimateId,
+                amount: applied,
+                invoiceId: created.id,
+                trx,
+              });
+              if (Math.round(allocated * 100) !== Math.round(applied * 100)) {
+                throw new Error(
+                  `deposit allocation mismatch (applied ${applied}, allocated ${allocated})`,
+                );
+              }
+            }
+            return created;
+          });
+        } catch (err) {
+          logger.warn(
+            `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
+          );
+          if (attempt === 1) {
+            try {
+              const { triggerNotification } = require("./notification-triggers");
+              await triggerNotification("estimate_deposit_reconcile_needed", {
+                estimateId: sourceEstimateId,
+              });
+            } catch (notifyErr) {
+              logger.error(
+                `[invoice] failed to raise deposit reconcile alert: ${notifyErr.message}`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    return this.create(createParams);
   },
 
   /**

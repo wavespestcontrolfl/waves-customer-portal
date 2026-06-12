@@ -728,6 +728,14 @@ async function syncConstantsFromDB(dbInstance) {
       deepMergePlainObject(constants.LAWN_PRICING_V2, config.lawn_pricing_v2);
     }
 
+    // ── Estimate acceptance deposit (flat per service class) ──
+    if (config.estimate_deposit) {
+      const recurring = Number(config.estimate_deposit.recurringAmount);
+      const oneTime = Number(config.estimate_deposit.oneTimeAmount);
+      if (Number.isFinite(recurring) && recurring > 0) constants.DEPOSIT.recurringAmount = r(recurring);
+      if (Number.isFinite(oneTime) && oneTime > 0) constants.DEPOSIT.oneTimeAmount = r(oneTime);
+    }
+
     // ── Pest Control ─────────────────────────────────────────
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);

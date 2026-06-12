@@ -5326,19 +5326,21 @@ router.put('/:token/accept', async (req, res, next) => {
     // ─────────────────────────────────────────────
     // REQUIRED ACCEPTANCE DEPOSIT (dark until ESTIMATE_DEPOSIT_REQUIRED).
     // Every acceptance requires a verified deposit except prepay-annual
-    // (paying in full), existing plan customers — whose commitment gate is
-    // booking the appointment itself — and one-time accepts on non-invoice
-    // estimates (no invoice exists at accept to credit the deposit
-    // against). Verification never trusts the client: webhook-recorded
-    // deposit, else live Stripe retrieval of the named PaymentIntent with
-    // metadata pinned to this estimate.
+    // (paying in full) and existing plan customers — whose commitment gate
+    // is booking the appointment itself. Flat per-service-class amounts:
+    // one-time accepts pay the heavier amount and the credit lands on their
+    // completed-visit invoice (createFromService roll-forward); recurring
+    // accepts credit the first invoice created here. Verification never
+    // trusts the client: webhook-recorded deposit, else live Stripe
+    // retrieval of the named PaymentIntent with metadata pinned to this
+    // estimate.
     // ─────────────────────────────────────────────
     const acceptMembership = await buildEstimateMembershipContext(estimate);
     const depositPolicy = resolveDepositPolicy({
       estimate,
       paymentMethodPreference,
       membership: acceptMembership,
-      oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
+      oneTime: treatAsOneTime,
     });
     if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
       return res.status(400).json({
@@ -6097,6 +6099,26 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
     } else if (customerId && treatAsOneTime) {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
+    }
+
+    // Exempt-path deposit sweep: the customer paid a deposit and then
+    // accepted through a path that owes none (switched to prepay-annual, or
+    // membership made them exempt). The webhook's staleness gate only
+    // catches money that lands AFTER acceptance — money recorded BEFORE an
+    // exempt accept would otherwise sit on the ledger forever. Refund it.
+    // Required paths never sweep: their unapplied remainder rolls forward
+    // to the next service-record invoice. Post-commit and best-effort —
+    // failures alert + leave the truth on the ledger.
+    if (depositPolicy.enforced && !depositPolicy.required) {
+      try {
+        const { refundUnconsumedDeposits } = require('../services/estimate-deposits');
+        await refundUnconsumedDeposits({
+          estimateId: estimate.id,
+          reason: `exempt_accept:${depositPolicy.exemptReason || 'unknown'}`,
+        });
+      } catch (e) {
+        logger.error(`[estimate-accept] exempt-path deposit sweep failed for estimate ${estimate.id}: ${e.message}`);
+      }
     }
 
     // In-app notifications for estimate accepted. Invoice-mode copy uses
@@ -9459,8 +9481,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 
     // Acceptance-deposit policy for the payment step: preference is unchosen
     // at data-fetch time, so this reflects the non-prepay path (prepay-annual
-    // is exempt at accept regardless). Mirrors accept's one-time input so the
-    // UI can never advertise a deposit the server would 409.
+    // is exempt at accept regardless). The amount is the flat class amount —
+    // structurally one-time estimates advertise the heavier figure; mixed
+    // estimates advertise the recurring figure and the deposit-intent call
+    // re-resolves with the customer's actual serviceMode.
     const depositEstData = (() => {
       try {
         return typeof estimate.estimate_data === 'string'
@@ -9472,7 +9496,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       estimate,
       paymentMethodPreference: null,
       membership,
-      oneTimeUninvoiced: isStructuralOneTimeOnlyEstimate(depositEstData, estimate) && estimate.bill_by_invoice !== true,
+      oneTime: isStructuralOneTimeOnlyEstimate(depositEstData, estimate),
     });
 
     res.json({

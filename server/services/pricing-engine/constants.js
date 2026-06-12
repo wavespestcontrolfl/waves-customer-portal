@@ -1624,6 +1624,18 @@ const ACH_DISCOUNT = {
   exemptFromCompositeCap: true,
 };
 
+// ── Estimate acceptance deposit ───────────────────────────────
+// Flat per-service-class amounts (owner decision 2026-06-12): the deposit is
+// a commitment device, not proportional cash collection, so it is never a
+// percentage of the job. Recurring plans use the lighter amount; one-time /
+// intensive jobs (bed bug, termite, rodent, wildlife) use the heavier one —
+// a stronger no-show filter that still stays under the $100 line.
+// DB-authoritative via pricing_config key `estimate_deposit`.
+const DEPOSIT = {
+  recurringAmount: 49,
+  oneTimeAmount: 99,
+};
+
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
@@ -1631,5 +1643,6 @@ module.exports = {
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
+  DEPOSIT,
   PROCESSING_ADJUSTMENT,
 };
