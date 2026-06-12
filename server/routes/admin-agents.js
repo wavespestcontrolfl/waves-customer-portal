@@ -1430,11 +1430,9 @@ router.get('/shadow-scores', async (req, res, next) => {
 router.get('/intent-modes', async (req, res, next) => {
   try {
     const suggestMode = require('../services/sms-suggest-mode');
-    const [rows, seenIntents, suggestedCounts, outcomes] = await Promise.all([
+    const [rows, seenIntents, outcomes] = await Promise.all([
       suggestMode.listIntentModes(),
       db('message_drafts').whereNotNull('intent').distinct('intent').pluck('intent'),
-      db('message_drafts').where('status', suggestMode.SUGGESTED_STATUS)
-        .select('intent').count('* as count').groupBy('intent'),
       db('agent_decisions').where('workflow', suggestMode.SUGGEST_WORKFLOW)
         .select('detected_intent as intent', 'status').count('* as count')
         .groupBy('detected_intent', 'status'),
@@ -1465,11 +1463,16 @@ router.get('/intent-modes', async (req, res, next) => {
       b.reason = row.reason || null;
     }
     for (const intent of seenIntents) bucket(intent);
-    for (const row of suggestedCounts) bucket(row.intent).suggest.suggested = asNumber(row.count);
     for (const row of outcomes) {
       const b = bucket(row.intent);
+      const n = asNumber(row.count);
+      // Total published = every decision ever inserted for the workflow,
+      // whatever its outcome. Counting message_drafts status='suggested'
+      // instead would shrink the denominator: unused suggestions revert
+      // their draft to 'shadow' for the judge.
+      b.suggest.suggested += n;
       const key = row.status === 'pending_review' ? 'pending' : row.status;
-      if (key in b.suggest) b.suggest[key] = asNumber(row.count);
+      if (key in b.suggest) b.suggest[key] = n;
     }
 
     res.json({

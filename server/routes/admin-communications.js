@@ -187,6 +187,7 @@ router.post('/sms', async (req, res, next) => {
       ? verifiedAgentDecision.suggested_message
       : null;
 
+    const sendStartedAt = new Date();
     const result = await sendCustomerMessage({
       to,
       body: cleanBody,
@@ -244,12 +245,16 @@ router.post('/sms', async (req, res, next) => {
     // sms_log row — the same ownership match the composer card fetch uses.
     // The unused drafts return to the judge pool: the reply that was just
     // sent is exactly the human ground truth Phase C scores against.
+    // Cutoff on the INBOUND's timestamp vs send start: a suggestion for a
+    // customer message that arrived while the send was in flight was never
+    // on the operator's screen and must keep its card.
     try {
       const ignoredPhoneLast10 = normalizePhoneLast10(to);
       if (ignoredPhoneLast10) {
         const staleQuery = db('agent_decisions as ad')
           .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
           .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+          .where('s.created_at', '<', sendStartedAt)
           .andWhere(function byPhone() {
             this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10])
               .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);

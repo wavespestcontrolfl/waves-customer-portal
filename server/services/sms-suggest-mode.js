@@ -140,27 +140,54 @@ async function revertDraftsToShadow(trx, draftIds) {
 }
 
 /**
+ * Pure ordering decision for a publish attempt. Drafting is fire-and-forget
+ * from the webhook, so two drafts for the same customer can finish out of
+ * order — an OLDER inbound's draft completing later must not supersede the
+ * newer card. Pending rows with a strictly newer inbound block this publish
+ * entirely; rows with an older (or unknown) inbound get superseded.
+ */
+function splitPendingSuggestions(pending, inboundAt) {
+  // new Date(null) is epoch zero, not NaN — reject missing anchors explicitly.
+  const anchor = inboundAt ? new Date(inboundAt).getTime() : NaN;
+  if (!Number.isFinite(anchor)) return { newerExists: true, supersede: [] };
+  const newerExists = (pending || []).some((row) => {
+    const t = new Date(row.inbound_at || 0).getTime();
+    return Number.isFinite(t) && t > anchor;
+  });
+  return { newerExists, supersede: newerExists ? [] : (pending || []) };
+}
+
+/**
  * Publish one suggested draft into the comms composer: supersede any older
  * pending suggestion for the customer (one card per thread, newest inbound
  * wins — their drafts go back to the judge), then insert the pending_review
- * decision the composer card reads. Returns the decision id, or null on
- * failure (caller reverts the draft to shadow so the judge still covers it).
+ * decision the composer card reads. Returns the decision id, or null when
+ * not published (failure, or a newer suggestion is already up) — the caller
+ * reverts the draft to shadow so the judge still covers it.
  */
 async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion }) {
   try {
     return await db.transaction(async (trx) => {
-      const superseded = await trx('agent_decisions')
-        .where({ workflow: SUGGEST_WORKFLOW, status: 'pending_review', customer_id: customerId })
-        .select('id', 'entity_id');
-      if (superseded.length) {
+      const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at');
+      if (!inbound?.created_at) return null;
+
+      const pending = await trx('agent_decisions as ad')
+        .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+        .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review', 'ad.customer_id': customerId })
+        .select('ad.id', 'ad.entity_id', 's.created_at as inbound_at');
+
+      const { newerExists, supersede } = splitPendingSuggestions(pending, inbound.created_at);
+      if (newerExists) return null;
+
+      if (supersede.length) {
         await trx('agent_decisions')
-          .whereIn('id', superseded.map((r) => r.id))
+          .whereIn('id', supersede.map((r) => r.id))
           .update({
             status: 'superseded',
             correction_note: 'Replaced by a suggestion for a newer inbound message.',
             updated_at: new Date(),
           });
-        await revertDraftsToShadow(trx, superseded.map((r) => r.entity_id));
+        await revertDraftsToShadow(trx, supersede.map((r) => r.entity_id));
       }
 
       const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
@@ -239,6 +266,7 @@ module.exports = {
   isEscalationIntent,
   suggestionEligible,
   validateModeChange,
+  splitPendingSuggestions,
   getIntentMode,
   resolveDraftStatus,
   listIntentModes,

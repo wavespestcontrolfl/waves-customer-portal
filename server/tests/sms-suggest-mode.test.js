@@ -13,6 +13,7 @@ const {
   isEscalationIntent,
   suggestionEligible,
   validateModeChange,
+  splitPendingSuggestions,
 } = require('../services/sms-suggest-mode');
 
 const ELIGIBLE = {
@@ -72,6 +73,51 @@ describe('suggest mode — mode-change validation', () => {
     expect(validateModeChange('x'.repeat(51), 'suggest').ok).toBe(false);
     expect(validateModeChange(` general_customer_sms_needs_review `, 'suggest').intent)
       .toBe('general_customer_sms_needs_review');
+  });
+});
+
+describe('suggest mode — out-of-order publish protection (Codex P1)', () => {
+  // Drafting is fire-and-forget from the webhook: an OLDER inbound's draft
+  // can finish AFTER a newer one already published its card.
+  const at = (mins) => new Date(Date.UTC(2026, 5, 12, 9, mins)).toISOString();
+
+  test('a pending suggestion for a newer inbound blocks the publish entirely', () => {
+    const pending = [{ id: 'newer', entity_id: 'd2', inbound_at: at(5) }];
+    const { newerExists, supersede } = splitPendingSuggestions(pending, at(0));
+    expect(newerExists).toBe(true);
+    expect(supersede).toEqual([]);
+  });
+
+  test('older pending suggestions are superseded — newest inbound wins', () => {
+    const pending = [
+      { id: 'old1', entity_id: 'd1', inbound_at: at(0) },
+      { id: 'old2', entity_id: 'd2', inbound_at: at(2) },
+    ];
+    const { newerExists, supersede } = splitPendingSuggestions(pending, at(5));
+    expect(newerExists).toBe(false);
+    expect(supersede.map((r) => r.id)).toEqual(['old1', 'old2']);
+  });
+
+  test('one newer row poisons the batch — nothing is superseded out from under it', () => {
+    const pending = [
+      { id: 'old', entity_id: 'd1', inbound_at: at(0) },
+      { id: 'newer', entity_id: 'd2', inbound_at: at(9) },
+    ];
+    const { newerExists, supersede } = splitPendingSuggestions(pending, at(5));
+    expect(newerExists).toBe(true);
+    expect(supersede).toEqual([]);
+  });
+
+  test('unparseable anchor timestamp fails closed (no publish)', () => {
+    expect(splitPendingSuggestions([], 'not-a-date').newerExists).toBe(true);
+    expect(splitPendingSuggestions([], null).newerExists).toBe(true);
+  });
+
+  test('pending rows with no inbound link count as older, not newer', () => {
+    const pending = [{ id: 'orphan', entity_id: 'd1', inbound_at: null }];
+    const { newerExists, supersede } = splitPendingSuggestions(pending, at(5));
+    expect(newerExists).toBe(false);
+    expect(supersede.map((r) => r.id)).toEqual(['orphan']);
   });
 });
 
