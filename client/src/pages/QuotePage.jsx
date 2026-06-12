@@ -1194,7 +1194,11 @@ export default function QuotePage({ serviceSlug = '' }) {
                       {result.confidence === 'low' && (
                         <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
                       )}
-                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${Number(result.annual_total).toLocaleString()}/yr · {result.service_interest}</div>
+                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>
+                        {Number(result.per_application) > 0
+                          ? `$${Number(result.per_application).toLocaleString()} per application · ${result.service_interest}`
+                          : `$${Number(result.annual_total).toLocaleString()}/yr · ${result.service_interest}`}
+                      </div>
                       {result.has_setup_fee && (
                         <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
                           + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>

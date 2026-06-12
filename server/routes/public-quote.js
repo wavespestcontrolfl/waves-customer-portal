@@ -109,6 +109,22 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
   };
 }
 
+// Per-application price for the wizard result screen (owner request,
+// 2026-06-12: lead with "$432/yr" wanted "$108 per application"). Only
+// derivable when exactly ONE recurring line carries per-app pricing —
+// with mixed cadences (pest 4x/yr + lawn 9x/yr) a single per-app number
+// would be wrong, so the client falls back to the annual caption.
+function derivePerApplication(estimate) {
+  const lines = (estimate?.lineItems || []).filter(
+    (item) => Number(item?.perApp) > 0 && Number(item?.visitsPerYear) > 0
+  );
+  if (lines.length !== 1) return null;
+  return {
+    amount: Math.round(Number(lines[0].perApp)),
+    visitsPerYear: Number(lines[0].visitsPerYear),
+  };
+}
+
 function normalizePublicQuotePestFrequency(value) {
   const raw = String(value || '')
     .trim()
@@ -796,14 +812,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // Post-quote orchestration — customer self-serves with price + booking link.
     // The outbound-admin-call pattern is reserved for the no-price divert flow
     // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
-    // Customer SMS: estimate_accepted_onetime template (DB-editable).
+    // Customer SMS: quote_wizard_booking_invite template (DB-editable).
+    // NOT estimate_accepted_onetime — that copy ("Thanks for booking your
+    // {service_label}") belongs to the estimate-acceptance moment; at the
+    // quote moment nothing is booked yet, so leads were thanked for a
+    // booking that doesn't exist (owner report, 2026-06-12).
     if (normalizedPhone && !quoteRequired && !isOneTimeOnly) {
       try {
         const wantsPest = !!services?.pest;
         const wantsLawn = !!services?.lawn;
         const serviceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
         const customerBody = await renderTemplate(
-          'estimate_accepted_onetime',
+          'quote_wizard_booking_invite',
           { first_name: contactFirstName, service_label: serviceLabel, booking_url: bookingUrl },
           {
             workflow: 'public_quote',
@@ -812,7 +832,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           },
         );
         if (!customerBody) {
-          logger.warn(`[public-quote] estimate_accepted_onetime template missing/disabled; booking SMS skipped for lead ${lead.id}`);
+          logger.warn(`[public-quote] quote_wizard_booking_invite template missing/disabled; booking SMS skipped for lead ${lead.id}`);
         } else {
           const smsResult = await sendCustomerMessage({
             to: normalizedPhone,
@@ -964,6 +984,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (oneTimeTotal > 0) {
       response.one_time_total = Math.round(oneTimeTotal);
     }
+    const perApplication = derivePerApplication(estimate);
+    if (perApplication) {
+      response.per_application = perApplication.amount;
+      response.visits_per_year = perApplication.visitsPerYear;
+    }
     res.json(response);
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
@@ -1080,4 +1105,5 @@ module.exports._internals = {
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
+  derivePerApplication,
 };
