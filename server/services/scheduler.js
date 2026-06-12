@@ -42,6 +42,61 @@ function scheduledSmsAttemptSql() {
 async function recoverStaleScheduledSmsClaims(now) {
   const staleBefore = new Date(now.getTime() - SCHEDULED_SMS_STALE_CLAIM_MS);
   const attemptsSql = scheduledSmsAttemptSql();
+
+  // Settle stale claims whose send PROVABLY happened first: the provider
+  // path writes a sibling sms_log row tagged with scheduled_sms_log_id when
+  // Twilio accepts. Blindly re-scheduling those would double-text the
+  // customer, and failing them would reopen Agent Review decisions on an
+  // answered thread. Mirrors the normal sent path (created_at re-stamped to
+  // send time, queued_at preserved).
+  const settled = await db.raw(`
+    UPDATE sms_log AS s
+    SET status = 'sent',
+        created_at = ?,
+        updated_at = ?,
+        metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
+          'queued_at', s.created_at,
+          'scheduled_sms_recovered_sent_at', ?::timestamptz
+        )
+    WHERE s.status = 'sending'
+      AND s.scheduled_for IS NOT NULL
+      AND s.scheduled_for <= ?
+      AND s.updated_at <= ?
+      AND EXISTS (
+        SELECT 1 FROM sms_log p
+        WHERE p.metadata->>'scheduled_sms_log_id' = s.id::text
+          AND p.direction = 'outbound'
+          AND p.status IN ('queued', 'sent', 'delivered')
+      )
+    RETURNING s.id, s.metadata, s.message_body, s.admin_user_id
+  `, [now, now, now, now, staleBefore]);
+
+  const settledRows = settled.rows || [];
+  if (settledRows.length > 0) {
+    logger.warn(`[scheduled-sms] Settled ${settledRows.length} stale claim(s) whose provider send already happened`);
+    const { resolveSuggestionAfterSend, ignoreParkedSuggestions } = require('./sms-suggest-mode');
+    for (const row of settledRows) {
+      let meta = row.metadata;
+      if (typeof meta === 'string') {
+        try { meta = JSON.parse(meta); } catch { meta = {}; }
+      }
+      meta = meta || {};
+      if (meta.agent_decision_id) {
+        await resolveSuggestionAfterSend({
+          decisionId: meta.agent_decision_id,
+          sentBody: row.message_body,
+          reviewedBy: row.admin_user_id || 'Admin',
+        });
+      }
+      if (Array.isArray(meta.parked_decision_ids) && meta.parked_decision_ids.length) {
+        await ignoreParkedSuggestions({
+          decisionIds: meta.parked_decision_ids,
+          reviewedBy: row.admin_user_id || 'Admin',
+        });
+      }
+    }
+  }
+
   const result = await db.raw(`
     UPDATE sms_log
     SET status = CASE
