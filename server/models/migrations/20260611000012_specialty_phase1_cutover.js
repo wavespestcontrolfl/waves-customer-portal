@@ -53,7 +53,7 @@ const PHASE1_KEYS = [
   { key: 'pest_inspection', from: 'pest_inspection', to: 'pest_inspection' },
   { key: 'new_customer_inspection', from: 'pest_inspection', to: 'pest_inspection' },
   { key: 'mosquito_event', from: ['mosquito_event', 'pest_inspection'], to: 'mosquito_event' },
-  { key: 'mosquito_one_time', from: 'one_time_pest_treatment', to: 'mosquito_event' },
+  { key: 'mosquito_one_time', from: ['one_time_pest_treatment', 'pest_inspection'], to: 'mosquito_event' },
   { key: 'palm_injection', from: 'palm_injection', to: 'palm_injection' },
   { key: 'lawn_aeration', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
   { key: 'lawn_care_one_time', from: 'one_time_lawn_treatment', to: 'one_time_lawn_treatment' },
