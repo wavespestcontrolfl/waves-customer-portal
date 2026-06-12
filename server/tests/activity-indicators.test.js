@@ -519,11 +519,22 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
   });
 
   test('schema slice carries sections and the required next step flag', () => {
+    // Unscoped slice = full registry (AI-draft labeling); a per-service-key
+    // slice scopes the §3 combo modules — covered in rodent-family-typed.
     const schema = findingsSchemaForType('rodent_trapping');
     expect(schema.nextStepRequired).toBe(true);
     expect(nextStepRequiredForType('one_time_pest_treatment')).toBe(false);
     const sections = [...new Set(schema.fields.map((f) => f.section))];
     expect(sections).toEqual([
+      'Evidence observed', 'Trap activity', 'Conducive conditions',
+      'Work completed', 'Recommendations', 'Customer communication',
+      'Exclusion module', 'Sanitation module',
+    ]);
+    const plainSections = [...new Set(
+      findingsSchemaForType('rodent_trapping', { serviceKey: 'rodent_trapping' })
+        .fields.map((f) => f.section),
+    )];
+    expect(plainSections).toEqual([
       'Evidence observed', 'Trap activity', 'Conducive conditions',
       'Work completed', 'Recommendations', 'Customer communication',
     ]);

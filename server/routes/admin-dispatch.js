@@ -993,7 +993,9 @@ router.get('/:date?', async (req, res, next) => {
         // never blocks on a registry fetch (bad-network field conditions).
         // Null for everything except cut-over specialty types.
         findingsSchema: completionProfile?.findingsType
-          ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType)
+          // serviceKey scopes combo-module sections (owner spec §3) — a pure
+          // trap check never sees the exclusion/sanitation modules.
+          ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType, { serviceKey: completionProfile.serviceKey })
           : null,
         linkedProject: linkedProject ? {
           id: linkedProject.id,
