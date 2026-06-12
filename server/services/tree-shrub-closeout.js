@@ -397,6 +397,120 @@ function validateTreeShrubCloseout({
   };
 }
 
+// Treatment chips that legally hinge on knowing WHAT was applied: without a
+// recorded product the N/P blackout, pollinator gate, and IRAC/FRAC checks
+// can't see the application at all, so these chips require at least one
+// product row on a typed completion.
+const TYPED_CHIPS_REQUIRING_PRODUCTS = new Set([
+  'Fertilizer', 'Palm fertilizer', 'Insect treatment',
+  'Disease / fungicide treatment', 'Horticultural oil',
+]);
+
+/**
+ * Regulatory closeout checks for TYPED tree_shrub completions (owner spec
+ * §6 "same enforcement, inside the new checklist model"). The typed form
+ * replaces the legacy closeout UX, but the load-bearing rules port over:
+ *
+ *   - N/P fertilizer summer blackout (June 1 – Sep 30) by ordinance zone —
+ *     zone is inferred from the service address (no tech override on the
+ *     typed path; unknown zones stay conservative, matching legacy).
+ *   - Bee-sensitive block: insect-like products on blooming plants with
+ *     bees active never complete.
+ *   - IRAC/FRAC rotation confirmation for pesticide applications.
+ *   - Product actuals (amount + unit) for every recorded product.
+ *   - 2-photo minimum (legacy parity — T&S reports are visual documents).
+ *   - Injection products redirect to the Palm Injection typed flow, which
+ *     carries the full injection record the legacy closeout required.
+ *
+ * Record-keeping fields the legacy closeout collected by hand (Snapshot
+ * YTD, fertilizer YTD) are NOT ported: property_application_history +
+ * product_limits track per-product/MOA limits from the recorded products.
+ */
+function validateTreeShrubTypedCompliance({
+  service = {},
+  serviceDate,
+  values = {},
+  products = [],
+  productRows = [],
+  completionPhotos = [],
+} = {}) {
+  const blocks = [];
+  const warnings = [];
+  const zone = inferTreeShrubOrdinanceZone(service);
+  const productRefs = buildProductRefs(products, productRows);
+  const hasInsectProduct = productRefs.some(isInsectLikeProduct);
+  const needsIracFracLog = productRefs.some(productNeedsIracFracLog);
+  const missingActuals = productRefs.filter(missingProductActuals).map(productName).filter(Boolean);
+  const pollinatorStatus = text(values.pollinator_status);
+
+  const treatments = String(values.treatments_completed || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const chipsNeedingProducts = treatments.filter((chip) => TYPED_CHIPS_REQUIRING_PRODUCTS.has(chip));
+  if (chipsNeedingProducts.length && productRefs.length === 0) {
+    pushBlock(
+      blocks,
+      'tree_shrub_products_required',
+      `Record the product(s) applied for: ${chipsNeedingProducts.join(', ')}. Compliance checks (fertilizer blackout, pollinator, IRAC/FRAC) need the product list.`,
+      'products',
+    );
+  }
+
+  if (
+    productRefs.some(productHasNpFertilizer)
+    && isSummerBlackoutForZone(serviceDate || service.scheduled_date, zone)
+  ) {
+    pushBlock(
+      blocks,
+      'tree_shrub_np_blackout',
+      'N/P fertilizer is blocked for this Tree/Shrub ordinance zone from June 1 through September 30.',
+      'products',
+    );
+  }
+
+  if (hasInsectProduct) {
+    if (!pollinatorStatus) {
+      pushBlock(blocks, 'tree_shrub_pollinator_status_required', 'Record flowering/pollinator status before applying insect products.', 'pollinator_status');
+    } else if (pollinatorStatus === 'Blooming — bees active') {
+      pushBlock(blocks, 'tree_shrub_pollinator_block', 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.', 'pollinator_status');
+    }
+  }
+
+  if (needsIracFracLog && text(values.irac_frac_logged) !== 'Yes') {
+    pushBlock(blocks, 'tree_shrub_irac_frac_required', 'Confirm IRAC/FRAC history was checked and logged for pesticide applications.', 'irac_frac_logged');
+  }
+
+  if (missingActuals.length) {
+    pushBlock(
+      blocks,
+      'tree_shrub_product_actuals_required',
+      `Enter actual product amount and unit before completing: ${missingActuals.join(', ')}.`,
+      'products',
+    );
+  }
+
+  if (!Array.isArray(completionPhotos) || completionPhotos.length < 2) {
+    pushBlock(blocks, 'tree_shrub_photos_required', 'Attach at least 2 Tree & Shrub photos.', 'completionPhotos');
+  }
+
+  if (productRefs.some(isInjectionProduct)) {
+    pushBlock(
+      blocks,
+      'tree_shrub_injection_use_palm_flow',
+      'Palm injections complete through the Palm Injection service so the injection record (species, dose, ports, follow-up) is captured — schedule or convert this visit’s injection under that service.',
+      'products',
+    );
+  }
+
+  if (zone === 'other_unknown') {
+    warnings.push({
+      code: 'tree_shrub_unknown_zone_conservative',
+      message: 'Unknown ordinance zone is treated as Sarasota/Manatee conservative blackout logic.',
+    });
+  }
+
+  return { ok: blocks.length === 0, blocks, warnings, zone };
+}
+
 module.exports = {
   TREE_SHRUB_CLOSEOUT_VERSION,
   inferTreeShrubOrdinanceZone,
@@ -404,4 +518,5 @@ module.exports = {
   normalizeTreeShrubCloseout,
   productHasNpFertilizer,
   validateTreeShrubCloseout,
+  validateTreeShrubTypedCompliance,
 };

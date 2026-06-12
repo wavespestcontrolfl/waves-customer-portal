@@ -44,7 +44,7 @@ const {
   recordLawnProtocolCompletion,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
-const { validateTreeShrubCloseout } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance } = require('../services/tree-shrub-closeout');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
@@ -1988,6 +1988,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       treeShrubCloseoutSummary = treeShrubValidation.normalized;
       treeShrubCloseoutWarnings = treeShrubValidation.warnings || [];
+    }
+
+    // Typed Tree & Shrub completions replace the legacy closeout UX but keep
+    // its regulatory teeth (owner spec §6 "same enforcement"): N/P fertilizer
+    // summer blackout, bee-active pollinator block, IRAC/FRAC confirmation,
+    // product actuals, photo minimum, and the palm-injection redirect all
+    // still gate completion — driven by the typed values + recorded products.
+    if (claim.action === 'proceed' && typedFindingsType === 'tree_shrub' && typedFindings && !isIncompleteVisit) {
+      const typedProductRows = await loadSubmittedCatalogProducts(products);
+      const typedCompliance = validateTreeShrubTypedCompliance({
+        service: svc,
+        serviceDate: serviceDateOnly(svc.scheduled_date),
+        values: typedFindings.values,
+        products: products || [],
+        productRows: typedProductRows,
+        completionPhotos,
+      });
+      if (!typedCompliance.ok) {
+        const complianceErr = new Error('tree_shrub_typed_compliance');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, complianceErr);
+        return res.status(400).json({
+          error: 'Tree & Shrub compliance checks must pass before completion',
+          code: 'tree_shrub_typed_compliance',
+          details: typedCompliance.blocks.map((block) => block.message),
+          blocks: typedCompliance.blocks,
+          warnings: typedCompliance.warnings,
+        });
+      }
+      treeShrubCloseoutWarnings = typedCompliance.warnings || [];
     }
 
     if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
