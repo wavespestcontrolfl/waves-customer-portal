@@ -5804,7 +5804,7 @@ router.put('/:token/accept', async (req, res, next) => {
           notes: invoiceDraft.notes,
           dueDate: etDateString(),
           ...(requestedInvoiceDepositCredit > 0
-            ? { depositCredit: { amount: requestedInvoiceDepositCredit } }
+            ? { depositCredit: { amount: requestedInvoiceDepositCredit, estimateId: estimate.id } }
             : {}),
         });
         if (!inv?.id) {
@@ -9664,6 +9664,7 @@ module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceM
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
+module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;

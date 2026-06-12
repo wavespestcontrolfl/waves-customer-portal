@@ -1002,3 +1002,103 @@ describe('consumeDepositCredit — partial application tracking', () => {
     expect(credit.amount).toBe(29);
   });
 });
+
+describe('restoreDepositCreditForVoidedInvoice — void returns consumed dollars to the ledger (P1)', () => {
+  const { restoreDepositCreditForVoidedInvoice } = require('../services/estimate-deposits');
+  const logger = require('../services/logger');
+
+  function voidedInvoice(creditLines) {
+    return {
+      id: 'inv-void',
+      status: 'void',
+      line_items: JSON.stringify([
+        { description: 'Service', quantity: 1, unit_price: 100 },
+        ...creditLines,
+      ]),
+    };
+  }
+  const creditLine = (amount, estimateId = 'est-1') => ({
+    description: 'Deposit credit (paid at acceptance)',
+    quantity: 1,
+    unit_price: -amount,
+    amount: -amount,
+    category: 'deposit_credit',
+    ...(estimateId ? { estimate_id: estimateId } : {}),
+  });
+
+  // Mirrors consumeDb: conditional updates report affected counts; 0 = the
+  // row was flipped under us by a reversal webhook.
+  function restoreDb({ rows, updates = [], updateResults = {} }) {
+    return () => ({
+      where(criteria) {
+        if (criteria && criteria.id) {
+          return {
+            update: async (payload) => {
+              updates.push({ id: criteria.id, criteria, payload });
+              return updateResults[criteria.id] ?? 1;
+            },
+          };
+        }
+        return this;
+      },
+      whereIn() { return this; },
+      orderBy() { return this; },
+      select: async () => rows,
+    });
+  }
+
+  it('restores newest consumption first; a fully-consumed row flips back to received with no invoice stamp', async () => {
+    const updates = [];
+    mockDbHandler = restoreDb({
+      rows: [
+        { id: 'd2', status: 'credited', credited_amount: '49.00' }, // newest
+        { id: 'd1', status: 'received', credited_amount: '30.00' },
+      ],
+      updates,
+    });
+
+    const restored = await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(70)]) });
+
+    expect(restored).toBe(70);
+    expect(updates[0]).toMatchObject({
+      id: 'd2',
+      payload: { credited_amount: 0, status: 'received', credited_invoice_id: null },
+    });
+    // Conditional on the exact state the math used.
+    expect(updates[0].criteria).toMatchObject({ id: 'd2', status: 'credited', credited_amount: '49.00' });
+    // The remaining $21 comes off the partially-consumed row, which keeps
+    // its received status (no status key in the payload).
+    expect(updates[1].id).toBe('d1');
+    expect(updates[1].payload.credited_amount).toBe(9);
+    expect(updates[1].payload.status).toBeUndefined();
+  });
+
+  it('a row flipped terminal mid-restore is skipped — the shortfall raises the reconcile alert, never resurrects refunded money', async () => {
+    const updates = [];
+    mockDbHandler = restoreDb({
+      rows: [{ id: 'd1', status: 'credited', credited_amount: '49.00' }],
+      updates,
+      updateResults: { d1: 0 },
+    });
+
+    const restored = await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(49)]) });
+
+    expect(restored).toBe(0);
+    expect(logger.error).toHaveBeenCalled();
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { invoiceId: 'inv-void' });
+  });
+
+  it('an unstamped legacy credit line cannot be attributed — alert instead of guessing a ledger', async () => {
+    mockDbHandler = () => { throw new Error('should not query without an estimate stamp'); };
+    const restored = await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(49, null)]) });
+    expect(restored).toBe(0);
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { invoiceId: 'inv-void' });
+  });
+
+  it('no deposit lines (or unparseable line_items) = silent no-op', async () => {
+    mockDbHandler = () => { throw new Error('should not query'); };
+    expect(await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([]) })).toBe(0);
+    expect(await restoreDepositCreditForVoidedInvoice({ invoice: { id: 'x', line_items: '{not json' } })).toBe(0);
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+});

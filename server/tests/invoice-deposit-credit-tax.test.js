@@ -161,6 +161,20 @@ describe('deposit credit is after-tax prior payment, never a discount', () => {
     expect(row.total).toBe(0);
   });
 
+  it('the depositCredit line carries its estimate_id stamp — the application record void-restore reads (P1)', async () => {
+    const { getInsertedInvoice } = setupDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+    });
+    await InvoiceService.create({
+      customerId: 'cust-1',
+      title: 'First visit',
+      lineItems: [{ description: 'Service', quantity: 1, unit_price: 100 }],
+      depositCredit: { amount: 49, estimateId: 'est-1' },
+    });
+    const credit = JSON.parse(getInsertedInvoice().line_items).find((i) => i.category === 'deposit_credit');
+    expect(credit.estimate_id).toBe('est-1');
+  });
+
   it('a zero-value invoice applies NO depositCredit — the full balance rolls forward', async () => {
     const { getInsertedInvoice } = setupDb({
       customer: { id: 'cust-1', property_type: 'residential' },
@@ -263,7 +277,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
 
     const row = getInsertedInvoice();
     const lines = JSON.parse(row.line_items);
-    expect(lines.some((i) => i.category === 'deposit_credit' && i.unit_price === -99)).toBe(true);
+    expect(lines.some((i) => i.category === 'deposit_credit' && i.unit_price === -99 && i.estimate_id === 'est-1')).toBe(true);
     expect(row.total).toBe(151); // 250 − 99, residential no tax
     expect(mockConsumeDepositCredit).toHaveBeenCalledWith(
       expect.objectContaining({ estimateId: 'est-1', amount: 99, invoiceId: 'invoice-1' }),
