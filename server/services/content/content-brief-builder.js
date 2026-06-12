@@ -24,6 +24,7 @@ const queue = require('./opportunity-queue');
 const router = require('./decision-router');
 const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
+const interceptSeeder = require('./intercept-brief-seeder');
 
 // ── keyword overlap helpers for customer-cluster topic match ────────
 
@@ -249,7 +250,15 @@ class ContentBriefBuilder {
     const opp = await queue.getById(opportunityId);
     if (!opp) throw new Error(`opportunity ${opportunityId} not found`);
 
-    const signals = await this._gatherSignals(opp, { skipSerp });
+    // Operator-pinned intercept briefs skip signal gathering entirely: the
+    // operator manifest IS the signal (decision-router pins the action
+    // regardless), SERP profiling competitor-brand keywords burns API spend
+    // for data the router must ignore, and a stray customer-cluster topic
+    // match could misclassify the FAQ policy for a consumer-protection post.
+    const operatorPinned = interceptSeeder.isOperatorIntercept(opp);
+    const signals = operatorPinned
+      ? { serp_profile: null, customer_signal: null, conversion_feedback: null }
+      : await this._gatherSignals(opp, { skipSerp });
     const existingBriefVersions = await this._countExistingBriefs(opp.id);
 
     const decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
@@ -464,6 +473,16 @@ class ContentBriefBuilder {
       ? stripFaqRequirements({ requiredSections: aeo.requiredSections, schemaTypes: aeo.schemaTypes })
       : { requiredSections: aeo.requiredSections, schemaTypes: aeo.schemaTypes };
 
+    // Operator-authored intercept brief: the seeded payload is injected
+    // VERBATIM — the operator's outline becomes the content plan, sources
+    // become required in-post citations, internal links become required
+    // anchors, and the full binding instruction block rides in
+    // voice_constraints.operator_brief (a persisted jsonb column, so the
+    // writer agent's get_content_brief tool returns it intact).
+    const interceptOverlay = interceptSeeder.isOperatorIntercept(opportunity)
+      ? interceptSeeder.buildOperatorOverlay({ opportunity, pageType, requiredSections, schemaTypes })
+      : null;
+
     return {
       facts_pack: factsPack,
       opportunity_id: opportunity.id,
@@ -523,9 +542,22 @@ class ContentBriefBuilder {
           }
         : null,
 
-      required_sections: requiredSections,
-      schema_types: schemaTypes,
-      internal_links_to_add: this._internalLinksFor(opportunity, pageType),
+      required_sections: interceptOverlay ? interceptOverlay.required_sections : requiredSections,
+      schema_types: interceptOverlay ? interceptOverlay.schema_types : schemaTypes,
+      // For intercept supporting blogs the operator links are REQUIRED and
+      // lead the list, but the standard service-hub links are merged in too —
+      // several manifest link maps carry no hub URL, and replacing the house
+      // links outright would leave the quality gate's hub_link_present check
+      // dependent on the writer inventing one. Refresh briefs keep the
+      // operator list verbatim (the editable surface is the existing page).
+      internal_links_to_add: interceptOverlay
+        ? (pageType === 'supporting-blog'
+          ? Array.from(new Set([
+            ...interceptOverlay.internal_links,
+            ...this._internalLinksFor(opportunity, pageType),
+          ]))
+          : interceptOverlay.internal_links)
+        : this._internalLinksFor(opportunity, pageType),
       seo_requirements: buildSeoRequirements({
         page_type: pageType,
         action_type: decision.action_type,
@@ -533,7 +565,9 @@ class ContentBriefBuilder {
         service: opportunity.service || null,
       }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
-      voice_constraints: aeo.voiceConstraints,
+      voice_constraints: interceptOverlay
+        ? { ...aeo.voiceConstraints, operator_brief: interceptOverlay.operator_brief }
+        : aeo.voiceConstraints,
 
       publish_window: nextWeekday9amET().toISOString(),
       human_review_required: decision.human_review_required,

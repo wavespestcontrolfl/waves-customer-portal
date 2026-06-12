@@ -48,6 +48,10 @@ class OpportunityQueue {
     try {
       let q = db('opportunity_queue')
         .where('status', 'pending')
+        // Same availability window as claimNext, so previews show exactly
+        // what the runner could claim (operator-seeded rows may carry a
+        // future available_at — see migration 20260611000016).
+        .whereRaw('(available_at IS NULL OR available_at <= now())')
         .orderBy('score', 'desc')
         .limit(limit);
       if (minScore != null) {
@@ -103,6 +107,11 @@ class OpportunityQueue {
        WHERE id = (
          SELECT id FROM opportunity_queue
          WHERE status = 'pending'
+           -- Availability window: operator-seeded rows (intercept briefs) may
+           -- carry a future available_at; they stay invisible to the claim
+           -- until their window opens. NULL = available immediately (every
+           -- miner row).
+           AND (available_at IS NULL OR available_at <= now())
            -- ::numeric casts are load-bearing: inside a CASE, Postgres types
            -- bare parameters as text (no comparison context), and
            -- integer >= text has no operator — this exact line failed in

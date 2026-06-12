@@ -79,6 +79,12 @@ const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
+const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
+
+// Bucket for operator-authored intercept briefs (intercept-brief-seeder).
+// Kept as a local constant (matching the seeder's export) so the runner's
+// claim path doesn't depend on the seeder module loading.
+const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
 
 // City → GBP location for autonomous gbp_post distribution, backed by the
 // canonical CITY_TO_LOCATION map in config/locations.js. A post goes to the
@@ -216,8 +222,14 @@ class AutonomousRunner {
     let brief;
     try {
       brief = await briefBuilder.compose(opp.id, {
+        // Operator-intercept rows skip SERP profiling: several intercept
+        // keywords are competitor-brand queries a profiler would mis-read as
+        // navigational, and the decision-router pins the action for this
+        // bucket anyway (profiler output would be ignored). The quality
+        // gate's serp/gsc evidence checks exempt this bucket to match.
         persist: !dryRun,
-        skipSerp: opp.action_type === 'add_internal_links',
+        skipSerp: opp.action_type === 'add_internal_links'
+          || opp.bucket === OPERATOR_INTERCEPT_BUCKET,
       });
     } catch (err) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
@@ -388,6 +400,25 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed_agent', failure_message: 'no draft from agent' });
     }
 
+    // 3a. Operator slug pin (machine-checked, not just prompt-binding). The
+    // intercept manifest declares the slug exact/binding; if the writer
+    // drifts, the fully-autonomous lane would otherwise publish a
+    // competitor-intercept post at the wrong URL (publishOrUpdatePage only
+    // validates canonical against the draft's OWN slug). Park for review —
+    // never auto-publish a mismatched URL.
+    if (opp.bucket === OPERATOR_INTERCEPT_BUCKET) {
+      const slugCheck = operatorSlugMismatch(brief, draft);
+      if (slugCheck) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'completed_pending_review',
+          skip_reason: 'operator_slug_mismatch',
+          reviewer_notes: `Writer slug "${slugCheck.draft_slug || '(none)'}" does not match the operator-pinned slug "${slugCheck.expected_slug}" — review/fix before publishing.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'operator_slug_mismatch', { claimToken });
+        return finalized;
+      }
+    }
+
     if (brief.action_type === 'rewrite_title_meta') {
       let result;
       try {
@@ -490,10 +521,20 @@ class AutonomousRunner {
           liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
         }
       }
+      // Narrow operator-FAQ exception: an operator_intercept brief whose
+      // seeded manifest explicitly requires an FAQ (operator_brief.
+      // faq_required, derived from the manifest payload — owner directive
+      // 2026-06-11: FAQPage on every intercept post) may keep its FAQ even
+      // on a FAQ-blocked service id (the termite-cluster consumer-protection
+      // posts). Bucket AND the composed brief flag must both agree; mined
+      // opportunities can never set this.
+      const operatorFaqException = opp.bucket === OPERATOR_INTERCEPT_BUCKET
+        && brief?.voice_constraints?.operator_brief?.faq_required === true;
       const guardResult = contentGuardrails.evaluate(draft, {
         service: opp.service || brief.service || null,
         primaryKeyword: brief.target_keyword || null,
         domains: liveDomains,
+        operatorFaqException,
       });
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {
@@ -762,6 +803,17 @@ class AutonomousRunner {
       await this._pendingReviewClaimOrThrow(queue, opp.id, publishingGuards.reason, { claimToken });
       return finalized;
     }
+
+    // 7b. Operator-intercept evidence snapshots. Capture an archive.org
+    // snapshot of every cited competitor source at draft-commit time (the
+    // manifest's "snapshot on publish day" rule) — the post's competitor
+    // claims must stay verifiable even if the competitor edits the page.
+    // STRICTLY fail-soft: a Wayback outage can never block or delay the
+    // publish. Results persist on the opportunity row's signal_metadata and
+    // in autonomous_runs.draft_payload.source_snapshots (the blog
+    // frontmatter schema is additionalProperties:false, so frontmatter
+    // storage is off the table).
+    await this._snapshotInterceptSources(opp, draft, run);
 
     // 8. Publish + index + plan links.
     let publishOutcome;
@@ -1183,6 +1235,62 @@ class AutonomousRunner {
       logger.info(`[autonomous-runner] engine-error alert sent: ${code}`);
     } catch (err) {
       logger.warn(`[autonomous-runner] engine-error alert failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Archive.org snapshots for operator-intercept sources. Fail-soft by
+   * contract: every path (module missing, fetch failure, timeout, db write
+   * failure) logs and returns — publishing NEVER blocks on snapshots.
+   */
+  async _snapshotInterceptSources(opp, draft, run) {
+    if (!opp || opp.bucket !== OPERATOR_INTERCEPT_BUCKET) return;
+    try {
+      const seeder = getInterceptSeeder();
+      if (!seeder?.snapshotSources) return;
+      // Capture BOTH the manifest's literal source URLs and the external
+      // links the writer actually cited in the body: several manifest
+      // sources are descriptive notes ("Orkin published terms/plan pages",
+      // "UF/IFAS for pre-treat longevity claims") whose live URLs only
+      // exist once the agent finds and links them — without the body sweep
+      // the publish-day archive audit is empty for exactly those claims.
+      const manifestSources = opp.signal_metadata?.intercept_brief?.sources || [];
+      const citedUrls = typeof seeder.externalUrlsFromMarkdown === 'function'
+        ? seeder.externalUrlsFromMarkdown(draft?.body || '')
+        : [];
+      const sources = Array.from(new Set([
+        ...(Array.isArray(manifestSources) ? manifestSources : []),
+        ...citedUrls,
+      ]));
+      if (sources.length === 0) return;
+
+      const totalTimeout = envInt('INTERCEPT_SNAPSHOT_TOTAL_TIMEOUT_MS', 90_000);
+      const result = await withTimeout(
+        seeder.snapshotSources(sources),
+        totalTimeout,
+        `intercept_snapshot_timeout_${totalTimeout}ms`
+      );
+
+      // Surface on the run record (draft_payload is a jsonb audit column).
+      if (draft && result?.snapshots) {
+        draft.source_snapshots = result.snapshots;
+        run.draft_payload = draft;
+      }
+      // Persist on the opportunity row so the snapshots survive even if the
+      // run insert later fails. Best-effort.
+      await db('opportunity_queue')
+        .where('id', opp.id)
+        .update({
+          signal_metadata: JSON.stringify({
+            ...(opp.signal_metadata || {}),
+            intercept_snapshots: result?.snapshots || [],
+            intercept_snapshot_at: new Date().toISOString(),
+          }),
+          updated_at: new Date(),
+        });
+      logger.info(`[autonomous-runner] intercept snapshots captured for ${opp.id}: ${result?.ok || 0}/${result?.attempted || 0}`);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] intercept source snapshot failed (non-blocking): ${err.message}`);
     }
   }
 
@@ -1994,6 +2102,26 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
   return run;
 }
 
+/**
+ * operatorSlugMismatch(brief, draft) → null when OK, or
+ * { expected_slug, draft_slug } when an operator-pinned slug exists and the
+ * draft's frontmatter slug doesn't match it (or is missing). Refresh briefs
+ * carry no operator slug (payload.slug is null) so they skip the check.
+ * Pure — exported via _internals for unit tests.
+ */
+function operatorSlugMismatch(brief, draft) {
+  const expected = brief?.voice_constraints?.operator_brief?.slug || null;
+  if (!expected) return null;
+  const draftSlug = draft?.frontmatter?.slug || null;
+  if (draftSlug && normalizeSlugPath(draftSlug) === normalizeSlugPath(expected)) return null;
+  return { expected_slug: expected, draft_slug: draftSlug };
+}
+
+function normalizeSlugPath(slug) {
+  const trimmed = String(slug || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '');
+  return `/${trimmed}/`;
+}
+
 function countsTowardTrustBuild(row) {
   if (row?.outcome === 'completed_published') return true;
   return row?.outcome === 'completed_pending_review'
@@ -2232,6 +2360,8 @@ module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
   isShadow,
   autoPublishEnabled,
+  OPERATOR_INTERCEPT_BUCKET,
+  operatorSlugMismatch,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,

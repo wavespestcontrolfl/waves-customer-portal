@@ -49,6 +49,24 @@ const ACTION_EXPECTS_PAGE_TYPE = {
   gbp_post: null,
 };
 
+// ── operator-pinned buckets ─────────────────────────────────────────
+//
+// Rows in these buckets were authored by the operator (intercept-brief-
+// seeder): the action, angle, and sources were chosen by a human and the
+// router must NOT second-guess them. No SERP-profile action upgrades, no
+// do_not_publish demotion (several intercept keywords are competitor-brand
+// queries a profiler would mis-read as "navigational"), no bucket
+// park-for-review rules, no customer-demand rerouting. signal_metadata.
+// operator_pinned is the belt-and-suspenders flag for any future seeded
+// bucket.
+const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
+
+function isOperatorPinned(opportunity = {}) {
+  if (OPERATOR_PINNED_BUCKETS.has(opportunity.bucket)) return true;
+  const meta = opportunity.signal_metadata;
+  return !!(meta && typeof meta === 'object' && meta.operator_pinned === true);
+}
+
 // ── main entry ──────────────────────────────────────────────────────
 
 /**
@@ -75,6 +93,22 @@ const ACTION_EXPECTS_PAGE_TYPE = {
  */
 function route(opportunity, signals = {}) {
   if (!opportunity) throw new Error('decision-router: opportunity required');
+
+  // Operator-pinned rows bypass every reroute/demote/park rule: the
+  // operator's action runs as seeded, at the seeded score. Profiler or
+  // customer-signal data (even if gathered) cannot change the action.
+  if (isOperatorPinned(opportunity)) {
+    return {
+      action_type: opportunity.action_type,
+      page_type: derivePageType(opportunity.action_type, null),
+      final_score: opportunity.score || 0,
+      score_breakdown: { base: opportunity.score || 0 },
+      human_review_required: false,
+      human_review_reason: null,
+      router_notes: `operator-pinned (${opportunity.bucket}): action fixed by operator manifest; SERP/customer/conversion rerouting and park-for-review rules bypassed`,
+    };
+  }
+
   const { serp_profile, customer_signal, conversion_feedback, existing_brief_versions = 0 } = signals;
 
   const notes = [];
@@ -247,8 +281,9 @@ function derivePageType(action, serp_profile) {
   return 'none';
 }
 
-module.exports = { route, derivePageType };
+module.exports = { route, derivePageType, isOperatorPinned };
 module.exports._internals = {
   ACTION_RISK,
   ACTION_EXPECTS_PAGE_TYPE,
+  OPERATOR_PINNED_BUCKETS,
 };

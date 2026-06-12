@@ -192,6 +192,14 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     expect(checkHubLinkPresent({ body: 'See /pest-control-services/' }).ok).toBe(true);
     expect(checkHubLinkPresent({ body: 'no hub link' }).ok).toBe(false);
   });
+  test('every SERVICE_HUB_LINKS hub satisfies the gate (termite/rodent intercept posts link where the builder steers them)', () => {
+    const { SERVICE_HUB_LINKS } = require('../services/content/content-brief-builder')._internals;
+    for (const hub of new Set(Object.values(SERVICE_HUB_LINKS).flat())) {
+      expect(checkHubLinkPresent({ body: `Book a visit via ${hub} today.` }).ok).toBe(true);
+    }
+    // The C/F-cluster case the gate previously failed: termite-only hub link.
+    expect(checkHubLinkPresent({ body: 'Schedule at /termite-inspection/ first.' }).ok).toBe(true);
+  });
   test('two-plus city mentions', () => {
     expect(checkTwoPlusCityMentions({ body: 'Bradenton and Sarasota homes' }).ok).toBe(true);
     expect(checkTwoPlusCityMentions({ body: 'Bradenton only' }).ok).toBe(false);

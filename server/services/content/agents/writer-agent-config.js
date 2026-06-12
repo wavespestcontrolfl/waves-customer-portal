@@ -104,6 +104,11 @@ enforces):
   Asked Questions", "FAQ", or "Common Questions" heading or Q&A block
   anywhere in the body. Answer reader questions inline as regular prose/H2
   sections instead.
+- EXCEPTION: if the brief carries voice_constraints.operator_brief with
+  faq_required=true (an operator-authored intercept brief), the operator
+  mandate wins — include the FAQ section exactly as the operator outline
+  specifies, even on an otherwise FAQ-blocked topic. The publish guardrail
+  honors the same exception for these briefs only.
 - Otherwise the page-type FAQ requirements above apply as written.
 
 ASTRO RENDERING — the body is published through the blog Astro pipeline.

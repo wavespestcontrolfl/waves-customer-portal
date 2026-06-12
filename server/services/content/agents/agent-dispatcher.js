@@ -90,13 +90,29 @@ function pickAgent(brief) {
   return { ok: true, role: route.role, agent_id: agentId, config_name: route.configName };
 }
 
+// voice_constraints arrives as an object from a fresh compose() but as a
+// JSON string when the brief was re-read from content_briefs. Normalize.
+function parseMaybeJson(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function buildInputPayload(brief) {
+  // Operator-authored intercept briefs carry their binding editorial plan in
+  // voice_constraints.operator_brief (a persisted jsonb column, so it also
+  // survives the get_content_brief round-trip). Surface it in the opening
+  // message so the agent treats it as binding from the first token, not as
+  // one more signal to weigh.
+  const voice = parseMaybeJson(brief.voice_constraints);
+  const operatorBrief = (voice && typeof voice === 'object' && voice.operator_brief) || null;
+
   // What the agent sees when its session opens — a structured JSON
   // representation of the brief plus an explicit instruction to start
   // with get_content_brief() for the full row.
   return {
-    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.${brief.facts_pack ? ' This brief includes a facts_pack: every local claim in your body must be grounded in one of its fact ids, and you must emit a claims_ledger.' : ''}`,
+    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.${brief.facts_pack ? ' This brief includes a facts_pack: every local claim in your body must be grounded in one of its fact ids, and you must emit a claims_ledger.' : ''}${operatorBrief ? ' IMPORTANT: this is an OPERATOR-AUTHORED intercept brief. The operator_brief block below (also at voice_constraints.operator_brief in the canonical brief) is BINDING: follow its binding_instructions exactly — the working title/thesis/outline are the content plan, required_sources must be linked in-post with explicit attribution, verify_notes are mandatory verification steps, and the internal links and author block are required as given. Do not re-derive the topic, angle, slug, or sources.' : ''}`,
     brief_summary: {
+      operator_brief: operatorBrief,
       opportunity_id: brief.opportunity_id,
       action_type: brief.action_type,
       page_type: brief.page_type,

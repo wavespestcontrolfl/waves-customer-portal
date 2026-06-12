@@ -214,7 +214,23 @@ function isPageOnlyOpportunity(brief) {
   return !brief.target_keyword && Boolean(brief.target_url);
 }
 
+// Operator-authored intercept briefs (intercept-brief-seeder, bucket
+// 'operator_intercept') are composed WITHOUT SERP profiling or mined GSC
+// numbers — the operator manifest IS the provenance these two
+// evidence-attachment hard checks exist to verify. Without the exemption
+// every intercept brief would hard-fail no_serp_signal / no_gsc_signal and
+// the auto-publish lane would silently skip the row. Keyed on the
+// persisted gsc_signal.bucket so the exemption survives a content_briefs
+// round-trip and cannot be spoofed by a draft.
+function isOperatorAuthoredBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'operator_intercept';
+}
+
 function checkSerpBriefAttached(_draft, brief) {
+  if (isOperatorAuthoredBrief(brief)) {
+    return { ok: true, reason: 'operator_authored_brief' };
+  }
   if (isPageOnlyOpportunity(brief)) {
     return { ok: true, reason: 'serp_skip_page_only' };
   }
@@ -224,6 +240,9 @@ function checkSerpBriefAttached(_draft, brief) {
 }
 
 function checkGscSignalAttached(_draft, brief) {
+  if (isOperatorAuthoredBrief(brief)) {
+    return { ok: true, reason: 'operator_authored_brief' };
+  }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
   return { ok: true };
@@ -333,7 +352,26 @@ function faqPolicyTopicFields(draft, brief) {
 // = the check passes at full weight when the FAQ is (correctly) absent;
 // an FAQ that IS present on a blocked topic fails here too (the guardrail
 // P0s it at publish anyway). Returns null when the policy doesn't apply.
+// Narrow operator override of the FAQ-blocked policy: an operator-authored
+// intercept brief whose seeded manifest mandates an FAQ carries
+// voice_constraints.operator_brief.faq_required=true (set by
+// intercept-brief-seeder from the manifest payload, never from generated
+// content — owner directive 2026-06-11: FAQPage on every intercept post).
+// Mirrors content-guardrails' operatorFaqException flag so the gate and the
+// publish-time guard can't disagree about the same draft.
+function operatorFaqMandate(brief) {
+  const voice = typeof brief?.voice_constraints === 'string'
+    ? safeParseObject(brief.voice_constraints)
+    : brief?.voice_constraints;
+  return !!(voice && typeof voice === 'object' && voice.operator_brief?.faq_required === true);
+}
+
+function safeParseObject(value) {
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function faqBlockedTopicResult(hasFaqSection, draft, brief) {
+  if (operatorFaqMandate(brief)) return null; // operator mandate — the normal FAQ checks apply
   if (!isFaqBlockedService(faqPolicyTopicFields(draft, brief))) return null;
   if (hasFaqSection) return { ok: false, reason: 'faq_present_on_faq_blocked_service' };
   return { ok: true, reason: 'faq_blocked_service_omission_is_correct' };
@@ -438,8 +476,14 @@ function checkImprovementOverPrior(draft, _brief, context) {
 
 function checkHubLinkPresent(draft, brief) {
   const body = String(draft.body || '');
-  // Per v3.1 — supporting blogs must link to the relevant hub.
-  const hubs = ['/pest-control-services/', '/waveguard-memberships/', '/pest-library/', '/lawn-care/', '/mosquito-control/'];
+  // Per v3.1 — supporting blogs must link to the relevant hub. The accepted
+  // set derives from the brief builder's SERVICE_HUB_LINKS (single source of
+  // truth): a service the builder steers toward its hub (termite →
+  // /termite-inspection/, rodent → /rodent-control/) must never fail the
+  // gate for linking exactly where it was told to. Lazy require avoids any
+  // load-order coupling with content-brief-builder.
+  const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
+  const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
   if (!hubs.some((h) => body.includes(h))) {
     return { ok: false, reason: 'no_hub_link_found' };
   }
@@ -523,6 +567,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORE,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
+  isOperatorAuthoredBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
