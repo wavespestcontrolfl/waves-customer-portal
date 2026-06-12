@@ -27,11 +27,13 @@ const DEFAULT_GSC_REQUEST_TIMEOUT_MS = 30000;
 
 // All 15 Waves network domains — GSC properties to query
 const NETWORK_DOMAINS = [
+  // Hub stays first — syncAllDomains runs in order, so hub data lands even
+  // if a later spoke property errors mid-loop.
   'wavespestcontrol.com', 'waveslawncare.com',
   'bradentonflpestcontrol.com', 'palmettoflpestcontrol.com', 'parrishpestcontrol.com',
-  'sarasotaflpestcontrol.com', 'veniceflpestcontrol.com',
+  'sarasotaflpestcontrol.com', 'veniceflpestcontrol.com', 'northportflpestcontrol.com',
   'bradentonflexterminator.com', 'palmettoexterminator.com', 'parrishexterminator.com',
-  'sarasotaflexterminator.com',
+  'sarasotaflexterminator.com', 'veniceexterminator.com',
   'bradentonfllawncare.com', 'parrishfllawncare.com', 'sarasotafllawncare.com', 'venicelawncare.com',
 ];
 
