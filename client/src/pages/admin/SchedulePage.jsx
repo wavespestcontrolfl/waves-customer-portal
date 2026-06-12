@@ -7507,6 +7507,10 @@ export function CompletionPanel({
           if (prev.length >= 5) return prev;
           return [...prev, photo];
         });
+        // The AI photo summary describes a specific photo set — any
+        // mutation stales it (captions travel with their photo objects
+        // and stay correct). Re-analyze to regenerate.
+        setTypedPhotoSummary("");
       } catch {
         failed += 1;
       }
@@ -7520,6 +7524,7 @@ export function CompletionPanel({
   }
   function removePhoto(index) {
     setServicePhotos((prev) => prev.filter((_, i) => i !== index));
+    setTypedPhotoSummary("");
   }
 
   async function handleSubmit() {
@@ -8059,13 +8064,18 @@ export function CompletionPanel({
     if (photoAnalyzing || !typedFindingsSchema || !servicePhotos.length) return;
     setPhotoAiError("");
     setPhotoAnalyzing(true);
+    // Snapshot the analyzed photo identities: photos can be added/removed
+    // while the request is in flight, and captions must attach to the
+    // photos that were actually analyzed — never by index into whatever
+    // the list is at response time.
+    const analyzed = servicePhotos;
     try {
       const r = await adminFetch(
         `/admin/dispatch/${service.id}/photo-analysis/draft`,
         {
           method: "POST",
           body: JSON.stringify({
-            photos: servicePhotos.map((photo, index) => ({
+            photos: analyzed.map((photo, index) => ({
               data: photo.data,
               name: photo.name || `service-photo-${index + 1}.jpg`,
             })),
@@ -8077,14 +8087,23 @@ export function CompletionPanel({
         },
       );
       if (r?.photoSummary) {
-        setTypedPhotoSummary(r.photoSummary);
-        setServicePhotos((prev) =>
-          prev.map((photo, i) =>
-            r.captions?.[i]
-              ? { ...photo, caption: r.captions[i], captionSource: "ai" }
-              : photo,
-          ),
-        );
+        let setUnchanged = true;
+        setServicePhotos((prev) => {
+          setUnchanged = prev.length === analyzed.length
+            && analyzed.every((photo) => prev.includes(photo));
+          return prev.map((photo) => {
+            const idx = analyzed.indexOf(photo);
+            return idx !== -1 && r.captions?.[idx]
+              ? { ...photo, caption: r.captions[idx], captionSource: "ai" }
+              : photo;
+          });
+        });
+        if (setUnchanged) {
+          setTypedPhotoSummary(r.photoSummary);
+        } else {
+          setTypedPhotoSummary("");
+          setPhotoAiError("Photos changed during analysis — analyze again for an updated summary.");
+        }
       } else {
         setPhotoAiError("Photo analysis unavailable — caption manually or skip.");
       }
