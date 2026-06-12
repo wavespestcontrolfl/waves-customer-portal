@@ -63,11 +63,16 @@ const ARGS = Object.fromEntries(
       console.log('');
     }
 
-    if (summary.failed > 0) process.exit(1);
-    if (summary.unverifiedSuites.length > 0) process.exit(3);
-    process.exit(0);
+    if (summary.failed > 0) process.exitCode = 1;
+    else if (summary.unverifiedSuites.length > 0) process.exitCode = 3;
   } catch (err) {
     console.error(`Incident eval failed to run: ${err.message}`);
-    process.exit(2);
+    process.exitCode = 2;
+  } finally {
+    // No hard process.exit(): when stdout is a pipe (--json | jq), exit()
+    // can truncate buffered output. Setting exitCode lets Node drain stdout
+    // naturally — the knex pool is what would keep the loop alive, so close
+    // it explicitly.
+    try { await require('../models/db').destroy(); } catch (e) { /* pool not open */ }
   }
 })();
