@@ -75,9 +75,25 @@ describe('competitor-gap-miner internals', () => {
     const parsed = parseRankedKeywords({
       tasks: [{ result: [{ items: [{
         keyword_data: { keyword: 'sand fleas', keyword_info: { search_volume: 110000 } },
-        ranked_serp_element: { serp_item: { rank_group: 8, relative_url: '/blog/sand-fleas-what-are-they/' } },
+        ranked_serp_element: { serp_item: { type: 'organic', rank_group: 8, relative_url: '/blog/sand-fleas-what-are-they/' } },
       }] }] }],
     });
     expect(parsed).toEqual([{ keyword: 'sand fleas', volume: 110000, position: 8, url: '/blog/sand-fleas-what-are-they/' }]);
+  });
+
+  test('parseRankedKeywords drops paid rows — only organic counts as evidence', () => {
+    const parsed = parseRankedKeywords({
+      tasks: [{ result: [{ items: [
+        {
+          keyword_data: { keyword: 'pest control ad term', keyword_info: { search_volume: 5000 } },
+          ranked_serp_element: { serp_item: { type: 'paid', rank_group: 1, relative_url: '/landing/' } },
+        },
+        {
+          keyword_data: { keyword: 'plaster bagworms', keyword_info: { search_volume: 1000 } },
+          ranked_serp_element: { serp_item: { type: 'organic', rank_group: 11, relative_url: '/plaster-bagworms/' } },
+        },
+      ] }] }],
+    });
+    expect(parsed).toEqual([{ keyword: 'plaster bagworms', volume: 1000, position: 11, url: '/plaster-bagworms/' }]);
   });
 });

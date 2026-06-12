@@ -176,13 +176,22 @@ async function fetchSitemapSlugSets(fetchImpl = global.fetch) {
 function parseRankedKeywords(apiResponse) {
   const items = apiResponse?.tasks?.[0]?.result?.[0]?.items;
   if (!Array.isArray(items)) return [];
-  return items.map((it) => ({
-    keyword: it.keyword_data?.keyword || '',
-    volume: it.keyword_data?.keyword_info?.search_volume || 0,
-    position: it.ranked_serp_element?.serp_item?.rank_group || null,
-    url: it.ranked_serp_element?.serp_item?.relative_url
-      || it.ranked_serp_element?.serp_item?.url || '',
-  })).filter((r) => r.keyword && r.position);
+  return items
+    // rankedKeywords() requests item_types ['organic'], but keep the
+    // belt-and-suspenders filter: a paid row that slipped through would
+    // read as fake organic competitor evidence.
+    .filter((it) => {
+      const type = it.ranked_serp_element?.serp_item?.type;
+      return !type || type === 'organic';
+    })
+    .map((it) => ({
+      keyword: it.keyword_data?.keyword || '',
+      volume: it.keyword_data?.keyword_info?.search_volume || 0,
+      position: it.ranked_serp_element?.serp_item?.rank_group || null,
+      url: it.ranked_serp_element?.serp_item?.relative_url
+        || it.ranked_serp_element?.serp_item?.url || '',
+    }))
+    .filter((r) => r.keyword && r.position);
 }
 
 // Score in the queue's vocabulary. Tuned so a real gap (≥1k volume,

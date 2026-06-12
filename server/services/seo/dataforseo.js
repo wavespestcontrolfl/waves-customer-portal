@@ -155,6 +155,10 @@ class DataForSEO {
       location_code: 2840, // United States — Labs national database
       language_code: 'en',
       limit,
+      // Organic only — the Labs default is ['organic','paid'], and a paid
+      // row would read as fake organic evidence downstream (Codex P2,
+      // PR #1645).
+      item_types: ['organic'],
       order_by: ['keyword_data.keyword_info.search_volume,desc'],
     };
     if (filters) task.filters = filters;
