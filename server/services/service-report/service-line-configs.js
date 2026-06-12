@@ -165,6 +165,15 @@ function detectServiceLine(serviceType) {
   if (/\bpalmetto\b/.test(text)) return 'pest';
   if (/\bpalm(s)?\b/.test(text)) return 'palm';
 
+  // Combined services ("Pest & Rodent Control", "Quarterly Pest + Termite
+  // Bait Station"): a "pest" mention BEFORE the rodent/termite token marks
+  // the pest-primary combined name — the companion token names a section,
+  // not the report layout. Order matters: "Rodent Pest Control"
+  // (rodent_general_one_time) leads with rodent and stays a rodent
+  // report. Lawn/turf and mosquito mentions still win ("Lawn Pest
+  // Treatment" stays lawn); names without "pest" are untouched.
+  if (/\bpest\b.*\b(rodent|termite)\b/.test(text) && !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(text)) return 'pest';
+
   const directCategory = detectExistingServiceCategory ? detectExistingServiceCategory(serviceType) : null;
   if (directCategory === 'lawn') return 'lawn';
   if (directCategory === 'mosquito') return 'mosquito';

@@ -106,8 +106,49 @@ New payload field `companionFindings`:
 - Companion draft state participates in the existing completion draft
   autosave/restore, with the same type-aware pruning on restore.
 
-## Out of scope (cutover PR, after owner confirms customer mappings)
+## Cutover (migration 20260612000031)
 
-Combined catalog keys + estimate routing, migrating the existing
-combined-name customers (4× "Pest & Rodent Control", Waters, Harris),
-and extending graduation flips to companion entries.
+Three combined catalog keys, each a standard recurring primary
+(service_report, no findingsType) + companion(s); companion delivery mirrors
+the type's standalone graduation state at cutover:
+
+| service_key | name | companion | delivery |
+|---|---|---|---|
+| `pest_rodent_quarterly` | Pest & Rodent Control | rodent_bait_station | internal_only (rodent shadow) |
+| `pest_termite_bait_quarterly` | Quarterly Pest + Termite Bait Station | termite_bait_station | auto_send (graduated 20260612000023) |
+| `lawn_tree_shrub_combo` | Lawn + Tree & Shrub | tree_shrub | auto_send (always was) |
+
+- Names are the customer-facing combined names verbatim, so name-based
+  profile resolution works; existing "Pest & Rodent Control"
+  scheduled_services rows are additionally service_id-linked by the
+  migration (name-matched, self-healed, prior service_id recorded).
+- `detectServiceLine`: a "pest" mention BEFORE the rodent/termite token
+  marks the pest-primary combined name — never beats lawn/turf or mosquito,
+  and token order is load-bearing ("Rodent Pest Control" =
+  rodent_general_one_time stays a rodent report). Without this, "Pest &
+  Rodent Control" rendered the RODENT report layout.
+
+## Graduation recipe (rodent family — future migration)
+
+When the rodent family graduates (owner shadow review), the graduation
+migration must flip BOTH:
+1. `delivery_mode` on the standalone rodent keys (the 20260612000023
+   pattern), AND
+2. the companion entry on `pest_rodent_quarterly`:
+   `companion_types` jsonb → set `delivery: 'auto_send'` on the
+   `rodent_bait_station` entry (read row, modify the parsed array in JS,
+   write back; marker + prior value in notes for rollback fidelity).
+Graduation never retro-publishes — stored snapshots keep their frozen
+posture (the runtime already guarantees this; the flip only affects new
+completions).
+
+## Out of scope (follow-up PR)
+
+- Estimate routing: the converter still emits one scheduled service per
+  recurring estimate line; combining pest+rodent_bait / pest+termite_bait /
+  lawn+tree_shrub estimate selections into ONE combined scheduled service
+  carries cadence + billing decisions (lawn 6/9/12-app vs T&S visit
+  mandates) and ships separately.
+- Harris: pest + rodent disclosed as SEPARATE services — not name-matched
+  by the cutover migration; mapping to the combined key is an owner
+  decision (then a one-off re-type of the rows or an admin edit).
