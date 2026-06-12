@@ -116,6 +116,28 @@ describe('winLossSlices', () => {
     ]);
   });
 
+  test('quote-wizard shape: estimate_data.enriched profile is recognized (not noProfile)', async () => {
+    mockDbHandler = estimatesTable([
+      row({
+        id: 'qw',
+        estimate_data: {
+          lead_id: 'lead-1',
+          enriched: { fieldVerifyFlags: [{ field: 'lotSize', reason: 'x', priority: 'MEDIUM' }] },
+        },
+      }),
+      row({
+        id: 'qw-clean',
+        estimate_data: { lead_id: 'lead-2', enriched: { fieldVerifyFlags: [] } },
+      }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    expect(result.byFlagPresence.noProfile.total).toBe(0);
+    expect(result.byFlagPresence.flagged.total).toBe(1);
+    expect(result.byFlagPresence.clean.total).toBe(1);
+  });
+
   test('resolution-date window: a re-saved old resolution is excluded', async () => {
     mockDbHandler = estimatesTable([
       // Accepted 200 days ago but updated yesterday (re-save) — outside window.

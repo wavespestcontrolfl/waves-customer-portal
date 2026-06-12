@@ -46,7 +46,13 @@ function parseEstimateData(raw) {
 }
 
 function profileFromEstimateData(data) {
-  return data?.engineRequest?.profile || data?.engineInputs || null;
+  // THREE persisted generations: admin creates nest it at
+  // engineRequest.profile, legacy public/lead creates flatten it as
+  // engineInputs, and quote-wizard estimates store the enriched profile at
+  // estimate_data.enriched (public-quote.js writes `enriched: ep`). Missing
+  // any of them silently dumps that cohort into noProfile and skews the
+  // slices.
+  return data?.engineRequest?.profile || data?.engineInputs || data?.enriched || null;
 }
 
 function verifyFlagsFrom(profile) {
