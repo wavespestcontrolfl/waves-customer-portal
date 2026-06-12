@@ -620,7 +620,11 @@ function generateEstimate(input) {
     const result = priceTreeShrub(property, {
       tier: services.treeShrub.tier,
       access: services.treeShrub.access || 'easy',
-      treeCount: services.treeShrub.treeCount ?? property.features?.treeCount ?? 0,
+      // No synthetic 0 here: pass the service-line override through and let
+      // priceTreeShrub resolve property.treeCount / features.treeCount, then
+      // fall back to the treeDensity estimate when no count exists at all
+      // (v4.6 — a fabricated 0 would price the per-tree material term away).
+      treeCount: services.treeShrub.treeCount,
     });
     result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;

@@ -66,10 +66,10 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 3273,
-      "annualAfterDiscount": 2618.4,
-      "monthlyTotal": 218.2,
-      "savings": 654.6,
+      "annualBeforeDiscount": 3097,
+      "annualAfterDiscount": 2500.13,
+      "monthlyTotal": 208.34,
+      "savings": 596.87,
       "serviceCount": 4
     },
     "results": {
@@ -112,12 +112,12 @@
       ],
       "ts": [
         {
-          "mo": 40,
+          "mo": 31.17,
           "recommended": false,
           "name": "Light"
         },
         {
-          "mo": 55.75,
+          "mo": 41.08,
           "recommended": true,
           "name": "Standard"
         }
@@ -141,8 +141,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2717.4,
-      "year2": 2618.4
+      "year1": 2599.13,
+      "year2": 2500.13
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -484,10 +484,10 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 2075.7,
-      "annualAfterDiscount": 1764.35,
-      "monthlyTotal": 147.03,
-      "savings": 311.35,
+      "annualBeforeDiscount": 1899.7,
+      "annualAfterDiscount": 1614.75,
+      "monthlyTotal": 134.56,
+      "savings": 284.95,
       "serviceCount": 3
     },
     "results": {
@@ -530,12 +530,12 @@
       ],
       "ts": [
         {
-          "mo": 40,
+          "mo": 31.17,
           "recommended": false,
           "name": "Light"
         },
         {
-          "mo": 55.75,
+          "mo": 41.08,
           "recommended": true,
           "name": "Standard"
         }
@@ -550,8 +550,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1863.35,
-      "year2": 1764.35
+      "year1": 1713.75,
+      "year2": 1614.75
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {

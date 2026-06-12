@@ -68,7 +68,10 @@ function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
     features: {
       ...(property.features || {}),
       access: tsLI.access || property.features?.access || property.access || 'easy',
-      treeCount: tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount ?? 0,
+      // No synthetic 0 (v4.6): when no count exists anywhere, leave it
+      // undefined so priceTreeShrub can run its treeDensity fallback instead
+      // of pricing the per-tree material term as zero trees.
+      treeCount: tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount,
     },
   };
 }
@@ -77,7 +80,7 @@ function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') 
   const quote = priceTreeShrub(treeShrubQuoteInput(v1Result, tsLI), {
     tier,
     access: tsLI.access || 'easy',
-    treeCount: tsLI.treeCount ?? 0,
+    treeCount: tsLI.treeCount,
   });
   const annual = Math.round(quote.annual);
   const monthly = roundMoney(annual / 12);
