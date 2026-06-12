@@ -1738,7 +1738,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             },
           };
         }
-        const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, typedFindingsType);
+        const chipsValidation = ActivityIndicators.validateNextStepChips(
+          nextStepChips, typedFindingsType, structuredFindings.values || {},
+        );
         if (!chipsValidation.ok) {
           return { status: 400, body: { error: chipsValidation.error, code: 'next_step_chips_invalid' } };
         }
@@ -1815,6 +1817,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 error: `${typedIndicator.label} requires an activity score (0-5) on a completed visit`,
                 code: 'activity_score_required',
               },
+            };
+          }
+          // The FINAL score (pinned or derived) must agree with the
+          // findings at the cleared boundary — the headline follows the
+          // score while areas/chip checks key off the select, so a
+          // crossing override would publish a self-contradicting report
+          // (Codex P2).
+          const scoreConsistency = ActivityIndicators.validateActivityScoreConsistency(
+            typedFindingsType, typedFindings.values, typedActivityScore,
+          );
+          if (!scoreConsistency.ok) {
+            return {
+              status: 422,
+              body: { error: scoreConsistency.error, code: 'activity_score_inconsistent' },
             };
           }
         }
@@ -4439,7 +4455,9 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     // the draft (the complete endpoint enforces them strictly). Validate
     // against THIS type's allowed chips, not the global list, so an off-type
     // chip can't steer the customer-facing draft (Codex P2).
-    const chipsValidation = ActivityIndicators.validateNextStepChips(nextStepChips, draftProfile.findingsType);
+    const chipsValidation = ActivityIndicators.validateNextStepChips(
+      nextStepChips, draftProfile.findingsType, structuredFindings?.values || {},
+    );
     const chips = chipsValidation.ok ? chipsValidation.chips : [];
     const commsContext = includeCustomerComms === true
       ? await loadFindingsRecapCommsContext(svc.customer_id).catch(() => '')
