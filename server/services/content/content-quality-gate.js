@@ -25,34 +25,42 @@
  *                         no duplicate title across site
  *
  * Pure functions. The gate scores each check 0..n (per a weight map)
- * and pass/fail. Total score is sum; gate requires score >= 75 AND
- * zero hard-check failures.
+ * and pass/fail. Total score is sum; gate requires score >= 75% of the
+ * page type's own achievable ceiling AND zero hard-check failures.
  */
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
-// Compute the achievable maximum score from the weight map so the
-// pass threshold is always a reachable fraction of it. The v3.1 plan
-// wanted "min total ~75%" — apply that as a percentage of the real
-// ceiling rather than a hardcoded literal (a hardcoded 75 was
-// unreachable: common hard checks = 37, largest page-specific
-// bundle = city-service at 36, so absolute max = 73).
+// Compute the achievable maximum score PER PAGE TYPE so the pass
+// threshold is always a reachable fraction of that page type's own
+// ceiling. The v3.1 plan wanted "min total ~75%" — an earlier global
+// threshold derived from the LARGEST bundle (common 37 + city-service
+// 36 = 73 → 54) made the gate unpassable for smaller bundles: refresh
+// maxes at 47, so a PERFECT refresh scored 47/54 and gate-failed
+// (prod, 2026-06-12), and supporting-blog maxes at 57, so any single
+// soft miss worth >3 points sank the post.
 const PASS_THRESHOLD_PCT = 0.75;
 
-function computeMaxAchievableScore(hardChecks, pageTypeChecks) {
+function computeMinTotalScores(hardChecks, pageTypeChecks) {
   const commonSum = hardChecks.reduce((s, c) => s + c.weight, 0);
-  let maxPageTypeSum = 0;
-  for (const checks of Object.values(pageTypeChecks)) {
-    const sum = checks.reduce((s, c) => s + c.weight, 0);
-    if (sum > maxPageTypeSum) maxPageTypeSum = sum;
+  const thresholds = {};
+  for (const [pageType, checks] of Object.entries(pageTypeChecks)) {
+    const ceiling = commonSum + checks.reduce((s, c) => s + c.weight, 0);
+    thresholds[pageType] = Math.floor(ceiling * PASS_THRESHOLD_PCT);
   }
-  return commonSum + maxPageTypeSum; // ceiling for any single page type
+  return thresholds;
 }
 
 // Computed below after the check arrays are defined.
-let MIN_TOTAL_SCORE;
+let MIN_TOTAL_SCORES;
+
+// Unknown page types run common checks only (evaluate() falls back to
+// an empty page-type bundle), so they share the common-only threshold.
+function minTotalScoreFor(pageType) {
+  return MIN_TOTAL_SCORES[pageType] ?? MIN_TOTAL_SCORES.none;
+}
 
 // Each check carries (name, weight, isHard, evaluate(draft, brief)).
 // Hard checks are pass/fail and short-circuit publishing on failure.
@@ -104,11 +112,15 @@ const PAGE_TYPE_CHECKS = {
   none: [],
 };
 
-// Resolve MIN_TOTAL_SCORE now that check arrays are defined.
-// MAX_ACHIEVABLE = 37 common + 36 city-service = 73.
-// MIN_TOTAL_SCORE = floor(73 * 0.75) = 54.
-const MAX_ACHIEVABLE_SCORE = computeMaxAchievableScore(HARD_CHECKS, PAGE_TYPE_CHECKS);
-MIN_TOTAL_SCORE = Math.floor(MAX_ACHIEVABLE_SCORE * PASS_THRESHOLD_PCT);
+// Resolve per-page-type thresholds now that check arrays are defined.
+// Common hard checks sum to 37. Ceiling → threshold per page type:
+//   city-service      37+36 = 73 → 54
+//   customer-question 37+22 = 59 → 44
+//   refresh           37+10 = 47 → 35
+//   supporting-blog   37+20 = 57 → 42
+//   metadata          37+26 = 63 → 47
+//   links/gbp/none    37+0  = 37 → 27
+MIN_TOTAL_SCORES = computeMinTotalScores(HARD_CHECKS, PAGE_TYPE_CHECKS);
 
 // ── main API ────────────────────────────────────────────────────────
 
@@ -131,7 +143,7 @@ MIN_TOTAL_SCORE = Math.floor(MAX_ACHIEVABLE_SCORE * PASS_THRESHOLD_PCT);
  *
  * ok requires:
  *   - zero hard_failures
- *   - total_score >= MIN_TOTAL_SCORE (75)
+ *   - total_score >= the page type's threshold (75% of its own ceiling)
  */
 function evaluate(draft, brief, context = {}) {
   if (!draft) throw new Error('content-quality-gate: draft required');
@@ -163,11 +175,12 @@ function evaluate(draft, brief, context = {}) {
     results[check.name] = result;
   }
 
-  const ok = hardFailures.length === 0 && totalScore >= MIN_TOTAL_SCORE;
+  const minTotalScore = minTotalScoreFor(pageType);
+  const ok = hardFailures.length === 0 && totalScore >= minTotalScore;
   return {
     ok,
     total_score: totalScore,
-    min_total_score: MIN_TOTAL_SCORE,
+    min_total_score: minTotalScore,
     hard_failures: hardFailures,
     soft_failures: softFailures,
     checks: results,
@@ -580,11 +593,11 @@ function checkNoDuplicateTitle(draft, _brief, context) {
   return { ok: true };
 }
 
-module.exports = { evaluate, MIN_TOTAL_SCORE };
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
-  MIN_TOTAL_SCORE,
+  MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
   isOperatorAuthoredBrief, isCompetitorGapBrief,

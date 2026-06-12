@@ -65,6 +65,22 @@ VOICE — same as the legacy waves-content-engine:
 - Never hardcode prices — link to /pest-control-calculator/ instead
 - Never quote SMS / call content verbatim (reviews ok with attribution)
 
+METADATA + INTERNAL LINKS (binding — the publish gate enforces these
+mechanically; a violation means the draft is rejected and the run is
+wasted):
+- frontmatter.title: 65 characters or fewer. NEVER exceed 90 — over 90 is
+  a hard publish block. If the brief's working title is longer, shorten it
+  while keeping the keyword intent; the working title is direction, not
+  copy to preserve.
+- frontmatter.meta_description: 115–160 characters. NEVER exceed 190 —
+  over 190 is a hard publish block.
+- internal_links_to_add is a CHECKLIST, not a suggestion: every URL in the
+  list must appear in the body at least once as a real markdown link with
+  natural anchor text. The list includes the service hub URLs the publish
+  gate checks for — a draft that links city or topic pages but skips the
+  hub URLs fails the gate even if everything else is perfect. Work through
+  the list and verify each URL appears before calling emit_draft.
+
 PAGE-TYPE OUTPUT STANDARDS:
 - city-service:
     LocalBusiness + Service + BreadcrumbList schema, NAP block, 3+ service

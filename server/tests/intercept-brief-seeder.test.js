@@ -36,6 +36,16 @@ describe('intercept manifest → opportunity rows', () => {
     expect(manifest.briefs.some((b) => String(b.id).toUpperCase().startsWith('E'))).toBe(false);
   });
 
+  test('working titles fit under the 90-char hard publish cap', () => {
+    // A1 shipped a 110-char working title; the writer trimmed it to 98,
+    // which still hard-failed title-meta-spam-gate's 90-char cap and
+    // terminally skipped the run (prod, 2026-06-12). The working title
+    // is direction, not copy — but it must never START over the cap.
+    for (const b of manifest.briefs) {
+      expect(String(b.working_title).length).toBeLessThanOrEqual(90);
+    }
+  });
+
   test('scores follow the manifest priority order and clear the action floors', () => {
     const byId = Object.fromEntries(manifest.briefs.map((b) => [b.id, b]));
     expect(scoreForBrief(byId.A0)).toBe(88); // refresh — must clear the 75 non-blog floor

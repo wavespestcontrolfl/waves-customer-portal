@@ -5,7 +5,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { evaluate, MIN_TOTAL_SCORE } = require('../services/content/content-quality-gate');
+const { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor } = require('../services/content/content-quality-gate');
 const {
   checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
@@ -285,12 +285,57 @@ describe('evaluate (full gate)', () => {
     );
     expect(r.hard_failures.some((f) => f.name === 'localbusiness_service_schema')).toBe(true);
   });
-  test('MIN_TOTAL_SCORE exposed and reachable', () => {
-    // 55/73 = ~75% of the achievable ceiling (city-service: 36 page-
-    // specific + 37 common = 73). 75 absolute would be unreachable.
-    // MIN = floor(MAX_ACHIEVABLE * 0.75). With city-service as the
-    // ceiling (common 37 + city-service 36 = 73), this resolves to 54.
-    expect(MIN_TOTAL_SCORE).toBe(54);
+  test('MIN_TOTAL_SCORES is per page type: 75% of each type\'s own ceiling', () => {
+    // Common hard checks sum to 37; each threshold = floor((37 + page
+    // bundle) * 0.75). A single global threshold derived from the
+    // largest bundle (city-service → 54) made smaller bundles
+    // unpassable: refresh maxes at 47.
+    expect(MIN_TOTAL_SCORES['city-service']).toBe(54);
+    expect(MIN_TOTAL_SCORES['customer-question']).toBe(44);
+    expect(MIN_TOTAL_SCORES.refresh).toBe(35);
+    expect(MIN_TOTAL_SCORES['supporting-blog']).toBe(42);
+    expect(MIN_TOTAL_SCORES.metadata).toBe(47);
+    expect(MIN_TOTAL_SCORES.none).toBe(27);
+  });
+  test('minTotalScoreFor falls back to the common-only threshold for unknown page types', () => {
+    expect(minTotalScoreFor('refresh')).toBe(35);
+    expect(minTotalScoreFor('some-future-type')).toBe(MIN_TOTAL_SCORES.none);
+    expect(minTotalScoreFor(undefined)).toBe(MIN_TOTAL_SCORES.none);
+  });
+  test('every page type\'s threshold is reachable from its own ceiling', () => {
+    const { HARD_CHECKS, PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
+    const commonSum = HARD_CHECKS.reduce((s, c) => s + c.weight, 0);
+    for (const [pageType, checks] of Object.entries(PAGE_TYPE_CHECKS)) {
+      const ceiling = commonSum + checks.reduce((s, c) => s + c.weight, 0);
+      expect(MIN_TOTAL_SCORES[pageType]).toBeLessThanOrEqual(ceiling);
+    }
+  });
+  test('perfect refresh draft passes its own threshold (prod 2026-06-12: 47/47 gate-failed under global 54)', () => {
+    const r = evaluate(
+      fullDraft({ body: 'x'.repeat(1500) }),
+      brief({ page_type: 'refresh' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true, previousVersion: { body: 'x'.repeat(1000) } }
+    );
+    expect(r.hard_failures).toEqual([]);
+    expect(r.total_score).toBe(47);
+    expect(r.min_total_score).toBe(35);
+    expect(r.ok).toBe(true);
+  });
+  test('supporting-blog survives one 6-point soft miss (sank under global 54: A1 scored 51)', () => {
+    // Passes cities/FAQ/voice and all common checks but has NO hub link:
+    // 57 - 6 = 51 ≥ 42. Under the old global threshold this exact shape
+    // failed (51 < 54) even though only one soft check missed.
+    const r = evaluate(
+      fullDraft({
+        body: 'Termite swarmers show up after rain in Bradenton and Sarasota. Your sandy soil and afternoon storms create perfect conditions. You should check your baseboards; your garage and your lanai matter too.\n\nFAQ\n- Do swarmers bite?\n- No.',
+      }),
+      brief({ page_type: 'supporting-blog' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.checks.hub_link_present.ok).toBe(false);
+    expect(r.total_score).toBe(51);
+    expect(r.min_total_score).toBe(42);
+    expect(r.ok).toBe(true);
   });
   test('throws on missing inputs', () => {
     expect(() => evaluate(null, brief())).toThrow();
