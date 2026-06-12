@@ -2157,3 +2157,46 @@ describe('runCatchUp (mid-day catch-up pass)', () => {
     expect(typeof mod.runCatchUp).toBe('function');
   });
 });
+
+describe('_queueHasClaimable (catch-up probe)', () => {
+  // Same fresh-registry + doMock pattern as the runNext harness above:
+  // module identity is NOT stable across this file's tests (resetModules),
+  // so the queue must be mocked into the registry the runner will require.
+  function probeSetup({ peekRows = [], recover = jest.fn().mockResolvedValue(0) } = {}) {
+    jest.resetModules();
+    const mockQueue = { recoverStaleClaims: recover, peek: jest.fn().mockResolvedValue(peekRows) };
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/content/opportunity-queue', () => mockQueue);
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    return { runner: new AutonomousRunner(), mockQueue };
+  }
+
+  test('recovers stale claims FIRST, then peeks blog rows only', async () => {
+    const { runner, mockQueue } = probeSetup({ peekRows: [{ id: 'opp_blog' }], recover: jest.fn().mockResolvedValue(1) });
+
+    await expect(runner._queueHasClaimable()).resolves.toBe(true);
+
+    // Blog-scoped: a pending non-blog row must not re-trigger the batch
+    // (and a second drought SMS) on a blog-supply-drought day.
+    expect(mockQueue.peek).toHaveBeenCalledWith({ limit: 1, minScore: DEFAULT_MIN_SCORE, actionType: 'new_supporting_blog' });
+    // Recovery precedes the probe: a morning batch that died HOLDING the
+    // only blog row's claim must read as claimable here, like claimNext.
+    expect(mockQueue.recoverStaleClaims.mock.invocationCallOrder[0])
+      .toBeLessThan(mockQueue.peek.mock.invocationCallOrder[0]);
+  });
+
+  test('no claimable blog rows → false', async () => {
+    const { runner } = probeSetup({ peekRows: [] });
+    await expect(runner._queueHasClaimable()).resolves.toBe(false);
+  });
+
+  test('recovery failure degrades to the plain probe instead of throwing', async () => {
+    const { runner, mockQueue } = probeSetup({
+      peekRows: [{ id: 'opp_blog' }],
+      recover: jest.fn().mockRejectedValue(new Error('db down')),
+    });
+    await expect(runner._queueHasClaimable()).resolves.toBe(true);
+    expect(mockQueue.peek).toHaveBeenCalled();
+  });
+});

@@ -969,10 +969,20 @@ class AutonomousRunner {
     return Boolean(row);
   }
 
-  // Same availability window + action-aware score floor as claimNext, so
-  // "claimable" here means exactly what the batch could actually claim.
+  // Probe for a claimable BLOG row specifically (Codex r1): an unscoped
+  // peek would re-run the batch — and re-send the drought SMS — for
+  // pending non-blog work on a genuine blog-supply-drought day. Recover
+  // stale claims first, exactly like claimNext does: the morning batch
+  // dying while HOLDING the only blog row's claim is the headline
+  // scenario this pass exists for, and peek alone only reads 'pending'.
+  // Recovery failure degrades to the plain probe (claimNext re-runs
+  // recovery anyway once the batch starts).
   async _queueHasClaimable() {
-    const rows = await getQueue().peek({ limit: 1, minScore: DEFAULT_MIN_SCORE });
+    const queue = getQueue();
+    await queue.recoverStaleClaims().catch((err) => {
+      logger.warn(`[autonomous-runner] catch-up stale-claim recovery failed (${err.message}); probing pending rows only`);
+    });
+    const rows = await queue.peek({ limit: 1, minScore: DEFAULT_MIN_SCORE, actionType: 'new_supporting_blog' });
     return Array.isArray(rows) && rows.length > 0;
   }
 
