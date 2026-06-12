@@ -185,6 +185,35 @@ async function getVerifiedOverrides(address) {
   }
 }
 
+// Backfill patch for rows cached BEFORE the FEMA NFHL provider shipped:
+// their stored property_record has no _floodZone key and the default TTL
+// keeps them for 180 days. Attaches the evidence to the stored JSON via an
+// ATOMIC jsonb merge guarded on key absence — a read-modify-write could
+// clobber a concurrent saveLookup's fresh record; `||` only adds the key to
+// whatever is current, and the guard makes replays no-ops. Deliberately
+// does NOT touch data_saved_at/expires_at: this is additive evidence, not
+// fresh data, so override-invalidation and expiry stay anchored to the
+// original lookup. (jsonb ? / || operators verified read-only against prod
+// 2026-06-12.)
+async function attachFloodZoneToCachedLookup(address, floodZone) {
+  if (isCacheDisabled() || !floodZone) return;
+  try {
+    const { hash } = addressKey(address);
+    await db('property_lookups')
+      .where({ address_hash: hash })
+      .whereNotNull('property_record')
+      .whereRaw("NOT (property_record \? '_floodZone')")
+      .update({
+        property_record: db.raw('property_record || ?::jsonb', [
+          JSON.stringify({ _floodZone: floodZone }),
+        ]),
+        updated_at: db.fn.now(),
+      });
+  } catch (err) {
+    logger.warn('[lookup-cache] flood-zone backfill failed', { error: err.message });
+  }
+}
+
 async function saveLookup(address, result) {
   if (isCacheDisabled()) return;
   // Never cache a failed lookup — a transient outage must not become a
@@ -343,6 +372,7 @@ module.exports = {
   getCachedLookup,
   getVerifiedOverrides,
   isCacheDisabled,
+  attachFloodZoneToCachedLookup,
   saveLookup,
   saveVerifiedOverride,
   VERIFIABLE_FIELDS,

@@ -20,6 +20,7 @@ const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } 
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
+  attachFloodZoneToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -119,6 +120,25 @@ async function performPropertyLookup(address, options = {}) {
   if (!options.refresh) {
     const cached = await getCachedLookup(address);
     if (cached) {
+      // Flood-zone backfill (#1698 review): rows cached before the FEMA
+      // provider shipped carry no _floodZone for up to the 180-day TTL.
+      // Query once on hit, attach for this response, and patch the stored
+      // record (atomic jsonb merge) so later hits skip the query. Fail-open
+      // like the live path; a null result is NOT persisted — an outage must
+      // not write "no zone" for the TTL — it simply retries next hit.
+      if (
+        cached.property_record
+        && cached.property_record._floodZone === undefined
+        && Number.isFinite(Number(cached.lat))
+        && Number.isFinite(Number(cached.lng))
+      ) {
+        const floodZone = await lookupFloodZoneByPoint(Number(cached.lat), Number(cached.lng))
+          .catch(() => null);
+        if (floodZone) {
+          cached.property_record._floodZone = floodZone;
+          await attachFloodZoneToCachedLookup(address, floodZone);
+        }
+      }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }

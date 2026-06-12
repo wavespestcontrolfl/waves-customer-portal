@@ -15,6 +15,7 @@ jest.mock('../services/logger', () => ({
 const {
   addressKey,
   applyVerifiedOverrides,
+  attachFloodZoneToCachedLookup,
   getCachedLookup,
   getVerifiedOverrides,
   saveLookup,
@@ -340,5 +341,38 @@ describe('saveVerifiedOverride', () => {
     mockDbHandler = () => fakeTable({});
     expect(await saveVerifiedOverride('100 Main St', { junk: 1 }, 'Adam')).toBeNull();
     expect(await saveVerifiedOverride('100 Main St', { stories: 0 }, 'Adam')).toBeNull();
+  });
+});
+
+describe('attachFloodZoneToCachedLookup (#1698 backfill)', () => {
+  test('atomic jsonb merge guarded on key absence — no read-modify-write', async () => {
+    const calls = { wheres: [], whereRaws: [], updates: [] };
+    mockDbHandler = () => ({
+      where(criteria) { calls.wheres.push(criteria); return this; },
+      whereNotNull(col) { calls.wheres.push({ notNull: col }); return this; },
+      whereRaw(sql) { calls.whereRaws.push(sql); return this; },
+      update: async (payload) => { calls.updates.push(payload); return 1; },
+    });
+
+    await attachFloodZoneToCachedLookup('123 Test St, Bradenton, FL', {
+      floodZone: 'AE', floodZoneSubtype: null, sfha: true,
+    });
+
+    // Guard: only rows that do NOT already carry the key are touched.
+    expect(calls.whereRaws.some((sql) => sql.includes("_floodZone"))).toBe(true);
+    // Payload: a raw `||` merge (recorded by the db.raw mock), never a full
+    // record rewrite — and the freshness anchors are deliberately untouched.
+    expect(calls.updates).toHaveLength(1);
+    expect(calls.updates[0].property_record.__raw).toContain('||');
+    expect(calls.updates[0].data_saved_at).toBeUndefined();
+    expect(calls.updates[0].expires_at).toBeUndefined();
+  });
+
+  test('no-ops without a flood zone and never throws on db failure', async () => {
+    mockDbHandler = () => { throw new Error('db down'); };
+    await expect(attachFloodZoneToCachedLookup('x', null)).resolves.toBeUndefined();
+    await expect(
+      attachFloodZoneToCachedLookup('x', { floodZone: 'X', sfha: false }),
+    ).resolves.toBeUndefined();
   });
 });

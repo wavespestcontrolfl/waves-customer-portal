@@ -13,10 +13,25 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+jest.mock('../services/property-lookup/lookup-cache', () => ({
+  attachFloodZoneToCachedLookup: jest.fn(async () => {}),
+  applyVerifiedOverrides: jest.fn((record) => record),
+  getCachedLookup: jest.fn(async () => null),
+  getVerifiedOverrides: jest.fn(async () => null),
+  saveLookup: jest.fn(async () => {}),
+  saveVerifiedOverride: jest.fn(async () => {}),
+}));
 
 const logger = require('../services/logger');
 const { lookupFloodZoneByPoint, _private } = require('../services/property-lookup/fema-nfhl');
-const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+const {
+  buildEnrichedProfile,
+  performPropertyLookup,
+} = require('../routes/property-lookup-v2');
+const {
+  attachFloodZoneToCachedLookup,
+  getCachedLookup,
+} = require('../services/property-lookup/lookup-cache');
 
 const savedFetch = global.fetch;
 
@@ -149,5 +164,62 @@ describe('profile surfacing (evidence-only)', () => {
     const without = buildEnrichedProfile(rc(null), {}, 27.1, -82.4, null);
     expect(withFlood.modifiers).toEqual(without.modifiers);
     expect(withFlood.foundationType).toBe(without.foundationType);
+  });
+});
+
+describe('cache-hit backfill (#1698 review P2)', () => {
+  const cachedRow = (recordOverrides = {}) => ({
+    property_record: {
+      formattedAddress: '123 Test St, Bradenton, FL',
+      squareFootage: 1800,
+      lotSize: 9000,
+      stories: 1,
+      ...recordOverrides,
+    },
+    ai_analysis: { estimatedTurfSf: 5000, confidenceScore: 80 },
+    lat: 27.1,
+    lng: -82.4,
+    updated_at: '2026-06-01T00:00:00Z',
+  });
+
+  test('pre-provider cached row gets the zone queried, attached, and persisted', async () => {
+    getCachedLookup.mockResolvedValue(cachedRow());
+    global.fetch = jest.fn(async () => femaResponse([
+      { attributes: { FLD_ZONE: 'AE', ZONE_SUBTY: null, SFHA_TF: 'T' } },
+    ]));
+
+    const result = await performPropertyLookup('123 Test St, Bradenton, FL');
+
+    expect(result.meta.cache).toBe('hit');
+    expect(result.enriched.floodZone).toBe('AE');
+    expect(result.enriched.inSpecialFloodHazardArea).toBe(true);
+    expect(attachFloodZoneToCachedLookup).toHaveBeenCalledWith(
+      '123 Test St, Bradenton, FL',
+      { floodZone: 'AE', floodZoneSubtype: null, sfha: true },
+    );
+  });
+
+  test('row that already carries _floodZone is served as-is — no FEMA query', async () => {
+    getCachedLookup.mockResolvedValue(cachedRow({
+      _floodZone: { floodZone: 'X', floodZoneSubtype: 'AREA OF MINIMAL FLOOD HAZARD', sfha: false },
+    }));
+    global.fetch = jest.fn();
+
+    const result = await performPropertyLookup('123 Test St, Bradenton, FL');
+
+    expect(result.enriched.floodZone).toBe('X');
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(attachFloodZoneToCachedLookup).not.toHaveBeenCalled();
+  });
+
+  test('FEMA outage on a cache hit: nothing persisted, hit still served (retry next hit)', async () => {
+    getCachedLookup.mockResolvedValue(cachedRow());
+    global.fetch = jest.fn(async () => { throw new Error('socket hang up'); });
+
+    const result = await performPropertyLookup('123 Test St, Bradenton, FL');
+
+    expect(result.meta.cache).toBe('hit');
+    expect(result.enriched.floodZone).toBeNull();
+    expect(attachFloodZoneToCachedLookup).not.toHaveBeenCalled();
   });
 });
