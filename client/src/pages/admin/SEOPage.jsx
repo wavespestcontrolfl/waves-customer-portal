@@ -1083,7 +1083,10 @@ function RankingsMonitorTab() {
         <div style={{ color: D.red }}>{error}</div>
       </Card>
     );
-  if (!data?.pages?.length)
+  // pages holds only visible movers — an all-flat window arrives with
+  // pages empty but pages_tracked > 0, and that's healthy data (the
+  // no-movement card below covers it), not missing GSC data.
+  if (!data?.pages?.length && !data?.summary?.pages_tracked)
     return (
       <Card style={{ padding: 40, textAlign: "center" }}>
         <div style={{ color: D.muted }}>
