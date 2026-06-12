@@ -612,6 +612,21 @@ router.post('/property-lookup', async (req, res) => {
 // re-apply to cached AND fresh lookups of the same address.
 // (Router-level adminAuthenticate + requireTechOrAdmin already cover this.)
 // ─────────────────────────────────────────────
+// GET /api/.../property-lookup/provider-accuracy — per-provider accuracy
+// vs tech-verified facts. Read-only analytics: every verified override is
+// scored against each provider's ORIGINAL claim preserved in the cached
+// record's _fieldEvidence (the input for any future evidence-weight retune,
+// which stays a separate deliberate decision).
+router.get('/property-lookup/provider-accuracy', async (req, res, next) => {
+  try {
+    const { providerAccuracy } = require('../services/property-lookup/provider-accuracy');
+    const report = await providerAccuracy();
+    res.json({ success: true, ...report });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/property-lookup/verify', async (req, res) => {
   const { address, fields } = req.body || {};
   if (!address || String(address).trim().length < 5) {
