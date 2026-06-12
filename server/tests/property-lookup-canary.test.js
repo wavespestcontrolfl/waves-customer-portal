@@ -99,6 +99,13 @@ describe('runPropertyLookupCanary', () => {
     expect(result.failures).toEqual(['FDOR cadastral layer: golden point no longer resolves to a parcel']);
   });
 
+  it('a wrong PAO parcel id from FDOR is a failure (normalization drift)', async () => {
+    mockLookupParcelByPoint.mockResolvedValue({ county: 'Manatee', paoParcelId: '0579642409' });
+    const result = await runPropertyLookupCanary();
+    expect(result.ok).toBe(false);
+    expect(result.failures).toEqual(['FDOR cadastral layer: golden point resolves to the wrong PAO parcel id']);
+  });
+
   it('lookup rejections degrade to failures instead of throwing', async () => {
     mockLookupParcelByPoint.mockRejectedValue(new Error('arcgis down'));
     mockLookupByParcel.mockRejectedValue(new Error('county down'));

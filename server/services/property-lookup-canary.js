@@ -48,8 +48,11 @@ const GOLDEN_PARCELS = [
 ];
 
 // Rooftop point inside the Manatee golden parcel — exercises the FDOR
-// statewide cadastral layer (point-in-polygon → parcel + PAO key).
-const GOLDEN_POINT = { lat: 27.4536, lng: -82.4221, expectCounty: 'Manatee' };
+// statewide cadastral layer (point-in-polygon → parcel + PAO key). The
+// expected PAO id is asserted exactly: county-only validation would pass
+// through parcel-id normalization drift or adjacent-polygon selection while
+// the production point→PAO handoff is broken.
+const GOLDEN_POINT = { lat: 27.4536, lng: -82.4221, expectCounty: 'Manatee', expectPaoParcelId: '579642409' };
 
 function isCanaryDisabled() {
   const flag = process.env.PROPERTY_LOOKUP_CANARY_DISABLED;
@@ -74,8 +77,10 @@ async function runPropertyLookupCanaryInner() {
 
   const parcel = await lookupParcelByPoint(GOLDEN_POINT.lat, GOLDEN_POINT.lng, { timeoutMs: CANARY_TIMEOUT_MS })
     .catch(() => null);
-  if (!parcel || parcel.county !== GOLDEN_POINT.expectCounty || !parcel.paoParcelId) {
+  if (!parcel || parcel.county !== GOLDEN_POINT.expectCounty) {
     failures.push('FDOR cadastral layer: golden point no longer resolves to a parcel');
+  } else if (parcel.paoParcelId !== GOLDEN_POINT.expectPaoParcelId) {
+    failures.push('FDOR cadastral layer: golden point resolves to the wrong PAO parcel id');
   }
 
   // Sequential on purpose — three polite hits a night, and a shared-cause
