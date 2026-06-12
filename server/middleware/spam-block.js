@@ -31,6 +31,14 @@ const TWIML_HANGUP_VOICE =
   '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
 const TWIML_SILENT_SMS = '<Response></Response>';
 
+// Phone numbers are PII and must never reach plain-text logs in full — log
+// the masked form; the audit table and Twilio console (via SID) keep the
+// full numbers for enforcement and follow-up.
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
+}
+
 /**
  * Extract the Marchex Clean Call verdict from Twilio's Marketplace `AddOns`
  * webhook param. Returns `{ recommendation, reason }` or null when the
@@ -86,7 +94,7 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns }) {
         if (!isEnabled('marchexAutoBlock')) {
           // Shadow mode — surface the verdict so accuracy can be judged from
           // logs before the gate lets it reject real callers.
-          logger.info(`[spam-block] Marchex would block voice from ${from} → ${to || 'unknown'} (shadow; reason=${marchex.reason || 'n/a'})`);
+          logger.info(`[spam-block] Marchex would block voice from ${maskPhone(from)} → ${maskPhone(to)} (shadow; sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
           return { blocked: false };
         }
         try {
@@ -100,7 +108,7 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns }) {
         } catch (err) {
           logger.error(`[spam-block] Audit insert failed: ${err.message}`);
         }
-        logger.info(`[spam-block] Marchex auto-blocked voice from ${from} → ${to || 'unknown'} (reason=${marchex.reason || 'n/a'})`);
+        logger.info(`[spam-block] Marchex auto-blocked voice from ${maskPhone(from)} → ${maskPhone(to)} (sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
         return { blocked: true, twiml: TWIML_HARD_BLOCK_VOICE, blockType: 'marchex_auto' };
       }
     }
@@ -135,7 +143,7 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns }) {
     twiml = TWIML_SILENT_SMS;
   }
 
-  logger.info(`[spam-block] Blocked ${channel} from ${from} → ${to || 'unknown'} (type=${block.block_type})`);
+  logger.info(`[spam-block] Blocked ${channel} from ${maskPhone(from)} → ${maskPhone(to)} (sid=${twilioSid || 'n/a'}; type=${block.block_type})`);
   return { blocked: true, twiml, blockType: block.block_type };
 }
 
