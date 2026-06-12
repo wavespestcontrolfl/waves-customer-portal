@@ -5,7 +5,7 @@
   "cases": [
     {
       "id": "waves-own-newsletter-no-destructive-action",
-      "incident": "2026-05-25 through 06-11: the agent classified Waves' own newsletter sends as marketing_newsletter, archived them AND fired the RFC 8058 one-click unsubscribe — silently enrolling contact@ in SendGrid suppression group 28768 (root cause of every \"test email vanished\" report; fixed in PR #1654). Whatever the model calls this email, the derived action must be non-destructive.",
+      "incident": "2026-05-25 through 06-11: the agent classified Waves' own newsletter sends as marketing_newsletter, archived them AND fired the RFC 8058 one-click unsubscribe — silently enrolling contact@ in SendGrid suppression group 28768 (root cause of every \"test email vanished\" report; fixed in PR #1654). Whatever the model calls this email, NO auto-action branch may fire: drift to lead_inquiry/complaint/vendor_invoice would still auto-create a lead, page an admin, or run invoice processing on our own send (expect tightened from destructive-only to branch_any=none in PR #1662 review).",
       "email": {
         "from_address": "events@wavespestcontrol.com",
         "from_name": "Waves Pest Control",
@@ -13,7 +13,10 @@
         "body_text": "Hey neighbor — here's what's actually worth leaving the house for this week.\n\nTHU: Venice Night Market, downtown Venice, 5-9 PM. Free entry.\nFRI: Movie in the Park at Payne Park, Sarasota — bring a blanket, starts at dusk.\nSAT: Farmers market on Main St, Bradenton, 8 AM-1 PM.\n\nPro tip: the night market parking fills by 5:30. Park at the library garage.\n\n— The Waves Pest Control Team\n\nYou're receiving this because you subscribed at wavespestcontrol.com. Unsubscribe: https://u31425306.ct.sendgrid.net/ls/click?upn=example"
       },
       "expect": {
-        "no_destructive_action": true
+        "no_destructive_action": true,
+        "branch_any": [
+          "none"
+        ]
       }
     },
     {

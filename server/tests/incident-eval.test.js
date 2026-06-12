@@ -3,11 +3,14 @@
  * live models weekly — see server/fixtures/incident-eval/README.md):
  *   - the corpus files load, validate, and keep their incident anchor cases
  *   - fail-open gate results (checked=false) count INCONCLUSIVE, never pass
- *   - a failing LLM case is retried once; pass-on-retry = flaky, not failing
- *   - the inbox suite derives destructive-action verdicts through the REAL
- *     shouldSkipAutoAction guard
- *   - exactly one admin notification on regression; a "could not run"
- *     notification when every case is inconclusive; silence when green
+ *   - a failing LLM case is retried once; pass-on-retry = flaky, not failing;
+ *     an inconclusive retry does NOT clear an observed failure
+ *   - the inbox suite derives the would-be executeAutoAction branch (ALL
+ *     branches, not just destructive) through the REAL shouldSkipAutoAction
+ *     guard
+ *   - exactly one admin notification on regression (naming any suite that
+ *     was fully inconclusive alongside); a "could not run" notification when
+ *     every case in a suite is inconclusive; silence when green
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -82,8 +85,10 @@ describe('incident-eval corpus integrity', () => {
 
     const inbox = loadSuite('inbox');
     const contact = inbox.cases.find((c) => c.id === 'waves-own-newsletter-no-destructive-action');
-    // PR #1654: our own newsletter must never draw a destructive action
+    // PR #1654: our own newsletter must never draw a destructive action —
+    // and no other auto-action branch either (lead/complaint/invoice drift)
     expect(contact.expect.no_destructive_action).toBe(true);
+    expect(contact.expect.branch_any).toEqual(['none']);
     expect(contact.email.from_address.endsWith('@wavespestcontrol.com')).toBe(true);
   });
 
@@ -173,6 +178,18 @@ describe('runIncidentEval semantics', () => {
     expect(contact.status).toBe('pass');
   });
 
+  test('classifier drift to lead_inquiry on our own newsletter is a regression (non-destructive branch would still auto-create a lead)', async () => {
+    const h = harness({
+      evaluate: healthyEvaluate,
+      classify: classifyBySender({ 'events@wavespestcontrol.com': 'lead_inquiry' }),
+    });
+    const result = await runIncidentEval(h.opts);
+    const contact = result.results.find((r) => r.id === 'waves-own-newsletter-no-destructive-action');
+    expect(contact.status).toBe('fail');
+    expect(contact.detail).toMatch(/branch=create_lead/);
+    expect(h.notifications).toHaveLength(1);
+  });
+
   test('classifier drift to "other" on an external newsletter is a regression (inbox stops cleaning itself)', async () => {
     const h = harness({
       evaluate: healthyEvaluate,
@@ -182,6 +199,23 @@ describe('runIncidentEval semantics', () => {
     const ext = result.results.find((r) => r.id === 'external-newsletter-destructive-action-must-fire');
     expect(ext.status).toBe('fail');
     expect(h.notifications).toHaveLength(1);
+  });
+
+  test('a regression in one suite still reports the other suite as unverified in the SAME notification', async () => {
+    const h = harness({
+      // Pre-#1561 failure mode: the gate P0-flags everything, so the
+      // must-pass fact-check cases regress…
+      evaluate: async () => ({ pass: false, checked: true, findings: [{ severity: 'P0' }] }),
+      // …while the inbox classifier is fully down (all cases inconclusive).
+      classify: async () => { throw new Error('api down'); },
+    });
+    const result = await runIncidentEval(h.opts);
+    expect(result.failed).toBeGreaterThan(0);
+    expect(result.unverifiedSuites).toEqual(['inbox']);
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0].title).toMatch(/regression/);
+    expect(h.notifications[0].body).toMatch(/NOT verified this run .*: inbox/);
+    expect(JSON.parse(h.notifications[0].metadata).unverifiedSuites).toEqual(['inbox']);
   });
 
   test('classifier API errors are inconclusive; all suites down raises ONE could-not-verify notification naming both', async () => {
@@ -225,5 +259,16 @@ describe('runCase retry-once', () => {
     const r = await runCase(async () => { calls++; return { status: 'inconclusive', detail: 'skipped' }; });
     expect(r.status).toBe('inconclusive');
     expect(calls).toBe(1);
+  });
+
+  test('fail then inconclusive = still a fail (only a clean pass clears the first failure)', async () => {
+    let n = 0;
+    const r = await runCase(async () => (n++ === 0
+      ? { status: 'fail', detail: 'observed drift' }
+      : { status: 'inconclusive', detail: 'timeout' }));
+    expect(r.status).toBe('fail');
+    expect(r.flaky).toBe(false);
+    expect(r.detail).toMatch(/observed drift/);
+    expect(r.detail).toMatch(/retry inconclusive: timeout/);
   });
 });

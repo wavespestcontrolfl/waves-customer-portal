@@ -17,12 +17,16 @@
  *     server/fixtures/incident-eval/. Cases are never deleted, only added.
  *   - LLM verdicts are non-deterministic, so a failing case is retried once
  *     and only a repeated failure counts as a regression (pass-on-retry is
- *     reported as flaky, not failing).
+ *     reported as flaky, not failing). Only a clean PASS clears the first
+ *     failure — a retry that comes back inconclusive keeps the case failing,
+ *     so a transient timeout can't mask observed drift.
  *   - The fact-check gate's fail-open paths (checked === false) count as
  *     INCONCLUSIVE, never as a pass — otherwise a dead API key reads as a
  *     green eval forever.
  *   - The inbox suite derives the would-be auto-action from the model's
- *     category + the shouldSkipAutoAction guard; it NEVER executes actions
+ *     category + the shouldSkipAutoAction guard, modeling EVERY
+ *     executeAutoAction branch (lead creation, complaint alerts, invoice
+ *     processing — not just the destructive pair); it NEVER executes actions
  *     (classifyEmailContent is the pure classification path — no emails-row
  *     update, no executeAutoAction).
  *   - Regressions raise ONE admin notification per run; a run where ANY
@@ -36,7 +40,28 @@ const path = require('path');
 const logger = require('../logger');
 
 const FIXTURES_DIR = path.join(__dirname, '..', '..', 'fixtures', 'incident-eval');
-const DESTRUCTIVE_CATEGORIES = ['spam', 'marketing_newsletter'];
+
+// Mirrors the executeAutoAction switch in services/email/email-actions.js:
+// category → the handler branch that would fire. The destructive pair is
+// what the operational-sender guard can skip, but the other branches still
+// mutate state in prod (lead rows, complaint alerts, invoice processing) —
+// drift INTO them matters just as much as drift into archive/unsubscribe.
+const AUTO_ACTION_BRANCHES = {
+  spam: 'trash_and_block',
+  marketing_newsletter: 'archive_and_unsubscribe',
+  lead_inquiry: 'create_lead',
+  customer_request: 'customer_request',
+  scheduling: 'customer_request',
+  complaint: 'complaint_alert',
+  vendor_invoice: 'process_invoice',
+  vendor_communication: 'vendor_comm',
+};
+const DESTRUCTIVE_BRANCHES = new Set(['trash_and_block', 'archive_and_unsubscribe']);
+
+function deriveAutoActionBranch(category, fromAddress, shouldSkipAutoAction) {
+  if (shouldSkipAutoAction(category, fromAddress)) return 'none';
+  return AUTO_ACTION_BRANCHES[category] || 'none';
+}
 
 function loadSuite(name) {
   const file = path.join(FIXTURES_DIR, `${name}.json`);
@@ -82,9 +107,10 @@ async function attemptFactCheckCase(c, evaluate) {
 }
 
 /**
- * One attempt of an inbox case: classify, then derive the would-be action.
- * Destructive = the category is one executeAutoAction archives/trashes/
- * unsubscribes on AND the operational-sender guard would not skip it.
+ * One attempt of an inbox case: classify, then derive the would-be
+ * executeAutoAction branch (see AUTO_ACTION_BRANCHES). Destructive = the
+ * trash/archive/unsubscribe pair AND the operational-sender guard would
+ * not skip it.
  */
 async function attemptInboxCase(c, classify, shouldSkipAutoAction) {
   let res;
@@ -97,31 +123,44 @@ async function attemptInboxCase(c, classify, shouldSkipAutoAction) {
     return { status: 'inconclusive', detail: 'classifier returned unparseable/empty result' };
   }
 
+  const branch = deriveAutoActionBranch(res.category, c.email.from_address, shouldSkipAutoAction);
+  const destructive = DESTRUCTIVE_BRANCHES.has(branch);
+
   const failures = [];
   if (Array.isArray(c.expect.category_any) && !c.expect.category_any.includes(res.category)) {
     failures.push(`category=${res.category}, expected one of [${c.expect.category_any.join(', ')}]`);
   }
+  if (Array.isArray(c.expect.branch_any) && !c.expect.branch_any.includes(branch)) {
+    failures.push(`auto-action branch=${branch} would fire (category=${res.category}), expected one of [${c.expect.branch_any.join(', ')}]`);
+  }
   if (typeof c.expect.no_destructive_action === 'boolean') {
-    const destructive = DESTRUCTIVE_CATEGORIES.includes(res.category)
-      && !shouldSkipAutoAction(res.category, c.email.from_address);
     if (c.expect.no_destructive_action && destructive) {
       failures.push(`destructive auto-action would fire (category=${res.category}, guard did not skip)`);
     }
     if (!c.expect.no_destructive_action && !destructive) {
-      failures.push(`destructive auto-action would NOT fire (category=${res.category}) — inbox stops cleaning itself`);
+      failures.push(`destructive auto-action would NOT fire (category=${res.category}, branch=${branch}) — inbox stops cleaning itself`);
     }
   }
   if (failures.length) return { status: 'fail', detail: failures.join('; ') };
   return { status: 'pass' };
 }
 
-/** Retry-once wrapper: only a repeated failure counts as a regression. */
+/**
+ * Retry-once wrapper: only a repeated failure counts as a regression — and
+ * only a clean PASS clears the first failure. A retry that comes back
+ * inconclusive (timeout, parse error) keeps the case failing; otherwise one
+ * transient blip downgrades observed drift to "could not verify" and the
+ * regression notification never fires.
+ */
 async function runCase(attempt) {
   const first = await attempt();
   if (first.status !== 'fail') return { ...first, flaky: false };
   const second = await attempt();
   if (second.status === 'pass') {
     return { status: 'pass', flaky: true, detail: `flaky (first attempt: ${first.detail})` };
+  }
+  if (second.status === 'inconclusive') {
+    return { status: 'fail', flaky: false, detail: `${first.detail} (retry inconclusive: ${second.detail})` };
   }
   return { ...second, flaky: false, detail: second.detail || first.detail };
 }
@@ -190,14 +229,20 @@ async function runIncidentEval(opts = {}) {
   const failures = results.filter((r) => r.status === 'fail');
   if (failures.length > 0) {
     const lines = failures.map((f) => `${f.suite}/${f.id}: ${f.detail}`);
+    // A fully-inconclusive suite rides along in the regression notification —
+    // admins must learn BOTH that one component regressed and that another
+    // was not verified at all this run.
+    const unverifiedNote = unverifiedSuites.length > 0
+      ? `\n\nAlso NOT verified this run (every case inconclusive): ${unverifiedSuites.join(', ')}.`
+      : '';
     await notify({
       recipient_type: 'admin',
       category: 'eval_regression',
       title: `Incident eval: ${failures.length} regression(s) in LLM gates`,
-      body: `${lines.join('\n').slice(0, 1500)}\n\nRe-run manually: node server/scripts/run-incident-eval.js`,
+      body: `${lines.join('\n').slice(0, 1500)}${unverifiedNote}\n\nRe-run manually: node server/scripts/run-incident-eval.js`,
       icon: '🧪',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ summary: { total: summary.total, passed: summary.passed, failed: summary.failed, inconclusive: summary.inconclusive }, failures: lines }),
+      metadata: JSON.stringify({ summary: { total: summary.total, passed: summary.passed, failed: summary.failed, inconclusive: summary.inconclusive }, failures: lines, unverifiedSuites }),
     });
   } else if (unverifiedSuites.length > 0) {
     const details = results
@@ -220,5 +265,5 @@ async function runIncidentEval(opts = {}) {
 
 module.exports = {
   runIncidentEval,
-  _internals: { loadSuite, attemptFactCheckCase, attemptInboxCase, runCase, DESTRUCTIVE_CATEGORIES },
+  _internals: { loadSuite, attemptFactCheckCase, attemptInboxCase, runCase, deriveAutoActionBranch, AUTO_ACTION_BRANCHES, DESTRUCTIVE_BRANCHES },
 };

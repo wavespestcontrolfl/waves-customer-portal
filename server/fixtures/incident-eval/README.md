@@ -38,9 +38,16 @@ ships a bad post or eats real mail.
   addresses, or phone numbers.
 - `expect` fields:
   - fact-check: `{ "pass": true|false }` — must the gate let it through?
-  - inbox: `{ "category_any": [..] }` and/or `{ "no_destructive_action": true|false }`
-    (destructive = spam/marketing_newsletter action that the operational-sender
-    guard would not skip).
+  - inbox: any combination of
+    - `{ "category_any": [..] }` — acceptable classifier categories;
+    - `{ "branch_any": [..] }` — acceptable derived `executeAutoAction`
+      branches: `trash_and_block`, `archive_and_unsubscribe`, `create_lead`,
+      `customer_request`, `complaint_alert`, `process_invoice`,
+      `vendor_comm`, `none` (guard-skipped or no-op category). Use
+      `["none"]` when NO side effect of any kind may fire;
+    - `{ "no_destructive_action": true|false }` — destructive = the
+      trash/archive/unsubscribe pair when the operational-sender guard
+      would not skip it.
 - LLM verdicts are non-deterministic: the runner retries a failing case once,
   so write cases the model should get right **twice in a row**. Don't add
   borderline cases — they train everyone to ignore the alert.
