@@ -15,21 +15,28 @@ function parseClaudeJson(text) {
   }
 }
 
-async function classifyEmail(email) {
-  try {
-    // Get known vendor domains for context
-    const vendors = await db('vendor_email_domains').select('domain', 'vendor_name');
-    const vendorList = vendors.map(v => `${v.domain} (${v.vendor_name})`).join(', ');
-    const senderDomain = email.from_address?.split('@')[1] || '';
+/**
+ * Pure classification: vendor-context lookup + Claude call + parse. NO DB
+ * writes, NO auto-actions — safe to call on a fixture email that has no
+ * `emails` row (the weekly incident-regression eval replays historical
+ * incident emails through this). Returns the parsed classification, null on
+ * unparseable model output, and THROWS on API errors so callers can tell
+ * "model unavailable" apart from "model answered garbage".
+ */
+async function classifyEmailContent(email) {
+  // Get known vendor domains for context
+  const vendors = await db('vendor_email_domains').select('domain', 'vendor_name');
+  const vendorList = vendors.map(v => `${v.domain} (${v.vendor_name})`).join(', ');
+  const senderDomain = email.from_address?.split('@')[1] || '';
 
-    const bodyPreview = (email.body_text || email.snippet || '').substring(0, 2000);
+  const bodyPreview = (email.body_text || email.snippet || '').substring(0, 2000);
 
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 512,
-      messages: [{
-        role: 'user',
-        content: `You are an email classifier for Waves Pest Control & Lawn Care, a family-owned pest control company in Southwest Florida.
+  const response = await anthropic.messages.create({
+    model: MODELS.FLAGSHIP,
+    max_tokens: 512,
+    messages: [{
+      role: 'user',
+      content: `You are an email classifier for Waves Pest Control & Lawn Care, a family-owned pest control company in Southwest Florida.
 
 Classify this email into exactly ONE category and extract relevant entities.
 
@@ -73,14 +80,21 @@ Respond ONLY in JSON, no markdown:
     "urgency_reason": "why this is urgent, if applicable"
   }
 }`,
-      }],
-    });
+    }],
+  });
 
-    const result = parseClaudeJson(response.content[0].text);
-    if (!result) {
-      logger.warn(`[email-classifier] Unparseable response for email ${email.id}`);
-      return null;
-    }
+  const result = parseClaudeJson(response.content[0].text);
+  if (!result) {
+    logger.warn(`[email-classifier] Unparseable response for email ${email.id}`);
+    return null;
+  }
+  return result;
+}
+
+async function classifyEmail(email) {
+  try {
+    const result = await classifyEmailContent(email);
+    if (!result) return null;
 
     // Update email record
     await db('emails').where({ id: email.id }).update({
@@ -102,4 +116,4 @@ Respond ONLY in JSON, no markdown:
   }
 }
 
-module.exports = { classifyEmail, parseClaudeJson };
+module.exports = { classifyEmail, classifyEmailContent, parseClaudeJson };

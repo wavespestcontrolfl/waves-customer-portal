@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "incident-eval.v1",
+  "suite": "inbox",
+  "description": "Replays inbox-agent incidents through the LIVE classifier weekly, then derives the would-be auto-action (classifier category + shouldSkipAutoAction guard) WITHOUT executing it. Jest unit tests (email-operational-sender-guard.test.js) lock the deterministic guard; this corpus catches classifier drift that changes which actions fire. All emails are synthetic — no real customer data.",
+  "cases": [
+    {
+      "id": "waves-own-newsletter-no-destructive-action",
+      "incident": "2026-05-25 through 06-11: the agent classified Waves' own newsletter sends as marketing_newsletter, archived them AND fired the RFC 8058 one-click unsubscribe — silently enrolling contact@ in SendGrid suppression group 28768 (root cause of every \"test email vanished\" report; fixed in PR #1654). Whatever the model calls this email, NO auto-action branch may fire: drift to lead_inquiry/complaint/vendor_invoice would still auto-create a lead, page an admin, or run invoice processing on our own send (expect tightened from destructive-only to branch_any=none in PR #1662 review).",
+      "email": {
+        "from_address": "events@wavespestcontrol.com",
+        "from_name": "Waves Pest Control",
+        "subject": "Fresh This Week: Venice Night Market, free outdoor movie at Payne Park 🌊",
+        "body_text": "Hey neighbor — here's what's actually worth leaving the house for this week.\n\nTHU: Venice Night Market, downtown Venice, 5-9 PM. Free entry.\nFRI: Movie in the Park at Payne Park, Sarasota — bring a blanket, starts at dusk.\nSAT: Farmers market on Main St, Bradenton, 8 AM-1 PM.\n\nPro tip: the night market parking fills by 5:30. Park at the library garage.\n\n— The Waves Pest Control Team\n\nYou're receiving this because you subscribed at wavespestcontrol.com. Unsubscribe: https://u31425306.ct.sendgrid.net/ls/click?upn=example"
+      },
+      "expect": {
+        "no_destructive_action": true,
+        "branch_any": [
+          "none"
+        ]
+      }
+    },
+    {
+      "id": "external-newsletter-destructive-action-must-fire",
+      "incident": "Counterpart to the contact@ incident: a genuine external marketing newsletter must still classify as marketing_newsletter/spam so the archive auto-action fires. If this fails, the inbox stops cleaning itself and Virginia wades through promo mail again.",
+      "email": {
+        "from_address": "deals@mail.shopsavvy-deals.com",
+        "from_name": "ShopSavvy Deals",
+        "subject": "48 HOURS ONLY ⏰ 25% off all patio furniture + free shipping",
+        "body_text": "Summer savings event! Take 25% off every patio set, grill, and outdoor accessory. Use code SUNNY25 at checkout. Plus: spend $200, get a $30 reward. Shop now before these deals melt away!\n\nNo longer want these emails? Unsubscribe here: https://mail.shopsavvy-deals.com/unsub/abc123"
+      },
+      "expect": {
+        "category_any": [
+          "marketing_newsletter",
+          "spam"
+        ],
+        "no_destructive_action": false
+      }
+    },
+    {
+      "id": "clear-lead-inquiry",
+      "incident": "Highest-cost drift direction: a missed lead_inquiry means no auto-created lead and no admin notification. Synthetic but unambiguous quote request.",
+      "email": {
+        "from_address": "maria.gonzalez.test@example.com",
+        "from_name": "Maria Gonzalez",
+        "subject": "Quote for pest control in Venice?",
+        "body_text": "Hi, we just moved to 1234 Example Ave in Venice and we're seeing small ants in the kitchen every morning, mostly around the sink. Could you give me a quote for regular pest control service? It's a 3 bed / 2 bath single-story house. You can call or text me at (941) 555-0142. Thanks! — Maria"
+      },
+      "expect": {
+        "category_any": [
+          "lead_inquiry"
+        ]
+      }
+    },
+    {
+      "id": "customer-complaint",
+      "incident": "Complaint drift means no star, no urgent notification, and a frustrated customer waiting silently. Synthetic but unambiguous.",
+      "email": {
+        "from_address": "john.smith.test@example.com",
+        "from_name": "John Smith",
+        "subject": "Still seeing roaches after last week's service",
+        "body_text": "I'm honestly pretty disappointed. Your tech came out last Tuesday for our quarterly service and I'm still finding roaches in the garage and now two in the kitchen. This is the second time this has happened after a treatment. I'm paying for a service that doesn't seem to be working. I need someone to come back out this week and make this right, or we're going to look at other companies."
+      },
+      "expect": {
+        "category_any": [
+          "complaint"
+        ]
+      }
+    },
+    {
+      "id": "vendor-invoice",
+      "incident": "vendor_invoice drift breaks the invoice-processor handoff (auto-filing and amount extraction). Synthetic vendor and amounts.",
+      "email": {
+        "from_address": "billing@swflchemsupply.com",
+        "from_name": "SWFL Chem Supply — Billing",
+        "subject": "Invoice INV-20488 for Waves Pest Control — due 07/01",
+        "body_text": "Dear Customer,\n\nPlease find attached invoice INV-20488 dated 06/10/2026 in the amount of $1,284.50 for your recent order (PO #WV-2231): 2x Termidor SC 20oz, 1 case Advion roach gel, 4x backpack sprayer filters.\n\nPayment terms: Net 21. Amount due: $1,284.50 by 07/01/2026.\n\nThank you for your business,\nSWFL Chem Supply Accounts Receivable"
+      },
+      "expect": {
+        "category_any": [
+          "vendor_invoice"
+        ]
+      }
+    },
+    {
+      "id": "seo-pitch-spam",
+      "incident": "The classifier prompt names SEO/link-building pitches as spam. If this drifts to \"other\", junk accumulates unblocked in the shared inbox.",
+      "email": {
+        "from_address": "outreach@rankboosterpro.com",
+        "from_name": "Tyler from RankBooster",
+        "subject": "Quick question about wavespestcontrol.com",
+        "body_text": "Hi there,\n\nI was checking out wavespestcontrol.com and noticed you're not ranking on page 1 for several high-value pest control keywords in your area. My agency specializes in getting local service businesses to the top of Google with our proven 90-day link building system. We have case studies showing 300% traffic increases.\n\nDo you have 15 minutes this week for a quick call? Just reply \"interested\" and I'll send over some times.\n\nBest,\nTyler\nRankBooster Pro — SEO That Works"
+      },
+      "expect": {
+        "category_any": [
+          "spam"
+        ]
+      }
+    }
+  ]
+}
