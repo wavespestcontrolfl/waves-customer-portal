@@ -71,3 +71,43 @@ test('kill switch AUTONOMOUS_BLOG_DROUGHT_ALERT=false silences it', async () => 
   await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
   expect(twilio.sendSMS).not.toHaveBeenCalled();
 });
+
+test('gate-failed attempt with reviewer_notes: SMS names the failing checks', async () => {
+  await runner._sendBlogDroughtSms([
+    {
+      action_type: 'new_supporting_blog',
+      outcome: 'skipped_gate_fail',
+      skip_reason: 'auto_publish_gate_fail',
+      reviewer_notes: 'quality: hard=hub_link_present soft=none score=51/51',
+    },
+  ]);
+
+  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
+  const [, body] = twilio.sendSMS.mock.calls[0];
+  expect(body).toMatch(/auto_publish_gate_fail×1/);
+  expect(body).toMatch(/Detail: quality: hard=hub_link_present/);
+});
+
+test('reviewer_notes detail is truncated to keep the SMS bounded', async () => {
+  await runner._sendBlogDroughtSms([
+    {
+      action_type: 'new_supporting_blog',
+      outcome: 'skipped_gate_fail',
+      skip_reason: 'auto_publish_gate_fail',
+      reviewer_notes: 'x'.repeat(500),
+    },
+  ]);
+
+  const [, body] = twilio.sendSMS.mock.calls[0];
+  const detail = body.split('Detail: ')[1];
+  expect(detail.length).toBeLessThanOrEqual(160);
+});
+
+test('no reviewer_notes on any attempt: body unchanged (no Detail clause)', async () => {
+  await runner._sendBlogDroughtSms([
+    { action_type: 'new_supporting_blog', outcome: 'skipped_gate_fail', skip_reason: 'gate_fail' },
+  ]);
+
+  const [, body] = twilio.sendSMS.mock.calls[0];
+  expect(body).not.toMatch(/Detail:/);
+});

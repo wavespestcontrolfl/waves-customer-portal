@@ -457,6 +457,22 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Autonomous content engine failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 1PM ET — Autonomous Content Engine catch-up. A deploy restarting
+  // the container mid-batch killed the 9am run in place on 2026-06-12 —
+  // zero posts AND zero alerts, with claimable work still queued. The
+  // catch-up re-runs the batch only when no blog post has started today
+  // and claimable rows remain (runCatchUp checks both); the engine
+  // advisory lock + per-day/week publish caps make a second pass safe.
+  // Kill switch: AUTONOMOUS_CONTENT_CATCHUP=false.
+  cron.schedule('0 13 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    logger.info('Running: Autonomous Content Engine catch-up');
+    try {
+      const AutonomousRunner = require('./content/autonomous-runner');
+      await AutonomousRunner.runCatchUp();
+    } catch (err) { logger.error(`Autonomous content engine catch-up failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 8AM ET — Content-optimization impact tracker. Snapshots a baseline
   // for newly-live optimizations, then fills the 14d/21d diff-in-diff windows
   // and records control-adjusted verdicts. Read-only against gsc_pages; writes

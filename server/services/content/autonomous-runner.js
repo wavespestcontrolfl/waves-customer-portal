@@ -918,6 +918,65 @@ class AutonomousRunner {
   }
 
   /**
+   * Mid-day catch-up pass (1pm ET cron). The 9am batch can die in place —
+   * a Railway deploy restarting the container mid-batch orphans the active
+   * claim, leaves the rest of the queue unattempted, AND skips the
+   * end-of-batch digest/drought SMS (2026-06-12: one snag turned six
+   * claimable briefs into a zero-post, zero-signal day). Re-runs the
+   * normal batch only when BOTH:
+   *   (a) no blog post started today (ET) — checked against persisted
+   *       autonomous_runs so a morning process death can't hide one, and
+   *   (b) the queue still has a claimable row — so a genuine supply-drought
+   *       day stays at ONE drought SMS (the morning's), not two.
+   * Safe alongside a healthy morning run: the engine advisory lock
+   * serializes batches and the per-day/week publish caps bound output. By
+   * 1pm the 30-minute stale-claim recovery inside claimNext has released
+   * any claim the dead morning batch was holding.
+   * Kill switch: AUTONOMOUS_CONTENT_CATCHUP=false.
+   */
+  async runCatchUp({ limit = null } = {}) {
+    if (!envBool('AUTONOMOUS_CONTENT_CATCHUP', true)) {
+      return { outcome: 'skipped_disabled', skipped: true, reason: 'catchup_disabled', count: 0, runs: [] };
+    }
+    if (await this._blogStartedToday()) {
+      logger.info('[autonomous-runner] catch-up skipped: a blog post already started today');
+      return { outcome: 'skipped_blog_already_started', skipped: true, reason: 'blog_already_started', count: 0, runs: [] };
+    }
+    if (!(await this._queueHasClaimable())) {
+      logger.info('[autonomous-runner] catch-up skipped: no claimable opportunities (the morning drought alert already covered supply)');
+      return { outcome: 'skipped_no_claimable', skipped: true, reason: 'no_claimable_opportunities', count: 0, runs: [] };
+    }
+    logger.info('[autonomous-runner] catch-up running: no blog started today and the queue has claimable work');
+    return this.runDaily({ limit });
+  }
+
+  /**
+   * "Started" mirrors _sendBlogDroughtSms: published directly, or parked
+   * awaiting its Astro PR merge (the poller completes those). DB-backed
+   * rather than in-memory so a morning batch killed mid-flight can't hide
+   * a blog that DID start before the restart.
+   */
+  async _blogStartedToday() {
+    const row = await db('autonomous_runs')
+      .where('action_type', 'new_supporting_blog')
+      .where('completed_at', '>=', startOfEtDay())
+      .where((q) => q
+        .where('outcome', 'completed_published')
+        .orWhere((q2) => q2
+          .where('outcome', 'completed_pending_review')
+          .where('skip_reason', 'astro_pr_pending_merge')))
+      .first('id');
+    return Boolean(row);
+  }
+
+  // Same availability window + action-aware score floor as claimNext, so
+  // "claimable" here means exactly what the batch could actually claim.
+  async _queueHasClaimable() {
+    const rows = await getQueue().peek({ limit: 1, minScore: DEFAULT_MIN_SCORE });
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
+  /**
    * Acquire the database-wide publishing lock for the duration of `fn`.
    * - lock held by another run  → skip cleanly (returns skipped_locked).
    * - lock infrastructure error → degrade and run anyway (the per-day/week
@@ -1080,7 +1139,13 @@ class AutonomousRunner {
       why = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 2)
         .map(([k, v]) => `${k}×${v}`).join(', ') || 'blog runs ended without a publish';
     }
-    const body = `Waves content engine: NO blog post today — ${why}.`;
+    // 'auto_publish_gate_fail×1' alone isn't actionable from a text — name
+    // the failing checks. reviewer_notes carries _summarizeForReviewer's
+    // compact gate summary on gate-failed/parked runs.
+    const gateDetail = blogAttempts
+      .map((r) => r.reviewer_notes)
+      .find((n) => typeof n === 'string' && n.trim());
+    const body = `Waves content engine: NO blog post today — ${why}.${gateDetail ? ` Detail: ${gateDetail.trim().slice(0, 160)}` : ''}`;
     const twilio = require('../twilio');
     const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
     await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
