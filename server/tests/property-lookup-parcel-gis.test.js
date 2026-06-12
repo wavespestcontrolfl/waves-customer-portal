@@ -374,9 +374,11 @@ describe('trio by-parcel routing', () => {
 
     const merged = await lookupPropertyFromAITrio('5510 lakewood rnch blvd bradenton', geo);
 
-    // Detail endpoints hit directly by parid — no search POST.
+    // Detail endpoints hit directly by parid — no search POST. Three models:
+    // land + buildings + extra features (pool/cage/spa).
     const manateeUrls = fetchedUrls.filter((u) => u.includes('manateepao.gov'));
-    expect(manateeUrls.length).toBe(2);
+    expect(manateeUrls.length).toBe(3);
+    expect(manateeUrls.some((u) => u.includes('pao-model-features.php'))).toBe(true);
     expect(manateeUrls.every((u) => u.includes('parid=3331410104'))).toBe(true);
     expect(fetchedUrls.some((u) => u.includes('parcel-search-results'))).toBe(false);
 

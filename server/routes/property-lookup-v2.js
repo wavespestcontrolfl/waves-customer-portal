@@ -775,7 +775,7 @@ Property record for this address:
 - Lot: ${propertyRecord.lotSize} sf
 - Year Built: ${propertyRecord.yearBuilt || 'unknown'}
 - Stories: ${propertyRecord.stories}
-- Pool (per records): ${propertyRecord.hasPool ? 'YES' : 'NO'}
+- Pool (per records): ${poolRecordContext(propertyRecord)}
 - Construction: ${propertyRecord.constructionMaterial}
 - Foundation: ${propertyRecord.foundationType}
 - Roof: ${propertyRecord.roofType}
@@ -1000,10 +1000,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     hasAttachedGarage: detectAttachedGarage(rc),
 
     // ── POOL / LANAI ──
+    // County-assessed cage sqft (extra-features roll) beats the vision guess
+    // for cage size — deterministic, not inferred. Positive-only: no cage row
+    // never downgrades a vision-detected cage.
     pool: mergePool(rc, ai),
-    poolCage: ai?.poolCage || 'UNKNOWN',
-    poolCageSize: normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
-    poolCageSizeInferred: ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
+    poolSource: poolSource(rc, ai),
+    poolAreaSqft: rc?.poolAreaSqft || null,
+    poolCageSqft: rc?.poolCageSqft || null,
+    hasSpa: rc?.hasSpa === true,
+    poolCage: rc?.poolCageSqft ? 'YES' : (ai?.poolCage || 'UNKNOWN'),
+    poolCageSize: classifyPoolCageSize(rc?.poolCageSqft) || normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
+    poolCageSizeInferred: !rc?.poolCageSqft
+      && ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
 
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',
@@ -1475,6 +1483,44 @@ function mergePool(rc, ai) {
   return 'NO';
 }
 
+// Provenance of the merged pool answer, for the estimator UI.
+function poolSource(rc, ai) {
+  if (rc?._fieldEvidence?.hasPool?.sourceType === 'verified') return 'verified';
+  if (rc?.hasPool === true) return 'county';
+  if (ai?.pool === 'YES' || ai?.pool === 'POSSIBLE') return 'vision';
+  return rc?.hasPool === false ? 'county' : null;
+}
+
+// Pool line for the vision prompts. hasPool is tri-state: county parsers set
+// true/false from the assessed extra-features roll; null means no county
+// signal — telling the models "NO" there (the old behavior, when hasPool was
+// hard-coded false) actively biased them against detecting real pools.
+function poolRecordContext(propertyRecord) {
+  if (propertyRecord?.hasPool === true) {
+    const details = [
+      propertyRecord.poolAreaSqft ? `${propertyRecord.poolAreaSqft} sq ft pool` : 'pool',
+      propertyRecord.poolCageSqft ? `${propertyRecord.poolCageSqft} sq ft screen cage` : null,
+      propertyRecord.hasSpa ? 'spa' : null,
+    ].filter(Boolean).join(', ');
+    return `YES (county-assessed: ${details})`;
+  }
+  if (propertyRecord?.hasPool === false) return 'NO (county roll shows no pool)';
+  return 'UNKNOWN';
+}
+
+// County-assessed screen cage beats the vision guess for cage size — the
+// sqft is on the tax roll, so the classification becomes deterministic.
+// Positive-only: no cage row never downgrades a vision-detected cage
+// (attached lanais are sometimes rolled into the building areas).
+function classifyPoolCageSize(sqft) {
+  if (!Number.isFinite(sqft) || sqft <= 0) return null;
+  if (sqft < 300) return 'SMALL';
+  if (sqft <= 600) return 'MEDIUM';
+  if (sqft <= 900) return 'LARGE';
+  return 'OVERSIZED';
+}
+
+
 function normalizePoolCageSize(value, poolCage) {
   const raw = String(value || '').toUpperCase();
   if (['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(raw)) return raw;
@@ -1719,9 +1765,11 @@ function buildFieldVerifyFlags(rc, ai) {
     });
   }
 
-  // Satellite AI pool signal disagrees with property records — unless a tech
-  // already verified the answer on site (the AI's pool is the neighbor's).
-  if (rc?.hasPool === false && ai?.pool === 'YES'
+  // Satellite AI pool signal without record confirmation — fires both when
+  // the county roll says no pool (new pool vs neighbor's) and when there is
+  // no county signal at all (hasPool null). Suppressed when a tech already
+  // verified the answer on site (the AI's pool is the neighbor's).
+  if (rc && rc.hasPool !== true && ai?.pool === 'YES'
       && rc?._fieldEvidence?.hasPool?.sourceType !== 'verified') {
     flags.push({
       field: 'pool',
@@ -2617,7 +2665,7 @@ function normalizeSatelliteAnalysis(analysis = {}) {
 }
 
 function buildSatelliteVisionPrompt(address, propertyRecord, visionContext = null) {
-  const rcContext = propertyRecord ? `Property record: ${propertyRecord.formattedAddress || address}, ${propertyRecord.squareFootage || 'unknown'} sf, ${propertyRecord.lotSize || 'unknown'} sf lot, built ${propertyRecord.yearBuilt || 'unknown'}, ${propertyRecord.stories || 'unknown'} story, pool record: ${propertyRecord.hasPool ? 'YES' : 'NO'}, construction: ${propertyRecord.constructionMaterial || 'UNKNOWN'}, foundation: ${propertyRecord.foundationType || 'UNKNOWN'}` : 'No public property record available.';
+  const rcContext = propertyRecord ? `Property record: ${propertyRecord.formattedAddress || address}, ${propertyRecord.squareFootage || 'unknown'} sf, ${propertyRecord.lotSize || 'unknown'} sf lot, built ${propertyRecord.yearBuilt || 'unknown'}, ${propertyRecord.stories || 'unknown'} story, pool record: ${poolRecordContext(propertyRecord)}, construction:${propertyRecord.constructionMaterial || 'UNKNOWN'}, foundation: ${propertyRecord.foundationType || 'UNKNOWN'}` : 'No public property record available.';
   return `Analyze these satellite images of a Southwest Florida property at ${address}. Closest images come first and should carry the most weight. ${rcContext}${visionContextPromptBlock(visionContext)}
 
 For pool cages, classify the visible screen enclosure service burden. SMALL is a compact lanai/cage under roughly 300 sq ft, MEDIUM is a typical 300-600 sq ft enclosure, LARGE is roughly 600-900 sq ft or clearly larger than a standard cage, and OVERSIZED is a very large or multi-section enclosure. If poolCage is not YES, return poolCageSize as NONE.
@@ -2691,9 +2739,13 @@ module.exports._private = {
   buildParcelOverlayParam,
   buildSatelliteVisionPrompt,
   buildVisionContext,
+  classifyPoolCageSize,
   imageWidthFt,
+  mergePool,
   parcelTurfBoundSqft,
   parseGeocodeResult,
+  poolRecordContext,
+  poolSource,
   turfRiskReasons,
   visionContextPromptBlock,
 };
