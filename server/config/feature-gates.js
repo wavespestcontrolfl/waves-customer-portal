@@ -143,6 +143,13 @@ const gates = {
   // inbox classifier to catch prompt/model drift. Read-only except one admin
   // notification on regression. Enable with GATE_INCIDENT_EVAL=true.
   incidentRegressionEval: isProd ? process.env.GATE_INCIDENT_EVAL === 'true' : true,
+
+  // Estimate "Show your work" — public estimate page trust block: property
+  // facts with friendly data-source labels, the county parcel match line,
+  // and the red parcel-outline satellite overlay on the Waves AI card.
+  // Off in prod until the rendered section is verified on a live estimate.
+  // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
+  estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
 };
 
 function isEnabled(gate) {

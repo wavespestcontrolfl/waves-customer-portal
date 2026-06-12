@@ -373,11 +373,14 @@ function Header({ customerFirstName, address, serviceLabel, canChooseOneTime, he
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null }) {
   if (!intelligence) return null;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
-  const satelliteUrl = intelligence.satelliteUrl;
+  // "Show your work" (estimateShowYourWork gate): the parcel-outline
+  // satellite image replaces the plain one when the server resolved it.
+  const satelliteUrl = showYourWork?.overlaySatelliteUrl || intelligence.satelliteUrl;
+  const showYourWorkFacts = Array.isArray(showYourWork?.facts) ? showYourWork.facts : [];
 
   return (
     <section style={{
@@ -458,6 +461,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
         />
       ) : null}
 
+      {showYourWork?.overlaySatelliteUrl ? (
+        <div style={{ marginTop: 6, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.45 }}>
+          Red outline: your property boundary from county records.
+        </div>
+      ) : null}
+
       {metrics.length ? (
         <div style={{
           display: 'grid',
@@ -494,6 +503,97 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
               </div>
             </div>
           ))}
+        </div>
+      ) : null}
+
+      {/* "Show your work" trust block — mirrors the server-rendered
+          .ai-show-work section (facts with friendly source labels, the
+          county parcel match line, and the confirm-on-site quality note). */}
+      {showYourWork ? (
+        <div style={{
+          display: 'grid',
+          gap: 10,
+          marginTop: 14,
+          paddingTop: 14,
+          borderTop: `1px solid ${ESTIMATE_BORDER}`,
+        }}>
+          <div style={{
+            fontSize: 13,
+            color: ESTIMATE_MUTED,
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            fontWeight: 700,
+          }}>
+            Where these details came from
+          </div>
+          {showYourWorkFacts.length ? (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: 8,
+            }}>
+              {showYourWorkFacts.map((fact) => (
+                <div
+                  key={`${fact.label}-${fact.value}`}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    background: COLORS.white,
+                    border: `1px solid ${ESTIMATE_BORDER}`,
+                    borderRadius: 10,
+                    padding: '10px 12px',
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{
+                      fontSize: 14,
+                      color: ESTIMATE_MUTED,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.08em',
+                      marginBottom: 4,
+                    }}>
+                      {fact.label}
+                    </div>
+                    <div style={{
+                      fontFamily: FONTS.serif,
+                      fontSize: 18,
+                      fontWeight: 500,
+                      color: ESTIMATE_TEXT,
+                    }}>
+                      {fact.value}
+                    </div>
+                  </div>
+                  <span style={{
+                    flex: 'none',
+                    padding: '5px 9px',
+                    borderRadius: 999,
+                    background: '#E3F5FD',
+                    color: '#065A8C',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    lineHeight: 1,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {fact.source}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {showYourWork.parcelLine ? (
+            <p style={{ margin: 0, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+              {showYourWork.parcelLine}
+            </p>
+          ) : null}
+          {showYourWork.qualityNote ? (
+            <p style={{ margin: 0, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+              {showYourWork.qualityNote}
+            </p>
+          ) : null}
         </div>
       ) : null}
 
@@ -2230,7 +2330,7 @@ export default function EstimateViewPage() {
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
         <MembershipCard membership={estimate.membership} />
-        <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
+        <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
           <EstimateAskBar
             token={token}
@@ -2268,7 +2368,7 @@ export default function EstimateViewPage() {
   const aiPanelBlock = (
     <>
       <MembershipCard membership={estimate.membership} />
-      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
+      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
       <EstimateAskBar
         token={token}
         askToken={estimate.askToken}
