@@ -126,7 +126,18 @@ const ACTIVITY_INDICATORS = {
     indicatorKey: 'flea_activity',
     label: 'Flea Activity',
     pestNoun: 'Flea',
-    derive: { field: 'evidence_level', scores: LEVEL_SELECT_SCORES },
+    // Owner spec §5 vocabulary (Suspected sits between cleared and Light —
+    // evidence suggests fleas but none were confirmed today).
+    derive: {
+      field: 'evidence_level',
+      scores: {
+        'None observed': 0,
+        Suspected: 1,
+        Light: 2,
+        Moderate: 3,
+        Heavy: 4,
+      },
+    },
   },
   termite_inspection: {
     indicatorKey: 'termite_activity',
@@ -329,6 +340,8 @@ const CUSTOMER_FIELD_LABELS = {
   photos_taken: 'Photos taken',
   recommended_service: 'Recommended service',
   urgency: 'Urgency',
+  activity_areas: 'Where activity was noted',
+  contributing_conditions: 'Contributing conditions',
 };
 
 // Registry select value → customer wording, keyed per field family. Values
@@ -369,6 +382,8 @@ const CUSTOMER_VALUE_LABELS = {
     'No active signs observed': 'No active signs observed today',
     'Low (few bugs)': 'Low activity',
     Low: 'Low activity',
+    Suspected: 'Activity suspected — not confirmed today',
+    Light: 'Light activity',
     Moderate: 'Moderate activity',
     Heavy: 'High activity',
     Severe: 'Severe activity',
@@ -543,7 +558,9 @@ const REQUIRED_FINDINGS_FIELDS = {
   palm_injection: ['palm_condition'],
   one_time_lawn_treatment: ['lawn_condition'],
   cockroach: ['species', 'activity_level'],
-  flea: ['evidence_level'],
+  // Owner spec §5: flea cooperation must be unmistakable — the aftercare
+  // chips are part of the required core (4 fields, within budget).
+  flea: ['evidence_level', 'activity_areas', 'treatment_completed', 'customer_prep'],
   rodent_trapping: ['species'],
   // Owner spec §1/§2/§4 mark the full checklists required — all fast taps.
   // Exceeds the ≤4 budget by owner instruction. Inspection adds conditional
@@ -673,7 +690,7 @@ const REQUIRED_NEXT_STEP_TYPES = new Set([
   'rodent_trapping', 'mosquito_event', 'palm_injection', 'one_time_lawn_treatment',
   'pest_inspection', 'cockroach', 'wildlife_trapping', 'bed_bug',
   'termite_bait_station', 'rodent_bait_station', 'tree_shrub',
-  'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection',
+  'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection', 'flea',
 ]);
 
 function nextStepRequiredForType(projectType) {
@@ -1007,11 +1024,35 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       if (value == null || String(value).trim() === '') missing.push(key);
     }
   }
+  // "Inspection only" treatment can't ride with applied treatments (owner
+  // spec §5 — the report tells one coherent story), and activity areas are
+  // required exactly when there was activity to locate ('None observed'
+  // visits have no truthful area to name — Codex P2).
+  if (type === 'flea') {
+    const treatments = String(values.treatment_completed || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (treatments.includes('Inspection only') && treatments.length > 1) {
+      errors.push('"Inspection only" cannot be combined with applied treatments');
+    }
+    const evidence = String(values.evidence_level || '');
+    if (enforceRequired && evidence && evidence !== 'None observed') {
+      const areas = String(values.activity_areas ?? '')
+        .split(',').map((s) => s.trim()).filter(Boolean);
+      if (!areas.length) missing.push('activity_areas');
+    }
+  }
 
   if (enforceRequired) {
+    // chips store a comma-joined selection — a value like "," has no real
+    // selections but a plain trim check would accept it (Codex P2). A
+    // required chips field needs at least one non-empty part.
+    const fieldTypeByKey = new Map(fields.map((f) => [f.key, f.type]));
     for (const key of REQUIRED_FINDINGS_FIELDS[type] || []) {
       const value = values[key];
-      if (value == null || String(value).trim() === '') missing.push(key);
+      const isEmpty = fieldTypeByKey.get(key) === 'chips'
+        ? String(value ?? '').split(',').map((s) => s.trim()).filter(Boolean).length === 0
+        : (value == null || String(value).trim() === '');
+      if (isEmpty) missing.push(key);
     }
   }
 
@@ -1218,6 +1259,19 @@ const WORK_PHRASE_FIELDS = {
       'Wetting agent applied': 'applied a wetting agent',
       'Spot treatment completed': 'spot-treated the noted areas',
       'Inspection completed': 'completed a lawn inspection',
+    },
+  },
+  flea: {
+    field: 'treatment_completed',
+    phrases: {
+      'Exterior flea treatment': 'completed a targeted exterior flea treatment',
+      'Interior flea treatment': 'treated the interior flea activity areas',
+      'Growth regulator': 'applied an insect growth regulator',
+      'Crack / crevice treatment': 'treated cracks and crevices',
+      'Lawn treatment': 'treated the lawn',
+      'Pet resting area treatment': 'treated the pet resting areas',
+      'Inspection only': 'completed a flea inspection',
+      'Limited treatment': 'completed a limited treatment where access allowed',
     },
   },
   cockroach: {
@@ -1509,6 +1563,43 @@ function buildTodaysResult({
         ? 'Rodent activity was found during today’s inspection.'
         : 'No current rodent activity was observed during today’s inspection.',
       body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      nextStep,
+    };
+  }
+
+  // Flea reports (owner spec §5) carry the cooperation line in EVERY body —
+  // treatment alone underperforms when vacuuming, pets, and yard care are
+  // ignored. Trend headlines win on later visits; the level wording follows
+  // the FINAL gauge score so a tech-pinned score never diverges.
+  if (projectType === 'flea' && values.evidence_level) {
+    const score = activity && Number.isInteger(activity.score) ? activity.score : null;
+    const select = String(values.evidence_level);
+    const cleared = score != null ? score === 0 : select === 'None observed';
+    const suspected = !cleared && (score != null ? score === 1 : select === 'Suspected');
+    let headline;
+    if (visitSequence > 1 && activity && activity.trendWord) {
+      headline = activity.trend === 'stable'
+        ? 'Flea activity is about the same as our last visit.'
+        : `Flea activity has ${activity.trend === 'worsening' ? 'increased' : 'decreased'} since our last visit.`;
+    } else if (cleared) {
+      headline = 'No active signs of flea activity observed today.';
+    } else if (suspected) {
+      headline = 'Flea activity is suspected — no live activity was confirmed today.';
+    } else {
+      const levelWord = score != null
+        ? String(SCORE_LEVEL_WORDS[score] || '').replace(' activity', '').toLowerCase()
+        : select.toLowerCase();
+      headline = `Flea activity was ${levelWord} today.`;
+    }
+    const areas = String(values.activity_areas || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .map((a) => (a === 'Other' ? null : a.toLowerCase())).filter(Boolean);
+    const intro = areas.length
+      ? `Completed your flea service with attention to the ${joinPhrases(areas)}.`
+      : 'Completed your flea service today.';
+    return {
+      headline,
+      body: `${intro} ${whatWeDid} Flea control works best when treatment and home care happen together — the aftercare steps below make the biggest difference.${nextStep ? ` ${nextStep}` : ''}`.replace(/\s+/g, ' ').trim(),
       nextStep,
     };
   }
