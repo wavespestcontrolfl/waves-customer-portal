@@ -344,9 +344,26 @@ describe('evaluate (full gate)', () => {
     expect(r.ok).toBe(true);
   });
   test('supporting-blog survives one 6-point soft miss (sank under global 54: A1 scored 51)', () => {
-    // Passes cities/FAQ/voice and all common checks but has NO hub link:
-    // 57 - 6 = 51 ≥ 42. Under the old global threshold this exact shape
+    // Passes hub/cities/FAQ and all common checks but misses voice_match:
+    // 57 - 6 = 51 ≥ 42. Under the old global threshold this score shape
     // failed (51 < 54) even though only one soft check missed.
+    const r = evaluate(
+      fullDraft({
+        body: 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.',
+      }),
+      brief({ page_type: 'supporting-blog' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.checks.voice_match.ok).toBe(false);
+    expect(r.hard_failures).toEqual([]);
+    expect(r.total_score).toBe(51);
+    expect(r.min_total_score).toBe(42);
+    expect(r.ok).toBe(true);
+  });
+  test('supporting-blog with no hub link hard-fails even above threshold (A1 shape must block, not pass)', () => {
+    // hub_link_present must be HARD: as a 6-pt soft miss this draft
+    // scores 51 >= 42 and would auto-publish without the hub link the
+    // writer instructions promise the gate enforces.
     const r = evaluate(
       fullDraft({
         body: 'Termite swarmers show up after rain in Bradenton and Sarasota. Your sandy soil and afternoon storms create perfect conditions. You should check your baseboards; your garage and your lanai matter too.\n\nFAQ\n- Do swarmers bite?\n- No.',
@@ -354,10 +371,38 @@ describe('evaluate (full gate)', () => {
       brief({ page_type: 'supporting-blog' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }
     );
-    expect(r.checks.hub_link_present.ok).toBe(false);
     expect(r.total_score).toBe(51);
-    expect(r.min_total_score).toBe(42);
-    expect(r.ok).toBe(true);
+    expect(r.total_score).toBeGreaterThanOrEqual(r.min_total_score);
+    expect(r.hard_failures.some((f) => f.name === 'hub_link_present')).toBe(true);
+    expect(r.ok).toBe(false);
+  });
+  test('customer-question missing both answer-up-front and internal link hard-fails despite 45 >= 44', () => {
+    // Both checks must be HARD: commons (37) + redaction (8) = 45 clears
+    // the customer-question threshold (44), so as soft checks a page that
+    // neither answers the question up front nor links anywhere internal
+    // would pass the gate.
+    const r = evaluate(
+      fullDraft({
+        body: 'Many homeowners ask about this every spring.\n\nLonger detail follows here without any links at all.',
+      }),
+      brief({ page_type: 'customer-question' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.total_score).toBe(45);
+    expect(r.total_score).toBeGreaterThanOrEqual(r.min_total_score);
+    expect(r.hard_failures.some((f) => f.name === 'answer_in_first_paragraph')).toBe(true);
+    expect(r.hard_failures.some((f) => f.name === 'source_internal_link')).toBe(true);
+    expect(r.ok).toBe(false);
+
+    const good = evaluate(
+      fullDraft({
+        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
+      }),
+      brief({ page_type: 'customer-question' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(good.hard_failures).toEqual([]);
+    expect(good.ok).toBe(true);
   });
   test('throws on missing inputs', () => {
     expect(() => evaluate(null, brief())).toThrow();

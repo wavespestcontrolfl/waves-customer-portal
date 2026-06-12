@@ -88,8 +88,13 @@ const PAGE_TYPE_CHECKS = {
     { name: 'localbusiness_service_schema', weight: 6, isHard: true, evaluate: checkLocalBusinessServiceSchema },
   ],
   'customer-question': [
-    { name: 'answer_in_first_paragraph', weight: 8, evaluate: checkAnswerInFirstParagraph },
-    { name: 'source_internal_link', weight: 6, evaluate: checkSourceInternalLink },
+    // Both hard: commons (37) + redaction (8) = 45 already clears this
+    // type's threshold (44), so as soft checks a question page that
+    // neither answers up front nor links anywhere internal would pass.
+    // Answer-up-front is what a customer-question page IS; a page with
+    // zero internal links is an orphan dead-end.
+    { name: 'answer_in_first_paragraph', weight: 8, isHard: true, evaluate: checkAnswerInFirstParagraph },
+    { name: 'source_internal_link', weight: 6, isHard: true, evaluate: checkSourceInternalLink },
     { name: 'redaction_passed', weight: 8, isHard: true, evaluate: checkRedactionPassed },
   ],
   refresh: [
@@ -100,7 +105,11 @@ const PAGE_TYPE_CHECKS = {
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
   ],
   'supporting-blog': [
-    { name: 'hub_link_present', weight: 6, evaluate: checkHubLinkPresent },
+    // Hard: hub links are the point of a supporting blog (hub-and-spoke
+    // link equity), and the writer instructions promise the gate enforces
+    // them. As a 6-pt soft miss, a hubless draft scores 51 >= 42 and
+    // auto-publishes — the exact A1 first-batch failure shape.
+    { name: 'hub_link_present', weight: 6, isHard: true, evaluate: checkHubLinkPresent },
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
