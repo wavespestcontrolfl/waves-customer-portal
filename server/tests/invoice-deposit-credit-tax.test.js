@@ -323,3 +323,44 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
 });
+
+describe('line-item edits on deposit-credited invoices are blocked (P1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function invoicesOnlyDb(storedInvoice) {
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => storedInvoice),
+        };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+  }
+
+  it('rejects line-item edits when the stored invoice carries a deposit_credit line — void-and-recreate is the supported path', async () => {
+    invoicesOnlyDb({
+      id: 'inv-1',
+      customer_id: 'cust-1',
+      line_items: JSON.stringify([
+        { description: 'Service', quantity: 1, unit_price: 100 },
+        { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -49, amount: -49, category: 'deposit_credit', estimate_id: 'est-1' },
+      ]),
+    });
+    // The edit recalculation can neither re-cap the credit nor re-balance
+    // the consumed estimate_deposits ledger — shrinking the invoice would
+    // leave credited_amount over-applied with no roll-forward/refund path.
+    await expect(InvoiceService.update('inv-1', {
+      line_items: [{ description: 'Service', quantity: 1, unit_price: 50 }],
+    })).rejects.toThrow(/deposit credit/);
+  });
+
+  it('rejects edits that introduce a deposit_credit line by hand — only create() may mint one, backed by the ledger', async () => {
+    invoicesOnlyDb({ id: 'inv-1', customer_id: 'cust-1', line_items: '[]' });
+    await expect(InvoiceService.update('inv-1', {
+      line_items: [{ description: 'Manual credit', quantity: 1, unit_price: -49, amount: -49, category: 'deposit_credit' }],
+    })).rejects.toThrow(/deposit credit/);
+  });
+});

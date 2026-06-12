@@ -237,9 +237,23 @@ async function createDepositIntentForEstimate(estimate, { oneTime = false } = {}
     return { alreadySatisfied: true, amount: 0, requiredAmount, receivedTotal };
   }
   const amount = missingCents / 100;
+  // Refunded/disputed money must not poison retries: within Stripe's
+  // idempotency window the bare estimate+amount key would hand back the OLD
+  // succeeded (and refunded) PI, whose terminal ledger row can never satisfy
+  // the gate — the customer would be stuck unable to pay a replacement
+  // deposit. Terminal rows only grow, so their count is a monotonic retry
+  // generation that mints a fresh PI after every refund/failure while
+  // same-generation retries still reuse one intent.
+  const terminalCountRow = await db('estimate_deposits')
+    .where({ estimate_id: estimate.id })
+    .whereIn('status', ['refunding', 'refunded', 'failed'])
+    .count({ n: '*' })
+    .first();
+  const retryGeneration = Number(terminalCountRow?.n || 0);
   const paymentIntent = await StripeService.createEstimateDepositIntent({
     estimateId: estimate.id,
     amountDollars: amount,
+    retryGeneration,
   });
   if (!paymentIntent) return null;
 

@@ -2152,6 +2152,26 @@ const InvoiceService = {
     if (updates.line_items) {
       const invoice = await db("invoices").where({ id }).first();
       if (!invoice) return null;
+      // Deposit-credited invoices are edit-locked on line items: the credit
+      // line is backed dollar-for-dollar by consumed estimate_deposits
+      // ledger rows, and a recalculation here can neither re-cap the credit
+      // against the new total nor re-balance the ledger — an edit could
+      // shrink the invoice below the credit (over-applied ledger money) or
+      // drop the credit line entirely while the deposit stays consumed.
+      // Void the invoice (which restores the ledger) and re-create instead.
+      const hasDepositCreditLine = (items) => {
+        try {
+          const arr = typeof items === "string" ? JSON.parse(items) : items;
+          return Array.isArray(arr) && arr.some((i) => i?.category === "deposit_credit");
+        } catch {
+          return false;
+        }
+      };
+      if (hasDepositCreditLine(invoice.line_items) || hasDepositCreditLine(updates.line_items)) {
+        throw new Error(
+          "This invoice carries an estimate deposit credit — void it (the deposit returns to the customer's ledger) and create a replacement instead of editing line items",
+        );
+      }
       const customer = await db("customers")
         .where({ id: invoice.customer_id })
         .first();

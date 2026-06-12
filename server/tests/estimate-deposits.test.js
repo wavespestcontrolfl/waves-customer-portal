@@ -347,11 +347,14 @@ describe('ensureDepositSatisfied', () => {
 
 describe('createDepositIntentForEstimate', () => {
   // ledgerRows feed receivedDepositTotal — the intent charges only the
-  // missing slice of the policy amount.
-  function intentDb({ ledgerRows = [], upserts = [] } = {}) {
+  // missing slice of the policy amount. terminalCount feeds the retry
+  // generation (count of refunded/refunding/failed rows).
+  function intentDb({ ledgerRows = [], upserts = [], terminalCount = 0 } = {}) {
     return () => ({
       where() { return this; },
       whereIn() { return this; },
+      count() { return this; },
+      first: async () => ({ n: terminalCount }),
       select: async () => ledgerRows.map((r) => ({ ...r })),
       insert(payload) { return { onConflict: () => ({ merge: async () => { upserts.push(payload); } }) }; },
     });
@@ -367,7 +370,7 @@ describe('createDepositIntentForEstimate', () => {
     // deterministic from (estimate, amount) or Stripe rejects idempotent
     // retries as key reuse with different parameters.
     expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 49,
+      estimateId: 'est-1', amountDollars: 49, retryGeneration: 0,
     });
     expect(result).toEqual({
       clientSecret: 'cs_9', amount: 49, paymentIntentId: 'pi_9', requiredAmount: 49, receivedTotal: 0,
@@ -380,7 +383,7 @@ describe('createDepositIntentForEstimate', () => {
     mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_10', client_secret: 'cs_10' });
     const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
     expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 99,
+      estimateId: 'est-1', amountDollars: 99, retryGeneration: 0,
     });
     expect(result.amount).toBe(99);
   });
@@ -390,7 +393,7 @@ describe('createDepositIntentForEstimate', () => {
     mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_topup', client_secret: 'cs_t' });
     const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
     expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 50,
+      estimateId: 'est-1', amountDollars: 50, retryGeneration: 0,
     });
     expect(result).toMatchObject({ amount: 50, requiredAmount: 99, receivedTotal: 49 });
   });
@@ -409,9 +412,23 @@ describe('createDepositIntentForEstimate', () => {
     mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_t2', client_secret: 'cs_t2' });
     const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
     expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 50,
+      estimateId: 'est-1', amountDollars: 50, retryGeneration: 0,
     });
     expect(result.receivedTotal).toBe(49);
+  });
+
+  it('terminal ledger rows bump the retry generation — a refunded deposit never blocks a replacement PI (P1)', async () => {
+    // The customer's first $49 deposit was refunded (stale/dispute). The
+    // bare estimate+amount idempotency key would make Stripe replay the
+    // old refunded PI within its window; the terminal-row count joins the
+    // key so the retry mints a fresh intent.
+    mockDbHandler = intentDb({ terminalCount: 1 });
+    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_retry', client_secret: 'cs_r' });
+    const result = await createDepositIntentForEstimate({ id: 'est-1' });
+    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
+      estimateId: 'est-1', amountDollars: 49, retryGeneration: 1,
+    });
+    expect(result.paymentIntentId).toBe('pi_retry');
   });
 
   it('returns null when Stripe is unconfigured', async () => {

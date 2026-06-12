@@ -337,8 +337,11 @@ const StripeService = {
    * (e.g. receipt_email) under the same key makes Stripe reject the retry
    * as a key reuse with different parameters. The payer's receipt comes
    * from the Payment Element's collected email, not from this intent.
+   * retryGeneration (the caller's count of terminal ledger rows) joins the
+   * key after a refund/dispute/failure, so a replacement deposit mints a
+   * fresh PI instead of Stripe replaying the old refunded one.
    */
-  async createEstimateDepositIntent({ estimateId, amountDollars }) {
+  async createEstimateDepositIntent({ estimateId, amountDollars, retryGeneration = 0 }) {
     const stripe = getStripe();
     if (!stripe) return null;
     const amountCents = Math.round(Number(amountDollars) * 100);
@@ -366,7 +369,7 @@ const StripeService = {
         // invoice payment.
         surcharge_policy: 'deposit_exempt',
       },
-    }, { idempotencyKey: `estimate_deposit_${estimateId}_${amountCents}` });
+    }, { idempotencyKey: `estimate_deposit_${estimateId}_${amountCents}${Number(retryGeneration) > 0 ? `_r${Number(retryGeneration)}` : ''}` });
   },
 
   /**
