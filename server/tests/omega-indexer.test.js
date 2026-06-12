@@ -41,11 +41,22 @@ describe('omega-indexer submit', () => {
     expect(captured.url).toBe(omega.OMEGA_ENDPOINT);
     expect(captured.opts.method).toBe('POST');
     expect(captured.opts.headers['Content-Type']).toMatch(/x-www-form-urlencoded/);
-    expect(captured.opts.body).toContain('apikey=sekret');
-    expect(captured.opts.body).toContain('dripfeed=2');
-    // urls are pipe-joined then uri-encoded (| -> %7C, : -> %3A, / -> %2F)
-    expect(captured.opts.body).toContain('%7C');
-    expect(captured.opts.body).toContain(encodeURIComponent('https://www.showmysites.com/wavespestcontrol/a/'));
+    // Parse the form body back — every field must round-trip exactly.
+    const form = new URLSearchParams(captured.opts.body);
+    expect(form.get('apikey')).toBe('sekret');
+    expect(form.get('dripfeed')).toBe('2');
+    expect(form.get('urls')).toBe('https://www.showmysites.com/wavespestcontrol/a/|https://www.showmysites.com/wavespestcontrol/b/');
+  });
+
+  test('encodes an apikey containing form-reserved chars (+, &, =, %) without corruption', async () => {
+    process.env.OMEGA_INDEXER_API_KEY = 'a+b&c=d%e';
+    let body = null;
+    await omega.submit('x.com', ['https://x.com/real'], {
+      fetchFn: async (_u, o) => { body = o.body; return { ok: true, status: 200, text: async () => '' }; },
+    });
+    const form = new URLSearchParams(body);
+    expect(form.get('apikey')).toBe('a+b&c=d%e'); // exact round-trip, not split into extra fields
+    expect(form.get('urls')).toBe('https://x.com/real');
   });
 
   test('filters falsy urls before submitting', async () => {
@@ -54,9 +65,8 @@ describe('omega-indexer submit', () => {
     await omega.submit('x.com', [null, '', 'https://x.com/real', undefined], {
       fetchFn: async (_u, o) => { body = o.body; return { ok: true, status: 200, text: async () => '' }; },
     });
-    expect(body).toContain(encodeURIComponent('https://x.com/real'));
-    // only one url -> no pipe separator
-    expect(body).not.toContain('%7C');
+    const form = new URLSearchParams(body);
+    expect(form.get('urls')).toBe('https://x.com/real'); // single url, no pipe separator
   });
 
   test('returns ok:false (not skipped) on a network error', async () => {

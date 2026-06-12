@@ -37,12 +37,18 @@ async function submit(label, urls, { fetchFn = fetch } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const urlString = encodeURIComponent(list.join('|'));
-    const campaignName = encodeURIComponent(`Waves Backlinks - ${label}`);
+    // URLSearchParams encodes EVERY field — including an apikey that may contain
+    // form-reserved chars (+, &, %, =) — so the body can't be corrupted/split.
+    const formBody = new URLSearchParams({
+      apikey: apiKey,
+      campaignname: `Waves Backlinks - ${label}`,
+      dripfeed: String(DRIP_FEED_DAYS),
+      urls: list.join('|'),
+    }).toString();
     const res = await fetchFn(OMEGA_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `apikey=${apiKey}&campaignname=${campaignName}&dripfeed=${DRIP_FEED_DAYS}&urls=${urlString}`,
+      body: formBody,
       signal: controller.signal,
     });
     const body = await res.text().catch(() => '');
