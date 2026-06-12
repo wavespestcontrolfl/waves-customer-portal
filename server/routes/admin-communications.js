@@ -14,7 +14,7 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
-const { SUGGEST_WORKFLOW, revertDraftsToShadow } = require('../services/sms-suggest-mode');
+const { SUGGEST_WORKFLOW, revertDraftsToShadow, markSuggestionScheduled, reopenScheduledSuggestion } = require('../services/sms-suggest-mode');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1058,6 +1058,18 @@ router.post('/schedule-sms', async (req, res, next) => {
       })
       .returning(['id', 'scheduled_for']);
 
+    // Park the decision in 'scheduled' so the composer can't surface (and
+    // re-send) the same suggestion while the queued send waits, and the
+    // expiry sweep can't expire it out from under the cron. Reopened on
+    // cancel/failure; resolved when the send fires.
+    if (row?.id && scheduledAgentDecision) {
+      try {
+        await markSuggestionScheduled({ decisionId: scheduledAgentDecision.id, scheduledFor: sendAt });
+      } catch (parkErr) {
+        logger.warn(`[agent-review] failed to park scheduled draft decision: ${parkErr.message}`);
+      }
+    }
+
     res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });
   } catch (err) { next(err); }
 });
@@ -1084,7 +1096,19 @@ router.get('/scheduled', async (req, res, next) => {
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
+    const row = await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).first('id', 'metadata');
     await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).del();
+
+    // The send was composed from an Agent Review draft — the customer was
+    // never answered, so the suggestion card returns to the composer.
+    const meta = parseJson(row?.metadata, {});
+    if (meta.agent_decision_id) {
+      await reopenScheduledSuggestion({
+        decisionId: meta.agent_decision_id,
+        reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
+      });
+    }
+
     res.json({ success: true });
   } catch (err) { next(err); }
 });

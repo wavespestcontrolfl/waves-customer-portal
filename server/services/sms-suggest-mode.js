@@ -269,6 +269,40 @@ function classifySendVerdict(sentBody, suggestedMessage) {
 }
 
 /**
+ * Holding state while a reviewed draft waits in the scheduled-send queue.
+ * 'scheduled' decisions are invisible to the composer card fetch and the
+ * expiry sweep (both filter pending_review), so the same suggestion can't
+ * be used twice and can't expire out from under a queued send. Reopened on
+ * cancel/failure; resolved (accepted/corrected) when the send fires.
+ */
+async function markSuggestionScheduled({ decisionId, scheduledFor }) {
+  return db('agent_decisions')
+    .where({ id: decisionId, status: 'pending_review' })
+    .update({
+      status: 'scheduled',
+      correction_note: `Reviewed draft scheduled from the SMS inbox for ${scheduledFor instanceof Date ? scheduledFor.toISOString() : scheduledFor}.`,
+      updated_at: new Date(),
+    });
+}
+
+/** Cancel/failure path: the customer was never answered — the card returns. */
+async function reopenScheduledSuggestion({ decisionId, reason }) {
+  if (!decisionId) return 0;
+  try {
+    return await db('agent_decisions')
+      .where({ id: decisionId, status: 'scheduled' })
+      .update({
+        status: 'pending_review',
+        correction_note: reason || 'Scheduled send did not go out — suggestion reopened.',
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[sms-suggest] reopen failed (decision ${decisionId}): ${err.message}`);
+    return 0;
+  }
+}
+
+/**
  * Resolve a reviewed draft decision after its SCHEDULED send actually fired
  * (the immediate /sms route resolves inline; the 5-min dispatch cron calls
  * this). Guarded on pending_review — if the decision was already resolved
@@ -277,14 +311,19 @@ function classifySendVerdict(sentBody, suggestedMessage) {
  */
 async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) {
   try {
+    // 'scheduled' is the expected state (set at schedule time);
+    // pending_review covers rows scheduled before the holding state shipped.
+    const RESOLVABLE = ['scheduled', 'pending_review'];
     const decision = await db('agent_decisions')
-      .where({ id: decisionId, status: 'pending_review' })
+      .where({ id: decisionId })
+      .whereIn('status', RESOLVABLE)
       .first('id', 'suggested_message');
     if (!decision) return null;
 
     const verdict = classifySendVerdict(sentBody, decision.suggested_message);
     const changed = await db('agent_decisions')
-      .where({ id: decisionId, status: 'pending_review' })
+      .where({ id: decisionId })
+      .whereIn('status', RESOLVABLE)
       .update({
         status: verdict,
         human_verdict: verdict,
@@ -311,6 +350,22 @@ async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) 
 async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
   const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
   return db.transaction(async (trx) => {
+    // Orphaned holding states first: a 'scheduled' decision whose queued
+    // sms_log row no longer exists in a live state (cancelled outside the
+    // cancel route, or stale-claim recovery marked it failed) would hang
+    // forever — reopen it, and the created_at-keyed expiry below gives it a
+    // terminal state if it's already past the window.
+    const reopened = await trx('agent_decisions as ad')
+      .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'scheduled' })
+      .where('ad.updated_at', '<', cutoff)
+      .whereRaw("NOT EXISTS (SELECT 1 FROM sms_log sl WHERE sl.metadata->>'agent_decision_id' = ad.id::text AND sl.status IN ('scheduled', 'sending'))")
+      .update({
+        status: 'pending_review',
+        correction_note: 'Scheduled send never fired — suggestion reopened by the expiry sweep.',
+        updated_at: new Date(),
+      });
+    if (reopened > 0) logger.info(`[sms-suggest] reopened ${reopened} orphaned scheduled suggestions`);
+
     // Single guarded UPDATE ... RETURNING — no SELECT-then-UPDATE window in
     // which the composer could resolve a row we then stomp to expired.
     const expired = await trx('agent_decisions')
@@ -350,6 +405,8 @@ module.exports = {
   setIntentMode,
   publishSuggestion,
   revertDraftsToShadow,
+  markSuggestionScheduled,
+  reopenScheduledSuggestion,
   resolveSuggestionAfterSend,
   expireStaleSuggestions,
 };

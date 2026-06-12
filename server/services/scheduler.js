@@ -992,6 +992,9 @@ function initScheduledJobs() {
       } catch { return; /* scheduled_for column may not exist yet */ }
 
       for (const msg of scheduled) {
+        const rowMeta = typeof msg.metadata === 'string'
+          ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
+          : (msg.metadata || {});
         try {
           const purpose = purposeForScheduledMessageType(msg.message_type);
           const smsResult = await sendCustomerMessage({
@@ -1033,9 +1036,6 @@ function initScheduledJobs() {
             // its decision now that the message actually left — schedule-sms
             // stashed the verified id on the row. Internal catch: a
             // resolution failure must not flip a SENT row to failed.
-            const rowMeta = typeof msg.metadata === 'string'
-              ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
-              : (msg.metadata || {});
             if (rowMeta.agent_decision_id) {
               const { resolveSuggestionAfterSend } = require('./sms-suggest-mode');
               await resolveSuggestionAfterSend({
@@ -1055,10 +1055,23 @@ function initScheduledJobs() {
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            // The customer was never answered — the suggestion card returns.
+            if (rowMeta.agent_decision_id) {
+              await require('./sms-suggest-mode').reopenScheduledSuggestion({
+                decisionId: rowMeta.agent_decision_id,
+                reason: 'Scheduled send was blocked — suggestion reopened.',
+              });
+            }
           }
         } catch (err) {
           await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: new Date() });
           logger.error(`[scheduled-sms] Failed: ${err.message}`);
+          if (rowMeta.agent_decision_id) {
+            await require('./sms-suggest-mode').reopenScheduledSuggestion({
+              decisionId: rowMeta.agent_decision_id,
+              reason: 'Scheduled send failed — suggestion reopened.',
+            });
+          }
         }
       }
     } catch (err) {
