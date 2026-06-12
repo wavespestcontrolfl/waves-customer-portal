@@ -26,14 +26,9 @@ const DEFAULT_SITE_URL = process.env.GSC_SITE_URL || 'https://www.wavespestcontr
 const DEFAULT_GSC_REQUEST_TIMEOUT_MS = 30000;
 
 // All 15 Waves network domains — GSC properties to query
-const NETWORK_DOMAINS = [
-  'wavespestcontrol.com', 'waveslawncare.com',
-  'bradentonflpestcontrol.com', 'palmettoflpestcontrol.com', 'parrishpestcontrol.com',
-  'sarasotaflpestcontrol.com', 'veniceflpestcontrol.com',
-  'bradentonflexterminator.com', 'palmettoexterminator.com', 'parrishexterminator.com',
-  'sarasotaflexterminator.com',
-  'bradentonfllawncare.com', 'parrishfllawncare.com', 'sarasotafllawncare.com', 'venicelawncare.com',
-];
+// Canonical list lives in normalize-url.js so the GSC sync and the SEO
+// allowlist (URL intelligence, sitemap validation) can never diverge.
+const { NETWORK_DOMAINS } = require('../../utils/normalize-url');
 
 function normalizeDomain(value) {
   return String(value || DEFAULT_SITE_URL)
@@ -100,6 +95,11 @@ const CITY_PATTERNS = {
   parrish: /parrish/i,
   lakewood_ranch: /lakewood\s*ranch/i,
   palmetto: /palmetto/i,
+  // north_port must precede port_charlotte — first match wins in the
+  // classification loop, and "north port" must not fall through on "port".
+  north_port: /north\s*port/i,
+  port_charlotte: /port\s*charlotte/i,
+  englewood: /englewood/i,
 };
 
 // Service mapping for query classification

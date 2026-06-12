@@ -1647,13 +1647,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6AM — Sync Google Search Console data
+  // DAILY 6AM — Sync Google Search Console data (hub + all spoke domains)
+  //
+  // syncAllDomains walks NETWORK_DOMAINS in order (hub first) and catches
+  // per-domain errors, so one bad spoke property never blocks the rest.
+  // A hub failure is critical (wavespestcontrol.com is the primary site) and
+  // triggers the seo_sync_failed notification; spoke failures are logged.
   // =========================================================================
   cron.schedule('0 6 * * *', async () => {
-    logger.info('Running: GSC data sync');
+    logger.info('Running: GSC data sync (all domains)');
     try {
       const SearchConsole = require('./seo/search-console-v2');
-      await SearchConsole.syncDailyData(3);
+      const results = await SearchConsole.syncAllDomains(3);
+      const failed = results.filter(r => !r.synced);
+      logger.info(`GSC sync: ${results.length - failed.length}/${results.length} domains synced`);
+      const hubFailure = failed.find(r => r.domain === 'wavespestcontrol.com');
+      if (failed.length) {
+        logger.error(`GSC sync failures: ${failed.map(r => `${r.domain} (${r.error || 'unknown'})`).join('; ')}`);
+      }
+      if (hubFailure) {
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('seo_sync_failed', { source: 'GSC', reason: `hub sync failed: ${hubFailure.error || 'unknown'}` });
+      }
     } catch (err) {
       logger.error(`GSC sync failed: ${err.message}`);
       try {

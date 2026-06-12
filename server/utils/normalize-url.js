@@ -1,9 +1,13 @@
+// Canonical fleet domain list — search-console-v2.js imports this for the
+// daily GSC sync, so keep it complete. Order matters: hubs first, because
+// syncAllDomains walks the list in order and hub data must land even if a
+// later spoke property errors mid-loop.
 const NETWORK_DOMAINS = [
   'wavespestcontrol.com', 'waveslawncare.com',
   'bradentonflpestcontrol.com', 'palmettoflpestcontrol.com', 'parrishpestcontrol.com',
-  'sarasotaflpestcontrol.com', 'veniceflpestcontrol.com',
+  'sarasotaflpestcontrol.com', 'veniceflpestcontrol.com', 'northportflpestcontrol.com',
   'bradentonflexterminator.com', 'palmettoexterminator.com', 'parrishexterminator.com',
-  'sarasotaflexterminator.com',
+  'sarasotaflexterminator.com', 'veniceexterminator.com',
   'bradentonfllawncare.com', 'parrishfllawncare.com', 'sarasotafllawncare.com', 'venicelawncare.com',
 ];
 
