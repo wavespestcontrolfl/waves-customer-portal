@@ -99,72 +99,17 @@ function sanitizeVoiceProviderError(value) {
 
 let warnedForwardNumberFallback = false;
 
-function parseJsonObject(value) {
-  if (!value) return {};
-  if (typeof value === 'object' && !Array.isArray(value)) return value;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-async function rememberForwardAccept({ parentCallSid, dialCallSid }) {
-  if (!parentCallSid) {
-    logger.warn(`[voice] Forward accept missing ParentCallSid for child ${maskSid(dialCallSid)}`);
-    return 0;
-  }
-
-  const acceptance = {
-    accepted: true,
-    parent_call_sid: parentCallSid,
-    dial_call_sid: dialCallSid || null,
-    accepted_at: new Date().toISOString(),
-  };
-
-  return db('call_log')
-    .where('twilio_call_sid', parentCallSid)
-    .update({
-      metadata: db.raw(
-        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{forward_acceptance}', ?::jsonb, true)",
-        [JSON.stringify(acceptance)]
-      ),
-      updated_at: new Date(),
-    });
-}
-
-function metadataHasForwardAcceptance(metadata, { parentCallSid, dialCallSid }) {
-  const acceptance = parseJsonObject(metadata).forward_acceptance || {};
-  if (acceptance.accepted !== true) return false;
-  if (parentCallSid && acceptance.parent_call_sid === parentCallSid) return true;
-  return !!(dialCallSid && acceptance.dial_call_sid === dialCallSid);
-}
-
-async function wasForwardAccepted({ parentCallSid, dialCallSid }) {
-  if (parentCallSid) {
-    const parentRow = await db('call_log')
-      .where('twilio_call_sid', parentCallSid)
-      .select('metadata')
-      .first();
-    if (metadataHasForwardAcceptance(parentRow?.metadata, { parentCallSid, dialCallSid })) return true;
-  }
-
-  if (!dialCallSid) return false;
-
-  const childMatch = await db('call_log')
-    .whereRaw("metadata -> 'forward_acceptance' ->> 'dial_call_sid' = ?", [dialCallSid])
-    .select('metadata')
-    .first();
-  return metadataHasForwardAcceptance(childMatch?.metadata, { parentCallSid, dialCallSid });
-}
-
-function resolveInboundDialCompletion({ status, duration, forwardAccepted }) {
-  const shouldRecordVoicemail = ['no-answer', 'busy', 'failed'].includes(status)
-    || (status === 'completed' && !forwardAccepted);
+// Inbound forwarding bridges the first staff leg that answers — no press-1
+// screen (removed 2026-06-12 at Adam's direction; staff just pick up and
+// talk). Known trade-off: if a staff cell is off or out of signal, its
+// CARRIER voicemail answers the leg and is classified here as a human
+// answer, so the caller lands in a personal voicemail box instead of the
+// Waves voicemail recorder.
+function resolveInboundDialCompletion({ status, duration }) {
+  const shouldRecordVoicemail = ['no-answer', 'busy', 'failed'].includes(status);
 
   let answeredBy = 'unknown';
-  if (status === 'completed' && duration > 0 && forwardAccepted) answeredBy = 'human';
+  if (status === 'completed' && duration > 0) answeredBy = 'human';
   else if (status === 'no-answer' || status === 'busy') answeredBy = 'missed';
   if (shouldRecordVoicemail) answeredBy = 'voicemail';
 
@@ -310,18 +255,11 @@ router.post('/voice', async (req, res) => {
 
     logger.info(`Inbound call: ${maskPhone(From)} -> ${maskPhone(To)} (${maskSid(CallSid)}) customer=${customer?.first_name || 'unknown'}`);
 
-    // Build TwiML response — fallback path that mirrors the production
-    // Studio Flow ("Waves Inbound — All Numbers", FW5fdc2e44...).
-    //
-    // Production routing for every Waves Twilio number lives in that
-    // Studio Flow — see Twilio Console. This /voice webhook is the
-    // FALLBACK that runs when (a) the Studio Flow is bypassed (rare),
-    // (b) an inbound number is provisioned but not yet wired into the
-    // flow, or (c) the call_log contract-test harness exercises this
-    // path directly. We keep its behavior aligned with the Studio Flow
-    // so a fallback caller hears the same greeting and reaches the
-    // same handlers (Adam + Virginia simul-ring, 30s timeout, Lakewood
-    // Ranch HQ as last resort).
+    // Build TwiML response — this webhook IS production inbound routing:
+    // all 25 Waves numbers point their voice_url here (verified against
+    // the IncomingPhoneNumbers API 2026-06-12). The Studio Flow "Waves
+    // Inbound — All Numbers" (FW5fdc2e44...) still exists in the console
+    // but is dormant — no number routes to it.
     //
     // FL §934.03 (2025) — interception lawful when all parties have
     // given prior consent. The greeting MP3 is the operative
@@ -333,10 +271,6 @@ router.post('/voice', async (req, res) => {
     const greetingUrl = process.env.WAVES_GREETING_URL
       || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
 
-    // Mirror the Studio Flow's `forward_call` widget, but add callee
-    // screening. Without "press 1 to accept", carrier voicemail can answer
-    // Adam/Virginia's cell and steal the caller before Twilio reaches the
-    // Waves-owned voicemail recorder.
     const twiml = new VoiceResponse();
     twiml.play(greetingUrl);
     const forwardNumbers = getFallbackForwardNumbers();
@@ -361,10 +295,7 @@ router.post('/voice', async (req, res) => {
     });
 
     for (const number of forwardNumbers) {
-      dial.number({
-        url: '/api/webhooks/twilio/inbound-forward-screen',
-        method: 'POST',
-      }, number);
+      dial.number(number);
     }
 
     res.type('text/xml').send(twiml.toString());
@@ -394,11 +325,9 @@ router.post('/call-complete', async (req, res) => {
 
     const duration = parseInt(DialCallDuration || CallDuration || 0);
     const status = DialCallStatus || 'completed';
-    const forwardAccepted = await wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
     const { shouldRecordVoicemail, answeredBy } = resolveInboundDialCompletion({
       status,
       duration,
-      forwardAccepted,
     });
 
     const callUpdate = {
@@ -466,64 +395,6 @@ router.post('/call-complete', async (req, res) => {
 // =========================================================================
 router.post('/voicemail-complete', (req, res) => {
   res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
-});
-
-// =========================================================================
-// POST /api/webhooks/twilio/inbound-forward-screen — press-1 screen for staff
-//
-// Runs on the forwarded staff leg before Twilio bridges the customer. This
-// keeps Adam/Virginia's carrier voicemail from answering the customer call.
-// A human must press 1; voicemail systems time out and hang up, allowing the
-// parent <Dial> to continue or fall through to the Waves-owned voicemail path.
-// =========================================================================
-router.post('/inbound-forward-screen', async (req, res) => {
-  try {
-    const twiml = new VoiceResponse();
-    const gather = twiml.gather({
-      numDigits: 1,
-      action: '/api/webhooks/twilio/inbound-forward-accept',
-      method: 'POST',
-      timeout: 7,
-    });
-
-    gather.say(
-      { voice: 'Polly.Joanna' },
-      'Waves inbound call. Press 1 to accept.'
-    );
-    twiml.say({ voice: 'Polly.Joanna' }, 'No input received. Goodbye.');
-    twiml.hangup();
-
-    res.type('text/xml').send(twiml.toString());
-  } catch (err) {
-    logger.error(`Inbound forward screen error: ${err.message}`);
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
-  }
-});
-
-// =========================================================================
-// POST /api/webhooks/twilio/inbound-forward-accept — accept/reject staff leg
-// =========================================================================
-router.post('/inbound-forward-accept', async (req, res) => {
-  try {
-    const digits = String(req.body?.Digits || '').trim();
-    const twiml = new VoiceResponse();
-
-    if (digits === '1') {
-      await rememberForwardAccept({
-        parentCallSid: req.body?.ParentCallSid,
-        dialCallSid: req.body?.CallSid,
-      });
-      twiml.say({ voice: 'Polly.Joanna' }, 'Connecting.');
-    } else {
-      twiml.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
-      twiml.hangup();
-    }
-
-    res.type('text/xml').send(twiml.toString());
-  } catch (err) {
-    logger.error(`Inbound forward accept error: ${err.message}`);
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
-  }
 });
 
 // =========================================================================
@@ -826,13 +697,13 @@ router.post('/outbound-connect', async (req, res) => {
       }
     }
 
-    // FL §934.03 — outbound calls record both legs via record-from-answer-dual.
-    // Disclosure is spoken on the customer leg before dial bridges so the
-    // recipient has notice before any audio is captured. The admin (Adam,
-    // Virginia) is on this call by construction and is on notice via
-    // CLAUDE.md / company policy that all admin↔customer calls are recorded.
+    // Outbound calls record both legs via record-from-answer-dual. The
+    // removed "processed with AI" announcement played on THIS (admin) leg
+    // before <Dial> ran — the customer was never on the call yet, so it
+    // disclosed nothing to them and only delayed the admin (removed
+    // 2026-06-12 at Adam's direction). FL §934.03 note: the customer leg
+    // has never received a recording disclosure on outbound calls.
     const twiml = new VoiceResponse();
-    twiml.say({ voice: 'Polly.Joanna' }, 'Connecting now. This call may be recorded, transcribed, and processed with A I to improve service.');
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',
@@ -988,11 +859,8 @@ router._test = {
   findSingleCustomerByPhone,
   maskPhone,
   maskSid,
-  metadataHasForwardAcceptance,
-  rememberForwardAccept,
   resolveInboundDialCompletion,
   sanitizeVoiceProviderError,
-  wasForwardAccepted,
 };
 
 module.exports = router;
