@@ -337,6 +337,67 @@ async function depositStillRecordable(estimateId) {
   return { recordable: true };
 }
 
+// Outbound-nudge eligibility for the estimate follow-up cron's
+// deposit-abandonment stage. Mirrors depositStillRecordable's checks with
+// the OPPOSITE failure policy: that probe fails OPEN because captured money
+// must be recorded even when the gates can't be verified; an unprompted SMS
+// must fail CLOSED — if eligibility can't be verified, we simply don't text.
+// Resolves the policy the way the accept flow would (live plan-customer
+// fallback, structural one-time class) and nets received money out, so the
+// nudge never duns money already paid, quotes the real outstanding amount
+// (top-up remainders included), and goes silent the moment the policy is
+// satisfied or stops requiring a deposit.
+async function assessDepositFollowUpEligibility(estimateId) {
+  try {
+    const estimate = await db('estimates').where({ id: estimateId }).first();
+    if (!estimate) return { eligible: false, reason: 'estimate_missing' };
+    if (!['sent', 'viewed'].includes(estimate.status)) {
+      return { eligible: false, reason: `status:${estimate.status}` };
+    }
+    const gates = require('../routes/estimate-public');
+    if (typeof gates.isEstimateAcceptActive !== 'function' || !gates.isEstimateAcceptActive(estimate)) {
+      return { eligible: false, reason: 'estimate_inactive' };
+    }
+    const estData = parseEstimateDataBlob(estimate);
+    const pricingBundle = await gates.buildPricingBundle(estimate);
+    const quoteRequirement = gates.resolveEstimateQuoteRequirement(pricingBundle, estData);
+    if (quoteRequirement?.quoteRequired) return { eligible: false, reason: 'quote_required' };
+
+    const { buildEstimateMembershipContext } = require('./estimate-membership-context');
+    const membership = await buildEstimateMembershipContext(estimate);
+    const structuralOneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'
+      && gates.isStructuralOneTimeOnlyEstimate(estData, estimate);
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate,
+      paymentMethodPreference: null,
+      membership,
+      oneTime: structuralOneTime,
+      oneTimeUninvoiced: structuralOneTime && estimate.bill_by_invoice !== true,
+    });
+    if (!policy.required) {
+      return { eligible: false, reason: policy.exemptReason || 'not_required' };
+    }
+
+    const netReceived = await receivedDepositTotal(estimateId);
+    const outstanding = Math.round((policy.amount - netReceived) * 100) / 100;
+    if (outstanding <= 0) return { eligible: false, reason: 'deposit_satisfied' };
+
+    // A pending intent is what makes this "abandonment": the customer
+    // reached the payment step and left it unfinished. No pending row means
+    // they never started paying — that's the viewed/final stages' job.
+    const pending = await db('estimate_deposits')
+      .where({ estimate_id: estimateId, status: 'pending' })
+      .orderBy('updated_at', 'desc')
+      .first();
+    if (!pending) return { eligible: false, reason: 'no_pending_intent' };
+
+    return { eligible: true, outstandingAmount: outstanding };
+  } catch (err) {
+    logger.warn('[estimate-deposits] follow-up eligibility check failed — skipping nudge (fail closed)', { error: err.message });
+    return { eligible: false, reason: 'eligibility_unverified' };
+  }
+}
+
 // Claim the ledger row for a refund BEFORE calling Stripe: a conditional
 // transition into 'refunding' from the exact observed state. Once claimed,
 // markDepositReceived (pending→received only) and consumeDepositCredit
@@ -888,6 +949,7 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
 }
 
 module.exports = {
+  assessDepositFollowUpEligibility,
   computeDepositAmount,
   consumeDepositCredit,
   createDepositIntentForEstimate,

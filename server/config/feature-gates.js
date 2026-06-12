@@ -19,6 +19,7 @@
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
+ *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -107,6 +108,14 @@ const gates = {
   // texts are opt-in everywhere until the WaveGuard autopay rollout is
   // verified. This does not affect internal admin alerts.
   autopayCustomerSms: process.env.GATE_AUTOPAY_CUSTOMER_SMS === 'true',
+
+  // Estimate Deposit-Abandonment SMS — texts customers who started the
+  // deposit payment step on a public estimate (a pending Stripe
+  // PaymentIntent in estimate_deposits) but never completed it. Customer-
+  // facing auto-send: explicit opt-in in EVERY environment. Until the gate
+  // is on, the follow-up cron only logs candidate counts (shadow) and never
+  // claims or sends.
+  estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each

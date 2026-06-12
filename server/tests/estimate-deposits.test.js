@@ -1167,3 +1167,104 @@ describe('handleDepositIntentCanceled — canceled PIs go terminal so retries mi
     expect(updates[0].criteria).toMatchObject({ status: 'pending' });
   });
 });
+
+describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
+  const gates = require('../routes/estimate-public');
+  const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+  const { assessDepositFollowUpEligibility } = require('../services/estimate-deposits');
+
+  // Minimal chainable for this helper's three reads: the estimate row, the
+  // refund-netted received rows, and the latest pending intent.
+  function followUpDb({ estimate, receivedRows = [], pendingRow = undefined }) {
+    return (table) => {
+      const b = {};
+      for (const m of ['where', 'whereIn', 'orderBy', 'select']) {
+        b[m] = jest.fn(() => b);
+      }
+      b.first = jest.fn(async () =>
+        table === 'estimates' ? estimate : pendingRow,
+      );
+      b.then = (resolve, reject) =>
+        Promise.resolve(table === 'estimate_deposits' ? receivedRows : [])
+          .then(resolve, reject);
+      return b;
+    };
+  }
+
+  const liveEstimate = { id: 'est-1', status: 'viewed', estimate_data: '{}' };
+
+  beforeEach(() => {
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    gates.buildPricingBundle.mockResolvedValue({});
+    gates.resolveEstimateQuoteRequirement.mockReturnValue({ quoteRequired: false });
+    gates.isStructuralOneTimeOnlyEstimate.mockReturnValue(false);
+    buildEstimateMembershipContext.mockResolvedValue({ isExistingCustomer: false });
+  });
+
+  it('eligible: quotes the policy amount minus refund-netted received money', async () => {
+    mockDbHandler = followUpDb({
+      estimate: liveEstimate,
+      receivedRows: [{ amount: '20.00', refunded_amount: '0.00' }],
+      pendingRow: { id: 'dep-1', status: 'pending' },
+    });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: true, outstandingAmount: 29 });
+  });
+
+  it('top-up case: $49 received toward a $99 structural one-time policy stays eligible for $50', async () => {
+    gates.isStructuralOneTimeOnlyEstimate.mockReturnValueOnce(true);
+    mockDbHandler = followUpDb({
+      estimate: liveEstimate,
+      receivedRows: [{ amount: '49.00', refunded_amount: '0.00' }],
+      pendingRow: { id: 'dep-topup', status: 'pending' },
+    });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: true, outstandingAmount: 50 });
+  });
+
+  it('satisfied policy goes silent even with a stale pending row lingering', async () => {
+    mockDbHandler = followUpDb({
+      estimate: liveEstimate,
+      receivedRows: [{ amount: '49.00', refunded_amount: '0.00' }],
+      pendingRow: { id: 'dep-stale', status: 'pending' },
+    });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'deposit_satisfied' });
+  });
+
+  it('no pending intent means no abandonment — never started paying', async () => {
+    mockDbHandler = followUpDb({ estimate: liveEstimate, pendingRow: undefined });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'no_pending_intent' });
+  });
+
+  it('non-live estimate status is ineligible (accepted race)', async () => {
+    mockDbHandler = followUpDb({ estimate: { ...liveEstimate, status: 'accepted' } });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'status:accepted' });
+  });
+
+  it('accept-inactive estimate is ineligible', async () => {
+    mockIsEstimateAcceptActive.mockReturnValueOnce(false);
+    mockDbHandler = followUpDb({ estimate: liveEstimate });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'estimate_inactive' });
+  });
+
+  it('exempt plan customer is ineligible', async () => {
+    buildEstimateMembershipContext.mockResolvedValueOnce({ isExistingCustomer: true });
+    mockDbHandler = followUpDb({
+      estimate: liveEstimate,
+      pendingRow: { id: 'dep-1', status: 'pending' },
+    });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'existing_plan_customer' });
+  });
+
+  it('fails CLOSED when verification errors (unlike depositStillRecordable)', async () => {
+    gates.buildPricingBundle.mockRejectedValueOnce(new Error('bundle exploded'));
+    mockDbHandler = followUpDb({ estimate: liveEstimate });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'eligibility_unverified' });
+  });
+});

@@ -5,6 +5,9 @@
  *   - Received an estimate but haven't viewed it (24h)
  *   - Viewed an estimate but haven't accepted (48h, 5d)
  *   - Estimate is about to expire (1-3 days before)
+ *   - Started the deposit payment step but never completed it (2-72h after
+ *     the last pending PaymentIntent; gated by
+ *     GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS — shadow-logs counts until on)
  *
  * Runs via cron every 2 hours. SMS is primary, email is a second channel —
  * each stage's flag flips once either channel attempts so we don't re-nudge.
@@ -17,6 +20,8 @@ const logger = require("./logger");
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
+const { isEnabled } = require("../config/feature-gates");
+const { assessDepositFollowUpEligibility } = require("./estimate-deposits");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -42,12 +47,12 @@ function isQuietHours(now = new Date()) {
 // Engagement signal: if the customer opened the estimate within the last N
 // hours (default 2), skip the scheduled nudge. They're thinking about it
 // right now and don't need a poke.
-function wasRecentlyOpened(est, hours = 2) {
+function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
   const last = est.last_viewed_at || est.viewed_at;
   if (!last) return false;
   const ts = new Date(last).getTime();
   if (Number.isNaN(ts)) return false;
-  return Date.now() - ts < hours * 3600000;
+  return nowMs - ts < hours * 3600000;
 }
 
 // Reply-pause: if the customer has SMS'd Waves in the last N days (via
@@ -84,11 +89,12 @@ async function hasRepliedRecently(est, days = 14) {
 
 // Unified gate. Returns { skip: true, reason } if the send should be
 // blocked, else { skip: false }. Keeps the per-stage loops readable.
-async function safetyGate(est) {
+async function safetyGate(est, now = new Date()) {
   if (TERMINAL_STATUSES.has(est.status))
     return { skip: true, reason: `terminal-status:${est.status}` };
-  if (isQuietHours()) return { skip: true, reason: "quiet-hours" };
-  if (wasRecentlyOpened(est)) return { skip: true, reason: "recently-opened" };
+  if (isQuietHours(now)) return { skip: true, reason: "quiet-hours" };
+  if (wasRecentlyOpened(est, 2, now.getTime()))
+    return { skip: true, reason: "recently-opened" };
   if (await hasRepliedRecently(est))
     return { skip: true, reason: "customer-replied-recently" };
   return { skip: false };
@@ -236,6 +242,145 @@ async function sendDualChannel(est, { sms, email }) {
     }
   }
   return attempted;
+}
+
+// 5. Deposit started but never completed (2-72h after the last pending
+// PaymentIntent). Highest-intent drop-off: the customer clicked accept and
+// reached the Stripe card form. Gated separately because it's a new
+// customer-facing auto-send — until GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS is
+// on, candidates are only counted in the log (shadow, no claims) so the
+// volume can be judged before any text goes out. SMS-only stage: there is no
+// email template for it, so a missing/disabled SMS template skips WITHOUT
+// claiming (nothing could send on either channel — claiming would burn the
+// stage for nothing).
+async function checkDepositAbandoned(now = new Date()) {
+  let sent = 0;
+  const nowMs = now.getTime();
+  // Window on updated_at, not created_at: the deposit-intent endpoint REUSES
+  // the same PaymentIntent for the same estimate+amount and bumps updated_at
+  // on retry, so updated_at is "last time the customer touched the payment
+  // step". created_at would both exclude a >72h-old intent the customer
+  // retried an hour ago and nudge someone who is actively retrying right now.
+  const latestPendingByEstimate = db("estimate_deposits")
+    .select("estimate_id")
+    .where("status", "pending")
+    .groupBy("estimate_id")
+    .max("updated_at as latest_pending_at")
+    .as("pd");
+  const candidates = await db("estimates")
+    .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
+    .whereIn("estimates.status", ["sent", "viewed"])
+    .whereNotNull("estimates.customer_phone")
+    .where("pd.latest_pending_at", "<", new Date(nowMs - 2 * 3600000))
+    .where("pd.latest_pending_at", ">", new Date(nowMs - 72 * 3600000))
+    .where((q) =>
+      q
+        .where("followup_deposit_abandoned_sent", false)
+        .orWhereNull("followup_deposit_abandoned_sent"),
+    )
+    .select("estimates.*");
+
+  if (!candidates.length) return 0;
+  if (!isEnabled("estimateDepositAbandonmentSms")) {
+    logger.info(
+      `[est-followup] Deposit-abandoned shadow: ${candidates.length} candidate(s), gate off — no sends`,
+    );
+    return 0;
+  }
+
+  for (const est of candidates) {
+    let claimed = false;
+    try {
+      const gate = await safetyGate(est, now);
+      if (gate.skip) {
+        logger.info(
+          `[est-followup] Deposit-abandoned skip ${est.id}: ${gate.reason}`,
+        );
+        continue;
+      }
+      // Fresh, fail-CLOSED eligibility + outstanding-amount resolution from
+      // the deposits service: re-checks the accepted race, an inactive/
+      // expired estimate, quote-required, a now-exempt policy, money already
+      // received (refund-netted, so a partial payment with a pending top-up
+      // remainder stays nudgeable while a covered policy goes silent), and
+      // that a pending intent still exists. Any verification failure skips —
+      // an unprompted SMS is never sent on unverified eligibility.
+      const eligibility = await assessDepositFollowUpEligibility(est.id);
+      if (!eligibility.eligible) {
+        logger.info(
+          `[est-followup] Deposit-abandoned skip ${est.id}: ${eligibility.reason || "ineligible"}`,
+        );
+        continue;
+      }
+      const depositAmount = Number(eligibility.outstandingAmount);
+      if (!Number.isFinite(depositAmount) || depositAmount <= 0) {
+        logger.warn(
+          `[est-followup] Deposit-abandoned skip ${est.id}: bad outstanding amount ${eligibility.outstandingAmount}`,
+        );
+        continue;
+      }
+      const firstName = (est.customer_name || "").split(" ")[0] || "there";
+      const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+      const url = await shortenOrPassthrough(longUrl, {
+        kind: "estimate",
+        entityType: "estimates",
+        entityId: est.id,
+        customerId: est.customer_id,
+      });
+      const smsBody = await renderTemplate("estimate_followup_deposit", {
+        first_name: firstName,
+        // Whole dollars render bare ("$49"); a refund-netted remainder with
+        // cents renders exactly ("$29.50") instead of misquoting via round.
+        deposit_amount: Number.isInteger(depositAmount)
+          ? String(depositAmount)
+          : depositAmount.toFixed(2),
+        estimate_url: url,
+      }, {
+        workflow: "estimate_follow_up",
+        entity_type: "estimate",
+        entity_id: est.id,
+      });
+      if (!smsBody) {
+        logger.warn(
+          `[est-followup] estimate_followup_deposit template missing/disabled — skipping est ${est.id} without claiming`,
+        );
+        continue;
+      }
+      if (!(await claimStage(est.id, "followup_deposit_abandoned_sent"))) {
+        logger.info(
+          `[est-followup] Deposit-abandoned skip ${est.id}: lost-claim`,
+        );
+        continue;
+      }
+      claimed = true;
+      const ok = await sendDualChannel(est, { sms: smsBody });
+      if (ok) {
+        await db("estimates")
+          .where({ id: est.id })
+          .update({
+            follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
+            last_follow_up_at: db.fn.now(),
+          });
+        sent++;
+        claimed = false;
+      }
+    } catch (e) {
+      logger.error(
+        `[est-followup] Deposit-abandoned send failed: ${e.message}`,
+      );
+    } finally {
+      if (claimed) {
+        try {
+          await releaseStage(est.id, "followup_deposit_abandoned_sent");
+        } catch (e) {
+          logger.error(
+            `[est-followup] Deposit-abandoned release failed: ${e.message}`,
+          );
+        }
+      }
+    }
+  }
+  return sent;
 }
 
 const EstimateFollowUp = {
@@ -603,6 +748,13 @@ const EstimateFollowUp = {
       /* columns may not exist */
     }
 
+    // 5. Deposit started but never completed
+    try {
+      sent += await checkDepositAbandoned();
+    } catch {
+      /* columns may not exist */
+    }
+
     if (sent > 0)
       logger.info(`[est-followup] Sent ${sent} follow-ups (SMS+email)`);
     return { sent };
@@ -610,4 +762,9 @@ const EstimateFollowUp = {
 };
 
 module.exports = EstimateFollowUp;
-module.exports._private = { sendDualChannel, estimateEmailPayload, renderTemplate };
+module.exports._private = {
+  sendDualChannel,
+  estimateEmailPayload,
+  renderTemplate,
+  checkDepositAbandoned,
+};
