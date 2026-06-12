@@ -322,6 +322,24 @@ describe('attachAnnotations', () => {
     expect(row.annotations).toHaveLength(6);
     expect(row.annotations[0].date).toBe('2026-04-09');
   });
+
+  test('caps each row at its OWN domain anchor — a lagging spoke must not show a chip dated after its window even when a fresher domain anchors later (Codex r4)', () => {
+    const [hubRow, spokeRow] = buildRows(
+      [cur(), cur({ page_url: 'https://venicepestcontrol.com/lawn/', domain: 'venicepestcontrol.com' })],
+      [pri(), pri({ page_url: 'https://venicepestcontrol.com/lawn/', domain: 'venicepestcontrol.com' })]
+    );
+    const anns = [
+      { key: 'wavespestcontrol.com/hotels', type: 'META', date: '2026-06-10', source: 'experiment' },
+      { key: 'venicepestcontrol.com/lawn', type: 'LINKS', date: '2026-06-10', source: 'internal_link' },
+      { key: 'venicepestcontrol.com/lawn', type: 'CONTENT', date: '2026-06-09', source: 'autonomous_run' },
+    ];
+    attachAnnotations([hubRow, spokeRow], anns, {
+      'wavespestcontrol.com': '2026-06-10',
+      'venicepestcontrol.com': '2026-06-09', // spoke sync is a day behind
+    });
+    expect(hubRow.annotations.map((a) => a.date)).toEqual(['2026-06-10']);
+    expect(spokeRow.annotations.map((a) => a.type)).toEqual(['CONTENT']); // 06-10 LINKS chip dropped
+  });
 });
 
 // ── summarize ───────────────────────────────────────────────────────

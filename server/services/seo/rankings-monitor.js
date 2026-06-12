@@ -274,9 +274,12 @@ function buildRows(currentRows = [], priorRows = [], { minImpressions = DEFAULT_
 /**
  * Merge raw annotations (same page + chip type + day from several sources
  * collapse into one chip), then attach to page rows by join key, most
- * recent first, capped.
+ * recent first, capped. With anchorsByDomain, each row's chips are also
+ * capped at its OWN domain's anchor — in a multi-domain view a lagging
+ * spoke's movement is measured only through its own anchor, so a chip
+ * dated after it would imply causality for movement GSC hasn't seen yet.
  */
-function attachAnnotations(rows = [], annotations = []) {
+function attachAnnotations(rows = [], annotations = [], anchorsByDomain = null) {
   const merged = new Map();
   for (const ann of annotations) {
     if (!ann?.key || !ann.type || !ann.date) continue;
@@ -299,7 +302,10 @@ function attachAnnotations(rows = [], annotations = []) {
   for (const row of rows) {
     const anns = byPage.get(row.join_key);
     if (!anns) continue;
-    row.annotations = anns
+    const domainAnchor = anchorsByDomain?.[row.domain] || null;
+    const eligible = domainAnchor ? capAnnotations(anns, domainAnchor) : anns;
+    if (!eligible.length) continue;
+    row.annotations = eligible
       .sort((a, b) => String(b.date).localeCompare(String(a.date)))
       .slice(0, MAX_ANNOTATIONS_PER_PAGE)
       .map(({ key, sources, ...rest }) => ({ ...rest, sources }));
@@ -492,17 +498,25 @@ function pageWindowQuery({ periodDays, phase, domain = null, type = null }) {
   return query;
 }
 
-// Per-domain anchors, for the caption (newest) and the annotation lookback
-// (oldest — widest net when a domain's sync is behind).
+// Per-domain anchors: the caption (newest), the annotation lookback
+// (oldest — widest net when a domain's sync is behind), and the byDomain
+// map for per-row chip caps — each row's movement is measured only through
+// its own domain's anchor.
 async function domainAnchors({ domain = null, type = null } = {}) {
   let query = db('gsc_pages').select('domain').max('date as anchor').groupBy('domain');
   if (domain) query = query.where('domain', domain);
   if (type) query = query.where('page_type', type);
   const rows = await query;
-  const anchors = rows.map((r) => dateColToString(r.anchor)).filter(Boolean).sort();
+  const byDomain = {};
+  for (const row of rows) {
+    const dateString = dateColToString(row.anchor);
+    if (dateString) byDomain[row.domain] = dateString;
+  }
+  const anchors = Object.values(byDomain).sort();
   return {
     newest: anchors[anchors.length - 1] || null,
     oldest: anchors[0] || null,
+    byDomain,
   };
 }
 
@@ -557,11 +571,12 @@ async function build({
   // Annotations span both windows: a change made in the prior window is
   // exactly what explains movement between them. Bounded from the OLDEST
   // domain anchor's window start (a lagging domain's chips aren't cut) up
-  // to the NEWEST anchor (no chips dated after the displayed data ends).
+  // to the NEWEST anchor (no chips dated after the displayed data ends);
+  // attach then tightens each row to its own domain's anchor.
   const annotations = await fetchAllAnnotations(
     annotationBoundaries(anchors.oldest || anchor, anchor, periodDays)
   );
-  attachAnnotations(rows, annotations);
+  attachAnnotations(rows, annotations, anchors.byDomain);
 
   const summary = summarize(rows);
   sortRows(rows);
