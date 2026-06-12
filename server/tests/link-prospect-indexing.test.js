@@ -24,18 +24,21 @@ function wireDb() {
     b.update = jest.fn((patch) => {
       updates.push(patch);
       const qs = patch.quality_signals;
-      if (qs && qs.__raw && qs.__raw.includes('jsonb_set')) return Promise.resolve(claimAffected);
+      // Only the atomic claim SETS omega_inflight via a jsonb path ('{omega_inflight}').
+      if (qs && qs.__raw && qs.__raw.includes("'{omega_inflight}'")) return Promise.resolve(claimAffected);
       return Promise.resolve(1);
     });
     return b;
   });
 }
 
-const stringWrite = () => {
-  const u = updates.find((p) => typeof p.quality_signals === 'string');
-  return u ? JSON.parse(u.quality_signals) : null;
-};
-const claimUpdate = () => updates.find((p) => p.quality_signals && p.quality_signals.__raw && p.quality_signals.__raw.includes('jsonb_set'));
+const rawOf = (p) => (p && p.quality_signals && p.quality_signals.__raw) || '';
+// The atomic claim is the only write that SETS omega_inflight.
+const claimUpdate = () => updates.find((p) => rawOf(p).includes("'{omega_inflight}'"));
+// Result writes touch only omega_* keys on the live column via jsonb_set/delete.
+const successWrite = () => updates.find((p) => rawOf(p).includes("'{omega_submitted}'"));
+const failureWrite = () => updates.find((p) => rawOf(p).includes("'{omega_attempts}'"));
+const releaseWrite = () => updates.find((p) => rawOf(p) === "quality_signals - 'omega_inflight'");
 
 const NOW = new Date('2026-06-12T08:00:00Z');
 const base = { id: 'p1', status: 'placed', indexing_status: 'not_checked', target_domain: 'showmysites.com', quality_signals: null };
@@ -50,10 +53,14 @@ describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () 
     expect(out).toBe(true);
     expect(claimUpdate()).toBeTruthy(); // atomic claim happened before the call
     expect(omega.submit).toHaveBeenCalledWith('showmysites.com', ['https://showmysites.com/x/']);
-    const w = stringWrite();
-    expect(w.omega_submitted).toBe(NOW.toISOString());
-    expect(w.omega_attempts).toBeUndefined();
-    expect(w.omega_inflight).toBeUndefined(); // claim released
+    const w = successWrite();
+    expect(w).toBeTruthy();
+    // stamps omega_submitted with NOW and clears attempts/error/inflight, all via
+    // jsonb_set/delete on the live column (no snapshot clobber).
+    expect(w.quality_signals.bindings).toContain(NOW.toISOString());
+    expect(w.quality_signals.__raw).toMatch(/- 'omega_attempts'/);
+    expect(w.quality_signals.__raw).toMatch(/- 'omega_inflight'/);
+    expect(failureWrite()).toBeUndefined();
   });
 
   test('does NOT submit a nofollow link (and never claims)', async () => {
@@ -86,11 +93,11 @@ describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () 
     omega.submit.mockResolvedValue({ ok: false, error: 'boom' });
     const out = await pushForIndexing(base, 'https://showmysites.com/x/', true, NOW);
     expect(out).toBe(false);
-    const w = stringWrite();
-    expect(w.omega_submitted).toBeUndefined(); // <-- the P1 fix
-    expect(w.omega_attempts).toBe(1);
-    expect(w.omega_error).toBe('boom');
-    expect(w.omega_inflight).toBeUndefined();
+    expect(successWrite()).toBeUndefined(); // <-- the P1 fix: never marks submitted
+    const w = failureWrite();
+    expect(w).toBeTruthy();
+    expect(w.quality_signals.bindings).toEqual([1, 'boom']); // attempts=1, error
+    expect(w.quality_signals.__raw).toMatch(/- 'omega_inflight'/); // claim released
   });
 
   test('already-submitted link is never re-pushed (no claim, no call)', async () => {
@@ -116,9 +123,9 @@ describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () 
     const out = await pushForIndexing(base, 'https://showmysites.com/x/', true, NOW);
     expect(out).toBe(false);
     expect(omega.submit).toHaveBeenCalledTimes(1);
-    // no JSON success/failure write; a raw inflight-release update instead
-    expect(stringWrite()).toBeNull();
-    const release = updates.find((p) => p.quality_signals && p.quality_signals.__raw && p.quality_signals.__raw.includes("- 'omega_inflight'"));
-    expect(release).toBeTruthy();
+    // no success/failure write; just a raw inflight-release update
+    expect(successWrite()).toBeUndefined();
+    expect(failureWrite()).toBeUndefined();
+    expect(releaseWrite()).toBeTruthy();
   });
 });

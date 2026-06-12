@@ -144,6 +144,11 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
 
   const res = await omega.submit(prospect.target_domain, [liveUrl]);
 
+  // All result writes touch ONLY the omega_* keys on the CURRENT column value
+  // (never a pre-call snapshot), so a concurrent writer — e.g. the indexer
+  // setting quality_signals.target_indexed during the 12s Omega call — isn't
+  // clobbered.
+
   // skipped = no key / no url (non-prod): release the claim, burn no attempt.
   if (res && res.skipped) {
     await db('seo_link_prospects').where({ id: prospect.id })
@@ -152,17 +157,26 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
   }
 
   if (res && res.ok === true) {
-    quality.omega_submitted = now.toISOString();
-    delete quality.omega_attempts;
-    delete quality.omega_error;
-  } else {
-    quality.omega_attempts = (quality.omega_attempts || 0) + 1;
-    quality.omega_error = (res && res.error) || `status ${res && res.status}`;
+    await db('seo_link_prospects').where({ id: prospect.id }).update({
+      quality_signals: db.raw(
+        "jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{omega_submitted}', to_jsonb(?::text), true) - 'omega_attempts' - 'omega_error' - 'omega_inflight'",
+        [now.toISOString()],
+      ),
+      updated_at: new Date(),
+    });
+    return true;
   }
-  delete quality.omega_inflight; // release the claim either way
-  await db('seo_link_prospects').where({ id: prospect.id })
-    .update({ quality_signals: JSON.stringify(quality), updated_at: new Date() });
-  return res ? res.ok === true : false;
+
+  const attempts = (quality.omega_attempts || 0) + 1; // safe: we hold the claim
+  const errStr = (res && res.error) || `status ${res && res.status}`;
+  await db('seo_link_prospects').where({ id: prospect.id }).update({
+    quality_signals: db.raw(
+      "jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{omega_attempts}', to_jsonb(?::int), true), '{omega_error}', to_jsonb(?::text), true) - 'omega_inflight'",
+      [attempts, errStr],
+    ),
+    updated_at: new Date(),
+  });
+  return false;
 }
 
 // Best-effort crawl: does live_url contain an <a> to wavespestcontrol.com, and is it dofollow?
