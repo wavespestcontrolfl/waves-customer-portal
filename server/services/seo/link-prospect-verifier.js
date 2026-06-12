@@ -25,6 +25,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
+const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
@@ -122,6 +123,9 @@ const OMEGA_INFLIGHT_TTL_MS = 10 * 60 * 1000;
 // already in-flight). Overlapping verifier runs can't both submit the same URL —
 // the loser's update affects 0 rows and bails.
 async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
+  // Paid call — gated with the other SEO API spend so disabling SEO Intelligence
+  // (GATE_SEO_INTELLIGENCE) halts Omega submissions, same as DataForSEO.
+  if (!isEnabled('seoIntelligence')) return false;
   if (!liveUrl || isDofollow === false) return false;
   if (prospect.status === 'indexed' || prospect.indexing_status === 'indexed') return false;
   const quality = parseQuality(prospect.quality_signals);

@@ -1,8 +1,10 @@
 jest.mock('../models/db');
 jest.mock('../services/seo/omega-indexer');
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 
 const db = require('../models/db');
 const omega = require('../services/seo/omega-indexer');
+const { isEnabled } = require('../config/feature-gates');
 const { pushForIndexing } = require('../services/seo/link-prospect-verifier');
 
 // Mock the knex builder. pushForIndexing issues up to two updates per call:
@@ -43,9 +45,18 @@ const releaseWrite = () => updates.find((p) => rawOf(p) === "quality_signals - '
 const NOW = new Date('2026-06-12T08:00:00Z');
 const base = { id: 'p1', status: 'placed', indexing_status: 'not_checked', target_domain: 'showmysites.com', quality_signals: null };
 
-beforeEach(() => { jest.clearAllMocks(); });
+beforeEach(() => { jest.clearAllMocks(); isEnabled.mockReturnValue(true); });
 
 describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () => {
+  test('does nothing when seoIntelligence is gated off (no claim, no paid call)', async () => {
+    wireDb();
+    isEnabled.mockReturnValue(false);
+    const out = await pushForIndexing(base, 'https://showmysites.com/x/', true, NOW);
+    expect(out).toBe(false);
+    expect(omega.submit).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(0);
+  });
+
   test('claims then submits a dofollow link and marks omega_submitted on success', async () => {
     wireDb();
     omega.submit.mockResolvedValue({ ok: true, status: 200 });
