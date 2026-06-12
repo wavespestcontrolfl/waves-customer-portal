@@ -180,14 +180,20 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       if (newerExists) return null;
 
       if (supersede.length) {
-        await trx('agent_decisions')
+        // Re-guard on pending_review and revert only rows actually changed:
+        // the composer can mark one accepted/corrected between our SELECT
+        // and this UPDATE, and a sent suggestion must keep its status and
+        // stay out of the judge pool.
+        const changed = await trx('agent_decisions')
           .whereIn('id', supersede.map((r) => r.id))
+          .where({ status: 'pending_review' })
           .update({
             status: 'superseded',
             correction_note: 'Replaced by a suggestion for a newer inbound message.',
             updated_at: new Date(),
-          });
-        await revertDraftsToShadow(trx, supersede.map((r) => r.entity_id));
+          })
+          .returning(['id', 'entity_id']);
+        await revertDraftsToShadow(trx, changed.map((r) => r.entity_id));
       }
 
       const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
@@ -235,23 +241,23 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
 async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
   const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
   return db.transaction(async (trx) => {
-    const stale = await trx('agent_decisions')
+    // Single guarded UPDATE ... RETURNING — no SELECT-then-UPDATE window in
+    // which the composer could resolve a row we then stomp to expired.
+    const expired = await trx('agent_decisions')
       .where({ workflow: SUGGEST_WORKFLOW, status: 'pending_review' })
       .where('created_at', '<', cutoff)
-      .select('id', 'entity_id');
-    if (!stale.length) return 0;
-
-    await trx('agent_decisions')
-      .whereIn('id', stale.map((r) => r.id))
       .update({
         status: 'expired',
         correction_note: `No staff action within ${maxAgeHours}h of the inbound.`,
         updated_at: new Date(),
-      });
-    await revertDraftsToShadow(trx, stale.map((r) => r.entity_id));
+      })
+      .returning(['id', 'entity_id']);
+    if (!expired.length) return 0;
 
-    logger.info(`[sms-suggest] expired ${stale.length} stale suggestions`);
-    return stale.length;
+    await revertDraftsToShadow(trx, expired.map((r) => r.entity_id));
+
+    logger.info(`[sms-suggest] expired ${expired.length} stale suggestions`);
+    return expired.length;
   });
 }
 

@@ -262,7 +262,10 @@ router.post('/sms', async (req, res, next) => {
         if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
         const stale = await staleQuery.select('ad.id', 'ad.entity_id');
         if (stale.length) {
-          await db('agent_decisions')
+          // Revert only rows the guarded UPDATE actually changed: a parallel
+          // operator can send one of these suggestions between the SELECT
+          // and the UPDATE, and that draft must stay out of the judge pool.
+          const ignored = await db('agent_decisions')
             .whereIn('id', stale.map((r) => r.id))
             .where('status', 'pending_review')
             .update({
@@ -272,8 +275,9 @@ router.post('/sms', async (req, res, next) => {
               reviewed_by: req.technicianId || 'Admin',
               reviewed_at: new Date(),
               updated_at: new Date(),
-            });
-          await revertDraftsToShadow(db, stale.map((r) => r.entity_id));
+            })
+            .returning(['id', 'entity_id']);
+          await revertDraftsToShadow(db, ignored.map((r) => r.entity_id));
         }
       }
     } catch (ignoreErr) {
