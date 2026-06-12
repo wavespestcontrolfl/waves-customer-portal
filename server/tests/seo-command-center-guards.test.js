@@ -213,6 +213,42 @@ describe('SEO Command Center guards', () => {
     ]));
   });
 
+  test('site audit never flags long titles — keyword-rich city-page titles are an intentional SEO play', async () => {
+    delete process.env.GOOGLE_API_KEY;
+
+    const longTitle = 'Pest Control Bradenton FL | Exterminator Near Me | ' +
+      'Ant, Roach, Rodent & Mosquito Control | '.repeat(10) + 'Waves Pest Control';
+    const pageHtml = (title) => `
+        <title>${title}</title>
+        <meta name="description" content="Pest control in Bradenton">
+        <h1>Pest Control in Bradenton, FL</h1>
+        <h2>Service Plans</h2>
+        <p>${'Local pest control details. '.repeat(80)}</p>
+      `;
+    const auditOf = (title) => SiteAuditor.auditPage(
+      'https://www.wavespestcontrol.com/pest-control-bradenton-fl/',
+      pageHtml(title),
+      200,
+      42,
+      null,
+      null,
+      'service_page',
+      'https://www.wavespestcontrol.com/',
+    );
+
+    const longAudit = await auditOf(longTitle);
+    const shortAudit = await auditOf('Pest Control Bradenton FL');
+
+    const issues = JSON.parse(longAudit.issues);
+    expect(issues).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'title_too_long' }),
+    ]));
+    expect(longAudit.meta_title_length).toBeGreaterThan(60); // raw length still reported as data
+    // The identical page must score the same regardless of title length —
+    // the long title is the play, not a defect.
+    expect(longAudit.technical_health_score).toBe(shortAudit.technical_health_score);
+  });
+
   test('site audit PageSpeed fetch uses a timeout signal', async () => {
     process.env.GOOGLE_API_KEY = 'test-key';
     process.env.SEO_PAGESPEED_TIMEOUT_MS = '1234';
