@@ -507,10 +507,14 @@ router.patch('/sends/:id', async (req, res, next) => {
     // it, so the stored locked ids are preserved instead of blanked. Without
     // this, re-drafting a saved campaign would ship a new event set while the
     // old event_ids drove times_featured.
+    // The preserved value must be re-serialized: event_ids is jsonb, so knex
+    // hands back a parsed JS array, and node-pg encodes a raw JS array as a
+    // Postgres array literal ('{a,b}') — invalid jsonb input. Non-empty sets
+    // made every save 500; empty ones silently corrupted '[]' into '{}'.
     const nextEventIds = eventIds !== undefined
       ? JSON.stringify((Array.isArray(eventIds) ? eventIds : [])
           .filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12))
-      : send.event_ids;
+      : (typeof send.event_ids === 'string' ? send.event_ids : JSON.stringify(send.event_ids ?? []));
 
     await db('newsletter_sends').where({ id: req.params.id }).update({
       subject: subject ?? send.subject,
