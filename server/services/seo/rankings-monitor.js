@@ -486,12 +486,15 @@ function pageWindowQuery({ periodDays, phase, domain = null, type = null }) {
     // position and fabricate wins/losses.
     .select(db.raw('sum(g.position * g.impressions) / nullif(sum(g.impressions), 0) as avg_position'))
     .groupByRaw(`${CANON_URL_SQL}, g.domain`);
+  // The ::int cast is load-bearing: Postgres assumes an UNTYPED bind in
+  // `date - $1` is the other operand's type (date - date → integer), so
+  // without it the bound day-offset fails at runtime, not in unit tests.
   if (phase === 'current') {
-    query = query.whereRaw('g.date >= a.anchor - ?', [periodDays - 1]);
+    query = query.whereRaw('g.date >= a.anchor - ?::int', [periodDays - 1]);
   } else {
     query = query
-      .whereRaw('g.date >= a.anchor - ?', [periodDays * 2 - 1])
-      .whereRaw('g.date < a.anchor - ?', [periodDays - 1]);
+      .whereRaw('g.date >= a.anchor - ?::int', [periodDays * 2 - 1])
+      .whereRaw('g.date < a.anchor - ?::int', [periodDays - 1]);
   }
   if (domain) query = query.where('g.domain', domain);
   if (type) query = query.where('g.page_type', type);
