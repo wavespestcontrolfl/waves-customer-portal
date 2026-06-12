@@ -547,6 +547,16 @@ function sortRows(rows) {
   );
 }
 
+// The UI renders only wins / losses (incl. GONE) / new pages — flat rows
+// are invisible, so they must not consume limit slots: flat jitter has a
+// nonzero magnitude while 'new' rows (change == null) sort at zero, and
+// enough flat rows would empty the New Pages table even with
+// summary.new_pages > 0. Callers summarize() BEFORE this so flat is still
+// counted.
+function visibleRows(rows) {
+  return sortRows(rows.filter((row) => row.movement !== 'flat'));
+}
+
 // ── entry point ─────────────────────────────────────────────────────
 
 async function build({
@@ -579,7 +589,7 @@ async function build({
   attachAnnotations(rows, annotations, anchors.byDomain);
 
   const summary = summarize(rows);
-  sortRows(rows);
+  const visible = visibleRows(rows);
 
   const boundedLimit = Math.min(Math.max(parseInt(limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   return {
@@ -590,7 +600,7 @@ async function build({
       prior: { from: bounds.prior_since, to: addDaysToDateString(bounds.current_since, -1) },
     },
     summary,
-    pages: rows.slice(0, boundedLimit).map(({ join_key, ...rest }) => rest),
+    pages: visible.slice(0, boundedLimit).map(({ join_key, ...rest }) => rest),
   };
 }
 
@@ -609,6 +619,7 @@ module.exports._internals = {
   annotationBoundaries,
   capAnnotations,
   sortRows,
+  visibleRows,
   toMetric,
   classifyMovement,
   mergeWindowRows,

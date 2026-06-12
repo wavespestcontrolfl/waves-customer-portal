@@ -20,6 +20,7 @@ const {
   annotationBoundaries,
   capAnnotations,
   sortRows,
+  visibleRows,
   classifyMovement,
   mergeWindowRows,
   buildRows,
@@ -151,6 +152,22 @@ describe('sortRows', () => {
     expect(rows.map((r) => r.movement)).toEqual(['lost', 'lost', 'win', 'flat']);
     // within the lost tier, bigger prior exposure first
     expect(rows[0].impressions_before).toBe(880);
+  });
+});
+
+describe('visibleRows', () => {
+  test('drops flat rows so invisible jitter cannot consume limit slots and starve the New Pages table (pre-push P1)', () => {
+    const rows = [
+      // flat jitter sorts above 'new' (change == null → magnitude 0), so
+      // with limit 3 the new page would have been sliced away.
+      { movement: 'flat', change: 0.3, impressions_now: 9000, impressions_before: 9000 },
+      { movement: 'flat', change: 0.2, impressions_now: 8000, impressions_before: 8000 },
+      { movement: 'flat', change: 0.1, impressions_now: 7000, impressions_before: 7000 },
+      { movement: 'new', change: null, impressions_now: 40, impressions_before: 0 },
+      { movement: 'win', change: -5.2, impressions_now: 300, impressions_before: 280 },
+    ];
+    const visible = visibleRows(rows).slice(0, 3);
+    expect(visible.map((r) => r.movement)).toEqual(['win', 'new']);
   });
 });
 
