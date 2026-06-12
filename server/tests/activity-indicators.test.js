@@ -537,3 +537,20 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
     }
   });
 });
+
+describe('chips storage safety', () => {
+  // chips persist as a comma-joined string — a comma INSIDE an option value
+  // would shatter on the validation round-trip and reject the completion
+  // (Codex P2 on #1646). Registry-wide guard.
+  test('no chips option in any type contains a comma', () => {
+    for (const [type, cfg] of Object.entries(PROJECT_TYPES)) {
+      for (const field of cfg.findingsFields || []) {
+        if (field.type !== 'chips') continue;
+        for (const option of field.options || []) {
+          expect({ type, field: field.key, option, hasComma: option.includes(',') })
+            .toEqual({ type, field: field.key, option, hasComma: false });
+        }
+      }
+    }
+  });
+});

@@ -152,7 +152,7 @@ const PROJECT_TYPES = {
       { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', section: 'Evidence observed', options: [
         'Droppings', 'Urine staining', 'Gnaw marks', 'Rub marks / grease trails',
         'Nesting material', 'Noises reported by customer', 'Odor', 'Burrows / runways',
-        'Damaged insulation, wiring, or stored items',
+        'Damaged insulation / wiring / stored items',
       ] },
       { key: 'traps_checked', label: 'Traps checked', type: 'count', section: 'Trap activity' },
       { key: 'captures', label: 'Captures', type: 'count', section: 'Trap activity' },
