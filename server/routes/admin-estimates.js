@@ -640,6 +640,20 @@ router.get('/lead-auto-send/preview', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/estimates/actuals-variance — estimate-vs-actuals systematic
+// bias per service line (sample sizes + average deltas; positive = actuals
+// ran OVER the estimate). Ledger written nightly by the estimate-actuals cron.
+router.get('/actuals-variance', async (req, res, next) => {
+  try {
+    const days = Math.min(365, Math.max(7, parseInt(req.query.days, 10) || 90));
+    const { varianceSummary } = require('../services/estimate-actuals');
+    const serviceLines = await varianceSummary({ days });
+    res.json({ success: true, days, serviceLines });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {

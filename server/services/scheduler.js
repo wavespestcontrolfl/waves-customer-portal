@@ -1189,6 +1189,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Estimate actuals reconcile — nightly, joins completed services back to
+  // the accepted estimate that created them and writes the priced-vs-observed
+  // ledger (estimate_actuals). Systematic-bias aggregates are read via
+  // GET /api/admin/estimates/actuals-variance.
+  // =========================================================================
+  cron.schedule('37 2 * * *', async () => {
+    try {
+      const { runEstimateActualsReconcile } = require('./estimate-actuals');
+      const result = await runEstimateActualsReconcile();
+      if (result.written > 0) {
+        logger.info(`[estimate-actuals] nightly reconcile wrote ${result.written} row(s)`);
+      }
+    } catch (err) {
+      logger.error(`Estimate actuals reconcile cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Dashboard alerts — every 5 minutes, detect transitions in operational
   // alerts and fan out Waves admin notifications.
   // See server/services/dashboard-alerts-cron.js for the diff logic.
