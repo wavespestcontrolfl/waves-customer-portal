@@ -56,7 +56,7 @@ async function recoverStaleScheduledSmsClaims(now) {
       AND scheduled_for IS NOT NULL
       AND scheduled_for <= ?
       AND updated_at <= ?
-    RETURNING status
+    RETURNING status, metadata
   `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, now, staleBefore]);
 
   const recovered = result.rows || [];
@@ -64,6 +64,27 @@ async function recoverStaleScheduledSmsClaims(now) {
     const retryCount = recovered.filter(row => row.status === 'scheduled').length;
     const failedCount = recovered.filter(row => row.status === 'failed').length;
     logger.warn(`[scheduled-sms] Recovered ${recovered.length} stale claim(s): ${retryCount} retried, ${failedCount} failed`);
+
+    // Rows that exhausted their attempts will never send — any Agent Review
+    // decisions parked behind them must return to the composer now, not
+    // after the 48h expiry sweep. Retried rows keep their decisions parked.
+    const decisionIds = [];
+    for (const row of recovered) {
+      if (row.status !== 'failed') continue;
+      let meta = row.metadata;
+      if (typeof meta === 'string') {
+        try { meta = JSON.parse(meta); } catch { meta = {}; }
+      }
+      meta = meta || {};
+      if (meta.agent_decision_id) decisionIds.push(meta.agent_decision_id);
+      if (Array.isArray(meta.parked_decision_ids)) decisionIds.push(...meta.parked_decision_ids);
+    }
+    if (decisionIds.length) {
+      await require('./sms-suggest-mode').reopenScheduledSuggestions({
+        decisionIds,
+        reason: 'Scheduled send failed after repeated claim timeouts — suggestion reopened.',
+      });
+    }
   }
 }
 

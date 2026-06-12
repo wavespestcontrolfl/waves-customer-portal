@@ -1059,43 +1059,55 @@ router.post('/schedule-sms', async (req, res, next) => {
     // waits. Fire resolves the used one and ignores the parked ones;
     // cancel/failure reopens them all. A park failure rolls the queue
     // insert back — never a queued send with a still-actionable card.
-    const row = await db.transaction(async (trx) => {
-      let usedDecisionId = null;
-      if (scheduledAgentDecision) {
-        const parkedUsed = await markSuggestionScheduled(
-          { decisionId: scheduledAgentDecision.id, scheduledFor: sendAt }, trx
+    let row;
+    try {
+      row = await db.transaction(async (trx) => {
+        let usedDecisionId = null;
+        if (scheduledAgentDecision) {
+          const parkedUsed = await markSuggestionScheduled(
+            { decisionId: scheduledAgentDecision.id, scheduledFor: sendAt }, trx
+          );
+          // 0 rows = a concurrent request claimed/resolved this decision
+          // between verification and the guarded park. Queueing anyway
+          // would double-send the same reply — abort and roll back.
+          if (parkedUsed === 0) {
+            const conflict = new Error('This Agent Review draft was just handled elsewhere — refresh the thread before sending.');
+            conflict.statusCode = 409;
+            throw conflict;
+          }
+          usedDecisionId = scheduledAgentDecision.id;
+        }
+        const parkedIds = await parkThreadSuggestions(
+          { phoneLast10: normalizePhoneLast10(to), excludeDecisionId: scheduledAgentDecision?.id }, trx
         );
-        // 0 rows = concurrently resolved elsewhere — queue the text the
-        // operator approved, but nothing to resolve at fire time.
-        if (parkedUsed > 0) usedDecisionId = scheduledAgentDecision.id;
-      }
-      const parkedIds = await parkThreadSuggestions(
-        { phoneLast10: normalizePhoneLast10(to), excludeDecisionId: scheduledAgentDecision?.id }, trx
-      );
 
-      const metadata = (usedDecisionId || parkedIds.length)
-        ? JSON.stringify({
-          agent_decision_id: usedDecisionId || undefined,
-          parked_decision_ids: parkedIds.length ? parkedIds : undefined,
-        })
-        : null;
+        const metadata = (usedDecisionId || parkedIds.length)
+          ? JSON.stringify({
+            agent_decision_id: usedDecisionId || undefined,
+            parked_decision_ids: parkedIds.length ? parkedIds : undefined,
+          })
+          : null;
 
-      const [inserted] = await trx('sms_log')
-        .insert({
-          customer_id: trustedCustomerId,
-          direction: 'outbound',
-          from_phone: chosenFrom,
-          to_phone: to,
-          message_body: cleanBody,
-          status: 'scheduled',
-          message_type: messageType || 'manual',
-          admin_user_id: req.technicianId || null,
-          scheduled_for: sendAt,
-          metadata,
-        })
-        .returning(['id', 'scheduled_for']);
-      return inserted;
-    });
+        const [inserted] = await trx('sms_log')
+          .insert({
+            customer_id: trustedCustomerId,
+            direction: 'outbound',
+            from_phone: chosenFrom,
+            to_phone: to,
+            message_body: cleanBody,
+            status: 'scheduled',
+            message_type: messageType || 'manual',
+            admin_user_id: req.technicianId || null,
+            scheduled_for: sendAt,
+            metadata,
+          })
+          .returning(['id', 'scheduled_for']);
+        return inserted;
+      });
+    } catch (scheduleErr) {
+      if (scheduleErr.statusCode === 409) return res.status(409).json({ error: scheduleErr.message });
+      throw scheduleErr;
+    }
 
     res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });
   } catch (err) { next(err); }
