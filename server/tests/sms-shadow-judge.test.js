@@ -34,6 +34,15 @@ describe('shadow judge — reply pairing', () => {
     expect(pairDraftWithHumanReply(draft, [reply]).id).toBe('fast');
   });
 
+  test('no pre-anchor slack on linked inbounds — prior-thread replies stay out (Codex P2 r2)', () => {
+    // Human replied to the PREVIOUS message at 8:59; new inbound 9:00.
+    // Same DB clock on both timestamps — that reply is not this draft's
+    // ground truth, even though it's within the 2-min skew slack.
+    const linked = { id: 'd1', customer_id: 'c1', inbound_at: at(0), created_at: at(0) };
+    const priorReply = { id: 'prev', customer_id: 'c1', message_body: 'Answering your earlier text', created_at: new Date(base - 60 * 1000).toISOString() };
+    expect(pairDraftWithHumanReply(linked, [priorReply])).toBeNull();
+  });
+
   test('anchors on the inbound timestamp, not the slow drafter row (Codex P2)', () => {
     // Inbound 9:00, human replied 9:02, but the async drafter took 5 min —
     // draft row created_at 9:05. Anchoring on created_at would drop the

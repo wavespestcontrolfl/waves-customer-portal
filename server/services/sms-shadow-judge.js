@@ -2,8 +2,10 @@
  * SMS Shadow Judge — Phase C of the SMS brand-voice loop.
  *
  * Nightly: pairs each unjudged message_drafts status='shadow' row with the
- * reply a human actually sent (first manual outbound to the same customer
- * within REPLY_WINDOW_HOURS of the inbound), scores the AI draft against it
+ * reply a human actually sent (first human-authored 'manual' or
+ * human-approved 'ai_approved'/'ai_revised' outbound that really left the
+ * system, to the same customer within REPLY_WINDOW_HOURS of the inbound),
+ * scores the AI draft against it
  * per intent class, and writes shadow_draft_judgments. Per-intent score
  * history is what eventually graduates an intent from shadow → suggest →
  * auto-send (Phase E); escalation classes never graduate regardless.
@@ -113,7 +115,11 @@ function parseJudgeResponse(text) {
  * falling back to the draft row's created_at only when the sms_log link is
  * missing — the async drafter can take minutes (context + Anthropic call)
  * before its row lands, and a fast human reply must not fall "before" the
- * window (Codex P2). Small slack still covers residual clock skew.
+ * window (Codex P2). Pre-anchor slack applies ONLY to the fallback anchor:
+ * a linked inbound_at and the outbound created_at come from the same DB
+ * clock, and slack there would let a reply to the PREVIOUS message (sent
+ * up to 2 min before this inbound) masquerade as this draft's ground
+ * truth (Codex P2 round 2).
  *
  * The window END is capped at the customer's NEXT inbound (nextInboundAt):
  * in a burst of inbound texts, one human reply addresses the latest
@@ -127,14 +133,16 @@ function pairDraftWithHumanReply(
   manualOutbounds = [],
   { windowHours = REPLY_WINDOW_HOURS, slackMs = 2 * 60 * 1000, nextInboundAt = null } = {}
 ) {
+  const hasLinkedInbound = Boolean(draft.inbound_at);
   const anchor = new Date(draft.inbound_at || draft.created_at).getTime();
+  const preAnchorSlack = hasLinkedInbound ? 0 : slackMs;
   let windowEnd = anchor + windowHours * 3600 * 1000;
   if (nextInboundAt) {
     windowEnd = Math.min(windowEnd, new Date(nextInboundAt).getTime());
   }
   for (const reply of manualOutbounds) {
     const t = new Date(reply.created_at).getTime();
-    if (t < anchor - slackMs) continue;
+    if (t < anchor - preAnchorSlack) continue;
     if (t > windowEnd) break;
     if (String(reply.message_body || '').trim()) return reply;
   }
@@ -242,12 +250,19 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
   const earliestAnchor = Math.min(...drafts.map(anchorOf));
   const prefetchFrom = new Date(earliestAnchor - 5 * 60 * 1000);
 
+  // Human ground truth = human-authored ('manual') OR human-approved
+  // ('ai_approved'/'ai_revised' via the legacy draft approval queue —
+  // admin-drafts.js routes original_message_type into sms_log.message_type).
+  // Positive status allowlist: only messages that actually left our system
+  // count ('sent' is the initial provider-success write; queued/delivered
+  // come from Twilio status callbacks). Internal queue states (scheduled/
+  // sending/blocked) and failures never become ground truth.
   const outbounds = await db('sms_log')
     .where('direction', 'outbound')
-    .where('message_type', 'manual')
+    .whereIn('message_type', ['manual', 'ai_approved', 'ai_revised'])
     .whereIn('customer_id', customerIds)
     .where('created_at', '>=', prefetchFrom)
-    .whereNotIn('status', ['failed', 'undelivered', 'scheduled'])
+    .whereIn('status', ['queued', 'sent', 'delivered'])
     .select('id', 'customer_id', 'message_body', 'created_at')
     .orderBy('created_at', 'asc');
   const outboundsByCustomer = new Map();
