@@ -1026,6 +1026,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     garageType: rc?.garageType || '',
     garageSpaces: rc?.garageSpaces || 0,
     hasAttachedGarage: detectAttachedGarage(rc),
+    // County-assessed detached/waterfront structures (extra-features roll;
+    // tri-state, null = roll not parsed). Evidence-only: pricing modifiers
+    // are untouched — pestGarageAdj still keys on the ATTACHED-garage
+    // detection; wiring detached garages or dock-confirmed water adjacency
+    // into modifiers is a later, gated step.
+    hasDetachedGarage: rc?.hasDetachedGarage ?? null,
+    detachedGarageSqft: rc?.detachedGarageSqft || null,
+    hasDock: rc?.hasDock ?? null,
 
     // ── POOL / LANAI ──
     // County-assessed cage sqft (extra-features roll) beats the vision guess

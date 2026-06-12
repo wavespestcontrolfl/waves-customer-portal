@@ -1782,9 +1782,11 @@ const SPA_FEATURE_RE = /\bSPA\b|JACUZZI|HOT\s*TUB|WHIRLPOOL/i;
 // pool, spa, and pool deck YES and the screen CAGE NO — mesh doesn't seal
 // the ground; the deck beneath is its own YES row). Counties without the
 // flag fall back to a conservative keyword classification mirroring those
-// semantics: pools, patios, decks, porches, driveways, walkways count;
-// cages/screens, vertical features (fence/wall), and equipment don't.
-const IMPERVIOUS_FEATURE_RE = /\b(POOL|PATIO|DECK|PORCH|DRIVEWAY|WALKWAY|SIDEWALK|CARPORT|PAVER|SPA)\b/i;
+// semantics: pools, patios, decks, porches, driveways, walkways, and
+// detached structures (garages/sheds — assessed footprints that seal the
+// ground, which Manatee's flag already counts) count; cages/screens,
+// vertical features (fence/wall), and equipment don't.
+const IMPERVIOUS_FEATURE_RE = /\b(POOL|PATIO|DECK|PORCH|DRIVEWAY|WALKWAY|SIDEWALK|CARPORT|PAVER|SPA|GARAGE|SHED)\b/i;
 const IMPERVIOUS_FEATURE_EXCLUDE_RE = /CAGE|ENCLOS|SCREEN|HEATER|EQUIP|BATH|DOCK|BOAT|LIFT|FENCE|WALL|SOLAR/i;
 
 // Returns { imperviousAreaSf } — total assessed impervious sqft for the
@@ -1807,6 +1809,33 @@ function imperviousFactsFromFeatures(features) {
     if (counts) total += sqft;
   }
   return { imperviousAreaSf: total };
+}
+
+// Detached structures + waterfront structures from the same assessed rows.
+// Attached garages live in the building data, not the features roll — a
+// GARAGE row here is the detached kind, an entry-point surface the building
+// record can't see. A dock/boat-lift/davit row is positive water-adjacency
+// evidence: a parcel with an assessed dock IS on water regardless of what
+// vision concluded. Tri-state like hasPool: callers that never parsed a
+// table return {} upstream; parsed-with-no-rows is a meaningful false.
+const DETACHED_GARAGE_FEATURE_RE = /\bGARAGE\b/i;
+const DOCK_FEATURE_RE = /\bDOCK\b|BOAT\s*LIFT|BOATLIFT|\bDAVIT\b/i;
+
+function garageDockFactsFromFeatures(features) {
+  if (!Array.isArray(features)) return {};
+  const facts = { hasDetachedGarage: false, detachedGarageSqft: null, hasDock: false };
+  for (const item of features) {
+    const description = String(item?.description || '');
+    const sqft = coerceInt(item?.sqft, 1, 200000);
+    if (DETACHED_GARAGE_FEATURE_RE.test(description)) {
+      facts.hasDetachedGarage = true;
+      // Largest structure wins when multiple garage rows exist.
+      if (sqft && sqft > (facts.detachedGarageSqft || 0)) facts.detachedGarageSqft = sqft;
+    } else if (DOCK_FEATURE_RE.test(description)) {
+      facts.hasDock = true;
+    }
+  }
+  return facts;
 }
 
 function poolFactsFromFeatures(features) {
@@ -1837,7 +1866,11 @@ function manateePoolFeatures(features) {
     sqft: row.Area,
     impervious: row.Impervious,
   }));
-  return { ...poolFactsFromFeatures(mapped), ...imperviousFactsFromFeatures(mapped) };
+  return {
+    ...poolFactsFromFeatures(mapped),
+    ...imperviousFactsFromFeatures(mapped),
+    ...garageDockFactsFromFeatures(mapped),
+  };
 }
 
 // Sarasota detail page "Extra Features" grid (no id/caption — heading only):
@@ -1850,7 +1883,11 @@ function sarasotaPoolFeatures(detailHtml) {
     description: row.Description,
     sqft: /^SF$/i.test(String(row['Unit Type'] || '').trim()) ? row.Units : null,
   }));
-  return { ...poolFactsFromFeatures(mapped), ...imperviousFactsFromFeatures(mapped) };
+  return {
+    ...poolFactsFromFeatures(mapped),
+    ...imperviousFactsFromFeatures(mapped),
+    ...garageDockFactsFromFeatures(mapped),
+  };
 }
 
 // Charlotte Show_Parcel "Land Improvement Information" table (oth=T, already
@@ -1860,7 +1897,11 @@ function charlottePoolFeatures(detailHtml) {
   if (!table) return {};
   const rows = parseHtmlTableRows(table);
   const mapped = rows.map((row) => ({ description: row.Description, sqft: row.Size }));
-  return { ...poolFactsFromFeatures(mapped), ...imperviousFactsFromFeatures(mapped) };
+  return {
+    ...poolFactsFromFeatures(mapped),
+    ...imperviousFactsFromFeatures(mapped),
+    ...garageDockFactsFromFeatures(mapped),
+  };
 }
 
 function parseManateePaoRecord({ address, search, land, buildings, features }) {
@@ -2682,6 +2723,9 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     // Tri-state like hasPool: number (possibly 0) only when a county
     // features table was parsed; null = no signal.
     imperviousAreaSf: p.imperviousAreaSf ?? null,
+    hasDetachedGarage: p.hasDetachedGarage ?? null,
+    detachedGarageSqft: p.detachedGarageSqft || null,
+    hasDock: p.hasDock ?? null,
     unitCount: 1,
     ownerType: null,
     ownerNames: [],
@@ -3044,6 +3088,7 @@ module.exports = {
     parseSarasotaPaoRecord,
     parseCharlottePaoRecord,
     parsePropertyJSON,
+    garageDockFactsFromFeatures,
     imperviousFactsFromFeatures,
     poolFactsFromFeatures,
     sarasotaPoolFeatures,
