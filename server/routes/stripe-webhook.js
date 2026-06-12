@@ -1789,6 +1789,15 @@ async function handlePaymentIntentCanceled(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent canceled: ${piId}`);
 
+  // Deposit PIs have no payments row — mark the pending ledger row terminal
+  // instead (which advances the retry generation so the next deposit
+  // attempt mints a fresh PI rather than reusing this canceled secret).
+  if (paymentIntent.metadata?.purpose === 'estimate_deposit') {
+    const { handleDepositIntentCanceled } = require('../services/estimate-deposits');
+    await handleDepositIntentCanceled(paymentIntent);
+    return;
+  }
+
   // No .catch — a failed write must propagate so the event is retried.
   await db('payments')
     .where({ stripe_payment_intent_id: piId })

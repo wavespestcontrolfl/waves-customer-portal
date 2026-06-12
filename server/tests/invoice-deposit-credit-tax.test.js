@@ -70,12 +70,6 @@ function setupDb({ customer }) {
 describe('deposit credit is after-tax prior payment, never a discount', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  const depositLine = {
-    description: 'Deposit credit (paid at acceptance)',
-    quantity: 1,
-    unit_price: -70,
-    category: 'deposit_credit',
-  };
   const serviceLine = {
     description: 'First service application',
     quantity: 1,
@@ -89,8 +83,9 @@ describe('deposit credit is after-tax prior payment, never a discount', () => {
     await InvoiceService.create({
       customerId: 'cust-1',
       title: 'First Service Application',
-      lineItems: [serviceLine, depositLine],
+      lineItems: [serviceLine],
       taxRate: 0.07,
+      depositCredit: { amount: 70 },
     });
     const row = getInsertedInvoice();
     expect(row.subtotal).toBe(200);
@@ -108,13 +103,31 @@ describe('deposit credit is after-tax prior payment, never a discount', () => {
     await InvoiceService.create({
       customerId: 'cust-1',
       title: 'First Service Application',
-      lineItems: [serviceLine, depositLine],
+      lineItems: [serviceLine],
+      depositCredit: { amount: 70 },
     });
     const row = getInsertedInvoice();
     expect(row.subtotal).toBe(200);
     expect(row.discount_amount).toBe(0);
     expect(row.tax_amount).toBe(0);
     expect(row.total).toBe(130);
+  });
+
+  it('caller-supplied deposit_credit LINE ITEMS are rejected — only the ledger-backed param may mint one (P1)', async () => {
+    setupDb({ customer: { id: 'cust-1', property_type: 'residential' } });
+    // Admin manual/batch invoice routes pass request line items straight
+    // through; a hand-crafted deposit_credit line would subtract real
+    // dollars with no estimate_deposits ledger backing.
+    await expect(InvoiceService.create({
+      customerId: 'cust-1',
+      title: 'First Service Application',
+      lineItems: [serviceLine, {
+        description: 'Deposit credit (paid at acceptance)',
+        quantity: 1,
+        unit_price: -70,
+        category: 'deposit_credit',
+      }],
+    })).rejects.toThrow(/depositCredit parameter/);
   });
 
   it('depositCredit REQUEST is capped at the POST-discount invoice value — discounted dollars never consume ledger money (P1)', async () => {
@@ -159,6 +172,20 @@ describe('deposit credit is after-tax prior payment, never a discount', () => {
     // After-discount $20 + 7% tax $1.40 = $21.40 of absorbable value.
     expect(invoice.applied_deposit_credit).toBe(21.4);
     expect(row.total).toBe(0);
+  });
+
+  it('the depositCredit line carries its estimate_id stamp — the application record void-restore reads (P1)', async () => {
+    const { getInsertedInvoice } = setupDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+    });
+    await InvoiceService.create({
+      customerId: 'cust-1',
+      title: 'First visit',
+      lineItems: [{ description: 'Service', quantity: 1, unit_price: 100 }],
+      depositCredit: { amount: 49, estimateId: 'est-1' },
+    });
+    const credit = JSON.parse(getInsertedInvoice().line_items).find((i) => i.category === 'deposit_credit');
+    expect(credit.estimate_id).toBe('est-1');
   });
 
   it('a zero-value invoice applies NO depositCredit — the full balance rolls forward', async () => {
@@ -263,7 +290,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
 
     const row = getInsertedInvoice();
     const lines = JSON.parse(row.line_items);
-    expect(lines.some((i) => i.category === 'deposit_credit' && i.unit_price === -99)).toBe(true);
+    expect(lines.some((i) => i.category === 'deposit_credit' && i.unit_price === -99 && i.estimate_id === 'est-1')).toBe(true);
     expect(row.total).toBe(151); // 250 − 99, residential no tax
     expect(mockConsumeDepositCredit).toHaveBeenCalledWith(
       expect.objectContaining({ estimateId: 'est-1', amount: 99, invoiceId: 'invoice-1' }),
@@ -307,5 +334,46 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     expect(JSON.parse(row.line_items).some((i) => i.category === 'deposit_credit')).toBe(false);
     expect(row.total).toBe(250);
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+  });
+});
+
+describe('line-item edits on deposit-credited invoices are blocked (P1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function invoicesOnlyDb(storedInvoice) {
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => storedInvoice),
+        };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+  }
+
+  it('rejects line-item edits when the stored invoice carries a deposit_credit line — void-and-recreate is the supported path', async () => {
+    invoicesOnlyDb({
+      id: 'inv-1',
+      customer_id: 'cust-1',
+      line_items: JSON.stringify([
+        { description: 'Service', quantity: 1, unit_price: 100 },
+        { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -49, amount: -49, category: 'deposit_credit', estimate_id: 'est-1' },
+      ]),
+    });
+    // The edit recalculation can neither re-cap the credit nor re-balance
+    // the consumed estimate_deposits ledger — shrinking the invoice would
+    // leave credited_amount over-applied with no roll-forward/refund path.
+    await expect(InvoiceService.update('inv-1', {
+      line_items: [{ description: 'Service', quantity: 1, unit_price: 50 }],
+    })).rejects.toThrow(/deposit credit/);
+  });
+
+  it('rejects edits that introduce a deposit_credit line by hand — only create() may mint one, backed by the ledger', async () => {
+    invoicesOnlyDb({ id: 'inv-1', customer_id: 'cust-1', line_items: '[]' });
+    await expect(InvoiceService.update('inv-1', {
+      line_items: [{ description: 'Manual credit', quantity: 1, unit_price: -49, amount: -49, category: 'deposit_credit' }],
+    })).rejects.toThrow(/deposit credit/);
   });
 });

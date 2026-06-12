@@ -767,17 +767,18 @@ const InvoiceService = {
       }
       return { row: d, dollars: Math.round(dollars * 100) / 100 };
     });
-    // Deposit credits are PRIOR PAYMENT, not price reductions: they must not
-    // shrink the tax base or fold into discount reporting. Excluded from the
-    // discount machinery here and subtracted AFTER tax below. The lines stay
-    // in line_items for display.
-    const depositCreditTotal =
-      Math.round(
-        items
-          .filter((item) => item.category === "deposit_credit")
-          .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
-          100,
-      ) / 100;
+    // Deposit credits are PRIOR PAYMENT backed dollar-for-dollar by consumed
+    // estimate_deposits ledger rows — only the `depositCredit` param below
+    // may mint one (create() caps it and the caller consumes the ledger in
+    // the same transaction). A caller-supplied deposit_credit line item
+    // (admin manual/batch invoice routes pass request line items straight
+    // through) would subtract real dollars from the total with NO ledger
+    // backing.
+    if (items.some((item) => item?.category === "deposit_credit")) {
+      throw new Error(
+        "deposit_credit line items are ledger-backed and cannot be supplied directly — use the depositCredit parameter",
+      );
+    }
     const lineItemDiscountIds = items
       .filter((item) => Number(item.amount) < 0 && item.discount_id)
       .map((item) => item.discount_id);
@@ -956,15 +957,14 @@ const InvoiceService = {
       }
     }
     // Deposit credit applies AFTER tax — prior payment, not a discount.
-    // Line-item credits arrive pre-capped by their callers (discount-free
-    // paths); the `depositCredit` param is capped HERE against the actual
-    // after-tax value so no requested dollar is consumed without appearing
-    // in the total. The floor guards rounding edges.
+    // The `depositCredit` param is capped HERE against the actual after-tax
+    // value so no requested dollar is consumed without appearing in the
+    // total. The floor guards rounding edges.
     let appliedDepositCredit = 0;
     if (depositCredit && Number(depositCredit.amount) > 0) {
       const ceilingCents = Math.max(
         0,
-        Math.round((afterDiscount + taxAmount - depositCreditTotal) * 100),
+        Math.round((afterDiscount + taxAmount) * 100),
       );
       const appliedCents = Math.min(
         Math.round(Number(depositCredit.amount) * 100),
@@ -978,13 +978,17 @@ const InvoiceService = {
           unit_price: -appliedDepositCredit,
           amount: -appliedDepositCredit,
           category: "deposit_credit",
+          // The line is the application record: voiding this invoice reads
+          // the stamp to return the consumed dollars to the right ledger
+          // (restoreDepositCreditForVoidedInvoice).
+          ...(depositCredit.estimateId ? { estimate_id: depositCredit.estimateId } : {}),
         });
       }
     }
     const total = Math.max(
       0,
       Math.round(
-        (afterDiscount + taxAmount - depositCreditTotal - appliedDepositCredit) * 100,
+        (afterDiscount + taxAmount - appliedDepositCredit) * 100,
       ) / 100,
     );
 
@@ -1252,7 +1256,7 @@ const InvoiceService = {
             const created = await this.create({
               ...createParams,
               database: trx,
-              depositCredit: { amount: requested },
+              depositCredit: { amount: requested, estimateId: sourceEstimateId },
             });
             const effective = Number(created?.applied_deposit_credit) || 0;
             if (created?.id && effective > 0) {
@@ -2148,6 +2152,26 @@ const InvoiceService = {
     if (updates.line_items) {
       const invoice = await db("invoices").where({ id }).first();
       if (!invoice) return null;
+      // Deposit-credited invoices are edit-locked on line items: the credit
+      // line is backed dollar-for-dollar by consumed estimate_deposits
+      // ledger rows, and a recalculation here can neither re-cap the credit
+      // against the new total nor re-balance the ledger — an edit could
+      // shrink the invoice below the credit (over-applied ledger money) or
+      // drop the credit line entirely while the deposit stays consumed.
+      // Void the invoice (which restores the ledger) and re-create instead.
+      const hasDepositCreditLine = (items) => {
+        try {
+          const arr = typeof items === "string" ? JSON.parse(items) : items;
+          return Array.isArray(arr) && arr.some((i) => i?.category === "deposit_credit");
+        } catch {
+          return false;
+        }
+      };
+      if (hasDepositCreditLine(invoice.line_items) || hasDepositCreditLine(updates.line_items)) {
+        throw new Error(
+          "This invoice carries an estimate deposit credit — void it (the deposit returns to the customer's ledger) and create a replacement instead of editing line items",
+        );
+      }
       const customer = await db("customers")
         .where({ id: invoice.customer_id })
         .first();
@@ -2183,10 +2207,25 @@ const InvoiceService = {
       await stopInvoiceFollowupSequence(id, "invoice_voided");
       return current;
     }
-    const [invoice] = await db("invoices")
-      .where({ id })
-      .update({ status: "void", updated_at: new Date() })
-      .returning("*");
+    // Void + deposit-ledger restore commit TOGETHER: a committed void beside
+    // a still-consumed deposit strands the customer's money — the credit can
+    // no longer roll forward or refund (a restore failure rolls the void
+    // back; a blocked void beats stranded money). The status-conditional
+    // update makes a concurrent void/payment lose cleanly, so the restore
+    // can never run twice for one invoice.
+    let invoice = null;
+    await db.transaction(async (trx) => {
+      const [updated] = await trx("invoices")
+        .where({ id, status: current.status })
+        .update({ status: "void", updated_at: new Date() })
+        .returning("*");
+      if (!updated) {
+        throw new Error("Invoice status changed while voiding — re-check and retry");
+      }
+      const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
+      await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });
+      invoice = updated;
+    });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {
       await require("./annual-prepay-renewals").syncTermForInvoicePayment(
@@ -2323,6 +2362,13 @@ const InvoiceService = {
               .update({ status: "void", updated_at: new Date() })
               .returning("*");
             if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
+            // Same-transaction ledger restore, matching voidInvoice: a
+            // cancelled job's pre-minted first invoice may carry the
+            // estimate's deposit credit, which must become available again
+            // (roll-forward or terminal sweep) once this invoice stops
+            // billing.
+            const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
+            await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice, trx });
             return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
           });
 

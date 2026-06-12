@@ -237,9 +237,23 @@ async function createDepositIntentForEstimate(estimate, { oneTime = false } = {}
     return { alreadySatisfied: true, amount: 0, requiredAmount, receivedTotal };
   }
   const amount = missingCents / 100;
+  // Refunded/disputed money must not poison retries: within Stripe's
+  // idempotency window the bare estimate+amount key would hand back the OLD
+  // succeeded (and refunded) PI, whose terminal ledger row can never satisfy
+  // the gate — the customer would be stuck unable to pay a replacement
+  // deposit. Terminal rows only grow, so their count is a monotonic retry
+  // generation that mints a fresh PI after every refund/failure while
+  // same-generation retries still reuse one intent.
+  const terminalCountRow = await db('estimate_deposits')
+    .where({ estimate_id: estimate.id })
+    .whereIn('status', ['refunding', 'refunded', 'failed'])
+    .count({ n: '*' })
+    .first();
+  const retryGeneration = Number(terminalCountRow?.n || 0);
   const paymentIntent = await StripeService.createEstimateDepositIntent({
     estimateId: estimate.id,
     amountDollars: amount,
+    retryGeneration,
   });
   if (!paymentIntent) return null;
 
@@ -772,6 +786,107 @@ async function consumeDepositCredit({ estimateId, amount, invoiceId, trx = db })
   return (requestedCents - remainingCents) / 100;
 }
 
+// payment_intent.canceled on a deposit PI: a canceled intent can never
+// succeed again, so its pending row goes terminal ('failed'). This also
+// advances the idempotency retry generation — without it, a retry inside
+// Stripe's idempotency window would be handed the same canceled
+// client_secret until the window expired. Monotonic: ONLY pending rows
+// flip. payment_intent.payment_failed deliberately does NOT land here — a
+// declined attempt leaves the PI live and retryable, and flipping its row
+// terminal would orphan money if a later attempt on the same PI succeeded.
+async function handleDepositIntentCanceled(paymentIntent) {
+  if (paymentIntent?.metadata?.purpose !== 'estimate_deposit' || !paymentIntent.id) {
+    return { handled: false };
+  }
+  const updated = await db('estimate_deposits')
+    .where({ stripe_payment_intent_id: paymentIntent.id, status: 'pending' })
+    .update({ status: 'failed', updated_at: db.fn.now() });
+  if (updated) {
+    logger.info('[estimate-deposits] canceled deposit intent marked failed — retries will mint a fresh PI', {
+      paymentIntentId: paymentIntent.id,
+    });
+  }
+  return { handled: true };
+}
+
+// Reverse a voided invoice's deposit consumption. The voided invoice's own
+// deposit_credit line items are the application record — each is stamped
+// with its estimate_id by InvoiceService.create(). Per-row attribution is
+// impossible (partial consumes never stamp credited_invoice_id), but the
+// ledger is a pool per estimate, so returning the voided dollars to the
+// estimate's live rows (newest consumption first) restores exactly what the
+// void released. Rows in refund/dispute states are never touched — that
+// money already left. A shortfall (unstamped legacy line, or rows flipped
+// terminal under us) raises the reconcile alert and then THROWS: callers
+// run this inside the void transaction, so the void rolls back rather than
+// committing beside a still-consumed ledger with no retry path — a blocked
+// void beats stranded money, and the human resolving the alert unblocks it.
+// Returns dollars restored on full success.
+async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
+  const items = (() => {
+    try {
+      const raw = invoice?.line_items;
+      const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return Array.isArray(arr) ? arr : [];
+    } catch { return []; }
+  })();
+  const creditLines = items.filter((item) => item?.category === 'deposit_credit');
+  let totalRequestedCents = 0;
+  let totalRestoredCents = 0;
+  for (const line of creditLines) {
+    const requestedCents = Math.abs(Math.round(Number(line.amount ?? line.unit_price ?? 0) * 100));
+    if (!(requestedCents > 0)) continue;
+    totalRequestedCents += requestedCents;
+    const estimateId = line.estimate_id || null;
+    if (!estimateId) continue; // unstamped line — counted in the shortfall alert below
+    let remainingCents = requestedCents;
+    const rows = await trx('estimate_deposits')
+      .where({ estimate_id: estimateId })
+      .whereIn('status', ['received', 'credited'])
+      .orderBy('updated_at', 'desc')
+      .select('id', 'status', 'credited_amount');
+    for (const row of rows) {
+      if (remainingCents <= 0) break;
+      const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
+      if (creditedCents <= 0) continue;
+      const giveCents = Math.min(creditedCents, remainingCents);
+      // CONDITIONAL: only restore the exact state the math used — reversal
+      // webhooks and concurrent consumes race this, and an unconditional
+      // write could resurrect refunded money. A lost row simply doesn't
+      // count toward the restored total.
+      const updatedCount = await trx('estimate_deposits')
+        .where({ id: row.id, status: row.status, credited_amount: row.credited_amount })
+        .update({
+          credited_amount: (creditedCents - giveCents) / 100,
+          // A fully-consumed row becomes available again for later
+          // roll-forwards or the terminal sweep.
+          ...(row.status === 'credited' ? { status: 'received', credited_invoice_id: null } : {}),
+          updated_at: trx.fn.now(),
+        });
+      if (!updatedCount) continue;
+      remainingCents -= giveCents;
+    }
+    totalRestoredCents += requestedCents - remainingCents;
+  }
+  if (totalRestoredCents < totalRequestedCents) {
+    logger.error('[estimate-deposits] voided invoice deposit credit cannot be fully restored — void rolled back, manual reconciliation needed', {
+      invoiceId: invoice?.id || null,
+      requested: totalRequestedCents / 100,
+      restored: totalRestoredCents / 100,
+    });
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('estimate_deposit_reconcile_needed', { invoiceId: invoice?.id || null });
+    } catch (notifyErr) {
+      logger.error(`[estimate-deposits] failed to raise reconcile alert for voided invoice ${invoice?.id}: ${notifyErr.message}`);
+    }
+    throw new Error(
+      `deposit credit restore incomplete for invoice ${invoice?.id} (restored $${totalRestoredCents / 100} of $${totalRequestedCents / 100}) — void blocked until the ledger is reconciled`,
+    );
+  }
+  return totalRestoredCents / 100;
+}
+
 module.exports = {
   computeDepositAmount,
   consumeDepositCredit,
@@ -779,12 +894,14 @@ module.exports = {
   ensureDepositSatisfied,
   handleDepositChargeReversed,
   handleDepositDisputeClosed,
+  handleDepositIntentCanceled,
   handleDepositIntentSucceeded,
   isDepositEnforced,
   pendingDepositCredit,
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
+  restoreDepositCreditForVoidedInvoice,
   sweepTerminalEstimateDeposits,
   _private: {
     claimDepositRowForRefund,

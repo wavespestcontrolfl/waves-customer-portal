@@ -732,7 +732,7 @@ const EstimateConverter = {
                   notes: invoiceNotes,
                   dueDate: etDateString(),
                   ...(requestedDepositCredit > 0
-                    ? { depositCredit: { amount: requestedDepositCredit } }
+                    ? { depositCredit: { amount: requestedDepositCredit, estimateId } }
                     : {}),
                 });
                 const effectiveDepositCredit = Number(created?.applied_deposit_credit) || 0;
