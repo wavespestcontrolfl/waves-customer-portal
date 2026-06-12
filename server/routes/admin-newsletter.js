@@ -570,6 +570,7 @@ router.post('/sends/:id/test', async (req, res) => {
       unsubscribeUrl: demoUrl,
       preheader: send.preview_text || undefined,
       newsletterType: send.newsletter_type || undefined,
+      preferredSourcesCta: true,
     });
     // Resolve the greeting first-name token the way the broadcast does:
     // use the test recipient's subscriber row when one exists, so the
@@ -788,6 +789,7 @@ router.post('/preview', async (req, res) => {
       unsubscribeUrl: demoUrl,
       preheader: previewText || undefined,
       newsletterType: newsletterType || undefined,
+      preferredSourcesCta: true,
     });
     res.json({ html });
   } catch (err) {

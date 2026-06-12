@@ -210,12 +210,27 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  *   newsletterType?: string,       // when 'local-weekly-fresh-events',
  *                                  // renders the local guide header
  *                                  // instead of "The Waves Newsletter"
+ *   preferredSourcesCta?: boolean, // newsletter broadcasts only — renders
+ *                                  // the Google Preferred Sources opt-in
+ *                                  // line above the unsub footer. Off by
+ *                                  // default so automation drips and
+ *                                  // library templates stay unchanged.
  * }} opts
  */
-function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType } = {}) {
+function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta } = {}) {
   const safeBody = body || '';
   const unsubLine = unsubscribeUrl
     ? `<a href="${unsubscribeUrl}" style="color:${MUTED};text-decoration:underline;">Unsubscribe</a> · `
+    : '';
+
+  // Google Preferred Sources is per-user search personalization: a signed-in
+  // reader who follows this link and checks the box sees Waves badged and
+  // surfaced more often in their own Top Stories / AI Overviews / AI Mode
+  // results. Domain-level only, so the hub domain is the one to promote.
+  const preferredSourcesLine = preferredSourcesCta
+    ? `<div style="margin-bottom:10px;font-family:Inter,Arial,sans-serif;font-size:12px;line-height:1.6;color:${BODY};text-align:center;">
+            Like what we send? <a href="https://www.google.com/preferences/source?q=${WAVES_WEBSITE_HOST}" style="color:${WAVES_BLUE};text-decoration:underline;font-weight:600;">Make Waves a preferred source on Google</a> — one tap, and you'll see more of us in your searches.
+          </div>`
     : '';
 
   const isLocalGuide = newsletterType === 'local-weekly-fresh-events';
@@ -256,7 +271,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslette
           ${safeBody}
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:18px 24px 22px 24px;border-top:1px solid ${RULE};">
-          <div style="font-family:Inter,Arial,sans-serif;font-size:12px;line-height:1.6;color:${MUTED};text-align:center;">
+          ${preferredSourcesLine}<div style="font-family:Inter,Arial,sans-serif;font-size:12px;line-height:1.6;color:${MUTED};text-align:center;">
             ${unsubLine}<a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:underline;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
           </div>
           <div style="margin-top:6px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">
