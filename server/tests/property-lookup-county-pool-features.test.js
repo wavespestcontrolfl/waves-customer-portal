@@ -105,6 +105,7 @@ describe('county extractors (live-probe fixtures)', () => {
   it('Manatee: pool 288 sqft + 1,066 sqft cage + spa', () => {
     expect(manateePoolFeatures(MANATEE_FEATURES)).toEqual({
       hasPool: true, poolAreaSqft: 288, poolCageSqft: 1066, hasSpa: true,
+      imperviousAreaSf: 1018, // flag-driven: pool 288 + spa 1 + deck 729; cage flagged NO
     });
   });
 
@@ -117,6 +118,7 @@ describe('county extractors (live-probe fixtures)', () => {
   it('Sarasota: Swimming Pool + Screened Enclosure from the Extra Features grid', () => {
     expect(sarasotaPoolFeatures(SARASOTA_POOL_HTML)).toEqual({
       hasPool: true, poolAreaSqft: 392, poolCageSqft: 1066, hasSpa: false,
+      imperviousAreaSf: 1066, // keyword fallback: pool 392 + patio 674; enclosure excluded
     });
   });
 
@@ -137,6 +139,7 @@ describe('county extractors (live-probe fixtures)', () => {
   it('Charlotte: Pool - Gunite + Screen Cage from Land Improvement Information', () => {
     expect(charlottePoolFeatures(CHARLOTTE_POOL_HTML)).toEqual({
       hasPool: true, poolAreaSqft: 392, poolCageSqft: 840, hasSpa: false,
+      imperviousAreaSf: 512, // keyword fallback: pool 392 + porch/deck 120; screen cage excluded
     });
   });
 

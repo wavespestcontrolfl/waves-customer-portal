@@ -949,7 +949,35 @@ Return a JSON object with exactly these fields:
 // ─────────────────────────────────────────────
 // ENRICHED PROFILE — merges all data sources
 // ─────────────────────────────────────────────
+// SHADOW (estimator backlog: building-footprint turf subtraction):
+// deterministic turf ceiling from county-assessed facts alone — lot minus
+// the ground-floor building footprint (living area / stories) minus the
+// assessed impervious improvements from the county extra-features roll
+// (imperviousAreaSf; null = roll not parsed, treated as 0 and flagged via
+// parts.imperviousKnown). Attached to the profile for comparison against
+// the vision estimate and, downstream, the estimate_actuals measured-turf
+// loop; NOT read by pricing — computeTurfArea consumes estimatedTurfSf /
+// measuredTurfSf only. Promoting this from shadow to a pricing input is a
+// deliberate later flip once the logged deltas have been judged.
+function computeFootprintTurf(rc) {
+  const lotSqFt = Number(rc?.lotSize);
+  const homeSqFt = Number(rc?.squareFootage);
+  if (!Number.isFinite(lotSqFt) || lotSqFt <= 0) return null;
+  if (!Number.isFinite(homeSqFt) || homeSqFt <= 0) return null;
+  const stories = Math.max(1, Number(rc?.stories) || 1);
+  const footprintSf = Math.round(homeSqFt / stories);
+  const imperviousRaw = Number(rc?.imperviousAreaSf);
+  const imperviousKnown = rc?.imperviousAreaSf != null && Number.isFinite(imperviousRaw);
+  const imperviousSf = imperviousKnown ? imperviousRaw : 0;
+  const turfSf = Math.max(0, Math.round(lotSqFt - footprintSf - imperviousSf));
+  return {
+    turfSf,
+    parts: { lotSqFt: Math.round(lotSqFt), footprintSf, imperviousSf, imperviousKnown },
+  };
+}
+
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
+  const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
   const imperviousSurfacePercent = firstNonNegativeNumber(
@@ -1026,6 +1054,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     imperviousSurfacePercent,
     imperviosSurfacePercent: imperviousSurfacePercent,
     estimatedTurfSf: ai?.estimatedTurfSf || 0,
+    // Shadow comparison fields — see computeFootprintTurf. Not a pricing
+    // input; estimatedTurfSf above remains the engine's turf source.
+    footprintTurfSf: footprintTurf ? footprintTurf.turfSf : null,
+    footprintTurfParts: footprintTurf ? footprintTurf.parts : null,
     turfCappedToParcel: ai?.turfCappedToParcel === true,
     _turfPreCapSf: ai?._turfPreCapSf,
     turfCondition: ai?.turfCondition || 'UNKNOWN',
@@ -1149,6 +1181,22 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
       fieldEvidence: !!(rc?._fieldEvidence && Object.keys(rc._fieldEvidence).length),
     }
   };
+
+  // Shadow signal for the footprint-turf rollout decision: how far the
+  // vision estimate sits from the deterministic county-facts ceiling.
+  // Coarse fields only (no address/parcel values — PII rule).
+  if (footprintTurf && !commercialProfile && profile.estimatedTurfSf > 0) {
+    const deltaPct = Math.round(
+      ((profile.estimatedTurfSf - footprintTurf.turfSf) / Math.max(footprintTurf.turfSf, 1)) * 1000,
+    ) / 10;
+    logger.info('[turf-footprint] shadow comparison', {
+      footprintTurfSf: footprintTurf.turfSf,
+      estimatedTurfSf: profile.estimatedTurfSf,
+      deltaPct,
+      imperviousKnown: footprintTurf.parts.imperviousKnown,
+      county: profile.county || null,
+    });
+  }
 
   return profile;
 }
@@ -2738,6 +2786,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyParcelTurfBound,
+  computeFootprintTurf,
   buildParcelOverlayParam,
   buildSatelliteVisionPrompt,
   buildVisionContext,
