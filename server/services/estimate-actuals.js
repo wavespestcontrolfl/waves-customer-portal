@@ -118,6 +118,7 @@ function buildActualsRow({ serviceRecord, scheduledService, estimate, completion
 // an accepted estimate. One query for the spine; per-service lookups for the
 // completion ledger and product count (bounded by MAX_BATCH).
 async function reconcileEstimateActuals({ rescanDays = DEFAULT_RESCAN_DAYS } = {}) {
+  logger.info('[estimate-actuals] scan started', { rescanDays });
   const spine = await db('service_records as sr')
     .join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .join('estimates as e', 'e.id', 'ss.source_estimate_id')
@@ -181,7 +182,11 @@ async function reconcileEstimateActuals({ rescanDays = DEFAULT_RESCAN_DAYS } = {
     }
   }
 
-  if (written || failed) logger.info('[estimate-actuals] reconciled completed services', { written, failed, rescanDays });
+  // Always log completion — a zero-row scan must be distinguishable from a
+  // scan that never ran (silent green is weaker than measurable green).
+  logger.info('[estimate-actuals] scan completed', {
+    scanned: spine.length, written, failed, rescanDays,
+  });
   return { written, failed, scanned: spine.length };
 }
 
