@@ -73,6 +73,9 @@ function evaluateGoldenRecord(label, record) {
 }
 
 async function runPropertyLookupCanaryInner() {
+  logger.info('[property-lookup-canary] canary started', {
+    parcels: GOLDEN_PARCELS.length, pointChecks: 1,
+  });
   const failures = [];
 
   const parcel = await lookupParcelByPoint(GOLDEN_POINT.lat, GOLDEN_POINT.lng, { timeoutMs: CANARY_TIMEOUT_MS })
