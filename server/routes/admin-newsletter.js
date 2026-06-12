@@ -780,8 +780,11 @@ router.post('/preview', async (req, res) => {
   try {
     const { htmlBody, previewText, newsletterType } = req.body || {};
     const demoUrl = sendgrid.unsubscribeUrl('preview-demo-token');
+    // Previews have no recipient — drop the greeting-name token so the
+    // operator never sees a literal {{greeting-name}} in the dialog.
+    const { stripGreetingNameToken } = require('../services/newsletter-draft');
     const html = wrapNewsletter({
-      body: htmlBody || '',
+      body: stripGreetingNameToken(htmlBody || ''),
       unsubscribeUrl: demoUrl,
       preheader: previewText || undefined,
       newsletterType: newsletterType || undefined,

@@ -15,7 +15,7 @@ const logger = require('./logger');
 const crypto = require('crypto');
 const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
-const { GREETING_NAME_TOKEN, greetingNameValueFor } = require('./newsletter-draft');
+const { GREETING_NAME_TOKEN, greetingNameValueFor, stripGreetingNameToken } = require('./newsletter-draft');
 
 function stripHtml(html) {
   if (!html) return '';
@@ -224,7 +224,7 @@ async function sendCampaign(sendId, opts = {}) {
         db('newsletter_subscribers')
           .where({ status: 'active' })
           .whereIn('id', retryableSubscriberIds),
-      ).select('id', 'email', 'unsubscribe_token', 'customer_id')
+      ).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
       : [];
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger (globally-suppressed excluded)`);
   }
@@ -265,7 +265,10 @@ async function sendCampaign(sendId, opts = {}) {
 
   // Body for customer touchpoints — pure function on the campaign body,
   // hoisted out of the loop. Same for every recipient.
-  const touchpointBody = send.text_body || stripHtml(send.html_body);
+  // Strip the greeting-name token: substitution happens inside SendGrid's
+  // payload, so the raw body still carries {{greeting-name}} — touchpoints
+  // record the neutral form (matches what a no-name subscriber received).
+  const touchpointBody = stripGreetingNameToken(send.text_body || stripHtml(send.html_body));
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
