@@ -132,6 +132,26 @@ describe('owner template composition', () => {
     expect(result.headline).toBe('Overall landscape condition is good.');
     expect(result.body).not.toContain('Ganoderma');
   });
+
+  test('stray palm-module values never produce a palm note on a non-palm visit (Codex P2)', () => {
+    const result = buildTodaysResult({
+      projectType: 'tree_shrub',
+      reportTypeLabel: 'Tree & Shrub Service Summary',
+      values: {
+        plant_groups: 'Shrubs',
+        landscape_condition: 'Good',
+        observed_conditions: 'Healthy / new growth',
+        treatments_completed: 'Fertilizer',
+        customer_recommendations: 'Continue program',
+        ganoderma_conk_observed: 'No',
+        palm_trunk_concern: 'No',
+      },
+      chips: ['Continue Tree & Shrub program'],
+      activity: null,
+      visitSequence: 1,
+    });
+    expect(result.body).not.toContain('Ganoderma');
+  });
 });
 
 describe('validation', () => {
@@ -193,6 +213,25 @@ describe('validation', () => {
       enforceRequired: true,
     });
     expect(clean.ok).toBe(true);
+  });
+
+  test('palm-module findings require Palms in the service scope (Codex P2)', () => {
+    const result = validateTypedFindings({
+      type: 'tree_shrub',
+      values: {
+        plant_groups: 'Shrubs, Hedges',
+        landscape_condition: 'Good',
+        observed_conditions: 'Healthy / new growth',
+        treatments_completed: 'Fertilizer',
+        customer_recommendations: 'Continue program',
+        palm_condition: 'Fair',
+        ganoderma_conk_observed: 'No',
+      },
+      expectedType: 'tree_shrub',
+      enforceRequired: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toMatch(/Palms is not among the serviced plant groups/);
   });
 
   test('"Inspection only" cannot ride with applied treatments', () => {
@@ -272,6 +311,19 @@ describe('ported closeout compliance (typed path)', () => {
       completionPhotos: photos,
     });
     expect(summerSafe.blocks.map((b) => b.code)).not.toContain('tree_shrub_np_blackout');
+  });
+
+  test('"No insecticide applied" contradicts a recorded insect product (Codex P1)', () => {
+    const contradiction = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Insect treatment', pollinator_status: 'No insecticide applied', irac_frac_logged: 'Yes' },
+      products: [product('p3', 'Bifenthrin Pro')],
+      productRows: [row('p3', 'Bifenthrin Pro')],
+      completionPhotos: photos,
+    });
+    expect(contradiction.ok).toBe(false);
+    expect(contradiction.blocks.map((b) => b.code)).toContain('tree_shrub_pollinator_status_contradiction');
   });
 
   test('insect products require pollinator status and block on active bees', () => {

@@ -846,14 +846,23 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     if (treatments.includes('Inspection only') && treatments.length > 1) {
       errors.push('"Inspection only" cannot be combined with applied treatments');
     }
-    if (enforceRequired) {
-      const groups = String(values.plant_groups || '')
-        .split(',').map((s) => s.trim()).filter(Boolean);
-      if (groups.includes('Palms')) {
-        for (const key of ['palm_condition', 'ganoderma_conk_observed']) {
-          const value = values[key];
-          if (value == null || String(value).trim() === '') missing.push(key);
-        }
+    const groups = String(values.plant_groups || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    // Palm-module findings without Palms in the service scope would put
+    // palm claims on a report whose scope contradicts them (Codex P2) —
+    // the tech either serviced palms (add the group) or didn't (clear the
+    // fields).
+    const palmModuleFilled = [
+      'palms_serviced', 'palm_condition', 'palm_nutrient_stress', 'spear_leaf_condition',
+      'canopy_density', 'palm_trunk_concern', 'ganoderma_conk_observed', 'injection_recommended',
+    ].filter((key) => values[key] != null && String(values[key]).trim() !== '');
+    if (palmModuleFilled.length && groups.length && !groups.includes('Palms')) {
+      errors.push('Palm module findings were recorded but Palms is not among the serviced plant groups — add Palms or clear the palm fields');
+    }
+    if (enforceRequired && groups.includes('Palms')) {
+      for (const key of ['palm_condition', 'ganoderma_conk_observed']) {
+        const value = values[key];
+        if (value == null || String(value).trim() === '') missing.push(key);
       }
     }
   }
@@ -1183,15 +1192,19 @@ function buildTodaysResult({
         ? `Completed Tree & Shrub service for the ${joinPhrases(groups)}.`
         : 'Completed your Tree & Shrub service today.';
       // Ganoderma is the question palm owners actually have — say the answer
-      // plainly. The "No" sentence couples trunk decay only when the trunk
-      // check also came back clean.
+      // plainly, but ONLY when palms were actually serviced (Codex P2: a
+      // shrub/bed-only visit with stray palm-module values must not claim
+      // palm findings the visit scope contradicts). The "No" sentence
+      // couples trunk decay only when the trunk check also came back clean.
       let palmNote = '';
-      if (String(values.ganoderma_conk_observed) === 'Yes') {
-        palmNote = ' A possible Ganoderma conk was observed on a palm — an arborist evaluation is recommended.';
-      } else if (String(values.ganoderma_conk_observed) === 'No') {
-        palmNote = String(values.palm_trunk_concern) === 'No'
-          ? ' No visible Ganoderma conks or trunk decay were observed on the palms today.'
-          : ' No visible Ganoderma conks were observed on the palms today.';
+      if (groups.includes('palms')) {
+        if (String(values.ganoderma_conk_observed) === 'Yes') {
+          palmNote = ' A possible Ganoderma conk was observed on a palm — an arborist evaluation is recommended.';
+        } else if (String(values.ganoderma_conk_observed) === 'No') {
+          palmNote = String(values.palm_trunk_concern) === 'No'
+            ? ' No visible Ganoderma conks or trunk decay were observed on the palms today.'
+            : ' No visible Ganoderma conks were observed on the palms today.';
+        }
       }
       return {
         headline,

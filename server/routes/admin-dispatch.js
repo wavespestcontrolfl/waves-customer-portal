@@ -1844,6 +1844,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const treeShrubCloseoutRequired = !isIncompleteVisit
       && !typedFindingsType
       && ['tree_shrub', 'palm'].includes(reportServiceLine);
+    // Typed T&S completions skip the legacy closeout but keep its
+    // pre-commit photo upload gate (Codex P2): without it, an S3 failure
+    // after commit would let a report send with fewer than the required
+    // photos — the count check on the submitted array alone can't see
+    // upload failures.
+    const treeShrubPhotoGateRequired = treeShrubCloseoutRequired
+      || (typedFindingsType === 'tree_shrub' && !isIncompleteVisit);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -2716,7 +2723,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .update({ structured_notes: serializeJsonb(record.structured_notes) });
         }
 
-        if (treeShrubCloseoutRequired) {
+        if (treeShrubPhotoGateRequired) {
           completionPhotoUploadResult = await uploadServicePhotoDataUrls({
             serviceRecordId: record.id,
             photos: completionPhotos,

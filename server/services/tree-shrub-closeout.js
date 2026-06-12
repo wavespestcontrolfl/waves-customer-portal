@@ -472,6 +472,11 @@ function validateTreeShrubTypedCompliance({
       pushBlock(blocks, 'tree_shrub_pollinator_status_required', 'Record flowering/pollinator status before applying insect products.', 'pollinator_status');
     } else if (pollinatorStatus === 'Blooming — bees active') {
       pushBlock(blocks, 'tree_shrub_pollinator_block', 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.', 'pollinator_status');
+    } else if (pollinatorStatus === 'No insecticide applied') {
+      // An insect product IS on the visit — this status provides no
+      // bloom/bee assessment and would bypass the bee-sensitive block
+      // (Codex P1). The tech must record one of the real statuses.
+      pushBlock(blocks, 'tree_shrub_pollinator_status_contradiction', '"No insecticide applied" contradicts the recorded insect product — record the actual flowering/bee status.', 'pollinator_status');
     }
   }
 
