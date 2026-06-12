@@ -4576,11 +4576,26 @@ function TypedFindingsSection({
     color: textColor,
     marginBottom: 6,
   };
+  const sectionHeaderStyle = {
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    color: mutedColor,
+    margin: "16px 0 8px",
+    paddingBottom: 4,
+    borderBottom: `1px solid ${hairline}`,
+  };
   return (
     <div style={{ marginBottom: 20 }}>
       <label style={labelCss}>Service findings</label>
-      {(schema.fields || []).map((field) => (
+      {(schema.fields || []).map((field, index) => (
         <div key={field.key} style={{ marginBottom: 12 }}>
+          {/* Sectioned schemas (rodent trapping): header above the first
+              field of each section so the checklist scans in groups. */}
+          {field.section && field.section !== schema.fields[index - 1]?.section && (
+            <div style={sectionHeaderStyle}>{field.section}</div>
+          )}
           <div style={fieldLabelStyle}>
             {field.label}
             {field.required && (
@@ -4643,7 +4658,12 @@ function TypedFindingsSection({
         </div>
       )}
       <div style={{ marginBottom: 12 }}>
-        <div style={fieldLabelStyle}>Next steps (up to 4)</div>
+        <div style={fieldLabelStyle}>
+          Next steps (up to 4)
+          {schema.nextStepRequired && (
+            <span style={{ color: requiredColor }}> *</span>
+          )}
+        </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {(schema.nextStepChips || []).map((chip) => {
             const selected = nextStepChips.includes(chip);
@@ -7072,21 +7092,64 @@ export function CompletionPanel({
     setTreeShrubCloseout(
       normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
     );
-    setFindingsValues(
+    // Drafts saved before a schema cutover carry values the current schema
+    // no longer accepts; submit sends the whole object and the server
+    // validation strands the draft. Key presence alone isn't enough — a
+    // field can keep its key while changing type (textarea → chips), so
+    // each restored value is validated against the field's CURRENT
+    // definition: chips keep only allowlisted tokens, selects must match
+    // an option, counts must be digit-only. Free-text fields keep anything.
+    const restoredFindings =
       savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
         ? savedDraft.findingsValues
-        : {},
-    );
+        : {};
+    if (typedFindingsSchema?.fields) {
+      const fieldByKey = new Map(
+        typedFindingsSchema.fields.map((f) => [f.key, f]),
+      );
+      for (const [key, raw] of Object.entries(restoredFindings)) {
+        const field = fieldByKey.get(key);
+        if (!field) {
+          delete restoredFindings[key];
+        } else if (field.type === "chips" && Array.isArray(field.options)) {
+          const kept = String(raw || "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => field.options.includes(s));
+          if (kept.length) restoredFindings[key] = kept.join(", ");
+          else delete restoredFindings[key];
+        } else if (
+          field.type === "select" &&
+          Array.isArray(field.options) &&
+          field.options.length &&
+          !field.options.includes(String(raw))
+        ) {
+          delete restoredFindings[key];
+        } else if (field.type === "count") {
+          const str =
+            typeof raw === "number"
+              ? String(raw)
+              : typeof raw === "string"
+                ? raw.trim()
+                : "";
+          if (!/^\d{1,4}$/.test(str)) delete restoredFindings[key];
+        }
+      }
+    }
+    setFindingsValues(restoredFindings);
     setTypedActivityScore(
       Number.isInteger(savedDraft.typedActivityScore)
         ? savedDraft.typedActivityScore
         : null,
     );
     setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+    const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
+      ? savedDraft.typedNextStepChips
+      : [];
     setTypedNextStepChips(
-      Array.isArray(savedDraft.typedNextStepChips)
-        ? savedDraft.typedNextStepChips
-        : [],
+      typedFindingsSchema?.nextStepChips
+        ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
+        : restoredChips,
     );
     setTypedRecommendations(savedDraft.typedRecommendations || "");
     setShowDraftPrompt(false);
@@ -7510,12 +7573,17 @@ export function CompletionPanel({
       // without one and the derive field can't fill it.
       const typedScoreMissing =
         !!typedFindingsSchema.activity && typedActivityScore == null;
-      if (missingTypedRequired.length || typedScoreMissing) {
+      // Mirror the server's next_step_required 422 pre-submit so the tech
+      // gets the same inline validation as other required fields.
+      const nextStepMissing =
+        !!typedFindingsSchema.nextStepRequired && !typedNextStepChips.length;
+      if (missingTypedRequired.length || typedScoreMissing || nextStepMissing) {
         completionTelemetryRef.current.requiredFieldErrorCount += 1;
         alert(
           `Complete the required service findings before submitting: ${[
             ...missingTypedRequired,
             ...(typedScoreMissing ? [typedFindingsSchema.activity.label] : []),
+            ...(nextStepMissing ? ["Next steps (select at least one)"] : []),
           ].join(", ")}.`,
         );
         return;

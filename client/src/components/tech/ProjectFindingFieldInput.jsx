@@ -170,6 +170,98 @@ function formatMultiSelectValue(values) {
   return values.map((item) => String(item || '').trim()).filter(Boolean).join(', ');
 }
 
+// Always-visible multi-toggle chips (no dropdown) — built for one-thumb
+// field completion. Same comma-joined storage as multi_select.
+function InlineChipsInput({ id, name, value, onChange, options = [] }) {
+  const selected = useMemo(() => parseMultiSelectValue(value), [value]);
+  const selectedSet = useMemo(() => new Set(selected.map((item) => item.toLowerCase())), [selected]);
+
+  const toggleOption = (option) => {
+    const normalized = String(option || '').trim();
+    if (!normalized) return;
+    const next = selectedSet.has(normalized.toLowerCase())
+      ? selected.filter((item) => item.toLowerCase() !== normalized.toLowerCase())
+      : [...selected, normalized];
+    onChange(formatMultiSelectValue(next));
+  };
+
+  return (
+    <div id={id} style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+      <input type="hidden" name={name} value={formatMultiSelectValue(selected)} />
+      {options.map((option) => {
+        const isSelected = selectedSet.has(String(option).toLowerCase());
+        return (
+          <button
+            key={option}
+            type="button"
+            onClick={() => toggleOption(option)}
+            aria-pressed={isSelected}
+            style={{
+              minHeight: 38,
+              padding: '8px 14px',
+              borderRadius: 999,
+              border: `1px solid ${isSelected ? '#1B2C5B' : '#CFE7F5'}`,
+              background: isSelected ? '#1B2C5B' : '#F8FCFE',
+              color: isSelected ? '#fff' : '#1B2C5B',
+              fontSize: 14,
+              fontWeight: 500,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {option}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Integer stepper for quick counts (traps checked, captures). Stores the
+// number as a string; empty string = not recorded (distinct from 0).
+function CountStepperInput({ id, name, value, onChange }) {
+  const current = String(value ?? '').trim();
+  const n = current === '' ? null : Number(current);
+  const setCount = (next) => {
+    if (next == null || next < 0) return onChange('');
+    onChange(String(Math.min(9999, next)));
+  };
+  const buttonStyle = {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+    border: '1px solid #CFE7F5',
+    background: '#F8FCFE',
+    color: '#1B2C5B',
+    fontSize: 20,
+    fontWeight: 600,
+    cursor: 'pointer',
+  };
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <button type="button" aria-label="Decrease" style={buttonStyle} onClick={() => setCount(n == null ? null : n - 1)}>−</button>
+      <input
+        id={id}
+        name={name}
+        type="number"
+        inputMode="numeric"
+        min={0}
+        max={9999}
+        value={current}
+        placeholder="—"
+        onChange={(e) => {
+          const raw = e.target.value;
+          if (raw === '') return onChange('');
+          const parsed = Number(raw);
+          if (Number.isInteger(parsed) && parsed >= 0) setCount(parsed);
+        }}
+        style={{ ...ESTIMATE_INPUT_STYLE, width: 88, textAlign: 'center' }}
+      />
+      <button type="button" aria-label="Increase" style={buttonStyle} onClick={() => setCount(n == null ? 1 : n + 1)}>+</button>
+    </div>
+  );
+}
+
 function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] }) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(() => parseMultiSelectValue(value), [value]);
@@ -493,6 +585,29 @@ export default function ProjectFindingFieldInput({
         onChange={onChange}
         inputStyle={inputStyle}
         options={field.options || []}
+      />
+    );
+  }
+
+  if (field.type === 'chips') {
+    return (
+      <InlineChipsInput
+        id={id}
+        name={name}
+        value={value || ''}
+        onChange={onChange}
+        options={field.options || []}
+      />
+    );
+  }
+
+  if (field.type === 'count') {
+    return (
+      <CountStepperInput
+        id={id}
+        name={name}
+        value={value}
+        onChange={onChange}
       />
     );
   }

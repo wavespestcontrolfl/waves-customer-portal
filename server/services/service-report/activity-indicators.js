@@ -18,9 +18,12 @@
 
 const { PROJECT_TYPES, isValidProjectType } = require('../project-types');
 
-const SCHEMA_VERSION = 1;
-const COPY_MAP_VERSION = 1;
-const SUMMARY_TEMPLATE_VERSION = 1;
+// v2: rodent_trapping sectioned checklist fields (chips/count types,
+// owner spec 2026-06-12). Snapshots are immutable — v1 snapshots keep
+// rendering with their persisted labels.
+const SCHEMA_VERSION = 2;
+const COPY_MAP_VERSION = 2;
+const SUMMARY_TEMPLATE_VERSION = 2;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -180,11 +183,33 @@ const CUSTOMER_FIELD_LABELS = {
   palm_count: 'Palms treated',
   linear_feet_or_stations: 'Linear feet / stations',
   gallons_or_amount: 'Amount applied',
+  evidence_observed: 'Evidence observed today',
+  traps_checked: 'Traps checked',
+  captures: 'Captures',
+  trap_actions: 'Trap service performed',
+  trap_activity_locations: 'Areas with trap activity',
+  trap_quiet_locations: 'Areas with no trap activity',
+  work_completed: 'Work completed today',
+  sanitation_recommendations: 'Sanitation recommendations',
+  exclusion_recommendation: 'Exclusion',
+  exclusion_notes: 'Entry points to seal',
+  customer_reported: 'What you told us',
+  customer_discussed: 'What we discussed',
 };
 
 // Registry select value → customer wording, keyed per field family. Values
 // not listed pass through verbatim.
 const CUSTOMER_VALUE_LABELS = {
+  // Owner wording rule: never claim a home is/will be "rodent-proof" —
+  // exclusion copy stays "reduce rodent access" (also enforced by the
+  // banned-copy list below).
+  exclusion_recommendation: {
+    'Not needed at this time': 'No exclusion work is needed at this time.',
+    'Recommended after activity stops': 'Exclusion repairs are recommended to reduce rodent access once trapping activity stops.',
+    'Quote provided — awaiting approval': 'An exclusion quote has been provided and is awaiting your approval.',
+    'Approved — scheduling': 'Exclusion work is approved and will be scheduled.',
+    'Completed previously': 'Exclusion repairs were completed previously.',
+  },
   species: {
     German: 'German cockroaches',
     American: 'American cockroaches (palmetto bugs)',
@@ -276,6 +301,10 @@ const NEXT_STEP_CHIPS = {
   'Seal entry points': 'Sealing the identified entry points is the key next step.',
   'Monitor for new activity': 'Monitor for new activity and let us know if anything changes.',
   'Exclusion work scheduled': 'The entry-point sealing work is scheduled.',
+  'Continue trapping': 'Trapping will continue until activity is reduced.',
+  'Await exclusion approval': 'Entry-point sealing will be scheduled once the exclusion quote is approved.',
+  'Monitor after no activity': 'With no recent activity, we will continue monitoring before removing traps.',
+  'Remove traps after inactivity': 'Traps will be removed once the inactivity period is confirmed.',
   'Daily trap checks underway': 'Daily trap checks are underway as required.',
   'Avoid trap area': 'Please avoid the trap area so the trap can do its job.',
   'Secure trash/food sources': 'Securing trash and outdoor food sources will reduce wildlife pressure.',
@@ -294,6 +323,16 @@ const NEXT_STEP_CHIPS = {
 
 const MAX_NEXT_STEP_CHIPS = 4;
 
+// Types whose completion must select at least one next-step chip (owner
+// spec: "every rodent report should end with a clear next action").
+// Enforced in the typed /complete path; served to clients in the schema
+// slice so the panel can mark the section required.
+const REQUIRED_NEXT_STEP_TYPES = new Set(['rodent_trapping']);
+
+function nextStepRequiredForType(projectType) {
+  return REQUIRED_NEXT_STEP_TYPES.has(projectType);
+}
+
 // Per-type chip allowlists (contract §7) — the global map alone would let a
 // cockroach completion persist lawn/mosquito guidance into the immutable
 // snapshot. Schema serving and validation both use the type's list.
@@ -307,6 +346,13 @@ const RODENT_FAMILY_CHIPS = [
   'Sanitation recommended', 'Monitor for new activity', 'Exclusion work scheduled',
   'Follow-up recommended',
 ];
+// Trapping-specific next steps (owner spec, 2026-06-12): every trapping
+// report ends with a clear next action — see REQUIRED_NEXT_STEP_TYPES.
+const RODENT_TRAPPING_CHIPS = [
+  'Continue trapping', 'Trap check scheduled', 'Await exclusion approval',
+  'Exclusion work scheduled', 'Monitor after no activity',
+  'Remove traps after inactivity', 'Seal entry points', 'Sanitation recommended',
+];
 const TYPE_NEXT_STEP_CHIPS = {
   pest_inspection: PEST_FAMILY_CHIPS,
   one_time_pest_treatment: PEST_FAMILY_CHIPS,
@@ -316,7 +362,7 @@ const TYPE_NEXT_STEP_CHIPS = {
     'Coordinate vet flea control', 'Stay off treated areas until dry',
     'Follow-up recommended', 'Monitor activity',
   ],
-  rodent_trapping: RODENT_FAMILY_CHIPS,
+  rodent_trapping: RODENT_TRAPPING_CHIPS,
   rodent_exclusion: RODENT_FAMILY_CHIPS,
   wildlife_trapping: [
     'No action needed', 'Daily trap checks underway', 'Avoid trap area',
@@ -434,6 +480,29 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
         errors.push(`Invalid value for ${field.key}: ${value}`);
       }
     }
+    // chips store a comma-joined selection (multi_select convention) —
+    // every element must come from the field's options so an off-list
+    // string can't reach the immutable customer-facing snapshot.
+    if (field.type === 'chips' && Array.isArray(field.options) && field.options.length) {
+      const parts = String(value).split(',').map((s) => s.trim()).filter(Boolean);
+      for (const part of parts) {
+        if (!field.options.includes(part)) {
+          errors.push(`Invalid value for ${field.key}: ${part}`);
+        }
+      }
+    }
+    if (field.type === 'count') {
+      // Validate shape BEFORE coercion: Number(false) / Number([]) /
+      // Number('  ') all coerce to 0 and would persist bogus counts into
+      // the immutable snapshot (hook P1). Only integer numbers and
+      // digit-only strings count.
+      const str = typeof value === 'number'
+        ? String(value)
+        : (typeof value === 'string' ? value.trim() : null);
+      if (str == null || !/^\d{1,4}$/.test(str)) {
+        errors.push(`Invalid count for ${field.key}: ${value}`);
+      }
+    }
     if (typeof value === 'string' && value.length > 4000) {
       errors.push(`Value for ${field.key} exceeds 4000 characters`);
     }
@@ -497,6 +566,38 @@ function nextStepSentence(chips = []) {
   return sentences.join(' ');
 }
 
+// Deterministic "what we did" sentence for rodent trapping, composed from
+// the sectioned checklist (counts + action chips) instead of free text.
+// Returns null when nothing trap-related was recorded so the generic
+// fallback chain applies.
+function rodentTrapSentence(values = {}) {
+  const parts = [];
+  const checked = Number(values.traps_checked);
+  if (Number.isInteger(checked) && checked > 0) {
+    parts.push(`checked ${checked} trap${checked === 1 ? '' : 's'}`);
+  }
+  const capturesRaw = values.captures;
+  const captures = Number(capturesRaw);
+  if (Number.isInteger(captures) && captures > 0) {
+    parts.push(`removed ${captures} capture${captures === 1 ? '' : 's'}`);
+  } else if (capturesRaw != null && capturesRaw !== '' && captures === 0 && parts.length) {
+    parts.push('found no new captures');
+  }
+  const actions = String(values.trap_actions || '')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (actions.includes('new traps added')) parts.push('added new traps');
+  if (actions.includes('traps reset')) parts.push('reset the traps');
+  if (actions.includes('traps moved')) parts.push('repositioned traps');
+  if (actions.includes('bait/lure refreshed')) parts.push('refreshed the bait');
+  const work = String(values.work_completed || '').toLowerCase();
+  if (work.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
+  if (!parts.length) return null;
+  const joined = parts.length === 1
+    ? parts[0]
+    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return `We ${joined} today.`;
+}
+
 /**
  * Deterministic Today's Result copy (contract §6). AI may later polish the
  * recommendations field, but this template output always exists and always
@@ -511,10 +612,13 @@ function buildTodaysResult({
   visitSequence = 1,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
-  const whatWeDid = firstSentenceFrom(
-    values.treatment_performed || values.exclusion_completed || values.areas_treated || values.traps_set,
-    'We completed the scheduled service.'
-  );
+  // Rodent trapping composes from the sectioned checklist; values.traps_set
+  // stays in the fallback chain so pre-v2 drafts still produce a sentence.
+  const whatWeDid = (projectType === 'rodent_trapping' && rodentTrapSentence(values))
+    || firstSentenceFrom(
+      values.treatment_performed || values.exclusion_completed || values.areas_treated || values.traps_set,
+      'We completed the scheduled service.'
+    );
   const nextStep = nextStepSentence(chips);
 
   // Bed bug zero state uses fixed, approved copy (contract §6).
@@ -604,12 +708,18 @@ function buildTypedReportSnapshot({
   for (const field of config.findingsFields || []) {
     const value = values[field.key];
     if (value == null || value === '') continue;
+    // chips persist a comma-joined selection — map each element through
+    // the copy map individually so per-chip customer wording applies.
+    const customerValueLabel = field.type === 'chips'
+      ? String(value).split(',').map((s) => s.trim()).filter(Boolean)
+        .map((part) => customerLabelForValue(field.key, part)).join(', ')
+      : customerLabelForValue(field.key, value);
     items.push({
       fieldKey: field.key,
       technicianLabel: field.label,
       customerLabel: customerLabelForField(field.key, field.label),
       value,
-      customerValueLabel: customerLabelForValue(field.key, value),
+      customerValueLabel,
     });
   }
 
@@ -669,6 +779,7 @@ function findingsSchemaForType(projectType) {
       key: f.key,
       label: f.label,
       type: f.type,
+      section: f.section || null,
       options: f.options || null,
       placeholder: f.placeholder || null,
       required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
@@ -676,6 +787,7 @@ function findingsSchemaForType(projectType) {
     photoCategories: config.photoCategories || [],
     requiredFields: REQUIRED_FINDINGS_FIELDS[projectType] || [],
     nextStepChips: chipsForType(projectType),
+    nextStepRequired: nextStepRequiredForType(projectType),
     activity: indicator
       ? {
         indicatorKey: indicator.indicatorKey,
@@ -707,6 +819,9 @@ const BANNED_CUSTOMER_COPY = [
   /\bcleared\b/i,
   /\bresolved\b/i,
   /\bgone\b/i,
+  // Owner rule (rodent program): never claim the home is or will be made
+  // "rodent-proof" — exclusion copy says "reduce rodent access".
+  /\brodent[\s-]?proof/i,
 ];
 
 function findBannedCustomerCopy(text) {
@@ -737,6 +852,7 @@ module.exports = {
   customerLabelForValue,
   validateTypedFindings,
   validateNextStepChips,
+  nextStepRequiredForType,
   trendWordForScores,
   trendDirection,
   buildTodaysResult,
