@@ -42,6 +42,7 @@ jest.mock('../services/estimate-deposits', () => ({
     eligible: true,
     outstandingAmount: 49,
   })),
+  DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
 }));
 
 const db = require('../models/db');

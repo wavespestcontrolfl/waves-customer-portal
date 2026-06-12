@@ -21,7 +21,10 @@ const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
-const { assessDepositFollowUpEligibility } = require("./estimate-deposits");
+const {
+  assessDepositFollowUpEligibility,
+  DEPOSIT_FOLLOWUP_WINDOW,
+} = require("./estimate-deposits");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -271,8 +274,8 @@ async function checkDepositAbandoned(now = new Date()) {
     .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
     .whereIn("estimates.status", ["sent", "viewed"])
     .whereNotNull("estimates.customer_phone")
-    .where("pd.latest_pending_at", "<", new Date(nowMs - 2 * 3600000))
-    .where("pd.latest_pending_at", ">", new Date(nowMs - 72 * 3600000))
+    .where("pd.latest_pending_at", "<", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000))
+    .where("pd.latest_pending_at", ">", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
     .where((q) =>
       q
         .where("followup_deposit_abandoned_sent", false)
@@ -305,7 +308,7 @@ async function checkDepositAbandoned(now = new Date()) {
       // remainder stays nudgeable while a covered policy goes silent), and
       // that a pending intent still exists. Any verification failure skips —
       // an unprompted SMS is never sent on unverified eligibility.
-      const eligibility = await assessDepositFollowUpEligibility(est.id);
+      const eligibility = await assessDepositFollowUpEligibility(est.id, now);
       if (!eligibility.eligible) {
         logger.info(
           `[est-followup] Deposit-abandoned skip ${est.id}: ${eligibility.reason || "ineligible"}`,

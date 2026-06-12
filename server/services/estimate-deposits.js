@@ -337,17 +337,29 @@ async function depositStillRecordable(estimateId) {
   return { recordable: true };
 }
 
+// Abandonment window for the deposit follow-up nudge: the latest pending
+// intent must have been last touched between these bounds. Under 2h the
+// customer may still be mid-payment; over 72h the expiring stage owns the
+// end-of-life messaging. Shared with the cron's candidate query AND
+// re-enforced at send time inside assessDepositFollowUpEligibility.
+const DEPOSIT_FOLLOWUP_WINDOW = { minAgeHours: 2, maxAgeHours: 72 };
+
 // Outbound-nudge eligibility for the estimate follow-up cron's
 // deposit-abandonment stage. Mirrors depositStillRecordable's checks with
 // the OPPOSITE failure policy: that probe fails OPEN because captured money
 // must be recorded even when the gates can't be verified; an unprompted SMS
 // must fail CLOSED — if eligibility can't be verified, we simply don't text.
-// Resolves the policy the way the accept flow would (live plan-customer
-// fallback, structural one-time class) and nets received money out, so the
-// nudge never duns money already paid, quotes the real outstanding amount
-// (top-up remainders included), and goes silent the moment the policy is
-// satisfied or stops requiring a deposit.
-async function assessDepositFollowUpEligibility(estimateId) {
+// That inversion includes the live plan-customer check: the accept-gate
+// resolver deliberately treats a failed lookup as "deposit required" (money
+// wrongly charged still credits forward), but here a failed lookup must
+// SKIP — texting an existing plan customer for a deposit they don't owe is
+// the worse error. So the live check runs HERE, unguarded (a throw falls
+// through to the fail-closed catch), and the resolved membership is passed
+// to the sync policy resolver so no internal fallback can mask it.
+// Nets received money out, so the nudge never duns money already paid,
+// quotes the real outstanding amount (top-up remainders included), and goes
+// silent the moment the policy is satisfied or stops requiring a deposit.
+async function assessDepositFollowUpEligibility(estimateId, now = new Date()) {
   try {
     const estimate = await db('estimates').where({ id: estimateId }).first();
     if (!estimate) return { eligible: false, reason: 'estimate_missing' };
@@ -364,10 +376,19 @@ async function assessDepositFollowUpEligibility(estimateId) {
     if (quoteRequirement?.quoteRequired) return { eligible: false, reason: 'quote_required' };
 
     const { buildEstimateMembershipContext } = require('./estimate-membership-context');
-    const membership = await buildEstimateMembershipContext(estimate);
+    let membership = await buildEstimateMembershipContext(estimate);
+    if (!membership?.isExistingCustomer && estimate.customer_id) {
+      // Fail-closed live plan-customer check (see header comment): no catch —
+      // a lookup failure must skip the SMS, not default to "required".
+      const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+      const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+      if (Array.isArray(rows) && rows.length > 0) {
+        membership = { ...(membership || {}), isExistingCustomer: true };
+      }
+    }
     const structuralOneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'
       && gates.isStructuralOneTimeOnlyEstimate(estData, estimate);
-    const policy = await resolveDepositPolicyForEstimate({
+    const policy = resolveDepositPolicy({
       estimate,
       paymentMethodPreference: null,
       membership,
@@ -390,6 +411,23 @@ async function assessDepositFollowUpEligibility(estimateId) {
       .orderBy('updated_at', 'desc')
       .first();
     if (!pending) return { eligible: false, reason: 'no_pending_intent' };
+
+    // Re-enforce the abandonment window at send time: the candidate list was
+    // read earlier in the cron tick, and a customer who reopened the payment
+    // step since then (createDepositIntentForEstimate bumps updated_at on
+    // reuse) must not be texted mid-payment. Unreadable timestamps fail
+    // closed like everything else here.
+    const lastTouchedMs = new Date(pending.updated_at).getTime();
+    if (!Number.isFinite(lastTouchedMs)) {
+      return { eligible: false, reason: 'pending_intent_unreadable' };
+    }
+    const ageMs = now.getTime() - lastTouchedMs;
+    if (ageMs < DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000) {
+      return { eligible: false, reason: 'pending_intent_recent' };
+    }
+    if (ageMs > DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000) {
+      return { eligible: false, reason: 'pending_intent_stale' };
+    }
 
     return { eligible: true, outstandingAmount: outstanding };
   } catch (err) {
@@ -951,6 +989,7 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
 module.exports = {
   assessDepositFollowUpEligibility,
   computeDepositAmount,
+  DEPOSIT_FOLLOWUP_WINDOW,
   consumeDepositCredit,
   createDepositIntentForEstimate,
   ensureDepositSatisfied,
