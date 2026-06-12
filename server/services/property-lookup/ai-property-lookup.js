@@ -1776,6 +1776,39 @@ const POOL_CAGE_FEATURE_RE = /\bCAGE\b|(?:SCREEN(?:ED)?|POOL)[\s,-]*ENCLOSURE/i;
 const SPA_FEATURE_RE = /\bSPA\b|JACUZZI|HOT\s*TUB|WHIRLPOOL/i;
 
 // features: [{ description, sqft }] from one county's parsed table.
+// Assessed ground-cover improvements that displace turf. Manatee's features
+// roll carries an explicit Impervious YES/NO per row — the county's own
+// classification is authoritative when present (live probe: it marks the
+// pool, spa, and pool deck YES and the screen CAGE NO — mesh doesn't seal
+// the ground; the deck beneath is its own YES row). Counties without the
+// flag fall back to a conservative keyword classification mirroring those
+// semantics: pools, patios, decks, porches, driveways, walkways count;
+// cages/screens, vertical features (fence/wall), and equipment don't.
+const IMPERVIOUS_FEATURE_RE = /\b(POOL|PATIO|DECK|PORCH|DRIVEWAY|WALKWAY|SIDEWALK|CARPORT|PAVER|SPA)\b/i;
+const IMPERVIOUS_FEATURE_EXCLUDE_RE = /CAGE|ENCLOS|SCREEN|HEATER|EQUIP|BATH|DOCK|BOAT|LIFT|FENCE|WALL|SOLAR/i;
+
+// Returns { imperviousAreaSf } — total assessed impervious sqft for the
+// parcel. Tri-state like hasPool: callers that never parsed a features
+// table return {} upstream (imperviousAreaSf stays null on the record);
+// a parsed table with zero impervious rows is a meaningful 0.
+function imperviousFactsFromFeatures(features) {
+  if (!Array.isArray(features)) return {};
+  let total = 0;
+  for (const item of features) {
+    const sqft = coerceInt(item?.sqft, 1, 200000);
+    if (!sqft) continue;
+    const description = String(item?.description || '');
+    const flag = item?.impervious == null || String(item.impervious).trim() === ''
+      ? null
+      : /^Y/i.test(String(item.impervious).trim());
+    const counts = flag != null
+      ? flag
+      : (IMPERVIOUS_FEATURE_RE.test(description) && !IMPERVIOUS_FEATURE_EXCLUDE_RE.test(description));
+    if (counts) total += sqft;
+  }
+  return { imperviousAreaSf: total };
+}
+
 function poolFactsFromFeatures(features) {
   if (!Array.isArray(features)) return {};
   const facts = { hasPool: false, poolAreaSqft: null, poolCageSqft: null, hasSpa: false };
@@ -1799,7 +1832,12 @@ function poolFactsFromFeatures(features) {
 function manateePoolFeatures(features) {
   if (!Array.isArray(features?.cols) || !Array.isArray(features?.rows)) return {};
   const rows = parsePaoRows(features);
-  return poolFactsFromFeatures(rows.map((row) => ({ description: row.Description, sqft: row.Area })));
+  const mapped = rows.map((row) => ({
+    description: row.Description,
+    sqft: row.Area,
+    impervious: row.Impervious,
+  }));
+  return { ...poolFactsFromFeatures(mapped), ...imperviousFactsFromFeatures(mapped) };
 }
 
 // Sarasota detail page "Extra Features" grid (no id/caption — heading only):
@@ -1808,10 +1846,11 @@ function sarasotaPoolFeatures(detailHtml) {
   const table = findHtmlTableAfterHeading(detailHtml, 'Extra Features');
   if (!table) return {};
   const rows = parseHtmlTableRows(table);
-  return poolFactsFromFeatures(rows.map((row) => ({
+  const mapped = rows.map((row) => ({
     description: row.Description,
     sqft: /^SF$/i.test(String(row['Unit Type'] || '').trim()) ? row.Units : null,
-  })));
+  }));
+  return { ...poolFactsFromFeatures(mapped), ...imperviousFactsFromFeatures(mapped) };
 }
 
 // Charlotte Show_Parcel "Land Improvement Information" table (oth=T, already
@@ -1820,7 +1859,8 @@ function charlottePoolFeatures(detailHtml) {
   const table = findHtmlTableByCaption(detailHtml, 'Land Improvement Information');
   if (!table) return {};
   const rows = parseHtmlTableRows(table);
-  return poolFactsFromFeatures(rows.map((row) => ({ description: row.Description, sqft: row.Size })));
+  const mapped = rows.map((row) => ({ description: row.Description, sqft: row.Size }));
+  return { ...poolFactsFromFeatures(mapped), ...imperviousFactsFromFeatures(mapped) };
 }
 
 function parseManateePaoRecord({ address, search, land, buildings, features }) {
@@ -2639,6 +2679,9 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     poolAreaSqft: p.poolAreaSqft || null,
     poolCageSqft: p.poolCageSqft || null,
     hasSpa: p.hasSpa ?? null,
+    // Tri-state like hasPool: number (possibly 0) only when a county
+    // features table was parsed; null = no signal.
+    imperviousAreaSf: p.imperviousAreaSf ?? null,
     unitCount: 1,
     ownerType: null,
     ownerNames: [],
@@ -3001,6 +3044,7 @@ module.exports = {
     parseSarasotaPaoRecord,
     parseCharlottePaoRecord,
     parsePropertyJSON,
+    imperviousFactsFromFeatures,
     poolFactsFromFeatures,
     sarasotaPoolFeatures,
     charlottePoolFeatures,
