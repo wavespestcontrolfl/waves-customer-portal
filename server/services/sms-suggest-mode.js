@@ -185,8 +185,22 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
         ['sms_suggest_publish', customerId]
       );
 
-      const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at');
+      const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone');
       if (!inbound?.created_at) return null;
+
+      // Immediate admin sends can be phone-only (customer_id null on the
+      // sms_log row), so every guard below matches on customer_id OR the
+      // thread phone — the customer's number this inbound arrived from.
+      const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
+      const byCustomerOrThreadPhone = (phoneColumn) => function matchThread() {
+        this.where({ customer_id: customerId });
+        if (threadLast10) {
+          this.orWhereRaw(
+            `RIGHT(REGEXP_REPLACE(COALESCE(${phoneColumn}, ''), '[^0-9]', '', 'g'), 10) = ?`,
+            [threadLast10]
+          );
+        }
+      };
 
       // A fast human reply can land while the draft is still generating, and
       // the post-send ignore sweep can't resolve a decision row that doesn't
@@ -194,7 +208,8 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // inbound, don't publish: the draft stays shadow and the judge scores
       // it against that very reply.
       const answered = await trx('sms_log')
-        .where({ customer_id: customerId, direction: 'outbound' })
+        .where({ direction: 'outbound' })
+        .where(byCustomerOrThreadPhone('to_phone'))
         .whereIn('message_type', HUMAN_REPLY_TYPES)
         .whereIn('status', SENT_STATUSES)
         .where('created_at', '>', inbound.created_at)
@@ -208,7 +223,8 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // reply. No timestamp filter on purpose — any live queued staff reply
       // answers the thread soon.
       const replyInFlight = await trx('sms_log')
-        .where({ customer_id: customerId, direction: 'outbound' })
+        .where({ direction: 'outbound' })
+        .where(byCustomerOrThreadPhone('to_phone'))
         .whereIn('message_type', HUMAN_REPLY_TYPES)
         .whereIn('status', ['scheduled', 'sending'])
         .first('id');
@@ -221,7 +237,8 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // reactions included): the cost of suppressing is one fewer card,
       // the draft reverts to shadow for the judge.
       const newerInbound = await trx('sms_log')
-        .where({ customer_id: customerId, direction: 'inbound' })
+        .where({ direction: 'inbound' })
+        .where(byCustomerOrThreadPhone('from_phone'))
         .where('created_at', '>', inbound.created_at)
         .first('id');
       if (newerInbound) return null;

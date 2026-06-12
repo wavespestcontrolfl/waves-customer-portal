@@ -1123,16 +1123,24 @@ router.get('/scheduled', async (req, res, next) => {
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
-    const row = await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).first('id', 'metadata');
-    await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).del();
+    // Atomic delete-with-returning: if the dispatch cron claimed the row
+    // (status flipped to 'sending') between any read and this delete, zero
+    // rows return and we must NOT reopen — the SMS is about to send and
+    // fire-time resolution owns the decisions.
+    const deleted = await db('sms_log')
+      .where({ id: req.params.id, status: 'scheduled' })
+      .del(['id', 'metadata']);
 
-    // The customer was never answered — the used suggestion AND any parked
-    // behind the queued send return to the composer.
-    const meta = parseJson(row?.metadata, {});
-    await reopenScheduledSuggestions({
-      decisionIds: [meta.agent_decision_id, ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : [])],
-      reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
-    });
+    const row = deleted?.[0];
+    if (row) {
+      // The customer was never answered — the used suggestion AND any
+      // parked behind the queued send return to the composer.
+      const meta = parseJson(row.metadata, {});
+      await reopenScheduledSuggestions({
+        decisionIds: [meta.agent_decision_id, ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : [])],
+        reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
+      });
+    }
 
     res.json({ success: true });
   } catch (err) { next(err); }
