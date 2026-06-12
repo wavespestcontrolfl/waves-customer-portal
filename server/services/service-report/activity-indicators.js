@@ -969,18 +969,30 @@ function buildTodaysResult({
   if (isBaitStationType && activity && activity.score === 0
     && !(visitSequence > 1 && activity.trendWord)) {
     if (projectType === 'termite_bait_station') {
+      // EVERY positive field contradicts the zero claim, not just the live
+      // signs (hook P1 round 2): stations-with-activity count, an active
+      // station location, or any feeding-level consumption.
       const liveSigns = String(values.activity_signs || '')
         .split(',').map((s) => s.trim())
-        .filter((s) => ['Live termites in station', 'Mud tubing in station', 'Bait feeding'].includes(s));
+        .some((s) => ['Live termites in station', 'Mud tubing in station', 'Bait feeding'].includes(s));
+      const activeStations = Number(values.stations_with_activity);
+      const consumption = String(values.bait_consumption || '');
+      const contradictsZero = liveSigns
+        || (Number.isInteger(activeStations) && activeStations > 0)
+        || String(values.active_station_location || '').trim().length > 0
+        || (consumption !== '' && consumption !== 'None — bait intact');
       return {
-        headline: liveSigns.length
+        headline: contradictsZero
           ? 'Termite activity signs were observed in the bait stations today — see the details below.'
           : 'No termite activity was observed in the accessible bait stations today.',
         body: `${whatWeDid} ${nextStep}`,
         nextStep,
       };
     }
-    const rodentEvidence = String(values.evidence_observed || '').trim();
+    // Rodent: evidence chips or a named highest-activity location both
+    // contradict a "no evidence" claim.
+    const rodentEvidence = String(values.evidence_observed || '').trim().length > 0
+      || String(values.highest_activity_location || '').trim().length > 0;
     return {
       headline: rodentEvidence
         ? 'No bait consumption was observed today, but rodent evidence was noted nearby.'

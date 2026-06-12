@@ -144,6 +144,33 @@ describe('owner risk wording', () => {
       visitSequence: 1,
     });
     expect(result.headline).toBe('Termite activity signs were observed in the bait stations today — see the details below.');
+    // Round 2: stations_with_activity count, active station location, and
+    // feeding-level consumption each contradict the zero claim on their own.
+    for (const values of [
+      { stations_checked: '18', termite_activity: 'None observed', stations_with_activity: '1' },
+      { stations_checked: '18', termite_activity: 'None observed', active_station_location: 'Station #7, rear wall' },
+      { stations_checked: '18', termite_activity: 'None observed', bait_consumption: 'Moderate feeding' },
+    ]) {
+      const r = buildTodaysResult({
+        projectType: 'termite_bait_station',
+        reportTypeLabel: 'Termite Bait Station Service Summary',
+        values,
+        chips: ['Recheck active station sooner'],
+        activity: { score: 0 },
+        visitSequence: 1,
+      });
+      expect(r.headline).toBe('Termite activity signs were observed in the bait stations today — see the details below.');
+    }
+    // A named highest-activity location contradicts the rodent zero claim too.
+    const rodentLocation = buildTodaysResult({
+      projectType: 'rodent_bait_station',
+      reportTypeLabel: 'Quarterly Rodent Bait Station Service Summary',
+      values: { stations_checked: '4', bait_consumption: 'None', highest_activity_location: 'Rear fence line' },
+      chips: ['Monitor activity'],
+      activity: { score: 0 },
+      visitSequence: 1,
+    });
+    expect(rodentLocation.headline).toBe('No bait consumption was observed today, but rodent evidence was noted nearby.');
     // Non-live signs (conducive conditions, previous feeding) do NOT trip it.
     const benign = buildTodaysResult({
       projectType: 'termite_bait_station',
