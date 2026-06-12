@@ -262,6 +262,46 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
   }
 }
 
+/** Pure verdict for a send derived from a reviewed draft: verbatim or edited. */
+function classifySendVerdict(sentBody, suggestedMessage) {
+  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  return normalize(sentBody) === normalize(suggestedMessage) ? 'accepted' : 'corrected';
+}
+
+/**
+ * Resolve a reviewed draft decision after its SCHEDULED send actually fired
+ * (the immediate /sms route resolves inline; the 5-min dispatch cron calls
+ * this). Guarded on pending_review — if the decision was already resolved
+ * or expired while the send waited, this is a no-op. Works for any
+ * workflow's decision: the schedule route only stashes ids it verified.
+ */
+async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) {
+  try {
+    const decision = await db('agent_decisions')
+      .where({ id: decisionId, status: 'pending_review' })
+      .first('id', 'suggested_message');
+    if (!decision) return null;
+
+    const verdict = classifySendVerdict(sentBody, decision.suggested_message);
+    const changed = await db('agent_decisions')
+      .where({ id: decisionId, status: 'pending_review' })
+      .update({
+        status: verdict,
+        human_verdict: verdict,
+        correction_note: verdict === 'accepted'
+          ? 'Reviewed draft scheduled and sent from the SMS inbox.'
+          : 'Reviewed draft edited, scheduled, and sent from the SMS inbox.',
+        reviewed_by: reviewedBy || 'Admin',
+        reviewed_at: new Date(),
+        updated_at: new Date(),
+      });
+    return changed ? verdict : null;
+  } catch (err) {
+    logger.warn(`[sms-suggest] post-scheduled-send resolution failed (decision ${decisionId}): ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * Nightly sweep: a suggestion nobody acted on within EXPIRY_HOURS is stale —
  * surfacing it days later under a dead thread is noise, and unresolved rows
@@ -303,11 +343,13 @@ module.exports = {
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
+  classifySendVerdict,
   getIntentMode,
   resolveDraftStatus,
   listIntentModes,
   setIntentMode,
   publishSuggestion,
   revertDraftsToShadow,
+  resolveSuggestionAfterSend,
   expireStaleSuggestions,
 };

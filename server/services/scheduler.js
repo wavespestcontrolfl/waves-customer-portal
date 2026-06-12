@@ -1028,6 +1028,22 @@ function initScheduledJobs() {
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
+
+            // A scheduled send composed from an Agent Review draft resolves
+            // its decision now that the message actually left — schedule-sms
+            // stashed the verified id on the row. Internal catch: a
+            // resolution failure must not flip a SENT row to failed.
+            const rowMeta = typeof msg.metadata === 'string'
+              ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
+              : (msg.metadata || {});
+            if (rowMeta.agent_decision_id) {
+              const { resolveSuggestionAfterSend } = require('./sms-suggest-mode');
+              await resolveSuggestionAfterSend({
+                decisionId: rowMeta.agent_decision_id,
+                sentBody: msg.message_body,
+                reviewedBy: msg.admin_user_id || 'Admin',
+              });
+            }
           } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',

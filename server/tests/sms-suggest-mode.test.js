@@ -14,6 +14,7 @@ const {
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
+  classifySendVerdict,
 } = require('../services/sms-suggest-mode');
 
 const ELIGIBLE = {
@@ -118,6 +119,18 @@ describe('suggest mode — out-of-order publish protection (Codex P1)', () => {
     const { newerExists, supersede } = splitPendingSuggestions(pending, at(5));
     expect(newerExists).toBe(false);
     expect(supersede.map((r) => r.id)).toEqual(['orphan']);
+  });
+});
+
+describe('suggest mode — scheduled-send verdict (Codex P1)', () => {
+  test('verbatim send = accepted; whitespace differences do not count as edits', () => {
+    expect(classifySendVerdict('Hello Dana! See you Tuesday.', 'Hello Dana! See you Tuesday.')).toBe('accepted');
+    expect(classifySendVerdict('  Hello Dana!\n See  you Tuesday. ', 'Hello Dana! See you Tuesday.')).toBe('accepted');
+  });
+
+  test('any wording change = corrected', () => {
+    expect(classifySendVerdict('Hello Dana! See you Wednesday.', 'Hello Dana! See you Tuesday.')).toBe('corrected');
+    expect(classifySendVerdict('', 'Hello Dana!')).toBe('corrected');
   });
 });
 

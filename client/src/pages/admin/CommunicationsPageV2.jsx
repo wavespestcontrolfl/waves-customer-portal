@@ -982,6 +982,8 @@ function SmsTab() {
             messageType: "manual",
             fromNumber,
             scheduledFor,
+            agentDecisionId: selectedAgentDraft?.decisionId || undefined,
+            agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
           }),
         });
         setSendResult({

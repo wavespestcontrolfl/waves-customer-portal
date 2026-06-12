@@ -65,6 +65,39 @@ function normalizeReplyForComparison(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+// Shared by the immediate /sms and /schedule-sms routes: an Agent Review
+// draft may only resolve a decision the sender actually owns — pending,
+// phone-matched through its inbound sms_log or customer record, and (when a
+// customer is selected) belonging to that customer.
+async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId }) {
+  try {
+    const sentPhoneLast10 = normalizePhoneLast10(to);
+    const decision = await db('agent_decisions as ad')
+      .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+      .leftJoin('customers as c', 'ad.customer_id', 'c.id')
+      .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' })
+      .select(
+        'ad.id',
+        'ad.customer_id',
+        'ad.suggested_message',
+        's.from_phone as sms_from_phone',
+        's.to_phone as sms_to_phone',
+        'c.phone as customer_phone'
+      )
+      .first();
+    const decisionPhoneMatches = sentPhoneLast10 && [
+      decision?.sms_from_phone,
+      decision?.sms_to_phone,
+      decision?.customer_phone,
+    ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
+    const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
+    if (decision?.id && customerMatches && decisionPhoneMatches) return decision;
+  } catch (verifyErr) {
+    logger.warn(`[agent-review] failed to verify inbox draft decision ownership: ${verifyErr.message}`);
+  }
+  return null;
+}
+
 async function findSingleCustomerForPhone(phone) {
   // Compare on the last 10 digits so stored formats ('+19415551234',
   // '9415551234', '(941) 555-1234') all match the same dialable number —
@@ -155,33 +188,7 @@ router.post('/sms', async (req, res, next) => {
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      try {
-        const sentPhoneLast10 = normalizePhoneLast10(to);
-        const decision = await db('agent_decisions as ad')
-          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-          .leftJoin('customers as c', 'ad.customer_id', 'c.id')
-          .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' })
-          .select(
-            'ad.id',
-            'ad.customer_id',
-            'ad.suggested_message',
-            's.from_phone as sms_from_phone',
-            's.to_phone as sms_to_phone',
-            'c.phone as customer_phone'
-          )
-          .first();
-        const decisionPhoneMatches = sentPhoneLast10 && [
-          decision?.sms_from_phone,
-          decision?.sms_to_phone,
-          decision?.customer_phone,
-        ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
-        const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
-        if (decision?.id && customerMatches && decisionPhoneMatches) {
-          verifiedAgentDecision = decision;
-        }
-      } catch (verifyErr) {
-        logger.warn(`[agent-review] failed to verify inbox draft decision ownership: ${verifyErr.message}`);
-      }
+      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
     }
     const verifiedAgentDraft = normalizeReplyForComparison(verifiedAgentDecision?.suggested_message)
       ? verifiedAgentDecision.suggested_message
@@ -984,7 +991,7 @@ router.post('/rewrite-sms', async (req, res) => {
 // through sendCustomerMessage (same path as the immediate /sms route).
 router.post('/schedule-sms', async (req, res, next) => {
   try {
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType } = req.body || {};
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft } = req.body || {};
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
@@ -1022,6 +1029,18 @@ router.post('/schedule-sms', async (req, res, next) => {
       if (fallback) trustedCustomerId = fallback.id;
     }
 
+    // An Agent Review draft can be scheduled instead of sent now. Carry the
+    // verified decision id on the scheduled row so the 5-min dispatch cron
+    // resolves it (accepted/corrected) when the send actually fires —
+    // otherwise the suggestion stays pending and gets miscounted as
+    // ignored/expired despite a human-approved send. Cancelling the
+    // scheduled row leaves the decision pending, which is correct: the
+    // customer was never answered and the card should return.
+    let scheduledAgentDecision = null;
+    if (agentDecisionId && agentDraft) {
+      scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+    }
+
     const [row] = await db('sms_log')
       .insert({
         customer_id: trustedCustomerId,
@@ -1033,6 +1052,9 @@ router.post('/schedule-sms', async (req, res, next) => {
         message_type: messageType || 'manual',
         admin_user_id: req.technicianId || null,
         scheduled_for: sendAt,
+        metadata: scheduledAgentDecision
+          ? JSON.stringify({ agent_decision_id: scheduledAgentDecision.id })
+          : null,
       })
       .returning(['id', 'scheduled_for']);
 
