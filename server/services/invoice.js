@@ -456,8 +456,20 @@ async function calculateUpdateFinancials({
   const lineItemDiscountRowById = new Map(
     lineItemDiscountRows.map((row) => [String(row.id), row]),
   );
+  // Deposit credits are prior payment, not discounts — keep them out of the
+  // discount/tax base on edits too, or an admin save would silently convert
+  // an after-tax credit into a pre-tax discount. Mirrors create().
+  const updateDepositCreditTotal =
+    Math.round(
+      items
+        .filter((item) => item.category === "deposit_credit")
+        .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
+        100,
+    ) / 100;
   const lineItemDiscountAmount = items
-    .filter((item) => Number(item.amount) < 0)
+    .filter(
+      (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
+    )
     .reduce((sum, item) => {
       const row = item.discount_id
         ? lineItemDiscountRowById.get(String(item.discount_id))
@@ -509,7 +521,12 @@ async function calculateUpdateFinancials({
     discount_label: labelParts.length ? labelParts.join(" + ") : null,
     tax_rate: rate,
     tax_amount: taxAmount,
-    total: Math.round((afterDiscount + taxAmount) * 100) / 100,
+    total: Math.max(
+      0,
+      Math.round(
+        (afterDiscount + taxAmount - updateDepositCreditTotal) * 100,
+      ) / 100,
+    ),
   };
 }
 
@@ -742,6 +759,17 @@ const InvoiceService = {
       }
       return { row: d, dollars: Math.round(dollars * 100) / 100 };
     });
+    // Deposit credits are PRIOR PAYMENT, not price reductions: they must not
+    // shrink the tax base or fold into discount reporting. Excluded from the
+    // discount machinery here and subtracted AFTER tax below. The lines stay
+    // in line_items for display.
+    const depositCreditTotal =
+      Math.round(
+        items
+          .filter((item) => item.category === "deposit_credit")
+          .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
+          100,
+      ) / 100;
     const lineItemDiscountIds = items
       .filter((item) => Number(item.amount) < 0 && item.discount_id)
       .map((item) => item.discount_id);
@@ -761,7 +789,10 @@ const InvoiceService = {
       lineItemDiscountRows.map((row) => [String(row.id), row]),
     );
     const lineItemDiscounts = items
-      .filter((item) => Number(item.amount) < 0)
+      .filter(
+        (item) =>
+          Number(item.amount) < 0 && item.category !== "deposit_credit",
+      )
       .map((item) => {
         const row = item.discount_id
           ? lineItemDiscountRowById.get(String(item.discount_id))
@@ -916,7 +947,13 @@ const InvoiceService = {
         taxAmount = Math.round(afterDiscount * rate * 100) / 100;
       }
     }
-    const total = Math.round((afterDiscount + taxAmount) * 100) / 100;
+    // Deposit credit applies AFTER tax — prior payment, not a discount.
+    // Callers cap the credit at the invoice subtotal; the floor guards
+    // rounding edges.
+    const total = Math.max(
+      0,
+      Math.round((afterDiscount + taxAmount - depositCreditTotal) * 100) / 100,
+    );
 
     const token = generateToken();
     let invoice = null;

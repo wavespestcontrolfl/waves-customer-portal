@@ -37,10 +37,18 @@ const logger = require('../services/logger');
 const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const {
+  buildPricingBundle,
   handleEstimateAsk,
+  isEstimateAcceptActive,
   isStructuralOneTimeOnlyEstimate,
+  resolveEstimateQuoteRequirement,
   verifyEstimateAskToken,
 } = require('./estimate-public');
+const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const {
+  createDepositIntentForEstimate,
+  resolveDepositPolicy,
+} = require('../services/estimate-deposits');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
@@ -140,6 +148,16 @@ const askLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many questions. Please try again in a minute.' },
+});
+
+// Deposit PaymentIntent creation — writes + a Stripe call per request, so
+// it rides the same tight 10/min budget as /reserve.
+const depositLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
 // Bound the Waves AI date/time search (each call spends one cheap model call).
@@ -276,6 +294,58 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   } catch (err) {
     logger.error(`[estimate-slots-public:reserve] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to reserve slot', retry: true });
+  }
+});
+
+// POST /:token/deposit-intent — Stripe PaymentIntent for the required
+// acceptance deposit (25% of first visit, $50–$99; ESTIMATE_DEPOSIT_REQUIRED
+// rollout switch). Gates mirror accept exactly: estimate-token format gate,
+// terminal/expired rejection, the accept-time quote gate (never collect
+// money for an estimate accept will reject), and the deposit policy itself
+// (prepay-annual choice, existing plan customers, and uninvoiced one-time
+// accepts owe nothing). The client pays the intent, then calls accept with
+// depositPaymentIntentId; the intent is idempotent per estimate+amount, so
+// retries reuse it.
+router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const estData = parseEstimateData(estimate);
+    const pricingBundle = await buildPricingBundle(estimate);
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
+    if (quoteRequirement.quoteRequired) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+
+    const membership = await buildEstimateMembershipContext(estimate);
+    const requestedOneTime = req.body?.serviceMode === 'one_time';
+    const oneTimeUninvoiced = (requestedOneTime || isStructuralOneTimeOnlyEstimate(estData, estimate))
+      && estimate.bill_by_invoice !== true;
+    const policy = resolveDepositPolicy({
+      estimate,
+      paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+      membership,
+      oneTimeUninvoiced,
+    });
+    if (!policy.required) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
+    }
+
+    const intent = await createDepositIntentForEstimate(estimate);
+    if (!intent) {
+      return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+    }
+    return res.json({ success: true, clientSecret: intent.clientSecret, amount: intent.amount, paymentIntentId: intent.paymentIntentId });
+  } catch (err) {
+    logger.error(`[estimate-slots-public:deposit-intent] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'Something went wrong' });
   }
 });
 

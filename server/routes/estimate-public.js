@@ -25,6 +25,10 @@ const {
 } = require('../services/lead-estimate-link');
 const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
 const {
+  ensureDepositSatisfied,
+  resolveDepositPolicy,
+} = require('../services/estimate-deposits');
+const {
   cleanupEstimatePricingCache,
   clearEstimatePricingCache,
   getEstimatePricingCache,
@@ -5318,6 +5322,45 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+
+    // ─────────────────────────────────────────────
+    // REQUIRED ACCEPTANCE DEPOSIT (dark until ESTIMATE_DEPOSIT_REQUIRED).
+    // Every acceptance requires a verified deposit except prepay-annual
+    // (paying in full), existing plan customers — whose commitment gate is
+    // booking the appointment itself — and one-time accepts on non-invoice
+    // estimates (no invoice exists at accept to credit the deposit
+    // against). Verification never trusts the client: webhook-recorded
+    // deposit, else live Stripe retrieval of the named PaymentIntent with
+    // metadata pinned to this estimate.
+    // ─────────────────────────────────────────────
+    const acceptMembership = await buildEstimateMembershipContext(estimate);
+    const depositPolicy = resolveDepositPolicy({
+      estimate,
+      paymentMethodPreference,
+      membership: acceptMembership,
+      oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
+    });
+    if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
+      return res.status(400).json({
+        error: 'Please pick your first appointment to confirm this service',
+        code: 'APPOINTMENT_REQUIRED',
+      });
+    }
+    if (depositPolicy.required) {
+      const depositPaymentIntentId = typeof req.body?.depositPaymentIntentId === 'string'
+        ? req.body.depositPaymentIntentId.trim()
+        : null;
+      const depositCheck = await ensureDepositSatisfied({ estimate, depositPaymentIntentId });
+      if (!depositCheck.satisfied) {
+        return res.status(402).json({
+          error: 'To confirm your service, a deposit is required and will be applied toward your first visit',
+          code: 'DEPOSIT_REQUIRED',
+          depositRequired: true,
+          depositAmount: depositPolicy.amount,
+        });
+      }
+    }
+
     const acceptedOneTimeChoiceList = treatAsOneTime && !isOneTimeOnly
       ? acceptedOneTimeChoiceListForEstimate(estimate, estData, pricingBundle, oneTimeChoicePrice)
       : null;
@@ -5726,20 +5769,59 @@ router.put('/:token/accept', async (req, res, next) => {
           effectiveBillingCadence,
           selectedFrequency,
         });
+        // Acceptance deposit credits this first invoice as a negative line
+        // item, capped at the invoice amount (never a negative invoice).
+        // Per-row credited_amount tracking means a partial application
+        // leaves only the unapplied remainder available on the ledger.
+        // Read through the accept trx so the consume below shares its
+        // snapshot; a read failure degrades to "no credit" (the deposit
+        // stays received on the ledger), never to an unbacked discount.
+        const { pendingDepositCredit: pendingEstimateDepositCredit, consumeDepositCredit: consumeEstimateDepositCredit } = require('../services/estimate-deposits');
+        const invoiceDepositCredit = await pendingEstimateDepositCredit(estimate.id, trx).catch(() => null);
+        const appliedInvoiceDepositCredit = invoiceDepositCredit && Number(invoiceDraft.amount) > 0
+          ? Math.min(invoiceDepositCredit.amount, Number(invoiceDraft.amount))
+          : 0;
+        const invoiceLineItems = appliedInvoiceDepositCredit > 0
+          ? [...invoiceDraft.lineItems, {
+              description: 'Deposit credit (paid at acceptance)',
+              quantity: 1,
+              unit_price: -appliedInvoiceDepositCredit,
+              // Prior payment, not a discount — InvoiceService applies it
+              // AFTER tax and keeps it out of discount reporting.
+              category: 'deposit_credit',
+            }]
+          : invoiceDraft.lineItems;
         const inv = await InvoiceService.create({
           database: trx,
           customerId,
           title: invoiceDraft.title,
-          lineItems: invoiceDraft.lineItems,
+          lineItems: invoiceLineItems,
           notes: invoiceDraft.notes,
           dueDate: etDateString(),
         });
         if (!inv?.id) {
           throw new Error('Invoice-mode acceptance could not create an invoice');
         }
+        if (appliedInvoiceDepositCredit > 0) {
+          const allocatedDepositCredit = await consumeEstimateDepositCredit({
+            estimateId: estimate.id,
+            amount: appliedInvoiceDepositCredit,
+            invoiceId: inv.id,
+            trx,
+          });
+          if (Math.round(allocatedDepositCredit * 100) !== Math.round(appliedInvoiceDepositCredit * 100)) {
+            // The ledger could not back the discount (a refund landed
+            // mid-accept) — roll the whole acceptance back rather than
+            // leave a discounted invoice beside an unconsumed deposit.
+            throw new Error(`deposit allocation mismatch on invoice-mode accept for estimate ${estimate.id} — acceptance rolled back`);
+          }
+          if (appliedInvoiceDepositCredit < invoiceDepositCredit.amount) {
+            logger.warn(`[estimate-public] deposit partially applied to invoice-mode accept for estimate ${estimate.id} — remainder stays on the ledger`);
+          }
+        }
         invoiceModeResult = true;
         invoiceIdResult = inv.id;
-        invoiceAmountResult = invoiceDraft.amount;
+        invoiceAmountResult = Math.max(0, Number(invoiceDraft.amount) - appliedInvoiceDepositCredit);
         invoicePayUrlResult = inv.token ? `/pay/${inv.token}` : null;
         invoiceServiceLabelResult = invoiceDraft.serviceLabel;
         invoiceKindResult = invoiceDraft.invoiceKind;
@@ -9375,7 +9457,32 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 
     const membership = await buildEstimateMembershipContext(estimate);
 
+    // Acceptance-deposit policy for the payment step: preference is unchosen
+    // at data-fetch time, so this reflects the non-prepay path (prepay-annual
+    // is exempt at accept regardless). Mirrors accept's one-time input so the
+    // UI can never advertise a deposit the server would 409.
+    const depositEstData = (() => {
+      try {
+        return typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data)
+          : (estimate.estimate_data || {});
+      } catch { return {}; }
+    })();
+    const depositPolicy = resolveDepositPolicy({
+      estimate,
+      paymentMethodPreference: null,
+      membership,
+      oneTimeUninvoiced: isStructuralOneTimeOnlyEstimate(depositEstData, estimate) && estimate.bill_by_invoice !== true,
+    });
+
     res.json({
+      depositPolicy: {
+        enforced: depositPolicy.enforced,
+        required: depositPolicy.required,
+        slotRequired: depositPolicy.slotRequired,
+        exemptReason: depositPolicy.exemptReason || null,
+        amount: depositPolicy.amount || null,
+      },
       estimate: {
         id: estimate.id,
         token: estimate.token,

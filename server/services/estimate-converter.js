@@ -694,6 +694,18 @@ const EstimateConverter = {
               unit_price: firstApplicationAmount,
             });
           }
+          // Acceptance deposit credits against this first invoice as a
+          // negative line item (capped at the invoice subtotal — a $50+
+          // deposit on a cheap first visit must not produce a negative
+          // invoice; the remainder stays on the deposit ledger). ATOMIC:
+          // the credit line exists IFF the ledger consumed exactly that
+          // amount in the same transaction — a consumption failure or an
+          // allocation mismatch (a refund landed between read and consume)
+          // rolls the invoice back, and one retry re-reads the fresh,
+          // possibly shrunken balance. Never a discounted invoice beside an
+          // unconsumed deposit row.
+          const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+          const invoiceSubtotal = (setupFeeApplies ? WAVEGUARD_SETUP_FEE : 0) + firstApplicationAmount;
           const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
             ? 'WaveGuard Membership Setup + First Application'
             : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
@@ -702,16 +714,76 @@ const EstimateConverter = {
             : (setupFeeApplies
                 ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99 setup fee only.`
                 : `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`);
-          const inv = await InvoiceService.create({
-            customerId,
-            scheduledServiceId,
-            title: invoiceTitle,
-            lineItems,
-            notes: invoiceNotes,
-            dueDate: etDateString(),
-          });
+          let inv = null;
+          let appliedDepositCredit = 0;
+          for (let attempt = 0; attempt < 2 && !inv; attempt += 1) {
+            const depositCredit = await pendingDepositCredit(estimateId).catch(() => null);
+            appliedDepositCredit = depositCredit && invoiceSubtotal > 0
+              ? Math.min(depositCredit.amount, invoiceSubtotal)
+              : 0;
+            const attemptLineItems = appliedDepositCredit > 0
+              ? [...lineItems, {
+                  description: 'Deposit credit (paid at acceptance)',
+                  quantity: 1,
+                  unit_price: -appliedDepositCredit,
+                  // Marks the line as prior payment — InvoiceService applies
+                  // it AFTER tax and keeps it out of discount reporting.
+                  category: 'deposit_credit',
+                }]
+              : lineItems;
+            try {
+              inv = await db.transaction(async (trx) => {
+                const created = await InvoiceService.create({
+                  database: trx,
+                  customerId,
+                  scheduledServiceId,
+                  title: invoiceTitle,
+                  lineItems: attemptLineItems,
+                  notes: invoiceNotes,
+                  dueDate: etDateString(),
+                });
+                if (created?.id && appliedDepositCredit > 0) {
+                  const allocated = await consumeDepositCredit({
+                    estimateId,
+                    amount: appliedDepositCredit,
+                    invoiceId: created.id,
+                    trx,
+                  });
+                  if (Math.round(allocated * 100) !== Math.round(appliedDepositCredit * 100)) {
+                    throw new Error(`deposit allocation mismatch (applied ${appliedDepositCredit}, allocated ${allocated})`);
+                  }
+                }
+                return created;
+              });
+              if (inv && appliedDepositCredit > 0 && appliedDepositCredit < depositCredit.amount) {
+                logger.warn(`[estimate-converter] deposit partially applied for estimate ${estimateId}`, {
+                  applied: appliedDepositCredit,
+                  remainder: Math.round((depositCredit.amount - appliedDepositCredit) * 100) / 100,
+                });
+              }
+            } catch (err) {
+              if (attempt === 0) {
+                logger.warn(`[estimate-converter] invoice+deposit transaction failed for estimate ${estimateId} — retrying with a fresh ledger read: ${err.message}`);
+              } else {
+                // The surrounding invoice block is best-effort (its outer
+                // catch logs and continues), so a paid deposit could end up
+                // accepted with no credit and no signal. Raise an explicit
+                // reconciliation hold for a human before this throw is
+                // swallowed.
+                if (appliedDepositCredit > 0) {
+                  try {
+                    const { triggerNotification } = require('./notification-triggers');
+                    await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
+                  } catch (notifyErr) {
+                    logger.error(`[estimate-converter] failed to raise deposit reconciliation alert for estimate ${estimateId}: ${notifyErr.message}`);
+                  }
+                }
+                throw err;
+              }
+            }
+          }
           draftInvoiceId = inv?.id || null;
-          draftInvoiceAmount = (setupFeeApplies ? WAVEGUARD_SETUP_FEE : 0) + firstApplicationAmount;
+          draftInvoiceAmount = invoiceSubtotal - appliedDepositCredit;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
         }
       }

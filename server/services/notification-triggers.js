@@ -114,6 +114,20 @@ const TRIGGER_REGISTRY = {
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
+  // Fired by estimate-converter when a paid acceptance deposit could not be
+  // credited to the first invoice — the money sits on the deposit ledger
+  // until someone reconciles it manually.
+  estimate_deposit_reconcile_needed: {
+    label: 'Estimate deposit needs manual reconciliation',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: 'Deposit paid but not credited',
+      body: `Estimate ${String(p.estimateId || 'unknown').slice(0, 40)}: deposit is on the ledger but the first-invoice credit failed — reconcile manually`,
+      link: '/admin/estimates',
+    }),
+  },
   twilio_failure: {
     label: 'Twilio call/SMS failure',
     category: 'system',
