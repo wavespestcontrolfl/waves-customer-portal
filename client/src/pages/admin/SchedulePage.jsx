@@ -4565,6 +4565,29 @@ export function typedNextStepChipConflict(schemaType, chip, values) {
   return null;
 }
 
+// Mirrors the server's final-score vs findings cleared-boundary rule
+// (validateActivityScoreConsistency / activity_score_inconsistent): a
+// pinned nonzero score beside cleared evidence — or a pinned 0 beside
+// positive evidence — would publish a headline that says the opposite of
+// the findings card. Returns the conflict message or null.
+const TYPED_SCORE_CLEARED_SELECT = {
+  flea: { field: "evidence_level", cleared: "None observed" },
+};
+export function typedActivityScoreConflict(schemaType, values, score) {
+  if (score == null) return null;
+  const rule = TYPED_SCORE_CLEARED_SELECT[schemaType];
+  if (!rule) return null;
+  const selected = String(values?.[rule.field] ?? "").trim();
+  if (!selected) return null;
+  if (selected === rule.cleared && score > 0) {
+    return `Activity score ${score} conflicts with "${rule.cleared}" — set the score to 0 or update the recorded level`;
+  }
+  if (selected !== rule.cleared && score === 0) {
+    return `Activity score 0 conflicts with the recorded level (${selected}) — select "${rule.cleared}" or use a nonzero score`;
+  }
+  return null;
+}
+
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -7661,6 +7684,18 @@ export function CompletionPanel({
         alert(
           `Fix the next-step selections before submitting: ${chipConflicts.join("; ")}.`,
         );
+        return;
+      }
+      // A pinned gauge score can likewise go stale when the evidence select
+      // changes after the tap. Mirror activity_score_inconsistent pre-submit.
+      const scoreConflict = typedActivityScoreConflict(
+        typedFindingsSchema.type,
+        findingsValues,
+        typedActivityScore,
+      );
+      if (scoreConflict) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(`Fix the activity score before submitting: ${scoreConflict}.`);
         return;
       }
     }

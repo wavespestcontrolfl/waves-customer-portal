@@ -1096,6 +1096,32 @@ function validateNextStepChips(chips, projectType = null, values = null) {
   return { ok: true, chips: normalized };
 }
 
+// Final-score vs findings consistency at the CLEARED boundary (Codex P2).
+// Within the active range a technician override is legal and the headline
+// follows the final score; crossing the 0 boundary is different — a pinned
+// nonzero score beside cleared evidence (or a pinned 0 beside positive
+// evidence) makes the headline say the opposite of the findings card, and
+// the areas/chip checks key off the select. Per-type map so other gauge
+// types can add their cleared-select boundary.
+const SCORE_CLEARED_SELECT = {
+  flea: { field: 'evidence_level', cleared: 'None observed' },
+};
+
+function validateActivityScoreConsistency(type, values = {}, score = null) {
+  if (score == null) return { ok: true };
+  const rule = SCORE_CLEARED_SELECT[type];
+  if (!rule) return { ok: true };
+  const selected = String(values?.[rule.field] ?? '').trim();
+  if (!selected) return { ok: true };
+  if (selected === rule.cleared && score > 0) {
+    return { ok: false, error: `Activity score ${score} contradicts "${rule.cleared}" — set the score to 0 or update the recorded level` };
+  }
+  if (selected !== rule.cleared && score === 0) {
+    return { ok: false, error: `Activity score 0 contradicts the recorded level (${selected}) — select "${rule.cleared}" or use a nonzero score` };
+  }
+  return { ok: true };
+}
+
 function trendWordForScores(score, priorScore) {
   if (priorScore == null) return null;
   if (score < priorScore) return 'decreased since the last visit';
@@ -1926,6 +1952,7 @@ module.exports = {
   customerLabelForValue,
   validateTypedFindings,
   validateNextStepChips,
+  validateActivityScoreConsistency,
   nextStepRequiredForType,
   trendWordForScores,
   trendDirection,

@@ -15,6 +15,7 @@ const {
   nextStepRequiredForType,
   validateTypedFindings,
   validateNextStepChips,
+  validateActivityScoreConsistency,
   findingsSchemaForType,
   buildTodaysResult,
   buildTypedReportSnapshot,
@@ -239,6 +240,33 @@ describe('next-step chips vs recorded evidence (Codex P2 round 2)', () => {
     expect(validateNextStepChips(['Vacuum daily for 2 weeks'], 'flea', FLEA_VALUES).ok).toBe(true);
     // Legacy callers without values keep the allowlist-only behavior.
     expect(validateNextStepChips(['No action needed'], 'flea').ok).toBe(true);
+  });
+});
+
+describe('final score vs cleared evidence (Codex P2 round 4)', () => {
+  test('pinned scores cannot cross the cleared boundary', () => {
+    // Nonzero pin beside cleared evidence: headline would say activity was
+    // present while the findings card says none was observed.
+    const pinnedUp = validateActivityScoreConsistency('flea',
+      { ...FLEA_VALUES, evidence_level: 'None observed', activity_areas: '' }, 2);
+    expect(pinnedUp.ok).toBe(false);
+    expect(pinnedUp.error).toMatch(/None observed/);
+
+    // Zero pin beside positive evidence: cleared headline under a findings
+    // card that records activity.
+    const pinnedDown = validateActivityScoreConsistency('flea', FLEA_VALUES, 0);
+    expect(pinnedDown.ok).toBe(false);
+    expect(pinnedDown.error).toMatch(/Moderate/);
+  });
+
+  test('agreeing scores, in-range overrides, and non-gauge paths pass', () => {
+    expect(validateActivityScoreConsistency('flea',
+      { ...FLEA_VALUES, evidence_level: 'None observed', activity_areas: '' }, 0).ok).toBe(true);
+    // Within the active range the tech override is legal — headline follows it.
+    expect(validateActivityScoreConsistency('flea', FLEA_VALUES, 4).ok).toBe(true);
+    expect(validateActivityScoreConsistency('flea', FLEA_VALUES, null).ok).toBe(true);
+    // Types without a cleared-select rule are unaffected.
+    expect(validateActivityScoreConsistency('pest_inspection', { severity: 'Low' }, 3).ok).toBe(true);
   });
 });
 

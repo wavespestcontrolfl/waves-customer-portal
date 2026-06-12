@@ -1819,6 +1819,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               },
             };
           }
+          // The FINAL score (pinned or derived) must agree with the
+          // findings at the cleared boundary — the headline follows the
+          // score while areas/chip checks key off the select, so a
+          // crossing override would publish a self-contradicting report
+          // (Codex P2).
+          const scoreConsistency = ActivityIndicators.validateActivityScoreConsistency(
+            typedFindingsType, typedFindings.values, typedActivityScore,
+          );
+          if (!scoreConsistency.ok) {
+            return {
+              status: 422,
+              body: { error: scoreConsistency.error, code: 'activity_score_inconsistent' },
+            };
+          }
         }
       }
       return null;
