@@ -110,15 +110,26 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(combineRecurringServicesForScheduling(undefined)).toEqual({ remaining: [], combos: [] });
   });
 
-  test('explicit visit counts drive the combo cadence — billing-level frequency never leaks in (Codex P1)', () => {
-    // 4x pest + 4x termite under monthly billing must combine as QUARTERLY:
-    // the combine decision reads service-level cadence only.
+  test('line-level visit counts drive the combo cadence when no plan selection was recorded', () => {
     const { combos } = combineRecurringServicesForScheduling([
       { name: 'Pest Control', visitsPerYear: 4 },
       { name: 'Termite Bait Station System', visitsPerYear: 4 },
     ]);
     expect(combos).toHaveLength(1);
     expect(combos[0].service.frequency).toBe('quarterly');
+  });
+
+  test('the ACCEPTED selection beats stale quote-time line cadence on the primary (Codex P1)', () => {
+    // Customer quoted quarterly (line carries visits 4) but switched the
+    // plan to monthly at accept — the quarterly companion must NOT combine.
+    const { combos } = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control', frequency: 'quarterly', visitsPerYear: 4 },
+        { name: 'Rodent Bait Stations', service: 'rodent_bait' },
+      ],
+      { acceptFrequency: 'monthly' },
+    );
+    expect(combos).toEqual([]);
   });
 
   test('a primary with no cadence anywhere never combines', () => {

@@ -202,16 +202,16 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const companion = companionIdx !== -1 ? remaining[companionIdx] : companionFromSupplement;
     if (!companion) continue;
     // Cadence resolution is role-aware:
-    //  - explicit service-level cadence always wins (and an explicit
-    //    mismatch always blocks);
-    //  - a primary without explicit cadence takes the ACCEPTED frequency —
-    //    that selection IS the pest/lawn plan cadence (a legacy monthly
-    //    pest accept blocks the quarterly companion);
-    //  - a companion without explicit cadence takes the route's program
-    //    default (bait-station programs are quarterly regardless of how
-    //    the pest plan bills);
+    //  - PRIMARY: the ACCEPTED plan selection wins when present — it is the
+    //    customer's FINAL cadence choice, and the persisted line can carry
+    //    stale quote-time frequency/visits (a quarterly quote switched to
+    //    monthly at accept must not combine quarterly — pre-push P1). Line
+    //    cadence is the fallback when no selection was recorded.
+    //  - COMPANION: explicit line cadence, else the route's program default
+    //    (bait-station programs are quarterly regardless of how the pest
+    //    plan bills) — NEVER the accepted selection.
     //  - nothing resolvable → no combine.
-    const primaryPattern = explicitServiceCadence(primary) || acceptPattern;
+    const primaryPattern = acceptPattern || explicitServiceCadence(primary);
     const companionPattern = explicitServiceCadence(companion) || route.companionDefaultPattern || null;
     if (!primaryPattern || !companionPattern || primaryPattern !== companionPattern) continue;
     // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
