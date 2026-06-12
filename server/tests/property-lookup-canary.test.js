@@ -149,6 +149,17 @@ describe('runPropertyLookupCanary', () => {
     expect(result.failures).toContain('FDOR cadastral layer: golden point lookup threw (TypeError)');
   });
 
+  it('passes rethrowErrors to both lookups — without it the providers swallow errors into nulls and the throw labels never fire', async () => {
+    await runPropertyLookupCanary();
+    expect(mockLookupParcelByPoint).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      expect.objectContaining({ rethrowErrors: true }),
+    );
+    for (const call of mockLookupByParcel.mock.calls) {
+      expect(call[2]).toEqual(expect.objectContaining({ rethrowErrors: true }));
+    }
+  });
+
   it('kill switch skips without touching the network', async () => {
     process.env.PROPERTY_LOOKUP_CANARY_DISABLED = '1';
     const result = await runPropertyLookupCanary();

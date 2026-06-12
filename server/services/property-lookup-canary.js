@@ -85,7 +85,7 @@ async function runPropertyLookupCanaryInner() {
   // code/name is recorded: err.message can embed the lookup URL, and the
   // PII rule (county-only labels) applies to logs and failure text alike.
   let pointErrCode = null;
-  const parcel = await lookupParcelByPoint(GOLDEN_POINT.lat, GOLDEN_POINT.lng, { timeoutMs: CANARY_TIMEOUT_MS })
+  const parcel = await lookupParcelByPoint(GOLDEN_POINT.lat, GOLDEN_POINT.lng, { timeoutMs: CANARY_TIMEOUT_MS, rethrowErrors: true })
     .catch((err) => { pointErrCode = (err && (err.code || err.name)) || 'network/timeout'; return null; });
   if (!parcel || parcel.county !== GOLDEN_POINT.expectCounty) {
     failures.push(pointErrCode
@@ -101,6 +101,7 @@ async function runPropertyLookupCanaryInner() {
     let errCode = null;
     const record = await lookupPropertyFromCountyByParcel(golden.parcel, golden.parcel.situsAddress, {
       timeoutMs: CANARY_TIMEOUT_MS,
+      rethrowErrors: true,
     }).catch((err) => { errCode = (err && (err.code || err.name)) || 'network/timeout'; return null; });
     if (errCode) {
       logger.warn('[property-lookup-canary] by-parcel lookup threw', { label: golden.label, code: errCode });

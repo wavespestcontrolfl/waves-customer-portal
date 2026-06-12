@@ -705,6 +705,10 @@ async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
       elapsedMs: Date.now() - t0,
       error: summarizeProviderError(err),
     });
+    // Production callers want null-on-error (caller falls back to other
+    // providers). The canary passes rethrowErrors so a transient county-site
+    // failure reads differently from a parsed-but-empty result.
+    if (options.rethrowErrors) throw err;
     return null;
   }
 }
