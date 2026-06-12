@@ -275,7 +275,7 @@ class BalanceReminder {
     if (balance.daysOverdue >= 30 && tier === "urgent") {
       const amt = balance.totalBalance.toFixed(2);
       await TwilioService.sendSMS(
-        process.env.ADAM_PHONE || "+19413187612",
+        process.env.ADAM_PHONE || "+19415993489",
         `💰 Overdue: ${service.first_name} ${service.last_name} — $${amt} (${balance.daysOverdue} days). Service ${daysUntil === 0 ? "today" : "tomorrow"}.`,
         { messageType: "internal_alert" },
       );

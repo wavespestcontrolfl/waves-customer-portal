@@ -67,6 +67,11 @@ const gates = {
   // human-approval-gated until volume/quality is proven (M3b).
   linkProspectOutreach: process.env.GATE_LINK_OUTREACH === 'true',
 
+  // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
+  // Marketplace add-on flags as spam. Explicit opt-in everywhere: until the
+  // gate is on, verdicts are only logged (shadow) and never block a caller.
+  marchexAutoBlock: process.env.GATE_MARCHEX_AUTO_BLOCK === 'true',
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.

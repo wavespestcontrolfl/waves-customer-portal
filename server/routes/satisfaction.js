@@ -92,7 +92,9 @@ function resolveOffice(customer) {
   return 'lakewood_ranch';
 }
 
-const WAVES_OFFICE_PHONE = '+19413187612';
+// Admin alert recipient — must be a real cell, never one of our own Twilio
+// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
+const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 // =========================================================================
 // GET /api/satisfaction/pending — unrated services from last 7 days
@@ -223,7 +225,7 @@ router.post('/', async (req, res, next) => {
     const urgency = isDetractor ? '🚨 URGENT' : '⚠️';
     try {
       await TwilioService.sendSMS(
-        WAVES_OFFICE_PHONE,
+        ADMIN_ALERT_PHONE,
         `${urgency} Satisfaction Alert\n\n` +
         `${customer.first_name} ${customer.last_name} rated their ` +
         `${service.service_type} (${service.service_date}) a ${rating}/10.\n` +

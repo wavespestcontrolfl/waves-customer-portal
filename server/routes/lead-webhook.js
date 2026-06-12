@@ -58,10 +58,9 @@ function capitalizeName(name) {
 }
 const leadAttribution = require('../services/lead-attribution');
 
-const WAVES_ADMIN_PHONE = '+19413187612';
-// Adam's personal cell for new-lead alerts. WAVES_ADMIN_PHONE is the HQ Pest
-// line used elsewhere for notifications; new leads should ring Adam directly.
-const ADAM_CELL = '+19415993489';
+// Adam's personal cell for new-lead alerts — must be a real cell, never one
+// of our own Twilio numbers (same-from/to sends fail with Twilio error 21266).
+const ADAM_CELL = process.env.ADAM_PHONE || '+19415993489';
 
 function applyLeadEstimateAutomationGate(readiness = {}) {
   if (isEnabled('leadEstimateAutomation')) return readiness;
@@ -296,7 +295,7 @@ router.post('/', async (req, res) => {
         // back manually from the admin portal or directly.
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-          const fromNumber = '+19412972606';
+          const fromNumber = TWILIO_NUMBERS.mainLine.number;
           attemptedLeadCallFrom = fromNumber;
           const autoBridge = isEnabled('leadAutoBridge');
 

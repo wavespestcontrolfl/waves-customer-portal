@@ -82,11 +82,13 @@ function initTimeTrackingCrons() {
 
       // SMS Virginia if there are weeks awaiting approval
       if (pendingCount > 0) {
-        const WAVES_OFFICE_PHONE = process.env.WAVES_OFFICE_PHONE || '+19413187612';
+        // Must be a real cell, never one of our own Twilio numbers (an SMS
+        // from the HQ line to itself fails with Twilio error 21266).
+        const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
         const portalBase = process.env.PORTAL_BASE_URL || 'https://portal.wavespestcontrol.com';
         const link = `${portalBase}/admin/timetracking?tab=approvals&weekStart=${weekStartStr}`;
         try {
-          await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+          await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
             `📋 ${pendingCount} tech timesheet${pendingCount === 1 ? '' : 's'} ready to approve for week of ${weekStartStr}. Review: ${link}`,
             { messageType: 'internal_alert', link: '/admin/timetracking' },
           );

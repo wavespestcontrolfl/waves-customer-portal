@@ -245,7 +245,9 @@ router.post('/voice', async (req, res) => {
 
     // ── Spam block (must run before any other routing) ──
     const { checkInboundBlock } = require('../middleware/spam-block');
-    const blockResult = await checkInboundBlock({ from: From, to: To, channel: 'voice', twilioSid: CallSid });
+    const blockResult = await checkInboundBlock({
+      from: From, to: To, channel: 'voice', twilioSid: CallSid, addOns: req.body.AddOns,
+    });
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);

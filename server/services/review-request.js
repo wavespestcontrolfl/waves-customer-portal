@@ -820,7 +820,7 @@ const ReviewService = {
       const urgency = isDetractor ? "🚨 URGENT" : "⚠️";
       try {
         const TwilioService = require("./twilio");
-        const alertPhone = process.env.OWNER_PHONE || "+19413187612";
+        const alertPhone = process.env.OWNER_PHONE || "+19415993489";
         await TwilioService.sendSMS(
           alertPhone,
           `${urgency} Review Alert\n\n` +
@@ -963,7 +963,7 @@ const ReviewService = {
 
       try {
         const TwilioService = require("./twilio");
-        const alertPhone = process.env.OWNER_PHONE || "+19413187612";
+        const alertPhone = process.env.OWNER_PHONE || "+19415993489";
         const result = await TwilioService.sendSMS(
           alertPhone,
           `Review follow-up needed: ${customerName} tapped ${request.score}/10 for ${serviceLabel} but did not submit feedback. Reach out before asking for a Google review.`,

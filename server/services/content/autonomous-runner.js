@@ -1042,7 +1042,7 @@ class AutonomousRunner {
     const body = parts.join(' ');
 
     const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
     await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
     logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
   }
@@ -1082,7 +1082,7 @@ class AutonomousRunner {
     }
     const body = `Waves content engine: NO blog post today — ${why}.`;
     const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
     await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
     logger.info(`[autonomous-runner] blog drought SMS sent: ${body}`);
   }
@@ -1227,7 +1227,7 @@ class AutonomousRunner {
     if (!envBool('AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT', false)) return;
     try {
       const twilio = require('../twilio');
-      const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+      const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
       await twilio.sendSMS(ownerPhone, `Waves content engine error [${code}]: ${message}`, {
         messageType: 'internal_alert',
         link: '/admin/seo',

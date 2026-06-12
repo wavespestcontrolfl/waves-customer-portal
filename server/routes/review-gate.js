@@ -21,7 +21,9 @@ function resolveReviewLocation(request, customer) {
   return WAVES_LOCATIONS[0];
 }
 
-const WAVES_ADMIN_PHONE = '+19413187612';
+// Admin alert recipient — must be a real cell, never one of our own Twilio
+// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
+const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 function categorizeScore(score) {
   if (score >= 8) return 'promoter';
@@ -235,7 +237,7 @@ router.post('/:token/submit', async (req, res, next) => {
       const customerName = customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown';
 
       const TwilioService = require('../services/twilio');
-      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+      await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
         `⚠️ Low NPS alert: ${customerName} rated ${score}/10 for ${request.service_type || 'service'} (${loc.name}).\n\nFeedback: "${(feedback || 'No comment').slice(0, 150)}"\n\nFollow up ASAP.`,
         { messageType: 'internal_alert' }
       );

@@ -42,7 +42,9 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
   return sendResult;
 }
 
-const WAVES_OFFICE_PHONE = '+19413187612';
+// Admin alert recipient — must be a real cell, never one of our own Twilio
+// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
+const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
 
 // Render customer billing SMS from the editable template table.
@@ -226,7 +228,7 @@ const BillingCron = {
           }
 
           try {
-            await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
               `🚨 Stripe orphan charge: customer id=${customer.id} — $${err.amount} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. DO NOT retry.`,
               { messageType: 'internal_alert', link: '/admin/revenue' },
             );
@@ -289,7 +291,7 @@ const BillingCron = {
             logger.error(`[billing-cron] Ambiguous-outcome alert creation failed: ${alertErr.message}`);
           }
           try {
-            await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
               `⚠️ Ambiguous autopay outcome: ${customer.first_name} ${customer.last_name} — $${customer.monthly_rate}. Stripe request died without a PaymentIntent; verify in the Stripe dashboard before re-charging. Parked, no retry scheduled.`,
               { messageType: 'internal_alert', link: '/admin/revenue' },
             );
@@ -551,7 +553,7 @@ const BillingCron = {
           if (!orphanDisarmed) {
             logger.error(`[billing-cron] CRITICAL: payment ${payment.id} was charged at Stripe (PI ${err.stripePaymentIntentId}) but could NOT be disarmed — it remains in the retry queue and balance sums`);
             try {
-              await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+              await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
                 `🚨🚨 URGENT: payment ${payment.id} (customer id=${payment.customer_id}) was CHARGED at Stripe but could not be removed from the retry queue. It WILL be re-charged and shows as owed. Fix the payments row now (PI ${err.stripePaymentIntentId}).`,
                 { messageType: 'internal_alert', link: '/admin/revenue' },
               );
@@ -582,7 +584,7 @@ const BillingCron = {
             logger.error(`[billing-cron] Retry orphan alert creation failed: ${alertErr.message}`);
           }
           try {
-            await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
               `🚨 Stripe orphan charge (retry): customer id=${payment.customer_id} — $${err.amount} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. DO NOT retry.`,
               { messageType: 'internal_alert', link: '/admin/revenue' },
             );
@@ -735,7 +737,7 @@ const BillingCron = {
           // Alert the office so Virginia can reach out (health alert alone
           // sat on a dashboard — push-style SMS makes sure it lands).
           try {
-            await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
               `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. Service paused until card is updated. Last error: ${err.message}`,
               { messageType: 'internal_alert', link: '/admin/revenue' },
             );

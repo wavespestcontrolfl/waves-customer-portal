@@ -234,7 +234,7 @@ async function alertStuckAutonomousPrs({ hours = null } = {}) {
   const body = `Waves content engine: ${urls.length} autonomous PR(s) stuck unmerged >${thresholdHours}h — check Codex review / build status. ${urls.slice(0, 3).join(' ')}`;
   try {
     const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
     await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
     logger.info(`[post-publish-visibility] stuck-PR alert sent: ${body}`);
   } catch (err) {
@@ -266,7 +266,7 @@ async function maybeAlertVisibilityFailure(url, snapshot, aiResult, post) {
     : `P0 ${p0Codes.join(', ') || 'visibility'}`;
   const body = `Waves content: auto-published page has a visibility problem — ${reason}. ${url}`;
   const twilio = require('../twilio');
-  const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+  const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
   await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
   logger.info(`[post-publish-visibility] visibility alert sent for ${url}`);
 }

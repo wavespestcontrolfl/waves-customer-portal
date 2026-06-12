@@ -52,7 +52,6 @@ const {
   createEstimateAddServiceRequest,
 } = require('../services/estimate-add-service-request');
 
-const WAVES_OFFICE_PHONE = '+19413187612';
 const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
   || config.jwt.secret
   || crypto.randomBytes(32).toString('hex');
