@@ -1,0 +1,243 @@
+/**
+ * Cockroach knockdown typed flows (owner spec 2026-06-12, Phase 2 §8):
+ * two DISTINCT checklists (German interior bait/IGR program vs palmetto
+ * large-roach perimeter program), shared roach_activity trend line,
+ * mandatory German cooperation language, and the palmetto flush disclosure.
+ */
+const {
+  ACTIVITY_INDICATORS,
+  REQUIRED_FINDINGS_FIELDS,
+  TYPE_NEXT_STEP_CHIPS,
+  NEXT_STEP_CHIPS,
+  customerLabelForValue,
+  deriveActivityScore,
+  findBannedCustomerCopy,
+  nextStepRequiredForType,
+  validateTypedFindings,
+  buildTodaysResult,
+  buildTypedReportSnapshot,
+} = require('../services/service-report/activity-indicators');
+const { PROJECT_TYPES } = require('../services/project-types');
+
+const GERMAN_VALUES = {
+  activity_level: 'Moderate',
+  rooms_treated: 'Kitchen and adjacent areas',
+  primary_harborage: 'Behind refrigerator, Under sink, Cabinet hinges',
+  live_roaches_observed: 'Yes',
+  droppings_egg_cases: 'Yes',
+  sanitation_issue: 'Yes',
+  moisture_leak_issue: 'No',
+  prep_status: 'Partial',
+  treatment_completed: 'Gel bait, Insect growth regulator, Crack & crevice treatment',
+  monitors_placed: 'Yes',
+  followup_required: 'Yes',
+  followup_window: '10–14 days',
+};
+
+const PALMETTO_VALUES = {
+  roach_type: 'Palmetto',
+  activity_level: 'Moderate',
+  activity_locations: 'Kitchen, Garage, Exterior perimeter',
+  interior_activity: 'Yes',
+  exterior_harborage: 'Yes',
+  moisture_issue: 'Yes',
+  entry_points_observed: 'Yes',
+  treatment_completed: 'Interior crack & crevice, Garage treatment, Exterior perimeter treatment',
+  customer_recommendations: 'Keep garage seals tight, Reduce moisture near entry points',
+  followup_needed: 'No',
+};
+
+describe('knockdown schemas', () => {
+  test('two distinct checklists — German interior program vs palmetto perimeter program', () => {
+    const german = Object.fromEntries(PROJECT_TYPES.german_roach_knockdown.findingsFields.map((f) => [f.key, f]));
+    const palmetto = Object.fromEntries(PROJECT_TYPES.palmetto_roach_knockdown.findingsFields.map((f) => [f.key, f]));
+    // German-only machinery: prep, monitors, structured follow-up window.
+    expect(german.prep_status).toBeTruthy();
+    expect(german.monitors_placed).toBeTruthy();
+    expect(german.followup_window.options).toContain('10–14 days');
+    expect(palmetto.prep_status).toBeUndefined();
+    // Palmetto-only machinery: species + exterior pressure trio.
+    expect(palmetto.roach_type.options).toEqual(['Palmetto', 'American', 'Smoky brown', 'Unknown large roach']);
+    expect(palmetto.exterior_harborage).toBeTruthy();
+    expect(german.roach_type).toBeUndefined();
+    // German runs multi-visit; palmetto does not force one.
+    expect(PROJECT_TYPES.german_roach_knockdown.requiresFollowup).toBe(true);
+    expect(PROJECT_TYPES.palmetto_roach_knockdown.requiresFollowup).toBe(false);
+  });
+
+  test('owner-required cores enforced; both types require a next step', () => {
+    expect(REQUIRED_FINDINGS_FIELDS.german_roach_knockdown).toContain('prep_status');
+    expect(REQUIRED_FINDINGS_FIELDS.palmetto_roach_knockdown).toContain('roach_type');
+    expect(nextStepRequiredForType('german_roach_knockdown')).toBe(true);
+    expect(nextStepRequiredForType('palmetto_roach_knockdown')).toBe(true);
+    for (const type of ['german_roach_knockdown', 'palmetto_roach_knockdown']) {
+      for (const chip of TYPE_NEXT_STEP_CHIPS[type]) {
+        expect({ type, chip, hasSentence: !!NEXT_STEP_CHIPS[chip] }).toEqual({ type, chip, hasSentence: true });
+      }
+    }
+  });
+
+  test('both knockdowns extend the shared roach trend line', () => {
+    expect(ACTIVITY_INDICATORS.german_roach_knockdown.indicatorKey).toBe('roach_activity');
+    expect(ACTIVITY_INDICATORS.palmetto_roach_knockdown.indicatorKey).toBe('roach_activity');
+    expect(ACTIVITY_INDICATORS.cockroach.indicatorKey).toBe('roach_activity');
+    expect(deriveActivityScore('german_roach_knockdown', { activity_level: 'Light' }).score).toBe(1);
+    expect(deriveActivityScore('german_roach_knockdown', { activity_level: 'Severe' }).score).toBe(5);
+    expect(deriveActivityScore('palmetto_roach_knockdown', { activity_level: 'Heavy' }).score).toBe(4);
+  });
+});
+
+describe('German knockdown report', () => {
+  test('cooperation language is mandatory and deterministic (owner critical warning)', () => {
+    const result = buildTodaysResult({
+      projectType: 'german_roach_knockdown',
+      reportTypeLabel: 'German Roach Knockdown Summary',
+      values: GERMAN_VALUES,
+      chips: ['Follow-up in 10–14 days', 'No store-bought sprays'],
+      activity: { score: 3 },
+      visitSequence: 1,
+    });
+    expect(result.headline).toBe('German cockroach activity was moderate today.');
+    expect(result.body).toContain('Completed your initial German cockroach knockdown service in the kitchen and adjacent areas.');
+    expect(result.body).toContain('placed targeted gel bait');
+    expect(result.body).toContain('avoid over-the-counter sprays');
+    expect(result.body).toContain('keep bait placements undisturbed');
+    expect(result.body).toContain('Follow-up service is recommended in 10–14 days.');
+    expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
+  });
+
+  test('cooperation language survives even a minimal submission', () => {
+    const result = buildTodaysResult({
+      projectType: 'german_roach_knockdown',
+      reportTypeLabel: 'German Roach Knockdown Summary',
+      values: { activity_level: 'Heavy', followup_required: 'No' },
+      chips: ['No store-bought sprays'],
+      activity: { score: 4 },
+      visitSequence: 1,
+    });
+    expect(result.body).toContain('keep bait placements undisturbed');
+    expect(result.body).not.toContain('Follow-up service is recommended');
+  });
+
+  test('cleared-state revisit stays observational, never "activity was none"', () => {
+    const result = buildTodaysResult({
+      projectType: 'german_roach_knockdown',
+      reportTypeLabel: 'German Roach Knockdown Summary',
+      values: { ...GERMAN_VALUES, activity_level: 'None observed', followup_required: 'No' },
+      chips: ['Keep treated areas undisturbed'],
+      activity: { score: 0 },
+      visitSequence: 1,
+    });
+    expect(result.headline).toBe('No live German cockroach activity was observed today.');
+    expect(result.headline).not.toContain('was none');
+    expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
+  });
+
+  test('trend headline wins on the 10–14 day follow-up visit', () => {
+    const result = buildTodaysResult({
+      projectType: 'german_roach_knockdown',
+      reportTypeLabel: 'Roach Program — Progress Visit',
+      values: { ...GERMAN_VALUES, activity_level: 'Light' },
+      chips: ['Keep treated areas undisturbed'],
+      activity: { score: 1, trend: 'improving', trendWord: 'decreased since the last visit' },
+      visitSequence: 2,
+    });
+    expect(result.headline).toContain('decreased since');
+  });
+});
+
+describe('palmetto knockdown report', () => {
+  test('flush disclosure + moisture context are deterministic', () => {
+    const result = buildTodaysResult({
+      projectType: 'palmetto_roach_knockdown',
+      reportTypeLabel: 'Palmetto Roach Knockdown Summary',
+      values: PALMETTO_VALUES,
+      chips: ['Seal entry gaps', 'Reduce moisture'],
+      activity: { score: 3 },
+      visitSequence: 1,
+    });
+    expect(result.headline).toBe('Large-roach activity was moderate today.');
+    expect(result.body).toContain('Completed your initial large-roach knockdown service.');
+    expect(result.body).toContain('treated the garage edges');
+    expect(result.body).toContain('Some activity may be seen temporarily as roaches are flushed from hiding areas.');
+    expect(result.body).toContain('Moisture and exterior entry points can contribute');
+    expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
+  });
+});
+
+describe('validation', () => {
+  test('owner-required cores enforce as missing', () => {
+    const german = validateTypedFindings({
+      type: 'german_roach_knockdown',
+      values: { activity_level: 'Moderate' },
+      expectedType: 'german_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(german.ok).toBe(false);
+    expect(german.missing).toEqual(expect.arrayContaining(['rooms_treated', 'prep_status', 'treatment_completed', 'followup_required']));
+
+    const palmetto = validateTypedFindings({
+      type: 'palmetto_roach_knockdown',
+      values: { activity_level: 'Light' },
+      expectedType: 'palmetto_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(palmetto.ok).toBe(false);
+    expect(palmetto.missing).toEqual(expect.arrayContaining(['roach_type', 'exterior_harborage', 'customer_recommendations']));
+  });
+
+  test('follow-up window required only when a follow-up is required', () => {
+    const withoutWindow = validateTypedFindings({
+      type: 'german_roach_knockdown',
+      values: { ...GERMAN_VALUES, followup_window: '' },
+      expectedType: 'german_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(withoutWindow.ok).toBe(false);
+    expect(withoutWindow.missing).toContain('followup_window');
+
+    const noFollowup = validateTypedFindings({
+      type: 'german_roach_knockdown',
+      values: { ...GERMAN_VALUES, followup_required: 'No', followup_window: '' },
+      expectedType: 'german_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(noFollowup.ok).toBe(true);
+  });
+
+  test('full owner submissions validate clean', () => {
+    for (const [type, values] of [
+      ['german_roach_knockdown', GERMAN_VALUES],
+      ['palmetto_roach_knockdown', PALMETTO_VALUES],
+    ]) {
+      const result = validateTypedFindings({ type, values, expectedType: type, enforceRequired: true });
+      expect({ type, ok: result.ok, errors: result.errors, missing: result.missing })
+        .toEqual({ type, ok: true, errors: [], missing: [] });
+    }
+  });
+});
+
+describe('snapshot', () => {
+  test('Yes/No selects render as findings sentences; whole snapshot is copy-safe', () => {
+    expect(customerLabelForValue('live_roaches_observed', 'No')).toBe('No live roaches observed today');
+    expect(customerLabelForValue('exterior_harborage', 'Yes')).toBe('Exterior harborage areas were identified');
+    expect(customerLabelForValue('roach_type', 'Palmetto')).toContain('Palmetto bugs');
+
+    for (const [type, values, key] of [
+      ['german_roach_knockdown', GERMAN_VALUES, 'pest_initial_german_knockdown'],
+      ['palmetto_roach_knockdown', PALMETTO_VALUES, 'pest_initial_palmetto_knockdown'],
+    ]) {
+      const snapshot = buildTypedReportSnapshot({
+        projectType: type,
+        values,
+        nextStepChips: ['Monitor activity'],
+        serviceKey: key,
+        serviceLabel: PROJECT_TYPES[type].label,
+        visitSequence: 1,
+        activity: { indicatorKey: 'roach_activity', label: 'Roach Activity', score: 3, source: 'derived' },
+      });
+      expect(findBannedCustomerCopy(JSON.stringify(snapshot))).toEqual([]);
+      expect(snapshot.activity.score).toBe(3);
+    }
+  });
+});

@@ -179,6 +179,80 @@ const PROJECT_TYPES = {
     ],
   },
 
+  // German roach knockdown (owner spec 2026-06-12, Phase 2 §8B) — the
+  // multi-visit interior sanitation/bait/IGR program. Distinct from the
+  // generic cockroach type and from palmetto knockdown: German work lives in
+  // kitchens and appliances, runs on bait + IGR, and only works with
+  // customer cooperation — the report's cooperation language is mandatory
+  // and deterministic (see buildTodaysResult), never chip-dependent.
+  german_roach_knockdown: {
+    label: 'German Roach Knockdown',
+    short: 'German Knockdown',
+    description: 'Initial German cockroach knockdown: interior bait/IGR program with mandatory customer-cooperation guidance and a 10–14 day follow-up.',
+    requiresFollowup: true,
+    photoCategories: ['kitchen', 'bathroom', 'appliance_area', 'cabinet', 'harborage', 'evidence', 'treatment_area', 'other'],
+    findingsFields: [
+      // 'None observed' exists for the follow-up visit's cleared state (the
+      // gauge contract requires a 0-mapped option) — the initial knockdown
+      // always has activity by definition.
+      { key: 'activity_level', label: 'Activity level', type: 'select', section: 'Activity', options: ['None observed', 'Light', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'rooms_treated', label: 'Rooms treated', type: 'text', section: 'Activity', placeholder: 'Kitchen, hall bath, laundry…' },
+      { key: 'primary_harborage', label: 'Primary harborage', type: 'chips', section: 'Activity', options: [
+        'Behind refrigerator', 'Behind stove', 'Under sink', 'Dishwasher area',
+        'Cabinet hinges', 'Pantry', 'Bathroom plumbing', 'Wall voids', 'Other',
+      ] },
+      { key: 'live_roaches_observed', label: 'Live roaches observed', type: 'select', section: 'Evidence', options: ['Yes', 'No'] },
+      { key: 'droppings_egg_cases', label: 'Droppings / egg cases observed', type: 'select', section: 'Evidence', options: ['Yes', 'No'] },
+      { key: 'sanitation_issue', label: 'Sanitation issue', type: 'select', section: 'Conditions', options: ['Yes', 'No'] },
+      { key: 'moisture_leak_issue', label: 'Moisture / leak issue', type: 'select', section: 'Conditions', options: ['Yes', 'No'] },
+      { key: 'prep_status', label: 'Customer prep status', type: 'select', section: 'Conditions', options: ['Completed', 'Partial', 'Not started'] },
+      { key: 'treatment_completed', label: 'Treatment completed', type: 'chips', section: 'Treatment', options: [
+        'Gel bait', 'Insect growth regulator', 'Crack & crevice treatment',
+        'Dust application', 'Vacuum / flush-out', 'Monitors / glue boards',
+        'Appliance-area treatment', 'Cabinet hinge treatment', 'Plumbing penetration treatment',
+      ] },
+      { key: 'monitors_placed', label: 'Monitors placed', type: 'select', section: 'Treatment', options: ['Yes', 'No'] },
+      { key: 'followup_required', label: 'Follow-up required', type: 'select', section: 'Follow-up', options: ['Yes', 'No'] },
+      { key: 'followup_window', label: 'Follow-up window', type: 'select', section: 'Follow-up', options: ['10–14 days', '2–3 weeks', 'As needed'] },
+    ],
+  },
+
+  // Palmetto / large roach knockdown (owner spec §8A) — large-roach
+  // reduction with an exclusion/moisture/perimeter story, NOT the German
+  // interior program. The flush disclosure ("some activity may be seen
+  // temporarily") is deterministic in the report body.
+  palmetto_roach_knockdown: {
+    label: 'Palmetto Roach Knockdown',
+    short: 'Palmetto Knockdown',
+    description: 'Initial large-roach (palmetto/American/smoky brown) knockdown: interior relief plus exterior harborage, moisture, and entry-point focus.',
+    requiresFollowup: false,
+    photoCategories: ['kitchen', 'garage', 'exterior', 'entry_point', 'harborage', 'evidence', 'treatment_area', 'other'],
+    findingsFields: [
+      { key: 'roach_type', label: 'Roach type', type: 'select', section: 'Activity', options: ['Palmetto', 'American', 'Smoky brown', 'Unknown large roach'] },
+      // 'None observed' = the cleared state for revisits (gauge contract).
+      { key: 'activity_level', label: 'Activity level', type: 'select', section: 'Activity', options: ['None observed', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'activity_locations', label: 'Activity locations', type: 'chips', section: 'Activity', options: [
+        'Kitchen', 'Bathrooms', 'Garage', 'Laundry', 'Lanai', 'Attic',
+        'Exterior perimeter', 'Entry doors', 'Mulch / landscape beds', 'Drains',
+      ] },
+      { key: 'interior_activity', label: 'Interior activity', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'exterior_harborage', label: 'Exterior harborage', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'moisture_issue', label: 'Moisture issue', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'entry_points_observed', label: 'Entry points observed', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'treatment_completed', label: 'Treatment completed', type: 'chips', section: 'Treatment', options: [
+        'Interior crack & crevice', 'Exterior perimeter treatment', 'Garage treatment',
+        'Attic / void treatment', 'Drain / moisture area treatment', 'Bait placement',
+        'Dust application', 'Glue boards placed',
+      ] },
+      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+        'Keep garage seals tight', 'Reduce moisture near entry points', 'Seal exterior gaps',
+        'Trim vegetation from structure', 'Remove debris near foundation',
+        'Store firewood away from home',
+      ] },
+      { key: 'followup_needed', label: 'Follow-up needed', type: 'select', section: 'Follow-up', options: ['Yes', 'No'] },
+    ],
+  },
+
   // Rodent exclusion (owner spec 2026-06-12, Phase 2 §1) — a
   // repair/prevention service, NOT a trapping report: entry points sealed,
   // materials used, remaining risks. Tap-to-fill replaces the old textarea
