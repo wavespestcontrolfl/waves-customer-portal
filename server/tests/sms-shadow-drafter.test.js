@@ -98,6 +98,27 @@ describe('sms shadow drafter — prompt contract', () => {
     expect(prompt).toContain('$240.00 outstanding');
   });
 
+  test('response template in the system prompt is itself valid JSON', () => {
+    const prompt = buildSystemPrompt();
+    const template = prompt.slice(prompt.indexOf('{', prompt.indexOf('Respond with ONLY')));
+    const parsed = JSON.parse(template); // throws = a literal model echo of the template would be dropped
+    expect(parsed.intended_actions[0].type).toBe('escalate');
+  });
+
+  test('DATE values format as the ET calendar day, not the prior day', () => {
+    // 2026-06-19 is a Friday. Naive new Date('2026-06-19') = midnight UTC,
+    // which ET-formats as Thursday — the regression Codex flagged.
+    const context = {
+      summary: 'X',
+      upcomingServices: [{ type: 'Quarterly Pest', date: '2026-06-19', window: '8-10am' }],
+      lastService: { type: 'Quarterly Pest', date: new Date(2026, 5, 12), notes: '' }, // pg DATE → local midnight
+    };
+    const prompt = buildUserPrompt(context, 'When are you coming?', null, false);
+    expect(prompt).toContain('Friday, Jun 19');
+    expect(prompt).toContain('Friday, Jun 12');
+    expect(prompt).not.toContain('Thursday');
+  });
+
   test('user prompt stays coherent on an empty context', () => {
     const prompt = buildUserPrompt({ summary: 'Unknown' }, 'Hi', null, false);
     expect(prompt).toContain('(no recent thread)');

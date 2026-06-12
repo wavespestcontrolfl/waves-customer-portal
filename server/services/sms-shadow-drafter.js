@@ -42,18 +42,32 @@ ${CUSTOMER_SMS_HOUSE_VOICE}
 RULES:
 - Never make up dates, prices, or tech names — only reference facts present in the provided context. If the context doesn't contain the fact you need, say what you'd naturally say while a human checks (e.g. "let me confirm the exact time and get right back to you") and list the gap in missing_info.
 - If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.
+- Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
 
 Respond with ONLY a JSON object, no prose, no code fences:
 {
   "reply": "the SMS you would send",
-  "intended_actions": [{"type": "${INTENDED_ACTION_TYPES.join('" | "')}", "note": "optional short reason"}],
+  "intended_actions": [{"type": "escalate", "note": "optional short reason"}],
   "missing_info": "facts you needed but the context lacked, or null"
 }`;
 }
 
 function formatEtDate(value) {
+  if (!value) return '';
   try {
-    return new Date(value).toLocaleDateString('en-US', {
+    // service_date / scheduled_date are Postgres DATE values — calendar
+    // days, not instants. Reparsing one as an instant puts it at midnight
+    // UTC, which formats in ET as the PREVIOUS day. Anchor date-only values
+    // to noon instead (same idiom as the legacy drafter in twilio-webhook).
+    // pg hands DATE columns over as Date objects at local midnight, so the
+    // local calendar parts are the true day.
+    const pad = (n) => String(n).padStart(2, '0');
+    const dayString = value instanceof Date
+      ? `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
+      : String(value);
+    const dateOnly = dayString.match(/^(\d{4}-\d{2}-\d{2})/);
+    const date = dateOnly ? new Date(`${dateOnly[1]}T12:00:00`) : new Date(value);
+    return date.toLocaleDateString('en-US', {
       weekday: 'long',
       month: 'short',
       day: 'numeric',
@@ -156,7 +170,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
   const startedAt = Date.now();
   try {
     const ContextAggregator = require('./context-aggregator');
-    const context = await ContextAggregator.getFullCustomerContext(fromPhone);
+    // The webhook already matched a single active customer (deleted_at +
+    // shared-number protection) — build context from that row instead of
+    // re-looking-up by phone, which could pick a different account.
+    const context = customer
+      ? await ContextAggregator.getContextForCustomer(customer)
+      : await ContextAggregator.getFullCustomerContext(fromPhone);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
