@@ -34,19 +34,26 @@ Rules:
 - When reviewing a diff, any string literal that looks like a timestamp
   inside `.where(...)` is a finding until proven offset-aware.
 
-## 3. Prod DB from a local machine
+## 3. Local DB access — dev/preview by default, prod is break-glass
 
-The private `DATABASE_URL` is unreachable from outside Railway. Use the
-public URL from the **Postgres service** (the app service's env does NOT
-carry a usable one — connecting with it fails with SSL errors):
+Default for agent sessions (per the AGENTS.md database policy): use a
+Railway **dev or preview Postgres branch** as `DATABASE_URL`. Do not point a
+session at production for routine work, and never run migrations or other
+writes against prod from a local machine.
+
+Prod access is **break-glass**: owner-authorized for the specific task,
+read-only (SELECT), and through a restricted role when one exists for the
+domain (e.g. `newsletter_verifier`) instead of the full-write URL. When
+authorized, the private `DATABASE_URL` is unreachable from outside Railway —
+use the public URL from the **Postgres service** (the app service's env does
+NOT carry a usable one; connecting with it fails with SSL errors):
 
 ```
 PUB=$(railway variables -s Postgres --json | python3 -c "import json,sys; print(json.load(sys.stdin)['DATABASE_PUBLIC_URL'])")
-DATABASE_URL="$PUB" node <script>      # or under: railway run -s waves-customer-portal -- ...
+DATABASE_URL="$PUB" node <read-only script>
 ```
 
-Never print the URL. Read-only exploration should prefer a restricted role
-when one exists for the domain (e.g. `newsletter_verifier`).
+Never print the URL or paste it into logs/PRs.
 
 ## 4. Migrations
 
