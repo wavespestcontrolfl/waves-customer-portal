@@ -115,6 +115,40 @@ describe('runPropertyLookupCanary', () => {
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
 
+  it('a thrown lookup is labeled distinctly from a clean no-record null', async () => {
+    const timeoutErr = new Error('connect ETIMEDOUT https://sc-pa.com/parcel/0069140016');
+    timeoutErr.code = 'ETIMEDOUT';
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw timeoutErr;
+      if (parcel.county === 'Charlotte') return null;
+      return healthyRecord();
+    });
+    const result = await runPropertyLookupCanary();
+    expect(result.ok).toBe(false);
+    expect(result.failures).toContain('Sarasota golden parcel: by-parcel lookup threw (ETIMEDOUT)');
+    expect(result.failures).toContain('Charlotte golden parcel: by-parcel lookup returned no record');
+  });
+
+  it('throw labels carry only the error code — never the URL/parcel from err.message', async () => {
+    const err = new Error('request to https://sc-pa.com/parcel/0069140016 failed');
+    err.code = 'ECONNRESET';
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw err;
+      return healthyRecord();
+    });
+    const result = await runPropertyLookupCanary();
+    const text = result.failures.join(' ');
+    expect(text).toContain('(ECONNRESET)');
+    expect(text).not.toContain('0069140016');
+    expect(text).not.toContain('sc-pa.com');
+  });
+
+  it('a codeless thrown error falls back to the network/timeout label', async () => {
+    mockLookupParcelByPoint.mockRejectedValue(new TypeError('fetch failed'));
+    const result = await runPropertyLookupCanary();
+    expect(result.failures).toContain('FDOR cadastral layer: golden point lookup threw (TypeError)');
+  });
+
   it('kill switch skips without touching the network', async () => {
     process.env.PROPERTY_LOOKUP_CANARY_DISABLED = '1';
     const result = await runPropertyLookupCanary();
