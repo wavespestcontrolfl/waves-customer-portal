@@ -1,8 +1,10 @@
 /**
  * <AgentsHubPage> — unified agent oversight surface at /admin/agents.
- * Two tabs rendered as one centered pill:
+ * Three tabs rendered as one centered pill:
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue)
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
+ *   - "Shadow Drafts"      — AgentShadowDraftsPage (brand-voice loop:
+ *                            silent SMS drafts + nightly judge scores)
  *
  * Per-tab URL state via ?tab=<key>; the URL is the single source of
  * truth (tab derives from useSearchParams on every render), so in-app
@@ -27,19 +29,22 @@
  */
 import React, { useState, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Bot, LayoutGrid, ListChecks, RefreshCw } from "lucide-react";
+import { Bot, LayoutGrid, ListChecks, MessageSquareDashed, RefreshCw } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
+import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
 
 const TAB_KEY = "tab";
 const TABS = {
   OVERVIEW: "overview",
   DECISIONS: "decisions",
+  SHADOW: "shadow",
 };
 const TAB_LIST = [
   { key: TABS.OVERVIEW, label: "Overview", Icon: LayoutGrid },
   { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
+  { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
 ];
 const VALID_TABS = TAB_LIST.map((t) => t.key);
 
@@ -86,7 +91,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName="grid-cols-2"
+        navGridClassName="grid-cols-3"
         action={
           tab === TABS.OVERVIEW
             ? {
@@ -101,8 +106,10 @@ export default function AgentsHubPage() {
       <div aria-label="Agents content" className="flex-1 min-h-0 flex flex-col">
         {tab === TABS.OVERVIEW ? (
           <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
-        ) : (
+        ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
+        ) : (
+          <AgentShadowDraftsPage embedded />
         )}
       </div>
     </div>
