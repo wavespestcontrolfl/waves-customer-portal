@@ -344,6 +344,13 @@ const StripeService = {
   async createEstimateDepositIntent({ estimateId, amountDollars, retryGeneration = 0 }) {
     const stripe = getStripe();
     if (!stripe) return null;
+    // PRODUCT DECISION (owner, 2026-06-12): deposits intentionally bypass
+    // computeChargeAmount and the 3.99% card surcharge. The customer-facing
+    // deposit amount must equal the invoice credit exactly ("pay $49 now,
+    // that exact $49 is credited to your first visit") — the surcharge
+    // applies only to the remaining first-invoice balance when paid by card.
+    // Do NOT route this amount through computeChargeAmount; the exemption is
+    // pinned by server/tests/estimate-deposit-intent-surcharge-exempt.test.js.
     const amountCents = Math.round(Number(amountDollars) * 100);
     if (!Number.isFinite(amountCents) || amountCents <= 0) {
       throw new Error('Invalid deposit amount');
