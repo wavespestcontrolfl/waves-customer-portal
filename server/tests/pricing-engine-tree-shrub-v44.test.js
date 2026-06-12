@@ -121,6 +121,45 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.treeCountSource).toBe('density_estimate');
   });
 
+  test('generateEstimate path honors the density fallback when no tree count exists anywhere', () => {
+    // Codex P1 on PR #1699: estimate-engine used to synthesize
+    // `treeCount: ... ?? 0`, so density-only properties priced as zero trees
+    // and lost the v4.6 per-tree material + labor term.
+    const estimate = generateEstimate({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      bedArea: 2000,
+      propertyType: 'single_family',
+      features: { shrubs: 'light', trees: 'moderate', complexity: 'simple' },
+      services: {
+        treeShrub: { tier: 'standard', access: 'easy' },
+      },
+    });
+    const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
+    expect(ts.treeCount).toBe(6);
+    expect(ts.treeCountSource).toBe('density_estimate');
+    // 6 density-estimated trees = +$24/yr materials over a bare 2,000 sqft bed.
+    expect(ts.costs.materialCost).toBeCloseTo(149, 2);
+  });
+
+  test('generateEstimate path keeps an explicit service-line zero authoritative', () => {
+    const estimate = generateEstimate({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      bedArea: 2000,
+      propertyType: 'single_family',
+      features: { shrubs: 'light', trees: 'moderate', complexity: 'simple' },
+      services: {
+        treeShrub: { tier: 'standard', access: 'easy', treeCount: 0 },
+      },
+    });
+    const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
+    expect(ts.treeCount).toBe(0);
+    expect(ts.treeCountSource).toBe('explicit');
+  });
+
   test('explicit zero treeCount is authoritative and skips the density fallback', () => {
     const quote = priceTreeShrub(
       { bedArea: 1000, treeCount: 0, treeDensity: 'heavy' },
