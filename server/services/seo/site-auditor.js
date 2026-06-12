@@ -416,8 +416,11 @@ class SiteAuditor {
     if (statusCode === 0 || statusCode >= 500) issues.push({ category: 'crawl', type: 'fetch_failed', severity: 'critical', recommendation: 'Page could not be fetched for audit' });
     else if (statusCode >= 400) issues.push({ category: 'crawl', type: 'http_error', severity: 'critical', recommendation: `Page returned HTTP ${statusCode}` });
     else if (soft404) issues.push({ category: 'crawl', type: 'soft_404', severity: 'critical', recommendation: 'Return HTTP 404/410 for missing pages or 301 redirect stale URLs to the closest relevant live page' });
+    // Title LENGTH is intentionally NOT audited: long keyword-rich titles on
+    // city/service pages are a deliberate SEO play (owner decision 2026-06-12),
+    // and a length warning docked every such page 5 health points. The raw
+    // meta_title_length still returns as data below.
     if (!metaTitle) issues.push({ category: 'meta', type: 'missing_title', severity: 'critical', recommendation: 'Add a title tag' });
-    else if (metaTitle.length > 60) issues.push({ category: 'meta', type: 'title_too_long', severity: 'warning', recommendation: `Title is ${metaTitle.length} chars, keep under 60` });
     if (!metaDesc) issues.push({ category: 'meta', type: 'missing_description', severity: 'warning', recommendation: 'Add a meta description' });
 
     // Headings
