@@ -15,7 +15,9 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 
-const WAVES_OFFICE_PHONE = '+19413187612';
+// Admin alert recipient — must be a real cell, never one of our own Twilio
+// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
+const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 function fmtMoney(value) {
   const n = Number(value || 0);
@@ -391,7 +393,7 @@ router.put('/:token/confirm-service', loadSession, async (req, res, next) => {
         .where({ id: svc.id })
         .update({ status: 'rescheduled', notes: notes || `Preferred date: ${preferredDate}` });
       try {
-        await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+        await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
           `📅 Reschedule request from ${req.customer.first_name} ${req.customer.last_name}: prefers ${preferredDate || 'TBD'}. Notes: ${notes || 'None'}`,
           { messageType: 'internal_alert', link: '/admin/schedule' });
       } catch (e) { logger.error(`Reschedule SMS failed: ${e.message}`); }
@@ -741,7 +743,7 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
       const planClause = s.waveguard_tier
         ? `${s.waveguard_tier} WaveGuard`
         : (s.service_type || 'Service');
-      await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+      await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
         `✅ New customer onboarded: ${c.first_name} ${c.last_name} at ${c.address_line1}, ${c.city}.\n` +
         `${planClause}, ${billingLine}. Card ✅.\n` +
         `First service: ${svcDate}. Gate: ${hasGate ? 'yes' : 'no'}. Pets: ${hasPets ? `yes (${prefs.pet_count})` : 'no'}.\n` +

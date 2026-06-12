@@ -14,7 +14,9 @@ const { hasSchedulingIntent, isSmsReaction } = require('../services/sms-intent')
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
 
-const WAVES_ADMIN_PHONE = '+19413187612';
+// Admin alert recipient — must be a real cell, never one of our own Twilio
+// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
+const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -593,7 +595,7 @@ router.post('/sms', async (req, res) => {
         // Notify Adam for high-urgency
         if (['COMPLAINT', 'CANCEL_REQUEST', 'SCHEDULE_INQUIRY'].includes(intent.intent)) {
           try {
-            await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
               `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${publicPortalUrl()}/admin/communications`,
               { messageType: 'internal_alert' }
             );

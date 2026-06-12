@@ -9,7 +9,9 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 
 router.use(authenticate);
 
-const WAVES_OFFICE_PHONE = '+19413187612';
+// Admin alert recipient — must be a real cell, never one of our own Twilio
+// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
+const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 // =========================================================================
 // SERVICE DEFINITIONS & PRICING
@@ -336,7 +338,7 @@ router.post('/:id/interest', async (req, res, next) => {
     // Internal office notification
     try {
       await TwilioService.sendSMS(
-        WAVES_OFFICE_PHONE,
+        ADMIN_ALERT_PHONE,
         `🎯 Upsell Interest!\n\n` +
         `${customer.first_name} ${customer.last_name} at ${customer.address_line1}, ${customer.city}\n` +
         `is interested in adding ${serviceName || serviceType}.\n\n` +

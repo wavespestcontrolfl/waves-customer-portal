@@ -100,7 +100,7 @@ describe('admin follow-up call workflow', () => {
     });
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415993489',
-      from: '+19412972606',
+      from: '+19412975749', // all outbound calls originate from the main Waves line
       url: expect.stringContaining('/api/webhooks/twilio/outbound-admin-prompt?'),
       statusCallback: 'https://portal.wavespestcontrol.com/api/webhooks/twilio/call-status',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
@@ -117,7 +117,7 @@ describe('admin follow-up call workflow', () => {
       row: expect.objectContaining({
         customer_id: 'customer-1',
         direction: 'outbound',
-        from_phone: '+19412972606',
+        from_phone: '+19412975749',
         to_phone: '+19415993489',
         status: 'initiated',
         source: 'estimate-accept-auto-bridge',

@@ -4,7 +4,9 @@ const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
 
-const WAVES_ADMIN_PHONE = '+19413187612';
+// Admin alert recipient — must be a real cell, never one of our own Twilio
+// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
+const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 const CANCELLATION_REASONS = new Set(['price', 'moving', 'quality']);
 
@@ -74,7 +76,7 @@ class CancellationSave {
     await sendCancellationSms(customer, step1Body, { sequence_id: sequence.id, step: 1 });
 
     // Notify Adam immediately
-    await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+    await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
       `CANCELLATION ALERT: ${customer.first_name} ${customer.last_name} ` +
       `(ID: ${customerId}) wants to cancel. Reason: ${reasonKey}. ` +
       `Save sequence started.`,
@@ -161,7 +163,7 @@ class CancellationSave {
       });
       await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'accepted_offer' });
 
-      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+      await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
         `SAVE WON: ${customer.first_name} ${customer.last_name} accepted the retention offer. Follow up to finalize.`,
         { messageType: 'admin_alert' }
       );
@@ -172,7 +174,7 @@ class CancellationSave {
     if (normalizedReply === '2') {
       await db('sms_sequences').where({ id: sequence.id }).update({ status: 'escalated' });
 
-      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+      await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
         `CALLBACK REQUESTED: ${customer.first_name} ${customer.last_name} (${customer.phone}) wants to discuss cancellation.`,
         { messageType: 'admin_alert' }
       );

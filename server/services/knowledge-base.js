@@ -410,7 +410,7 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       // SMS alert via Twilio if available
       try {
         const twilioService = require('./twilio');
-        const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+        const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
         await twilioService.sendSMS(ownerPhone, alertMsg, { messageType: 'internal_alert', link: '/admin/credentials' });
         logger.info('[token-health] SMS alert sent');
       } catch {

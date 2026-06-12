@@ -26,7 +26,6 @@ const {
   normalizePropertyType,
 } = require('../services/pricing-engine/commercial-helpers');
 
-const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
 
 function isPublicCommercialQuote(body = {}, enriched = {}) {

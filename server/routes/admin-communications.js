@@ -273,7 +273,10 @@ router.post('/call', async (req, res, next) => {
     }
     const client = twilio(config.twilio.accountSid, config.twilio.authToken);
 
-    const from = fromNumber || TWILIO_NUMBERS.mainLine.number;
+    // All outbound calls present the main company line, regardless of which
+    // endpoint the UI picker selected (fromNumber is still validated above so
+    // garbage input fails loudly rather than silently dialing as main).
+    const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
     const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
     const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';

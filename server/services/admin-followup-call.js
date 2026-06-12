@@ -52,7 +52,7 @@ function adminPhone() {
 
 function alertFromNumber() {
   return normalizeUsPhone(process.env.WAVES_LEAD_ALERT_FROM_NUMBER)
-    || TWILIO_NUMBERS.getOutboundNumber('sarasota');
+    || TWILIO_NUMBERS.mainLine.number;
 }
 
 function fallbackSmsBody({
