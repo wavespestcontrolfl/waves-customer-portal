@@ -15,6 +15,7 @@ const logger = require('./logger');
 const crypto = require('crypto');
 const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
+const { GREETING_NAME_TOKEN, greetingNameValueFor } = require('./newsletter-draft');
 
 function stripHtml(html) {
   if (!html) return '';
@@ -297,6 +298,11 @@ async function sendCampaign(sendId, opts = {}) {
         return {
           email: s.email,
           unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
+          // Greeting personalization: the assembler put {{greeting-name}}
+          // in the body; this resolves it to ", FirstName" (or "" when the
+          // subscriber row has no first name). Applies to both the HTML
+          // and plain-text parts via SendGrid substitutions.
+          substitutions: { [GREETING_NAME_TOKEN]: greetingNameValueFor(s.first_name) },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
           // even when the X-Message-Id from this batch was never observed

@@ -11,6 +11,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { stripGreetingNameToken } = require('../services/newsletter-draft');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
@@ -376,8 +377,10 @@ router.get('/posts/by-slug/:slug', async (req, res) => {
       subject: row.subject,
       newsletterType: row.newsletter_type || null,
       previewText: row.preview_text || null,
-      htmlBody: row.html_body || '',
-      textBody: row.text_body || null,
+      // Archive pages have no recipient identity — drop the greeting
+      // first-name token so readers never see a literal {{greeting-name}}.
+      htmlBody: stripGreetingNameToken(row.html_body || ''),
+      textBody: row.text_body ? stripGreetingNameToken(row.text_body) : null,
       sentAt: row.sent_at,
       indexability: row.indexability || 'index',
       seo: {
@@ -407,8 +410,8 @@ router.get('/posts/:id', async (req, res) => {
       subject: row.subject,
       newsletterType: row.newsletter_type || null,
       previewText: row.preview_text || null,
-      htmlBody: row.html_body || '',
-      textBody: row.text_body || null,
+      htmlBody: stripGreetingNameToken(row.html_body || ''),
+      textBody: row.text_body ? stripGreetingNameToken(row.text_body) : null,
       sentAt: row.sent_at,
       indexability: row.indexability || 'index',
     });

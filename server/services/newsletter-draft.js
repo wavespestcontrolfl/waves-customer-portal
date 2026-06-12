@@ -120,12 +120,12 @@ EVENT RULES:
 - gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo.
 - description: 2-4 sentences, conversational, says WHY someone would actually go. Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
 - scoopLabel: the lead-in for the highlights list. Rotate across events, never repeat in one issue: "Here's the scoop:", "Here's the deal:", "Here's what's going down:", "What to expect:", "Here's the rundown:", "Why it's a vibe:", "Why it's a weekend winner:", "Here's what you're walking into:".
-- highlights: 3-5 bullets, EACH starting with its own thematic emoji (🐾 🎟️ 🍿 ✨ ...). Vibe-only; no logistics, no prices.
+- highlights: 3-5 short bullets, PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
 - proTip: insider tip (optional — only if genuinely useful, e.g. parking, arrive-early, what to bring). Do NOT include the words "Pro tip" — the renderer adds the label. NOT pricing or ticket logistics.
 - closingLine: punchy one-line kicker to wrap the event — bold the punch ("This is **Bradenton's Fourth of July mic drop.**").
 - linkText: short anchor text for the ticket link, rotated across events: "More info here", "Get tickets", "Grab your spot", "Full lineup", "Save your seat", "All the details".
 
-INTRO: greeting "Hey there!" energy; introText 2-4 sentences with a "Whether you're into X, Y, or Z" triad and a FOMO close. introGifCaption: cold-open punchline for the intro GIF (same caption genre).
+INTRO: greeting "Hey there!" energy — NEVER include a name or name placeholder; the renderer appends the subscriber's first name automatically. introText 2-4 sentences with a "Whether you're into X, Y, or Z" triad and a FOMO close. introGifCaption: cold-open punchline for the intro GIF (same caption genre).
 
 HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep). Max ~90 words. Genuinely useful, not salesy — the brand sell in this newsletter is ZERO; this tip is the only Waves-adjacent content and it must stand on its own. Voice it like the themed issues: **bold the facts**, _italicize the jokes_, anthropomorphize the pest/plant when it lands ("that mosquito keeping you up at night? Probably a mom-to-be"), urgency biological/seasonal, never commercial. May end with a "Hot tip:" one-liner.
 
@@ -154,7 +154,7 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
       "gifCaption": "string (caption-genre punchline, max 12 words)",
       "description": "string (2-4 sentences, includes the event's official name once verbatim — vibe only, no logistics)",
       "scoopLabel": "string (rotating lead-in for highlights)",
-      "highlights": ["string (each starts with its own emoji)"] or null,
+      "highlights": ["string (plain text, no emoji, no bullet marker)"] or null,
       "proTip": "string or null (no 'Pro tip' prefix)",
       "linkText": "string (rotating ticket-link anchor text)",
       "closingLine": "string (bold punchy kicker)"
@@ -385,10 +385,11 @@ async function assemblePestInsiderNewsletter(draft) {
 </div>`);
   }
 
-  // Cold open + intro
+  // Cold open + intro — 22px greeting with the per-recipient first-name
+  // token (same device as the flagship assembler).
   if (introGif) parts.push(gifBlock(introGif, draft.introGifCaption));
   if (draft.greeting) {
-    parts.push(`<p style="margin:0 0 4px 0;font-size:16px;line-height:1.6;">👋 <strong><em>${markdownToHtml(draft.greeting)}</em></strong></p>`);
+    parts.push(`<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${markdownToHtml(greetingWithNameToken(draft.greeting))}</em></strong></p>`);
   }
   if (draft.introText) {
     parts.push(`<p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.introText).replace(/\n+/g, '<br/><br/>')}</p>`);
@@ -572,8 +573,60 @@ function slugify(text) {
 function dividerHtml() {
   return `<div style="text-align:center;margin:28px 0;">
 <a href="https://www.wavespestcontrol.com/" style="text-decoration:none;">
-<img src="${WAVES_DIVIDER_GIF}" alt="" width="100" style="width:100px;height:auto;display:inline-block;" />
+<img src="${WAVES_DIVIDER_GIF}" alt="" width="64" style="width:64px;height:auto;display:inline-block;" />
 </a></div>`;
+}
+
+// ── Greeting personalization ─────────────────────────────────────────
+// The assembler injects this token into the greeting ("Hey
+// there{{greeting-name}}!"); sendBatch substitutes it per recipient with
+// ", FirstName" (or "" when the subscriber has no first name, so the
+// greeting reads naturally either way). Hyphenated on purpose: an
+// underscore token could pair with a model-written _italic_ marker in
+// markdownToHtml and split the token mid-render.
+const GREETING_NAME_TOKEN = '{{greeting-name}}';
+
+// "Hey there!" → "Hey there{{greeting-name}}!" — the token slots in
+// before any trailing punctuation so the substituted name lands inside
+// the sentence, not after the exclamation point.
+function greetingWithNameToken(greeting) {
+  const m = String(greeting).match(/^([\s\S]*?)([!.?…]*)\s*$/);
+  return `${m[1]}${GREETING_NAME_TOKEN}${m[2]}`;
+}
+
+// Substitution value for one subscriber. SendGrid substitutions are raw
+// string replacement into BOTH the HTML and plain-text parts, so instead
+// of HTML-escaping (which would render "&#39;" in the text part for
+// names like D'Angelo) we whitelist name characters — letters, marks,
+// apostrophes, spaces, periods, hyphens. No HTML metacharacter survives.
+function greetingNameValueFor(firstName) {
+  const cleaned = String(firstName || '')
+    .replace(/[^\p{L}\p{M}'’ .-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40)
+    .trim();
+  return cleaned ? `, ${cleaned}` : '';
+}
+
+// For surfaces with no per-recipient identity (public archive pages,
+// any path that skips substitution): drop the token so readers never
+// see a literal "{{greeting-name}}".
+function stripGreetingNameToken(content) {
+  return String(content || '').split(GREETING_NAME_TOKEN).join('');
+}
+
+// Highlights bullets are plain text with a renderer-added "•" marker
+// (owner decision 2026-06-12: no emoji bullets). The prompt forbids
+// emojis, but strip any leading emoji/marker the model emits anyway —
+// and older persisted drafts still carry the emoji-bullet format.
+function plainBulletText(text) {
+  return String(text || '')
+    // leading emoji clusters incl. ZWJ sequences + variation selectors
+    .replace(/^\s*(?:(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u200D\uFE0F\u20E3])+\s*)*/u, '')
+    // leading literal bullet/dash markers the model might add
+    .replace(/^[•·▪◦*–—-]+\s*/, '')
+    .trim();
 }
 
 /**
@@ -839,8 +892,10 @@ async function assembleBeehiivNewsletter(draft) {
   if (introGif) parts.push(gifBlock(introGif, draft.introGifCaption));
 
   // ── Greeting + Intro ──
+  // 22px display-weight greeting with the per-recipient first-name token
+  // ("Hey there, Adam!" / "Hey there!" when no name is on file).
   if (draft.greeting) {
-    parts.push(`<p style="margin:0 0 4px 0;font-size:16px;line-height:1.6;">👋 <strong><em>${markdownToHtml(draft.greeting)}</em></strong></p>`);
+    parts.push(`<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${markdownToHtml(greetingWithNameToken(draft.greeting))}</em></strong></p>`);
   }
   if (draft.introText) {
     parts.push(`<p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.introText)}</p>`);
@@ -912,17 +967,22 @@ async function assembleBeehiivNewsletter(draft) {
       parts.push(`<div style="margin:0 0 14px 0;padding:12px 16px;background:${COLORS.cardBg};border-radius:8px;font-size:14px;line-height:2;">\n${meta.join('<br/>\n')}\n</div>`);
     }
 
-    // Highlights — rotating lead-in label from the model; each bullet
-    // carries its own thematic emoji, so no injected "•".
+    // Highlights — rotating lead-in label from the model; plain "•"
+    // bullets (owner decision 2026-06-12: no emoji bullets). plainBulletText
+    // strips any leading emoji/marker the model emits anyway, and keeps
+    // older emoji-bullet drafts rendering clean on re-assembly.
     const hl = Array.isArray(ev.highlights) ? ev.highlights : (typeof ev.highlights === 'string' ? [ev.highlights] : []);
     if (hl.length) {
       const label = (typeof ev.scoopLabel === 'string' && ev.scoopLabel.trim())
         ? ev.scoopLabel.trim().slice(0, 60)
         : 'What to expect:';
       parts.push(`<p style="margin:0 0 6px 0;font-size:14px;font-weight:600;">${markdownToHtml(label)}</p>`);
-      const bullets = hl.map(h =>
-        `<li style="margin:0 0 6px 0;padding-left:4px;font-size:14px;line-height:1.6;">${markdownToHtml(h)}</li>`
-      ).join('\n');
+      const bullets = hl
+        .map((h) => plainBulletText(h))
+        .filter(Boolean)
+        .map((h) =>
+          `<li style="margin:0 0 6px 0;padding-left:4px;font-size:14px;line-height:1.6;">• ${markdownToHtml(h)}</li>`
+        ).join('\n');
       parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${bullets}</ul>`);
     }
 
@@ -1282,4 +1342,10 @@ module.exports = {
   sanitizePestInsiderDraft,
   assemblePestInsiderNewsletter,
   PEST_INSIDER_ROTATION,
+  // Greeting personalization — token + per-recipient value + archive strip
+  GREETING_NAME_TOKEN,
+  greetingWithNameToken,
+  greetingNameValueFor,
+  stripGreetingNameToken,
+  plainBulletText,
 };

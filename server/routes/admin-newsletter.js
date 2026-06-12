@@ -565,12 +565,26 @@ router.post('/sends/:id/test', async (req, res) => {
     const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
     // Same wrapper the real send uses (newsletter-sender.js) so the
     // operator's preview matches what subscribers will receive.
-    const html = wrapNewsletter({
+    let html = wrapNewsletter({
       body: send.html_body || '',
       unsubscribeUrl: demoUrl,
       preheader: send.preview_text || undefined,
       newsletterType: send.newsletter_type || undefined,
     });
+    // Resolve the greeting first-name token the way the broadcast does:
+    // use the test recipient's subscriber row when one exists, so the
+    // operator previews real personalization ("Hey there, Adam!"); strip
+    // the token when there's no row. sendOne has no substitutions API,
+    // so this is a manual replace.
+    const { GREETING_NAME_TOKEN, greetingNameValueFor } = require('../services/newsletter-draft');
+    const testSub = await db('newsletter_subscribers')
+      .whereRaw('LOWER(email) = ?', [String(testEmail).toLowerCase()])
+      .first();
+    const greetingValue = greetingNameValueFor(testSub?.first_name);
+    html = html.split(GREETING_NAME_TOKEN).join(greetingValue);
+    const testText = send.text_body
+      ? String(send.text_body).split(GREETING_NAME_TOKEN).join(greetingValue)
+      : undefined;
 
     const result = await sendgrid.sendOne({
       to: testEmail,
@@ -578,7 +592,7 @@ router.post('/sends/:id/test', async (req, res) => {
       fromName: send.from_name,
       subject: `[TEST] ${send.subject}`,
       html,
-      text: send.text_body || undefined,
+      text: testText,
       replyTo: send.reply_to,
       headers: {
         'List-Unsubscribe': `<${demoUrl}>`,
