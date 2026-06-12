@@ -571,7 +571,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                     borderRadius: 999,
                     background: '#E3F5FD',
                     color: '#065A8C',
-                    fontSize: 12,
+                    fontSize: 14,
                     fontWeight: 800,
                     lineHeight: 1,
                     textTransform: 'uppercase',

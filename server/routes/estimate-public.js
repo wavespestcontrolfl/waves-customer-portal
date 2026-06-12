@@ -3418,7 +3418,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .ai-fact{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
   .ai-fact-label{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-fact-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
-  .ai-fact-source{flex:none;padding:5px 9px;border-radius:999px;background:#E3F5FD;color:#065A8C;font:800 12px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .ai-fact-source{flex:none;padding:5px 9px;border-radius:999px;background:#E3F5FD;color:#065A8C;font:800 14px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
   .ai-parcel-line{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}
   .ai-quality-note{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}` : '';
   const aiBlockHtml = intelligence ? `
