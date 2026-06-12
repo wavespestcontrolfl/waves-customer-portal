@@ -52,6 +52,29 @@ describe('link prospect worker — report mapping', () => {
     expect(p.status).toBe('placed');
     expect(p.live_url).toBeNull();
   });
+
+  test('placed + pending marks quality_signals.pending and tolerates a null live_url', () => {
+    const p = mapReportToPatch('placed', { pending: true, notes: '8-10wk queue' });
+    expect(p.status).toBe('placed');
+    expect(p.live_url).toBeNull();
+    const q = JSON.parse(p.quality_signals);
+    expect(q.pending).toBe(true);
+    expect(q.submitted_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  test('pending merges into existing quality_signals (object or json) without clobbering', () => {
+    const fromObj = mapReportToPatch('placed', { pending: true }, { target_indexed: true });
+    expect(JSON.parse(fromObj.quality_signals).target_indexed).toBe(true);
+    const fromJson = mapReportToPatch('placed', { pending: true }, '{"omega_submitted":"2026-06-01T00:00:00Z"}');
+    const merged = JSON.parse(fromJson.quality_signals);
+    expect(merged.omega_submitted).toBe('2026-06-01T00:00:00Z');
+    expect(merged.pending).toBe(true);
+  });
+
+  test('placed WITHOUT pending leaves quality_signals untouched', () => {
+    const p = mapReportToPatch('placed', { live_url: 'https://x' });
+    expect(p.quality_signals).toBeUndefined();
+  });
 });
 
 describe('link prospect worker — business profile (canonical NAP)', () => {

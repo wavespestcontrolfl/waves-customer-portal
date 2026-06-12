@@ -16,6 +16,13 @@ const SIGNUP_TYPES = ['directory', 'citation', 'social'];
 const OUTREACH_TYPES = ['editorial', 'resource', 'guest_post', 'haro'];
 const MAX_ATTEMPTS = 4;
 
+// quality_signals may arrive as an object (pg jsonb) or a JSON string.
+function parseQuality(q) {
+  if (!q) return {};
+  if (typeof q === 'object') return { ...q };
+  try { return JSON.parse(q) || {}; } catch { return {}; }
+}
+
 /**
  * Lease up to n unworked prospects of a lane, atomically. FOR UPDATE SKIP LOCKED
  * so parallel Hermes subagents never grab the same row.
@@ -50,8 +57,10 @@ async function claim({ n = 10, type = 'signup' } = {}) {
 /**
  * Map a worker outcome to a DB patch. Pure (no I/O) → unit-testable.
  * Always releases the lease. `placed` never goes straight to `live`.
+ * `existingQuality` is the prospect's current quality_signals (object|json|null),
+ * merged into so a pending marker doesn't clobber prior signals.
  */
-function mapReportToPatch(outcome, body = {}) {
+function mapReportToPatch(outcome, body = {}, existingQuality = null) {
   const now = new Date();
   const release = { claimed_at: null, claimed_by: null, updated_at: now };
 
@@ -65,7 +74,7 @@ function mapReportToPatch(outcome, body = {}) {
       || (typeof raw === 'string' && raw.trim() !== '');
     const n = Number(raw);
     const cost = isNumericInput && Number.isFinite(n) && n >= 0 ? n : null;
-    return {
+    const patch = {
       ...release,
       status: 'placed',
       live_url: body.live_url || null,
@@ -74,6 +83,16 @@ function mapReportToPatch(outcome, body = {}) {
       cost,
       notes: body.notes || null,
     };
+    // Pending = submitted to a slow-moderation directory; the live URL may be
+    // unknown until approval. Mark it so the verifier's domain reconcile polls
+    // for it instead of treating a null live_url as a stranded row.
+    if (body.pending) {
+      const quality = parseQuality(existingQuality);
+      quality.pending = true;
+      quality.submitted_at = now.toISOString();
+      patch.quality_signals = JSON.stringify(quality);
+    }
+    return patch;
   }
   if (outcome === 'skipped') {
     return { ...release, status: 'rejected', notes: body.notes || 'worker skipped' };
@@ -85,9 +104,10 @@ function mapReportToPatch(outcome, body = {}) {
 async function report({ prospect_id, outcome, lease_token, ...body }) {
   // A 'placed' report MUST carry a live_url — otherwise the row lands in 'placed'
   // with live_url=null, which the verifier skips and claim() never re-serves,
-  // permanently stranding it.
-  if (outcome === 'placed' && !body.live_url) {
-    return { ok: false, code: 'live_url_required', error: 'a placed report requires live_url' };
+  // permanently stranding it. EXCEPTION: pending=true (slow-moderation submission)
+  // is allowed without a live_url — the verifier's domain reconcile tracks it.
+  if (outcome === 'placed' && !body.live_url && !body.pending) {
+    return { ok: false, code: 'live_url_required', error: 'a placed report requires live_url (or pending:true)' };
   }
   const leaseDate = lease_token ? new Date(lease_token) : null;
   if (!leaseDate || Number.isNaN(leaseDate.getTime())) {
@@ -98,7 +118,7 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   if (!prospect) return { ok: false, code: 'not_found', error: 'prospect not found' };
 
   const attempts = (prospect.attempts || 0) + 1;
-  const patch = mapReportToPatch(outcome, body);
+  const patch = mapReportToPatch(outcome, body, prospect.quality_signals);
   // Cap retries so a permanently-failing prospect doesn't churn forever.
   if (outcome === 'failed' && attempts >= MAX_ATTEMPTS) patch.status = 'rejected';
 

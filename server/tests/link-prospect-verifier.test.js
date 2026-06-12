@@ -60,3 +60,26 @@ describe('link prospect verifier target matching', () => {
     expect(_test.matchesTargetUrl('wavespestcontrol.com/wdo-inspection', root)).toBe(false);
   });
 });
+
+describe('link prospect verifier — domain + quality helpers', () => {
+  test('comparableDomain reduces any host form to a bare registrable host', () => {
+    expect(_test.comparableDomain('https://www.ShowMySites.com/path')).toBe('showmysites.com');
+    expect(_test.comparableDomain('marketinginternetdirectory.com')).toBe('marketinginternetdirectory.com');
+    expect(_test.comparableDomain('http://sub.example.org:8080/x')).toBe('sub.example.org');
+    expect(_test.comparableDomain('')).toBe('');
+  });
+
+  test('parseQuality accepts object, json string, or null and never throws', () => {
+    expect(_test.parseQuality(null)).toEqual({});
+    expect(_test.parseQuality({ pending: true })).toEqual({ pending: true });
+    expect(_test.parseQuality('{"omega_submitted":"x"}')).toEqual({ omega_submitted: 'x' });
+    expect(_test.parseQuality('not json')).toEqual({});
+  });
+
+  test('parseQuality returns a fresh copy (mutation-safe)', () => {
+    const src = { a: 1 };
+    const out = _test.parseQuality(src);
+    out.b = 2;
+    expect(src).toEqual({ a: 1 });
+  });
+});
