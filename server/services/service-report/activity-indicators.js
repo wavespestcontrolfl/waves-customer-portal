@@ -196,6 +196,38 @@ const ACTIVITY_INDICATORS = {
       },
     },
   },
+  // Knockdown programs share the cockroach indicator so the 10–14 day
+  // follow-up visit trends against the initial knockdown. 'Light' scores 1
+  // to line up with the generic cockroach type's 'Low' on the shared scale.
+  german_roach_knockdown: {
+    indicatorKey: 'roach_activity',
+    label: 'Roach Activity',
+    pestNoun: 'Roach',
+    derive: {
+      field: 'activity_level',
+      scores: {
+        'None observed': 0,
+        Light: 1,
+        Moderate: 3,
+        Heavy: 4,
+        Severe: 5,
+      },
+    },
+  },
+  palmetto_roach_knockdown: {
+    indicatorKey: 'roach_activity',
+    label: 'Roach Activity',
+    pestNoun: 'Roach',
+    derive: {
+      field: 'activity_level',
+      scores: {
+        'None observed': 0,
+        Light: 1,
+        Moderate: 3,
+        Heavy: 4,
+      },
+    },
+  },
 };
 
 // Technician registry label → customer report label. Fields not listed fall
@@ -342,6 +374,20 @@ const CUSTOMER_FIELD_LABELS = {
   urgency: 'Urgency',
   activity_areas: 'Where activity was noted',
   contributing_conditions: 'Contributing conditions',
+  primary_harborage: 'Where activity was concentrated',
+  live_roaches_observed: 'Live roaches',
+  droppings_egg_cases: 'Droppings / egg cases',
+  sanitation_issue: 'Sanitation',
+  moisture_leak_issue: 'Moisture / leaks',
+  monitors_placed: 'Monitoring',
+  followup_required: 'Follow-up',
+  followup_window: 'Follow-up window',
+  roach_type: 'What we found',
+  interior_activity: 'Interior activity',
+  exterior_harborage: 'Exterior harborage',
+  moisture_issue: 'Moisture conditions',
+  entry_points_observed: 'Entry points',
+  followup_needed: 'Follow-up',
 };
 
 // Registry select value → customer wording, keyed per field family. Values
@@ -546,6 +592,59 @@ const CUSTOMER_VALUE_LABELS = {
     Yes: 'An additional cleanup visit is recommended',
     No: 'No additional cleanup needed',
   },
+  // Knockdown Yes/No selects read as findings sentences, not raw booleans.
+  // Absence wording stays observational ("observed today") per the
+  // banned-copy rules — never absolute claims.
+  live_roaches_observed: {
+    Yes: 'Live roaches were observed today',
+    No: 'No live roaches observed today',
+  },
+  droppings_egg_cases: {
+    Yes: 'Droppings or egg cases were present',
+    No: 'No droppings or egg cases observed today',
+  },
+  sanitation_issue: {
+    Yes: 'Sanitation improvements will help — see the guidance below',
+    No: 'No sanitation concerns noted today',
+  },
+  moisture_leak_issue: {
+    Yes: 'A moisture or leak issue was noted — correcting it will help',
+    No: 'No moisture issues noted today',
+  },
+  monitors_placed: {
+    Yes: 'Monitoring stations are in place',
+    No: 'No monitors placed this visit',
+  },
+  followup_required: {
+    Yes: 'A follow-up visit is required',
+    No: 'No follow-up visit required',
+  },
+  interior_activity: {
+    Yes: 'Activity was present indoors',
+    No: 'No interior activity observed today',
+  },
+  exterior_harborage: {
+    Yes: 'Exterior harborage areas were identified',
+    No: 'No exterior harborage identified today',
+  },
+  moisture_issue: {
+    Yes: 'Moisture conditions are contributing to activity',
+    No: 'No moisture issues noted today',
+  },
+  entry_points_observed: {
+    Yes: 'Possible entry points were observed',
+    No: 'No obvious entry points observed today',
+  },
+  followup_needed: {
+    Yes: 'A follow-up visit is recommended',
+    No: 'No follow-up needed',
+  },
+  roach_type: {
+    Palmetto: 'Palmetto bugs (large outdoor roaches)',
+    American: 'American cockroaches (palmetto bugs)',
+    'Smoky brown': 'Smoky brown cockroaches',
+    'Unknown large roach': 'Large roach species not yet confirmed',
+  },
 };
 
 // Required service-specific fields per type (contract §4; budget ≤4 except
@@ -597,6 +696,21 @@ const REQUIRED_FINDINGS_FIELDS = {
   // (REQUIRED_NEXT_STEP_TYPES). Exceeds the ≤4 budget by owner instruction
   // ("same enforcement, inside the new checklist model").
   tree_shrub: ['plant_groups', 'landscape_condition', 'observed_conditions', 'treatments_completed', 'customer_recommendations'],
+  // Owner spec §8 marks the full knockdown checklists required — all fast
+  // taps (Y/N selects + chips). Exceeds the ≤4 budget by owner instruction;
+  // followup_window (followup_required = Yes) and palmetto activity_locations
+  // (activity_level ≠ 'None observed') are conditionally required in
+  // validateTypedFindings instead.
+  german_roach_knockdown: [
+    'activity_level', 'rooms_treated', 'primary_harborage', 'live_roaches_observed',
+    'droppings_egg_cases', 'sanitation_issue', 'moisture_leak_issue', 'prep_status',
+    'treatment_completed', 'monitors_placed', 'followup_required',
+  ],
+  palmetto_roach_knockdown: [
+    'roach_type', 'activity_level', 'interior_activity',
+    'exterior_harborage', 'moisture_issue', 'entry_points_observed',
+    'treatment_completed', 'customer_recommendations', 'followup_needed',
+  ],
 };
 
 // Next-step chips per type (contract §7). Each chip maps to the
@@ -693,6 +807,7 @@ const REQUIRED_NEXT_STEP_TYPES = new Set([
   'pest_inspection', 'cockroach', 'wildlife_trapping', 'bed_bug',
   'termite_bait_station', 'rodent_bait_station', 'tree_shrub',
   'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection', 'flea',
+  'german_roach_knockdown', 'palmetto_roach_knockdown',
 ]);
 
 function nextStepRequiredForType(projectType) {
@@ -792,6 +907,14 @@ const TYPE_NEXT_STEP_CHIPS = {
     'Continue Tree & Shrub program', 'Monitor plant response', 'Recheck next visit',
     'Injection recommended', 'Arborist review recommended', 'Follow-up recommended',
     'Customer action needed', 'No action needed',
+  ],
+  german_roach_knockdown: [
+    'Follow-up in 10–14 days', 'No store-bought sprays', 'Keep treated areas undisturbed',
+    'Sanitation recommended', 'Reduce moisture', 'Monitor activity', 'Follow-up recommended',
+  ],
+  palmetto_roach_knockdown: [
+    'Monitor activity', 'Seal entry gaps', 'Reduce moisture', 'Sanitation recommended',
+    'Exclusion recommended', 'Follow-up recommended', 'No action needed',
   ],
 };
 
@@ -1026,6 +1149,27 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       if (value == null || String(value).trim() === '') missing.push(key);
     }
   }
+  // German knockdown: the follow-up window is only meaningful (and only
+  // required) once a follow-up is actually required — owner spec §8B,
+  // "10–14 days preferred". A stale window left behind after switching the
+  // answer to "No" is a contradiction, not noise: the immutable snapshot
+  // would render "No follow-up visit required" beside a follow-up window
+  // (Codex P2 round 6). Same for a monitor treatment chip beside
+  // "Monitors placed: No" — the report would claim both.
+  if (type === 'german_roach_knockdown') {
+    const window = String(values.followup_window ?? '').trim();
+    if (enforceRequired && String(values.followup_required) === 'Yes' && !window) {
+      missing.push('followup_window');
+    }
+    if (String(values.followup_required) === 'No' && window) {
+      errors.push('A follow-up window cannot be recorded with "Follow-up required: No" — update the follow-up answer or clear the window');
+    }
+    const treatments = String(values.treatment_completed || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (treatments.includes('Monitors / glue boards') && String(values.monitors_placed) === 'No') {
+      errors.push('"Monitors / glue boards" in the completed treatments contradicts "Monitors placed: No" — update the monitor answer or remove the treatment chip');
+    }
+  }
   // "Inspection only" treatment can't ride with applied treatments (owner
   // spec §5 — the report tells one coherent story), and activity areas are
   // required exactly when there was activity to locate: a 'None observed'
@@ -1046,6 +1190,38 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     }
     if (enforceRequired && evidence && evidence !== 'None observed' && !areas.length) {
       missing.push('activity_areas');
+    }
+  }
+
+  // Knockdown zero states must not contradict the recorded evidence — the
+  // gauge derives 0 from 'None observed' alone, so live evidence beside it
+  // would persist a zero score under findings that say otherwise (same
+  // guard as termite stations; Codex P2 round 3).
+  if (type === 'german_roach_knockdown' && String(values.activity_level) === 'None observed') {
+    const evidence = [];
+    if (String(values.live_roaches_observed) === 'Yes') evidence.push('live roaches observed');
+    if (String(values.droppings_egg_cases) === 'Yes') evidence.push('droppings / egg cases observed');
+    if (evidence.length) {
+      errors.push(`Activity level "None observed" contradicts the recorded evidence (${evidence.join('; ')}) — update the activity level or the evidence fields`);
+    }
+  }
+  if (type === 'palmetto_roach_knockdown' && String(values.activity_level) === 'None observed'
+    && String(values.interior_activity) === 'Yes') {
+    errors.push('Activity level "None observed" contradicts "Interior activity: Yes" — update the activity level or the interior activity field');
+  }
+  // Cleared palmetto visits have no truthful activity location to name —
+  // the field is required exactly when there was activity to locate, and
+  // recorded locations beside "None observed" would render a zero-score
+  // report that still says where activity was noted (Codex P2 round 5).
+  if (type === 'palmetto_roach_knockdown') {
+    const locations = String(values.activity_locations ?? '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (String(values.activity_level) === 'None observed' && locations.length) {
+      errors.push('Activity locations cannot be recorded with activity level "None observed" — update the activity level or clear the locations');
+    }
+    if (enforceRequired && String(values.activity_level || '').trim()
+      && String(values.activity_level) !== 'None observed' && !locations.length) {
+      missing.push('activity_locations');
     }
   }
 
@@ -1093,6 +1269,43 @@ function validateNextStepChips(chips, projectType = null, values = null) {
     && String(values.evidence_level) !== 'None observed') {
     return { ok: false, error: `Next-step chip "No action needed" contradicts the recorded flea evidence level (${String(values.evidence_level)}) — remove the chip or update the evidence level` };
   }
+  // Knockdown follow-up chips must agree with the structured follow-up
+  // answer — the chip text lands verbatim in Today's Result, so a chip
+  // recommending a follow-up beside findings that say "No" (or a chip
+  // naming a window the tech didn't select) contradicts the report body
+  // and the suppressed/redated CTA (Codex P2 round 5).
+  if (values && projectType === 'german_roach_knockdown') {
+    const followupRequired = String(values.followup_required || '');
+    const window = String(values.followup_window || '');
+    for (const chip of normalized) {
+      const recommendsFollowup = chip === 'Follow-up recommended' || chip === 'Follow-up in 10–14 days';
+      if (followupRequired === 'No' && recommendsFollowup) {
+        return { ok: false, error: `Next-step chip "${chip}" contradicts "Follow-up required: No" — update the follow-up answer or remove the chip` };
+      }
+      if (chip === 'Follow-up in 10–14 days' && window && window !== '10–14 days') {
+        return { ok: false, error: `Next-step chip "Follow-up in 10–14 days" contradicts the selected follow-up window (${window}) — match the window or use "Follow-up recommended"` };
+      }
+    }
+  }
+  if (values && projectType === 'palmetto_roach_knockdown') {
+    if (String(values.followup_needed || '') === 'No'
+      && normalized.includes('Follow-up recommended')) {
+      return { ok: false, error: 'Next-step chip "Follow-up recommended" contradicts "Follow-up needed: No" — update the follow-up answer or remove the chip' };
+    }
+    // "No action needed" stays available for cleared/no-follow-up visits but
+    // contradicts recorded activity or a requested follow-up (Codex P2
+    // round 6) — the chip sentence would deny the action the findings/CTA
+    // call for.
+    if (normalized.includes('No action needed')) {
+      const level = String(values.activity_level || '').trim();
+      if (level && level !== 'None observed') {
+        return { ok: false, error: `Next-step chip "No action needed" contradicts the recorded activity level (${level}) — remove the chip or update the activity level` };
+      }
+      if (String(values.followup_needed || '') === 'Yes') {
+        return { ok: false, error: 'Next-step chip "No action needed" contradicts "Follow-up needed: Yes" — remove the chip or update the follow-up answer' };
+      }
+    }
+  }
   return { ok: true, chips: normalized };
 }
 
@@ -1105,6 +1318,8 @@ function validateNextStepChips(chips, projectType = null, values = null) {
 // types can add their cleared-select boundary.
 const SCORE_CLEARED_SELECT = {
   flea: { field: 'evidence_level', cleared: 'None observed' },
+  german_roach_knockdown: { field: 'activity_level', cleared: 'None observed' },
+  palmetto_roach_knockdown: { field: 'activity_level', cleared: 'None observed' },
 };
 
 function validateActivityScoreConsistency(type, values = {}, score = null) {
@@ -1330,6 +1545,33 @@ const WORK_PHRASE_FIELDS = {
       'Glue boards placed': 'placed glue boards',
       'Monitoring stations placed': 'placed monitoring stations',
       'Sanitation review completed': 'reviewed sanitation together',
+    },
+  },
+  german_roach_knockdown: {
+    field: 'treatment_completed',
+    phrases: {
+      'Gel bait': 'placed targeted gel bait',
+      'Insect growth regulator': 'applied an insect growth regulator',
+      'Crack & crevice treatment': 'treated cracks and crevices',
+      'Dust application': 'applied dust to voids',
+      'Vacuum / flush-out': 'completed a vacuum and flush-out',
+      'Monitors / glue boards': 'placed monitors',
+      'Appliance-area treatment': 'treated the appliance areas',
+      'Cabinet hinge treatment': 'treated the cabinet hinge areas',
+      'Plumbing penetration treatment': 'treated the plumbing penetrations',
+    },
+  },
+  palmetto_roach_knockdown: {
+    field: 'treatment_completed',
+    phrases: {
+      'Interior crack & crevice': 'treated interior cracks and crevices',
+      'Exterior perimeter treatment': 'treated exterior perimeter harborage areas',
+      'Garage treatment': 'treated the garage edges',
+      'Attic / void treatment': 'treated attic and void areas',
+      'Drain / moisture area treatment': 'treated drain and moisture areas',
+      'Bait placement': 'placed targeted bait',
+      'Dust application': 'applied dust to voids',
+      'Glue boards placed': 'placed glue boards',
     },
   },
   bed_bug: {
@@ -1648,6 +1890,56 @@ function buildTodaysResult({
     return {
       headline,
       body: `${intro} ${whatWeDid} Flea control works best when treatment and home care happen together — the aftercare steps below make the biggest difference.${nextStep ? ` ${nextStep}` : ''}`.replace(/\s+/g, ' ').trim(),
+      nextStep,
+    };
+  }
+
+  // Knockdown reports (owner spec §8) carry deterministic expectation-setting
+  // language in EVERY report body — German cooperation guidance (bait
+  // programs fail without it — owner critical warning) and the palmetto
+  // flush disclosure survive trend visits and cleared states alike (Codex
+  // P2 round 1). Headline precedence: trend > cleared > level, with the
+  // level wording driven by the FINAL gauge score so a tech-pinned score
+  // can never diverge from the headline.
+  const isKnockdownType = projectType === 'german_roach_knockdown' || projectType === 'palmetto_roach_knockdown';
+  if (isKnockdownType && values.activity_level) {
+    const isGerman = projectType === 'german_roach_knockdown';
+    const noun = isGerman ? 'German cockroach' : 'large-roach';
+    const score = activity && Number.isInteger(activity.score) ? activity.score : null;
+    const levelWord = score != null
+      ? String(SCORE_LEVEL_WORDS[score] || '').replace(' activity', '').toLowerCase()
+      : String(values.activity_level).toLowerCase();
+    const cleared = score != null ? score === 0 : levelWord === 'none observed';
+    let headline;
+    if (visitSequence > 1 && activity && activity.trendWord) {
+      // Mirror the generic trend shapes (stable needs its own sentence).
+      headline = activity.trend === 'stable'
+        ? 'Roach activity is about the same as our last visit.'
+        : `Roach activity has ${activity.trend === 'worsening' ? 'increased' : 'decreased'} since our last visit.`;
+    } else if (cleared) {
+      headline = `No live ${noun} activity was observed today.`;
+    } else {
+      headline = `${noun.charAt(0).toUpperCase()}${noun.slice(1)} activity was ${levelWord} today.`;
+    }
+    const initial = visitSequence > 1 ? '' : 'initial ';
+    const rooms = isGerman ? String(values.rooms_treated || '').trim().replace(/\.$/, '') : '';
+    const intro = isGerman
+      ? (rooms
+        ? `Completed your ${initial}German cockroach knockdown service in the ${rooms.charAt(0).toLowerCase()}${rooms.slice(1)}.`
+        : `Completed your ${initial}German cockroach knockdown service.`)
+      : `Completed your ${initial}large-roach knockdown service.`;
+    const disclosure = isGerman
+      ? ' Please avoid over-the-counter sprays, clean food debris behind and under appliances, and keep bait placements undisturbed so the bait can do its job.'
+      : ' Moisture and exterior entry points can contribute to large-roach activity. Some activity may be seen temporarily as roaches are flushed from hiding areas.';
+    const window = String(values.followup_window || '10–14 days');
+    const followup = isGerman && String(values.followup_required) === 'Yes'
+      ? (window === 'As needed'
+        ? ' A follow-up visit is recommended — we will help you get it scheduled.'
+        : ` Follow-up service is recommended in ${window}.`)
+      : '';
+    return {
+      headline,
+      body: `${intro} ${whatWeDid}${disclosure}${followup} ${nextStep}`.replace(/\s+/g, ' ').trim(),
       nextStep,
     };
   }

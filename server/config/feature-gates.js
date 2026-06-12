@@ -11,6 +11,7 @@
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
+ *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
@@ -48,6 +49,12 @@ const gates = {
   // reply a human actually sent. Burns one Anthropic call per inbound
   // customer SMS, so prod requires explicit opt-in.
   smsShadowDrafts: isProd ? process.env.GATE_SMS_SHADOW_DRAFTS === 'true' : true,
+
+  // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
+  // human-authored SMS replies + consent-gated call transcripts into
+  // voice_corpus_examples (redacted text only, reader-not-ingestor).
+  // No sends, no customer-visible effect; prod opt-in per house pattern.
+  voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
 
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
