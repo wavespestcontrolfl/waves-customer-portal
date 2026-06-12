@@ -107,22 +107,49 @@ async function reconcileByDomain(prospect) {
 
 // After how many failed Omega attempts we stop retrying a single URL.
 const OMEGA_MAX_ATTEMPTS = 5;
+// A stale in-flight claim (run crashed mid-submit) frees up after this long.
+const OMEGA_INFLIGHT_TTL_MS = 10 * 60 * 1000;
 
 // Force-index a confirmed-live page via Omega Indexer. No-ops for nofollow (no
-// equity to index). Dedups via quality_signals.omega_submitted — which is set
-// ONLY on a confirmed-accepted submission, so a transient failure (skip/429/5xx/
-// network) is retried on the next verifier run rather than silently dropped.
-// Failures bump omega_attempts and stop after OMEGA_MAX_ATTEMPTS.
+// equity to index) and for already-indexed pages (nothing to gain). Dedups via
+// quality_signals.omega_submitted — set ONLY on a confirmed-accepted submission,
+// so a transient failure (429/5xx/network) is retried next run rather than
+// dropped; failures bump omega_attempts and stop after OMEGA_MAX_ATTEMPTS.
+//
+// Concurrency: before the paid call we atomically claim the row with a
+// conditional jsonb update (sets omega_inflight only if not submitted and not
+// already in-flight). Overlapping verifier runs can't both submit the same URL —
+// the loser's update affects 0 rows and bails.
 async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
   if (!liveUrl || isDofollow === false) return false;
+  if (prospect.status === 'indexed' || prospect.indexing_status === 'indexed') return false;
   const quality = parseQuality(prospect.quality_signals);
   if (quality.omega_submitted) return false; // already accepted — never re-push
   if ((quality.omega_attempts || 0) >= OMEGA_MAX_ATTEMPTS) return false;
 
+  // Atomic claim: win only if not submitted and not currently (freshly) in-flight.
+  const inflightCutoff = new Date(now.getTime() - OMEGA_INFLIGHT_TTL_MS).toISOString();
+  const claimed = await db('seo_link_prospects')
+    .where({ id: prospect.id })
+    .whereRaw("(quality_signals->>'omega_submitted') IS NULL")
+    .whereRaw("COALESCE((quality_signals->>'omega_inflight')::timestamptz, to_timestamp(0)) < ?", [inflightCutoff])
+    .update({
+      quality_signals: db.raw(
+        "jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{omega_inflight}', to_jsonb(?::text), true)",
+        [now.toISOString()],
+      ),
+      updated_at: new Date(),
+    });
+  if (!claimed) return false; // another run owns it, or it was just submitted
+
   const res = await omega.submit(prospect.target_domain, [liveUrl]);
-  // skipped = no key / no url (non-prod). Pure no-op: don't burn an attempt or
-  // write the row — it retries naturally once a key is present.
-  if (res && res.skipped) return false;
+
+  // skipped = no key / no url (non-prod): release the claim, burn no attempt.
+  if (res && res.skipped) {
+    await db('seo_link_prospects').where({ id: prospect.id })
+      .update({ quality_signals: db.raw("quality_signals - 'omega_inflight'"), updated_at: new Date() });
+    return false;
+  }
 
   if (res && res.ok === true) {
     quality.omega_submitted = now.toISOString();
@@ -132,6 +159,7 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now) {
     quality.omega_attempts = (quality.omega_attempts || 0) + 1;
     quality.omega_error = (res && res.error) || `status ${res && res.status}`;
   }
+  delete quality.omega_inflight; // release the claim either way
   await db('seo_link_prospects').where({ id: prospect.id })
     .update({ quality_signals: JSON.stringify(quality), updated_at: new Date() });
   return res ? res.ok === true : false;

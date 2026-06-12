@@ -18,6 +18,7 @@ const logger = require('../logger');
 
 const OMEGA_ENDPOINT = 'https://www.omegaindexer.com/amember/dashboard/api';
 const DRIP_FEED_DAYS = 2; // spread submissions to look organic
+const REQUEST_TIMEOUT_MS = 12000; // never let a stuck Omega call block the verifier
 
 /**
  * Submit URLs to Omega Indexer under a named campaign.
@@ -31,6 +32,10 @@ async function submit(label, urls, { fetchFn = fetch } = {}) {
   if (!apiKey) return { ok: false, skipped: true, error: 'OMEGA_INDEXER_API_KEY not set' };
   if (list.length === 0) return { ok: false, skipped: true, error: 'no urls' };
 
+  // Bound the request so a hung connection can't stall the sequential verifier;
+  // an abort/error returns a retryable (non-skipped) failure.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const urlString = encodeURIComponent(list.join('|'));
     const campaignName = encodeURIComponent(`Waves Backlinks - ${label}`);
@@ -38,13 +43,17 @@ async function submit(label, urls, { fetchFn = fetch } = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `apikey=${apiKey}&campaignname=${campaignName}&dripfeed=${DRIP_FEED_DAYS}&urls=${urlString}`,
+      signal: controller.signal,
     });
     const body = await res.text().catch(() => '');
     logger.info(`[omega-indexer] submitted ${list.length} url(s) for ${label}: ${String(body).slice(0, 200)}`);
     return { ok: !!res.ok, status: res.status, body };
   } catch (err) {
-    logger.error(`[omega-indexer] failed for ${label}: ${err.message}`);
-    return { ok: false, error: err.message };
+    const msg = err.name === 'AbortError' ? `timeout after ${REQUEST_TIMEOUT_MS}ms` : err.message;
+    logger.error(`[omega-indexer] failed for ${label}: ${msg}`);
+    return { ok: false, error: msg };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
