@@ -178,58 +178,114 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
 // close with a phone CTA. Sell stays ≤ ~3.5/10; urgency is biological
 // ("by March they're out in full force"), never commercial.
 
-// Month → featured service rotation (owner decision 2026-06-11:
-// auto-rotate by season; override any month via the Compose prompt).
+// Month → editorial slate (owner decision 2026-06-11: auto-rotate by
+// season, override any month via the Compose prompt). Built from the
+// SWFL pest calendar: each month carries the featured service (the ONE
+// pitch), the Lawn Corner beat, and the content angles that month owns.
 const PEST_INSIDER_ROTATION = {
-  January: 'rodent control & exclusion (cool weather drives rats/mice indoors)',
-  February: 'termite protection (pre-swarm season prep, inspections)',
-  March: 'subterranean termite treatment (swarm season is ON)',
-  April: 'fire ant control (mounds wake up with spring rain)',
-  May: 'mosquito treatment (salt-marsh mosquito ramp + no-see-um peak)',
-  June: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
-  July: 'German cockroach & palmetto bug defense (peak indoor pressure)',
-  August: 'lawn pest control (chinch bugs shredding St. Augustine)',
-  September: 'termite inspection (post-storm swarms)',
-  October: 'rodent exclusion (season begins as nights cool)',
-  November: 'rodent control (attics fill up as snowbirds return)',
-  December: 'general home pest defense (cooler weather pushes pests indoors)',
+  January: {
+    service: 'rodent control & pest inspections (cool weather drives rats/mice indoors; snowbirds reopening closed-up homes — the "welcome-back inspection")',
+    lawn: 'dry-season lawn watering discipline + winter annuals',
+    beats: 'rodents seeking warmth; surprises in snowbird homes',
+  },
+  February: {
+    service: 'termite protection & WDO inspections (pre-swarm prep — the single most important content window of the year starts NOW)',
+    lawn: 'pre-emergent timing before spring weeds wake up',
+    beats: 'flying ants vs termites — the 10-second test; drywood vs subterranean',
+  },
+  March: {
+    service: 'subterranean termite treatment (swarm season is ON)',
+    lawn: 'spring lawn wake-up: first mow height, aeration timing',
+    beats: 'termite swarmers after warm rain; love bug season opener (pure engagement — everyone in SWFL has opinions)',
+  },
+  April: {
+    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mounds wake with spring rain)',
+    lawn: 'weed pre-emergents last call + aeration',
+    beats: 'love bugs peak; spring buyers need WDO',
+  },
+  May: {
+    service: 'mosquito treatment (rainy-season kickoff = mosquito explosion — the biggest add-on push of the year)',
+    lawn: 'rainy-season mowing rhythm; watch for early chinch activity',
+    beats: 'standing-water audit checklist ("walk your yard with this list"); Memorial Day backyard prep',
+  },
+  June: {
+    service: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
+    lawn: 'chinch bugs starting on St. Augustine; nitrogen blackout begins',
+    beats: 'hurricane season opens — what storms do to pests (displaced rodents, mosquito boom in debris, fire ant rafts)',
+  },
+  July: {
+    service: 'quarterly pest defense (German cockroach & palmetto bug peak indoor pressure; ghost ants in kitchens)',
+    lawn: 'chinch bug damage spreading — brown patches that aren\'t drought',
+    beats: 'ghost ants, palmetto bugs, post-storm pest surges',
+  },
+  August: {
+    service: 'lawn pest control (chinch bugs shredding St. Augustine — before/after season)',
+    lawn: 'sod webworms move in; recovery plan for chinch damage',
+    beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
+  },
+  September: {
+    service: 'termite inspection (post-storm swarms) + lawn recovery',
+    lawn: 'fall fertilization window opens as blackout ends',
+    beats: 'hurricane peak; termite swarms after storms',
+  },
+  October: {
+    service: 'rodent exclusion (season begins as nights cool)',
+    lawn: 'fall fertilization + winterizing the irrigation schedule',
+    beats: 'spooky season fun: spider myths debunked, which Florida bugs are ACTUALLY dangerous',
+  },
+  November: {
+    service: 'rodent control (attics fill as snowbirds return)',
+    lawn: 'winter annuals in; last fertilization call',
+    beats: 'pantry pests before holiday baking; firewood hitchhikers',
+  },
+  December: {
+    service: 'pest inspections (pest-proof the house before holiday guests; gift-a-service for elderly parents)',
+    lawn: 'cool-season lawn care + holiday lighting vs irrigation',
+    beats: 'Christmas tree hitchhikers; pantry pests; cooler weather drives indoor activity',
+  },
 };
 
 function buildPestInsiderSystemPrompt(voice, month) {
-  const featured = PEST_INSIDER_ROTATION[month] || 'general home pest defense';
-  return `You write "Pest Insider" — Waves Pest Control's monthly pest deep-dive for Southwest Florida homeowners.
+  const slate = PEST_INSIDER_ROTATION[month]
+    || { service: 'general home pest defense', lawn: 'seasonal lawn upkeep', beats: 'seasonal pest pressure' };
+  return `You write "Pest Insider" — Waves Pest Control's monthly pest + lawn deep-dive for Southwest Florida homeowners. It should read like a knowledgeable neighbor texting you what's about to crawl out of the ground this month — NEVER corporate marketing.
 
-This is NOT a sales email. It is the humor-sandwich format: most of the email is genuinely fun, surprisingly educational pest content; ONE section sincerely describes a Waves service; the close brings the voice back. Readers should finish smarter and entertained whether or not they ever call.
+The four jobs, in priority order: (1) retention — readers who feel informed keep their quarterly service; (2) tier upgrades — seasonal content naturally introduces the matching add-on; (3) referrals; (4) eventual conversion of non-customers who subscribed for the tips. Jobs 2-4 get exactly ONE pitch and ONE CTA; job 1 is every section.
 
 CURRENT MONTH: ${month}
-THIS MONTH'S FEATURED SERVICE: ${featured}
+FEATURED SERVICE (the one pitch): ${slate.service}
+LAWN CORNER BEAT: ${slate.lawn}
+CONTENT ANGLES THIS MONTH OWNS: ${slate.beats}
 
-VOICE (same narrator as the weekly events guide):
-- Irreverent but not mean. A hype-y group-chat friend who happens to know a disturbing amount about bugs.
+VOICE (same narrator as the weekly events guide, signed by a real person):
+- Funny, blunt, zero fearmongering-for-sales. "So, your place has bed bugs. Fantastic." energy.
 - Dense phrase-level interleave — **bold** the payoff facts, _italic_ the jokes and asides.
 - Anthropomorphize the pest ("that mosquito keeping you up at night? Probably a mom-to-be").
 - Jokes at the PEST's expense, never pressure on the reader.
 - Parenthetical asides as a second comedic voice: "(which, we assume you are)", "(no judgment)".
 
-SUBJECT LINES: max ${voice.subjectLineRules.maxLength} chars, one leading thematic emoji, PSA/curiosity-gap energy ("🦟 PSA: Mosquitoes Are Back and Hungrier Than Ever—But We've Got a Game-Changer!"). PREVIEW TEXT: short punchline, never a summary ("Bite Me? Nope. Not Anymore.").
+SUBJECT LINES: max ${voice.subjectLineRules.maxLength} chars, one leading thematic emoji. SPECIFIC AND LOCAL BEATS CLEVER: "🐜 Termites are swarming in Sarasota this week" crushes "Your March Pest Insider". Use honest alert framing whenever the season supports it. PREVIEW TEXT: short punchline, never a summary ("Bite Me? Nope. Not Anymore.").
 
 HARD RULES:
 - NO dollar amounts, prices, discounts, or "free" offers anywhere.
-- NO invented technology names, product brands, percentages, or study citations — describe the service in honest capability terms only.
+- NO invented technology names, product brands, percentages, statistics, or study citations — honest capability terms only.
 - NO safety/efficacy claims: never "pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved".
-- Facts must be true, mainstream pest biology — nothing obscure enough to be wrong.
+- Facts must be true, mainstream pest/lawn knowledge for SWFL — nothing obscure enough to be wrong.
+- NO invented customer stories, tech anecdotes, or "we saw this in [city]" claims — you have no field data. Stay in general seasonal-biology territory.
 - Urgency is seasonal/biological only — never "limited time", never commercial pressure.
 - The pitch section is SINCERE: plain feature-benefit, no jokes inside the bullets. The humor lives in everything around it.
 
-STRUCTURE (the humor sandwich):
-1. Seasonal hook intro — why THIS pest matters in ${month}, in SWFL terms.
-2. Edutainment facts — 6-9 short ✔-style facts, each a real biology fact delivered with a punchline.
-3. Featured service — one earnest section: what Waves does about it and why the approach works.
-4. Close — voice returns, one-line CTA to call.
+ISSUE SKELETON (every issue, same order — train the reader):
+1. "What's Crawling This Month" — the lead story: 150-250 words on the pest about to peak, why now, what the reader will actually notice.
+2. "Pest of the Month" ID card — where you'll see it, how worried to be (honest), one genuinely useful DIY tip, and when it's time to call someone.
+3. "The Lawn Corner" — one timely lawn task or threat (${slate.lawn}). Most pest newsletters ignore lawns; we have a whole lawn division.
+4. "Myth-Buster" — one forwardable myth verdict ("Do dryer sheets repel mosquitoes?" / "Does mulch attract termites?").
+5. Featured service — the ONE earnest pitch section tied to the month.
+6. Close — voice returns; one-line call CTA; quarterly tie-in ("this is what your quarterly visit is handling right now"); referral nudge.
 
-GIF CAPTIONS (introGifCaption, factsGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive.
+GIF CAPTIONS (introGifCaption, crawlGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive.
 
-SIGN-OFF: "${voice.signoff}" (the renderer appends the 🌊).
+SIGN-OFF: "${voice.pestInsiderSignoff || '— Adam, Waves Pest Control'}" (a real person, not "The Team" — the renderer appends the 🌊).
 
 Return STRICT JSON (no HTML, no prose outside the JSON):
 {
@@ -239,62 +295,88 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
   "introGifTerm": "string (Giphy search, pest/seasonal reaction meme)",
   "introGifCaption": "string",
   "greeting": "string (e.g. 'Hey there!')",
-  "introText": "string (2-3 short paragraphs, seasonal-urgency hook, **bold**/_italic_ interleave)",
-  "factsHeading": "string (emoji + curiosity-gap, e.g. '🦟 Alright, Let's Talk About Mosquitoes')",
-  "factsGifTerm": "string (Giphy search)",
-  "factsGifCaption": "string",
-  "factsIntro": "string (1-2 sentences teeing up the facts)",
-  "facts": [{ "title": "string (short bold lead, e.g. 'Only Females Bite')", "text": "string (the fact + punchline)" }],
+  "introText": "string (1-2 short paragraphs, seasonal hook, **bold**/_italic_ interleave)",
+  "crawlHeading": "string (emoji + hook, e.g. '🦟 What's Crawling This Month')",
+  "crawlGifTerm": "string (Giphy search)",
+  "crawlGifCaption": "string",
+  "crawlText": "string (the 150-250 word lead story)",
+  "pestOfMonth": {
+    "name": "string (common name)",
+    "emoji": "string",
+    "whereYoullSeeIt": "string (1-2 sentences)",
+    "threatLevel": "string (honest, e.g. 'Annoying, not dangerous' or 'Call sooner than later')",
+    "diyTip": "string (one genuinely useful tip)",
+    "whenToCall": "string (the honest escalation line)"
+  },
+  "lawnHeading": "string (e.g. '🌱 The Lawn Corner')",
+  "lawnText": "string (one timely task/threat, 60-120 words)",
+  "mythQuestion": "string (e.g. 'Do dryer sheets repel mosquitoes?')",
+  "mythVerdict": "string (the answer with a punchline, 40-90 words)",
   "pitchHeading": "string (emoji + benefit-framed, e.g. '✈️ Turn Your Yard Into a No-Fly Zone')",
   "pitchGifTerm": "string (Giphy search)",
   "pitchGifCaption": "string",
   "pitchIntro": "string (1 paragraph framing what Waves does about this — sincere)",
   "pitchBullets": [{ "title": "string (e.g. 'Stops the Cycle')", "text": "string (plain feature-benefit, no jokes)" }],
-  "closingHeading": "string (e.g. '😎 Want to Take Back Your Outdoor Space?')",
-  "closingText": "string (1-2 short paragraphs, voice returns)",
+  "closingHeading": "string (e.g. '😎 Want Your Backyard Back?')",
+  "closingText": "string (voice returns; include the quarterly tie-in sentence)",
   "ctaLine": "string (one line ending in the call prompt — the renderer attaches the phone number)",
   "signoff": "string",
-  "ps": "string or null"
+  "ps": "string or null (forwardable nudge)"
 }`;
 }
 
 const PEST_INSIDER_PROSE_FIELDS = [
-  'greeting', 'introText', 'introGifCaption', 'factsHeading', 'factsGifCaption',
-  'factsIntro', 'pitchHeading', 'pitchGifCaption', 'pitchIntro',
+  'greeting', 'introText', 'introGifCaption',
+  'crawlHeading', 'crawlGifCaption', 'crawlText',
+  'lawnHeading', 'lawnText', 'mythQuestion', 'mythVerdict',
+  'pitchHeading', 'pitchGifCaption', 'pitchIntro',
   'closingHeading', 'closingText', 'ctaLine', 'signoff', 'ps',
 ];
+const PEST_OF_MONTH_FIELDS = ['name', 'emoji', 'whereYoullSeeIt', 'threatLevel', 'diyTip', 'whenToCall'];
 
 function sanitizePestInsiderDraft(draft) {
   for (const k of PEST_INSIDER_PROSE_FIELDS) {
     if (typeof draft[k] === 'string') draft[k] = stripCommentaryUrls(draft[k]);
   }
-  for (const key of ['facts', 'pitchBullets']) {
-    draft[key] = (Array.isArray(draft[key]) ? draft[key] : [])
-      .map((item) => (item && typeof item === 'object' ? {
-        title: typeof item.title === 'string' ? stripCommentaryUrls(item.title) : null,
-        text: typeof item.text === 'string' ? stripCommentaryUrls(item.text) : null,
-      } : null))
-      .filter((item) => item && (item.title || item.text));
+  if (draft.pestOfMonth && typeof draft.pestOfMonth === 'object') {
+    const card = {};
+    for (const k of PEST_OF_MONTH_FIELDS) {
+      card[k] = typeof draft.pestOfMonth[k] === 'string' ? stripCommentaryUrls(draft.pestOfMonth[k]) : null;
+    }
+    draft.pestOfMonth = card.name ? card : null;
+  } else {
+    draft.pestOfMonth = null;
   }
+  draft.pitchBullets = (Array.isArray(draft.pitchBullets) ? draft.pitchBullets : [])
+    .map((item) => (item && typeof item === 'object' ? {
+      title: typeof item.title === 'string' ? stripCommentaryUrls(item.title) : null,
+      text: typeof item.text === 'string' ? stripCommentaryUrls(item.text) : null,
+    } : null))
+    .filter((item) => item && (item.title || item.text));
   return draft;
 }
+
+// Customer-facing referral page (verified live 2026-06-11).
+const WAVES_REFERRAL_URL = 'https://www.wavespestcontrol.com/referral/';
 
 async function assemblePestInsiderNewsletter(draft) {
   const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
   const parts = [];
 
   // Parallel GIF prefetch — same rationale as the flagship assembler.
-  const [introGif, factsGif, pitchGif] = await Promise.all([
+  const [introGif, crawlGif, pitchGif] = await Promise.all([
     searchGiphy(draft.introGifTerm),
-    searchGiphy(draft.factsGifTerm),
+    searchGiphy(draft.crawlGifTerm),
     searchGiphy(draft.pitchGifTerm),
   ]);
 
-  // TOC
+  // TOC — the repeatable skeleton trains the reader.
   const tocItems = [
-    draft.factsHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-facts" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.factsHeading)}</a></li>`,
+    draft.crawlHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-crawl" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.crawlHeading)}</a></li>`,
+    draft.pestOfMonth?.name && `<li style="margin:0 0 6px 0;"><a href="#pi-pest" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${escapeHtml(draft.pestOfMonth.emoji || '🪲')} Pest of the Month</a></li>`,
+    draft.lawnHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-lawn" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.lawnHeading)}</a></li>`,
+    draft.mythQuestion && `<li style="margin:0 0 6px 0;"><a href="#pi-myth" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🔍 Myth-Buster</a></li>`,
     draft.pitchHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-pitch" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.pitchHeading)}</a></li>`,
-    draft.closingHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-close" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.closingHeading)}</a></li>`,
   ].filter(Boolean);
   if (tocItems.length) {
     parts.push(`<div style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
@@ -312,21 +394,53 @@ async function assemblePestInsiderNewsletter(draft) {
     parts.push(`<p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.introText).replace(/\n+/g, '<br/><br/>')}</p>`);
   }
 
-  // Facts (the edutainment ~60%)
-  if (draft.factsHeading) {
+  // 1. What's Crawling This Month — the lead story
+  if (draft.crawlHeading || draft.crawlText) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-facts" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.factsHeading)}</em></strong></h2>`);
-    if (factsGif) parts.push(gifBlock(factsGif, draft.factsGifCaption));
-    if (draft.factsIntro) {
-      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.factsIntro)}</p>`);
+    if (draft.crawlHeading) {
+      parts.push(`<h2 id="pi-crawl" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
     }
-    const facts = (draft.facts || []).slice(0, 9).map((f) =>
-      `<li style="margin:0 0 10px 0;font-size:15px;line-height:1.6;">✔ <strong>${markdownToHtml(f.title || '')}</strong>${f.title && f.text ? ' – ' : ''}${markdownToHtml(f.text || '')}</li>`
-    ).join('\n');
-    if (facts) parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${facts}</ul>`);
+    if (crawlGif) parts.push(gifBlock(crawlGif, draft.crawlGifCaption));
+    if (draft.crawlText) {
+      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.crawlText).replace(/\n+/g, '<br/><br/>')}</p>`);
+    }
   }
 
-  // The pitch (sincere middle of the sandwich)
+  // 2. Pest of the Month — ID card
+  if (draft.pestOfMonth?.name) {
+    const card = draft.pestOfMonth;
+    parts.push(dividerHtml());
+    parts.push(`<h2 id="pi-pest" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
+    const rows = [
+      card.whereYoullSeeIt && `📍 <strong>Where you'll see it:</strong> ${markdownToHtml(card.whereYoullSeeIt)}`,
+      card.threatLevel && `⚠️ <strong>How worried to be:</strong> ${markdownToHtml(card.threatLevel)}`,
+      card.diyTip && `🛠️ <strong>DIY tip:</strong> ${markdownToHtml(card.diyTip)}`,
+      card.whenToCall && `📞 <strong>When to call:</strong> ${markdownToHtml(card.whenToCall)}`,
+    ].filter(Boolean);
+    parts.push(`<div style="margin:0 0 14px 0;padding:14px 18px;background:${COLORS.cardBg};border-radius:10px;font-size:14px;line-height:1.8;">\n${rows.join('<br/>\n')}\n</div>`);
+  }
+
+  // 3. The Lawn Corner
+  if (draft.lawnHeading || draft.lawnText) {
+    parts.push(dividerHtml());
+    if (draft.lawnHeading) {
+      parts.push(`<h2 id="pi-lawn" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
+    }
+    if (draft.lawnText) {
+      parts.push(`<div style="margin:0 0 14px 0;padding:14px 18px;background:#F2F8F0;border-radius:10px;border-left:4px solid #5BA862;">
+<p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.lawnText)}</p>
+</div>`);
+    }
+  }
+
+  // 4. Myth-Buster
+  if (draft.mythQuestion && draft.mythVerdict) {
+    parts.push(dividerHtml());
+    parts.push(`<h2 id="pi-myth" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
+    parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.mythVerdict)}</p>`);
+  }
+
+  // 5. The pitch (sincere middle of the sandwich)
   if (draft.pitchHeading) {
     parts.push(dividerHtml());
     parts.push(`<h2 id="pi-pitch" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
@@ -351,10 +465,14 @@ async function assemblePestInsiderNewsletter(draft) {
     }
     const cta = draft.ctaLine ? markdownToHtml(draft.ctaLine) : 'Tired of sharing your yard? Give us a call';
     parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">👉 ${cta} <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${escapeHtml(WAVES_SUPPORT_PHONE_DISPLAY)}</a></p>`);
+    // Referral nudge — every issue carries it; readers are the warmest
+    // referral audience (job #3). One line, never a second pitch.
+    parts.push(`<p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:${COLORS.muted};">Know a neighbor fighting the same bugs? <a href="${WAVES_REFERRAL_URL}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">Send them our way</a> — referrals are the nicest compliment we get.</p>`);
   }
 
-  // Sign-off
-  const signoffText = draft.signoff || '— The Waves Pest Control Team';
+  // Sign-off — a real person, not "The Team" (reviews mention Adam by
+  // name constantly; that's an asset).
+  const signoffText = draft.signoff || '— Adam, Waves Pest Control';
   parts.push(`<p style="margin:20px 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
   if (draft.ps) {
     parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(draft.ps)}</em></p>`);

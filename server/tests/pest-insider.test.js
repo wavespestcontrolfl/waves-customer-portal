@@ -1,7 +1,7 @@
 /**
- * Pest Insider (monthly) — humor-sandwich newsletter type.
- * Pure pieces: prompt construction, sanitization, assembly, and the
- * first-Tuesday/month-bounds cron guards.
+ * Pest Insider (monthly) — humor-sandwich newsletter type with the
+ * repeatable issue skeleton (What's Crawling / Pest of the Month /
+ * Lawn Corner / Myth-Buster / one pitch / close). Pure pieces only.
  */
 
 const {
@@ -21,46 +21,69 @@ const voice = getVoiceProfile('waves_phase_3_local');
 describe('pest-insider buildPestInsiderSystemPrompt', () => {
   const prompt = buildPestInsiderSystemPrompt(voice, 'June');
 
-  test('encodes the humor-sandwich structure and this month\'s featured service', () => {
-    expect(prompt).toContain('humor-sandwich');
-    expect(prompt).toContain('THIS MONTH\'S FEATURED SERVICE: mosquito treatment');
-    expect(prompt).toContain('The pitch section is SINCERE');
-    expect(prompt).toContain('Edutainment facts');
+  test('encodes the issue skeleton, four jobs, and this month\'s editorial slate', () => {
+    expect(prompt).toContain('ISSUE SKELETON');
+    expect(prompt).toContain("What's Crawling This Month");
+    expect(prompt).toContain('Pest of the Month');
+    expect(prompt).toContain('The Lawn Corner');
+    expect(prompt).toContain('Myth-Buster');
+    expect(prompt).toContain('FEATURED SERVICE (the one pitch): mosquito treatment');
+    expect(prompt).toContain('LAWN CORNER BEAT: chinch bugs starting');
+    expect(prompt).toContain('retention');
+    expect(prompt).toContain('exactly ONE pitch and ONE CTA');
   });
 
-  test('carries the hard rules: no prices, no invented tech, no efficacy claims, biological urgency', () => {
+  test('carries the hard rules: no prices, no invented tech/stories, no efficacy claims, biological urgency', () => {
     expect(prompt).toContain('NO dollar amounts');
     expect(prompt).toContain('NO invented technology names');
+    expect(prompt).toContain('NO invented customer stories');
     expect(prompt).toContain('never "pet-safe"');
     expect(prompt).toContain('seasonal/biological only');
+    expect(prompt).toContain('The pitch section is SINCERE');
   });
 
-  test('rotation covers all 12 months and unknown months fall back', () => {
+  test('subject guidance is specific-and-local; sign-off is a real person', () => {
+    expect(prompt).toContain('SPECIFIC AND LOCAL BEATS CLEVER');
+    expect(prompt).toContain('Termites are swarming in Sarasota this week');
+    expect(prompt).toContain('— Adam, Waves Pest Control');
+  });
+
+  test('rotation covers all 12 months with service+lawn+beats; unknown months fall back', () => {
     expect(Object.keys(PEST_INSIDER_ROTATION)).toHaveLength(12);
+    for (const slate of Object.values(PEST_INSIDER_ROTATION)) {
+      expect(slate.service).toBeTruthy();
+      expect(slate.lawn).toBeTruthy();
+      expect(slate.beats).toBeTruthy();
+    }
     expect(buildPestInsiderSystemPrompt(voice, 'Smarch')).toContain('general home pest defense');
   });
 });
 
 describe('pest-insider sanitizePestInsiderDraft', () => {
-  test('strips URLs from prose and structured items; drops emptied items', () => {
+  test('strips URLs from prose, the ID card, and pitch bullets; drops emptied items', () => {
     const draft = sanitizePestInsiderDraft({
-      introText: 'Read more at https://evil.example now',
-      facts: [
-        { title: 'Only Females Bite', text: 'See https://spam.example for proof' },
+      crawlText: 'Read more at https://evil.example now',
+      pestOfMonth: {
+        name: 'Ghost Ant',
+        whereYoullSeeIt: 'Kitchens — see https://spam.example',
+        threatLevel: 'Annoying, not dangerous',
+      },
+      pitchBullets: [
+        { title: 'Stops the Cycle', text: 'Growth regulation prevents the next generation.' },
         { title: '', text: '' },
         'not-an-object',
       ],
-      pitchBullets: [{ title: 'Stops the Cycle', text: 'IGR prevents larvae.' }],
     });
-    expect(draft.introText).not.toContain('evil.example');
-    expect(draft.facts).toHaveLength(1);
-    expect(draft.facts[0].text).not.toContain('spam.example');
-    expect(draft.pitchBullets).toEqual([{ title: 'Stops the Cycle', text: 'IGR prevents larvae.' }]);
+    expect(draft.crawlText).not.toContain('evil.example');
+    expect(draft.pestOfMonth.whereYoullSeeIt).not.toContain('spam.example');
+    expect(draft.pitchBullets).toEqual([
+      { title: 'Stops the Cycle', text: 'Growth regulation prevents the next generation.' },
+    ]);
   });
 
-  test('non-array facts/pitchBullets normalize to empty arrays', () => {
-    const draft = sanitizePestInsiderDraft({ facts: 'nope', pitchBullets: null });
-    expect(draft.facts).toEqual([]);
+  test('a nameless ID card nulls out; non-array pitchBullets normalize', () => {
+    const draft = sanitizePestInsiderDraft({ pestOfMonth: { whereYoullSeeIt: 'x' }, pitchBullets: null });
+    expect(draft.pestOfMonth).toBeNull();
     expect(draft.pitchBullets).toEqual([]);
   });
 });
@@ -69,38 +92,64 @@ describe('pest-insider assemblePestInsiderNewsletter', () => {
   const baseDraft = {
     greeting: 'Hey there!',
     introText: 'Mosquito season is **coming**.',
-    factsHeading: '🦟 Alright, Let\'s Talk About Mosquitoes',
-    factsIntro: 'Buckle up.',
-    facts: [{ title: 'Only Females Bite', text: 'That mosquito? _Probably a mom-to-be._' }],
+    crawlHeading: "🦟 What's Crawling This Month",
+    crawlText: 'Salt-marsh mosquitoes are about to peak.',
+    pestOfMonth: {
+      name: 'Salt-Marsh Mosquito',
+      emoji: '🦟',
+      whereYoullSeeIt: 'Dusk, anywhere near standing water.',
+      threatLevel: 'Annoying, occasionally disease-carrying.',
+      diyTip: 'Walk your yard and dump anything holding water.',
+      whenToCall: 'When dumping water stops making a dent.',
+    },
+    lawnHeading: '🌱 The Lawn Corner',
+    lawnText: 'Chinch bugs are waking up on St. Augustine.',
+    mythQuestion: 'Do dryer sheets repel mosquitoes?',
+    mythVerdict: 'Short answer: _no_. Long answer: **still no**, but your trunk smells great.',
     pitchHeading: '✈️ Turn Your Yard Into a No-Fly Zone',
-    pitchIntro: 'Here\'s what we do about it.',
+    pitchIntro: "Here's what we do about it.",
     pitchBullets: [{ title: 'Stops the Cycle', text: 'Growth regulation prevents the next generation.' }],
     closingHeading: '😎 Want Your Backyard Back?',
-    closingText: 'Backyards are for BBQs.',
-    ctaLine: 'Let\'s make mosquitoes a problem of the past —',
+    closingText: 'Your quarterly visit is already on mosquito duty this month.',
+    ctaLine: "Let's make mosquitoes a problem of the past —",
     ps: 'Forward this to the friend who attracts every mosquito at the bonfire.',
   };
 
-  test('renders the full sandwich: TOC, ✔ facts, 🔹 pitch, tel CTA, Team sign-off, P.S.', async () => {
+  test('renders the full skeleton: TOC, lead story, ID card, Lawn Corner, Myth-Buster, pitch, tel CTA, referral, Adam sign-off', async () => {
     const html = await assemblePestInsiderNewsletter({ ...baseDraft });
     expect(html).toContain('In this email:');
-    expect(html).toContain('#pi-facts');
-    expect(html).toContain('✔ <strong>Only Females Bite</strong>');
+    expect(html).toContain('#pi-crawl');
+    expect(html).toContain('Pest of the Month: Salt-Marsh Mosquito');
+    expect(html).toContain("Where you'll see it:");
+    expect(html).toContain('How worried to be:');
+    expect(html).toContain('The Lawn Corner');
+    expect(html).toContain('Myth-Buster: Do dryer sheets repel mosquitoes?');
     expect(html).toContain('🔹 <strong>Stops the Cycle</strong>');
     expect(html).toContain('href="tel:');
     expect(html).toContain('(941) 297-5749');
-    expect(html).toContain('— The Waves Pest Control Team');
+    expect(html).toContain('https://www.wavespestcontrol.com/referral/');
+    expect(html).toContain('— Adam, Waves Pest Control');
     expect(html).toContain('<strong>P.S.</strong>');
   });
 
-  test('escapes injected markup in fact content', async () => {
+  test('escapes injected markup in ID-card content', async () => {
     const html = await assemblePestInsiderNewsletter({
       ...baseDraft,
-      facts: [{ title: 'Bad <script>x</script>', text: '<img src=x onerror="steal()">' }],
+      pestOfMonth: {
+        ...baseDraft.pestOfMonth,
+        name: 'Bad <script>x</script>',
+        diyTip: '<img src=x onerror="steal()">',
+      },
     });
     expect(html).not.toContain('<script>x</script>');
     expect(html).not.toContain('onerror="steal()"');
     expect(html).toContain('&lt;script&gt;');
+  });
+
+  test('exactly one referral link and one tel CTA — the single-CTA discipline', async () => {
+    const html = await assemblePestInsiderNewsletter({ ...baseDraft });
+    expect(html.match(/referral\//g)).toHaveLength(1);
+    expect(html.match(/href="tel:/g)).toHaveLength(1);
   });
 });
 
