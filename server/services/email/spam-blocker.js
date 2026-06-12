@@ -231,5 +231,6 @@ module.exports = {
   domainFromAddress,
   domainMatches,
   isProtectedDomain,
+  isOperationalDomain,
   normalizeAddress,
 };
