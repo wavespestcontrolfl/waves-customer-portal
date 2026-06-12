@@ -84,6 +84,23 @@ function sanitizeBuiltNotification(built = {}) {
 
 // priority: 'urgent' (red, double vibrate), 'high' (amber), 'normal' (teal), 'low' (gray)
 const TRIGGER_REGISTRY = {
+  // Fired by server/services/property-lookup-canary.js when a golden parcel
+  // stops parsing — a county PAO layout change silently degrading estimator
+  // accuracy until fixed.
+  property_lookup_canary_failed: {
+    label: 'Property-lookup parser canary failed',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => {
+      const failures = Array.isArray(p.failures) ? p.failures : [];
+      return {
+        title: 'Estimator data canary: county parser regression',
+        body: `${failures.length} check(s) failing — ${failures.slice(0, 3).join('; ')}`.slice(0, 220),
+        link: '/admin/estimates',
+      };
+    },
+  },
   new_lead: {
     label: 'New lead submitted',
     category: 'new_lead',
