@@ -201,6 +201,31 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
         .first('id');
       if (answered) return null;
 
+      // Same race, queued flavor: staff can have a reply for this thread
+      // sitting in the scheduled-send queue. /schedule-sms couldn't park a
+      // decision that didn't exist yet (the drafter was mid-generation), so
+      // publishing now would put an actionable card on top of the queued
+      // reply. No timestamp filter on purpose — any live queued staff reply
+      // answers the thread soon.
+      const replyInFlight = await trx('sms_log')
+        .where({ customer_id: customerId, direction: 'outbound' })
+        .whereIn('message_type', HUMAN_REPLY_TYPES)
+        .whereIn('status', ['scheduled', 'sending'])
+        .first('id');
+      if (replyInFlight) return null;
+
+      // A newer inbound may exist whose own draft hasn't published yet —
+      // invisible to the pending-suggestion ordering check below. This
+      // draft's context is stale; the newer inbound's draft will publish
+      // its own card. Conservative on purpose (any newer inbound row,
+      // reactions included): the cost of suppressing is one fewer card,
+      // the draft reverts to shadow for the judge.
+      const newerInbound = await trx('sms_log')
+        .where({ customer_id: customerId, direction: 'inbound' })
+        .where('created_at', '>', inbound.created_at)
+        .first('id');
+      if (newerInbound) return null;
+
       const pending = await trx('agent_decisions as ad')
         .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
         .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review', 'ad.customer_id': customerId })
