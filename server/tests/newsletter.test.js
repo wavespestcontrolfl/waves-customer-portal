@@ -1276,6 +1276,25 @@ describe('newsletter P.S. body + plain-text entity decode helpers', () => {
   });
 });
 
+describe('newsletter closing-checklist checkmark guard', () => {
+  const { checklistItemText } = require('../services/newsletter-draft');
+
+  test('strips a leading model-written checkmark so the renderer marker never doubles', () => {
+    expect(checklistItemText('✔️ Sunscreen before the patio, not after')).toBe('Sunscreen before the patio, not after');
+    expect(checklistItemText('✔ Hydrate like it\'s your job')).toBe('Hydrate like it\'s your job');
+    expect(checklistItemText('✅ Dump standing water after every storm')).toBe('Dump standing water after every storm');
+    expect(checklistItemText('  ✓ Foldable chair = permanent trunk resident')).toBe('Foldable chair = permanent trunk resident');
+    expect(checklistItemText('✔️ ✔️ already doubled in an old draft')).toBe('already doubled in an old draft');
+  });
+
+  test('leaves non-checkmark openers intact — other emoji are content, not markers', () => {
+    expect(checklistItemText('🧴 Sunscreen first')).toBe('🧴 Sunscreen first');
+    expect(checklistItemText('Don\'t underestimate the funnel cake')).toBe('Don\'t underestimate the funnel cake');
+    expect(checklistItemText('Check the radar ✔️ before heading out')).toBe('Check the radar ✔️ before heading out');
+    expect(checklistItemText(null)).toBe('');
+  });
+});
+
 describe('newsletter greeting personalization + render polish', () => {
   const {
     GREETING_NAME_TOKEN,
