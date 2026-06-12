@@ -17,6 +17,7 @@
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
+ *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -131,6 +132,12 @@ const gates = {
   dataHygieneAutoApply:                 process.env.GATE_DATA_HYGIENE_AUTO_APPLY === 'true',
   // Vault decrypt/reveal is explicit opt-in in every shared environment.
   dataHygieneSensitiveReveal: isProd ? process.env.GATE_DATA_HYGIENE_REVEAL === 'true' : false,
+
+  // Weekly incident regression eval — replays the incident corpus
+  // (server/fixtures/incident-eval/) through the LIVE fact-check gate and
+  // inbox classifier to catch prompt/model drift. Read-only except one admin
+  // notification on regression. Enable with GATE_INCIDENT_EVAL=true.
+  incidentRegressionEval: isProd ? process.env.GATE_INCIDENT_EVAL === 'true' : true,
 };
 
 function isEnabled(gate) {

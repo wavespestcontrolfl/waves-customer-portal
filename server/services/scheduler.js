@@ -674,6 +674,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY MONDAY 3:20AM ET — Incident regression eval. Replays the incident
+  // corpus (server/fixtures/incident-eval/) through the LIVE fact-check gate
+  // and inbox classifier and notifies admin on regression. The jest tests for
+  // these components mock the model, so prompt edits, MODEL_* env swaps, and
+  // provider-side drift are invisible to CI — and both components degrade
+  // silently (the gate fails open; a classifier drift just fires a different
+  // auto-action). Each case is a real past incident; see the corpus README.
+  // Read-only against business data: classification runs through the pure
+  // classifyEmailContent path (no emails-row writes, no auto-actions).
+  // runExclusive: ~10 LLM calls; don't double-spend on deploy-overlap ticks.
+  // Kill switch: GATE_INCIDENT_EVAL=false.
+  // =========================================================================
+  cron.schedule('20 3 * * 1', async () => {
+    if (!isEnabled('incidentRegressionEval')) return;
+    logger.info('Running: incident regression eval');
+    try {
+      await runExclusive('incident-regression-eval', async () => {
+        const { runIncidentEval } = require('./eval/incident-regression');
+        const result = await runIncidentEval();
+        logger.info(`Incident eval done: ${result.passed}/${result.total} passed, ${result.failed} failed, ${result.inconclusive} inconclusive`);
+      });
+    } catch (err) {
+      logger.error(`Incident regression eval failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5:30AM ET — Expire past events. classifyFreshness never emits an
   // 'expired' status and nothing else transitions an event out of its fresh
   // state once its date passes, so a one_time/annual event would keep its high
