@@ -82,7 +82,7 @@ const NAV_SECTIONS = [
     section: "Operations",
     items: [
       { path: "/admin/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-      { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
+      { path: "/admin/agents", icon: Bot, label: "Agents" },
       { path: "/admin/customers", icon: Users, label: "Customers" },
       { path: "/admin/pipeline", icon: ClipboardList, label: "Pipeline" },
       { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
@@ -115,7 +115,6 @@ const NAV_SECTIONS = [
       { path: "/admin/content-engine", icon: Bot, label: "Content Engine" },
       { path: "/admin/content-registry", icon: Database, label: "Registry" },
       { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
-      { path: "/admin/agent-decisions", icon: Brain, label: "Agent Review" },
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },

@@ -305,7 +305,7 @@ function LeadConversionPanel({ details }) {
   );
 }
 
-export default function AgentOpsPage() {
+export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -330,6 +330,14 @@ export default function AgentOpsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // When embedded under AgentsHubPage, the hub header owns the Refresh
+  // pill — register our load() (and busy state) with it.
+  useEffect(() => {
+    if (!setRefreshHandler) return undefined;
+    setRefreshHandler(load, loading);
+    return () => setRefreshHandler(null);
+  }, [setRefreshHandler, load, loading]);
 
   const tasks = useMemo(() => {
     const all = data?.tasks || [];
@@ -387,13 +395,15 @@ export default function AgentOpsPage() {
         }
       `}</style>
 
-      <AdminCommandHeader
-        title="Agent Ops"
-        icon={Bot}
-        actions={[
-          { key: "refresh", label: loading ? "Refreshing" : "Refresh", icon: RefreshCw, onClick: load, disabled: loading, variant: "secondary" },
-        ]}
-      />
+      {!embedded && (
+        <AdminCommandHeader
+          title="Agent Ops"
+          icon={Bot}
+          actions={[
+            { key: "refresh", label: loading ? "Refreshing" : "Refresh", icon: RefreshCw, onClick: load, disabled: loading, variant: "secondary" },
+          ]}
+        />
+      )}
 
       <div className="agent-ops-wrap">
         {error && (

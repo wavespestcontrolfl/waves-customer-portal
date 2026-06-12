@@ -359,7 +359,7 @@ async function loadAgentDecisionTasks() {
         sourceLabel: 'Agent Review',
         sourceId: row.id,
         createdAt: row.created_at,
-        actionUrl: '/admin/agent-decisions',
+        actionUrl: '/admin/agents?tab=decisions',
         actionLabel: 'Open Agent Review',
         confidence,
         impact: safetyFlags.length ? `${safetyFlags.length} safety flag${safetyFlags.length === 1 ? '' : 's'}` : null,
