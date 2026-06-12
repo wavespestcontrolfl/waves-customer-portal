@@ -1302,4 +1302,121 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
   }
 });
 
+// ── Shadow Drafts (brand-voice loop) ────────────────────────────────────
+// GET /shadow-drafts — recent message_drafts status='shadow' rows with
+// their judgment (if the nightly judge has scored them yet).
+router.get('/shadow-drafts', async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const intent = String(req.query.intent || '').trim();
+
+    const query = db('message_drafts')
+      .where('message_drafts.status', 'shadow')
+      .leftJoin('shadow_draft_judgments', 'message_drafts.id', 'shadow_draft_judgments.draft_id')
+      .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
+      .select(
+        'message_drafts.id', 'message_drafts.customer_id', 'message_drafts.inbound_message',
+        'message_drafts.draft_response', 'message_drafts.intent', 'message_drafts.scheduling_intent',
+        'message_drafts.intended_actions', 'message_drafts.draft_ms', 'message_drafts.created_at',
+        'customers.first_name', 'customers.last_name',
+        'shadow_draft_judgments.verdict', 'shadow_draft_judgments.scores',
+        'shadow_draft_judgments.human_replied', 'shadow_draft_judgments.human_reply_text',
+        'shadow_draft_judgments.notes as judge_notes', 'shadow_draft_judgments.judged_at'
+      )
+      .orderBy('message_drafts.created_at', 'desc')
+      .limit(limit);
+    if (intent) query.where('message_drafts.intent', intent);
+
+    const rows = await query;
+    res.json({
+      drafts: rows.map((r) => ({
+        id: r.id,
+        customerName: r.first_name ? `${r.first_name} ${r.last_name || ''}`.trim() : null,
+        inboundMessage: r.inbound_message,
+        draftResponse: r.draft_response,
+        intent: r.intent,
+        schedulingIntent: Boolean(r.scheduling_intent),
+        intendedActions: r.intended_actions || null,
+        draftMs: r.draft_ms,
+        createdAt: r.created_at,
+        judgment: r.judged_at
+          ? {
+              verdict: r.verdict,
+              scores: r.scores || null,
+              humanReplied: Boolean(r.human_replied),
+              humanReplyText: r.human_reply_text,
+              notes: r.judge_notes,
+              judgedAt: r.judged_at,
+            }
+          : null,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /shadow-scores — per-intent rollup over shadow_draft_judgments.
+// Average scores count ONLY LLM-scored verdicts (scores is null on the
+// deterministic no-reply outcomes); agreement/verdict counts cover all.
+router.get('/shadow-scores', async (req, res, next) => {
+  try {
+    const totals = await db('message_drafts')
+      .where('status', 'shadow')
+      .select('intent')
+      .count('* as drafts')
+      .groupBy('intent');
+
+    const judged = await db('shadow_draft_judgments')
+      .select('intent', 'verdict')
+      .count('* as count')
+      .groupBy('intent', 'verdict');
+
+    const avgScores = await db('shadow_draft_judgments')
+      .whereNotNull('scores')
+      .select(
+        'intent',
+        db.raw('COUNT(*) as scored'),
+        db.raw("AVG((scores->>'voice')::numeric) as voice"),
+        db.raw("AVG((scores->>'safety')::numeric) as safety"),
+        db.raw("AVG((scores->>'actions')::numeric) as actions"),
+        db.raw("AVG((scores->>'overall')::numeric) as overall")
+      )
+      .groupBy('intent');
+
+    const byIntent = new Map();
+    const bucket = (intent) => {
+      const key = intent || 'GENERAL';
+      if (!byIntent.has(key)) {
+        byIntent.set(key, { intent: key, drafts: 0, judged: 0, verdicts: {}, scored: 0, avg: null });
+      }
+      return byIntent.get(key);
+    };
+    for (const row of totals) bucket(row.intent).drafts = parseInt(row.drafts, 10);
+    for (const row of judged) {
+      const b = bucket(row.intent);
+      const n = parseInt(row.count, 10);
+      b.judged += n;
+      b.verdicts[row.verdict] = n;
+    }
+    for (const row of avgScores) {
+      const b = bucket(row.intent);
+      b.scored = parseInt(row.scored, 10);
+      b.avg = {
+        voice: row.voice === null ? null : Number(Number(row.voice).toFixed(1)),
+        safety: row.safety === null ? null : Number(Number(row.safety).toFixed(1)),
+        actions: row.actions === null ? null : Number(Number(row.actions).toFixed(1)),
+        overall: row.overall === null ? null : Number(Number(row.overall).toFixed(1)),
+      };
+    }
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      intents: [...byIntent.values()].sort((a, b) => b.drafts - a.drafts),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

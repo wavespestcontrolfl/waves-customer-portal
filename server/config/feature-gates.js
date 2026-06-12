@@ -12,6 +12,7 @@
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
+ *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
@@ -55,6 +56,13 @@ const gates = {
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
+
+  // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
+  // message_drafts status='shadow' rows against the reply a human actually
+  // sent, per intent class (shadow_draft_judgments). LLM is called only
+  // when the human replied; batch-capped per run. No sends, no
+  // customer-visible effect; prod opt-in per house pattern.
+  shadowJudge: isProd ? process.env.GATE_SHADOW_JUDGE === 'true' : true,
 
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,

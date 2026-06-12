@@ -529,6 +529,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:55AM ET — Shadow judge (SMS brand-voice loop, Phase C). Pairs
+  // each 24h-matured shadow draft with the human reply that actually went
+  // out and scores it per intent class. LLM only when the human replied;
+  // batch-capped; unjudged drafts retry next night (anti-join).
+  // =========================================================================
+  cron.schedule('55 3 * * *', async () => {
+    if (!isEnabled('shadowJudge')) return;
+    logger.info('Running: Shadow judge');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { judgeShadowDrafts } = require('./sms-shadow-judge');
+      await runExclusive('shadow-judge', () => judgeShadowDrafts());
+    } catch (err) {
+      logger.error(`Shadow judge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
   // Stripe's retry window is 72h max, so anything past 90d is just historical
   // noise; the table grows ~50–500 rows/day and never shrinks otherwise.
