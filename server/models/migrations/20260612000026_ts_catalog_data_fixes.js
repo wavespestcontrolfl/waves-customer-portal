@@ -38,7 +38,12 @@ exports.up = async function (knex) {
       default_unit: 'percent_solution',
       needs_pricing: true,
       active: true,
-      rate_notes: 'T&S protocol: 1.0% standard, 1.5% only with active scale/mites and safe plant/weather conditions. Keep separate from copper tanks. OMRI listed.',
+      // rate_notes is a jsonb column (20260430000009) — keyed object,
+      // stringified, matching the seed convention in 20260430000010.
+      rate_notes: JSON.stringify({
+        protocol_note: 'T&S protocol: 1.0% standard, 1.5% only with active scale/mites and safe plant/weather conditions.',
+        mixing_note: 'Keep separate from copper tanks. OMRI listed.',
+      }),
     });
   }
 };
