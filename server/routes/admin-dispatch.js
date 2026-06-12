@@ -1926,9 +1926,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // pre-commit photo upload gate (Codex P2): without it, an S3 failure
     // after commit would let a report send with fewer than the required
     // photos — the count check on the submitted array alone can't see
-    // upload failures.
+    // upload failures. A declared tree_shrub COMPANION is T&S work all the
+    // same — the gate applies to combined completions too (pre-push P1).
+    const hasTreeShrubCompanion = (completionProfile?.companions || [])
+      .some((companion) => companion.type === 'tree_shrub');
     const treeShrubPhotoGateRequired = treeShrubCloseoutRequired
-      || (typedFindingsType === 'tree_shrub' && !isIncompleteVisit);
+      || ((typedFindingsType === 'tree_shrub' || hasTreeShrubCompanion) && !isIncompleteVisit);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -2088,7 +2091,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // summer blackout, bee-active pollinator block, IRAC/FRAC confirmation,
     // product actuals, photo minimum, and the palm-injection redirect all
     // still gate completion — driven by the typed values + recorded products.
-    if (claim.action === 'proceed' && typedFindingsType === 'tree_shrub' && typedFindings && !isIncompleteVisit) {
+    // The values can come from the typed PRIMARY or from a tree_shrub
+    // COMPANION section (lawn + T&S combined visits) — the regulatory gates
+    // apply identically; a companion must not be a side door around them
+    // (pre-push P1). The two sources are mutually exclusive: companion
+    // parsing drops entries duplicating the profile's own findingsType.
+    const treeShrubComplianceValues = (typedFindingsType === 'tree_shrub' && typedFindings && !isIncompleteVisit)
+      ? typedFindings.values
+      : (!isIncompleteVisit && validatedCompanions.find((c) => c.type === 'tree_shrub')?.values) || null;
+    if (claim.action === 'proceed' && treeShrubComplianceValues) {
       // The compliance classifiers need the CATALOG rows (name/category/
       // IRAC/FRAC/analysis) — degrading to submitted-input-only refs on a
       // transient DB error would silently skip the blackout/pollinator/
@@ -2120,7 +2131,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const typedCompliance = validateTreeShrubTypedCompliance({
         service: svc,
         serviceDate: serviceDateOnly(svc.scheduled_date),
-        values: typedFindings.values,
+        values: treeShrubComplianceValues,
         products: products || [],
         productRows: typedProductRows,
         completionPhotos,
