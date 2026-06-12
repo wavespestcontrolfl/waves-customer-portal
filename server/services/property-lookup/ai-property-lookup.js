@@ -1067,6 +1067,34 @@ async function lookupPropertyFromGemini(address) {
   }
 }
 
+// Leading house number of a street line, or null when it can't be compared:
+// no leading number, or two consecutive number tokens (a "13500-13700"-style
+// range situs normalizes to "13500 13700 ..." and is not comparable to a
+// single typed number — guessing either bound would fire the guard on legit
+// matches).
+function leadingHouseNumber(address) {
+  const line = normalizeCountyStreetLine(address);
+  const match = line.match(/^(\d+)\s/);
+  if (!match) return null;
+  if (/^\d+\s+\d+(\s|$)/.test(line)) return null;
+  return match[1];
+}
+
+// A GIS point match is only trusted when its situs house number agrees with
+// the typed address. Apartment/condo complexes share one master parcel whose
+// FDOR situs names a DIFFERENT building (live miss: "13649 Luxe Ave" landed
+// on the complex parcel sited "13510 LUXE AVE APT 101" — 200k-sqft
+// COMMERCIAL — so the wizard commercial-diverted a residential resident and
+// the estimate displayed complex-level facts). Positive-only, like the geo
+// gates: fires ONLY when BOTH sides expose a single clean leading house
+// number and they differ; a missing or range number keeps today's behavior.
+function situsHouseNumberMismatch(searchAddress, situsAddress) {
+  const searchNumber = leadingHouseNumber(searchAddress);
+  const situsNumber = leadingHouseNumber(situsAddress);
+  if (!searchNumber || !situsNumber) return false;
+  return searchNumber !== situsNumber;
+}
+
 async function lookupPropertyFromAITrio(address, geoContext = null) {
   // County street-string matching and AI search prompts both get the
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
@@ -1083,6 +1111,15 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
     parcel = await lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: gisTimeoutMs })
       .catch(() => null);
+    if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
+      // The rooftop point landed inside a parcel whose situs is a different
+      // building (multi-building complex master parcel). Drop the GIS match
+      // entirely — by-parcel detail, the cadastral record, and parcel meta
+      // would all describe the wrong building — and let the typed-address
+      // search below decide. No address values in the log (PII rule).
+      logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
+      parcel = null;
+    }
   }
 
   // County record: keyed by parcel ID when GIS matched, else (or on a
@@ -2950,6 +2987,8 @@ module.exports = {
     geoOpensCountyGate,
     hasCountyPricingCore,
     hasAnyPropertyFact,
+    leadingHouseNumber,
+    situsHouseNumberMismatch,
     lookupPropertyFromManateePAO,
     lookupPropertyFromSarasotaPAO,
     lookupPropertyFromCharlottePAO,
