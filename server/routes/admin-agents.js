@@ -338,6 +338,10 @@ async function loadAgentDecisionTasks() {
   if (!(await tableExists('agent_decisions'))) return { missing: true, tasks: [] };
   const rows = await db('agent_decisions')
     .where('status', 'pending_review')
+    // Pending house-voice suggestions resolve in the comms composer, not
+    // the Agent Review queue — surfacing them here as "needs review" tasks
+    // points at a path the review endpoint rejects.
+    .whereNot('workflow', require('../services/sms-suggest-mode').SUGGEST_WORKFLOW)
     .select('id', 'workflow', 'agent_name', 'entity_type', 'confidence', 'reasoning_summary', 'recommended_actions', 'safety_flags', 'created_at')
     .orderBy('created_at', 'desc')
     .limit(14);
