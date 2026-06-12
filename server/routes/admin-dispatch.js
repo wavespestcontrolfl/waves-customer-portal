@@ -2003,7 +2003,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // product actuals, photo minimum, and the palm-injection redirect all
     // still gate completion — driven by the typed values + recorded products.
     if (claim.action === 'proceed' && typedFindingsType === 'tree_shrub' && typedFindings && !isIncompleteVisit) {
-      const typedProductRows = await loadSubmittedCatalogProducts(products);
+      // The compliance classifiers need the CATALOG rows (name/category/
+      // IRAC/FRAC/analysis) — degrading to submitted-input-only refs on a
+      // transient DB error would silently skip the blackout/pollinator/
+      // IRAC gates (Codex P1 round 2). Fail closed on lookup failure and
+      // on product ids that don't resolve to catalog rows.
+      const submittedProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
+      let typedProductRows = [];
+      if (submittedProductIds.length) {
+        try {
+          typedProductRows = await db('products_catalog').whereIn('id', submittedProductIds).select('*');
+        } catch (catalogErr) {
+          logger.error(`[dispatch] typed T&S catalog lookup failed for ${svc.id}: ${catalogErr.message}`);
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_catalog_lookup_failed'));
+          return res.status(503).json({
+            error: 'Could not verify the recorded products against the catalog. Try again in a moment.',
+            code: 'tree_shrub_catalog_lookup_failed',
+          });
+        }
+        if (typedProductRows.length < submittedProductIds.length) {
+          const found = new Set(typedProductRows.map((row) => String(row.id)));
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_unknown_products'));
+          return res.status(400).json({
+            error: 'Some recorded products were not found in the catalog — refresh the product list and try again.',
+            code: 'tree_shrub_unknown_products',
+            details: submittedProductIds.filter((id) => !found.has(String(id))),
+          });
+        }
+      }
       const typedCompliance = validateTreeShrubTypedCompliance({
         service: svc,
         serviceDate: serviceDateOnly(svc.scheduled_date),

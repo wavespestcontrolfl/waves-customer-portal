@@ -398,13 +398,29 @@ function validateTreeShrubCloseout({
 }
 
 // Treatment chips that legally hinge on knowing WHAT was applied: without a
-// recorded product the N/P blackout, pollinator gate, and IRAC/FRAC checks
-// can't see the application at all, so these chips require at least one
-// product row on a typed completion.
-const TYPED_CHIPS_REQUIRING_PRODUCTS = new Set([
-  'Fertilizer', 'Palm fertilizer', 'Insect treatment',
-  'Disease / fungicide treatment', 'Horticultural oil',
-]);
+// MATCHING product the N/P blackout, pollinator gate, and IRAC/FRAC checks
+// can't see that application at all. Each regulated chip requires a product
+// whose classification matches it — an unrelated product must not satisfy
+// the insect/fungicide/oil compliance (Codex P2 round 2: "Fertilizer,
+// Insect treatment" with only a fertilizer product skipped the pollinator
+// and IRAC gates entirely).
+function isFertilizerLikeProduct(productRef = {}) {
+  const catalog = productRef.catalog || productRef;
+  if (productHasNpFertilizer(productRef)) return true;
+  if (parseFertilizerAnalysis(catalog.fertilizer_analysis)) return true;
+  // N/P-free summer blends (0-0-16 etc.) are still fertilizers.
+  return /\bfertiliz|\bfert\b|\b\d+\s*-\s*\d+\s*-\s*\d+\b/.test(productText(productRef));
+}
+
+const TYPED_CHIP_PRODUCT_RULES = [
+  { chip: 'Fertilizer', matches: isFertilizerLikeProduct },
+  { chip: 'Palm fertilizer', matches: isFertilizerLikeProduct },
+  { chip: 'Insect treatment', matches: isInsectLikeProduct },
+  { chip: 'Disease / fungicide treatment', matches: isFungicideLikeProduct },
+  // Horticultural oils are bee-sensitive contact products — the insect
+  // classifier already recognizes them.
+  { chip: 'Horticultural oil', matches: isInsectLikeProduct },
+];
 
 /**
  * Regulatory closeout checks for TYPED tree_shrub completions (owner spec
@@ -445,14 +461,16 @@ function validateTreeShrubTypedCompliance({
 
   const treatments = String(values.treatments_completed || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
-  const chipsNeedingProducts = treatments.filter((chip) => TYPED_CHIPS_REQUIRING_PRODUCTS.has(chip));
-  if (chipsNeedingProducts.length && productRefs.length === 0) {
-    pushBlock(
-      blocks,
-      'tree_shrub_products_required',
-      `Record the product(s) applied for: ${chipsNeedingProducts.join(', ')}. Compliance checks (fertilizer blackout, pollinator, IRAC/FRAC) need the product list.`,
-      'products',
-    );
+  for (const rule of TYPED_CHIP_PRODUCT_RULES) {
+    if (!treatments.includes(rule.chip)) continue;
+    if (!productRefs.some(rule.matches)) {
+      pushBlock(
+        blocks,
+        'tree_shrub_products_required',
+        `Record the product applied for "${rule.chip}" — compliance checks (fertilizer blackout, pollinator, IRAC/FRAC) need a matching product.`,
+        'products',
+      );
+    }
   }
 
   if (

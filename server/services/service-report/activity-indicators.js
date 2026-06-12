@@ -837,14 +837,25 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     const issueChips = observed.filter((c) => c !== 'No major issues observed' && c !== 'Healthy / new growth');
     const heavyPressure = ['pest_pressure', 'disease_pressure', 'deficiency_symptoms', 'bed_weed_pressure']
       .some((key) => ['Moderate', 'Heavy'].includes(String(values[key] || '')));
-    const palmFlags = String(values.ganoderma_conk_observed) === 'Yes' || String(values.palm_trunk_concern) === 'Yes';
-    if (observed.includes('No major issues observed') && (issueChips.length || heavyPressure || palmFlags)) {
+    // EVERY issue-flavored Yes toggle contradicts the no-issues claim, not
+    // just the two palm flags (Codex P2 round 2) — "no major issues" next
+    // to "A pruning issue was observed" is incoherent.
+    const issueToggles = [
+      'ganoderma_conk_observed', 'palm_trunk_concern', 'palm_nutrient_stress',
+      'pruning_issue_observed', 'irrigation_issue_observed', 'mulch_depth_concern',
+    ].some((key) => String(values[key] || '') === 'Yes');
+    if (observed.includes('No major issues observed') && (issueChips.length || heavyPressure || issueToggles)) {
       errors.push('"No major issues observed" contradicts the recorded issues — remove it or the conflicting findings');
     }
     const treatments = String(values.treatments_completed || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
     if (treatments.includes('Inspection only') && treatments.length > 1) {
       errors.push('"Inspection only" cannot be combined with applied treatments');
+    }
+    // pre_emergent_applied is an APPLICATION field — it can't ride an
+    // inspection-only visit either (Codex P2 round 2).
+    if (treatments.includes('Inspection only') && String(values.pre_emergent_applied) === 'Yes') {
+      errors.push('"Inspection only" contradicts "Pre-emergent applied" — record the treatment or clear the bed module field');
     }
     const groups = String(values.plant_groups || '')
       .split(',').map((s) => s.trim()).filter(Boolean);

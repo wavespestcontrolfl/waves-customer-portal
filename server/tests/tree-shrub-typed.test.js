@@ -191,6 +191,9 @@ describe('validation', () => {
       { observed_conditions: 'No major issues observed, Scale' },
       { observed_conditions: 'No major issues observed', pest_pressure: 'Heavy' },
       { observed_conditions: 'No major issues observed', ganoderma_conk_observed: 'Yes' },
+      { observed_conditions: 'No major issues observed', pruning_issue_observed: 'Yes' },
+      { observed_conditions: 'No major issues observed', irrigation_issue_observed: 'Yes' },
+      { observed_conditions: 'No major issues observed', mulch_depth_concern: 'Yes' },
     ]) {
       const result = validateTypedFindings({
         type: 'tree_shrub',
@@ -243,6 +246,16 @@ describe('validation', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors.join(' ')).toMatch(/Inspection only/);
+
+    // Applied-treatment module fields contradict inspection-only too.
+    const preEmergent = validateTypedFindings({
+      type: 'tree_shrub',
+      values: { ...BASE_VALUES, treatments_completed: 'Inspection only', pre_emergent_applied: 'Yes' },
+      expectedType: 'tree_shrub',
+      enforceRequired: true,
+    });
+    expect(preEmergent.ok).toBe(false);
+    expect(preEmergent.errors.join(' ')).toMatch(/Pre-emergent applied/);
   });
 });
 
@@ -390,6 +403,34 @@ describe('ported closeout compliance (typed path)', () => {
       completionPhotos: photos,
     });
     expect(inspectionOnly.blocks.map((b) => b.code)).not.toContain('tree_shrub_products_required');
+  });
+
+  test('each regulated chip needs a MATCHING product — an unrelated one never satisfies it (Codex P2)', () => {
+    // Fertilizer product alone cannot satisfy the insect chip: the
+    // pollinator/IRAC gates would never see the insect application.
+    const mismatch = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Fertilizer, Insect treatment' },
+      products: [product('p4', 'Ornamental 13-0-13')],
+      productRows: [row('p4', 'Ornamental 13-0-13')],
+      completionPhotos: photos,
+    });
+    const productBlocks = mismatch.blocks.filter((b) => b.code === 'tree_shrub_products_required');
+    expect(productBlocks).toHaveLength(1);
+    expect(productBlocks[0].message).toContain('Insect treatment');
+
+    // Matching products for both chips clear the rule (pollinator + IRAC
+    // recorded for the insect application).
+    const matched = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Fertilizer, Insect treatment', pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes' },
+      products: [product('p4', 'Ornamental 13-0-13'), product('p3', 'Bifenthrin Pro')],
+      productRows: [row('p4', 'Ornamental 13-0-13'), row('p3', 'Bifenthrin Pro')],
+      completionPhotos: photos,
+    });
+    expect(matched.blocks.map((b) => b.code)).not.toContain('tree_shrub_products_required');
   });
 
   test('product actuals, photo minimum, and injection redirect enforced', () => {
