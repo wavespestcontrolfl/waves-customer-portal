@@ -46,13 +46,26 @@ function parseEstimateData(raw) {
 }
 
 function profileFromEstimateData(data) {
-  // THREE persisted generations: admin creates nest it at
-  // engineRequest.profile, legacy public/lead creates flatten it as
-  // engineInputs, and quote-wizard estimates store the enriched profile at
-  // estimate_data.enriched (public-quote.js writes `enriched: ep`). Missing
-  // any of them silently dumps that cohort into noProfile and skews the
-  // slices.
-  return data?.engineRequest?.profile || data?.engineInputs || data?.enriched || null;
+  // THREE persisted generations: admin creates nest the enriched profile at
+  // engineRequest.profile, quote-wizard estimates store it at
+  // estimate_data.enriched (public-quote.js writes `enriched: ep`), and v1
+  // rows flatten pricing inputs as engineInputs. The first two are enriched
+  // profiles by construction. engineInputs is just the pricing-input shape —
+  // often manual/AI/user-entered values with NO lookup provenance — so it
+  // only counts as a lookup profile when enrichment markers actually
+  // survived on it; otherwise the row is "no lookup profile", never "clean".
+  const direct = data?.engineRequest?.profile || data?.enriched;
+  if (direct) return direct;
+  const inputs = data?.engineInputs;
+  if (
+    inputs
+    && (Array.isArray(inputs.fieldVerifyFlags)
+      || inputs.propertyDataQuality
+      || inputs.dataSources)
+  ) {
+    return inputs;
+  }
+  return null;
 }
 
 function verifyFlagsFrom(profile) {
@@ -101,16 +114,24 @@ function finalize(cell) {
 
 async function winLossSlices({ days = 90 } = {}) {
   const cutoffMs = Date.now() - days * 86400000;
-  // updated_at always moves on the resolving status transition, so this
-  // WHERE is a superset of "resolved within the window"; the precise
-  // resolution-date filter below trims re-saved older rows.
+  const cutoff = new Date(cutoffMs);
+  // Window prefilter is a deliberate SUPERSET built from every column the
+  // resolution-date chain can pick (the admin decline patch stamps
+  // declined_at WITHOUT touching updated_at, so updated_at alone would drop
+  // a freshly-declined old estimate); the precise resolution-date filter
+  // below trims to the real window.
   const rows = await db('estimates')
     .whereIn('status', RESOLVED_STATUSES)
-    .where('updated_at', '>=', new Date(cutoffMs))
+    .where((q) => q
+      .where('accepted_at', '>=', cutoff)
+      .orWhere('declined_at', '>=', cutoff)
+      .orWhere('expires_at', '>=', cutoff)
+      .orWhere('updated_at', '>=', cutoff)
+      .orWhere('created_at', '>=', cutoff))
     .select(
       'id', 'status', 'accepted_at', 'declined_at', 'expires_at',
-      'created_at', 'updated_at', 'monthly_total', 'onetime_total',
-      'estimate_data',
+      'created_at', 'updated_at', 'archived_at', 'monthly_total',
+      'onetime_total', 'estimate_data',
     );
 
   const totals = emptyCell();
@@ -136,6 +157,10 @@ async function winLossSlices({ days = 90 } = {}) {
   }));
 
   for (const row of rows) {
+    // Mirror PipelineAnalytics' archived semantics exactly: archived WINS
+    // still count (won = won forever), archived LOSSES are housekeeping and
+    // never count — the client never even fetches them.
+    if (row.archived_at && row.status !== 'accepted') continue;
     const resolvedAt = resolutionDateMs(row);
     if (resolvedAt == null || resolvedAt < cutoffMs) continue;
     const isWon = row.status === 'accepted';

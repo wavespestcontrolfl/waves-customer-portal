@@ -42,6 +42,7 @@ function row(overrides = {}) {
     accepted_at: daysAgo(5),
     declined_at: null,
     expires_at: null,
+    archived_at: null,
     created_at: daysAgo(10),
     updated_at: daysAgo(5),
     monthly_total: '79.00',
@@ -103,13 +104,17 @@ describe('winLossSlices', () => {
     mockDbHandler = estimatesTable([
       row({ id: 'a', estimate_data: { engineInputs: { fieldVerifyFlags: [{ field: 'stories', priority: 'HIGH', reason: 'x' }] } } }),
       row({ id: 'b', estimate_data: {} }), // no profile at all
-      row({ id: 'c', estimate_data: '{"engineInputs":{"homeSqFt":1800}}' }), // string jsonb, no flags
+      // engineInputs WITHOUT enrichment markers = manual/v1 pricing inputs,
+      // no lookup provenance → noProfile, never "clean".
+      row({ id: 'c', estimate_data: '{"engineInputs":{"homeSqFt":1800}}' }),
+      // engineInputs WITH a surviving enrichment marker counts as a profile.
+      row({ id: 'd', estimate_data: { engineInputs: { homeSqFt: 1800, fieldVerifyFlags: [] } } }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
 
     expect(result.byFlagPresence.flagged.total).toBe(1);
-    expect(result.byFlagPresence.noProfile.total).toBe(1);
+    expect(result.byFlagPresence.noProfile.total).toBe(2);
     expect(result.byFlagPresence.clean.total).toBe(1);
     expect(result.byFlagField).toEqual([
       expect.objectContaining({ field: 'stories', total: 1 }),
@@ -164,6 +169,20 @@ describe('winLossSlices', () => {
     expect(high).toMatchObject({ lost: 1, total: 1 });
     // Recurring bands untouched.
     expect(result.byPriceBand.recurring.every((b) => b.total === 0)).toBe(true);
+  });
+
+  test('archived semantics mirror PipelineAnalytics: archived wins count, archived losses never do', async () => {
+    mockDbHandler = estimatesTable([
+      row({ id: 'win-archived', archived_at: daysAgo(1) }), // accepted + archived → counts
+      row({ id: 'loss-archived', status: 'declined', accepted_at: null, declined_at: daysAgo(2), archived_at: daysAgo(1) }), // excluded
+      row({ id: 'loss-live', status: 'declined', accepted_at: null, declined_at: daysAgo(2) }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    expect(result.resolved).toBe(2);
+    expect(result.won).toBe(1);
+    expect(result.lost).toBe(1);
   });
 
   test('zero resolved rows returns null win rates, not divide-by-zero', async () => {
