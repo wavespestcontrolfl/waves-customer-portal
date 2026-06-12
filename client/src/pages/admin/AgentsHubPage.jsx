@@ -4,9 +4,18 @@
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue)
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
  *
- * Per-tab URL state via ?tab=<key>. Default = overview. The legacy
+ * Per-tab URL state via ?tab=<key>; the URL is the single source of
+ * truth (tab derives from useSearchParams on every render), so in-app
+ * links that change only the query — e.g. the Overview task queue's
+ * "Open Agent Review" actionUrl → ?tab=decisions — switch tabs while
+ * the component stays mounted. Default = overview. The legacy
  * /admin/agent-decisions route redirects to ?tab=decisions (App.jsx)
  * so existing bookmarks and server actionUrls keep working.
+ *
+ * Both pages are imported statically: the hub itself is code-split via
+ * App.jsx's lazyWithRetry (which handles stale-chunk reloads after a
+ * deploy), so a nested React.lazy here would bypass that retry path
+ * for no real chunk-size win — the pages are small.
  *
  * Why a tab wrapper at /admin/agents (not sibling routes): one canonical
  * URL space for agent supervision — upcoming surfaces (shadow SMS drafts,
@@ -16,19 +25,12 @@
  * Tier 1 V2 styling for the shell; the embedded pages keep their own
  * Tier 2 styles.
  */
-import React, {
-  Suspense,
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-} from "react";
+import React, { useState, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Bot, LayoutGrid, ListChecks, RefreshCw } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-
-const AgentOpsPage = React.lazy(() => import("./AgentOpsPage"));
-const AgentDecisionsPage = React.lazy(() => import("./AgentDecisionsPage"));
+import AgentOpsPage from "./AgentOpsPage";
+import AgentDecisionsPage from "./AgentDecisionsPage";
 
 const TAB_KEY = "tab";
 const TABS = {
@@ -43,10 +45,21 @@ const VALID_TABS = TAB_LIST.map((t) => t.key);
 
 export default function AgentsHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initial = VALID_TABS.includes(searchParams.get(TAB_KEY))
-    ? searchParams.get(TAB_KEY)
-    : TABS.OVERVIEW;
-  const [tab, setTab] = useState(initial);
+  const paramTab = searchParams.get(TAB_KEY);
+  const tab = VALID_TABS.includes(paramTab) ? paramTab : TABS.OVERVIEW;
+  const setTab = useCallback(
+    (next) => {
+      setSearchParams(
+        (current) => {
+          const params = new URLSearchParams(current);
+          params.set(TAB_KEY, next);
+          return params;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
 
   // AgentOpsPage owns its data fetch; expose a handle here so the lifted
   // Refresh pill in this header can trigger it without lifting the state
@@ -63,18 +76,6 @@ export default function AgentsHubPage() {
     setRefreshState({ ready: typeof handler === "function", busy });
   }, []);
   const handleRefresh = () => refreshRef.current?.();
-
-  // Keep URL in sync without remount-thrashing the active tab content
-  // (both embedded pages do their own data fetches).
-  useEffect(() => {
-    const current = searchParams.get(TAB_KEY);
-    if (current !== tab) {
-      const next = new URLSearchParams(searchParams);
-      next.set(TAB_KEY, tab);
-      setSearchParams(next, { replace: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
 
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)] max-w-[1300px] mx-auto">
@@ -98,19 +99,11 @@ export default function AgentsHubPage() {
         }
       />
       <div aria-label="Agents content" className="flex-1 min-h-0 flex flex-col">
-        <Suspense
-          fallback={
-            <div className="text-14 text-ink-tertiary p-10 text-center">
-              Loading agents…
-            </div>
-          }
-        >
-          {tab === TABS.OVERVIEW ? (
-            <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
-          ) : (
-            <AgentDecisionsPage embedded />
-          )}
-        </Suspense>
+        {tab === TABS.OVERVIEW ? (
+          <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
+        ) : (
+          <AgentDecisionsPage embedded />
+        )}
       </div>
     </div>
   );
