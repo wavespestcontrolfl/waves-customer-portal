@@ -74,8 +74,12 @@ function finalize(cell) {
 }
 
 async function providerAccuracy() {
+  // verified_overrides is NOT NULL DEFAULT '{}' — whereNotNull would match
+  // EVERY cached row and pull each property_record JSONB into memory. The
+  // empty-object inequality restricts the scan to genuinely verified rows
+  // (predicate verified read-only against prod 2026-06-12: 1 of 5 rows).
   const rows = await db('property_lookups')
-    .whereNotNull('verified_overrides')
+    .whereRaw("verified_overrides <> '{}'::jsonb")
     .whereNotNull('property_record')
     .select('verified_overrides', 'property_record');
 

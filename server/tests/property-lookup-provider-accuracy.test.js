@@ -23,11 +23,15 @@ jest.mock('../services/logger', () => ({
 const { providerAccuracy, _private } = require('../services/property-lookup/provider-accuracy');
 
 function lookupsTable(rows) {
+  const calls = { whereRaws: [] };
   const builder = {
     whereNotNull: () => builder,
+    whereRaw(sql) { calls.whereRaws.push(sql); return builder; },
     select: async () => rows,
   };
-  return () => builder;
+  const handler = () => builder;
+  handler.calls = calls;
+  return handler;
 }
 
 const evidence = (provider, value, extra = {}) => ({
@@ -147,5 +151,14 @@ describe('providerAccuracy', () => {
     mockDbHandler = lookupsTable([]);
     const report = await providerAccuracy();
     expect(report).toMatchObject({ lookupsScored: 0, comparisons: 0, providers: [] });
+  });
+
+  test('scan is restricted to genuinely verified rows (column defaults to {})', async () => {
+    const handler = lookupsTable([]);
+    mockDbHandler = handler;
+    await providerAccuracy();
+    expect(handler.calls.whereRaws).toEqual([
+      expect.stringContaining("verified_overrides <> '{}'::jsonb"),
+    ]);
   });
 });
