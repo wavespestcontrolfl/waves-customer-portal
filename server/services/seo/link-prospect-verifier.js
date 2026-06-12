@@ -164,8 +164,11 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowCon
     const c = await crawlFn(liveUrl, prospect.target_page);
     if (!c.found || c.isDofollow === false) {
       // Not dofollow (or not reachable right now): release the claim, don't spend.
-      await db('seo_link_prospects').where({ id: prospect.id })
-        .update({ quality_signals: db.raw("quality_signals - 'omega_inflight'"), updated_at: new Date() });
+      const release = { quality_signals: db.raw("quality_signals - 'omega_inflight'"), updated_at: new Date() };
+      // If the crawl AUTHORITATIVELY found nofollow, persist that correction —
+      // DataForSEO's default-true is_dofollow may have been written by markLive.
+      if (c.found && c.isDofollow === false) release.is_dofollow = false;
+      await db('seo_link_prospects').where({ id: prospect.id }).update(release);
       return false;
     }
   }
@@ -252,6 +255,7 @@ async function crawlForLink(liveUrl, targetPage) {
 // before spending an Omega credit.
 async function markLive(prospect, { isDofollow, anchorText, backlinkId, discoveredUrl, dofollowConfirmed = false }, now) {
   const liveUrl = discoveredUrl || prospect.live_url;
+  const urlChanged = !!discoveredUrl && discoveredUrl !== prospect.live_url;
   const patch = {
     is_dofollow: isDofollow,
     anchor_text: anchorText || prospect.anchor_text,
@@ -260,7 +264,16 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   };
   if (backlinkId) patch.backlink_id = backlinkId;
   if (discoveredUrl) patch.live_url = discoveredUrl;
-  if (!['live', 'indexed'].includes(prospect.status)) patch.status = 'live';
+  // A moved/replacement URL has its OWN (unknown) index state. A row that was
+  // 'indexed' at the OLD url must re-enter the index flow for the new page — never
+  // inherit the old verdict (which also kept pushForIndexing's already-indexed
+  // guard from submitting the new URL).
+  if (urlChanged) {
+    patch.status = 'live';
+    patch.indexing_status = 'not_checked';
+  } else if (!['live', 'indexed'].includes(prospect.status)) {
+    patch.status = 'live';
+  }
   if (!prospect.first_live_at) patch.first_live_at = now;
   if (!prospect.placement_date) patch.placement_date = etDateString();
   // Clear the pending marker IN PLACE (jsonb delete on the live column) — never a
@@ -269,10 +282,16 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
     patch.quality_signals = db.raw("quality_signals - 'pending'");
   }
   await db('seo_link_prospects').where({ id: prospect.id }).update(patch);
-  // pushForIndexing reads omega_* from its own atomic claim against the live
-  // column, so passing the original snapshot is safe (and the pending key it may
-  // still carry is irrelevant to indexing).
-  await pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowConfirmed });
+  // Hand pushForIndexing the POST-patch view so its already-indexed guard and URL
+  // dedupe see the reset state, not the stale snapshot. (omega_* still read from
+  // its own atomic claim against the live column.)
+  const updated = {
+    ...prospect,
+    live_url: liveUrl,
+    status: patch.status || prospect.status,
+    indexing_status: patch.indexing_status !== undefined ? patch.indexing_status : prospect.indexing_status,
+  };
+  await pushForIndexing(updated, liveUrl, isDofollow, now, { dofollowConfirmed });
   return 'live';
 }
 
@@ -349,7 +368,7 @@ async function run({ limit = 200 } = {}) {
   return { checked: prospects.length, live, lost, pending };
 }
 
-module.exports = { run, verifyOne, crawlForLink, reconcileByDomain, pushForIndexing };
+module.exports = { run, verifyOne, crawlForLink, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
   comparableDomain, parseQuality,

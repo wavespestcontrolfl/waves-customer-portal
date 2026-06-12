@@ -5,7 +5,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 const db = require('../models/db');
 const omega = require('../services/seo/omega-indexer');
 const { isEnabled } = require('../config/feature-gates');
-const { pushForIndexing } = require('../services/seo/link-prospect-verifier');
+const { pushForIndexing, markLive } = require('../services/seo/link-prospect-verifier');
 
 // Mock the knex builder. pushForIndexing issues up to two updates per call:
 //   1. the atomic claim — quality_signals = db.raw("jsonb_set(...)") — returns
@@ -168,24 +168,27 @@ describe('pushForIndexing — Omega dedupe, atomic claim, retry discipline', () 
 });
 
 describe('pushForIndexing — crawl-confirms dofollow before spending (unreliable DataForSEO signal)', () => {
-  test('DataForSEO says dofollow but a crawl finds nofollow → releases claim, no submit', async () => {
+  test('DataForSEO says dofollow but a crawl finds nofollow → releases claim, persists is_dofollow=false', async () => {
     wireDb();
     const crawlFn = jest.fn().mockResolvedValue({ found: true, isDofollow: false });
     const out = await pushForIndexing(base, URL, true, NOW, { crawlFn }); // dofollowConfirmed defaults false
     expect(out).toBe(false);
     expect(crawlFn).toHaveBeenCalledWith(URL, base.target_page);
     expect(omega.submit).not.toHaveBeenCalled();
-    expect(releaseWrite()).toBeTruthy(); // claim released
     expect(successWrite()).toBeUndefined();
+    // claim released AND the authoritative nofollow correction persisted (P2)
+    expect(releaseWrite()).toBeTruthy();
+    expect(releaseWrite().is_dofollow).toBe(false);
   });
 
-  test('crawl cannot reach the page → releases claim, no submit (retryable)', async () => {
+  test('crawl cannot reach the page → releases claim, does NOT assert nofollow (retryable)', async () => {
     wireDb();
     const crawlFn = jest.fn().mockResolvedValue({ found: false });
     const out = await pushForIndexing(base, URL, true, NOW, { crawlFn });
     expect(out).toBe(false);
     expect(omega.submit).not.toHaveBeenCalled();
     expect(releaseWrite()).toBeTruthy();
+    expect(releaseWrite().is_dofollow).toBeUndefined(); // unreachable ≠ nofollow
   });
 
   test('crawl confirms dofollow → submits and records the URL', async () => {
@@ -207,5 +210,29 @@ describe('pushForIndexing — crawl-confirms dofollow before spending (unreliabl
     expect(out).toBe(true);
     expect(crawlFn).not.toHaveBeenCalled();
     expect(omega.submit).toHaveBeenCalled();
+  });
+});
+
+describe('markLive — a moved/discovered URL resets index state (P2)', () => {
+  test('discovered new URL on an already-indexed prospect resets to live/not_checked', async () => {
+    wireDb();
+    isEnabled.mockReturnValue(false); // make pushForIndexing a no-op; inspect markLive's own write
+    const p = { id: 'p9', status: 'indexed', indexing_status: 'indexed', live_url: 'https://dir.com/OLD/', target_domain: 'dir.com', quality_signals: null };
+    await markLive(p, { isDofollow: true, anchorText: 'x', backlinkId: 'b1', discoveredUrl: 'https://dir.com/NEW/' }, NOW);
+    expect(updates).toHaveLength(1);
+    const patch = updates[0];
+    expect(patch.live_url).toBe('https://dir.com/NEW/');
+    expect(patch.status).toBe('live'); // NOT inherited 'indexed'
+    expect(patch.indexing_status).toBe('not_checked');
+  });
+
+  test('same-URL re-confirm of an indexed row does NOT reset its index state', async () => {
+    wireDb();
+    isEnabled.mockReturnValue(false);
+    const p = { id: 'p9', status: 'indexed', indexing_status: 'indexed', live_url: 'https://dir.com/x/', target_domain: 'dir.com', quality_signals: null };
+    await markLive(p, { isDofollow: true, anchorText: 'x', backlinkId: 'b1' }, NOW); // no discoveredUrl
+    const patch = updates[0];
+    expect(patch.status).toBeUndefined(); // stays 'indexed'
+    expect(patch.indexing_status).toBeUndefined();
   });
 });
