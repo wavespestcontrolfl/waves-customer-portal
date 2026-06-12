@@ -104,6 +104,80 @@ function recurringServiceKey(svc = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+// Combined-service routing (combined-service-completions.md cutover): the
+// owner-named pairs complete as ONE service, ONE submission, ONE report. At
+// accept, when an estimate carries both lines of a pair AND their visit
+// cadences match, the converter schedules ONE combined service — the
+// combined catalog name resolves to the combined completion profile
+// (primary flow + companion section). Mismatched cadences stay separate
+// rows: a monthly pest visit can't absorb a quarterly bait check.
+//
+// Pricing, WaveGuard tier counting, and billing all read the ESTIMATE
+// lines, which this never touches — combining is purely how the sold work
+// is scheduled. Route order is precedence: a pest line combines with at
+// most ONE companion (rodent bait first), the other stays standalone.
+const COMBINED_SERVICE_ROUTES = [
+  {
+    primaryKey: 'pest_control',
+    companionKey: 'rodent_bait',
+    catalogServiceKey: 'pest_rodent_quarterly',
+    name: 'Pest & Rodent Control',
+  },
+  {
+    primaryKey: 'pest_control',
+    companionKey: 'termite_bait',
+    catalogServiceKey: 'pest_termite_bait_quarterly',
+    name: 'Quarterly Pest + Termite Bait Station',
+  },
+  {
+    primaryKey: 'lawn_care',
+    companionKey: 'tree_shrub',
+    catalogServiceKey: 'lawn_tree_shrub_combo',
+    name: 'Lawn + Tree & Shrub',
+  },
+];
+
+function combineRecurringServicesForScheduling(recurringServices = [], { fallbackFrequency = null } = {}) {
+  const remaining = Array.isArray(recurringServices) ? recurringServices.slice() : [];
+  const combos = [];
+  for (const route of COMBINED_SERVICE_ROUTES) {
+    const primaryIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.primaryKey);
+    const companionIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
+    if (primaryIdx === -1 || companionIdx === -1) continue;
+    const primary = remaining[primaryIdx];
+    const companion = remaining[companionIdx];
+    const primaryPattern = RecurringAppointmentSeeder.inferRecurringPattern({
+      service: primary,
+      fallbackFrequency,
+    });
+    const companionPattern = RecurringAppointmentSeeder.inferRecurringPattern({
+      service: companion,
+      fallbackFrequency,
+    });
+    if (!primaryPattern || primaryPattern !== companionPattern) continue;
+    // Remove higher index first so the lower index stays valid.
+    for (const idx of [primaryIdx, companionIdx].sort((a, b) => b - a)) remaining.splice(idx, 1);
+    combos.push({
+      route,
+      frequency: primaryPattern,
+      combinedFrom: [primary, companion],
+      // The synthetic line the scheduling loop consumes: carries the
+      // combined catalog name (profile resolution) and explicit frequency
+      // so no downstream inference re-derives cadence from the name.
+      service: {
+        name: route.name,
+        frequency: primaryPattern,
+        combinedCatalogServiceKey: route.catalogServiceKey,
+        visitsPerYear: firstPositiveNumber(
+          visitsPerYearForRecurringService(primary),
+          visitsPerYearForRecurringService(companion),
+        ),
+      },
+    });
+  }
+  return { remaining, combos };
+}
+
 function serviceCountsTowardWaveGuardTier(svc = {}) {
   if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
   return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
@@ -315,6 +389,11 @@ function visitsPerYearForRecurringService(svc = {}) {
 }
 
 function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {
+  // Combined synthetic lines carry the catalog row's duration explicitly
+  // (e.g. Pest + Termite Bait at 75min) — that beats the pest-quarterly
+  // default so combined follow-ups inherit the right visit length.
+  const explicit = firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes);
+  if (explicit) return explicit;
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
@@ -532,7 +611,38 @@ const EstimateConverter = {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;
 
-      for (const svc of recurringServices) {
+      // Combined-service routing: matching-cadence pairs schedule as ONE
+      // combined service; everything else flows through unchanged.
+      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServices, {
+        fallbackFrequency: inferredFrequencyKey,
+      });
+      const scheduleUnits = [
+        ...combos.map((combo) => ({ svc: combo.service, combo })),
+        ...remaining.map((svc) => ({ svc })),
+      ];
+      for (const unit of scheduleUnits) {
+        const svc = unit.svc;
+        let combinedServiceId = null;
+        if (unit.combo) {
+          // service_id makes profile resolution sturdy against later
+          // renames; name-based resolution still works without it, so a
+          // missing catalog row (env not yet migrated) degrades safely.
+          try {
+            const catalogRow = await database('services')
+              .where({ service_key: unit.combo.route.catalogServiceKey })
+              .first('id', 'default_duration_minutes');
+            if (catalogRow) {
+              combinedServiceId = catalogRow.id;
+              if (catalogRow.default_duration_minutes) {
+                svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
+              }
+            } else {
+              logger.warn(`[estimate-converter] combined catalog row ${unit.combo.route.catalogServiceKey} absent — scheduling by name only`);
+            }
+          } catch (lookupErr) {
+            logger.warn(`[estimate-converter] combined catalog lookup failed for ${unit.combo.route.catalogServiceKey}: ${lookupErr.message}`);
+          }
+        }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
         const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
           service: svc,
@@ -545,14 +655,20 @@ const EstimateConverter = {
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);
 
         try {
+          const combinedNote = unit.combo
+            ? ` Combined service: ${unit.combo.combinedFrom
+              .map((s) => s.name || s.serviceName || s.service_name || recurringServiceKey(s))
+              .join(' + ')} — one visit, one report.`
+            : '';
           const row = {
             customer_id: customerId,
             scheduled_date: firstServiceDate,
             service_type: serviceName,
             status: 'pending',
-            notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}`,
+            notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}.${combinedNote}`,
             source_estimate_id: estimateId,
           };
+          if (combinedServiceId) row.service_id = combinedServiceId;
           if (estimatedPrice) row.estimated_price = estimatedPrice;
           if (durationMinutes) row.estimated_duration_minutes = durationMinutes;
           const inserted = await database('scheduled_services').insert(row).returning('*');
@@ -857,6 +973,9 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
+module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
+module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
