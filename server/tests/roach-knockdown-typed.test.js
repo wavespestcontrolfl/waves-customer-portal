@@ -14,6 +14,7 @@ const {
   findBannedCustomerCopy,
   nextStepRequiredForType,
   validateTypedFindings,
+  validateNextStepChips,
   buildTodaysResult,
   buildTypedReportSnapshot,
 } = require('../services/service-report/activity-indicators');
@@ -276,6 +277,37 @@ describe('validation', () => {
     expect(palmetto.errors.join(' ')).toMatch(/Interior activity/);
   });
 
+  test('cleared palmetto visits: activity locations conditional + contradiction-guarded (Codex P2 round 5)', () => {
+    // Locations recorded beside "None observed" contradict the zero claim.
+    const contradicted = validateTypedFindings({
+      type: 'palmetto_roach_knockdown',
+      values: { ...PALMETTO_VALUES, activity_level: 'None observed', interior_activity: 'No' },
+      expectedType: 'palmetto_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(contradicted.ok).toBe(false);
+    expect(contradicted.errors.join(' ')).toMatch(/Activity locations/);
+
+    // A truthful cleared revisit passes without naming any location.
+    const cleared = validateTypedFindings({
+      type: 'palmetto_roach_knockdown',
+      values: { ...PALMETTO_VALUES, activity_level: 'None observed', interior_activity: 'No', activity_locations: '' },
+      expectedType: 'palmetto_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(cleared.ok).toBe(true);
+
+    // Active visits still require the locations.
+    const active = validateTypedFindings({
+      type: 'palmetto_roach_knockdown',
+      values: { ...PALMETTO_VALUES, activity_locations: ' , ' },
+      expectedType: 'palmetto_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(active.ok).toBe(false);
+    expect(active.missing).toContain('activity_locations');
+  });
+
   test('full owner submissions validate clean', () => {
     for (const [type, values] of [
       ['german_roach_knockdown', GERMAN_VALUES],
@@ -285,6 +317,41 @@ describe('validation', () => {
       expect({ type, ok: result.ok, errors: result.errors, missing: result.missing })
         .toEqual({ type, ok: true, errors: [], missing: [] });
     }
+  });
+});
+
+describe('next-step chips vs structured follow-up answers (Codex P2 round 5)', () => {
+  test('German follow-up chips must agree with followup_required and the selected window', () => {
+    for (const chip of ['Follow-up recommended', 'Follow-up in 10–14 days']) {
+      const result = validateNextStepChips([chip], 'german_roach_knockdown',
+        { ...GERMAN_VALUES, followup_required: 'No', followup_window: '' });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/Follow-up required: No/);
+    }
+    for (const window of ['2–3 weeks', 'As needed']) {
+      const result = validateNextStepChips(['Follow-up in 10–14 days'], 'german_roach_knockdown',
+        { ...GERMAN_VALUES, followup_window: window });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/follow-up window/);
+    }
+    // The generic chip is window-agnostic; the dated chip matches its window.
+    expect(validateNextStepChips(['Follow-up recommended'], 'german_roach_knockdown',
+      { ...GERMAN_VALUES, followup_window: '2–3 weeks' }).ok).toBe(true);
+    expect(validateNextStepChips(['Follow-up in 10–14 days'], 'german_roach_knockdown', GERMAN_VALUES).ok).toBe(true);
+  });
+
+  test('palmetto "Follow-up recommended" chip requires followup_needed Yes', () => {
+    const rejected = validateNextStepChips(['Follow-up recommended'], 'palmetto_roach_knockdown', PALMETTO_VALUES);
+    expect(rejected.ok).toBe(false);
+    expect(rejected.error).toMatch(/Follow-up needed: No/);
+    expect(validateNextStepChips(['Follow-up recommended'], 'palmetto_roach_knockdown',
+      { ...PALMETTO_VALUES, followup_needed: 'Yes' }).ok).toBe(true);
+    // Non-follow-up chips are unaffected by the answer.
+    expect(validateNextStepChips(['Monitor activity'], 'palmetto_roach_knockdown', PALMETTO_VALUES).ok).toBe(true);
+  });
+
+  test('without values (legacy callers) chip validation is unchanged', () => {
+    expect(validateNextStepChips(['Follow-up recommended'], 'palmetto_roach_knockdown').ok).toBe(true);
   });
 });
 

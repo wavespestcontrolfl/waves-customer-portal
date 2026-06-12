@@ -698,7 +698,8 @@ const REQUIRED_FINDINGS_FIELDS = {
   tree_shrub: ['plant_groups', 'landscape_condition', 'observed_conditions', 'treatments_completed', 'customer_recommendations'],
   // Owner spec §8 marks the full knockdown checklists required — all fast
   // taps (Y/N selects + chips). Exceeds the ≤4 budget by owner instruction;
-  // followup_window is conditionally required (followup_required = Yes) in
+  // followup_window (followup_required = Yes) and palmetto activity_locations
+  // (activity_level ≠ 'None observed') are conditionally required in
   // validateTypedFindings instead.
   german_roach_knockdown: [
     'activity_level', 'rooms_treated', 'primary_harborage', 'live_roaches_observed',
@@ -706,7 +707,7 @@ const REQUIRED_FINDINGS_FIELDS = {
     'treatment_completed', 'monitors_placed', 'followup_required',
   ],
   palmetto_roach_knockdown: [
-    'roach_type', 'activity_level', 'activity_locations', 'interior_activity',
+    'roach_type', 'activity_level', 'interior_activity',
     'exterior_harborage', 'moisture_issue', 'entry_points_observed',
     'treatment_completed', 'customer_recommendations', 'followup_needed',
   ],
@@ -1195,6 +1196,21 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     && String(values.interior_activity) === 'Yes') {
     errors.push('Activity level "None observed" contradicts "Interior activity: Yes" — update the activity level or the interior activity field');
   }
+  // Cleared palmetto visits have no truthful activity location to name —
+  // the field is required exactly when there was activity to locate, and
+  // recorded locations beside "None observed" would render a zero-score
+  // report that still says where activity was noted (Codex P2 round 5).
+  if (type === 'palmetto_roach_knockdown') {
+    const locations = String(values.activity_locations ?? '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (String(values.activity_level) === 'None observed' && locations.length) {
+      errors.push('Activity locations cannot be recorded with activity level "None observed" — update the activity level or clear the locations');
+    }
+    if (enforceRequired && String(values.activity_level || '').trim()
+      && String(values.activity_level) !== 'None observed' && !locations.length) {
+      missing.push('activity_locations');
+    }
+  }
 
   if (enforceRequired) {
     // chips store a comma-joined selection — a value like "," has no real
@@ -1239,6 +1255,29 @@ function validateNextStepChips(chips, projectType = null, values = null) {
     && String(values.evidence_level || '').trim()
     && String(values.evidence_level) !== 'None observed') {
     return { ok: false, error: `Next-step chip "No action needed" contradicts the recorded flea evidence level (${String(values.evidence_level)}) — remove the chip or update the evidence level` };
+  }
+  // Knockdown follow-up chips must agree with the structured follow-up
+  // answer — the chip text lands verbatim in Today's Result, so a chip
+  // recommending a follow-up beside findings that say "No" (or a chip
+  // naming a window the tech didn't select) contradicts the report body
+  // and the suppressed/redated CTA (Codex P2 round 5).
+  if (values && projectType === 'german_roach_knockdown') {
+    const followupRequired = String(values.followup_required || '');
+    const window = String(values.followup_window || '');
+    for (const chip of normalized) {
+      const recommendsFollowup = chip === 'Follow-up recommended' || chip === 'Follow-up in 10–14 days';
+      if (followupRequired === 'No' && recommendsFollowup) {
+        return { ok: false, error: `Next-step chip "${chip}" contradicts "Follow-up required: No" — update the follow-up answer or remove the chip` };
+      }
+      if (chip === 'Follow-up in 10–14 days' && window && window !== '10–14 days') {
+        return { ok: false, error: `Next-step chip "Follow-up in 10–14 days" contradicts the selected follow-up window (${window}) — match the window or use "Follow-up recommended"` };
+      }
+    }
+  }
+  if (values && projectType === 'palmetto_roach_knockdown'
+    && String(values.followup_needed || '') === 'No'
+    && normalized.includes('Follow-up recommended')) {
+    return { ok: false, error: 'Next-step chip "Follow-up recommended" contradicts "Follow-up needed: No" — update the follow-up answer or remove the chip' };
   }
   return { ok: true, chips: normalized };
 }
