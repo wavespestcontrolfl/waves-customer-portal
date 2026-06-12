@@ -28,8 +28,10 @@
  *    logged, never asserted (the #1617 lesson).
  *
  * ROLLBACK FIDELITY: up() stamps [combined_cutover_action=...] markers into
- * notes (profiles + catalog internal_notes) and a notes marker on each
- * scheduled_services row it links; down() restores ONLY marked rows.
+ * profile notes, catalog internal_notes, and scheduled_services
+ * INTERNAL_notes (NEVER scheduled_services.notes — that column is returned
+ * to customers by GET /api/schedule and rendered as appointment notes in
+ * the scheduling UI); down() restores ONLY marked rows.
  */
 
 const MARKER_RE = / ?\[combined_cutover_action=[^\]]*\]/;
@@ -210,18 +212,20 @@ exports.up = async function up(knex) {
   const rows = await knex('scheduled_services')
     .whereRaw('lower(btrim(service_type)) in (?, ?)', COMBINED_NAME_MATCHES)
     .where((q) => q.whereNull('service_id').orWhereNot('service_id', combined.id))
-    .select('id', 'customer_id', 'service_id', 'notes', 'status');
+    .select('id', 'customer_id', 'service_id', 'internal_notes', 'status');
   if (!rows.length) {
     console.log('[combined-cutover] scheduled_services: no combined-name rows needing a link (0 found)');
     return;
   }
   const customers = new Set(rows.map((r) => r.customer_id).filter(Boolean));
   for (const row of rows) {
+    // Marker goes in internal_notes — scheduled_services.notes is
+    // customer-visible (GET /api/schedule) and editable as appointment notes.
     await knex('scheduled_services')
       .where({ id: row.id })
       .update({
         service_id: combined.id,
-        notes: withMarker(row.notes, `linked:${row.service_id || '-'}`),
+        internal_notes: withMarker(row.internal_notes, `linked:${row.service_id || '-'}`),
         updated_at: knex.fn.now(),
       });
   }
@@ -231,17 +235,17 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   // 3. Unlink scheduled_services rows THIS migration linked.
   const marked = await knex('scheduled_services')
-    .where('notes', 'like', '%[combined_cutover_action=linked:%')
-    .select('id', 'notes');
+    .where('internal_notes', 'like', '%[combined_cutover_action=linked:%')
+    .select('id', 'internal_notes');
   for (const row of marked) {
-    const match = String(row.notes || '').match(/\[combined_cutover_action=linked:([^\]]*)\]/);
+    const match = String(row.internal_notes || '').match(/\[combined_cutover_action=linked:([^\]]*)\]/);
     if (!match) continue;
     const prior = match[1] === '-' ? null : match[1];
     await knex('scheduled_services')
       .where({ id: row.id })
       .update({
         service_id: prior,
-        notes: String(row.notes || '').replace(MARKER_RE, '').trim() || null,
+        internal_notes: String(row.internal_notes || '').replace(MARKER_RE, '').trim() || null,
         updated_at: knex.fn.now(),
       });
   }
@@ -272,21 +276,25 @@ exports.down = async function down(knex) {
     }
   }
 
-  // 1. Catalog rows THIS migration created — delete only when unreferenced;
-  //    otherwise deactivate so history stays intact.
+  // 1. Catalog rows THIS migration created — delete only when NOTHING
+  //    references them. service_records.service_id is ON DELETE SET NULL,
+  //    so deleting a row with completed-service history would silently null
+  //    the historical link — count BOTH tables; deactivate when either has
+  //    rows so history stays intact.
   for (const svc of NEW_SERVICES) {
     const service = await knex('services')
       .where({ service_key: svc.service_key })
       .where('internal_notes', 'like', '%[combined_cutover_action=inserted]%')
       .first('id');
     if (!service) continue;
-    const [{ count }] = await knex('scheduled_services').where({ service_id: service.id }).count('id as count');
-    if (Number(count) === 0) {
+    const [{ count: scheduledCount }] = await knex('scheduled_services').where({ service_id: service.id }).count('id as count');
+    const [{ count: recordCount }] = await knex('service_records').where({ service_id: service.id }).count('id as count');
+    if (Number(scheduledCount) === 0 && Number(recordCount) === 0) {
       await knex('services').where({ id: service.id }).del();
       console.log(`[combined-cutover:down] services.${svc.service_key}: deleted (unreferenced)`);
     } else {
       await knex('services').where({ id: service.id }).update({ is_active: false, updated_at: knex.fn.now() });
-      console.warn(`[combined-cutover:down] services.${svc.service_key}: ${count} scheduled service(s) reference it — deactivated instead of deleted`);
+      console.warn(`[combined-cutover:down] services.${svc.service_key}: ${scheduledCount} scheduled + ${recordCount} completed record(s) reference it — deactivated instead of deleted`);
     }
   }
 };

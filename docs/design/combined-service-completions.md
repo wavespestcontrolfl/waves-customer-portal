@@ -122,10 +122,11 @@ the type's standalone graduation state at cutover:
   profile resolution works; existing "Pest & Rodent Control"
   scheduled_services rows are additionally service_id-linked by the
   migration (name-matched, self-healed, prior service_id recorded).
-- `detectServiceLine`: an explicit "pest" mention is the PRIMARY line —
-  beats the companion's rodent/termite token, never beats lawn/turf or
-  mosquito. Without this, "Pest & Rodent Control" rendered the RODENT
-  report layout.
+- `detectServiceLine`: a "pest" mention BEFORE the rodent/termite token
+  marks the pest-primary combined name — never beats lawn/turf or mosquito,
+  and token order is load-bearing ("Rodent Pest Control" =
+  rodent_general_one_time stays a rodent report). Without this, "Pest &
+  Rodent Control" rendered the RODENT report layout.
 
 ## Graduation recipe (rodent family — future migration)
 

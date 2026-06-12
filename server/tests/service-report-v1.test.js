@@ -787,12 +787,15 @@ describe('service report v1', () => {
   });
 
   test('combined-service names detect their PRIMARY line (cutover)', () => {
-    // An explicit "pest" mention beats the companion's rodent/termite token —
+    // "pest" BEFORE the rodent/termite token = pest-primary combined name —
     // the combined report renders the pest layout (pest pressure, pest copy)
     // with the companion as a section, not a rodent/termite report.
     expect(detectServiceLine('Pest & Rodent Control')).toBe('pest');
     expect(detectServiceLine('Quarterly Pest + Termite Bait Station')).toBe('pest');
     expect(detectServiceLine('Lawn + Tree & Shrub')).toBe('lawn');
+    // Token order is load-bearing: rodent_general_one_time is named
+    // "Rodent Pest Control" and must STAY a rodent report (Codex P2).
+    expect(detectServiceLine('Rodent Pest Control')).toBe('rodent');
     // Names without "pest" keep their standalone lines.
     expect(detectServiceLine('Quarterly Rodent Bait Station Service')).toBe('rodent');
     expect(detectServiceLine('Termite Bait Station System')).toBe('termite');
