@@ -101,6 +101,7 @@ function mockDb({ deliveryMode }) {
       .mockResolvedValueOnce({ id: 'service-1', structured_notes: structuredNotes })
       .mockResolvedValueOnce(fullRecord),
   });
+  const activityLog = chain();
   db.mockImplementation((table) => {
     if (table === 'service_records') return serviceRead;
     if (table === 'technicians') return chain({
@@ -109,9 +110,10 @@ function mockDb({ deliveryMode }) {
     if (table === 'service_products') return chain({
       where: jest.fn().mockResolvedValue([]),
     });
-    if (table === 'activity_log') return chain();
+    if (table === 'activity_log') return activityLog;
     throw new Error(`Unexpected table query: ${table}`);
   });
+  return { serviceRead, activityLog };
 }
 
 describe('GET /reports/:token/data for suppressed typed reports', () => {
@@ -153,6 +155,67 @@ describe('GET /reports/:token/data for suppressed typed reports', () => {
       expect(res.status).toBe(200);
       expect(body.pdfUrl).toBe(`/api/reports/${VALID_TOKEN}`);
       expect(body.internalOnly).toBeUndefined();
+    });
+  });
+});
+
+describe('GET /reports/:token/data view tracking', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    buildReportV1Data.mockResolvedValue({
+      typedReport: { headline: 'Rodent activity was high today.' },
+      pestPressure: null,
+      pdfUrl: `/api/reports/${VALID_TOKEN}`,
+    });
+  });
+
+  test('staff reads of a customer-visible report never count as customer views (Codex P2)', async () => {
+    // A staff JWT on an auto_send report (e.g. reviewing an internal_only
+    // companion section on an otherwise customer-visible report) must not
+    // stamp report_viewed_at or log a report_viewed activity. The payload
+    // carries staffViewer: true so the client also suppresses its
+    // unauthenticated /events posts (service_report_viewed and every
+    // interaction event after it) — the events endpoint has no JWT to check.
+    const { serviceRead, activityLog } = mockDb({ deliveryMode: 'auto_send' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`, {
+        headers: { Authorization: `Bearer ${STAFF_JWT}` },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.staffViewer).toBe(true);
+      expect(serviceRead.update).not.toHaveBeenCalled();
+      expect(activityLog.insert).not.toHaveBeenCalled();
+    });
+  });
+
+  test('customer reads still stamp report_viewed_at and log the activity', async () => {
+    const { serviceRead, activityLog } = mockDb({ deliveryMode: 'auto_send' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      // Customer payloads stay byte-identical — no staffViewer field at all.
+      expect('staffViewer' in body).toBe(false);
+      expect(serviceRead.update).toHaveBeenCalledWith(
+        expect.objectContaining({ report_viewed_at: expect.anything() }),
+      );
+      expect(activityLog.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'report_viewed' }),
+      );
+    });
+  });
+
+  test('staff read of a suppressed report also carries the staffViewer flag', async () => {
+    mockDb({ deliveryMode: 'internal_only' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`, {
+        headers: { Authorization: `Bearer ${STAFF_JWT}` },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.internalOnly).toBe(true);
+      expect(body.staffViewer).toBe(true);
     });
   });
 });

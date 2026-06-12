@@ -4619,6 +4619,59 @@ export function typedActivityScoreConflict(schemaType, values, score) {
   return null;
 }
 
+// Prune draft-restored findings values to the CURRENT schema fields (shared
+// by the primary and companion restores). Drafts saved before a schema
+// cutover carry values the schema no longer accepts; submit sends the whole
+// object and the server validation strands the draft. Key presence alone
+// isn't enough — a field can keep its key while changing type (textarea →
+// chips), so each restored value is validated against the field's CURRENT
+// definition: chips keep only allowlisted tokens, selects must match an
+// option, counts must be digit-only. Free-text fields keep anything.
+// Mutates and returns `restored`.
+function pruneRestoredFindingsValues(restored, fields) {
+  const values = restored && typeof restored === "object" ? restored : {};
+  if (!Array.isArray(fields)) return values;
+  const fieldByKey = new Map(fields.map((f) => [f.key, f]));
+  for (const [key, raw] of Object.entries(values)) {
+    const field = fieldByKey.get(key);
+    if (!field) {
+      delete values[key];
+    } else if (field.type === "chips" && Array.isArray(field.options)) {
+      const kept = String(raw || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => field.options.includes(s));
+      if (kept.length) values[key] = kept.join(", ");
+      else delete values[key];
+    } else if (
+      field.type === "select" &&
+      Array.isArray(field.options) &&
+      field.options.length &&
+      !field.options.includes(String(raw))
+    ) {
+      delete values[key];
+    } else if (field.type === "count") {
+      const str =
+        typeof raw === "number"
+          ? String(raw)
+          : typeof raw === "string"
+            ? raw.trim()
+            : "";
+      if (!/^\d{1,4}$/.test(str)) delete values[key];
+    }
+  }
+  return values;
+}
+
+// Render-time fallback for a companion section with no state yet. Never
+// mutated — every companion handler spreads into fresh objects.
+const EMPTY_COMPANION_ENTRY = {
+  values: {},
+  chips: [],
+  score: null,
+  scoreTouched: false,
+};
+
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -4670,7 +4723,11 @@ function TypedFindingsSection({
   };
   return (
     <div style={{ marginBottom: 20 }}>
-      <label style={labelCss}>Service findings</label>
+      {/* Companion sections (onRecommendationsChange null) label themselves
+          by schema so stacked sections stay distinguishable. */}
+      <label style={labelCss}>
+        {onRecommendationsChange ? "Service findings" : schema.label || "Service findings"}
+      </label>
       {(schema.fields || []).map((field, index) => (
         <div key={field.key} style={{ marginBottom: 12 }}>
           {/* Sectioned schemas (rodent trapping): header above the first
@@ -4787,6 +4844,10 @@ function TypedFindingsSection({
           })}
         </div>
       </div>
+      {/* Recommendations textarea + AI draft stay PRIMARY-only: companion
+          sections pass onRecommendationsChange={null} and are chips-first
+          deterministic copy (combined-service-completions.md). */}
+      {onRecommendationsChange && (
       <div style={{ marginBottom: 4 }}>
         <div style={fieldLabelStyle}>Recommendations (optional)</div>
         <textarea
@@ -4859,6 +4920,7 @@ function TypedFindingsSection({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -6259,6 +6321,21 @@ export function CompletionPanel({
   const isTypedFindings = !!(
     service.completionProfile?.findingsType && typedFindingsSchema
   );
+  // Companion typed sections (combined-service-completions.md): zero or more
+  // additional findings schemas embedded beside findingsSchema in the
+  // dispatch payload. Each keeps its own values/chips/gauge state keyed by
+  // type — companions ride typed AND recurring primaries.
+  const companionSchemas = Array.isArray(service.companionSchemas)
+    ? service.companionSchemas.filter((s) => s && s.type)
+    : [];
+  const [companionState, setCompanionState] = useState(() =>
+    Object.fromEntries(
+      companionSchemas.map((s) => [
+        s.type,
+        { values: {}, chips: [], score: null, scoreTouched: false },
+      ]),
+    ),
+  );
   const [findingsValues, setFindingsValues] = useState({});
   const [typedActivityScore, setTypedActivityScore] = useState(null);
   // Pin semantics (contract §4): while untouched, the score recomputes from
@@ -7011,6 +7088,12 @@ export function CompletionPanel({
       typedActivityScore != null ||
       typedNextStepChips.length ||
       typedRecommendations.trim() ||
+      Object.values(companionState).some(
+        (entry) =>
+          Object.keys(entry?.values || {}).length ||
+          (entry?.chips || []).length ||
+          entry?.score != null,
+      ) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) return;
 
@@ -7061,6 +7144,9 @@ export function CompletionPanel({
         typedActivityTouched,
         typedNextStepChips,
         typedRecommendations,
+        // Companion section state rides the same draft (and the same
+        // billing-409 checkout detour survival).
+        companionState,
       };
     // Latest draft is always reachable synchronously — the billing-409
     // detour unmounts this panel before the debounce timer fires, and the
@@ -7119,6 +7205,7 @@ export function CompletionPanel({
     typedActivityTouched,
     typedNextStepChips,
     typedRecommendations,
+    companionState,
     service.city,
     service.address,
     service.serviceAddress,
@@ -7196,49 +7283,14 @@ export function CompletionPanel({
     setTreeShrubCloseout(
       normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
     );
-    // Drafts saved before a schema cutover carry values the current schema
-    // no longer accepts; submit sends the whole object and the server
-    // validation strands the draft. Key presence alone isn't enough — a
-    // field can keep its key while changing type (textarea → chips), so
-    // each restored value is validated against the field's CURRENT
-    // definition: chips keep only allowlisted tokens, selects must match
-    // an option, counts must be digit-only. Free-text fields keep anything.
+    // Type-aware pruning against the CURRENT schema — see
+    // pruneRestoredFindingsValues for why key presence alone isn't enough.
     const restoredFindings =
       savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
         ? savedDraft.findingsValues
         : {};
     if (typedFindingsSchema?.fields) {
-      const fieldByKey = new Map(
-        typedFindingsSchema.fields.map((f) => [f.key, f]),
-      );
-      for (const [key, raw] of Object.entries(restoredFindings)) {
-        const field = fieldByKey.get(key);
-        if (!field) {
-          delete restoredFindings[key];
-        } else if (field.type === "chips" && Array.isArray(field.options)) {
-          const kept = String(raw || "")
-            .split(",")
-            .map((s) => s.trim())
-            .filter((s) => field.options.includes(s));
-          if (kept.length) restoredFindings[key] = kept.join(", ");
-          else delete restoredFindings[key];
-        } else if (
-          field.type === "select" &&
-          Array.isArray(field.options) &&
-          field.options.length &&
-          !field.options.includes(String(raw))
-        ) {
-          delete restoredFindings[key];
-        } else if (field.type === "count") {
-          const str =
-            typeof raw === "number"
-              ? String(raw)
-              : typeof raw === "string"
-                ? raw.trim()
-                : "";
-          if (!/^\d{1,4}$/.test(str)) delete restoredFindings[key];
-        }
-      }
+      pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
     }
     setFindingsValues(restoredFindings);
     setTypedActivityScore(
@@ -7256,6 +7308,46 @@ export function CompletionPanel({
         : restoredChips,
     );
     setTypedRecommendations(savedDraft.typedRecommendations || "");
+    // Companion draft state — the same type-aware pruning per companion
+    // schema; saved types the profile no longer declares are dropped, and
+    // chips are filtered to the schema's current allowlist.
+    const savedCompanions =
+      savedDraft.companionState && typeof savedDraft.companionState === "object"
+        ? savedDraft.companionState
+        : {};
+    setCompanionState(
+      Object.fromEntries(
+        companionSchemas.map((schema) => {
+          const saved = savedCompanions[schema.type];
+          if (!saved || typeof saved !== "object") {
+            return [
+              schema.type,
+              { values: {}, chips: [], score: null, scoreTouched: false },
+            ];
+          }
+          const values = pruneRestoredFindingsValues(
+            saved.values && typeof saved.values === "object"
+              ? { ...saved.values }
+              : {},
+            schema.fields || [],
+          );
+          const chips = Array.isArray(saved.chips)
+            ? saved.chips.filter((chip) =>
+                (schema.nextStepChips || []).includes(chip),
+              )
+            : [];
+          return [
+            schema.type,
+            {
+              values,
+              chips,
+              score: Number.isInteger(saved.score) ? saved.score : null,
+              scoreTouched: !!saved.scoreTouched,
+            },
+          ];
+        }),
+      ),
+    );
     setShowDraftPrompt(false);
   }
 
@@ -7730,6 +7822,67 @@ export function CompletionPanel({
         return;
       }
     }
+    // Companion sections mirror every primary typed pre-submit gate PER
+    // COMPANION (server-side conditional checks without client mirrors are
+    // a known Codex flag). Messages prefix the companion's label so the
+    // tech knows which section to fix.
+    if (companionSchemas.length && !isIncompleteVisit) {
+      for (const schema of companionSchemas) {
+        const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+        const label = schema.label || schema.type;
+        const missingCompanionRequired = (schema.fields || [])
+          .filter(
+            (f) =>
+              typedFieldRequiredNow(f, entry.values) &&
+              String(entry.values[f.key] ?? "").trim() === "",
+          )
+          .map((f) => f.label);
+        const companionScoreMissing = !!schema.activity && entry.score == null;
+        const companionNextStepMissing =
+          !!schema.nextStepRequired && !entry.chips.length;
+        if (
+          missingCompanionRequired.length ||
+          companionScoreMissing ||
+          companionNextStepMissing
+        ) {
+          completionTelemetryRef.current.requiredFieldErrorCount += 1;
+          alert(
+            `${label}: complete the required service findings before submitting: ${[
+              ...missingCompanionRequired,
+              ...(companionScoreMissing ? [schema.activity.label] : []),
+              ...(companionNextStepMissing
+                ? ["Next steps (select at least one)"]
+                : []),
+            ].join(", ")}.`,
+          );
+          return;
+        }
+        const companionChipConflicts = entry.chips
+          .map((chip) =>
+            typedNextStepChipConflict(schema.type, chip, entry.values),
+          )
+          .filter(Boolean);
+        if (companionChipConflicts.length) {
+          completionTelemetryRef.current.requiredFieldErrorCount += 1;
+          alert(
+            `${label}: fix the next-step selections before submitting: ${companionChipConflicts.join("; ")}.`,
+          );
+          return;
+        }
+        const companionScoreConflict = typedActivityScoreConflict(
+          schema.type,
+          entry.values,
+          entry.score,
+        );
+        if (companionScoreConflict) {
+          completionTelemetryRef.current.requiredFieldErrorCount += 1;
+          alert(
+            `${label}: fix the activity score before submitting: ${companionScoreConflict}.`,
+          );
+          return;
+        }
+      }
+    }
     if (
       calibrationRequired &&
       !isIncompleteVisit &&
@@ -7977,6 +8130,29 @@ export function CompletionPanel({
           activityScoreTouched: typedActivityTouched,
         };
       }
+      // Companion findings payload (combined-service-completions.md) —
+      // ordered as the schemas arrived (declared profile order). Skipped on
+      // incomplete visits; the server skips companions for them entirely.
+      if (companionSchemas.length && !isIncompleteVisit) {
+        body.companionFindings = companionSchemas.map((schema) => {
+          const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+          return {
+            type: schema.type,
+            values: entry.values,
+            nextStepChips: entry.chips,
+            // Same pin semantics as the primary: untouched-and-derived
+            // submits as 'derived', any tap pins 'technician'.
+            ...(entry.score != null
+              ? {
+                  activityScore: entry.score,
+                  activityScoreSource: entry.scoreTouched
+                    ? "technician"
+                    : "derived",
+                }
+              : {}),
+          };
+        });
+      }
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
@@ -8153,6 +8329,47 @@ export function CompletionPanel({
     markTypedFirstFieldTouch();
     setTypedRecommendations(value);
     setTypedRecommendationsEdited(true);
+  }
+  // Companion section handlers — mirror the primary typed handlers PER
+  // companion type, including derive-then-pin: while a companion's gauge is
+  // untouched, its score recomputes from the schema's derive-field select on
+  // every change; the first tap pins technician-set.
+  function handleCompanionFieldChange(type, key, value) {
+    markTypedFirstFieldTouch();
+    setCompanionState((prev) => {
+      const entry = prev[type] || EMPTY_COMPANION_ENTRY;
+      const next = { ...entry, values: { ...entry.values, [key]: value } };
+      const activity = companionSchemas.find((s) => s.type === type)?.activity;
+      if (activity?.deriveField === key && !entry.scoreTouched) {
+        const derived = activity.deriveScores?.[String(value)];
+        next.score = derived == null ? null : derived;
+      }
+      return { ...prev, [type]: next };
+    });
+  }
+  function handleCompanionActivityTap(type, n) {
+    markTypedFirstFieldTouch();
+    // First tap pins technician-set, even when the value doesn't change.
+    setCompanionState((prev) => ({
+      ...prev,
+      [type]: {
+        ...(prev[type] || EMPTY_COMPANION_ENTRY),
+        score: n,
+        scoreTouched: true,
+      },
+    }));
+  }
+  function toggleCompanionNextStepChip(type, chip) {
+    markTypedFirstFieldTouch();
+    setCompanionState((prev) => {
+      const entry = prev[type] || EMPTY_COMPANION_ENTRY;
+      const chips = entry.chips.includes(chip)
+        ? entry.chips.filter((c) => c !== chip)
+        : entry.chips.length >= 4
+          ? entry.chips
+          : [...entry.chips, chip];
+      return { ...prev, [type]: { ...entry, chips } };
+    });
   }
   // Optional AI polish — failures surface inline and never block submit;
   // the Complete button stays usable while a draft is in flight.
@@ -9548,6 +9765,39 @@ export function CompletionPanel({
                 onAiDraft={handleTypedAiDraft}
               />
             )}
+            {/* Companion sections — one typed form per companion schema,
+                below the primary. Recommendations/AI stay primary-only
+                (onRecommendationsChange null hides them in the section). */}
+            {companionSchemas.map((schema) => {
+              const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+              return (
+                <TypedFindingsSection
+                  key={schema.type}
+                  variant="mobile"
+                  schema={schema}
+                  values={entry.values}
+                  onFieldChange={(key, value) =>
+                    handleCompanionFieldChange(schema.type, key, value)
+                  }
+                  activityScore={entry.score}
+                  activityScoreTouched={entry.scoreTouched}
+                  onActivityTap={(n) =>
+                    handleCompanionActivityTap(schema.type, n)
+                  }
+                  nextStepChips={entry.chips}
+                  onToggleChip={(chip) =>
+                    toggleCompanionNextStepChip(schema.type, chip)
+                  }
+                  recommendations=""
+                  onRecommendationsChange={null}
+                  aiDrafting={false}
+                  aiError=""
+                  includeComms={false}
+                  onIncludeCommsChange={() => {}}
+                  onAiDraft={() => {}}
+                />
+              );
+            })}
             {/* Products applied */}
             <Field label="Products applied">
               {quickComplete ? (
@@ -11544,6 +11794,37 @@ export function CompletionPanel({
               onAiDraft={handleTypedAiDraft}
             />
           )}
+          {/* Companion sections — one typed form per companion schema,
+              below the primary. Recommendations/AI stay primary-only
+              (onRecommendationsChange null hides them in the section). */}
+          {companionSchemas.map((schema) => {
+            const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+            return (
+              <TypedFindingsSection
+                key={schema.type}
+                variant="desktop"
+                schema={schema}
+                values={entry.values}
+                onFieldChange={(key, value) =>
+                  handleCompanionFieldChange(schema.type, key, value)
+                }
+                activityScore={entry.score}
+                activityScoreTouched={entry.scoreTouched}
+                onActivityTap={(n) => handleCompanionActivityTap(schema.type, n)}
+                nextStepChips={entry.chips}
+                onToggleChip={(chip) =>
+                  toggleCompanionNextStepChip(schema.type, chip)
+                }
+                recommendations=""
+                onRecommendationsChange={null}
+                aiDrafting={false}
+                aiError=""
+                includeComms={false}
+                onIncludeCommsChange={() => {}}
+                onAiDraft={() => {}}
+              />
+            );
+          })}
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {quickComplete ? (

@@ -200,8 +200,13 @@ async function recordServiceReportEvent(service, eventName, channel, req, metada
   });
 }
 
-async function buildServiceReportV1ResponseData(service, token, { mode = 'live', pestPressureConfig } = {}) {
-  const data = await buildReportV1Data(service, token, db, { pestPressureConfig });
+async function buildServiceReportV1ResponseData(service, token, { mode = 'live', pestPressureConfig, staffViewer = false } = {}) {
+  // staffViewer gates internal_only companion sections (combined-service
+  // completions): report-data omits them from customer payloads entirely.
+  // Only the /data route resolves it (staffCanViewSuppressed — the same
+  // staff-JWT signal as the Phase-1b suppressed-report gate); PDF, ask, and
+  // every other caller stays a customer view.
+  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
   // buildPestPressureCustomerView returns null only when Pest Pressure
@@ -224,10 +229,16 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // auto_send) and the plain <a> download can't carry the staff JWT anyway,
   // so null the pdfUrl and flag the payload: the viewer swaps the
   // download/share bar for an internal-review notice instead of dead controls.
+  // staffViewer is echoed to the client so ReportViewPage suppresses ALL
+  // report-interaction event posts for the session (Codex P2): the /events
+  // endpoint is unauthenticated (the client's POST carries no JWT — only the
+  // /data fetch does), so the staff signal can't be re-derived server-side
+  // and the analytics gate has to ride the payload. Flag only when true —
+  // customer payloads stay byte-identical.
   if (suppressedTypedReport(service)) {
-    return { ...data, dynamicContext, pdfUrl: null, internalOnly: true };
+    return { ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) };
   }
-  return { ...data, dynamicContext };
+  return { ...data, dynamicContext, ...(staffViewer ? { staffViewer: true } : {}) };
 }
 
 async function findProjectByReportSegment(segment) {
@@ -836,17 +847,25 @@ router.get('/:token/data', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
+    // Staff browsers attach their portal JWT on this fetch (ReportViewPage)
+    // — the same signal that opens suppressed shadow reports also unlocks
+    // internal_only companion sections. Resolved BEFORE view tracking: a
+    // staff read of a customer-visible report (reviewing a shadowed
+    // companion section) must not stamp report_viewed_at or log a customer
+    // report_viewed activity (Codex P2).
+    const staffViewer = await staffCanViewSuppressed(req);
+
     // Suppressed-report access is enforced by the router.param('token')
-    // gate; a suppressed record here means a staff viewer — don't count
-    // their shadow reviews as customer report views.
-    if (mode === 'live' && !suppressedTypedReport(service)) {
+    // gate; a suppressed record here means a staff viewer. Staff reads of
+    // customer-visible reports skip tracking the same way.
+    if (mode === 'live' && !staffViewer && !suppressedTypedReport(service)) {
       await trackServiceReportView(service);
     }
 
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode }));
+      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer }));
     }
 
     res.json({

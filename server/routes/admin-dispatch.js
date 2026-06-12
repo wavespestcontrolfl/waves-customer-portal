@@ -50,6 +50,7 @@ const {
   resolveCompletionProfileForServiceId,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
+const CompanionCompletions = require('../services/service-report/companion-completions');
 const {
   resolveProjectCompletionBilling,
   projectFollowupSuggestion,
@@ -1001,6 +1002,14 @@ router.get('/:date?', async (req, res, next) => {
           // trap check never sees the exclusion/sanitation modules.
           ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType, { serviceKey: completionProfile.serviceKey })
           : null,
+        // Companion section schemas (combined-service-completions.md),
+        // embedded beside findingsSchema for the same reason: mobile
+        // completion must never block on a registry fetch.
+        companionSchemas: completionProfile
+          ? (completionProfile.companions || [])
+            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey }))
+            .filter(Boolean)
+          : null,
         linkedProject: linkedProject ? {
           id: linkedProject.id,
           status: linkedProject.status,
@@ -1512,6 +1521,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionPhotos = [],
       clientPestRating = null,
       structuredFindings = null,
+      companionFindings = null,
       activityScore = null,
       activityScoreSource = null,
       nextStepChips = null,
@@ -1841,6 +1851,52 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       return null;
     };
+    // Companion typed sections (combined-service-completions.md): the
+    // profile's declared companions ride this completion — typed primary OR
+    // recurring. Same placement contract as runTypedValidation: fresh
+    // executions only (replays return the stored payload above; resumes
+    // re-enter after an already-committed trx). Incomplete visits skip
+    // companions entirely. Mutates validatedCompanions on success.
+    let validatedCompanions = [];
+    const runCompanionValidation = () => {
+      if (isIncompleteVisit) return null;
+      const declaredCompanions = Array.isArray(completionProfile?.companions)
+        ? completionProfile.companions
+        : [];
+      if (!declaredCompanions.length) {
+        // The profile is authoritative — a payload carrying companion
+        // sections the profile doesn't declare is a refresh-needed conflict,
+        // never data to accept.
+        if (Array.isArray(companionFindings) && companionFindings.length) {
+          return {
+            status: 409,
+            body: {
+              error: "This service's completion profile has no companion sections. Refresh and complete the visit again.",
+              code: 'companion_type_mismatch',
+            },
+          };
+        }
+        return null;
+      }
+      const result = CompanionCompletions.validateCompanionSubmission({
+        profile: completionProfile,
+        companionFindings,
+        primaryFindingsType: typedFindingsType,
+      });
+      if (!result.ok) return { status: result.status, body: result.body };
+      validatedCompanions = result.companions;
+      return null;
+    };
+    // Companion delivery postures, frozen per section at completion time.
+    // The global typed-report kill env suppresses companion customer copy
+    // the same way it suppresses typed primaries — coerce to internal_only
+    // so a frozen posture can never auto-send while the kill switch is on.
+    const companionDeliveryByType = new Map(
+      (completionProfile?.companions || []).map((c) => [
+        c.type,
+        process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true' ? 'internal_only' : c.delivery,
+      ]),
+    );
     // Delivery control for typed completions: profile delivery_mode
     // (auto_send | internal_only | disabled) + a global kill env.
     // internal_only renders + stores the report (token/PDF) without customer
@@ -1870,9 +1926,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // pre-commit photo upload gate (Codex P2): without it, an S3 failure
     // after commit would let a report send with fewer than the required
     // photos — the count check on the submitted array alone can't see
-    // upload failures.
+    // upload failures. A declared tree_shrub COMPANION is T&S work all the
+    // same — the gate applies to combined completions too (pre-push P1).
+    const hasTreeShrubCompanion = (completionProfile?.companions || [])
+      .some((companion) => companion.type === 'tree_shrub');
     const treeShrubPhotoGateRequired = treeShrubCloseoutRequired
-      || (typedFindingsType === 'tree_shrub' && !isIncompleteVisit);
+      || ((typedFindingsType === 'tree_shrub' || hasTreeShrubCompanion) && !isIncompleteVisit);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -1934,6 +1993,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           new Error(typedValidationError.body.code),
         );
         return res.status(typedValidationError.status).json(typedValidationError.body);
+      }
+      const companionValidationError = runCompanionValidation();
+      if (companionValidationError) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error(companionValidationError.body.code),
+        );
+        return res.status(companionValidationError.status).json(companionValidationError.body);
       }
     }
 
@@ -2024,7 +2091,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // summer blackout, bee-active pollinator block, IRAC/FRAC confirmation,
     // product actuals, photo minimum, and the palm-injection redirect all
     // still gate completion — driven by the typed values + recorded products.
-    if (claim.action === 'proceed' && typedFindingsType === 'tree_shrub' && typedFindings && !isIncompleteVisit) {
+    // The values can come from the typed PRIMARY or from a tree_shrub
+    // COMPANION section (lawn + T&S combined visits) — the regulatory gates
+    // apply identically; a companion must not be a side door around them
+    // (pre-push P1). The two sources are mutually exclusive: companion
+    // parsing drops entries duplicating the profile's own findingsType.
+    const treeShrubComplianceValues = (typedFindingsType === 'tree_shrub' && typedFindings && !isIncompleteVisit)
+      ? typedFindings.values
+      : (!isIncompleteVisit && validatedCompanions.find((c) => c.type === 'tree_shrub')?.values) || null;
+    if (claim.action === 'proceed' && treeShrubComplianceValues) {
       // The compliance classifiers need the CATALOG rows (name/category/
       // IRAC/FRAC/analysis) — degrading to submitted-input-only refs on a
       // transient DB error would silently skip the blackout/pollinator/
@@ -2056,7 +2131,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const typedCompliance = validateTreeShrubTypedCompliance({
         service: svc,
         serviceDate: serviceDateOnly(svc.scheduled_date),
-        values: typedFindings.values,
+        values: treeShrubComplianceValues,
         products: products || [],
         productRows: typedProductRows,
         completionPhotos,
@@ -2338,6 +2413,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // (Phase-1b shadow) — a later graduation to auto_send must not
             // retroactively expose reports that were never sent.
             ...(typedFindingsType ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // Companion delivery postures frozen alongside (same rule):
+            // graduation flips on the profile never retro-publish stored
+            // companion sections.
+            ...(validatedCompanions.length
+              ? { companionReportDelivery: Object.fromEntries(companionDeliveryByType) }
+              : {}),
           };
           const serviceData = {
             protocol: {
@@ -2400,6 +2481,59 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               activity: typedActivity,
               photoSummary: photoSummaryText || null,
             });
+          }
+          // Companion typed sections: one immutable snapshot per validated
+          // companion, each carrying its frozen delivery posture. Trend
+          // resolution mirrors the primary's (same queries, same trx);
+          // photos / photo AI / pest pressure stay primary-only in v1.
+          // Activity scores insert REGARDLESS of delivery — deliberately
+          // identical to the standalone shadow semantic (Phase 1b): the
+          // shadow gates customer COPY, not observations of the customer's
+          // own property, so a graduated section trends against its
+          // shadow-era baseline instead of resetting to "first marker".
+          const companionActivityInserts = [];
+          if (validatedCompanions.length) {
+            const companionSnapshots = [];
+            for (const companion of validatedCompanions) {
+              const companionIndicator = ActivityIndicators.getActivityIndicator(companion.type);
+              let companionActivity = null;
+              let companionVisitSequence = 1;
+              if (companionIndicator && companion.activityScore != null && activityScoresAvailable) {
+                const resolved = await CompanionCompletions.resolveCompanionActivity(trx, {
+                  customerId: svc.customer_id,
+                  indicatorKey: companionIndicator.indicatorKey,
+                  completionServiceDate,
+                  score: companion.activityScore,
+                  scoreSource: companion.activityScoreSource,
+                  type: companion.type,
+                  values: companion.values,
+                });
+                companionActivity = resolved.activity;
+                companionVisitSequence = resolved.visitSequence;
+              }
+              const companionSnapshot = ActivityIndicators.buildTypedReportSnapshot({
+                projectType: companion.type,
+                values: companion.values,
+                nextStepChips: companion.chips,
+                serviceKey: completionProfile?.serviceKey || null,
+                // The companion section speaks for ITS work, not the whole
+                // combined service — null falls back to the type's own label
+                // so "Lawn + Tree & Shrub" copy never claims the lawn visit
+                // (Codex P2).
+                serviceLabel: null,
+                visitSequence: companionVisitSequence,
+                activity: companionActivity,
+                photoSummary: null,
+              });
+              if (companionSnapshot) {
+                // The frozen per-section delivery rides the snapshot itself
+                // so report-data filters without re-reading the live profile.
+                companionSnapshot.delivery = companionDeliveryByType.get(companion.type) || 'internal_only';
+                companionSnapshots.push(companionSnapshot);
+              }
+              if (companionActivity) companionActivityInserts.push(companionActivity);
+            }
+            if (companionSnapshots.length) serviceData.companionReportSnapshots = companionSnapshots;
           }
           const [priorVisitCountRow] = serviceRecordCols.visit_number
             ? await trx('service_records')
@@ -2521,6 +2655,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               score: typedActivity.score,
               source: typedActivity.source,
               derived_from: typedActivity.derivedFrom ? serializeJsonb(typedActivity.derivedFrom) : null,
+            })
+            .onConflict(['service_record_id', 'indicator_key'])
+            .ignore();
+        }
+
+        // Companion activity scores — one row per companion with a resolved
+        // indicator score, same trx + onConflict ignore as the primary
+        // (indicator uniqueness vs primary/siblings was validated up front,
+        // so the composite unique never silently drops a row).
+        for (const companionActivity of companionActivityInserts) {
+          await trx('service_activity_scores')
+            .insert({
+              customer_id: svc.customer_id,
+              service_record_id: record.id,
+              indicator_key: companionActivity.indicatorKey,
+              service_date: completionServiceDate,
+              score: companionActivity.score,
+              source: companionActivity.source,
+              derived_from: companionActivity.derivedFrom ? serializeJsonb(companionActivity.derivedFrom) : null,
             })
             .onConflict(['service_record_id', 'indicator_key'])
             .ignore();

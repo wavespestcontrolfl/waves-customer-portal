@@ -42,6 +42,9 @@ const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
 const PRESSURE_INDEX_DISPLAY_FLOOR = 0.3;
 const DEFAULT_PORTAL_DESCRIPTION = 'Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service.';
 const sentReportEvents = new Set();
+// Tokens whose /data payload came back flagged staffViewer: trackReportEvent
+// drops every event for them so staff QA never pollutes customer analytics.
+const staffViewTokens = new Set();
 const REVIEW_LOCATIONS = [
   {
     key: 'parrish',
@@ -435,6 +438,11 @@ function positiveNumber(value) {
 
 function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
+  // Staff reads (data payload flagged staffViewer — the /data fetch carried
+  // the portal JWT) post NO interaction events: this endpoint is
+  // unauthenticated, so a staff QA pass would otherwise record as customer
+  // analytics (report_viewed and every tap after it).
+  if (staffViewTokens.has(token)) return;
   const key = `${token}:${eventName}:${JSON.stringify(metadata)}`;
   if (sentReportEvents.has(key)) return;
   sentReportEvents.add(key);
@@ -1817,11 +1825,11 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   return (
-    <section className="report-card" data-section="todays-result" id="todays-result">
+    <section className="report-card" data-section="todays-result" id={sectionId}>
       <div className="section-eyebrow">
         {typedReport.isProgressVisit ? typedReport.reportTypeLabel : "Today's result"}
       </div>
@@ -1844,11 +1852,11 @@ function TodaysResultCard({ typedReport }) {
  * Zero-state values ("No active signs observed today") are results and
  * render like any other finding.
  */
-function TypedFindingsCard({ typedReport }) {
+function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
   const items = typedReport?.findings;
   if (!Array.isArray(items) || !items.length) return null;
   return (
-    <section className="sr-section" id="typed-findings" data-section="typed-findings">
+    <section className="sr-section" id={sectionId} data-section="typed-findings">
       <h2>What we found & did</h2>
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
@@ -1864,6 +1872,35 @@ function TypedFindingsCard({ typedReport }) {
           </div>
         ))}
       </dl>
+    </section>
+  );
+}
+
+/**
+ * Heading for a companion typed section (combined-service-completions.md) —
+ * combined services complete once and render the primary content first,
+ * then one block per companion. internal-only entries only ever arrive for
+ * STAFF viewers (the server omits them from customer payloads entirely);
+ * they reuse the InternalReviewBar visual treatment as a per-section notice.
+ */
+function CompanionSectionHeader({ companion }) {
+  const title = companion.typeLabel || companion.reportTypeLabel || 'Additional service';
+  if (companion.internalOnly) {
+    return (
+      <section className="report-action-bar" aria-label="Internal review notice">
+        <div className="section-eyebrow">Internal Review</div>
+        <h2 className="report-action-title">{title}</h2>
+        <p className="report-action-copy">
+          This section is stored for staff review only. The customer copy of
+          this report does not include it.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section className="sr-section" data-section="companion-heading">
+      <div className="section-eyebrow">Also completed this visit</div>
+      <h2 style={{ margin: 0 }}>{title}</h2>
     </section>
   );
 }
@@ -7205,6 +7242,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top { position: static; }
           .sr-actions,
           .report-action-bar { display: none; }
+          /* Staff-only companion sections never print — the printed page
+             must match the customer artifact (the internal warning header
+             is hidden in print, so the body must go with it). */
+          .companion-internal { display: none; }
           .service-report-v1 { background: #fff; }
           .sr-shell { padding: 0; }
           .service-status-card,
@@ -7280,6 +7321,37 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {data.activity
           ? <ActivityCard data={data.activity} />
           : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />}
+
+        {/* Companion typed sections (combined services): primary content
+            first, then one block per companion — heading, Today's Result,
+            findings, and the activity gauge, all rendered from the
+            companion's frozen snapshot. The server already filtered
+            internal_only entries out of customer payloads; the
+            companion-internal wrapper additionally excludes staff-only
+            sections from PRINT (the print stylesheet hides the warning
+            header, so a staff print must match the customer artifact). */}
+        {(data.companionReports || []).map((companion) => (
+          <div
+            key={companion.type}
+            className={companion.internalOnly ? 'companion-internal' : undefined}
+          >
+            <CompanionSectionHeader companion={companion} />
+            <TodaysResultCard
+              typedReport={companion}
+              sectionId={`companion-${companion.type}-todays-result`}
+            />
+            <TypedFindingsCard
+              typedReport={companion}
+              sectionId={`companion-${companion.type}-findings`}
+            />
+            {companion.activity && (
+              <ActivityCard
+                data={companion.activity}
+                sectionId={`companion-${companion.type}-activity`}
+              />
+            )}
+          </div>
+        ))}
 
         <QuickNavigationAndAsk
           mode={mode}
@@ -7371,6 +7443,9 @@ export default function ReportViewPage() {
     })
       .then((r) => r.json())
       .then((d) => {
+        // Must register BEFORE setData: the view-event effect fires on first
+        // render of the report, and a staff read may never post events.
+        if (d && d.staffViewer) staffViewTokens.add(token);
         if (!cancelled) setData(d);
       })
       .catch(() => {

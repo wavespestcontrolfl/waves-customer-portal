@@ -1020,6 +1020,15 @@ async function loadProjectCompletionContextByServiceId(services) {
         // trap check never sees the exclusion/sanitation modules.
         ? ActivityIndicators.findingsSchemaForType(completionProfile.findingsType, { serviceKey: completionProfile.serviceKey })
         : null,
+      // Companion section schemas (combined-service-completions.md),
+      // embedded beside findingsSchema for the same no-registry-fetch reason.
+      // serviceKey scoping applies to companions too — a pest + rodent-bait
+      // combo must not expose exclusion/sanitation module fields (Codex P2).
+      companionSchemas: completionProfile
+        ? (completionProfile.companions || [])
+          .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey }))
+          .filter(Boolean)
+        : null,
       linkedProject: linkedProjectsByServiceId.get(service.id) || null,
     }];
   }));
@@ -1156,6 +1165,7 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         completionProfile: projectCompletionContext.completionProfile || null,
         findingsSchema: projectCompletionContext.findingsSchema || null,
+        companionSchemas: projectCompletionContext.companionSchemas || null,
         linkedProject: projectCompletionContext.linkedProject || null,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
@@ -1365,6 +1375,7 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
           completionProfile: projectCompletionContext.completionProfile || null,
           findingsSchema: projectCompletionContext.findingsSchema || null,
+          companionSchemas: projectCompletionContext.companionSchemas || null,
           linkedProject: projectCompletionContext.linkedProject || null,
           technicianId: s.technician_id,
           technicianName: s.tech_name,
