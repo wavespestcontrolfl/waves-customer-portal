@@ -178,6 +178,25 @@ function combineRecurringServicesForScheduling(recurringServices = [], { fallbac
   return { remaining, combos };
 }
 
+// A reserved (customer-picked) first appointment must reflect the same
+// combined decision as the auto-schedule path — otherwise the slot row
+// keeps the standalone primary name and every follow-up it seeds misses
+// the companion section (pre-push P1). A rewrite is safe ONLY when exactly
+// one reserved row maps to a combo's primary or companion key: with both
+// halves separately reserved, rewriting either would double-cover the
+// work, so both stay standalone.
+function reservedRowComboRewrites(reservedRows = [], combos = []) {
+  const rewrites = [];
+  for (const combo of combos) {
+    const matching = reservedRows.filter((row) => {
+      const key = recurringServiceKey({ name: row.service_type });
+      return key === combo.route.primaryKey || key === combo.route.companionKey;
+    });
+    if (matching.length === 1) rewrites.push({ row: matching[0], combo });
+  }
+  return rewrites;
+}
+
 function serviceCountsTowardWaveGuardTier(svc = {}) {
   if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
   return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
@@ -582,18 +601,56 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
       );
-      const reservedStart = await database('scheduled_services')
+      const reservedRows = await database('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNotNull('customer_id')
         .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc')
-        .first('*');
+        .orderBy('scheduled_date', 'asc');
+      const reservedStart = reservedRows[0] || null;
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;
       scheduledCount = Number(existingFromReservation?.count || 0);
+
+      // Combined routing reaches reserved rows too: rewrite the slot row to
+      // the combined service (type/service_id/duration — the customer's
+      // picked date and window are untouched) so the first visit and every
+      // follow-up it seeds resolve the companion profile.
+      let reservedSeedSvc = null;
+      try {
+        const { combos } = combineRecurringServicesForScheduling(recurringServices, {
+          fallbackFrequency: inferredFrequencyKey,
+        });
+        for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
+          const update = { service_type: combo.route.name, updated_at: new Date() };
+          try {
+            const catalogRow = await database('services')
+              .where({ service_key: combo.route.catalogServiceKey })
+              .first('id', 'default_duration_minutes');
+            if (catalogRow) {
+              update.service_id = catalogRow.id;
+              if (catalogRow.default_duration_minutes) {
+                update.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                combo.service.estimatedDurationMinutes = catalogRow.default_duration_minutes;
+              }
+            }
+          } catch (lookupErr) {
+            logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
+          }
+          await database('scheduled_services').where({ id: row.id }).update(update);
+          row.service_type = combo.route.name;
+          if (reservedStart && row.id === reservedStart.id) {
+            reservedStart.service_type = combo.route.name;
+            reservedSeedSvc = combo.service;
+          }
+          logger.info(`[estimate-converter] reserved row ${row.id} combined → "${combo.route.name}" (picked slot preserved)`);
+        }
+      } catch (comboErr) {
+        logger.warn(`[estimate-converter] combined routing on reserved rows failed: ${comboErr.message}`);
+      }
+
       if (reservedStart) {
         try {
-          const seedSvc = recurringServiceForScheduledRow(recurringServices, reservedStart);
+          const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServices, reservedStart);
           const seedResult = await seedRecurringFollowUpsForParent(database, reservedStart, seedSvc, {
             fallbackFrequency: inferredFrequencyKey,
           });
@@ -974,6 +1031,7 @@ module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
+module.exports.reservedRowComboRewrites = reservedRowComboRewrites;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;

@@ -9,6 +9,7 @@ const {
   combineRecurringServicesForScheduling,
   durationMinutesForRecurringService,
   recurringServiceKey,
+  reservedRowComboRewrites,
 } = require('../services/estimate-converter');
 const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
 
@@ -87,6 +88,49 @@ describe('combineRecurringServicesForScheduling', () => {
     );
     expect(combos).toHaveLength(1);
     expect(combos[0].service.frequency).toBe('quarterly');
+  });
+});
+
+describe('reservedRowComboRewrites (slot-reserved accepts)', () => {
+  const pestRodentCombo = () => combineRecurringServicesForScheduling([
+    { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+    { name: 'Rodent Bait Stations', frequency: 'quarterly' },
+  ]).combos;
+
+  test('a reserved primary-line row is rewritten to the combined service', () => {
+    const row = { id: 'ss-1', service_type: 'Quarterly Pest Control' };
+    const rewrites = reservedRowComboRewrites([row], pestRodentCombo());
+    expect(rewrites).toHaveLength(1);
+    expect(rewrites[0].row).toBe(row);
+    expect(rewrites[0].combo.route.name).toBe('Pest & Rodent Control');
+  });
+
+  test('a reserved companion-line row also maps to the combo', () => {
+    const row = { id: 'ss-2', service_type: 'Rodent Bait Stations' };
+    const rewrites = reservedRowComboRewrites([row], pestRodentCombo());
+    expect(rewrites).toHaveLength(1);
+    expect(rewrites[0].combo.route.catalogServiceKey).toBe('pest_rodent_quarterly');
+  });
+
+  test('both halves separately reserved → NO rewrite (would double-cover the work)', () => {
+    const rewrites = reservedRowComboRewrites([
+      { id: 'ss-1', service_type: 'Quarterly Pest Control' },
+      { id: 'ss-2', service_type: 'Rodent Bait Stations' },
+    ], pestRodentCombo());
+    expect(rewrites).toEqual([]);
+  });
+
+  test('unrelated reserved rows are ignored', () => {
+    const rewrites = reservedRowComboRewrites([
+      { id: 'ss-3', service_type: 'Mosquito Treatment' },
+    ], pestRodentCombo());
+    expect(rewrites).toEqual([]);
+  });
+
+  test('no combos → no rewrites', () => {
+    expect(reservedRowComboRewrites([
+      { id: 'ss-1', service_type: 'Quarterly Pest Control' },
+    ], [])).toEqual([]);
   });
 });
 
