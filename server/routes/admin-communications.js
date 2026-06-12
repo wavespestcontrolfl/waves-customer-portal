@@ -22,6 +22,7 @@ const {
   markSuggestionScheduled,
   parkThreadSuggestions,
   reopenScheduledSuggestions,
+  ignoreParkedSuggestions,
   lockSuggestThread,
 } = require('../services/sms-suggest-mode');
 
@@ -1203,7 +1204,7 @@ router.delete('/scheduled/:id', async (req, res, next) => {
     // fire-time resolution owns the decisions.
     const deleted = await db('sms_log')
       .where({ id: req.params.id, status: 'scheduled' })
-      .del(['id', 'metadata', 'to_phone']);
+      .del(['id', 'metadata', 'to_phone', 'created_at']);
 
     const row = deleted?.[0];
     if (row) {
@@ -1215,7 +1216,7 @@ router.delete('/scheduled/:id', async (req, res, next) => {
 
       if (decisionIds.length) {
         const threadLast10 = normalizePhoneLast10(row.to_phone);
-        let transferred = false;
+        let resolution = 'reopen';
         if (threadLast10) {
           await db.transaction(async (trx) => {
             await lockSuggestThread(trx, threadLast10);
@@ -1243,13 +1244,28 @@ router.delete('/scheduled/:id', async (req, res, next) => {
                     [JSON.stringify(decisionIds)]
                   ),
                 });
-              transferred = true;
+              resolution = 'transferred';
+              return;
             }
+            // No live sibling — but one may have JUST flipped sending→sent
+            // while this cancel ran. The thread was answered since these
+            // decisions were parked, so they resolve as ignored (drafts
+            // back to the judge), not reopened onto an answered thread.
+            const sentSibling = await trx('sms_log')
+              .where({ direction: 'outbound' })
+              .whereIn('status', ['queued', 'sent', 'delivered'])
+              .whereIn('message_type', HUMAN_REPLY_TYPES)
+              .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+              .where('created_at', '>', row.created_at)
+              .first('id');
+            if (sentSibling) resolution = 'ignore';
           });
         }
-        if (!transferred) {
-          // No surviving queued reply — the customer was never answered,
-          // the cards return to the composer.
+        if (resolution === 'ignore') {
+          await ignoreParkedSuggestions({ decisionIds, reviewedBy: req.technicianId || 'Admin' });
+        } else if (resolution === 'reopen') {
+          // No surviving or just-sent reply — the customer was never
+          // answered, the cards return to the composer.
           await reopenScheduledSuggestions({
             decisionIds,
             reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',

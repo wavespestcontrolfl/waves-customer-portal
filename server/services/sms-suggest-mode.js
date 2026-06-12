@@ -196,9 +196,13 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone');
       if (!inbound?.created_at) return null;
 
-      // Immediate admin sends can be phone-only (customer_id null on the
-      // sms_log row), so every guard below matches on customer_id OR the
-      // thread phone — the customer's number this inbound arrived from.
+      // Thread identity = the customer phone this inbound arrived from.
+      // Every guard below scopes to THIS thread, not the whole customer: a
+      // multi-phone customer (service contacts carry three slots) can have
+      // parallel conversations, and an answer or newer inbound on one
+      // thread must not block or supersede the card on another. Phone-only
+      // admin sends (customer_id null) match through the same phone scope;
+      // customer_id is only the fallback when the inbound has no phone.
       const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
 
       // Serializes against other publishers AND the staff send/queue paths
@@ -206,13 +210,14 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // every guard below reads committed state, and anything we insert is
       // visible to the next locked path.
       await lockSuggestThread(trx, threadLast10 || customerId);
-      const byCustomerOrThreadPhone = (phoneColumn) => function matchThread() {
-        this.where({ customer_id: customerId });
+      const byThread = (phoneColumn) => function matchThread() {
         if (threadLast10) {
-          this.orWhereRaw(
+          this.whereRaw(
             `RIGHT(REGEXP_REPLACE(COALESCE(${phoneColumn}, ''), '[^0-9]', '', 'g'), 10) = ?`,
             [threadLast10]
           );
+        } else {
+          this.where({ customer_id: customerId });
         }
       };
 
@@ -223,7 +228,7 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // it against that very reply.
       const answered = await trx('sms_log')
         .where({ direction: 'outbound' })
-        .where(byCustomerOrThreadPhone('to_phone'))
+        .where(byThread('to_phone'))
         .whereIn('message_type', HUMAN_REPLY_TYPES)
         .whereIn('status', SENT_STATUSES)
         .where('created_at', '>', inbound.created_at)
@@ -238,7 +243,7 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // answers the thread soon.
       const replyInFlight = await trx('sms_log')
         .where({ direction: 'outbound' })
-        .where(byCustomerOrThreadPhone('to_phone'))
+        .where(byThread('to_phone'))
         .whereIn('message_type', HUMAN_REPLY_TYPES)
         .whereIn('status', ['scheduled', 'sending'])
         .first('id');
@@ -252,14 +257,24 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // the draft reverts to shadow for the judge.
       const newerInbound = await trx('sms_log')
         .where({ direction: 'inbound' })
-        .where(byCustomerOrThreadPhone('from_phone'))
+        .where(byThread('from_phone'))
         .where('created_at', '>', inbound.created_at)
         .first('id');
       if (newerInbound) return null;
 
+      // Same thread scope as the guards: supersede/ordering must only see
+      // cards for THIS conversation — a multi-phone customer's other thread
+      // keeps its own card.
       const pending = await trx('agent_decisions as ad')
         .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-        .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review', 'ad.customer_id': customerId })
+        .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+        .where(function pendingThreadScope() {
+          if (threadLast10) {
+            this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
+          } else {
+            this.where('ad.customer_id', customerId);
+          }
+        })
         .select('ad.id', 'ad.entity_id', 's.created_at as inbound_at');
 
       const { newerExists, supersede } = splitPendingSuggestions(pending, inbound.created_at);
@@ -492,8 +507,10 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
   // helpers are guarded, so racing a live cron iteration double-resolves to
   // the same verdict.
   try {
+    // Status allowlist matches SENT_STATUSES: a delivery callback can flip
+    // a sent row to 'delivered' before this sweep runs.
     const sentUsed = await db('agent_decisions as ad')
-      .joinRaw("JOIN sms_log sl ON sl.metadata->>'agent_decision_id' = ad.id::text AND sl.status = 'sent'")
+      .joinRaw("JOIN sms_log sl ON sl.metadata->>'agent_decision_id' = ad.id::text AND sl.status IN ('queued', 'sent', 'delivered')")
       .where({ 'ad.status': 'scheduled', 'ad.source_channel': 'sms' })
       .select('ad.id', 'sl.message_body', 'sl.admin_user_id');
     for (const row of sentUsed) {
@@ -505,7 +522,7 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
     }
 
     const sentParked = await db('agent_decisions as ad')
-      .joinRaw("JOIN sms_log sl ON jsonb_exists(COALESCE(sl.metadata->'parked_decision_ids', '[]'::jsonb), ad.id::text) AND sl.status = 'sent'")
+      .joinRaw("JOIN sms_log sl ON jsonb_exists(COALESCE(sl.metadata->'parked_decision_ids', '[]'::jsonb), ad.id::text) AND sl.status IN ('queued', 'sent', 'delivered')")
       .where({ 'ad.status': 'scheduled', 'ad.source_channel': 'sms' })
       .distinct('ad.id')
       .pluck('ad.id');
