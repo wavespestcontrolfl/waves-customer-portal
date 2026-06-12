@@ -28,6 +28,7 @@ const {
   actionForOpportunity,
   dedupeKey,
   scoreOpportunity,
+  deriveLinkBoost,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
 const { WEIGHTS } = require('../services/content/scoring-config');
@@ -249,6 +250,12 @@ describe('actionForOpportunity', () => {
     expect(actionForOpportunity({ bucket: 'decay_refresh', page_url: 'x', service: 'pest', city: 'Bradenton' }))
       .toBe('refresh_existing_page');
   });
+  test('link_boost with page → add_internal_links; without page → do_not_publish', () => {
+    expect(actionForOpportunity({ bucket: 'link_boost', page_url: 'x', service: 'pest', city: 'Bradenton' }))
+      .toBe('add_internal_links');
+    expect(actionForOpportunity({ bucket: 'link_boost', query: 'pest control bradenton' }))
+      .toBe('do_not_publish');
+  });
   test('local_gap → create_or_refresh_city_service_page', () => {
     expect(actionForOpportunity({ bucket: 'local_gap', service: 'pest', city: 'Bradenton' }))
       .toBe('create_or_refresh_city_service_page');
@@ -345,5 +352,116 @@ describe('scoreOpportunity', () => {
     const low = scoreOpportunity(o, { position: 6, impressions: 60 }).total;
     const high = scoreOpportunity(o, { position: 6, impressions: 500 }).total;
     expect(high).toBeGreaterThan(low);
+  });
+});
+
+// ── deriveLinkBoost ─────────────────────────────────────────────────
+
+describe('deriveLinkBoost', () => {
+  const ctrParent = (over = {}) => ({
+    bucket: 'ctr_rewrite',
+    action_type: 'rewrite_title_meta',
+    query: 'termite inspection sarasota',
+    page_url: '/termite-control-sarasota-fl/',
+    service: 'termite',
+    city: 'Sarasota',
+    score: 88,
+    score_breakdown: { base: 88 },
+    signal_metadata: { impressions: 400, ctr: 0.01 },
+    ...over,
+  });
+  const decayParent = (over = {}) => ({
+    bucket: 'decay_refresh',
+    action_type: 'refresh_existing_page',
+    query: null,
+    page_url: '/pest-control-bradenton-fl/',
+    service: 'pest',
+    city: 'Bradenton',
+    score: 80,
+    score_breakdown: { base: 80 },
+    signal_metadata: { decay_pct: 0.4 },
+    ...over,
+  });
+
+  test('a ctr_rewrite parent spawns an add_internal_links companion that inherits its signal', () => {
+    const [opp, ...rest] = deriveLinkBoost([ctrParent()], { cap: 10 });
+    expect(rest).toHaveLength(0);
+    expect(opp.bucket).toBe('link_boost');
+    expect(opp.action_type).toBe('add_internal_links');
+    expect(opp.page_url).toBe('/termite-control-sarasota-fl/');
+    expect(opp.query).toBe('termite inspection sarasota');
+    expect(opp.score).toBe(88);
+    expect(opp.score_breakdown.derivedFrom).toBe('ctr_rewrite');
+    expect(opp.signal_metadata.source_bucket).toBe('ctr_rewrite');
+    expect(opp.dedupe_key).toContain('link_boost');
+  });
+
+  test('decay_refresh parents derive too (null query is fine)', () => {
+    const [opp] = deriveLinkBoost([decayParent()], { cap: 10 });
+    expect(opp.action_type).toBe('add_internal_links');
+    expect(opp.query).toBeNull();
+    expect(opp.signal_metadata.source_bucket).toBe('decay_refresh');
+  });
+
+  test('parents without a page_url derive nothing — there is no page to boost', () => {
+    expect(deriveLinkBoost([ctrParent({ page_url: null, action_type: 'do_not_publish' })], { cap: 10 }))
+      .toHaveLength(0);
+  });
+
+  test('do_not_publish parents derive nothing even if a page_url slipped through', () => {
+    expect(deriveLinkBoost([ctrParent({ action_type: 'do_not_publish' })], { cap: 10 }))
+      .toHaveLength(0);
+  });
+
+  test('two parents on the same page+segment collapse to one companion, keeping the higher score', () => {
+    const a = ctrParent({ page_url: '/pest-control-bradenton-fl/', service: 'pest', city: 'Bradenton', score: 82 });
+    const b = decayParent({ score: 91 });
+    const out = deriveLinkBoost([a, b], { cap: 10 });
+    expect(out).toHaveLength(1);
+    expect(out[0].score).toBe(91);
+    expect(out[0].signal_metadata.source_bucket).toBe('decay_refresh');
+  });
+
+  test('cap keeps only the highest-scoring companions; cap 0 disables the lane', () => {
+    const parents = [
+      ctrParent({ page_url: '/a/', score: 70 }),
+      ctrParent({ page_url: '/b/', score: 95 }),
+      ctrParent({ page_url: '/c/', score: 85 }),
+    ];
+    const capped = deriveLinkBoost(parents, { cap: 2 });
+    expect(capped.map((o) => o.page_url)).toEqual(['/b/', '/c/']);
+    expect(deriveLinkBoost(parents, { cap: 0 })).toHaveLength(0);
+  });
+
+  test('near-me parent queries still derive — anchors only wrap text that already exists on hub pages', () => {
+    const [opp] = deriveLinkBoost([ctrParent({ query: 'exterminator near me sarasota' })], { cap: 10 });
+    expect(opp.action_type).toBe('add_internal_links');
+  });
+
+  test('excludeKeys rotates the cap past occupied rows instead of starving lower-scoring pages', () => {
+    const parents = [
+      ctrParent({ page_url: '/a/', score: 95 }),
+      ctrParent({ page_url: '/b/', score: 85 }),
+      ctrParent({ page_url: '/c/', score: 70 }),
+    ];
+    // First run: cap 2 → the top two pages.
+    const firstRun = deriveLinkBoost(parents, { cap: 2 });
+    expect(firstRun.map((o) => o.page_url)).toEqual(['/a/', '/b/']);
+    // Next run: those rows are claimed/done/pending_review → the cap is
+    // spent on the next qualifying page rather than re-emitting them.
+    const occupied = new Set(firstRun.map((o) => o.dedupe_key));
+    const secondRun = deriveLinkBoost(parents, { cap: 2, excludeKeys: occupied });
+    expect(secondRun.map((o) => o.page_url)).toEqual(['/c/']);
+  });
+
+  test('companions derived after the facts boost inherit the boosted parent score', () => {
+    // mineAll boosts parent scores in place BEFORE deriving (Codex P2):
+    // mutate the parent like _applyFactsReadinessBoost does, then derive.
+    const parent = decayParent({ score: 65, score_breakdown: { base: 65 } });
+    parent.score += 15;
+    parent.score_breakdown.factsReady = 15;
+    const [opp] = deriveLinkBoost([parent], { cap: 10 });
+    expect(opp.score).toBe(80);
+    expect(opp.score_breakdown.factsReady).toBe(15);
   });
 });

@@ -19,6 +19,10 @@
  *   no_content_yet      query has impressions but no own page anywhere
  *   aeo_gap             city×service absent from LLM answers across N+ days
  *                       AND has GSC demand (gated behind GATE_AEO_GAP_MINING)
+ *   link_boost          derived (not mined): every ctr_rewrite/decay_refresh
+ *                       page also gets an add_internal_links companion so
+ *                       underperformers receive inbound links, not just a
+ *                       title/meta rewrite. LINK_BOOST_MAX_PER_RUN=0 disables.
  *
  * Defensive about Step-0 data quality findings:
  *   - city_target == 'local_intent' is normalized to null (overload from
@@ -218,6 +222,7 @@ function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
   }
   if (bucket === 'ctr_rewrite' && page_url) return 'rewrite_title_meta';
   if (bucket === 'decay_refresh' && page_url) return 'refresh_existing_page';
+  if (bucket === 'link_boost' && page_url) return 'add_internal_links';
   if (bucket === 'local_gap') return 'create_or_refresh_city_service_page';
   if (bucket === 'no_content_yet') {
     if (city && service) return 'create_or_refresh_city_service_page';
@@ -285,6 +290,71 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
   return { total, breakdown: { ...breakdown, _penalty: penalty } };
 }
 
+// ── link-boost derivation (pure) ─────────────────────────────────────
+//
+// A page flagged for ctr_rewrite or decay_refresh needs more than a
+// title/meta rewrite or a body refresh — it usually also needs inbound
+// internal links. Those parents only edit the page itself; nothing
+// pointed sibling-page equity at it. Each parent with a known page_url
+// therefore spawns a companion add_internal_links opportunity that the
+// runner executes through the existing internal-link planner → dry-run
+// → review-queue path (shadow by SHADOW_MODE_ADD_INTERNAL_LINKS).
+//
+// The companion INHERITS the parent's score instead of re-deriving it:
+// the demand signal is identical, and re-scoring under a new bucket
+// multiplier would let a parent clear persistAll's floor while its
+// companion silently missed it. For the same reason mineAll derives
+// AFTER _applyFactsReadinessBoost — a facts-ready decay refresh lifted
+// over the floor must lift its companion too. gscOpportunityScore is
+// never consulted for this bucket.
+//
+// excludeKeys rotates the per-run cap: dedupe keys whose queue rows are
+// claimed / done / pending_review are skipped BEFORE capping — persistAll's
+// upsert refuses to re-open those statuses, so emitting them again would
+// burn cap slots on rows that can't change while lower-scoring qualifying
+// pages starve behind them.
+
+const LINK_BOOST_SOURCE_ACTIONS = new Set(['rewrite_title_meta', 'refresh_existing_page']);
+const DEFAULT_LINK_BOOST_MAX_PER_RUN = 10;
+
+function linkBoostCap() {
+  const raw = Number.parseInt(process.env.LINK_BOOST_MAX_PER_RUN, 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_LINK_BOOST_MAX_PER_RUN;
+}
+
+function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new Set() } = {}) {
+  if (!cap) return [];
+  const byKey = new Map();
+  for (const parent of parents) {
+    if (!parent?.page_url) continue;
+    // Only derive from parents that themselves survived as in-place page
+    // edits — a do_not_publish parent (e.g. ctr_rewrite with no resolvable
+    // own page) has nothing to boost.
+    if (!LINK_BOOST_SOURCE_ACTIONS.has(parent.action_type)) continue;
+    const opp = {
+      bucket: 'link_boost',
+      query: parent.query || null,
+      page_url: parent.page_url,
+      service: parent.service || null,
+      city: parent.city || null,
+      score: parent.score,
+      score_breakdown: { ...(parent.score_breakdown || {}), derivedFrom: parent.bucket },
+      signal_metadata: { ...(parent.signal_metadata || {}), source_bucket: parent.bucket },
+    };
+    opp.action_type = actionForOpportunity(opp);
+    opp.dedupe_key = dedupeKey(opp);
+    if (excludeKeys.has(opp.dedupe_key)) continue;
+    // Multiple parents (several low-CTR queries, or ctr_rewrite + decay on
+    // the same page) collapse to one companion per dedupe key; keep the
+    // strongest signal.
+    const existing = byKey.get(opp.dedupe_key);
+    if (!existing || opp.score > existing.score) byKey.set(opp.dedupe_key, opp);
+  }
+  return Array.from(byKey.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, cap);
+}
+
 // ── miner class ──────────────────────────────────────────────────────
 
 class GscOpportunityMiner {
@@ -334,11 +404,35 @@ class GscOpportunityMiner {
       }
     }
 
-    const allOpportunities = Object.values(buckets).flat();
-
     // Facts-readiness boost — applied before persistAll so well-supported
     // rewrite opportunities can clear the global minScoreToAct floor.
-    await this._applyFactsReadinessBoost(allOpportunities);
+    const minedOpportunities = Object.values(buckets).flat();
+    await this._applyFactsReadinessBoost(minedOpportunities);
+
+    // Derived bucket — no GSC query of its own. Underperforming pages get an
+    // inbound internal-link companion alongside their rewrite/refresh.
+    // Runs AFTER the facts boost so companions inherit the boosted parent
+    // score, and with already-occupied queue rows excluded so the per-run
+    // cap rotates to lower-scoring pages (see deriveLinkBoost docs).
+    try {
+      const occupied = await this._loadOccupiedLinkBoostKeys().catch((err) => {
+        // Fail-open to pre-rotation behavior: re-emitting occupied rows is
+        // harmless (persistAll freezes their status); dropping the lane on a
+        // transient query error is not.
+        logger.warn(`[gsc-opp-miner] occupied link_boost keys load failed: ${err.message}`);
+        return new Set();
+      });
+      buckets.link_boost = deriveLinkBoost(
+        [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])],
+        { excludeKeys: occupied }
+      );
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] link_boost failed: ${err.message}`);
+      errors.link_boost = err.message;
+      buckets.link_boost = [];
+    }
+
+    const allOpportunities = [...minedOpportunities, ...buckets.link_boost];
 
     const counts = Object.fromEntries(
       Object.entries(buckets).map(([k, v]) => [k, v.length])
@@ -397,6 +491,17 @@ class GscOpportunityMiner {
         opp.score_breakdown.factsReady = WEIGHTS.factsReady;
       }
     }
+  }
+
+  // dedupe keys of link_boost rows persistAll's upsert would refuse to
+  // re-open (claimed / done / pending_review) — emitting those again only
+  // burns per-run cap slots on rows whose status can't change.
+  async _loadOccupiedLinkBoostKeys() {
+    const rows = await db('opportunity_queue')
+      .where('bucket', 'link_boost')
+      .whereIn('status', ['claimed', 'done', 'pending_review'])
+      .select('dedupe_key');
+    return new Set(rows.map((r) => r.dedupe_key));
   }
 
   // ── own-page resolution helper ─────────────────────────────────────
@@ -1132,4 +1237,6 @@ module.exports._internals = {
   ownPageKey,
   dedupeKey,
   scoreOpportunity,
+  deriveLinkBoost,
+  linkBoostCap,
 };
