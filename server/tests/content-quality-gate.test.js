@@ -310,6 +310,28 @@ describe('evaluate (full gate)', () => {
       expect(MIN_TOTAL_SCORES[pageType]).toBeLessThanOrEqual(ceiling);
     }
   });
+  test('refresh that fails improvement_over_prior hard-fails even though common points (37) clear the threshold (35)', () => {
+    // improvement_over_prior must be HARD: were it soft, a refresh that
+    // loses >20% of prior content scores 37 (commons alone) >= 35 and
+    // a content-gutting edit to a live page would pass the gate.
+    const lost = evaluate(
+      fullDraft({ body: 'x'.repeat(700) }),
+      brief({ page_type: 'refresh' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true, previousVersion: { body: 'x'.repeat(1000) } }
+    );
+    expect(lost.total_score).toBe(37);
+    expect(lost.total_score).toBeGreaterThanOrEqual(lost.min_total_score);
+    expect(lost.hard_failures.some((f) => f.name === 'improvement_over_prior')).toBe(true);
+    expect(lost.ok).toBe(false);
+
+    const noPrior = evaluate(
+      fullDraft({ body: 'x'.repeat(1500) }),
+      brief({ page_type: 'refresh' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(noPrior.hard_failures.some((f) => f.name === 'improvement_over_prior')).toBe(true);
+    expect(noPrior.ok).toBe(false);
+  });
   test('perfect refresh draft passes its own threshold (prod 2026-06-12: 47/47 gate-failed under global 54)', () => {
     const r = evaluate(
       fullDraft({ body: 'x'.repeat(1500) }),

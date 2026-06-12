@@ -93,7 +93,11 @@ const PAGE_TYPE_CHECKS = {
     { name: 'redaction_passed', weight: 8, isHard: true, evaluate: checkRedactionPassed },
   ],
   refresh: [
-    { name: 'improvement_over_prior', weight: 10, evaluate: checkImprovementOverPrior },
+    // Hard: refresh edits an EXISTING prod page, and the common checks
+    // alone (37, all hard) clear refresh's threshold (35) — if this were
+    // soft, a refresh that guts >20% of prior content or has no prior
+    // version to compare would still pass on common points alone.
+    { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
   ],
   'supporting-blog': [
     { name: 'hub_link_present', weight: 6, evaluate: checkHubLinkPresent },
