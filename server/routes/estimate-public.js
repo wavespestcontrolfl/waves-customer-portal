@@ -2497,13 +2497,24 @@ function renderMembershipBlockHtml(membership) {
   // snapshot tier (the one that priced this estimate at save), NOT a live
   // customers.waveguard_tier read — the record only updates on acceptance, so
   // it would hide the upgrade story for a Bronze customer whose estimate is
-  // priced at Silver. The snapshot itself still flows regardless: the
-  // setup-fee waiver and cross-sell pick read it independently of this card.
-  if (!(Number(membership.tierDiscountPct) > 0)) return '';
+  // priced at Silver. Snapshot shapes have drifted before (see the cross-sell
+  // fallback below), so a snapshot missing tierDiscountPct falls through to
+  // the row checks rather than losing its card. The snapshot itself still
+  // flows regardless: the setup-fee waiver and cross-sell pick read it
+  // independently of this card.
+  if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return '';
 
   const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
-  const existing = Array.isArray(membership.existingServices) ? membership.existingServices : [];
-  const added = Array.isArray(membership.newServices) ? membership.newServices : [];
+  // Only rows with a real, non-zero benefit render — the pricing engine's
+  // margin guard can cap the applied discount to 0 even at Silver+, and a
+  // bare "Member pricing" row with no figure is the same no-benefit card
+  // this gate exists to suppress.
+  const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
+    .filter((s) => Number(s.extraDiscountPct) > 0);
+  const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
+    .filter((s) => Number(s.discountPct) > 0
+      || Number(s.perApplicationSavings) > 0
+      || Number(s.monthlySavings) > 0);
   // Nothing to say (e.g. a re-quote of a service the member already has) —
   // skip rather than render a header-and-badge-only card.
   if (!membership.upgrade && existing.length === 0 && added.length === 0) return '';

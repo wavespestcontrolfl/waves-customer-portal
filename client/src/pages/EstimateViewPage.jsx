@@ -542,11 +542,18 @@ function MembershipCard({ membership }) {
   const tc = TIER_COLORS[membership.tier] || TIER_COLORS.bronze;
   // Mirrors renderMembershipBlockHtml in routes/estimate-public.js: Bronze
   // (0% tier discount) has no member benefits to show, so the card gates on
-  // the snapshot's combined tier — the tier that priced this estimate — and
-  // skips entirely when there is also nothing to list.
-  if (!(Number(membership.tierDiscountPct) > 0)) return null;
-  const existing = Array.isArray(membership.existingServices) ? membership.existingServices : [];
-  const added = Array.isArray(membership.newServices) ? membership.newServices : [];
+  // the snapshot's combined tier — the tier that priced this estimate.
+  // Legacy snapshots without tierDiscountPct fall through to the row checks;
+  // rows must carry a real non-zero benefit (margin guard can cap the
+  // applied discount to 0 even at Silver+), and a card with no upgrade and
+  // no rows left is skipped.
+  if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return null;
+  const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
+    .filter((s) => Number(s.extraDiscountPct) > 0);
+  const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
+    .filter((s) => Number(s.discountPct) > 0
+      || Number(s.perApplicationSavings) > 0
+      || Number(s.monthlySavings) > 0);
   if (!membership.upgrade && existing.length === 0 && added.length === 0) return null;
   const hello = membership.firstName ? `Welcome back, ${membership.firstName}` : 'Welcome back';
 

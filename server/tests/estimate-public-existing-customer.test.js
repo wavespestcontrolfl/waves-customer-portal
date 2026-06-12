@@ -154,6 +154,36 @@ describe('existing-customer public estimate page', () => {
     expect(html).toContain("you're already a Waves customer");
   });
 
+  test('Silver+ with the applied discount margin-guarded to 0 renders no member card', () => {
+    // combinedTier says Silver but the engine applied 0% — the snapshot rows
+    // carry no real benefit, so no card (Codex P2 on PR #1675).
+    const membership = donMembership({
+      upgrade: null,
+      existingServices: [],
+      newServices: [{
+        key: 'lawn_care',
+        label: 'Lawn Care',
+        discountPct: 0,
+        monthlySavings: 0,
+        perApplicationSavings: 0,
+      }],
+    });
+    const html = renderPage('margin-guard-token', lawnEstimate(), lawnEstimateData(), membership);
+
+    expect(html).not.toContain('<section class="card wg-member-card">');
+    expect(html).not.toContain('Member pricing');
+  });
+
+  test('legacy snapshot without tierDiscountPct keeps its card when rows carry benefit', () => {
+    const membership = donMembership();
+    delete membership.tierDiscountPct;
+    const html = renderPage('legacy-snapshot-token', lawnEstimate(), lawnEstimateData(), membership);
+
+    expect(html).toContain('<section class="card wg-member-card">');
+    expect(html).toContain('Welcome back, Don');
+    expect(html).toContain('save $9.30 per application');
+  });
+
   test('cross-sell skips services the customer already has — seasonal mosquito first', () => {
     const html = renderPage('existing-token-3', lawnEstimate(), lawnEstimateData(), donMembership());
 
