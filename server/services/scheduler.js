@@ -510,10 +510,11 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 2:45AM ET — Voice-corpus miner (SMS brand-voice loop, Phase A).
-  // Mines yesterday's human-authored SMS replies + consent-gated labeled
-  // call transcripts into voice_corpus_examples (redacted). Overlapping
-  // 3-day lookback + insert-ignore = idempotent, so a missed night
-  // self-heals on the next run.
+  // Mines human-authored SMS replies (on a 7-day-delayed band so each
+  // pair's outcome window has closed before the row freezes) + recent
+  // consent-gated labeled call transcripts into voice_corpus_examples
+  // (redacted). Overlapping 3-day bands + insert-ignore = idempotent, so
+  // a missed night self-heals on the next run.
   // =========================================================================
   cron.schedule('45 2 * * *', async () => {
     if (!isEnabled('voiceCorpusMiner')) return;

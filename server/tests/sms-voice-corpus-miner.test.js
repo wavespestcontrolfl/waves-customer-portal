@@ -1,6 +1,6 @@
 const {
   SCHEMA_VERSION,
-  _test: { pairRepliesWithInbound, isMinableReply, hasAgentCallerLabels, PAIR_WINDOW_HOURS },
+  _test: { pairRepliesWithInbound, isMinableReply, hasAgentCallerLabels, redactCorpusText, PAIR_WINDOW_HOURS },
 } = require('../services/sms-voice-corpus-miner');
 const { redactText } = require('../services/agent-decision-training');
 
@@ -62,9 +62,12 @@ describe('voice corpus miner — eligibility filters', () => {
     expect(isMinableReply('Hello Dale! You are on the schedule for Friday morning.')).toBe(true);
   });
 
-  test('only diarized Agent:/Caller: transcripts qualify', () => {
+  test('only transcripts with BOTH Agent: and Caller: labels qualify', () => {
     expect(hasAgentCallerLabels('Agent: Thanks for calling Waves.\nCaller: Hi, I have ants.')).toBe(true);
-    expect(hasAgentCallerLabels('caller: lowercase still counts')).toBe(true);
+    expect(hasAgentCallerLabels('agent: lowercase works\ncaller: both sides here')).toBe(true);
+    // one-sided diarization would pollute the corpus with non-house voice
+    expect(hasAgentCallerLabels('Caller: only the customer talking here')).toBe(false);
+    expect(hasAgentCallerLabels('Agent: voicemail greeting only')).toBe(false);
     expect(hasAgentCallerLabels('hi i have ants in my kitchen can someone come out')).toBe(false);
     expect(hasAgentCallerLabels(null)).toBe(false);
   });
@@ -82,6 +85,17 @@ describe('voice corpus miner — redaction contract', () => {
     expect(out).toContain('[phone]');
     expect(out).toContain('[email]');
     expect(out).toContain('[address]');
+  });
+
+  test('self-introduced names are scrubbed even with no customer context', () => {
+    const out = redactCorpusText('Caller: Hi, my name is Alicia Jonesworth and I have ants everywhere.', {});
+    expect(out).not.toContain('Alicia');
+    expect(out).not.toContain('Jonesworth');
+  });
+
+  test('allowlisted staff names survive — house-voice attribution, not PII', () => {
+    const out = redactCorpusText('Agent: Hello, this is Virginia with Waves Pest Control.', {});
+    expect(out).toContain('Virginia');
   });
 
   test('schema version is pinned for the distiller', () => {

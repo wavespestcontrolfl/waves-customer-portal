@@ -18,14 +18,18 @@
  *      when the column is missing.
  *
  * Reader, not ingestor — never mutates source tables. All stored text is
- * redacted via agent-decision-training redactText ([name]/[phone]/[email]/
- * [address]/[url]) before insert; raw bodies never land in the corpus.
- * Suppressed senders are excluded entirely, mirroring the insights miner.
+ * double-redacted before insert: agent-decision-training redactText
+ * (context names + structured PII) then the content engine's pii-redactor
+ * (heuristic names the customer record doesn't know — self-introductions,
+ * spouses, tenants). Raw bodies never land in the corpus. Suppressed
+ * senders are excluded entirely, mirroring the insights miner.
  *
  * Outcome enrichment (not exclusion): each SMS pair records whether the
  * customer replied within 7 days, opted out, or raised a complaint — the
  * distiller weights by outcome rather than the miner deciding what
- * "good" means.
+ * "good" means. SMS pairs are mined on a DELAYED band (now-10d → now-7d
+ * by default) so the outcome window has closed before the row freezes
+ * under insert-ignore; calls mine from the recent band.
  *
  * Idempotent: UNIQUE (source, source_id) + onConflict().ignore() lets the
  * nightly run use an overlapping lookback window with no watermark state.
@@ -35,6 +39,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { redactText } = require('./agent-decision-training');
+const { redact: redactPii } = require('./content/pii-redactor');
 const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
 
 const SCHEMA_VERSION = 'voice-corpus.v1';
@@ -47,7 +52,23 @@ const MAX_TRANSCRIPT_CHARS = 12000;
 const EXCLUDED_REPLY_BODIES_RE = /^(yes|no|ok|okay|thanks|thank you|👍)\W*$/i;
 
 function hasAgentCallerLabels(transcript) {
-  return /(^|\n)\s*(Agent|Caller)\s*:/i.test(String(transcript || ''));
+  // BOTH sides required: an Agent-only or Caller-only transcript can't
+  // teach whose voice is whose — customer-only text would pollute the
+  // corpus with language that isn't the brand voice.
+  const text = String(transcript || '');
+  return /(^|\n)\s*Agent\s*:/i.test(text) && /(^|\n)\s*Caller\s*:/i.test(text);
+}
+
+/**
+ * Corpus redaction = context-name pass (shared with decision fixtures)
+ * THEN the content engine's generic pii-redactor pass. The second pass
+ * catches names the customer record doesn't know — self-introductions
+ * ("my name is Alice Jones"), spouses, tenants — via signal-word and
+ * name-pair heuristics. Staff names stay (allowlisted) — that's house
+ * voice attribution, not customer PII.
+ */
+function redactCorpusText(text, context = {}) {
+  return redactPii(redactText(text, context)).text;
 }
 
 /**
@@ -111,17 +132,21 @@ function last10(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
 }
 
-async function mineSmsPairs({ since, skipped }) {
+async function mineSmsPairs({ since, until, skipped }) {
   const suppressed = await activeSuppressedPhoneSet();
   if (suppressed === null) {
     skipped.suppression_lookup_unavailable = (skipped.suppression_lookup_unavailable || 0) + 1;
     return [];
   }
 
+  // `until` = now - OUTCOME_WINDOW_DAYS: a pair is only inserted once its
+  // 7-day outcome window has CLOSED. Insert-ignore would otherwise freeze
+  // immature outcomes forever (Codex P2).
   const replies = await db('sms_log')
     .where('direction', 'outbound')
     .where('message_type', 'manual')
     .where('created_at', '>=', since)
+    .where('created_at', '<', until)
     .whereNotNull('customer_id')
     .whereNotIn('status', ['failed', 'undelivered', 'scheduled'])
     .select('id', 'customer_id', 'admin_user_id', 'message_body', 'to_phone', 'created_at')
@@ -187,8 +212,8 @@ async function mineSmsPairs({ since, skipped }) {
       customer_id: reply.customer_id,
       admin_user_id: reply.admin_user_id || null,
       intent: triage?.intent || null,
-      inbound_text: redactText(inbound.message_body, context),
-      reply_text: redactText(reply.message_body, context),
+      inbound_text: redactCorpusText(inbound.message_body, context),
+      reply_text: redactCorpusText(reply.message_body, context),
       transcript_text: null,
       outcome: JSON.stringify({
         customerReplied: followupsAfter.length > 0,
@@ -214,7 +239,10 @@ async function mineCallTranscripts({ since, skipped }) {
     .where('direction', 'inbound')
     .where('created_at', '>=', since)
     .whereNotNull('transcription')
-    .whereNotIn('call_outcome', ['wrong_number', 'spam'])
+    // NULL call_outcome must stay eligible — NOT IN evaluates UNKNOWN on
+    // NULL and would drop consented calls that simply haven't been
+    // assigned an outcome yet (Codex P2).
+    .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
     .select('id', 'customer_id', 'transcription', 'call_outcome', 'created_at',
       'call_recording_consent_disclaimer_played');
 
@@ -246,7 +274,7 @@ async function mineCallTranscripts({ since, skipped }) {
       intent: null,
       inbound_text: null,
       reply_text: null,
-      transcript_text: redactText(String(call.transcription).slice(0, MAX_TRANSCRIPT_CHARS), context),
+      transcript_text: redactCorpusText(String(call.transcription).slice(0, MAX_TRANSCRIPT_CHARS), context),
       outcome: JSON.stringify({ callOutcome: call.call_outcome || null }),
       occurred_at: call.created_at,
       schema_version: SCHEMA_VERSION,
@@ -260,11 +288,18 @@ async function mineCallTranscripts({ since, skipped }) {
  */
 async function mineVoiceCorpus({ sinceDays = 3 } = {}) {
   const startedAt = Date.now();
-  const since = new Date(Date.now() - sinceDays * 86400 * 1000);
   const skipped = {};
 
-  const smsRows = await mineSmsPairs({ since, skipped });
-  const callRows = await mineCallTranscripts({ since, skipped });
+  // SMS band is shifted back by the outcome window: pairs are mined only
+  // once their 7-day outcome window has closed, so insert-ignore freezes
+  // rows with MATURE outcomes. Calls have no maturing outcome — they mine
+  // from the recent band.
+  const smsUntil = new Date(Date.now() - OUTCOME_WINDOW_DAYS * 86400 * 1000);
+  const smsSince = new Date(smsUntil.getTime() - sinceDays * 86400 * 1000);
+  const callSince = new Date(Date.now() - sinceDays * 86400 * 1000);
+
+  const smsRows = await mineSmsPairs({ since: smsSince, until: smsUntil, skipped });
+  const callRows = await mineCallTranscripts({ since: callSince, skipped });
 
   let inserted = 0;
   const all = [...smsRows, ...callRows];
@@ -296,6 +331,8 @@ module.exports = {
     pairRepliesWithInbound,
     isMinableReply,
     hasAgentCallerLabels,
+    redactCorpusText,
     PAIR_WINDOW_HOURS,
+    OUTCOME_WINDOW_DAYS,
   },
 };
