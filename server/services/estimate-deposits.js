@@ -816,9 +816,12 @@ async function handleDepositIntentCanceled(paymentIntent) {
 // ledger is a pool per estimate, so returning the voided dollars to the
 // estimate's live rows (newest consumption first) restores exactly what the
 // void released. Rows in refund/dispute states are never touched — that
-// money already left; an unrestorable slice (or an unstamped legacy line)
-// raises the reconcile alert instead of silently stranding the customer's
-// deposit. Returns dollars restored.
+// money already left. A shortfall (unstamped legacy line, or rows flipped
+// terminal under us) raises the reconcile alert and then THROWS: callers
+// run this inside the void transaction, so the void rolls back rather than
+// committing beside a still-consumed ledger with no retry path — a blocked
+// void beats stranded money, and the human resolving the alert unblocks it.
+// Returns dollars restored on full success.
 async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
   const items = (() => {
     try {
@@ -866,7 +869,7 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
     totalRestoredCents += requestedCents - remainingCents;
   }
   if (totalRestoredCents < totalRequestedCents) {
-    logger.error('[estimate-deposits] voided invoice deposit credit only partially restored — manual reconciliation needed', {
+    logger.error('[estimate-deposits] voided invoice deposit credit cannot be fully restored — void rolled back, manual reconciliation needed', {
       invoiceId: invoice?.id || null,
       requested: totalRequestedCents / 100,
       restored: totalRestoredCents / 100,
@@ -877,6 +880,9 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
     } catch (notifyErr) {
       logger.error(`[estimate-deposits] failed to raise reconcile alert for voided invoice ${invoice?.id}: ${notifyErr.message}`);
     }
+    throw new Error(
+      `deposit credit restore incomplete for invoice ${invoice?.id} (restored $${totalRestoredCents / 100} of $${totalRequestedCents / 100}) — void blocked until the ledger is reconciled`,
+    );
   }
   return totalRestoredCents / 100;
 }

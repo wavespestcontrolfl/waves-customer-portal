@@ -1090,7 +1090,7 @@ describe('restoreDepositCreditForVoidedInvoice — void returns consumed dollars
     expect(updates[1].payload.status).toBeUndefined();
   });
 
-  it('a row flipped terminal mid-restore is skipped — the shortfall raises the reconcile alert, never resurrects refunded money', async () => {
+  it('a row flipped terminal mid-restore is skipped — the shortfall alerts and THROWS so the void rolls back (P1)', async () => {
     const updates = [];
     mockDbHandler = restoreDb({
       rows: [{ id: 'd1', status: 'credited', credited_amount: '49.00' }],
@@ -1098,17 +1098,18 @@ describe('restoreDepositCreditForVoidedInvoice — void returns consumed dollars
       updateResults: { d1: 0 },
     });
 
-    const restored = await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(49)]) });
-
-    expect(restored).toBe(0);
+    // Never resurrects refunded money; the throw aborts the enclosing void
+    // transaction so the invoice stays live until a human reconciles.
+    await expect(restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(49)]) }))
+      .rejects.toThrow(/void blocked/);
     expect(logger.error).toHaveBeenCalled();
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { invoiceId: 'inv-void' });
   });
 
-  it('an unstamped legacy credit line cannot be attributed — alert instead of guessing a ledger', async () => {
+  it('an unstamped legacy credit line cannot be attributed — alert + throw instead of guessing a ledger', async () => {
     mockDbHandler = () => { throw new Error('should not query without an estimate stamp'); };
-    const restored = await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(49, null)]) });
-    expect(restored).toBe(0);
+    await expect(restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(49, null)]) }))
+      .rejects.toThrow(/void blocked/);
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { invoiceId: 'inv-void' });
   });
 
