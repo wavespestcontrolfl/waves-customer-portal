@@ -1567,6 +1567,23 @@ function ServiceStatusCard({ data, mode }) {
   );
 }
 
+// Shown to staff viewing an internal-only (shadow) report in place of the
+// download/share bar: no PDF is rendered for these records and the public
+// link 404s for customers, so every control there would dead-end. Customers
+// never reach this page for suppressed reports (the server 404s them).
+function InternalReviewBar() {
+  return (
+    <section className="report-action-bar" aria-label="Internal review notice">
+      <div className="section-eyebrow">Internal Review</div>
+      <h2 className="report-action-title">Not sent to the customer</h2>
+      <p className="report-action-copy">
+        This report is stored for staff review only. Download and share become
+        available once this service type graduates to customer delivery.
+      </p>
+    </section>
+  );
+}
+
 function ReportActionBar({ pdfUrl, token, onShare }) {
   return (
     <section className="report-action-bar" aria-label="Report tools">
@@ -7214,7 +7231,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       </header>
 
       <main className="sr-shell">
-        {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
+        {mode === 'live' && (data.internalOnly
+          ? <InternalReviewBar />
+          : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
 
         <ServiceStatusCard data={data} mode={mode} />
 

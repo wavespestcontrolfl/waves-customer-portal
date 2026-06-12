@@ -218,6 +218,15 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
     omitPestPressureContext,
     pestPressureConfig,
   });
+  // Suppressed typed reports (internal_only shadow / disabled kill switch)
+  // reach this builder only for staff viewers — the param gate 404s everyone
+  // else. No PDF exists for these records (renders are deferred until
+  // auto_send) and the plain <a> download can't carry the staff JWT anyway,
+  // so null the pdfUrl and flag the payload: the viewer swaps the
+  // download/share bar for an internal-review notice instead of dead controls.
+  if (suppressedTypedReport(service)) {
+    return { ...data, dynamicContext, pdfUrl: null, internalOnly: true };
+  }
   return { ...data, dynamicContext };
 }
 
