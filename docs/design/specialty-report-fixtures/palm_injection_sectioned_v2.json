@@ -1,0 +1,97 @@
+{
+ "fixture": "palm_injection_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "observation_scoped_absence",
+  "palm_work_sentence"
+ ],
+ "typedReportSnapshot": {
+  "type": "palm_injection",
+  "typeLabel": "Palm Injection",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "palm_injection",
+  "serviceLabel": "Palm Injection",
+  "reportTypeLabel": "Palm Injection Summary",
+  "visitSequence": 1,
+  "values": {
+   "palm_species": "Sylvester palm",
+   "palms_serviced": "4",
+   "palm_condition": "Fair",
+   "condition_observations": "Yellowing lower fronds, Firm spear leaf, New growth present",
+   "deficiency_signs": "Potassium deficiency signs, Magnesium deficiency signs",
+   "pest_disease_signs": "None observed today",
+   "work_completed": "Palm fertilizer applied, Palm injection completed, Canopy / crown inspection",
+   "customer_recommendations": "Avoid over-pruning, Do not remove green fronds, Keep mulch away from trunks"
+  },
+  "nextStepChips": [
+   "Continue palm program",
+   "Monitor canopy response"
+  ],
+  "todaysResult": {
+   "headline": "Palm Injection completed today.",
+   "body": "We applied palm fertilizer around the root zone, completed the palm injection and inspected the canopy and crown areas today. We will continue your palm care program. We will monitor canopy response over the next visits.",
+   "nextStep": "We will continue your palm care program. We will monitor canopy response over the next visits."
+  },
+  "findings": [
+   {
+    "fieldKey": "palm_species",
+    "technicianLabel": "Palm species",
+    "customerLabel": "What we treated",
+    "value": "Sylvester palm",
+    "customerValueLabel": "Sylvester palm"
+   },
+   {
+    "fieldKey": "palms_serviced",
+    "technicianLabel": "Palms serviced",
+    "customerLabel": "Palms serviced",
+    "value": "4",
+    "customerValueLabel": "4"
+   },
+   {
+    "fieldKey": "palm_condition",
+    "technicianLabel": "Overall palm condition",
+    "customerLabel": "Overall palm condition",
+    "value": "Fair",
+    "customerValueLabel": "Fair"
+   },
+   {
+    "fieldKey": "condition_observations",
+    "technicianLabel": "Canopy & growth observations",
+    "customerLabel": "Canopy & growth observations",
+    "value": "Yellowing lower fronds, Firm spear leaf, New growth present",
+    "customerValueLabel": "Yellowing lower fronds, Firm spear leaf, New growth present"
+   },
+   {
+    "fieldKey": "deficiency_signs",
+    "technicianLabel": "Nutrient observations",
+    "customerLabel": "Nutrient observations",
+    "value": "Potassium deficiency signs, Magnesium deficiency signs",
+    "customerValueLabel": "Potassium deficiency signs, Magnesium deficiency signs"
+   },
+   {
+    "fieldKey": "pest_disease_signs",
+    "technicianLabel": "Pest & disease check",
+    "customerLabel": "Pest & disease check",
+    "value": "None observed today",
+    "customerValueLabel": "No visible pest or disease indicators were observed at today's service"
+   },
+   {
+    "fieldKey": "work_completed",
+    "technicianLabel": "Work completed today",
+    "customerLabel": "Work completed today",
+    "value": "Palm fertilizer applied, Palm injection completed, Canopy / crown inspection",
+    "customerValueLabel": "Palm fertilizer applied, Palm injection completed, Canopy / crown inspection"
+   },
+   {
+    "fieldKey": "customer_recommendations",
+    "technicianLabel": "Customer recommendations",
+    "customerLabel": "What you can do",
+    "value": "Avoid over-pruning, Do not remove green fronds, Keep mulch away from trunks",
+    "customerValueLabel": "Avoid over-pruning, Do not remove green fronds, Keep mulch away from trunks"
+   }
+  ],
+  "activity": null
+ }
+}

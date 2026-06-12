@@ -195,6 +195,36 @@ const CUSTOMER_FIELD_LABELS = {
   exclusion_notes: 'Entry points to seal',
   customer_reported: 'What you told us',
   customer_discussed: 'What we discussed',
+  activity_locations: 'Where activity was noted',
+  treatment_completed: 'Treatment completed',
+  treatment_zones: 'Areas we treated',
+  standing_water: 'Standing water',
+  breeding_sources: 'Breeding sources noted',
+  source_reduction: 'Source reduction completed',
+  sensitive_areas: 'Sensitive areas on site',
+  sensitive_areas_avoided: 'Sensitive-area handling',
+  weather_conditions: 'Weather at service time',
+  customer_recommendations: 'What you can do',
+  palms_serviced: 'Palms serviced',
+  palm_condition: 'Overall palm condition',
+  condition_observations: 'Canopy & growth observations',
+  deficiency_signs: 'Nutrient observations',
+  pest_disease_signs: 'Pest & disease check',
+  lawn_condition: 'Lawn condition',
+  turf_color: 'Turf color',
+  weed_pressure: 'Weed pressure',
+  insect_pressure: 'Insect pressure',
+  disease_pressure: 'Disease pressure',
+  turf_issues: 'Issues observed',
+  irrigation_mowing: 'Irrigation & mowing notes',
+  spot_treatment_areas: 'Spot-treated areas',
+  inspection_type: 'Inspection type',
+  findings_observed: 'What we observed',
+  access_limitations: 'Inspection access notes',
+  entry_points: 'Entry points we found',
+  customer_prep: 'How you can help',
+  prep_status: 'Prep status',
+  rooms_treated: 'Rooms treated',
 };
 
 // Registry select value → customer wording, keyed per field family. Values
@@ -223,6 +253,7 @@ const CUSTOMER_VALUE_LABELS = {
   activity_level: {
     'None observed': 'No active signs observed today',
     Low: 'Low activity',
+    Light: 'Light activity',
     Moderate: 'Moderate activity',
     Heavy: 'High activity',
     Severe: 'Severe activity',
@@ -255,6 +286,44 @@ const CUSTOMER_VALUE_LABELS = {
     'Chemical + heat': 'Combined chemical and heat treatment',
     'Steam + chemical': 'Combined steam and chemical treatment',
   },
+  standing_water: {
+    Yes: 'Standing water was found — see the breeding sources noted below',
+    No: 'No standing water was found today',
+  },
+  sensitive_areas_avoided: {
+    Avoided: 'Sensitive areas were avoided during treatment',
+    'Treated with care': 'Sensitive areas were treated with care',
+    'None present': 'No sensitive areas were present',
+  },
+  // Owner wording rule: observation-scoped absence claims only — never
+  // "no disease exists" style absolutes.
+  deficiency_signs: {
+    'None observed today': "No nutrient deficiency signs were observed at today's service",
+  },
+  pest_disease_signs: {
+    'None observed today': "No visible pest or disease indicators were observed at today's service",
+  },
+  weed_pressure: {
+    'None observed': 'No active weeds observed today',
+  },
+  insect_pressure: {
+    'None observed': 'No signs observed today',
+    Suspected: 'Suspected — we are monitoring',
+    Confirmed: 'Confirmed today',
+  },
+  disease_pressure: {
+    'None observed': 'No signs observed today',
+    Suspected: 'Suspected — we are monitoring',
+    Confirmed: 'Confirmed today',
+  },
+  findings_observed: {
+    'No live activity observed': 'No live pest activity observed in accessible areas today',
+  },
+  prep_status: {
+    Completed: 'Prep completed — thank you!',
+    Partial: 'Prep partially completed — see the prep list below',
+    'Not started': 'Prep not yet started — see the prep list below',
+  },
 };
 
 // Required service-specific fields per type (contract §4; budget ≤4 except
@@ -263,14 +332,14 @@ const CUSTOMER_VALUE_LABELS = {
 const REQUIRED_FINDINGS_FIELDS = {
   pest_inspection: ['severity'],
   one_time_pest_treatment: ['activity_level'],
-  mosquito_event: [],
-  palm_injection: [],
-  one_time_lawn_treatment: [],
+  mosquito_event: ['activity_level', 'standing_water'],
+  palm_injection: ['palm_condition'],
+  one_time_lawn_treatment: ['lawn_condition'],
   cockroach: ['species', 'activity_level'],
   flea: ['evidence_level'],
   rodent_trapping: ['species'],
   rodent_exclusion: ['species'],
-  wildlife_trapping: [],
+  wildlife_trapping: ['target_animal'],
   bed_bug: ['evidence_level', 'treatment_method'],
   termite_inspection: ['termite_type', 'activity_status'],
   termite_treatment: [
@@ -305,6 +374,29 @@ const NEXT_STEP_CHIPS = {
   'Await exclusion approval': 'Entry-point sealing will be scheduled once the exclusion quote is approved.',
   'Monitor after no activity': 'With no recent activity, we will continue monitoring before removing traps.',
   'Remove traps after inactivity': 'Traps will be removed once the inactivity period is confirmed.',
+  'Continue mosquito program': 'We will continue your regular mosquito service.',
+  'Recheck breeding areas next visit': 'We will recheck the noted breeding areas on the next visit.',
+  'Monitor after rainfall': 'Monitor mosquito activity after rainfall and let us know what you see.',
+  'Customer action — remove standing water': 'Removing the noted standing water will make a big difference before the next visit.',
+  'Callback if activity persists': 'If activity stays high after the treatment window, contact us for a callback visit.',
+  'Continue palm program': 'We will continue your palm care program.',
+  'Monitor canopy response': 'We will monitor canopy response over the next visits.',
+  'Injection recommended': 'A palm injection is recommended to address the noted deficiency.',
+  'Arborist review recommended': 'An arborist evaluation is recommended for the noted concern.',
+  'Removal evaluation recommended': 'A removal evaluation is recommended for the declining palm.',
+  'Continue lawn program': 'We will continue your lawn care program.',
+  'Recheck next visit': 'We will recheck the noted areas on the next visit.',
+  'Add-on treatment recommended': 'An add-on treatment is recommended — we will help you get it scheduled.',
+  'Irrigation correction needed': 'Correcting the noted irrigation issue will help the lawn recover.',
+  'Callback if no improvement': 'If you do not see improvement, contact us for a callback visit.',
+  'Treatment recommended': 'A treatment program is recommended — we will help you get it scheduled.',
+  'Estimate to follow': 'We will follow up with an estimate for the recommended work.',
+  'Exclusion recommended': 'Sealing work is recommended to reduce pest access.',
+  'Follow-up in 10–14 days': 'A follow-up visit in 10–14 days is recommended to stay ahead of newly hatching activity.',
+  'No store-bought sprays': 'Please avoid store-bought sprays — they interfere with the bait placements.',
+  'Install one-way device': 'A one-way exit device will be installed so the animal can leave but not return.',
+  'Exclusion after activity stops': 'Entry points will be sealed once activity has stopped.',
+  'Attic sanitation recommended': 'Attic sanitation is recommended after removal is complete.',
   'Daily trap checks underway': 'Daily trap checks are underway as required.',
   'Avoid trap area': 'Please avoid the trap area so the trap can do its job.',
   'Secure trash/food sources': 'Securing trash and outdoor food sources will reduce wildlife pressure.',
@@ -324,10 +416,13 @@ const NEXT_STEP_CHIPS = {
 const MAX_NEXT_STEP_CHIPS = 4;
 
 // Types whose completion must select at least one next-step chip (owner
-// spec: "every rodent report should end with a clear next action").
-// Enforced in the typed /complete path; served to clients in the schema
-// slice so the panel can mark the section required.
-const REQUIRED_NEXT_STEP_TYPES = new Set(['rodent_trapping']);
+// spec: every report ends with a clear next action). Enforced in the typed
+// /complete path; served to clients in the schema slice so the panel can
+// mark the section required.
+const REQUIRED_NEXT_STEP_TYPES = new Set([
+  'rodent_trapping', 'mosquito_event', 'palm_injection', 'one_time_lawn_treatment',
+  'pest_inspection', 'cockroach', 'wildlife_trapping', 'bed_bug',
+]);
 
 function nextStepRequiredForType(projectType) {
   return REQUIRED_NEXT_STEP_TYPES.has(projectType);
@@ -354,9 +449,12 @@ const RODENT_TRAPPING_CHIPS = [
   'Remove traps after inactivity', 'Seal entry points', 'Sanitation recommended',
 ];
 const TYPE_NEXT_STEP_CHIPS = {
-  pest_inspection: PEST_FAMILY_CHIPS,
+  pest_inspection: [
+    'No action needed', 'Treatment recommended', 'Follow-up recommended',
+    'Estimate to follow', 'Exclusion recommended', 'Monitor activity', 'Seal entry gaps',
+  ],
   one_time_pest_treatment: PEST_FAMILY_CHIPS,
-  cockroach: PEST_FAMILY_CHIPS,
+  cockroach: [...PEST_FAMILY_CHIPS, 'Follow-up in 10–14 days', 'No store-bought sprays'],
   flea: [
     'No action needed', 'Vacuum daily for 2 weeks', 'Wash pet bedding',
     'Coordinate vet flea control', 'Stay off treated areas until dry',
@@ -365,21 +463,29 @@ const TYPE_NEXT_STEP_CHIPS = {
   rodent_trapping: RODENT_TRAPPING_CHIPS,
   rodent_exclusion: RODENT_FAMILY_CHIPS,
   wildlife_trapping: [
-    'No action needed', 'Daily trap checks underway', 'Avoid trap area',
-    'Secure trash/food sources', 'Monitor for new activity',
+    'Continue trapping', 'Daily trap checks underway', 'Install one-way device',
+    'Exclusion after activity stops', 'Remove traps after inactivity',
+    'Attic sanitation recommended', 'Avoid trap area', 'Secure trash/food sources',
+    'Monitor for new activity', 'No action needed',
   ],
   bed_bug: [
     'Follow prep sheet', 'Wash/dry bedding on high heat',
-    '14-day follow-up scheduled', 'Continue monitoring',
+    '14-day follow-up scheduled', 'Follow-up in 10–14 days', 'Continue monitoring',
   ],
   mosquito_event: [
-    'No action needed', 'Dump standing water weekly', 'Avoid treated foliage until dry',
+    'Continue mosquito program', 'Recheck breeding areas next visit', 'Monitor after rainfall',
+    'Customer action — remove standing water', 'Callback if activity persists',
+    'Dump standing water weekly', 'Avoid treated foliage until dry', 'No action needed',
   ],
   one_time_lawn_treatment: [
-    'No action needed', 'Follow watering guidance', 'Mow guidance provided', 'Re-check scheduled',
+    'Continue lawn program', 'Recheck next visit', 'Add-on treatment recommended',
+    'Irrigation correction needed', 'Callback if no improvement',
+    'Follow watering guidance', 'Mow guidance provided', 'No action needed',
   ],
   palm_injection: [
-    'No action needed', 'Retreatment scheduled', 'Monitor fronds for change',
+    'Continue palm program', 'Monitor canopy response', 'Injection recommended',
+    'Arborist review recommended', 'Removal evaluation recommended',
+    'Retreatment scheduled', 'Monitor fronds for change', 'No action needed',
   ],
   termite_inspection: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
   termite_treatment: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
@@ -566,11 +672,18 @@ function nextStepSentence(chips = []) {
   return sentences.join(' ');
 }
 
-// Deterministic "what we did" sentence for rodent trapping, composed from
-// the sectioned checklist (counts + action chips) instead of free text.
-// Returns null when nothing trap-related was recorded so the generic
-// fallback chain applies.
-function rodentTrapSentence(values = {}) {
+function joinPhrases(parts) {
+  if (!parts.length) return null;
+  return parts.length === 1
+    ? parts[0]
+    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+// Deterministic "what we did" sentence for trapping programs (rodent +
+// wildlife), composed from the sectioned checklist (counts + action chips)
+// instead of free text. Returns null when nothing trap-related was recorded
+// so the generic fallback chain applies.
+function trapActivitySentence(values = {}) {
   const parts = [];
   const checked = Number(values.traps_checked);
   if (Number.isInteger(checked) && checked > 0) {
@@ -583,19 +696,115 @@ function rodentTrapSentence(values = {}) {
   } else if (capturesRaw != null && capturesRaw !== '' && captures === 0 && parts.length) {
     parts.push('found no new captures');
   }
+  // Both trapping vocabularies: rodent ('Traps reset', 'New traps added')
+  // and wildlife ('Trap installed', 'One-way door installed').
   const actions = String(values.trap_actions || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (actions.includes('trap installed')) parts.push('installed traps');
   if (actions.includes('new traps added')) parts.push('added new traps');
   if (actions.includes('traps reset')) parts.push('reset the traps');
   if (actions.includes('traps moved')) parts.push('repositioned traps');
+  if (actions.includes('one-way door installed')) parts.push('installed a one-way exit device');
   if (actions.includes('bait/lure refreshed')) parts.push('refreshed the bait');
+  if (actions.includes('trap removed')) parts.push('removed traps');
   const work = String(values.work_completed || '').toLowerCase();
   if (work.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
-  if (!parts.length) return null;
-  const joined = parts.length === 1
-    ? parts[0]
-    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
-  return `We ${joined} today.`;
+  const joined = joinPhrases(parts);
+  return joined ? `We ${joined} today.` : null;
+}
+
+// Work-chip → verb-phrase maps for the composed "what we did" sentence.
+// Only selected chips with a phrase contribute; types without an entry (or
+// with no selections) fall through to the generic fallback chain.
+const WORK_PHRASE_FIELDS = {
+  mosquito_event: {
+    field: 'treatment_completed',
+    phrases: {
+      'Barrier treatment': 'completed a mosquito barrier treatment',
+      'Adulticide treatment': 'treated for adult mosquitoes',
+      'Larvicide applied': 'applied larvicide to water-holding areas',
+      'Resting-site treatment': 'treated shaded resting areas',
+      'Source reduction': 'completed source reduction',
+      'Inspection only': 'completed a mosquito inspection',
+    },
+  },
+  palm_injection: {
+    field: 'work_completed',
+    phrases: {
+      'Palm fertilizer applied': 'applied palm fertilizer around the root zone',
+      'Liquid micronutrient treatment': 'applied a liquid micronutrient treatment',
+      'Soil drench': 'completed a soil drench',
+      'Insect treatment': 'treated for insect activity',
+      'Disease treatment': 'applied a disease treatment',
+      'Palm injection completed': 'completed the palm injection',
+      'Soil acidifier applied': 'applied a soil acidifier',
+      'Canopy / crown inspection': 'inspected the canopy and crown areas',
+    },
+  },
+  one_time_lawn_treatment: {
+    field: 'work_completed',
+    phrases: {
+      'Fertilizer applied': 'applied fertilizer',
+      'Weed control applied': 'applied weed control',
+      'Insect control applied': 'applied insect control',
+      'Disease control applied': 'applied disease control',
+      'Iron / micronutrients applied': 'applied iron and micronutrients',
+      'Biostimulant applied': 'applied a biostimulant',
+      'Soil amendment applied': 'applied a soil amendment',
+      'Wetting agent applied': 'applied a wetting agent',
+      'Spot treatment completed': 'spot-treated the noted areas',
+      'Inspection completed': 'completed a lawn inspection',
+    },
+  },
+  cockroach: {
+    field: 'work_completed',
+    phrases: {
+      'Bait placement': 'placed targeted bait',
+      'Insect growth regulator': 'applied an insect growth regulator',
+      'Crack & crevice treatment': 'treated cracks and crevices',
+      'Dust application': 'applied dust to voids',
+      'Flush-out treatment': 'completed a flush-out treatment',
+      'Exterior perimeter treatment': 'treated the exterior perimeter',
+      'Glue boards placed': 'placed glue boards',
+      'Monitoring stations placed': 'placed monitoring stations',
+      'Sanitation review completed': 'reviewed sanitation together',
+    },
+  },
+  bed_bug: {
+    field: 'work_completed',
+    phrases: {
+      'Crack & crevice treatment': 'treated cracks and crevices',
+      'Mattress / box spring treatment': 'treated the mattress and box spring',
+      'Bed frame treatment': 'treated the bed frame',
+      'Baseboard treatment': 'treated the baseboards',
+      'Furniture treatment': 'treated nearby furniture',
+      'Dust application': 'applied dust to voids',
+      'Steam treatment': 'completed a steam treatment',
+      'Vacuuming completed': 'vacuumed harborage areas',
+      'Encasement installed': 'installed mattress encasements',
+      'Interceptors installed': 'placed interceptors under bed legs',
+      'Adjacent rooms inspected': 'inspected adjacent rooms',
+    },
+  },
+};
+
+function composedWorkSentence(projectType, values = {}) {
+  // Inspection visits compose from the areas covered instead of work chips.
+  if (projectType === 'pest_inspection') {
+    const areas = String(values.areas_inspected || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .map((a) => (a === a.toUpperCase() ? a : a.charAt(0).toLowerCase() + a.slice(1)));
+    if (!areas.length) return null;
+    return `We inspected the ${joinPhrases(areas)}.`;
+  }
+  const config = WORK_PHRASE_FIELDS[projectType];
+  if (!config) return null;
+  const phrases = String(values[config.field] || '')
+    .split(',').map((s) => s.trim()).filter(Boolean)
+    .map((chip) => config.phrases[chip])
+    .filter(Boolean);
+  const joined = joinPhrases(phrases);
+  return joined ? `We ${joined} today.` : null;
 }
 
 /**
@@ -612,14 +821,38 @@ function buildTodaysResult({
   visitSequence = 1,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
-  // Rodent trapping composes from the sectioned checklist; values.traps_set
-  // stays in the fallback chain so pre-v2 drafts still produce a sentence.
-  const whatWeDid = (projectType === 'rodent_trapping' && rodentTrapSentence(values))
+  // Sectioned-checklist types compose "what we did" from their selections
+  // (trapping: counts + actions; others: work chips; inspections: areas).
+  // The free-text keys stay in the fallback chain so pre-v2 drafts still
+  // produce a sentence.
+  const isTrappingType = projectType === 'rodent_trapping' || projectType === 'wildlife_trapping';
+  const whatWeDid = (isTrappingType && trapActivitySentence(values))
+    || composedWorkSentence(projectType, values)
     || firstSentenceFrom(
       values.treatment_performed || values.exclusion_completed || values.areas_treated || values.traps_set,
       'We completed the scheduled service.'
     );
   const nextStep = nextStepSentence(chips);
+
+  // Mosquito has no 0-5 gauge (not a trend type) but the owner template
+  // leads with the observed level: "Mosquito activity was light today."
+  if (projectType === 'mosquito_event' && values.activity_level) {
+    const level = String(values.activity_level);
+    if (level === 'None observed') {
+      return {
+        headline: 'No active signs of mosquito activity observed today.',
+        body: `${whatWeDid} Continue monitoring and contact us if activity returns.`,
+        nextStep,
+      };
+    }
+    if (['Light', 'Moderate', 'Heavy'].includes(level)) {
+      return {
+        headline: `Mosquito activity was ${level.toLowerCase()} today.`,
+        body: `${whatWeDid} ${nextStep}`,
+        nextStep,
+      };
+    }
+  }
 
   // Bed bug zero state uses fixed, approved copy (contract §6).
   if (projectType === 'bed_bug' && activity && activity.score === 0) {
@@ -671,7 +904,10 @@ function buildTodaysResult({
     };
   }
   return {
-    headline: `${reportTypeLabel} completed today.`,
+    // The label suffix reads awkwardly in a headline ("Palm Injection
+    // Summary completed today") — the approved golden-fixture style is
+    // "Palm Injection Treatment completed today."
+    headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today.`,
     body: `${whatWeDid} ${nextStep}`,
     nextStep,
   };
@@ -819,9 +1055,9 @@ const BANNED_CUSTOMER_COPY = [
   /\bcleared\b/i,
   /\bresolved\b/i,
   /\bgone\b/i,
-  // Owner rule (rodent program): never claim the home is or will be made
-  // "rodent-proof" — exclusion copy says "reduce rodent access".
-  /\brodent[\s-]?proof/i,
+  // Owner rule: never claim a home is or will be made "-proof" against
+  // anything — exclusion copy says "reduce access".
+  /\b(?:rodent|wildlife|pest|bug|mosquito|critter|animal)[\s-]?proof/i,
 ];
 
 function findBannedCustomerCopy(text) {

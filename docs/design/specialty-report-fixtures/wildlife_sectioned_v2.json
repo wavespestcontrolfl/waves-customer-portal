@@ -1,0 +1,98 @@
+{
+ "fixture": "wildlife_sectioned_v2",
+ "proves": [
+  "sectioned_checklist",
+  "wildlife_trap_sentence",
+  "no_proof_claims"
+ ],
+ "typedReportSnapshot": {
+  "type": "wildlife_trapping",
+  "typeLabel": "Wildlife Trapping",
+  "schemaVersion": 2,
+  "copyMapVersion": 2,
+  "summaryTemplateVersion": 2,
+  "serviceKey": "wildlife_trapping",
+  "serviceLabel": "Wildlife Trapping",
+  "reportTypeLabel": "Wildlife Program — Progress Visit",
+  "visitSequence": 2,
+  "values": {
+   "target_animal": "Squirrel",
+   "evidence_observed": "Chewing marks, Nesting material, Noises reported",
+   "entry_points": "Roof returns, Tree limbs touching roof",
+   "traps_checked": "2",
+   "captures": "0",
+   "trap_actions": "Traps reset, Bait/lure refreshed",
+   "customer_recommendations": "Trim branches off roofline, Secure trash"
+  },
+  "nextStepChips": [
+   "Continue trapping",
+   "Exclusion after activity stops"
+  ],
+  "todaysResult": {
+   "headline": "Wildlife activity is about the same as our last visit.",
+   "body": "We checked 2 traps, found no new captures, reset the traps and refreshed the bait today. Trapping will continue until activity is reduced. Entry points will be sealed once activity has stopped.",
+   "nextStep": "Trapping will continue until activity is reduced. Entry points will be sealed once activity has stopped."
+  },
+  "findings": [
+   {
+    "fieldKey": "target_animal",
+    "technicianLabel": "Suspected species",
+    "customerLabel": "What we found",
+    "value": "Squirrel",
+    "customerValueLabel": "Squirrel"
+   },
+   {
+    "fieldKey": "evidence_observed",
+    "technicianLabel": "Evidence observed",
+    "customerLabel": "Evidence observed today",
+    "value": "Chewing marks, Nesting material, Noises reported",
+    "customerValueLabel": "Chewing marks, Nesting material, Noises reported"
+   },
+   {
+    "fieldKey": "entry_points",
+    "technicianLabel": "Entry / access points",
+    "customerLabel": "Entry points we found",
+    "value": "Roof returns, Tree limbs touching roof",
+    "customerValueLabel": "Roof returns, Tree limbs touching roof"
+   },
+   {
+    "fieldKey": "traps_checked",
+    "technicianLabel": "Traps checked",
+    "customerLabel": "Traps checked",
+    "value": "2",
+    "customerValueLabel": "2"
+   },
+   {
+    "fieldKey": "captures",
+    "technicianLabel": "Captures",
+    "customerLabel": "Captures",
+    "value": "0",
+    "customerValueLabel": "0"
+   },
+   {
+    "fieldKey": "trap_actions",
+    "technicianLabel": "Trap / device status",
+    "customerLabel": "Trap service performed",
+    "value": "Traps reset, Bait/lure refreshed",
+    "customerValueLabel": "Traps reset, Bait/lure refreshed"
+   },
+   {
+    "fieldKey": "customer_recommendations",
+    "technicianLabel": "Customer recommendations",
+    "customerLabel": "What you can do",
+    "value": "Trim branches off roofline, Secure trash",
+    "customerValueLabel": "Trim branches off roofline, Secure trash"
+   }
+  ],
+  "activity": {
+   "indicatorKey": "wildlife_activity",
+   "label": "Wildlife Activity",
+   "score": 2,
+   "levelWord": "Low activity",
+   "source": "tech",
+   "derivedFrom": null,
+   "trend": "stable",
+   "trendWord": "about the same as the last visit"
+  }
+ }
+}
