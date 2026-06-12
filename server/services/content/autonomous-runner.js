@@ -1163,25 +1163,29 @@ class AutonomousRunner {
         || (r.outcome === 'completed_pending_review' && r.skip_reason === 'astro_pr_pending_merge')));
     if (blogStarted) return;
 
-    // Day-dedupe via sms_log (Codex r2): the 1pm catch-up re-triggers this
-    // alert when the morning batch died before ITS send — without a
-    // persisted marker that either double-texts on every drought day or
-    // (worse) stays silent on the zero-alert days it exists to catch. Max
-    // one drought text per ET day no matter how many passes run. Fail-open:
-    // a dedupe lookup error must never suppress the alert.
+    // Day-dedupe (Codex r2+r3): the 1pm catch-up re-triggers this alert when
+    // the morning batch died before ITS send, so without a persisted marker
+    // every drought day double-alerts. internal_alert sends never reach
+    // Twilio or sms_log — TwilioService.sendSMS redirects them to the in-app
+    // admin notification system (redirectInternalAdminSmsToNotification),
+    // whose bell entry persists in `notifications` with recipient_type
+    // 'admin' and title = the first line of the SMS body. THAT row is the
+    // marker: max one drought alert per ET day across the 9am batch, the
+    // 1pm catch-up, and any manual run. Push-only delivery (bell pref off)
+    // leaves no row and lookup errors throw — both fail OPEN, the right
+    // direction for an alert that exists to catch silence.
     try {
-      const dup = await db('sms_log')
-        .where('message_type', 'internal_alert')
-        .where('direction', 'outbound')
+      const dup = await db('notifications')
+        .where('recipient_type', 'admin')
         .where('created_at', '>=', startOfEtDay())
-        .where('message_body', 'like', 'Waves content engine: NO blog post today%')
+        .where('title', 'like', 'Waves content engine: NO blog post today%')
         .first('id');
       if (dup) {
-        logger.info('[autonomous-runner] blog drought SMS already sent today; skipping duplicate');
+        logger.info('[autonomous-runner] blog drought alert already delivered today; skipping duplicate');
         return;
       }
     } catch (err) {
-      logger.warn(`[autonomous-runner] drought SMS dedupe lookup failed (${err.message}); sending anyway`);
+      logger.warn(`[autonomous-runner] drought alert dedupe lookup failed (${err.message}); sending anyway`);
     }
 
     const blogAttempts = real.filter((r) => r.action_type === 'new_supporting_blog');

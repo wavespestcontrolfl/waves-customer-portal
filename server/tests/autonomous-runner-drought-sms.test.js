@@ -119,7 +119,9 @@ test('no reviewer_notes on any attempt: body unchanged (no Detail clause)', asyn
   expect(body).not.toMatch(/Detail:/);
 });
 
-test('day-dedupe: a drought SMS already in sms_log today suppresses the duplicate', async () => {
+test('day-dedupe: a drought alert already in notifications today suppresses the duplicate', async () => {
+  // internal_alert sends redirect to the in-app notification system and
+  // never reach sms_log — the bell entry in `notifications` is the marker.
   const chain = {
     where: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue({ id: 7 }),
@@ -129,7 +131,9 @@ test('day-dedupe: a drought SMS already in sms_log today suppresses the duplicat
   await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
 
   expect(twilio.sendSMS).not.toHaveBeenCalled();
-  expect(chain.where).toHaveBeenCalledWith('message_body', 'like', 'Waves content engine: NO blog post today%');
+  expect(db).toHaveBeenCalledWith('notifications');
+  expect(chain.where).toHaveBeenCalledWith('recipient_type', 'admin');
+  expect(chain.where).toHaveBeenCalledWith('title', 'like', 'Waves content engine: NO blog post today%');
 });
 
 test('day-dedupe: no prior SMS in sms_log today → alert sends', async () => {
