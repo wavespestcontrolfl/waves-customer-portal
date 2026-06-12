@@ -15,7 +15,10 @@ const {
   chipForAction,
   urlJoinKey,
   dateColToString,
+  addDaysToDateString,
+  windowBounds,
   classifyMovement,
+  mergeWindowRows,
   buildRows,
   attachAnnotations,
   summarize,
@@ -88,6 +91,25 @@ describe('dateColToString', () => {
   test('null/invalid → null', () => {
     expect(dateColToString(null)).toBeNull();
     expect(dateColToString(new Date('garbage'))).toBeNull();
+  });
+});
+
+// ── window math ─────────────────────────────────────────────────────
+
+describe('windowBounds', () => {
+  test('anchors both windows on the latest synced GSC date (Codex P2: an ends-today window starves the current period by the sync lag)', () => {
+    const b = windowBounds(7, '2026-06-10');
+    expect(b.current_since).toBe('2026-06-04');
+    expect(b.current_to).toBe('2026-06-10');
+    expect(b.prior_since).toBe('2026-05-28');
+    // both windows are exactly 7 calendar days
+    expect(addDaysToDateString(b.current_since, 6)).toBe(b.current_to);
+    expect(addDaysToDateString(b.prior_since, 6)).toBe(addDaysToDateString(b.current_since, -1));
+  });
+  test('addDaysToDateString crosses month/year boundaries', () => {
+    expect(addDaysToDateString('2026-01-01', -1)).toBe('2025-12-31');
+    expect(addDaysToDateString('2026-02-28', 1)).toBe('2026-03-01');
+    expect(addDaysToDateString('garbage', 1)).toBeNull();
   });
 });
 
@@ -166,6 +188,49 @@ describe('buildRows', () => {
     const rows = buildRows([cur({ impressions: '2' })], [pri({ impressions: '500' })], { minImpressions: 10 });
     expect(rows).toHaveLength(1);
   });
+  test('a page ABSENT from the current window is emitted as lost with zeroed now-metrics (Codex P2)', () => {
+    const rows = buildRows([], [pri({ impressions: '500' })], { minImpressions: 10 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].movement).toBe('lost');
+    expect(rows[0].pos_now).toBeNull();
+    expect(rows[0].clicks_now).toBe(0);
+    expect(rows[0].impressions_now).toBe(0);
+    expect(rows[0].pos_before).toBe(64.8);
+  });
+  test('a vanished page below the floor stays dropped', () => {
+    expect(buildRows([], [pri({ impressions: '4' })], { minImpressions: 10 })).toHaveLength(0);
+  });
+  test('windows join on the canonical key — /foo vs /foo/ across a canonical change is a move, not new+lost (Codex P2)', () => {
+    const rows = buildRows(
+      [cur({ page_url: 'https://www.wavespestcontrol.com/hotels' })],
+      [pri({ page_url: 'https://wavespestcontrol.com/hotels/' })]
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].movement).toBe('win');
+    expect(rows[0].pos_before).toBe(64.8);
+  });
+});
+
+// ── mergeWindowRows ─────────────────────────────────────────────────
+
+describe('mergeWindowRows', () => {
+  test('URL variants within one window combine with impression-weighted position', () => {
+    const merged = mergeWindowRows([
+      cur({ page_url: 'https://www.wavespestcontrol.com/hotels/', impressions: '1000', avg_position: '50', clicks: '5' }),
+      cur({ page_url: 'https://wavespestcontrol.com/hotels', impressions: '1', avg_position: '1', clicks: '1' }),
+    ]);
+    expect(merged.size).toBe(1);
+    const entry = [...merged.values()][0];
+    // (50×1000 + 1×1) / 1001 ≈ 50 — NOT the unweighted 25.5
+    expect(entry.position).toBeCloseTo(50, 0);
+    expect(entry.clicks).toBe(6);
+    expect(entry.impressions).toBe(1001);
+    // higher-impression variant's URL wins for display
+    expect(entry.page_url).toBe('https://www.wavespestcontrol.com/hotels/');
+  });
+  test('unkeyable URLs are skipped, not crashed on', () => {
+    expect(mergeWindowRows([cur({ page_url: 'garbage' })]).size).toBe(0);
+  });
 });
 
 // ── attachAnnotations ───────────────────────────────────────────────
@@ -240,5 +305,12 @@ describe('summarize', () => {
     const s = summarize([]);
     expect(s.avg_position).toBeNull();
     expect(s.pages_tracked).toBe(0);
+  });
+  test('lost pages count as lost and do NOT inflate pages_tracked', () => {
+    const rows = buildRows([cur()], [pri(), pri({ page_url: 'https://www.wavespestcontrol.com/vanished/', impressions: '300' })]);
+    const s = summarize(rows);
+    expect(s.lost).toBe(1);
+    expect(s.pages_tracked).toBe(1);
+    expect(s.pages_tracked_delta).toBe(1 - 2);
   });
 });

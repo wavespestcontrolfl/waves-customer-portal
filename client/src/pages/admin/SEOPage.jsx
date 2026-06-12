@@ -1014,16 +1014,24 @@ function MonitorTable({ title, rows, accent }) {
                       ...tdR,
                       fontWeight: 600,
                       color:
-                        p.change == null
-                          ? D.muted
-                          : p.change < 0
-                            ? D.green
-                            : p.change > 0
-                              ? D.red
-                              : D.muted,
+                        p.movement === "lost"
+                          ? D.red
+                          : p.change == null
+                            ? D.muted
+                            : p.change < 0
+                              ? D.green
+                              : p.change > 0
+                                ? D.red
+                                : D.muted,
                     }}
                   >
-                    {p.change == null ? "NEW" : p.change > 0 ? `+${p.change}` : p.change}
+                    {p.movement === "lost"
+                      ? "GONE"
+                      : p.change == null
+                        ? "NEW"
+                        : p.change > 0
+                          ? `+${p.change}`
+                          : p.change}
                   </td>
                   <td style={tdR}>{beforeAfter(p.clicks_before, p.clicks_now)}</td>
                   <td style={tdR}>
@@ -1087,7 +1095,11 @@ function RankingsMonitorTab() {
 
   const s = data.summary || {};
   const wins = data.pages.filter((p) => p.movement === "win");
-  const losses = data.pages.filter((p) => p.movement === "loss");
+  // Pages that vanished from GSC entirely are the hardest losses — they
+  // share the Losses table, marked GONE.
+  const losses = data.pages.filter(
+    (p) => p.movement === "loss" || p.movement === "lost"
+  );
   const fresh = data.pages.filter((p) => p.movement === "new");
   const deltaSub = (delta, invert = false) => {
     if (delta == null || delta === 0) return null;

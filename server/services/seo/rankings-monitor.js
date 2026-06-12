@@ -118,11 +118,29 @@ function timestampToETDate(value) {
   return etDateString(d);
 }
 
-function windowBounds(periodDays, now = new Date()) {
+// Calendar-day arithmetic on 'YYYY-MM-DD' strings (UTC-pinned — these are
+// pure dates, no timezone in play).
+function addDaysToDateString(dateString, days) {
+  const [y, m, d] = String(dateString || '').split('-').map(Number);
+  if (!y || !m || !d) return null;
+  const date = new Date(Date.UTC(y, m - 1, d + days));
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Both windows anchor on the LATEST SYNCED GSC date, not today — GSC
+ * publishes with a ~2-3 day lag, so an ends-today current window would
+ * hold period-minus-lag days of data against a full prior period and make
+ * every delta look falsely negative (worst on the 7-day view).
+ *
+ * current = (anchor - period, anchor], prior = the equal window before it.
+ */
+function windowBounds(periodDays, anchorDateString) {
+  const current_since = addDaysToDateString(anchorDateString, -(periodDays - 1));
   return {
-    current_since: etDateString(addETDays(now, -periodDays)),
-    prior_since: etDateString(addETDays(now, -periodDays * 2)),
-    today: etDateString(now),
+    current_since,
+    current_to: anchorDateString,
+    prior_since: addDaysToDateString(anchorDateString, -(periodDays * 2 - 1)),
   };
 }
 
@@ -148,30 +166,74 @@ function classifyMovement(change, hasPrior) {
 }
 
 /**
- * Join the two window maps into page rows. Keyed on `${domain}|${canon
- * url}`. Pages below the impressions floor in BOTH windows are dropped —
- * single-impression pages produce junk position math.
+ * Aggregate one window's rows by `${domain}|${urlJoinKey}` — GSC can report
+ * the same page as /foo/ and /foo (or a case/www variant) across a
+ * canonical change, and the raw URL would split it into a phantom
+ * new-page + lost-page pair. Positions combine impression-weighted; the
+ * higher-impression variant's URL wins for display.
+ */
+function mergeWindowRows(rows = []) {
+  const byKey = new Map();
+  for (const row of rows) {
+    const joinKey = urlJoinKey(row.page_url);
+    if (!joinKey) continue;
+    const mapKey = `${row.domain || ''}|${joinKey}`;
+    const metric = toMetric(row);
+    const existing = byKey.get(mapKey);
+    if (!existing) {
+      byKey.set(mapKey, {
+        page_url: row.page_url,
+        domain: row.domain || null,
+        page_type: row.page_type || null,
+        join_key: joinKey,
+        clicks: metric.clicks,
+        impressions: metric.impressions,
+        weighted_pos: metric.position != null ? metric.position * metric.impressions : 0,
+        weight: metric.position != null ? metric.impressions : 0,
+      });
+      continue;
+    }
+    if (metric.impressions > existing.impressions) {
+      existing.page_url = row.page_url;
+      existing.page_type = row.page_type || existing.page_type;
+    }
+    existing.clicks += metric.clicks;
+    existing.impressions += metric.impressions;
+    if (metric.position != null) {
+      existing.weighted_pos += metric.position * metric.impressions;
+      existing.weight += metric.impressions;
+    }
+  }
+  for (const entry of byKey.values()) {
+    entry.position = entry.weight > 0 ? Math.round((entry.weighted_pos / entry.weight) * 10) / 10 : null;
+    entry.ctr = entry.impressions > 0 ? Math.round((entry.clicks / entry.impressions) * 10000) / 100 : 0;
+  }
+  return byKey;
+}
+
+/**
+ * Join the two windows into page rows on the canonical key. Pages below
+ * the impressions floor in BOTH windows are dropped — single-impression
+ * pages produce junk position math. Pages present in the prior window but
+ * ABSENT from the current one (GSC only returns rows for pages that got
+ * impressions) are emitted as movement='lost' — those are the hardest
+ * ranking drops and must not vanish from the monitor.
  */
 function buildRows(currentRows = [], priorRows = [], { minImpressions = DEFAULT_MIN_IMPRESSIONS } = {}) {
-  const priorByKey = new Map();
-  for (const row of priorRows) {
-    priorByKey.set(`${row.domain || ''}|${row.page_url}`, row);
-  }
+  const current = mergeWindowRows(currentRows);
+  const prior = mergeWindowRows(priorRows);
   const out = [];
-  for (const row of currentRows) {
-    const mapKey = `${row.domain || ''}|${row.page_url}`;
-    const prior = priorByKey.get(mapKey) || null;
-    const now = toMetric(row);
-    const before = prior ? toMetric(prior) : null;
+  for (const [mapKey, now] of current) {
+    const before = prior.get(mapKey) || null;
     if (now.impressions < minImpressions && (!before || before.impressions < minImpressions)) continue;
     const change = before && before.position != null && now.position != null
       ? Math.round((now.position - before.position) * 10) / 10
       : null;
     out.push({
-      page_url: row.page_url,
-      domain: row.domain || null,
-      page_type: row.page_type || null,
-      join_key: urlJoinKey(row.page_url),
+      page_url: now.page_url,
+      domain: now.domain,
+      page_type: now.page_type,
+      join_key: now.join_key,
       pos_before: before ? before.position : null,
       pos_now: now.position,
       change,
@@ -182,6 +244,27 @@ function buildRows(currentRows = [], priorRows = [], { minImpressions = DEFAULT_
       impressions_now: now.impressions,
       ctr_before: before ? before.ctr : null,
       ctr_now: now.ctr,
+      annotations: [],
+    });
+  }
+  for (const [mapKey, before] of prior) {
+    if (current.has(mapKey)) continue;
+    if (before.impressions < minImpressions) continue;
+    out.push({
+      page_url: before.page_url,
+      domain: before.domain,
+      page_type: before.page_type,
+      join_key: before.join_key,
+      pos_before: before.position,
+      pos_now: null,
+      change: null,
+      movement: 'lost',
+      clicks_before: before.clicks,
+      clicks_now: 0,
+      impressions_before: before.impressions,
+      impressions_now: 0,
+      ctr_before: before.ctr,
+      ctr_now: 0,
       annotations: [],
     });
   }
@@ -230,13 +313,13 @@ function summarize(rows = []) {
     impressions_now: 0, impressions_before: 0,
     weighted_pos_now: 0, weighted_pos_before: 0,
     pages_now: 0, pages_before: 0,
-    wins: 0, losses: 0, flat: 0, new_pages: 0,
+    wins: 0, losses: 0, flat: 0, new_pages: 0, lost: 0,
   };
   for (const row of rows) {
     sum.clicks_now += row.clicks_now;
     sum.impressions_now += row.impressions_now;
     if (row.pos_now != null) sum.weighted_pos_now += row.pos_now * row.impressions_now;
-    sum.pages_now += 1;
+    if (row.movement !== 'lost') sum.pages_now += 1;
     if (row.pos_before != null) {
       sum.clicks_before += row.clicks_before || 0;
       sum.impressions_before += row.impressions_before || 0;
@@ -245,6 +328,7 @@ function summarize(rows = []) {
     }
     if (row.movement === 'win') sum.wins += 1;
     else if (row.movement === 'loss') sum.losses += 1;
+    else if (row.movement === 'lost') sum.lost += 1;
     else if (row.movement === 'new') sum.new_pages += 1;
     else sum.flat += 1;
   }
@@ -261,6 +345,7 @@ function summarize(rows = []) {
     pages_tracked_delta: sum.pages_now - sum.pages_before,
     wins: sum.wins,
     losses: sum.losses,
+    lost: sum.lost,
     flat: sum.flat,
     new_pages: sum.new_pages,
   };
@@ -301,16 +386,23 @@ async function fetchAutonomousRunAnnotations(sinceDate) {
 }
 
 async function fetchInternalLinkAnnotations(sinceDate) {
+  // A task can merge before the window cutoff but deploy/verify inside it —
+  // match on ANY lifecycle timestamp in the window, and chip the date the
+  // link actually became live (deploy when known, else merge).
   const rows = await db('content_internal_link_tasks')
     .whereIn('status', ['merged', 'deployed', 'verified', 'applied'])
     .where((builder) => {
-      builder.where('merged_at', '>=', sinceDate).orWhere('applied_at', '>=', sinceDate);
+      builder
+        .where('merged_at', '>=', sinceDate)
+        .orWhere('deployed_at', '>=', sinceDate)
+        .orWhere('verified_at', '>=', sinceDate)
+        .orWhere('applied_at', '>=', sinceDate);
     })
     .select('target_url', 'status', 'merged_at', 'deployed_at', 'verified_at', 'applied_at');
   const out = [];
   for (const row of rows) {
     const key = urlJoinKey(row.target_url, { assumeHost: HUB_HOST });
-    const date = timestampToETDate(row.merged_at || row.deployed_at || row.verified_at || row.applied_at);
+    const date = timestampToETDate(row.deployed_at || row.merged_at || row.applied_at || row.verified_at);
     if (!key || !date) continue;
     out.push({ key, type: 'LINKS', date, source: 'internal_link' });
   }
@@ -359,12 +451,25 @@ function pageWindowQuery({ since, until = null, domain = null, type = null }) {
     .max('page_type as page_type')
     .sum('clicks as clicks')
     .sum('impressions as impressions')
-    .avg('position as avg_position')
+    // GSC's own aggregate position is impression-weighted — an unweighted
+    // avg() lets a 1-impression day at position 1 halve a page's reported
+    // position and fabricate wins/losses.
+    .select(db.raw('sum(position * impressions) / nullif(sum(impressions), 0) as avg_position'))
     .groupByRaw(`${CANON_URL_SQL}, domain`);
   if (until) query = query.where('date', '<', until);
   if (domain) query = query.where('domain', domain);
   if (type) query = query.where('page_type', type);
   return query;
+}
+
+// Latest date the GSC sync has actually written — the anchor both windows
+// hang from (see windowBounds).
+async function latestSyncedDate({ domain = null, type = null } = {}) {
+  let query = db('gsc_pages').max('date as max_date');
+  if (domain) query = query.where('domain', domain);
+  if (type) query = query.where('page_type', type);
+  const row = await query.first();
+  return dateColToString(row?.max_date);
 }
 
 // ── entry point ─────────────────────────────────────────────────────
@@ -377,7 +482,8 @@ async function build({
   minImpressions = DEFAULT_MIN_IMPRESSIONS,
   now = new Date(),
 } = {}) {
-  const bounds = windowBounds(periodDays, now);
+  const anchor = (await latestSyncedDate({ domain, type })) || etDateString(now);
+  const bounds = windowBounds(periodDays, anchor);
   const [currentRows, priorRows] = await Promise.all([
     pageWindowQuery({ since: bounds.current_since, domain, type }),
     pageWindowQuery({ since: bounds.prior_since, until: bounds.current_since, domain, type }),
@@ -385,7 +491,9 @@ async function build({
 
   const rows = buildRows(currentRows, priorRows, { minImpressions });
   // Annotations span both windows: a change made in the prior window is
-  // exactly what explains movement between them.
+  // exactly what explains movement between them. The timestamp boundary
+  // tracks the anchored span (plus the sync lag days between anchor and
+  // now, which only widens the net).
   const annotations = await fetchAllAnnotations({
     sinceDateString: bounds.prior_since,
     sinceDate: addETDays(now, -periodDays * 2),
@@ -406,8 +514,9 @@ async function build({
   return {
     window: {
       period_days: periodDays,
-      current: { from: bounds.current_since, to: bounds.today },
-      prior: { from: bounds.prior_since, to: bounds.current_since },
+      anchored_to: anchor,
+      current: { from: bounds.current_since, to: bounds.current_to },
+      prior: { from: bounds.prior_since, to: addDaysToDateString(bounds.current_since, -1) },
     },
     summary,
     pages: rows.slice(0, boundedLimit).map(({ join_key, ...rest }) => rest),
@@ -424,9 +533,11 @@ module.exports._internals = {
   urlJoinKey,
   dateColToString,
   timestampToETDate,
+  addDaysToDateString,
   windowBounds,
   toMetric,
   classifyMovement,
+  mergeWindowRows,
   buildRows,
   attachAnnotations,
   summarize,
