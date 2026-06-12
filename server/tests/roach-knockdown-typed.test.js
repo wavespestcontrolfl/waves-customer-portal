@@ -119,7 +119,7 @@ describe('German knockdown report', () => {
     expect(result.body).not.toContain('Follow-up service is recommended');
   });
 
-  test('cleared-state revisit stays observational, never "activity was none"', () => {
+  test('cleared-state revisit stays observational AND keeps the cooperation language (Codex P2)', () => {
     const result = buildTodaysResult({
       projectType: 'german_roach_knockdown',
       reportTypeLabel: 'German Roach Knockdown Summary',
@@ -130,10 +130,11 @@ describe('German knockdown report', () => {
     });
     expect(result.headline).toBe('No live German cockroach activity was observed today.');
     expect(result.headline).not.toContain('was none');
+    expect(result.body).toContain('keep bait placements undisturbed');
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
-  test('trend headline wins on the 10–14 day follow-up visit', () => {
+  test('trend headline wins on the follow-up visit but the required copy survives (Codex P2)', () => {
     const result = buildTodaysResult({
       projectType: 'german_roach_knockdown',
       reportTypeLabel: 'Roach Program — Progress Visit',
@@ -142,7 +143,33 @@ describe('German knockdown report', () => {
       activity: { score: 1, trend: 'improving', trendWord: 'decreased since the last visit' },
       visitSequence: 2,
     });
-    expect(result.headline).toContain('decreased since');
+    expect(result.headline).toBe('Roach activity has decreased since our last visit.');
+    expect(result.body).toContain('keep bait placements undisturbed');
+    expect(result.body).not.toContain('initial');
+
+    const palmetto = buildTodaysResult({
+      projectType: 'palmetto_roach_knockdown',
+      reportTypeLabel: 'Roach Program — Progress Visit',
+      values: { ...PALMETTO_VALUES, activity_level: 'Light' },
+      chips: ['Monitor activity'],
+      activity: { score: 1, trend: 'stable', trendWord: 'about the same as the last visit' },
+      visitSequence: 2,
+    });
+    expect(palmetto.headline).toBe('Roach activity is about the same as our last visit.');
+    expect(palmetto.body).toContain('flushed from hiding areas');
+  });
+
+  test('headline follows the final gauge score when the tech overrides it (Codex P2)', () => {
+    const result = buildTodaysResult({
+      projectType: 'german_roach_knockdown',
+      reportTypeLabel: 'German Roach Knockdown Summary',
+      values: { ...GERMAN_VALUES, activity_level: 'Light' },
+      chips: ['No store-bought sprays'],
+      activity: { score: 4, source: 'technician' },
+      visitSequence: 1,
+    });
+    expect(result.headline).toBe('German cockroach activity was high today.');
+    expect(result.headline).not.toContain('light');
   });
 });
 
@@ -203,6 +230,17 @@ describe('validation', () => {
       enforceRequired: true,
     });
     expect(noFollowup.ok).toBe(true);
+  });
+
+  test('required chips with only empty parts count as missing (Codex P2)', () => {
+    const result = validateTypedFindings({
+      type: 'german_roach_knockdown',
+      values: { ...GERMAN_VALUES, primary_harborage: ' , ', treatment_completed: ',' },
+      expectedType: 'german_roach_knockdown',
+      enforceRequired: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.missing).toEqual(expect.arrayContaining(['primary_harborage', 'treatment_completed']));
   });
 
   test('full owner submissions validate clean', () => {

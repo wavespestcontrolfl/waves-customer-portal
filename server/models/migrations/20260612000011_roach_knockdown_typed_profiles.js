@@ -27,9 +27,14 @@ function withMarker(notes, action) {
   return `${base}${base ? ' ' : ''}[roach_knockdown_action=${action}]`;
 }
 
+// German keeps the follow-up ALERT policy from 20260531000003 (German work
+// always needs a re-service; the success-screen follow-up CTA is driven by
+// followup_policy) with the type's 10–14 day window as the default
+// interval. Palmetto stays no-follow-up. The update path never touches
+// followup fields — these apply only when a profile row must be inserted.
 const TARGETS = [
-  { key: 'pest_initial_german_knockdown', projectType: 'german_roach_knockdown', category: 'pest_control', billingType: 'one_time' },
-  { key: 'pest_initial_palmetto_knockdown', projectType: 'palmetto_roach_knockdown', category: 'pest_control', billingType: 'one_time' },
+  { key: 'pest_initial_german_knockdown', projectType: 'german_roach_knockdown', category: 'pest_control', billingType: 'one_time', followupPolicy: 'alert', defaultFollowupDays: 14 },
+  { key: 'pest_initial_palmetto_knockdown', projectType: 'palmetto_roach_knockdown', category: 'pest_control', billingType: 'one_time', followupPolicy: 'none', defaultFollowupDays: null },
 ];
 
 exports.up = async function up(knex) {
@@ -59,14 +64,19 @@ exports.up = async function up(knex) {
         creates_service_record: true,
         portal_visibility: 'customer_portal',
         portal_attach_policy: 'active_portal_customer',
-        followup_policy: 'none',
+        followup_policy: target.followupPolicy,
+        default_followup_days: target.defaultFollowupDays,
         active: true,
         notes: withMarker('', 'inserted'),
       });
-      console.log(`[roach-knockdown] ${target.key}: profile inserted → service_report/${target.projectType}/auto_send`);
+      console.log(`[roach-knockdown] ${target.key}: profile inserted → service_report/${target.projectType}/auto_send (followup ${target.followupPolicy})`);
       continue;
     }
-    if (row.completion_mode === 'service_report' && row.project_type === target.projectType) {
+    if (
+      row.completion_mode === 'service_report'
+      && row.project_type === target.projectType
+      && row.delivery_mode === 'auto_send'
+    ) {
       console.log(`[roach-knockdown] ${target.key}: already at target — no-op`);
       continue;
     }

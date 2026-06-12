@@ -1810,44 +1810,51 @@ function buildTodaysResult({
   }
 
   // Knockdown reports (owner spec §8) carry deterministic expectation-setting
-  // language: German visits ALWAYS include the customer-cooperation sentence
-  // (bait programs fail without it — owner critical warning), palmetto
-  // visits ALWAYS include the flush disclosure. Trend headlines still win on
-  // follow-up visits so the 10–14 day recheck reads as progress.
+  // language in EVERY report body — German cooperation guidance (bait
+  // programs fail without it — owner critical warning) and the palmetto
+  // flush disclosure survive trend visits and cleared states alike (Codex
+  // P2 round 1). Headline precedence: trend > cleared > level, with the
+  // level wording driven by the FINAL gauge score so a tech-pinned score
+  // can never diverge from the headline.
   const isKnockdownType = projectType === 'german_roach_knockdown' || projectType === 'palmetto_roach_knockdown';
-  if (isKnockdownType && values.activity_level
-    && !(visitSequence > 1 && activity && activity.trendWord)) {
-    const level = String(values.activity_level).toLowerCase();
-    // Cleared-state revisit without a prior score to trend against: stay
-    // observational ("None observed" never reads as "activity was none").
-    if (level === 'none observed') {
-      const noun = projectType === 'german_roach_knockdown' ? 'German cockroach' : 'large-roach';
-      return {
-        headline: `No live ${noun} activity was observed today.`,
-        body: `${whatWeDid} ${nextStep}`.replace(/\s+/g, ' ').trim(),
-        nextStep,
-      };
+  if (isKnockdownType && values.activity_level) {
+    const isGerman = projectType === 'german_roach_knockdown';
+    const noun = isGerman ? 'German cockroach' : 'large-roach';
+    const score = activity && Number.isInteger(activity.score) ? activity.score : null;
+    const levelWord = score != null
+      ? String(SCORE_LEVEL_WORDS[score] || '').replace(' activity', '').toLowerCase()
+      : String(values.activity_level).toLowerCase();
+    const cleared = score != null ? score === 0 : levelWord === 'none observed';
+    let headline;
+    if (visitSequence > 1 && activity && activity.trendWord) {
+      // Mirror the generic trend shapes (stable needs its own sentence).
+      headline = activity.trend === 'stable'
+        ? 'Roach activity is about the same as our last visit.'
+        : `Roach activity has ${activity.trend === 'worsening' ? 'increased' : 'decreased'} since our last visit.`;
+    } else if (cleared) {
+      headline = `No live ${noun} activity was observed today.`;
+    } else {
+      headline = `${noun.charAt(0).toUpperCase()}${noun.slice(1)} activity was ${levelWord} today.`;
     }
-    if (projectType === 'german_roach_knockdown') {
-      const rooms = String(values.rooms_treated || '').trim().replace(/\.$/, '');
-      const intro = rooms
-        ? `Completed your initial German cockroach knockdown service in the ${rooms.charAt(0).toLowerCase()}${rooms.slice(1)}.`
-        : 'Completed your initial German cockroach knockdown service.';
-      const window = String(values.followup_window || '10–14 days');
-      const followup = String(values.followup_required) === 'Yes'
-        ? (window === 'As needed'
-          ? ' A follow-up visit is recommended — we will help you get it scheduled.'
-          : ` Follow-up service is recommended in ${window}.`)
-        : '';
-      return {
-        headline: `German cockroach activity was ${level} today.`,
-        body: `${intro} ${whatWeDid} Please avoid over-the-counter sprays, clean food debris behind and under appliances, and keep bait placements undisturbed so the bait can do its job.${followup} ${nextStep}`.replace(/\s+/g, ' ').trim(),
-        nextStep,
-      };
-    }
+    const initial = visitSequence > 1 ? '' : 'initial ';
+    const rooms = isGerman ? String(values.rooms_treated || '').trim().replace(/\.$/, '') : '';
+    const intro = isGerman
+      ? (rooms
+        ? `Completed your ${initial}German cockroach knockdown service in the ${rooms.charAt(0).toLowerCase()}${rooms.slice(1)}.`
+        : `Completed your ${initial}German cockroach knockdown service.`)
+      : `Completed your ${initial}large-roach knockdown service.`;
+    const disclosure = isGerman
+      ? ' Please avoid over-the-counter sprays, clean food debris behind and under appliances, and keep bait placements undisturbed so the bait can do its job.'
+      : ' Moisture and exterior entry points can contribute to large-roach activity. Some activity may be seen temporarily as roaches are flushed from hiding areas.';
+    const window = String(values.followup_window || '10–14 days');
+    const followup = isGerman && String(values.followup_required) === 'Yes'
+      ? (window === 'As needed'
+        ? ' A follow-up visit is recommended — we will help you get it scheduled.'
+        : ` Follow-up service is recommended in ${window}.`)
+      : '';
     return {
-      headline: `Large-roach activity was ${level} today.`,
-      body: `Completed your initial large-roach knockdown service. ${whatWeDid} Moisture and exterior entry points can contribute to large-roach activity. Some activity may be seen temporarily as roaches are flushed from hiding areas. ${nextStep}`.replace(/\s+/g, ' ').trim(),
+      headline,
+      body: `${intro} ${whatWeDid}${disclosure}${followup} ${nextStep}`.replace(/\s+/g, ' ').trim(),
       nextStep,
     };
   }
