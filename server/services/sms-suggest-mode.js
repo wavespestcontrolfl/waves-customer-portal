@@ -168,6 +168,18 @@ function splitPendingSuggestions(pending, inboundAt) {
 async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion }) {
   try {
     return await db.transaction(async (trx) => {
+      // Serialize publishes per customer: two fire-and-forget drafter jobs
+      // can otherwise both pass the pending-suggestion read below before
+      // either inserts, and the composer card query (latest created_at
+      // wins) would surface whichever decision landed LAST — possibly the
+      // staler inbound's. The xact lock releases at commit/rollback, so the
+      // second publisher then sees the first one's committed row and the
+      // inbound-ordering guard works. (Same two-key pattern as booking.js.)
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['sms_suggest_publish', customerId]
+      );
+
       const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at');
       if (!inbound?.created_at) return null;
 
