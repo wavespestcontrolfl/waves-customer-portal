@@ -7,6 +7,7 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
+const { fetchServiceWeekRainInches } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -235,7 +236,7 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null } = {}) {
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
   const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
@@ -261,6 +262,9 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     assessment.fawn_rainfall_7d,
   );
   const rainfallInches7d = firstNumber(
+    // Live Open-Meteo trailing-7-day total — the only real weekly rainfall
+    // source; the FAWN snapshot keys below are legacy/unpopulated fallbacks.
+    completionRainfall7dInches,
     fawnSnapshot.rainfall_7d,
     fawnSnapshot.rain_7d,
     fawnSnapshot.rainfall_last_7d,
@@ -1706,6 +1710,17 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     ...parseJsonObject(service.conditions),
     ...parseJsonObject(service.weather_data),
   };
+  // Trailing-7-day rainfall total for the water balance, keyed to the SERVICE
+  // DATE (not now) so this long-lived report token always renders the same
+  // season-consistent balance. Cached + fail-soft: null → 'rain_unknown'.
+  let completionRainfall7dInches = null;
+  try {
+    completionRainfall7dInches = await fetchServiceWeekRainInches({
+      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+      serviceDate: assessment.service_date,
+    });
+  } catch (e) { /* non-blocking */ }
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
@@ -1716,6 +1731,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       completionConditions.rain_24h_in,
       completionConditions.rainfall_in,
     ),
+    completionRainfall7dInches,
   });
 
   return {
