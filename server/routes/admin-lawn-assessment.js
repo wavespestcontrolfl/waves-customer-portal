@@ -83,6 +83,12 @@ function normalizeAssessmentRow(row) {
   };
 }
 
+function applyServiceAssessmentOrder(query) {
+  return query
+    .orderBy('created_at', 'desc')
+    .orderBy('updated_at', 'desc');
+}
+
 function scoreValue(value, fallback = 0) {
   const n = Number(value);
   if (Number.isFinite(n)) return Math.max(0, Math.min(100, Math.round(n)));
@@ -1379,11 +1385,9 @@ router.post('/recommendations/:recommendationId/events', async (req, res, next) 
 // =========================================================================
 router.get('/service/:serviceId', async (req, res, next) => {
   try {
-    const assessment = await db('lawn_assessments')
-      .where({ service_id: req.params.serviceId })
-      .orderByRaw('confirmed_at DESC NULLS LAST')
-      .orderBy('created_at', 'desc')
-      .first();
+    const assessment = await applyServiceAssessmentOrder(
+      db('lawn_assessments').where({ service_id: req.params.serviceId }),
+    ).first();
 
     if (!assessment) return res.json({ assessment: null });
 
@@ -1473,6 +1477,7 @@ router._test = {
   normalizeStressFlags,
   normalizeSnapshotRow,
   normalizeRecommendationRow,
+  applyServiceAssessmentOrder,
   canShowRecommendationToCustomer,
   CUSTOMER_FACING_STATUSES,
   customerCopyViolation,

@@ -192,6 +192,133 @@ function shouldInsertNoActivityFinding({
     && !String(concernText || '').trim();
 }
 
+function lawnAssessmentCompletionBlockPayload({
+  reportServiceLine,
+  isIncompleteVisit,
+  lawnAssessmentId,
+  submittedAssessment,
+  latestAssessment,
+} = {}) {
+  if (isIncompleteVisit || reportServiceLine !== 'lawn') return null;
+
+  if (lawnAssessmentId && !submittedAssessment) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Lawn assessment was not found for this service. Refresh and confirm the assessment before completing.',
+        code: 'lawn_assessment_not_found',
+        lawnAssessmentId,
+      },
+    };
+  }
+
+  if (submittedAssessment && submittedAssessment.confirmed_by_tech !== true) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Confirm the lawn assessment before completing this service so it appears in the customer report.',
+        code: 'lawn_assessment_unconfirmed',
+        lawnAssessmentId: submittedAssessment.id,
+      },
+    };
+  }
+
+  if (
+    lawnAssessmentId
+    && submittedAssessment
+    && latestAssessment
+    && latestAssessment.id !== submittedAssessment.id
+  ) {
+    if (latestAssessment.confirmed_by_tech === true) {
+      return {
+        status: 409,
+        payload: {
+          error: 'A newer lawn assessment is available. Refresh and complete with the latest confirmed assessment.',
+          code: 'lawn_assessment_stale',
+          lawnAssessmentId: latestAssessment.id,
+        },
+      };
+    }
+
+    return {
+      status: 400,
+      payload: {
+        error: 'A newer lawn assessment was analyzed but not confirmed. Confirm the latest assessment before completing this service.',
+        code: 'lawn_assessment_unconfirmed',
+        lawnAssessmentId: latestAssessment.id,
+      },
+    };
+  }
+
+  if (!lawnAssessmentId && latestAssessment && latestAssessment.confirmed_by_tech !== true) {
+    return {
+      status: 400,
+      payload: {
+        error: 'A lawn assessment was analyzed but not confirmed. Confirm assessment before completing this service.',
+        code: 'lawn_assessment_unconfirmed',
+        lawnAssessmentId: latestAssessment.id,
+      },
+    };
+  }
+
+  return null;
+}
+
+async function preflightLawnAssessmentCompletion({
+  knex = db,
+  serviceId,
+  customerId,
+  reportServiceLine,
+  isIncompleteVisit,
+  lawnAssessmentId,
+} = {}) {
+  if (isIncompleteVisit || reportServiceLine !== 'lawn' || !serviceId || !customerId) return null;
+
+  if (lawnAssessmentId) {
+    const [submittedAssessment, latestAssessment] = await Promise.all([
+      knex('lawn_assessments')
+        .where({
+          id: lawnAssessmentId,
+          service_id: serviceId,
+          customer_id: customerId,
+        })
+        .first('id', 'confirmed_by_tech'),
+      knex('lawn_assessments')
+        .where({
+          service_id: serviceId,
+          customer_id: customerId,
+        })
+        .orderBy('created_at', 'desc')
+        .orderBy('updated_at', 'desc')
+        .first('id', 'confirmed_by_tech'),
+    ]);
+
+    return lawnAssessmentCompletionBlockPayload({
+      reportServiceLine,
+      isIncompleteVisit,
+      lawnAssessmentId,
+      submittedAssessment,
+      latestAssessment,
+    });
+  }
+
+  const latestAssessment = await knex('lawn_assessments')
+    .where({
+      service_id: serviceId,
+      customer_id: customerId,
+    })
+    .orderBy('created_at', 'desc')
+    .orderBy('updated_at', 'desc')
+    .first('id', 'confirmed_by_tech');
+
+  return lawnAssessmentCompletionBlockPayload({
+    reportServiceLine,
+    isIncompleteVisit,
+    lawnAssessmentId,
+    latestAssessment,
+  });
+}
+
 async function renderRequiredTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -1986,6 +2113,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
     if (claim.action === 'proceed') {
+      if (canLinkLawnAssessmentRecord) {
+        const lawnAssessmentCompletionBlock = await preflightLawnAssessmentCompletion({
+          serviceId: svc.id,
+          customerId: svc.customer_id,
+          reportServiceLine,
+          isIncompleteVisit,
+          lawnAssessmentId,
+        });
+        if (lawnAssessmentCompletionBlock) {
+          await CompletionAttempts.markCompletionAttemptFailed(
+            completionAttempt,
+            new Error(lawnAssessmentCompletionBlock.payload.code || 'lawn_assessment_completion_blocked'),
+          );
+          return res
+            .status(lawnAssessmentCompletionBlock.status)
+            .json(lawnAssessmentCompletionBlock.payload);
+        }
+      }
+
       const typedValidationError = runTypedValidation();
       if (typedValidationError) {
         await CompletionAttempts.markCompletionAttemptFailed(
@@ -5674,3 +5820,7 @@ router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._test = {
+  lawnAssessmentCompletionBlockPayload,
+  preflightLawnAssessmentCompletion,
+};
