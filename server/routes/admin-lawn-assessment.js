@@ -15,7 +15,7 @@ const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
 const LawnSnapshot = require('../services/lawn-snapshot');
 const RecommendationEngine = require('../services/lawn-recommendation-engine');
-const { withConcurrency, majorityVote } = require('../services/lawn-photo-merge');
+const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -704,37 +704,11 @@ router.post('/assess', async (req, res, next) => {
     }
 
     // Average composites across all photos
-    let mergedComposite;
-    if (validResults.length === 1) {
-      mergedComposite = validResults[0].composite;
-    } else {
-      // Average all photo composites together
-      const fields = ['turf_density', 'weed_coverage'];
-      mergedComposite = {};
-      for (const field of fields) {
-        const vals = validResults.map(r => r.composite[field]).filter(v => v != null);
-        mergedComposite[field] = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
-      }
-      const colorVals = validResults.map(r => r.composite.color_health).filter(v => v != null);
-      mergedComposite.color_health = colorVals.length
-        ? Math.round(colorVals.reduce((a, b) => a + b, 0) / colorVals.length * 10) / 10
-        : 5;
-
-      // Majority vote across photos for categorical fields. Replaces
-      // first-valid-wins, which was risky: fungicide/dethatching gates
-      // would unlock based on photo 0 alone even if photos 1+2 disagreed.
-      // Tie resolves to first-seen — for 1-photo this is identical to
-      // the prior behavior.
-      mergedComposite.fungal_activity = majorityVote(
-        validResults.map(r => r.composite.fungal_activity),
-        validResults[0].composite.fungal_activity,
-      );
-      mergedComposite.thatch_visibility = majorityVote(
-        validResults.map(r => r.composite.thatch_visibility),
-        validResults[0].composite.thatch_visibility,
-      );
-      mergedComposite.observations = validResults.map(r => r.composite.observations).filter(Boolean).join(' | ');
-    }
+    // Merge per-photo composites: average numeric, majority-vote categorical,
+    // single-voice observations, and OR the overwatering_signal across photos.
+    // (See mergePhotoComposites — majority vote replaced first-valid-wins so a
+    // fungicide/dethatch gate can't unlock on photo 0 alone.)
+    const mergedComposite = mergePhotoComposites(validResults);
 
     // Convert to display scores
     const displayScores = lawnAssessment.mapToDisplayScores(mergedComposite);
