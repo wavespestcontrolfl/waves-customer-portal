@@ -68,14 +68,25 @@ describe('verifier — verdict parsing (fails safe)', () => {
     expect(parseVerifierResponse('{"supported":"yes","violations":[]}').supported).toBe(false);
   });
 
-  test('malformed violations field (string, not array) fails safe to not-supported (Codex P2)', () => {
-    // A schema slip — model flagged something but as a bare string — must
-    // NOT be dropped to [] and waved through as converged.
-    const v = parseVerifierResponse('{"supported":true,"violations":"invents a 9am arrival"}');
+  test('any flagged violation shape with supported:true still fails safe (Codex P2 + P2-r2)', () => {
+    // The model can slip the schema several ways; none may wave a draft
+    // through as converged when it clearly flagged something.
+    // (a) bare string
+    let v = parseVerifierResponse('{"supported":true,"violations":"invents a 9am arrival"}');
     expect(v.supported).toBe(false);
     expect(v.violations).toEqual(['invents a 9am arrival']);
-    // non-string malformed → still not supported, with a placeholder
+    // (b) array of objects — the common slip; extract the claim text
+    v = parseVerifierResponse('{"supported":true,"violations":[{"claim":"invents 9am"},{"violation":"names Adam"}]}');
+    expect(v.supported).toBe(false);
+    expect(v.violations).toEqual(['invents 9am', 'names Adam']);
+    // (c) array of junk we can't read → not supported, placeholder kept
+    v = parseVerifierResponse('{"supported":true,"violations":[42, {}]}');
+    expect(v.supported).toBe(false);
+    expect(v.violations.length).toBeGreaterThan(0);
+    // (d) non-empty object
     expect(parseVerifierResponse('{"supported":true,"violations":{"x":1}}').supported).toBe(false);
+    // clean pass still works: explicit true + empty array
+    expect(parseVerifierResponse('{"supported":true,"violations":[]}').supported).toBe(true);
   });
 
   test('unusable payloads return null (loop treats as inconclusive, stops)', () => {

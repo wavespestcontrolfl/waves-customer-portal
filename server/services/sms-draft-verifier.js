@@ -71,22 +71,40 @@ function parseVerifierResponse(text) {
   if (!parsed || typeof parsed !== 'object') return null;
 
   const raw = parsed.violations;
-  // A malformed violations field (present but not an array — e.g. the model
-  // returns the text as a bare string) must NOT be silently dropped to []
-  // and waved through: the model flagged something. Fail safe to
-  // not-supported, capturing the text when we can.
-  if (raw !== undefined && raw !== null && !Array.isArray(raw)) {
-    const text = typeof raw === 'string' && raw.trim()
-      ? raw.trim().slice(0, 200)
-      : 'verifier returned a malformed violations field';
-    return { supported: false, violations: [text] };
+
+  // Did the model flag ANYTHING, in ANY shape? A clean pass is an explicit
+  // empty/absent violations. Any content — a non-empty array (even of
+  // objects or junk), a non-empty string, or a non-empty object — means it
+  // flagged something and must NOT be waved through, whatever 'supported'
+  // says. Converged drafts can publish to suggest mode, so an unreadable
+  // verdict has to fail safe to a revision.
+  const flaggedSomething =
+    (Array.isArray(raw) && raw.length > 0) ||
+    (typeof raw === 'string' && raw.trim().length > 0) ||
+    (raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length > 0);
+
+  // Pull human-readable strings out for the revise feedback, coping with
+  // strings, {claim|violation|text} objects, and bare arrays.
+  let violations = [];
+  if (Array.isArray(raw)) {
+    violations = raw
+      .map((v) => {
+        if (typeof v === 'string') return v;
+        if (v && typeof v === 'object') return v.claim || v.violation || v.text || '';
+        return '';
+      })
+      .filter((v) => typeof v === 'string' && v.trim())
+      .map((v) => v.trim().slice(0, 200));
+  } else if (typeof raw === 'string' && raw.trim()) {
+    violations = [raw.trim().slice(0, 200)];
   }
 
-  const violations = Array.isArray(raw)
-    ? raw.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim().slice(0, 200))
-    : [];
-  // supported only when explicitly true AND nothing flagged — fail safe.
-  const supported = parsed.supported === true && violations.length === 0;
+  const supported = parsed.supported === true && !flaggedSomething;
+  // Flagged something we couldn't extract cleanly — keep a placeholder so the
+  // loop still revises rather than passing on an empty (but non-clean) verdict.
+  if (!supported && violations.length === 0 && flaggedSomething) {
+    violations = ['verifier flagged a violation in an unreadable format'];
+  }
   return { supported, violations };
 }
 
