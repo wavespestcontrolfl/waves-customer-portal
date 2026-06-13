@@ -48,6 +48,8 @@ import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
+import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 
@@ -162,6 +164,7 @@ export default function TechHomePage() {
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
+  const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const techName = getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
@@ -430,6 +433,7 @@ export default function TechHomePage() {
           border: `1px solid ${DARK.border}`, textAlign: 'center', color: DARK.muted,
         }}>Loading schedule...</div>
       ) : nextStop ? (
+        <>
         <div style={{
           background: DARK.card,
           borderRadius: 12,
@@ -488,6 +492,10 @@ export default function TechHomePage() {
             </div>
           )}
         </div>
+        {visualServiceNotesEnabled && nextStop.status === 'on_site' && (
+          <VisualNotesPanel service={nextStop} />
+        )}
+        </>
       ) : (
         <div style={{
           background: DARK.card, borderRadius: 12, padding: 24,

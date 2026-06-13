@@ -43,6 +43,8 @@ import {
   Select,
   cn,
 } from '../ui';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import VisualNotesReviewSection from './VisualNotesReviewSection';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -89,6 +91,7 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [busyAction, setBusyAction] = useState(null);
+  const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
 
   // Active-tech list for the assignment dropdown. Fetched once on
   // mount; same list applies regardless of which job the drawer
@@ -419,6 +422,9 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
             </Field>
             <Field label="Notes (customer-facing)">{job.notes}</Field>
             <Field label="Internal Notes">{job.internal_notes}</Field>
+            {visualServiceNotesEnabled && (
+              <VisualNotesReviewSection jobId={job.id} />
+            )}
           </>
         )}
       </SheetBody>

@@ -3,6 +3,10 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
+const {
+  VISUAL_SERVICE_NOTES_FLAG,
+  isVisualServiceNotesEnabled,
+} = require('../services/visual-service-notes');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -16,6 +20,7 @@ router.get('/', async (req, res, next) => {
       .select('flag_key', 'enabled');
     const flags = {};
     for (const row of rows) flags[row.flag_key] = !!row.enabled;
+    flags[VISUAL_SERVICE_NOTES_FLAG] = await isVisualServiceNotesEnabled(req.technicianId);
     res.json({ flags });
   } catch (err) {
     next(err);
