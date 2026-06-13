@@ -25,7 +25,7 @@ class ContextAggregator {
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services').where({ customer_id: customer.id }).where('scheduled_date', '>=', etDateString()).whereNotIn('status', ['cancelled', 'completed']).orderBy('scheduled_date').limit(3),
+      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereNotIn('ss.status', ['cancelled', 'completed']).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       db('payments').where({ 'payments.customer_id': customer.id }).orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
@@ -67,7 +67,7 @@ class ContextAggregator {
       },
       smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
       lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: lastService.technician_notes } : null,
-      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: s.window_display, status: s.status })),
+      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: s.window_display, status: s.status, tech: s.technician_name || null })),
       billing: { outstandingBalance: balance, recentPayments: payments.slice(0, 3) },
       propertyPrefs: propertyPrefs || {},
       flags, compliance,
