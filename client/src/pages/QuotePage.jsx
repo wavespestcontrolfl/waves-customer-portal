@@ -222,10 +222,12 @@ function captureAttribution() {
     };
     const hasUtm = Object.values(utm).some(Boolean);
     const gclid = p.get('gclid') || null;
+    const wbraid = p.get('wbraid') || null;
+    const gbraid = p.get('gbraid') || null;
     const referrer = document.referrer || null;
     const landing_url = window.location.href || null;
-    if (!hasUtm && !gclid && !referrer) return null;
-    return { utm: hasUtm ? utm : null, gclid, referrer, landing_url };
+    if (!hasUtm && !gclid && !wbraid && !gbraid && !referrer) return null;
+    return { utm: hasUtm ? utm : null, gclid, wbraid, gbraid, referrer, landing_url };
   } catch {
     return null;
   }

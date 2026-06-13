@@ -381,6 +381,47 @@ async function getTrafficBySource(startDate, endDate) {
   }
 }
 
+// ── 2b. GBP-tagged website traffic by profile ───────────────────────
+async function getGbpUtmTraffic(startDate, endDate) {
+  try {
+    const client = await initialize();
+    if (!client) return { configured: false, data: [] };
+
+    const range = defaultDateRange(startDate, endDate);
+    const response = await runGa4Report(client, {
+      dateRanges: [range],
+      dimensions: [
+        { name: 'sessionManualSource' },
+        { name: 'sessionManualMedium' },
+        { name: 'sessionManualCampaignName' },
+        { name: 'sessionManualAdContent' },
+      ],
+      metrics: [
+        { name: 'sessions' },
+        { name: 'totalUsers' },
+        { name: KEY_EVENTS_METRIC },
+      ],
+      orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+      limit: 10000,
+    });
+
+    const rows = (response.data.rows || []).map(row => ({
+      source: dimensionValue(row, 0),
+      medium: dimensionValue(row, 1),
+      campaign: dimensionValue(row, 2),
+      content: dimensionValue(row, 3),
+      sessions: Math.round(metricNumber(row, 0)),
+      users: Math.round(metricNumber(row, 1)),
+      conversions: Math.round(metricNumber(row, 2)),
+    }));
+
+    return { configured: true, data: rows, period: range };
+  } catch (err) {
+    logger.error(`[GA4] getGbpUtmTraffic failed: ${err.message}`);
+    return { configured: true, data: [], error: err.message };
+  }
+}
+
 // ── 3. Top Pages ────────────────────────────────────────────────────
 async function getTopPages(startDate, endDate, limit = 20) {
   try {
@@ -680,6 +721,7 @@ module.exports = {
   initialize,
   getTrafficOverview,
   getTrafficBySource,
+  getGbpUtmTraffic,
   getTopPages,
   getTopLandingPages,
   getDeviceBreakdown,

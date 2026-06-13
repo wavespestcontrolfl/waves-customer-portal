@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const GA4 = require('../services/analytics/google-analytics');
+const LocalPerformance = require('../services/analytics/local-performance');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -39,6 +40,15 @@ router.get('/sources', async (req, res, next) => {
   try {
     const { startDate, endDate } = parseDateRange(req.query);
     const data = await GA4.getTrafficBySource(startDate, endDate);
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/analytics/local-performance
+router.get('/local-performance', async (req, res, next) => {
+  try {
+    const period = parseInt(req.query.period || 30);
+    const data = await LocalPerformance.buildLocalPerformance({ periodDays: period });
     res.json(data);
   } catch (err) { next(err); }
 });
