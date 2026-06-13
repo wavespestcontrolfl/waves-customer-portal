@@ -220,7 +220,13 @@ function roundInches(value) {
 
 function monthFromServiceDate(serviceDate) {
   if (!serviceDate) return null;
-  const m = Number(String(serviceDate).slice(5, 7));
+  // A DATE column can arrive as a JS Date object (pg/Knex) or an ISO string.
+  // String(Date) yields "Sat Jun 13 2026 ..." whose slice(5,7) is non-numeric,
+  // which would silently fall back to the peak-season target. Normalize a Date
+  // to YYYY-MM-DD first; ET is behind UTC so a date-only value never crosses a
+  // month boundary under toISOString.
+  const str = serviceDate instanceof Date ? serviceDate.toISOString() : String(serviceDate);
+  const m = Number(str.slice(5, 7));
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
@@ -255,7 +261,11 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     grassType,
     month: monthFromServiceDate(serviceDate),
     irrigationInchesPerWeek,
-    rainfallInches7d,
+    // Weekly rainfall drives the water balance. When no 7-day value exists, fall
+    // back to the (completion-preferred) recent daily figure as a conservative
+    // floor — otherwise reports with 24h rain but no FAWN 7-day total would tell
+    // the customer their applied water is irrigation only.
+    rainfallInches7d: firstNumber(rainfallInches7d, rainfallInchesToday),
   });
 
   // Always return a context for lawn reports: even with no inputs we carry the
@@ -2248,4 +2258,5 @@ module.exports = {
   publicTimingFields,
   resolveReportArrivalTime,
   resolveReportCompletionTime,
+  monthFromServiceDate,
 };
