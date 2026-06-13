@@ -25,6 +25,8 @@ Agronomic tells to weigh:
 
 Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
 
+Set "overwatering_signal" true only when the photo shows a DIRECT sign of excess water — mushrooms/toadstools/fungal fruiting bodies, standing water, algae, or moss — not merely lush growth.
+
 Return this exact JSON structure and nothing else — no markdown, no backticks, no preamble:
 {
   "turf_density": <number 0-100>,
@@ -32,6 +34,7 @@ Return this exact JSON structure and nothing else — no markdown, no backticks,
   "color_health": <number 1-10>,
   "fungal_activity": <"none" | "minor" | "moderate" | "severe">,
   "thatch_visibility": <"low" | "moderate" | "high">,
+  "overwatering_signal": <true | false>,
   "observations": "<one concise paragraph>"
 }`;
 
@@ -47,6 +50,12 @@ const FUNGUS_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
 const THATCH_DISPLAY = { low: 85, moderate: 60, high: 35 };
 
 // ── Vision API calls ────────────────────────────────────────────
+
+// LLMs sometimes emit JSON booleans as strings. Coerce to a strict boolean so
+// "false" can't read as truthy and "true" survives the strict merge check.
+function strictBool(v) {
+  return v === true || String(v).trim().toLowerCase() === 'true';
+}
 
 async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
@@ -68,7 +77,9 @@ async function callClaudeVision(base64Image, mimeType) {
 
     const text = response.content?.[0]?.text;
     if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+    return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Claude vision failed: ${err.message}`);
     return null;
@@ -104,7 +115,9 @@ async function callGeminiVision(base64Image, mimeType) {
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) return null;
 
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+    return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Gemini vision failed: ${err.message}`);
     return null;
@@ -232,6 +245,10 @@ function averageScores(claudeResult, geminiResult) {
   composite.observationsGemini = geminiResult.observations || null;
   composite.observations = String(claudeResult.observations || geminiResult.observations || '').trim();
 
+  // Either model seeing a direct overwatering tell (mushrooms/standing water/
+  // algae) flags it — this cross-checks the water-balance surplus on the report.
+  composite.overwatering_signal = !!(claudeResult.overwatering_signal || geminiResult.overwatering_signal);
+
   return { composite, divergenceFlags };
 }
 
@@ -248,6 +265,7 @@ function mapToDisplayScores(composite) {
     color_health: clamp(Math.round((composite.color_health || 5) * 10)),
     fungus_control: clamp(FUNGUS_DISPLAY[composite.fungal_activity] || 50),
     thatch_level: clamp(THATCH_DISPLAY[composite.thatch_visibility] || 60),
+    overwatering_signal: !!composite.overwatering_signal,
     observations: composite.observations || '',
   };
 }

@@ -62,4 +62,38 @@ function majorityVote(values, fallback = null) {
   return best;
 }
 
-module.exports = { withConcurrency, majorityVote };
+// Merge per-photo composite results into one assessment composite. A single
+// photo is returned as-is (it already carries the Claude/Gemini overwatering_signal
+// + single-voice observations from averageScores). For 2+ photos: average the
+// numeric fields, majority-vote the categoricals, take the PRIMARY photo's
+// observation as a single voice (not a contradictory ' | ' join across photos),
+// and OR overwatering_signal so one photo seeing mushrooms/standing water/algae
+// still flags the whole assessment.
+function mergePhotoComposites(validResults = []) {
+  const results = Array.isArray(validResults) ? validResults.filter(Boolean) : [];
+  if (!results.length) return null;
+  if (results.length === 1) return results[0].composite;
+
+  const merged = {};
+  for (const field of ['turf_density', 'weed_coverage']) {
+    const vals = results.map(r => r.composite[field]).filter(v => v != null);
+    merged[field] = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
+  }
+  const colorVals = results.map(r => r.composite.color_health).filter(v => v != null);
+  merged.color_health = colorVals.length
+    ? Math.round(colorVals.reduce((a, b) => a + b, 0) / colorVals.length * 10) / 10
+    : 5;
+  merged.fungal_activity = majorityVote(
+    results.map(r => r.composite.fungal_activity),
+    results[0].composite.fungal_activity,
+  );
+  merged.thatch_visibility = majorityVote(
+    results.map(r => r.composite.thatch_visibility),
+    results[0].composite.thatch_visibility,
+  );
+  merged.observations = results.map(r => r.composite.observations).filter(Boolean)[0] || '';
+  merged.overwatering_signal = results.some(r => r.composite?.overwatering_signal === true);
+  return merged;
+}
+
+module.exports = { withConcurrency, majorityVote, mergePhotoComposites };

@@ -1,7 +1,33 @@
 const {
   recommendedInchesPerWeek,
+  recommendedFromEt0,
   buildIrrigationAdvice,
 } = require('../services/service-report/irrigation-advice');
+
+describe('recommendedFromEt0 (ET₀ × turf Kc)', () => {
+  test('calibrates to the approved seasonal targets in a typical summer week', () => {
+    expect(recommendedFromEt0(1.6, 'St. Augustine')).toBe(1.25); // 1.6 × 0.8
+    expect(recommendedFromEt0(1.6, 'bahia')).toBe(0.75);         // 1.6 × 0.45
+  });
+  test('null/zero/invalid ET₀ → null (caller falls back to seasonal lookup)', () => {
+    expect(recommendedFromEt0(null, 'St. Augustine')).toBeNull();
+    expect(recommendedFromEt0(0, 'St. Augustine')).toBeNull();
+    expect(recommendedFromEt0('x', 'St. Augustine')).toBeNull();
+  });
+});
+
+describe('buildIrrigationAdvice target basis', () => {
+  test('uses the ET₀ target when reference ET₀ is supplied', () => {
+    const a = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 6, irrigationInchesPerWeek: 1, rainfallInches7d: 0.3, referenceEt0InchesWeek: 1.6 });
+    expect(a.targetBasis).toBe('evapotranspiration');
+    expect(a.recommendedInchesPerWeek).toBe(1.25);
+  });
+  test('falls back to the seasonal lookup when ET₀ is absent', () => {
+    const a = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 6, irrigationInchesPerWeek: 1, rainfallInches7d: 0.3 });
+    expect(a.targetBasis).toBe('seasonal');
+    expect(a.recommendedInchesPerWeek).toBe(1.25);
+  });
+});
 
 describe('recommendedInchesPerWeek (grass × season, v1 lookup)', () => {
   test('St. Augustine steps down from peak to cool season', () => {
@@ -10,10 +36,11 @@ describe('recommendedInchesPerWeek (grass × season, v1 lookup)', () => {
     expect(recommendedInchesPerWeek('St. Augustine', 12)).toBe(0.75); // cool
   });
 
-  test('drought-tolerant grasses recommend less; unknown falls back to default', () => {
+  test('drought-tolerant grasses recommend less; unknown defaults to St. Augustine', () => {
     expect(recommendedInchesPerWeek('bahia', 6)).toBe(0.75);
     expect(recommendedInchesPerWeek('zoysia', 6)).toBe(1);
-    expect(recommendedInchesPerWeek(null, 6)).toBe(1);
+    expect(recommendedInchesPerWeek(null, 6)).toBe(1.25);   // St. Augustine default
+    expect(recommendedFromEt0(1.6, null)).toBe(1.25);        // 1.6 × 0.8 (St. Aug Kc)
   });
 });
 

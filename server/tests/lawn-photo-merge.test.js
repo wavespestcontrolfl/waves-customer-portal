@@ -4,7 +4,43 @@
  * developer box without DATABASE_URL.
  */
 
-const { withConcurrency, majorityVote } = require('../services/lawn-photo-merge');
+const { withConcurrency, majorityVote, mergePhotoComposites } = require('../services/lawn-photo-merge');
+
+describe('mergePhotoComposites', () => {
+  const photo = (o) => ({ composite: { turf_density: 70, weed_coverage: 10, color_health: 7, fungal_activity: 'none', thatch_visibility: 'low', observations: '', overwatering_signal: false, ...o } });
+
+  test('ORs overwatering_signal across photos (one photo seeing it flags all)', () => {
+    const merged = mergePhotoComposites([
+      photo({ observations: 'Front looks healthy.' }),
+      photo({ observations: 'Mushrooms near the bed.', overwatering_signal: true }),
+      photo({ observations: 'Side yard fine.' }),
+    ]);
+    expect(merged.overwatering_signal).toBe(true);
+  });
+
+  test('all photos clear → overwatering_signal false', () => {
+    expect(mergePhotoComposites([photo({}), photo({})]).overwatering_signal).toBe(false);
+  });
+
+  test('single-voice observations — primary photo, never a " | " join', () => {
+    const merged = mergePhotoComposites([
+      photo({ observations: 'Primary view: dense, green.' }),
+      photo({ observations: 'No significant weeds.' }),
+    ]);
+    expect(merged.observations).toBe('Primary view: dense, green.');
+    expect(merged.observations).not.toContain(' | ');
+  });
+
+  test('single photo returns its composite as-is (signal preserved)', () => {
+    const c = photo({ overwatering_signal: true }).composite;
+    expect(mergePhotoComposites([{ composite: c }])).toBe(c);
+  });
+
+  test('empty → null', () => {
+    expect(mergePhotoComposites([])).toBeNull();
+    expect(mergePhotoComposites(null)).toBeNull();
+  });
+});
 
 describe('withConcurrency', () => {
   test('preserves input order even when fn resolves out of order', async () => {

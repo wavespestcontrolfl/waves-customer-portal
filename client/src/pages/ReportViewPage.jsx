@@ -972,7 +972,7 @@ function lawnWaterLine(water = {}) {
 // rainfall) to the grass×season recommendation. Surplus reads as over-watering
 // (the fungus/mushroom cross-check); deficit as drought stress. When no schedule
 // is on file it prompts the customer to add it (deep-links to My Property).
-function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live' }) {
+function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live', overwateringObserved = false }) {
   const advice = water?.irrigationAdvice;
   if (!advice) {
     const line = lawnWaterLine(water);
@@ -996,7 +996,9 @@ function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live' }) {
   const gap = formatWaterInches(Math.abs(Number(advice.differentialInchesPerWeek) || 0));
   let message;
   if (advice.status === 'surplus') {
-    message = <>You're applying about <strong>{applied}/week</strong> — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season. Easing back can reduce fungus, mushrooms, and weed pressure.</>;
+    message = overwateringObserved
+      ? <>You're applying about <strong>{applied}/week</strong> — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season, and the fungal/mushroom signs in today's photos line up with over-watering. Easing back should reduce them along with weed pressure.</>
+      : <>You're applying about <strong>{applied}/week</strong> — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season. Easing back can reduce fungus, mushrooms, and weed pressure.</>;
   } else if (advice.status === 'deficit') {
     message = <>You're applying about <strong>{applied}/week</strong> — roughly {gap} short of the ~{recommended} your {grassLabel} needs this season.</>;
   } else if (advice.status === 'rain_unknown') {
@@ -1317,6 +1319,12 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   const profile = assessment.turfProfile;
   const irrigationInches = formatIrrigationInches(profile?.irrigationInchesPerWeek);
   const grassLabel = profile?.grassType ? formatEnumLabel(profile.grassType) : 'lawn';
+  // Over-watering evidence for the water-balance cross-link: the explicit vision
+  // signal (mushrooms/standing water), or — for older assessments without it — a
+  // low fungus-control score (moderate+ fungal activity) as a proxy.
+  const fungusControl = Number(assessment.scores?.fungusControl);
+  const overwateringObserved = assessment.overwateringSignal === true
+    || (Number.isFinite(fungusControl) && fungusControl > 0 && fungusControl <= 50);
   const metricRows = lawnMetricRows(assessment);
   const visiblePhotos = (assessment.photos || []).filter((photo) => photo.url).slice(0, 3);
 
@@ -1348,7 +1356,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
         </div>
         <LawnTrendChart trend={assessment.trend || []} summary={assessment.customerSummary} />
       </div>
-      <LawnWaterBalance water={assessment.waterContext} grassLabel={grassLabel} mode={mode} />
+      <LawnWaterBalance water={assessment.waterContext} grassLabel={grassLabel} mode={mode} overwateringObserved={overwateringObserved} />
       <div className="lawn-score-grid">
         {metricRows.map(([label, value]) => (
           <div className="lawn-score-cell" key={label}>
