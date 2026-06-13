@@ -51,6 +51,12 @@ const THATCH_DISPLAY = { low: 85, moderate: 60, high: 35 };
 
 // ── Vision API calls ────────────────────────────────────────────
 
+// LLMs sometimes emit JSON booleans as strings. Coerce to a strict boolean so
+// "false" can't read as truthy and "true" survives the strict merge check.
+function strictBool(v) {
+  return v === true || String(v).trim().toLowerCase() === 'true';
+}
+
 async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
 
@@ -71,7 +77,9 @@ async function callClaudeVision(base64Image, mimeType) {
 
     const text = response.content?.[0]?.text;
     if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+    return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Claude vision failed: ${err.message}`);
     return null;
@@ -107,7 +115,9 @@ async function callGeminiVision(base64Image, mimeType) {
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) return null;
 
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+    return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Gemini vision failed: ${err.message}`);
     return null;
