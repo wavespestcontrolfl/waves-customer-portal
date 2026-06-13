@@ -128,9 +128,100 @@ async function fetchApplicationConditions({ latitude, longitude } = {}) {
   return fetchOpenMeteoConditions(coords);
 }
 
+// Sum of daily precipitation (inches) over a window. Returns null if ANY day is
+// missing/non-numeric: a partial week can't be trusted as a weekly total (a gap
+// day might have rained), and summing the rest would undercount and could falsely
+// flag under-watering. An incomplete window → 'rain_unknown', never a guess. A
+// genuine all-zero (dry) week still returns 0.
+function sumPrecipInches(dailySums) {
+  if (!Array.isArray(dailySums) || !dailySums.length) return null;
+  let total = 0;
+  for (const v of dailySums) {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    total += n;
+  }
+  return roundedNumber(total, 2);
+}
+
+// { start, end } YYYY-MM-DD for the `days`-day window ending ON serviceDate.
+function rainWindowEndingOn(serviceDate, days = 7) {
+  const ymd = (serviceDate instanceof Date ? serviceDate.toISOString() : String(serviceDate || '')).slice(0, 10);
+  const end = new Date(`${ymd}T00:00:00Z`);
+  if (Number.isNaN(end.getTime())) return null;
+  const start = new Date(end.getTime() - (days - 1) * 86400000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { start: fmt(start), end: fmt(end) };
+}
+
+const _rainCache = new Map();
+const RAIN_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+function rainCacheKey(lat, lon, end) {
+  return `${Number(lat).toFixed(2)},${Number(lon).toFixed(2)},${end}`;
+}
+
+// Trailing-7-day rainfall total (inches) for the week ENDING ON the service date
+// — keyed to the visit, never "now", so a long-lived report token always renders
+// the same season-consistent water balance. Cached by coord+date; fail-soft to
+// null so the report degrades to 'rain_unknown'. Open-Meteo's forecast endpoint
+// serves recent history via start_date/end_date; older dates resolve to null.
+async function fetchServiceWeekRainInches({ latitude, longitude, serviceDate } = {}) {
+  const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
+  const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
+  const range = rainWindowEndingOn(serviceDate, 7);
+  if (lat == null || lon == null || !range) return null;
+  const key = rainCacheKey(lat, lon, range.end);
+  const cached = _rainCache.get(key);
+  if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
+
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.searchParams.set('latitude', String(lat));
+  url.searchParams.set('longitude', String(lon));
+  url.searchParams.set('daily', 'precipitation_sum');
+  url.searchParams.set('start_date', range.start);
+  url.searchParams.set('end_date', range.end);
+  url.searchParams.set('precipitation_unit', 'inch');
+  url.searchParams.set('timezone', 'America/New_York');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const daily = payload?.daily || {};
+    const sums = daily.precipitation_sum;
+    const times = daily.time;
+    // Trust only a COMPLETE window: if Open-Meteo returns a short/partial range
+    // (date range partly outside its coverage), surface rain_unknown rather than
+    // a weekly total computed from fewer days.
+    const expectedDays = Math.round(
+      (Date.parse(`${range.end}T00:00:00Z`) - Date.parse(`${range.start}T00:00:00Z`)) / 86400000,
+    ) + 1;
+    const complete = Array.isArray(sums) && Array.isArray(times)
+      && sums.length === expectedDays
+      && times.length === expectedDays
+      && times[0] === range.start
+      && times[times.length - 1] === range.end;
+    const value = complete ? sumPrecipInches(sums) : null;
+    _rainCache.set(key, { at: Date.now(), value });
+    return value;
+  } catch (err) {
+    logger.warn(`[application-conditions] service-week rainfall fetch failed: ${err.message}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 module.exports = {
   fetchApplicationConditions,
   fetchOpenMeteoConditions,
+  fetchServiceWeekRainInches,
+  sumPrecipInches,
+  rainWindowEndingOn,
   normalizeFawnConditions,
   weatherCodeLabel,
 };
