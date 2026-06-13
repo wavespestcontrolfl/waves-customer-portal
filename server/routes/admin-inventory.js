@@ -109,6 +109,106 @@ function cleanString(value) {
   return str || null;
 }
 
+function parseJsonObject(value, fallback = {}) {
+  if (!value) return fallback;
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseBoundedInt(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+const HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES = [
+  'portal_connector',
+  'approved_feed',
+  'api',
+  'workwave_marketplace',
+];
+
+function isOpenLoginDiscoveryJob(loginDiscovery = {}) {
+  if (loginDiscovery.status === 'queued') return true;
+  if (loginDiscovery.status !== 'running') return false;
+  const claimedUntil = Date.parse(loginDiscovery.claimedUntil || '');
+  return Number.isFinite(claimedUntil) && claimedUntil > Date.now();
+}
+
+function vendorHasLoginIdentity(vendor = {}) {
+  return Boolean(cleanString(vendor.login_username) || cleanString(vendor.login_email) || cleanString(vendor.account_number));
+}
+
+function vendorNeedsLoginDiscovery(vendor = {}, connections = [], includePublic = false) {
+  if (vendor.active === false) return false;
+  if (String(vendor.type || '') === 'competitor_reference') return false;
+
+  const hasLoginUrl = Boolean(cleanString(vendor.login_url));
+  const hasLoginIdentity = vendorHasLoginIdentity(vendor);
+  const credentialStatus = String(vendor.credential_status || '').toLowerCase();
+  const syncMethod = String(vendor.sync_method || '').toLowerCase();
+  if (['manual', 'manual_csv', 'manual_seed'].includes(credentialStatus)) return false;
+  if (['manual', 'manual_csv', 'manual_seed'].includes(syncMethod)) return false;
+  const accountConnection = connections.find((connection) => (
+    connection.is_active !== false
+    && HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES.includes(connection.connection_type)
+  ));
+  const configured = connections.some((connection) => (
+    connection.is_active !== false
+    && HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES.includes(connection.connection_type)
+    && connection.credential_status === 'configured'
+  ));
+
+  if (configured && hasLoginUrl && hasLoginIdentity) return false;
+  if (credentialStatus && ['configured', 'not_required'].includes(credentialStatus) && !includePublic) return false;
+  if (syncMethod === 'public_scraper' && credentialStatus === 'not_required' && !includePublic) return false;
+  if (!hasLoginUrl || !hasLoginIdentity) return true;
+  if (['needs_login', 'needs_rep_setup', 'needs_api_key', 'missing', 'failed', 'expired'].includes(credentialStatus)) return true;
+  return Boolean(accountConnection && accountConnection.credential_status !== 'configured');
+}
+
+async function ensureLoginDiscoveryConnection(trx, vendor) {
+  const existingConnections = await trx('vendor_connections')
+    .where({ vendor_id: vendor.id, is_active: true })
+    .whereIn('connection_type', HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES)
+    .orderByRaw(`
+      CASE connection_type
+        WHEN 'portal_connector' THEN 0
+        WHEN 'workwave_marketplace' THEN 1
+        WHEN 'approved_feed' THEN 2
+        WHEN 'api' THEN 3
+        ELSE 4
+      END
+    `);
+  if (existingConnections.length) return existingConnections[0];
+
+  const [connection] = await trx('vendor_connections')
+    .insert({
+      vendor_id: vendor.id,
+      connection_type: 'portal_connector',
+      approval_status: 'requested',
+      credential_status: 'missing',
+      supports_account_pricing: true,
+      supports_public_pricing: false,
+      supports_inventory: true,
+      supports_branch_availability: true,
+      supports_bulk_pricing: false,
+      config_json: JSON.stringify({
+        seededFrom: 'hermes_login_discovery',
+      }),
+      is_active: true,
+      created_at: new Date(),
+      updated_at: new Date(),
+    })
+    .returning('*');
+  return connection;
+}
+
 function parseDecimalOrNull(value) {
   if (value === '' || value == null) return null;
   const n = Number(value);
@@ -914,11 +1014,19 @@ router.get('/price-sync/vendors', async (req, res, next) => {
         'v.type',
         'v.active',
         'v.website',
+        'v.login_url',
+        'v.login_username',
+        'v.login_email',
+        'v.account_number',
+        'v.credential_status as vendor_credential_status',
+        'v.sync_method',
+        'v.sync_method_notes',
         'vc.id as connection_id',
         'vc.connection_type',
         'vc.display_name',
         'vc.approval_status',
         'vc.credential_status',
+        'vc.config_json',
         'vc.supports_account_pricing',
         'vc.supports_public_pricing',
         'vc.supports_inventory',
@@ -971,23 +1079,34 @@ router.get('/price-sync/vendors', async (req, res, next) => {
           type: row.type,
           active: row.active,
           website: row.website,
+          loginUrl: row.login_url,
+          hasCredentials: Boolean(row.login_username || row.login_email || row.account_number),
+          credentialStatus: row.vendor_credential_status || null,
+          syncMethod: row.sync_method || null,
+          syncMethodNotes: row.sync_method_notes || null,
           mappedProducts: Number(row.mapped_products || 0),
           verifiedMappings: Number(row.verified_mappings || 0),
           currentPrices: Number(row.current_prices || 0),
           bestPrices: Number(row.best_prices || 0),
           pendingApprovals: Number(row.pending_approvals || 0),
           nextAction: 'Needs mapping',
+          loginDiscoveryNeeded: false,
+          loginDiscoveryStatus: null,
+          loginDiscoveryResult: null,
           connections: [],
         });
       }
       const vendor = grouped.get(row.id);
       if (row.connection_id) {
+        const config = parseJsonObject(row.config_json, {});
+        const loginDiscovery = config.loginDiscovery || null;
         const connection = {
           id: row.connection_id,
           type: row.connection_type,
           displayName: row.display_name || row.connection_type,
           approvalStatus: row.approval_status,
           credentialStatus: row.credential_status,
+          loginDiscovery,
           supportsAccountPricing: row.supports_account_pricing,
           supportsPublicPricing: row.supports_public_pricing,
           supportsInventory: row.supports_inventory,
@@ -998,6 +1117,10 @@ router.get('/price-sync/vendors', async (req, res, next) => {
           failureReason: row.failure_reason,
         };
         vendor.connections.push(connection);
+        if (loginDiscovery?.status) {
+          vendor.loginDiscoveryStatus = loginDiscovery.status;
+          vendor.loginDiscoveryResult = loginDiscovery.outcome || loginDiscovery.result || null;
+        }
       }
       if (vendor.verifiedMappings > 0 && vendor.currentPrices > 0) vendor.nextAction = 'Ready for manual seed review';
       else if (vendor.mappedProducts > 0 && vendor.verifiedMappings === 0) vendor.nextAction = 'Verify mappings';
@@ -1006,7 +1129,134 @@ router.get('/price-sync/vendors', async (req, res, next) => {
       }
     }
 
+    for (const vendor of grouped.values()) {
+      const loginDiscoveryConnections = vendor.connections.map((connection) => ({
+        is_active: true,
+        connection_type: connection.type,
+        credential_status: connection.credentialStatus,
+      }));
+      vendor.loginDiscoveryNeeded = vendorNeedsLoginDiscovery({
+        id: vendor.id,
+        type: vendor.type,
+        active: vendor.active,
+        login_url: vendor.loginUrl,
+        login_username: vendor.hasCredentials ? 'configured' : null,
+        credential_status: vendor.credentialStatus,
+        sync_method: vendor.syncMethod,
+      }, loginDiscoveryConnections);
+    }
+
     res.json({ vendors: Array.from(grouped.values()) });
+  } catch (err) { next(err); }
+});
+
+router.post('/price-sync/hermes-login-discovery', async (req, res, next) => {
+  try {
+    if (!(await db.schema.hasTable('vendor_connections'))) {
+      return res.status(404).json({ error: 'Vendor connection table is not available. Run database migrations first.' });
+    }
+
+    const limit = parseBoundedInt(req.body?.limit, 50, 1, 200);
+    const includePublic = req.body?.includePublic === true;
+    const requestedBy = req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin';
+
+    const vendors = await db('vendors')
+      .where(function activeVendors() {
+        this.where('active', true).orWhereNull('active');
+      })
+      .where(function notCompetitorReference() {
+        this.whereNull('type').orWhereNot('type', 'competitor_reference');
+      })
+      .orderByRaw(`
+        CASE
+          WHEN credential_status IN ('needs_login', 'needs_rep_setup', 'needs_api_key', 'missing', 'failed', 'expired') THEN 0
+          WHEN login_url IS NULL THEN 1
+          ELSE 2
+        END
+      `)
+      .orderBy('name');
+
+    const vendorIds = vendors.map((vendor) => vendor.id);
+    const connectionRows = vendorIds.length
+      ? await db('vendor_connections').whereIn('vendor_id', vendorIds).where({ is_active: true })
+      : [];
+    const connectionsByVendor = new Map();
+    for (const connection of connectionRows) {
+      const key = String(connection.vendor_id);
+      if (!connectionsByVendor.has(key)) connectionsByVendor.set(key, []);
+      connectionsByVendor.get(key).push(connection);
+    }
+
+    const candidates = vendors
+      .filter((vendor) => vendorNeedsLoginDiscovery(vendor, connectionsByVendor.get(String(vendor.id)) || [], includePublic))
+      .slice(0, limit);
+
+    let queued = 0;
+    let duplicates = 0;
+    const jobs = [];
+    await db.transaction(async (trx) => {
+      for (const vendor of candidates) {
+        const connection = await ensureLoginDiscoveryConnection(trx, vendor);
+        const config = parseJsonObject(connection.config_json, {});
+        const existing = config.loginDiscovery || {};
+        if (isOpenLoginDiscoveryJob(existing)) {
+          duplicates += 1;
+          jobs.push({
+            vendorId: vendor.id,
+            vendorName: vendor.name,
+            connectionId: connection.id,
+            status: existing.status,
+            duplicate: true,
+          });
+          continue;
+        }
+
+        const loginDiscovery = {
+          status: 'queued',
+          requestedAt: new Date().toISOString(),
+          requestedBy,
+          source: 'admin_inventory_price_sync',
+        };
+        await trx('vendor_connections').where({ id: connection.id }).update({
+          approval_status: connection.approval_status === 'approved' ? 'approved' : 'requested',
+          credential_status: connection.credential_status === 'configured' ? 'configured' : 'missing',
+          config_json: JSON.stringify({
+            ...config,
+            loginDiscovery,
+          }),
+          failure_reason: null,
+          updated_at: new Date(),
+        });
+
+        const nextCredentialStatus = ['configured', 'not_required', 'manual'].includes(String(vendor.credential_status || ''))
+          ? vendor.credential_status
+          : 'needs_login';
+        await trx('vendors').where({ id: vendor.id }).update({
+          credential_status: nextCredentialStatus,
+          updated_at: new Date(),
+        });
+
+        queued += 1;
+        jobs.push({
+          vendorId: vendor.id,
+          vendorName: vendor.name,
+          connectionId: connection.id,
+          connectionType: connection.connection_type,
+          status: 'queued',
+        });
+      }
+    });
+
+    res.status(202).json({
+      success: true,
+      queued,
+      duplicates,
+      candidateCount: candidates.length,
+      jobs,
+      message: queued
+        ? `Queued ${queued} vendor login discovery job${queued === 1 ? '' : 's'} for Hermes.`
+        : 'No new vendor login discovery jobs needed.',
+    });
   } catch (err) { next(err); }
 });
 
