@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const GA4 = require('../services/analytics/google-analytics');
 const LocalPerformance = require('../services/analytics/local-performance');
 const DataManager = require('../services/ads/data-manager');
@@ -65,7 +65,7 @@ router.get('/data-manager/readiness', async (req, res, next) => {
 });
 
 // POST /api/admin/analytics/data-manager/upload
-router.post('/data-manager/upload', async (req, res, next) => {
+router.post('/data-manager/upload', requireAdmin, async (req, res, next) => {
   try {
     const result = await DataManager.uploadConversions({
       conversionType: req.body?.conversionType || req.body?.type || 'completed_job_revenue',

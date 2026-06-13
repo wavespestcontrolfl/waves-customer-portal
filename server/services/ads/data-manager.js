@@ -28,6 +28,8 @@ const REQUEST_STATUS_URL = 'https://datamanager.googleapis.com/v1/requestStatus:
 const DEFAULT_CURRENCY = 'USD';
 const MAX_EVENTS_PER_REQUEST = 2000;
 const MAX_LIMIT = 500;
+const LIVE_UPLOAD_PENDING_STATUS = 'pending';
+const LIVE_UPLOAD_SENT_STATUS = 'sent';
 
 const CONVERSIONS = {
   qualified_lead: {
@@ -301,6 +303,46 @@ function redactedEventSummary(candidate, event) {
   };
 }
 
+function candidateMatchScore(candidate) {
+  let score = 0;
+  if (candidate.gclid) score += 8;
+  if (candidate.wbraid || candidate.gbraid) score += 6;
+  if (normalizeEmail(candidate.email)) score += 4;
+  if (normalizePhone(candidate.phone)) score += 4;
+  if (number(candidate.conversionValue) > 0) score += 2;
+  if (candidate.eventTimestamp) score += 1;
+  if (candidate.leadId) score += 1;
+  return score;
+}
+
+function dedupeCandidatesByTransaction(candidates = []) {
+  const byTransaction = new Map();
+  const order = [];
+
+  for (const candidate of candidates) {
+    const transactionId = candidate?.transactionId;
+    if (!transactionId) {
+      order.push({ candidate });
+      continue;
+    }
+
+    if (!byTransaction.has(transactionId)) {
+      byTransaction.set(transactionId, candidate);
+      order.push({ transactionId });
+      continue;
+    }
+
+    const existing = byTransaction.get(transactionId);
+    if (candidateMatchScore(candidate) > candidateMatchScore(existing)) {
+      byTransaction.set(transactionId, candidate);
+    }
+  }
+
+  return order.map((entry) => (
+    entry.transactionId ? byTransaction.get(entry.transactionId) : entry.candidate
+  ));
+}
+
 function mapLeadCandidate(row) {
   const eventTimestamp = toRfc3339(row.converted_at || row.first_contact_at || row.created_at);
   return {
@@ -373,10 +415,11 @@ function mapCompletedJobCandidate(row) {
 
 async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMIT } = {}) {
   const cap = Math.min(Math.max(parseInt(limit, 10) || MAX_LIMIT, 1), MAX_LIMIT);
+  const eventTimestampSql = 'COALESCE(l.converted_at, l.first_contact_at, l.created_at)';
   const rows = await db('leads as l')
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
-    .where('l.first_contact_at', '>=', since)
-    .where('l.first_contact_at', '<', addDateStringDays(endDate, 1))
+    .whereRaw(`${eventTimestampSql} >= ?::timestamptz`, [since])
+    .whereRaw(`${eventTimestampSql} < ?::timestamptz`, [addDateStringDays(endDate, 1)])
     .where((q) => {
       q.where('l.is_qualified', true)
         .orWhereRaw("LOWER(COALESCE(l.status, '')) IN ('qualified', 'booked', 'converted', 'won')");
@@ -398,21 +441,22 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       'ls.source_type',
       'ls.channel',
     )
-    .orderBy('l.first_contact_at', 'desc')
+    .orderByRaw(`${eventTimestampSql} DESC NULLS LAST`)
     .limit(cap);
 
   return rows.map(mapLeadCandidate);
 }
 
 function invoiceRollupSubquery() {
+  const invoiceOrder = 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC';
   return db('invoices')
     .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
     .whereNotNull('service_record_id')
     .select(
       'service_record_id',
-      db.raw('(ARRAY_AGG(id ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST))[1] as invoice_id'),
-      db.raw('(ARRAY_AGG(status ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST))[1] as invoice_status'),
-      db.raw('MAX(total) as invoice_total'),
+      db.raw(`(ARRAY_AGG(id ORDER BY ${invoiceOrder}))[1] as invoice_id`),
+      db.raw(`(ARRAY_AGG(status ORDER BY ${invoiceOrder}))[1] as invoice_status`),
+      db.raw(`(ARRAY_AGG(total ORDER BY ${invoiceOrder}))[1] as invoice_total`),
     )
     .groupBy('service_record_id')
     .as('inv');
@@ -420,6 +464,7 @@ function invoiceRollupSubquery() {
 
 async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT } = {}) {
   const cap = Math.min(Math.max(parseInt(limit, 10) || MAX_LIMIT, 1), MAX_LIMIT);
+  const queryLimit = Math.min(cap * 2, MAX_EVENTS_PER_REQUEST);
   const invoiceRollup = invoiceRollupSubquery();
 
   const rows = await db('estimate_actuals as ea')
@@ -458,15 +503,26 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
       'sr.updated_at as completed_at',
     )
     .orderBy('ea.service_date', 'desc')
-    .limit(cap);
+    .limit(queryLimit);
 
-  return rows.map(mapCompletedJobCandidate);
+  return dedupeCandidatesByTransaction(rows.map(mapCompletedJobCandidate)).slice(0, cap);
 }
 
 async function collectCandidates(conversionType, options = {}) {
-  if (conversionType === 'qualified_lead') return collectQualifiedLeadCandidates(options);
-  if (conversionType === 'completed_job_revenue') return collectCompletedJobCandidates(options);
+  if (conversionType === 'qualified_lead') {
+    return dedupeCandidatesByTransaction(await collectQualifiedLeadCandidates(options));
+  }
+  if (conversionType === 'completed_job_revenue') {
+    return dedupeCandidatesByTransaction(await collectCompletedJobCandidates(options));
+  }
   throw new Error(`Unsupported conversion type: ${conversionType}`);
+}
+
+function priorUploadSkipReason(prior) {
+  if (!prior) return null;
+  if (prior.status === LIVE_UPLOAD_SENT_STATUS) return 'already_sent';
+  if (prior.status === LIVE_UPLOAD_PENDING_STATUS) return 'upload_pending';
+  return null;
 }
 
 function summarizeCandidates(candidates, existingByTransaction = new Map()) {
@@ -474,6 +530,7 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     total: candidates.length,
     eligible: 0,
     alreadySent: 0,
+    pending: 0,
     missingMatchKeys: 0,
     missingConversionValue: 0,
     missingEventTimestamp: 0,
@@ -482,19 +539,20 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
   const rows = candidates.map((candidate) => {
     const reason = skipReason(candidate);
     const existing = existingByTransaction.get(candidate.transactionId);
-    const alreadySent = existing?.status === 'sent';
-    if (alreadySent) counts.alreadySent += 1;
+    const priorReason = priorUploadSkipReason(existing);
+    if (priorReason === 'already_sent') counts.alreadySent += 1;
+    if (priorReason === 'upload_pending') counts.pending += 1;
     if (reason === 'missing_match_keys') counts.missingMatchKeys += 1;
     if (reason === 'missing_conversion_value') counts.missingConversionValue += 1;
     if (reason === 'missing_event_timestamp') counts.missingEventTimestamp += 1;
-    if (!reason && !alreadySent) counts.eligible += 1;
-    if (reason || alreadySent) counts.skipped += 1;
+    if (!reason && !priorReason) counts.eligible += 1;
+    if (reason || priorReason) counts.skipped += 1;
     return {
       transactionId: candidate.transactionId,
       conversionType: candidate.conversionType,
       eventTimestamp: candidate.eventTimestamp,
       conversionValue: candidate.conversionValue,
-      skipReason: alreadySent ? 'already_sent' : reason,
+      skipReason: priorReason || reason,
       matchKeys: matchKeys(candidate),
       source: {
         leadId: candidate.leadId,
@@ -625,6 +683,10 @@ async function upsertUploadLog(candidate, { status, validateOnly, requestId = nu
     .merge(row);
 }
 
+function uploadLogStatusForIngest(effectiveValidateOnly) {
+  return effectiveValidateOnly ? 'validated' : LIVE_UPLOAD_PENDING_STATUS;
+}
+
 function uploadValidateOnly(requestedValidateOnly) {
   const forceValidateOnly = boolEnv('GOOGLE_DATA_MANAGER_VALIDATE_ONLY', true);
   const liveUploadsAllowed = boolEnv('GOOGLE_DATA_MANAGER_ALLOW_UPLOADS', false);
@@ -654,12 +716,13 @@ async function uploadConversions({
   for (const candidate of candidates) {
     const reason = skipReason(candidate);
     const prior = existing.get(candidate.transactionId);
+    const priorReason = priorUploadSkipReason(prior);
     if (reason) {
       skipped.push({ transactionId: candidate.transactionId, reason });
       continue;
     }
-    if (!force && prior?.status === 'sent') {
-      skipped.push({ transactionId: candidate.transactionId, reason: 'already_sent' });
+    if (!force && priorReason) {
+      skipped.push({ transactionId: candidate.transactionId, reason: priorReason });
       continue;
     }
     uploadable.push(candidate);
@@ -698,7 +761,7 @@ async function uploadConversions({
 
   try {
     const response = await sendIngestRequest(request, { fetchImpl, accessToken });
-    const status = effectiveValidateOnly ? 'validated' : 'sent';
+    const status = uploadLogStatusForIngest(effectiveValidateOnly);
     await Promise.all(eventPairs.map(({ candidate, event }) => (
       upsertUploadLog(candidate, {
         status,
@@ -715,7 +778,9 @@ async function uploadConversions({
       validateOnly: effectiveValidateOnly,
       forcedValidateOnly: effectiveValidateOnly && validateOnly === false,
       requestId: response.requestId || null,
-      sent: uploadable.length,
+      sent: effectiveValidateOnly ? uploadable.length : 0,
+      accepted: uploadable.length,
+      pending: effectiveValidateOnly ? 0 : uploadable.length,
       candidates: candidates.length,
       skipped,
       preview: eventPairs.slice(0, 5).map(({ candidate, event }) => redactedEventSummary(candidate, event)),
@@ -746,6 +811,55 @@ async function uploadConversions({
   }
 }
 
+function dataManagerRequestStatuses(data) {
+  return (data?.requestStatusPerDestination || [])
+    .map((item) => String(item?.requestStatus || '').toUpperCase())
+    .filter(Boolean);
+}
+
+function uploadStatusFromRequestStatus(data) {
+  const statuses = dataManagerRequestStatuses(data);
+  if (!statuses.length) return LIVE_UPLOAD_PENDING_STATUS;
+  if (statuses.some((status) => status === 'PROCESSING' || status === 'REQUEST_STATUS_UNKNOWN')) {
+    return LIVE_UPLOAD_PENDING_STATUS;
+  }
+  if (statuses.some((status) => status === 'FAILED')) return 'failed';
+  if (statuses.some((status) => status === 'PARTIAL_SUCCESS')) return 'partial_success';
+  if (statuses.every((status) => status === 'SUCCESS')) return LIVE_UPLOAD_SENT_STATUS;
+  return LIVE_UPLOAD_PENDING_STATUS;
+}
+
+function requestStatusMessage(data) {
+  const details = (data?.requestStatusPerDestination || []).map((destinationStatus) => ({
+    requestStatus: destinationStatus.requestStatus || null,
+    errorInfo: destinationStatus.errorInfo || null,
+    warningInfo: destinationStatus.warningInfo || null,
+  }));
+  if (!details.some((detail) => detail.errorInfo || detail.warningInfo)) return null;
+  return JSON.stringify(details).slice(0, 4000);
+}
+
+async function updateUploadLogsForRequestStatus(requestId, data) {
+  const status = uploadStatusFromRequestStatus(data);
+  const patch = {
+    status,
+    error_message: ['failed', 'partial_success'].includes(status) ? requestStatusMessage(data) : null,
+    updated_at: db.fn.now(),
+  };
+  if (status === LIVE_UPLOAD_SENT_STATUS) {
+    patch.sent_at = db.fn.now();
+  } else if (status === 'failed' || status === 'partial_success') {
+    patch.sent_at = null;
+  }
+
+  const updated = await db('google_ads_conversion_uploads')
+    .where({ request_id: requestId })
+    .andWhere('validate_only', false)
+    .update(patch);
+
+  return { status, updated };
+}
+
 async function retrieveRequestStatus(requestId, { fetchImpl = global.fetch, accessToken } = {}) {
   if (!requestId) throw new Error('requestId is required');
   const token = accessToken || await getAccessToken();
@@ -761,7 +875,8 @@ async function retrieveRequestStatus(requestId, { fetchImpl = global.fetch, acce
     err.response = data;
     throw err;
   }
-  return data;
+  const uploadStatus = await updateUploadLogsForRequestStatus(requestId, data);
+  return { ...data, uploadStatus: uploadStatus.status, uploadsUpdated: uploadStatus.updated };
 }
 
 module.exports = {
@@ -776,6 +891,7 @@ module.exports = {
     candidateHasUserData,
     cleanNumericId,
     configurationFor,
+    dedupeCandidatesByTransaction,
     destinationFor,
     hashedUserData,
     mapCompletedJobCandidate,
@@ -788,6 +904,8 @@ module.exports = {
     skipReason,
     summarizeCandidates,
     toRfc3339,
+    uploadLogStatusForIngest,
+    uploadStatusFromRequestStatus,
     uploadValidateOnly,
   },
 };

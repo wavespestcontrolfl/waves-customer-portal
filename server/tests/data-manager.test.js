@@ -18,6 +18,7 @@ const {
   buildIngestRequest,
   cleanNumericId,
   configurationFor,
+  dedupeCandidatesByTransaction,
   destinationFor,
   hashedUserData,
   mapCompletedJobCandidate,
@@ -28,6 +29,8 @@ const {
   sha256Hex,
   skipReason,
   summarizeCandidates,
+  uploadLogStatusForIngest,
+  uploadStatusFromRequestStatus,
   uploadValidateOnly,
 } = DataManager._private;
 
@@ -143,6 +146,23 @@ describe('Google Data Manager upload helpers', () => {
     expect(uploadValidateOnly(true)).toBe(true);
   });
 
+  test('keeps live upload logs pending until async request status succeeds', () => {
+    expect(uploadLogStatusForIngest(true)).toBe('validated');
+    expect(uploadLogStatusForIngest(false)).toBe('pending');
+    expect(uploadStatusFromRequestStatus({
+      requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }],
+    })).toBe('pending');
+    expect(uploadStatusFromRequestStatus({
+      requestStatusPerDestination: [{ requestStatus: 'SUCCESS' }],
+    })).toBe('sent');
+    expect(uploadStatusFromRequestStatus({
+      requestStatusPerDestination: [{ requestStatus: 'PARTIAL_SUCCESS' }],
+    })).toBe('partial_success');
+    expect(uploadStatusFromRequestStatus({
+      requestStatusPerDestination: [{ requestStatus: 'FAILED' }],
+    })).toBe('failed');
+  });
+
   test('maps qualified leads with optional lead value and click IDs', () => {
     process.env.GOOGLE_ADS_DM_QUALIFIED_LEAD_VALUE = '75.50';
     const candidate = mapLeadCandidate({
@@ -150,6 +170,7 @@ describe('Google Data Manager upload helpers', () => {
       estimate_id: 'estimate-1',
       customer_id: 'customer-1',
       first_contact_at: '2026-06-12T14:30:00-04:00',
+      converted_at: '2026-06-13T15:00:00-04:00',
       status: 'qualified',
       email: 'lead@example.com',
       phone: '9415550100',
@@ -164,6 +185,7 @@ describe('Google Data Manager upload helpers', () => {
       sourceTable: 'leads',
       sourceId: 'lead-1',
       transactionId: 'waves_qualified_lead:lead-1',
+      eventTimestamp: '2026-06-13T19:00:00.000Z',
       conversionValue: 75.5,
       gclid: 'GCLID',
     }));
@@ -219,23 +241,71 @@ describe('Google Data Manager upload helpers', () => {
       },
       {
         conversionType: 'qualified_lead',
+        transactionId: 'lead:pending',
+        eventTimestamp: '2026-06-12T16:00:00Z',
+        gclid: 'GCLID',
+      },
+      {
+        conversionType: 'qualified_lead',
         transactionId: 'lead:ready',
         eventTimestamp: '2026-06-12T16:00:00Z',
         gclid: 'GCLID',
       },
     ];
-    const existing = new Map([['lead:sent', { status: 'sent' }]]);
+    const existing = new Map([
+      ['lead:sent', { status: 'sent' }],
+      ['lead:pending', { status: 'pending' }],
+    ]);
 
     const summary = summarizeCandidates(candidates, existing);
 
     expect(summary.counts).toEqual(expect.objectContaining({
-      total: 4,
+      total: 5,
       eligible: 1,
       alreadySent: 1,
+      pending: 1,
       missingMatchKeys: 1,
       missingConversionValue: 1,
-      skipped: 3,
+      skipped: 4,
     }));
+  });
+
+  test('dedupes duplicate transaction IDs and keeps the strongest match keys', () => {
+    const candidates = [
+      {
+        conversionType: 'completed_job_revenue',
+        transactionId: 'waves_completed_job:service-1',
+        eventTimestamp: '2026-06-12T16:00:00Z',
+        conversionValue: 100,
+        email: 'customer@example.com',
+      },
+      {
+        conversionType: 'completed_job_revenue',
+        transactionId: 'waves_completed_job:service-1',
+        eventTimestamp: '2026-06-12T16:00:00Z',
+        conversionValue: 100,
+        gclid: 'GCLID',
+        leadId: 'lead-with-click',
+      },
+      {
+        conversionType: 'completed_job_revenue',
+        transactionId: 'waves_completed_job:service-2',
+        eventTimestamp: '2026-06-12T16:00:00Z',
+        conversionValue: 150,
+        email: 'other@example.com',
+      },
+    ];
+
+    expect(dedupeCandidatesByTransaction(candidates)).toEqual([
+      expect.objectContaining({
+        transactionId: 'waves_completed_job:service-1',
+        gclid: 'GCLID',
+        leadId: 'lead-with-click',
+      }),
+      expect.objectContaining({
+        transactionId: 'waves_completed_job:service-2',
+      }),
+    ]);
   });
 
   test('builds a validate-only ingest request with one destination and HEX encoding', () => {
