@@ -39,8 +39,25 @@ const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const BACKFILL_PROMPT_VERSION = 'house_voice_v1_backfill';
-const AI_ASSISTANT_LAST10 = '8559260203';
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
+
+function phoneLast10(value) {
+  return String(value || '').replace(/\D/g, '').slice(-10);
+}
+
+/**
+ * Location-number allowlist derived from config, never literals: only the
+ * staffed-location lines the live webhook shadow-drafts. The AI assistant
+ * toll-free line is structurally excluded — it lives in
+ * TWILIO_NUMBERS.tollFree, not .locations, so it can never enter this set
+ * even though findByNumber() reports it as type 'location' (the documented
+ * registry trap). A config number change flows through automatically.
+ */
+function locationNumberLast10s() {
+  return Object.values(TWILIO_NUMBERS.locations || {})
+    .map((l) => phoneLast10(l.number))
+    .filter(Boolean);
+}
 
 const DEFAULT_BATCH = Number(process.env.SHADOW_BACKFILL_BATCH) > 0
   ? Number(process.env.SHADOW_BACKFILL_BATCH)
@@ -52,17 +69,35 @@ const DEFAULT_JUDGE_BATCH = Number(process.env.SHADOW_BACKFILL_JUDGE_BATCH) > 0
   ? Number(process.env.SHADOW_BACKFILL_JUDGE_BATCH)
   : 150;
 
-/**
- * Pure: would the live webhook have shadow-drafted an inbound to this
- * number? Location numbers only, with the AI assistant line excluded
- * explicitly — twilio-numbers reports the toll-free AI number as
- * type 'location' (twilio-numbers.js:107), so type alone is not enough.
- */
+/** Pure: would the live webhook have shadow-drafted an inbound to this number? */
 function isBackfillableNumber(toPhone) {
-  const last10 = String(toPhone || '').replace(/\D/g, '').slice(-10);
-  if (!last10 || last10 === AI_ASSISTANT_LAST10) return false;
-  const config = TWILIO_NUMBERS.findByNumber(toPhone);
-  return config?.type === 'location';
+  const last10 = phoneLast10(toPhone);
+  return Boolean(last10) && locationNumberLast10s().includes(last10);
+}
+
+/**
+ * Pure: bound the aggregated context to what existed BEFORE the historical
+ * inbound. ContextAggregator returns the customer's latest SMS thread —
+ * which, for an old inbound, includes the human reply the judge later
+ * treats as ground truth. Leaving it in lets the model copy the answer and
+ * inflates every backfill score (test-set leakage). Strictly-before also
+ * drops the inbound itself: buildUserPrompt appends it separately, same as
+ * the live path. Other context (balance, next service) still reflects
+ * today — that drift is accepted and flagged via prompt_version; the
+ * ground-truth reply is the one thing that must never reach the prompt.
+ */
+function boundContextToInbound(context, inboundAt) {
+  const anchor = new Date(inboundAt).getTime();
+  return {
+    ...context,
+    smsHistory: (context.smsHistory || []).filter((m) => {
+      // new Date(null) is epoch zero, not NaN — reject missing dates
+      // explicitly so an undateable row can never sneak the ground-truth
+      // reply past the strictly-before cut.
+      const t = m.date ? new Date(m.date).getTime() : NaN;
+      return Number.isFinite(t) && t < anchor;
+    }),
+  };
 }
 
 /**
@@ -98,21 +133,28 @@ function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs }) {
 /**
  * Historical inbounds that (a) the live gate would have drafted, (b) have
  * no draft yet, and (c) have a human ground-truth reply inside the judge's
- * window. Overfetches because the location-number gate needs JS (the
- * number registry isn't in SQL); newest first so the freshest voice
- * examples score first.
+ * window. The location-number allowlist is applied IN SQL so the limit
+ * always advances past non-location traffic — a JS post-filter over a
+ * capped fetch could stall forever on a run of AI/tracking-number rows.
+ * Newest first so the freshest voice examples score first.
  */
 async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = DEFAULT_SINCE_DAYS } = {}) {
+  const allowedLast10 = locationNumberLast10s();
+  if (!allowedLast10.length) return [];
   const since = new Date(Date.now() - sinceDays * 24 * 3600 * 1000);
   const matureBefore = new Date(Date.now() - REPLY_WINDOW_HOURS * 3600 * 1000);
 
-  const rows = await db('sms_log as i')
+  return db('sms_log as i')
     .where('i.direction', 'inbound')
     .whereNotNull('i.customer_id')
     .where('i.created_at', '>=', since)
     .where('i.created_at', '<', matureBefore)
     .whereRaw("COALESCE(i.message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction')")
     .whereRaw("NULLIF(TRIM(i.message_body), '') IS NOT NULL")
+    .whereRaw(
+      `RIGHT(REGEXP_REPLACE(COALESCE(i.to_phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)`,
+      [allowedLast10]
+    )
     .whereRaw('NOT EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id)')
     .whereRaw(`EXISTS (
       SELECT 1 FROM sms_log o
@@ -125,9 +167,7 @@ async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = D
     )`)
     .select('i.id', 'i.customer_id', 'i.message_body', 'i.to_phone', 'i.created_at')
     .orderBy('i.created_at', 'desc')
-    .limit(batchSize * 3);
-
-  return rows.filter((r) => isBackfillableNumber(r.to_phone)).slice(0, batchSize);
+    .limit(batchSize);
 }
 
 async function draftOneBackfill(inbound, customer) {
@@ -137,7 +177,13 @@ async function draftOneBackfill(inbound, customer) {
   const ContextAggregator = require('./context-aggregator');
 
   const intent = classifyCustomerSmsTriageIntent(inbound.message_body, { customer });
-  const context = await ContextAggregator.getContextForCustomer(customer);
+  // Bound the SMS thread to strictly before this inbound — the unbounded
+  // context contains the human's actual reply, i.e. the judge's ground
+  // truth. See boundContextToInbound.
+  const context = boundContextToInbound(
+    await ContextAggregator.getContextForCustomer(customer),
+    inbound.created_at
+  );
 
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -219,6 +265,7 @@ module.exports = {
   BACKFILL_PROMPT_VERSION,
   REPLY_WINDOW_HOURS,
   isBackfillableNumber,
+  boundContextToInbound,
   buildBackfillDraftRow,
   findBackfillCandidates,
   runShadowBackfill,

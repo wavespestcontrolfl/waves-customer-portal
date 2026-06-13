@@ -6,6 +6,7 @@ const {
   BACKFILL_PROMPT_VERSION,
   REPLY_WINDOW_HOURS,
   isBackfillableNumber,
+  boundContextToInbound,
   buildBackfillDraftRow,
 } = require('../services/sms-shadow-backfill');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -33,6 +34,43 @@ describe('shadow backfill — number gate (mirrors the live webhook gate)', () =
     expect(isBackfillableNumber('+19998887777')).toBe(false);
     expect(isBackfillableNumber('')).toBe(false);
     expect(isBackfillableNumber(null)).toBe(false);
+  });
+});
+
+describe('shadow backfill — ground-truth leak guard (Codex P1)', () => {
+  const inboundAt = new Date(Date.UTC(2026, 2, 10, 14, 30)).toISOString();
+  const at = (offsetMin) => new Date(Date.UTC(2026, 2, 10, 14, 30 + offsetMin)).toISOString();
+
+  test("the human's reply (the judge's ground truth) never reaches the prompt context", () => {
+    const context = {
+      summary: 'kept',
+      smsHistory: [
+        { direction: 'outbound', body: 'THE GROUND TRUTH REPLY', date: at(5), type: 'manual' },
+        { direction: 'inbound', body: 'the inbound itself', date: at(0), type: null },
+        { direction: 'outbound', body: 'an older reply', date: at(-60), type: 'manual' },
+        { direction: 'inbound', body: 'an older question', date: at(-65), type: null },
+      ],
+    };
+    const bounded = boundContextToInbound(context, inboundAt);
+    const bodies = bounded.smsHistory.map((m) => m.body);
+    expect(bodies).toEqual(['an older reply', 'an older question']);
+    // Strictly-before also drops the inbound itself — buildUserPrompt
+    // appends it separately, same as the live path.
+    expect(bodies).not.toContain('THE GROUND TRUTH REPLY');
+    expect(bodies).not.toContain('the inbound itself');
+    expect(bounded.summary).toBe('kept');
+  });
+
+  test('unparseable history dates are dropped, never assumed old', () => {
+    const bounded = boundContextToInbound(
+      { smsHistory: [{ body: 'no date', date: null }, { body: 'bad date', date: 'nope' }] },
+      inboundAt
+    );
+    expect(bounded.smsHistory).toEqual([]);
+  });
+
+  test('missing history is tolerated', () => {
+    expect(boundContextToInbound({}, inboundAt).smsHistory).toEqual([]);
   });
 });
 
