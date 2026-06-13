@@ -33,6 +33,30 @@ describe('slot reservation helpers', () => {
     )).toBe('Rodent Trapping Service');
   });
 
+  test('one-time pest accepts are not stamped with a recurring cadence prefix', () => {
+    // One-time profile carries empty services → visits unknown → would default
+    // to "Quarterly Pest Control". serviceMode one_time must collapse to bare
+    // "Pest Control" instead.
+    expect(slotReservation._internals.canonicalServiceTypeForProfile(
+      { serviceMode: 'one_time', services: [] },
+      'Pest Control',
+    )).toBe('Pest Control');
+    // Already-mislabeled fallback ("Quarterly Pest Control") must NOT survive a
+    // one-time canonicalization.
+    expect(slotReservation._internals.canonicalServiceTypeForProfile(
+      { serviceMode: 'one_time', services: [] },
+      'Quarterly Pest Control',
+    )).toBe('Pest Control');
+    // Re-mislabel guard: a null profile at commit must still honor an explicit
+    // one-time serviceMode rather than re-deriving the cadence from the
+    // (possibly stale) fallback.
+    expect(slotReservation._internals.canonicalServiceTypeForProfile(
+      null,
+      'Quarterly Pest Control',
+      { serviceMode: 'one_time' },
+    )).toBe('Pest Control');
+  });
+
   test('reserveSlot writes service-profile duration and checks overlapping windows', async () => {
     const estimateBuilder = {
       where: jest.fn().mockReturnThis(),
@@ -98,6 +122,69 @@ describe('slot reservation helpers', () => {
       window_start: '09:00:00',
       window_end: '10:30:00',
       estimated_duration_minutes: 90,
+    }));
+  });
+
+  test('reserveSlot labels a one-time pest accept "Pest Control" and pins is_recurring=false', async () => {
+    // One-time profile: empty services, so the cadence is unknown — the old
+    // behavior defaulted the pest label to "Quarterly Pest Control".
+    estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+      serviceMode: 'one_time',
+      serviceLabel: 'Pest Control',
+      durationMinutes: 60,
+      services: [],
+    });
+    const estimateBuilder = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'estimate-789',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      }),
+    };
+    const conflictBuilder = {
+      where: jest.fn().mockReturnThis(),
+      modify: jest.fn(function (callback) {
+        callback(this);
+        return this;
+      }),
+      whereNotIn: jest.fn().mockReturnThis(),
+      andWhereRaw: jest.fn().mockReturnThis(),
+      andWhere: jest.fn(function (callback) {
+        callback(this);
+        return this;
+      }),
+      whereNull: jest.fn().mockReturnThis(),
+      orWhereRaw: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const insertBuilder = {
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{
+        id: 'scheduled-789',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      }]),
+    };
+    const scheduledBuilders = [conflictBuilder, insertBuilder];
+    const trx = jest.fn((table) => {
+      if (table === 'estimates') return estimateBuilder;
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+
+    await slotReservation.reserveSlot({
+      estimateId: 'estimate-789',
+      slotId: '2027-05-20_09-00_tech-1',
+      serviceMode: 'one_time',
+    });
+
+    expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
+      service_type: 'Pest Control',
+      is_recurring: false,
     }));
   });
 

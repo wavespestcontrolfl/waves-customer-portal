@@ -108,12 +108,19 @@ function pestServiceTypeFromVisits(visitsPerYear) {
   return 'Quarterly Pest Control';
 }
 
-function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimate service') {
+function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimate service', opts = {}) {
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
   const key = primary?.service || serviceKeyForLabel(fallback);
+  // A one-time accept is a single visit with no cadence. The one-time service
+  // profile carries an empty `services` array, so visitsPerYear is unknown and
+  // pestServiceTypeFromVisits would default to "Quarterly Pest Control" —
+  // labeling a one-time booking as recurring. Honor an explicit serviceMode
+  // (threaded from the reserve/commit callers) over the profile so a null
+  // profile at commit can't re-derive the cadence prefix from a stale fallback.
+  const isOneTime = opts.serviceMode === 'one_time' || serviceProfile?.serviceMode === 'one_time';
 
-  if (key === 'pest_control') return pestServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'pest_control') return isOneTime ? 'Pest Control' : pestServiceTypeFromVisits(primary?.visitsPerYear);
   if (key === 'lawn_care') return 'Lawn Care';
   if (key === 'mosquito') return 'Mosquito Treatment';
   if (key === 'tree_shrub') return 'Tree & Shrub';
@@ -291,7 +298,7 @@ async function reserveSlot({
         ? Number(serviceProfile.durationMinutes)
         : DEFAULT_DURATION_MINUTES;
       const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
-      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest);
+      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
 
@@ -366,6 +373,11 @@ async function reserveSlot({
         payment_method_preference: null,
         estimated_duration_minutes: effectiveDurationMinutes,
         notes,
+        // One-time accepts are a single visit — pin is_recurring=false so
+        // dispatch job-classification and recurring-only sweeps never treat
+        // them as a series. Recurring reserves are left to the column default
+        // (false) + the converter/seeder, which flips the parent to recurring.
+        ...(serviceMode === 'one_time' ? { is_recurring: false } : {}),
         // track_state uses its DB default ('scheduled'). track_view_token
         // stays null — reservation rows aren't yet customer-linked, so
         // there's nothing to track. commitReservation can mint a token
@@ -491,7 +503,7 @@ async function commitReservation({
     if (windowEnd) {
       updates.window_end = windowEnd;
       updates.estimated_duration_minutes = effectiveDurationMinutes;
-      updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type);
+      updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.notes = notesWithServiceMix(row.notes, serviceProfile, row.service_type);
     }
 
