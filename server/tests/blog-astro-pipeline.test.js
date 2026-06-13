@@ -408,7 +408,11 @@ describe('blog Astro frontmatter validation', () => {
         frontmatter: validFrontmatter({
           slug: '/ant-trails-bradenton/',
           domains: ['veniceflpestcontrol.com'],
-          tracking: { domains: ['veniceflpestcontrol.com'] },
+          tracking: {
+            number_key: 'venice_lawn',
+            domains: ['veniceflpestcontrol.com'],
+            robots: 'index, follow',
+          },
         }),
         body: 'Waves Pest Control guidance for Bradenton homeowners.',
       },
@@ -419,7 +423,11 @@ describe('blog Astro frontmatter validation', () => {
     const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('/ant-trails-bradenton.mdx'));
     const parsed = fmModule.parse(markdownCall[0].content);
     expect(parsed.data.domains).toEqual(['wavespestcontrol.com']);
-    expect(parsed.data.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
+    expect(parsed.data.tracking).toEqual({
+      number_key: 'venice_lawn',
+      domains: ['wavespestcontrol.com'],
+      robots: 'index, follow',
+    });
     expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/ant-trails-bradenton/');
   });
 

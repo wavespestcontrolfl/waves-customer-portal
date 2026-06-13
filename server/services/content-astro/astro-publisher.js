@@ -74,8 +74,13 @@ function hubOnlyBlogDomains() {
 }
 
 function stampHubOnlyBlogDomains(frontmatter) {
+  const tracking = frontmatter.tracking
+    && typeof frontmatter.tracking === 'object'
+    && !Array.isArray(frontmatter.tracking)
+    ? frontmatter.tracking
+    : {};
   frontmatter.domains = hubOnlyBlogDomains();
-  frontmatter.tracking = { domains: hubOnlyBlogDomains() };
+  frontmatter.tracking = { ...tracking, domains: hubOnlyBlogDomains() };
   return frontmatter;
 }
 
