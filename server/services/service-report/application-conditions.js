@@ -128,19 +128,21 @@ async function fetchApplicationConditions({ latitude, longitude } = {}) {
   return fetchOpenMeteoConditions(coords);
 }
 
-// Sum of daily precipitation (inches), skipping missing/non-numeric days so an
-// all-missing window returns null (unknown) rather than a false zero — a null
-// precip day must not be read as "no rain".
+// Sum of daily precipitation (inches) over a window. Returns null if ANY day is
+// missing/non-numeric: a partial week can't be trusted as a weekly total (a gap
+// day might have rained), and summing the rest would undercount and could falsely
+// flag under-watering. An incomplete window → 'rain_unknown', never a guess. A
+// genuine all-zero (dry) week still returns 0.
 function sumPrecipInches(dailySums) {
   if (!Array.isArray(dailySums) || !dailySums.length) return null;
   let total = 0;
-  let any = false;
   for (const v of dailySums) {
-    if (v == null || v === '') continue;
+    if (v == null || v === '') return null;
     const n = Number(v);
-    if (Number.isFinite(n)) { total += n; any = true; }
+    if (!Number.isFinite(n)) return null;
+    total += n;
   }
-  return any ? roundedNumber(total, 2) : null;
+  return roundedNumber(total, 2);
 }
 
 // { start, end } YYYY-MM-DD for the `days`-day window ending ON serviceDate.

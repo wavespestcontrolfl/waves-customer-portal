@@ -9,8 +9,10 @@ describe('sumPrecipInches', () => {
     expect(sumPrecipInches([0, 0, 0])).toBe(0);
   });
 
-  test('skips missing days rather than reading them as zero', () => {
-    expect(sumPrecipInches([null, 0.2, null, 0.3])).toBeCloseTo(0.5, 5);
+  test('a PARTIAL window (any missing/non-numeric day) → null, not an undercount', () => {
+    expect(sumPrecipInches([null, 0.2, null, 0.3])).toBeNull();
+    expect(sumPrecipInches([0.2, '', 0.3])).toBeNull();
+    expect(sumPrecipInches([0.2, 'x', 0.3])).toBeNull();
   });
 
   test('all-missing / empty → null (caller degrades to rain_unknown)', () => {
