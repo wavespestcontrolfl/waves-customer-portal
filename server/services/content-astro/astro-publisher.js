@@ -128,20 +128,10 @@ async function buildFrontmatter(post) {
   const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
   const factCheckedDate = dateOnly(post.fact_checked_at);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
-  const targetSites = normalizeTargetSites(post.target_sites);
   const relatedServices = normalizeArray(post.related_services);
-  // Automated blog posts (idea generator / demand miner / content calendar)
-  // target the hub only — they're general SWFL educational content, not
-  // spoke-domain material. Without an explicit target the empty-list default
-  // would fan them across every spoke domain, so pin automated, untargeted
-  // posts to wavespestcontrol.com. Manually-authored posts keep the existing
-  // empty-means-astro-default behavior (so the "publish to all domains" option
-  // still works for hand-curated content).
-  const AUTOMATED_BLOG_SOURCES = new Set(['ai_generated', 'demand_mined', 'calendar']);
-  const effectiveTargets = targetSites.length > 0
-    ? targetSites
-    : (AUTOMATED_BLOG_SOURCES.has(post.source) ? ['wavespestcontrol.com'] : []);
-  const domains = effectiveTargets.length > 0 ? effectiveTargets : undefined;
+  // Blog posts from this publisher are hub-only. Spoke/service pages can still
+  // carry spoke domains, but blog content should not fan out to city spokes.
+  const domains = ['wavespestcontrol.com'];
 
   const data = {
     title: post.title,
@@ -154,13 +144,9 @@ async function buildFrontmatter(post) {
     service_areas_tag: serviceAreas.length > 0 ? serviceAreas : undefined,
     related_services: relatedServices,
     spoke_links: normalizeArray(post.spoke_links),
-    // Per-post spoke targeting. Written as `domains` to match the existing
-    // Astro convention — src/pages/[...slug].astro already has a
-    // `domainMatches()` filter that reads this field. Absent/empty keeps
-    // the astro defaults ("hub sees it, spokes don't") so old posts that
-    // never set target_sites keep their current behavior on the detail
-    // route. The list route (src/pages/blog.astro) is being updated in a
-    // matching commit in the astro repo to honor `domains` too.
+    // Per-post domain targeting. For publisher-created blogs this is always
+    // hub-only; spoke/domain-specific pages live in the service/location
+    // collections, not the blog collection.
     domains,
     author: author ? {
       name: author.name,
@@ -190,7 +176,7 @@ async function buildFrontmatter(post) {
     canonical,
     schema_types: schemaTypesForContent(post.content, ['Article']),
     disclosure: { type: 'pricing-transparency' },
-    tracking: domains ? { domains } : undefined,
+    tracking: { domains },
   };
 
   // Drop undefined keys so YAML output stays clean.
@@ -498,14 +484,6 @@ async function publishAstro(postId) {
     // schema validation, so a generated post could ship "$39/month" or a
     // spoke-domain brand leak with nothing but the prompt stopping it. Block
     // P0/P1 here too — body + editable meta are checked.
-    // target_sites semantics: a non-empty list targets those domains, but an
-    // EMPTY/null list renders on ALL spoke domains (backward-compat — see the
-    // target_sites migration + admin "publish to ALL 15 domains" warning).
-    // buildFrontmatter omits data.domains when target_sites is empty, so expand
-    // that to the full spoke list here — otherwise the brand-token guard would
-    // wrongly treat an all-domains post as hub-only and let a literal-brand leak
-    // ship to every spoke. (New posts default to hub-only targeting, so this
-    // mainly catches legacy/cleared rows — exactly the multi-domain case.)
     const guardrailDomains = (Array.isArray(data.domains) && data.domains.length > 0)
       ? data.domains
       : SPOKE_SITE_KEYS;
@@ -1559,11 +1537,7 @@ function cloudflarePreviewUrl(branch) {
 
 function liveUrlForPost(post) {
   const slug = post.slug || slugify(post.title);
-  const targets = normalizeTargetSites(post.target_sites);
-  const firstTarget = targets[0] || 'wavespestcontrol.com';
-  const origin = firstTarget === 'wavespestcontrol.com'
-    ? (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com')
-    : `https://${firstTarget}`;
+  const origin = process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com';
   return `${origin.replace(/\/$/, '')}/${slug}/`;
 }
 

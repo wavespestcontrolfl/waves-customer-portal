@@ -1143,7 +1143,7 @@ describe('Astro publisher hero image republish', () => {
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
   });
 
-  test('blocks a literal-brand post with empty target_sites (renders on ALL spokes, not hub-only)', async () => {
+  test('empty target_sites still emits a hub-only blog post', async () => {
     const post = {
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
@@ -1154,7 +1154,7 @@ describe('Astro publisher hero image republish', () => {
       post_type: 'location',
       service_areas_tag: ['Bradenton'],
       related_services: [],
-      target_sites: [], // empty → publishes to ALL 15 domains (backward-compat)
+      target_sites: [],
       author_slug: 'adam',
       reviewer_slug: 'reviewer',
       technically_reviewed_at: '2026-05-08',
@@ -1162,7 +1162,6 @@ describe('Astro publisher hero image republish', () => {
       fact_checked_at: '2026-05-08',
       featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
-      // Literal brand would leak across every spoke domain — must use {{brandName}}.
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
     };
     const read = chain({ first: jest.fn().mockResolvedValue(post) });
@@ -1170,9 +1169,12 @@ describe('Astro publisher hero image republish', () => {
     const queries = [read, update];
     db.mockImplementation(() => queries.shift() || chain());
 
-    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
-    expect(gh.createBranch).not.toHaveBeenCalled();
-    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
+    await expect(AstroPublisher.publishAstro('post-1')).resolves.toMatchObject({ pr_number: 123 });
+    const fmModule = require('../services/content-astro/frontmatter');
+    const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('/ant-trails-bradenton.md'));
+    const parsed = fmModule.parse(markdownCall[0].content);
+    expect(parsed.data.domains).toEqual(['wavespestcontrol.com']);
+    expect(parsed.data.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
   });
 });
 
@@ -1346,7 +1348,7 @@ describe('compressToWebp (hero LCP optimization)', () => {
   });
 });
 
-describe('automated blog posts target the hub only', () => {
+describe('blog posts target the hub only', () => {
   const base = {
     title: 'Dollar Spot in Venice', slug: 'dollar-spot-venice',
     meta_description: 'A short guide to dollar spot on Venice lawns and how to actually treat it.',
@@ -1368,16 +1370,17 @@ describe('automated blog posts target the hub only', () => {
     }
   });
 
-  test('a manual post with no target_sites keeps the empty/astro-default (undefined domains)', async () => {
+  test('a manual post with no target_sites also pins to wavespestcontrol.com', async () => {
     const data = await AstroPublisher.buildFrontmatter({ ...base, source: 'manual' });
-    expect(data.domains).toBeUndefined();
+    expect(data.domains).toEqual(['wavespestcontrol.com']);
+    expect(data.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
   });
 
-  test('an explicit target_sites is always respected, even for automated posts', async () => {
+  test('explicit spoke target_sites are ignored for blog frontmatter', async () => {
     const data = await AstroPublisher.buildFrontmatter({
-      ...base, source: 'ai_generated', target_sites: ['wavespestcontrol.com', 'example-spoke.com'],
+      ...base, source: 'ai_generated', target_sites: ['wavespestcontrol.com', 'veniceflpestcontrol.com'],
     });
-    expect(data.domains).toContain('wavespestcontrol.com');
+    expect(data.domains).toEqual(['wavespestcontrol.com']);
   });
 });
 
@@ -1540,21 +1543,26 @@ describe('post-merge internal-link planning', () => {
     expect(result).toEqual(expect.objectContaining({ queued: 1, candidates: 1 }));
   });
 
-  test('spoke-published posts plan nothing (real planner rejects the spoke URL)', async () => {
+  test('target_sites cannot move blog internal-link planning off the hub', async () => {
     jest.spyOn(planner, 'loadAstroCorpusFromGitHub').mockResolvedValue([
       { file: 'src/content/blog/post-a.md', body: 'Lawns with venice dollar spot rings need fungicide.', url: '/blog/post-a/' },
     ]);
-    const dryRunSpy = jest.spyOn(linkExecutor, 'runDryRun');
-    const { insert } = mockTaskInsert([]);
+    const planSpy = jest.spyOn(planner, 'planForTarget');
+    const dryRunSpy = jest.spyOn(linkExecutor, 'runDryRun').mockResolvedValue({ results: [] });
+    const { insert } = mockTaskInsert(['task-1']);
 
     const result = await planInternalLinksForMergedPost({
       ...post,
       target_sites: ['veniceflpestcontrol.com'],
     });
 
-    expect(insert).not.toHaveBeenCalled();
-    expect(dryRunSpy).not.toHaveBeenCalled();
-    expect(result).toEqual(expect.objectContaining({ queued: 0, candidates: 0 }));
+    expect(planSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ url: 'https://www.wavespestcontrol.com/venice-dollar-spot-guide/' }),
+      expect.objectContaining({ corpus: expect.any(Array) }),
+    );
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(dryRunSpy).toHaveBeenCalledWith({ taskIds: ['task-1'], limit: 1 });
+    expect(result).toEqual(expect.objectContaining({ queued: 1 }));
   });
 
   test('INTERNAL_LINK_PLAN_ON_BLOG_MERGE=false disables post-merge planning', async () => {

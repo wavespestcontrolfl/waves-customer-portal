@@ -30,7 +30,7 @@ function html() {
   `;
 }
 
-function makeDbMock() {
+function makeDbMock({ linkTaskCount = 1 } = {}) {
   const calls = [];
   db.mockImplementation((table) => {
     const chain = {
@@ -38,7 +38,7 @@ function makeDbMock() {
       where: jest.fn(() => chain),
       whereIn: jest.fn(() => chain),
       count: jest.fn(() => chain),
-      first: jest.fn(async () => (table === 'content_internal_link_tasks' ? { count: 1 } : null)),
+      first: jest.fn(async () => (table === 'content_internal_link_tasks' ? { count: linkTaskCount } : null)),
       insert: jest.fn(async (row) => { calls.push({ table, op: 'insert', row }); return [row]; }),
       update: jest.fn(async (row) => { calls.push({ table, op: 'update', row }); return 1; }),
     };
@@ -86,6 +86,30 @@ describe('post-publish-visibility-worker', () => {
       '/blog/ghost-ants-kitchen-florida',
     ]));
     expect(linkTaskQuery.whereIn).toHaveBeenCalledWith('status', ['pending', 'queued', 'patch_candidate', 'approved', 'applied']);
+  });
+
+  test('counts a crawlable live blog index link when link tasks have not applied', async () => {
+    makeDbMock({ linkTaskCount: 0 });
+    const fetchFn = jest.fn((url) => {
+      if (String(url).endsWith('/robots.txt')) return ok('User-agent: *\nAllow: /');
+      if (String(url).endsWith('/blog/')) {
+        return ok('<html><body><a href="/blog/ghost-ants-kitchen-florida/">Ghost ants in Florida kitchens</a></body></html>');
+      }
+      return ok(html());
+    });
+    const sitemap = { invalidate: jest.fn(), hasUrl: jest.fn().mockResolvedValue({ present: true }) };
+    const indexNow = { submit: jest.fn().mockResolvedValue({ ok: true, status: 'ok' }) };
+
+    const result = await Worker.runForPost({
+      id: 'post_1',
+      astro_live_url: 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',
+      title: 'Why are ghost ants in my kitchen?',
+      target_keyword: 'why are ghost ants in my kitchen',
+    }, { fetchFn, sitemap, indexNow });
+
+    expect(result.ok).toBe(true);
+    expect(result.snapshot.internal_inbound_links).toBe(1);
+    expect(result.snapshot.ai_visibility.findings.some((f) => f.code === 'P0_NO_CRAWLABLE_INBOUND_INTERNAL_LINK')).toBe(false);
   });
 
   test('builds inbound-link target variants for relative planner paths', () => {
