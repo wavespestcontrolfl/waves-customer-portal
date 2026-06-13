@@ -910,10 +910,8 @@ export default function WavesSEODashboard() {
           {/* Keyword Tracking Table */}
           {aiOverview.keywordTracking.length > 0 && (
             <Card style={{ marginBottom: 20 }}>
-              {" "}
-              <SectionTitle>Keyword AI Tracking</SectionTitle>{" "}
+              <SectionTitle>Keyword AI Tracking</SectionTitle>
               <div style={{ overflowX: "auto" }}>
-                {" "}
                 <table
                   style={{
                     width: "100%",
@@ -921,9 +919,7 @@ export default function WavesSEODashboard() {
                     fontSize: 13,
                   }}
                 >
-                  {" "}
                   <thead>
-                    {" "}
                     <tr
                       style={{
                         borderBottom: `1px solid ${WAVES_COLORS.cardBorder}`,
@@ -951,8 +947,8 @@ export default function WavesSEODashboard() {
                           {h}
                         </th>
                       ))}
-                    </tr>{" "}
-                  </thead>{" "}
+                    </tr>
+                  </thead>
                   <tbody>
                     {aiOverview.keywordTracking.map((kw, i) => (
                       <tr
@@ -961,7 +957,6 @@ export default function WavesSEODashboard() {
                           borderBottom: `1px solid ${WAVES_COLORS.cardBorder}22`,
                         }}
                       >
-                        {" "}
                         <td
                           style={{
                             padding: "10px 12px",
@@ -970,7 +965,7 @@ export default function WavesSEODashboard() {
                           }}
                         >
                           {kw.keyword}
-                        </td>{" "}
+                        </td>
                         <td style={{ padding: "10px 12px" }}>
                           {kw.aio ? (
                             <span
@@ -986,10 +981,10 @@ export default function WavesSEODashboard() {
                               No
                             </span>
                           )}
-                        </td>{" "}
+                        </td>
                         <td style={{ padding: "10px 12px" }}>
                           <StatusDot status={kw.status} />
-                        </td>{" "}
+                        </td>
                         <td
                           style={{
                             padding: "10px 12px",
@@ -1001,7 +996,7 @@ export default function WavesSEODashboard() {
                           }}
                         >
                           {kw.citedBy}
-                        </td>{" "}
+                        </td>
                         <td
                           style={{
                             padding: "10px 12px",
@@ -1009,12 +1004,12 @@ export default function WavesSEODashboard() {
                           }}
                         >
                           {kw.provider}
-                        </td>{" "}
+                        </td>
                       </tr>
                     ))}
-                  </tbody>{" "}
-                </table>{" "}
-              </div>{" "}
+                  </tbody>
+                </table>
+              </div>
             </Card>
           )}
 
@@ -1305,9 +1300,8 @@ export default function WavesSEODashboard() {
               }
             >
               Keyword Rankings
-            </SectionTitle>{" "}
+            </SectionTitle>
             <div style={{ overflowX: "auto" }}>
-              {" "}
               <table
                 style={{
                   width: "100%",
@@ -1315,9 +1309,7 @@ export default function WavesSEODashboard() {
                   fontSize: 13,
                 }}
               >
-                {" "}
                 <thead>
-                  {" "}
                   <tr
                     style={{
                       borderBottom: `1px solid ${WAVES_COLORS.cardBorder}`,
@@ -1347,8 +1339,8 @@ export default function WavesSEODashboard() {
                         {h}
                       </th>
                     ))}
-                  </tr>{" "}
-                </thead>{" "}
+                  </tr>
+                </thead>
                 <tbody>
                   {filteredKeywords.map((kw, i) => (
                     <tr
@@ -1358,7 +1350,6 @@ export default function WavesSEODashboard() {
                         background: i % 2 === 0 ? "transparent" : "#FAFAFA",
                       }}
                     >
-                      {" "}
                       <td
                         style={{
                           padding: "10px 12px",
@@ -1368,9 +1359,8 @@ export default function WavesSEODashboard() {
                         }}
                       >
                         {kw.keyword}
-                      </td>{" "}
+                      </td>
                       <td style={{ padding: "10px 12px", textAlign: "center" }}>
-                        {" "}
                         <PositionBadge pos={kw.organic} />
                         {kw.prev != null &&
                           kw.organic != null &&
@@ -1382,12 +1372,11 @@ export default function WavesSEODashboard() {
                               />
                             </span>
                           )}
-                      </td>{" "}
+                      </td>
                       <td style={{ padding: "10px 12px", textAlign: "center" }}>
                         <PositionBadge pos={kw.mapPack} />
-                      </td>{" "}
+                      </td>
                       <td style={{ padding: "10px 12px" }}>
-                        {" "}
                         <span
                           style={{
                             padding: "2px 8px",
@@ -1399,8 +1388,8 @@ export default function WavesSEODashboard() {
                           }}
                         >
                           {kw.category}
-                        </span>{" "}
-                      </td>{" "}
+                        </span>
+                      </td>
                       <td
                         style={{
                           padding: "10px 12px",
@@ -1409,10 +1398,10 @@ export default function WavesSEODashboard() {
                         }}
                       >
                         {kw.city}
-                      </td>{" "}
+                      </td>
                       <td style={{ padding: "10px 12px" }}>
                         <Sparkline data={kw.trend} />
-                      </td>{" "}
+                      </td>
                     </tr>
                   ))}
                   {filteredKeywords.length === 0 && (
@@ -1429,9 +1418,9 @@ export default function WavesSEODashboard() {
                       </td>
                     </tr>
                   )}
-                </tbody>{" "}
-              </table>{" "}
-            </div>{" "}
+                </tbody>
+              </table>
+            </div>
           </Card>
           {/* Top Movers */}
           <div
