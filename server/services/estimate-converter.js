@@ -17,6 +17,24 @@ const {
 } = require('./billing-cadence');
 const AccountMembershipEmail = require('./account-membership-email');
 const { etDateString } = require('../utils/datetime-et');
+const { normalizeGrassType } = require('./lawn-grass-context');
+
+// Find the first grassType/grass_type string anywhere in the estimate data
+// (confirmed primary path is inputs.grassType, but estimate shapes vary).
+// Depth-capped to avoid pathological recursion.
+function findGrassTypeDeep(node, depth = 6) {
+  if (depth < 0 || node == null || typeof node !== 'object') return null;
+  for (const k of ['grassType', 'grass_type']) {
+    if (typeof node[k] === 'string' && node[k].trim()) return node[k];
+  }
+  for (const v of Object.values(node)) {
+    if (v && typeof v === 'object') {
+      const found = findGrassTypeDeep(v, depth - 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
 
 const WAVEGUARD_SETUP_FEE = 99;
@@ -674,6 +692,25 @@ const EstimateConverter = {
       deleted_at: null,
     });
 
+    // 1b. Persist grass type captured during the estimate so lawn reports use
+    //     the real turf instead of the St. Augustine default. Fail-soft and
+    //     COALESCE-guarded — never clobber an admin-set value, never break
+    //     acceptance.
+    try {
+      const grass = normalizeGrassType(findGrassTypeDeep(estimateData));
+      if (grass) {
+        await database('customer_turf_profiles')
+          .insert({ customer_id: customerId, grass_type: grass })
+          .onConflict('customer_id')
+          .merge({
+            grass_type: database.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [grass]),
+            updated_at: new Date(),
+          });
+      }
+    } catch (grassErr) {
+      logger.warn?.(`[estimate-converter] grass-type persist skipped for customer ${customerId}: ${grassErr.message}`);
+    }
+
     // 2. Create scheduled_services for recurring services — but ONLY if
     //    the accept path didn't already create one via slot reservation
     //    (PR B.1). The reservation path commits a scheduled_services row
@@ -1152,6 +1189,7 @@ const EstimateConverter = {
 };
 
 module.exports = EstimateConverter;
+module.exports.findGrassTypeDeep = findGrassTypeDeep;
 module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
 module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
 module.exports.determineTier = determineTier;
