@@ -59,6 +59,20 @@ function isCanaryDisabled() {
   return flag === '1' || flag === 'true' || flag === 'on';
 }
 
+// Short, PII-safe label for a thrown lookup error — the whole point of the
+// throw path is to read as a "network/timeout blip, watch tomorrow" signal,
+// so a timeout has to *look* like one. An AbortController timeout surfaces as
+// a DOMException whose numeric `.code` is 20 (legacy ABORT_ERR), which renders
+// as an opaque "(20)" and buries the signal; collapse all the abort spellings
+// to "timeout". Other codes (ETIMEDOUT/ECONNRESET/…) already read fine and are
+// kept verbatim. Stays on code/name only — err.message can embed the lookup
+// URL, and the county-only PII rule applies to failure text as much as logs.
+function errLabel(err) {
+  if (!err) return 'network/timeout';
+  if (err.name === 'AbortError' || err.code === 'ABORT_ERR' || err.code === 20) return 'timeout';
+  return err.code || err.name || 'network/timeout';
+}
+
 // Presence-level expectations every golden parcel must satisfy. Each maps to
 // a distinct parsing surface, so the failure text names what broke.
 function evaluateGoldenRecord(label, record) {
@@ -86,7 +100,7 @@ async function runPropertyLookupCanaryInner() {
   // PII rule (county-only labels) applies to logs and failure text alike.
   let pointErrCode = null;
   const parcel = await lookupParcelByPoint(GOLDEN_POINT.lat, GOLDEN_POINT.lng, { timeoutMs: CANARY_TIMEOUT_MS, rethrowErrors: true })
-    .catch((err) => { pointErrCode = (err && (err.code || err.name)) || 'network/timeout'; return null; });
+    .catch((err) => { pointErrCode = errLabel(err); return null; });
   if (!parcel || parcel.county !== GOLDEN_POINT.expectCounty) {
     failures.push(pointErrCode
       ? `FDOR cadastral layer: golden point lookup threw (${pointErrCode})`
@@ -102,7 +116,7 @@ async function runPropertyLookupCanaryInner() {
     const record = await lookupPropertyFromCountyByParcel(golden.parcel, golden.parcel.situsAddress, {
       timeoutMs: CANARY_TIMEOUT_MS,
       rethrowErrors: true,
-    }).catch((err) => { errCode = (err && (err.code || err.name)) || 'network/timeout'; return null; });
+    }).catch((err) => { errCode = errLabel(err); return null; });
     if (errCode) {
       logger.warn('[property-lookup-canary] by-parcel lookup threw', { label: golden.label, code: errCode });
       failures.push(`${golden.label}: by-parcel lookup threw (${errCode})`);
@@ -140,6 +154,7 @@ module.exports = {
     GOLDEN_PARCELS,
     GOLDEN_POINT,
     evaluateGoldenRecord,
+    errLabel,
     isCanaryDisabled,
     runPropertyLookupCanaryInner,
   },
