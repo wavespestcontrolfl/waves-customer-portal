@@ -34,11 +34,16 @@ exports.up = async function (knex) {
     declare
       enabled boolean;
     begin
-      -- The brand-voice loop (house-voice shadow drafter + backfill) is a
-      -- separate, independently-gated system; the legacy approval-queue
-      -- flag never governed it. Only legacy drafts (drafter other than
-      -- 'house_voice', i.e. the old path's NULL) hit the kill switch.
-      if NEW.drafter is distinct from 'house_voice' then
+      -- Exempt ONLY the brand-voice loop's unsendable shape:
+      -- drafter='house_voice' AND status='shadow'. Every legitimate
+      -- house-voice insert (live shadow drafter + backfill) is status
+      -- 'shadow'; 'suggested' only ever arises via a later UPDATE, which
+      -- this BEFORE INSERT trigger doesn't gate. Requiring 'shadow' keeps
+      -- the kill switch effective against a future/buggy house-voice insert
+      -- with a sendable status (e.g. 'pending'), which admin-drafts would
+      -- otherwise pick up. Everything else (legacy NULL-drafter path) stays
+      -- subject to the flag.
+      if NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow' then
         select lower(value) = 'true' into enabled
           from system_config where key = 'legacy_ai_drafts_enabled';
         if coalesce(enabled, false) is not true then
