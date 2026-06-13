@@ -185,6 +185,22 @@ describe('lawn assessment route contracts', () => {
     expect(adminLawnAssessmentRouter._test.customerVisibleForQualityCheck(null)).toBe(true);
   });
 
+  test('service assessment lookup prefers the latest captured row', () => {
+    const calls = [];
+    const query = {
+      orderBy: jest.fn((column, direction) => {
+        calls.push([column, direction]);
+        return query;
+      }),
+    };
+
+    expect(adminLawnAssessmentRouter._test.applyServiceAssessmentOrder(query)).toBe(query);
+    expect(calls).toEqual([
+      ['created_at', 'desc'],
+      ['updated_at', 'desc'],
+    ]);
+  });
+
   test('recommendation customer visibility requires approval except low-risk education', () => {
     expect(adminLawnAssessmentRouter._test.canShowRecommendationToCustomer({
       type: 'tier_upgrade',
