@@ -8,6 +8,8 @@ jest.mock('../services/seo/backlink-monitor', () => ({
 describe('GSC Links importer', () => {
   beforeEach(() => {
     jest.resetModules();
+    require('../models/db').mockReset();
+    require('../services/seo/backlink-monitor').takeSnapshot.mockClear();
   });
 
   test('dry run accepts source-page exports and skips aggregate rows', async () => {
@@ -56,6 +58,54 @@ describe('GSC Links importer', () => {
     })).toEqual(expect.objectContaining({
       skipped: true,
       reason: 'non_waves_target',
+    }));
+  });
+
+  test('re-import preserves existing disavow and toxicity decisions', async () => {
+    const db = require('../models/db');
+    const existing = {
+      id: 'backlink-1',
+      source_url: 'https://example.com/listing',
+      target_url: 'https://wavespestcontrol.com/',
+      status: 'disavowed',
+      severity: 'critical',
+      toxicity_score: 90,
+      toxicity_reasons: JSON.stringify(['manual_disavow']),
+      is_dofollow: false,
+      first_seen: '2026-05-01',
+    };
+    const updates = [];
+
+    db.mockImplementation((table) => {
+      if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
+      const builder = {
+        where: jest.fn(() => builder),
+        first: jest.fn(async () => existing),
+        update: jest.fn(async (patch) => {
+          updates.push(patch);
+          return 1;
+        }),
+      };
+      return builder;
+    });
+
+    const importer = require('../services/seo/gsc-links-importer');
+    const csv = [
+      'Source page,Target page,Anchor text',
+      'https://example.com/listing,https://wavespestcontrol.com/,Waves Pest Control',
+    ].join('\n');
+
+    const result = await importer.importCsv(csv, { apply: true });
+
+    expect(result).toMatchObject({ inserted: 0, updated: 1 });
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toEqual(expect.objectContaining({
+      status: 'disavowed',
+      severity: 'critical',
+      toxicity_score: 90,
+      toxicity_reasons: JSON.stringify(['manual_disavow']),
+      is_dofollow: false,
+      first_seen: '2026-05-01',
     }));
   });
 });
