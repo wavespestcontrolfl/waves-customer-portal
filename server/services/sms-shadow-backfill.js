@@ -237,8 +237,14 @@ async function findRedraftCandidates({ batchSize = DEFAULT_BATCH, sinceDays = DE
       `RIGHT(REGEXP_REPLACE(COALESCE(i.to_phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)`,
       [allowedLast10]
     )
-    // Was backfilled before (has a house-voice draft) ...
-    .whereRaw("EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id AND md.drafter = 'house_voice')")
+    // Was sampled by a PRIOR BACKFILL run — a prompt_version ending in
+    // 'backfill' that isn't the current one. Restricting to backfill (not any
+    // house-voice draft) is load-bearing: live shadow/suggestion drafts use
+    // prompt_version 'house_voice_vN' (no 'backfill' suffix), so re-draft can
+    // NEVER pick up live customer traffic — even if the flag is left on — and
+    // the job terminates cleanly once every prior backfill row has a current
+    // one. (LIKE '%backfill' is safe: only backfill versions end in it.)
+    .whereRaw("EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id AND md.prompt_version LIKE '%backfill' AND md.prompt_version <> ?)", [BACKFILL_PROMPT_VERSION])
     // ... but not yet under the CURRENT version (idempotent across batches).
     .whereRaw('NOT EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id AND md.prompt_version = ?)', [BACKFILL_PROMPT_VERSION])
     .whereRaw('EXISTS (SELECT 1 FROM customers c WHERE c.id = i.customer_id AND c.deleted_at IS NULL)')
