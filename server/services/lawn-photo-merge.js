@@ -93,6 +93,9 @@ function mergePhotoComposites(validResults = []) {
   );
   merged.observations = results.map(r => r.composite.observations).filter(Boolean)[0] || '';
   merged.overwatering_signal = results.some(r => r.composite?.overwatering_signal === true);
+  // Grass type: majority vote across photos, falling back to the first detected.
+  const grasses = results.map(r => r.composite?.grass_type).filter(Boolean);
+  merged.grass_type = grasses.length ? (majorityVote(grasses) || grasses[0]) : null;
   return merged;
 }
 

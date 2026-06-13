@@ -450,6 +450,12 @@ export default function LawnAssessmentPanel() {
         }),
       });
       setResult(r);
+      // Pre-fill grass type from the AI read when the turf profile has none yet,
+      // so the tech sees + can confirm/override. The server already COALESCE-
+      // persisted it; this just surfaces it in the profile form.
+      if (r.detectedGrassType) {
+        setTurfProfile((prev) => (prev.grass_type ? prev : { ...prev, grass_type: r.detectedGrassType }));
+      }
       setSnapshotReview(null);
       setAssessmentConfirmed(false);
       // Seed from the server's season-adjusted scores so the review

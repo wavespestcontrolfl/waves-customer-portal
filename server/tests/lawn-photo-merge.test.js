@@ -9,6 +9,19 @@ const { withConcurrency, majorityVote, mergePhotoComposites } = require('../serv
 describe('mergePhotoComposites', () => {
   const photo = (o) => ({ composite: { turf_density: 70, weed_coverage: 10, color_health: 7, fungal_activity: 'none', thatch_visibility: 'low', observations: '', overwatering_signal: false, ...o } });
 
+  test('grass_type: majority vote across photos, ignoring undetected', () => {
+    expect(mergePhotoComposites([
+      photo({ grass_type: 'st_augustine' }),
+      photo({ grass_type: 'st_augustine' }),
+      photo({ grass_type: 'bahia' }),
+    ]).grass_type).toBe('st_augustine');
+    expect(mergePhotoComposites([
+      photo({ grass_type: null }),
+      photo({ grass_type: 'zoysia' }),
+    ]).grass_type).toBe('zoysia');
+    expect(mergePhotoComposites([photo({ grass_type: null }), photo({ grass_type: null })]).grass_type).toBeNull();
+  });
+
   test('ORs overwatering_signal across photos (one photo seeing it flags all)', () => {
     const merged = mergePhotoComposites([
       photo({ observations: 'Front looks healthy.' }),
