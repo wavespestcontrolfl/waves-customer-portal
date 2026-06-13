@@ -191,7 +191,21 @@ async function fetchServiceWeekRainInches({ latitude, longitude, serviceDate } =
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) return null;
     const payload = await response.json();
-    const value = sumPrecipInches(payload?.daily?.precipitation_sum);
+    const daily = payload?.daily || {};
+    const sums = daily.precipitation_sum;
+    const times = daily.time;
+    // Trust only a COMPLETE window: if Open-Meteo returns a short/partial range
+    // (date range partly outside its coverage), surface rain_unknown rather than
+    // a weekly total computed from fewer days.
+    const expectedDays = Math.round(
+      (Date.parse(`${range.end}T00:00:00Z`) - Date.parse(`${range.start}T00:00:00Z`)) / 86400000,
+    ) + 1;
+    const complete = Array.isArray(sums) && Array.isArray(times)
+      && sums.length === expectedDays
+      && times.length === expectedDays
+      && times[0] === range.start
+      && times[times.length - 1] === range.end;
+    const value = complete ? sumPrecipInches(sums) : null;
     _rainCache.set(key, { at: Date.now(), value });
     return value;
   } catch (err) {
