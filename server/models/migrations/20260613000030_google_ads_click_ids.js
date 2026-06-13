@@ -6,8 +6,8 @@ exports.up = async function (knex) {
     const hasWbraid = await knex.schema.hasColumn(tableName, 'wbraid');
     const hasGbraid = await knex.schema.hasColumn(tableName, 'gbraid');
     await knex.schema.alterTable(tableName, (t) => {
-      if (!hasWbraid) t.string('wbraid', 200);
-      if (!hasGbraid) t.string('gbraid', 200);
+      if (!hasWbraid) t.string('wbraid', 255);
+      if (!hasGbraid) t.string('gbraid', 255);
     });
   };
 

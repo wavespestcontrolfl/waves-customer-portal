@@ -133,13 +133,6 @@ router.post('/', async (req, res) => {
       }
       if (!sourceRecord && leadSource.source === 'google_business') {
         sourceRecord = await db('lead_sources')
-          .where('source_type', 'gbp')
-          .where('channel', 'organic')
-          .where('is_active', true)
-          .first();
-      }
-      if (!sourceRecord && leadSource.source === 'google_business') {
-        sourceRecord = await db('lead_sources')
           .where('source_type', 'website_organic')
           .where('channel', 'google')
           .where('is_active', true)
@@ -823,10 +816,14 @@ function getLeadWebhookAttribution(body = {}) {
     utmCampaign: body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '',
     utmContent: body.utm_content || body['Utm Content'] || attrUtm.content || '',
     utmTerm: body.utm_term || body['Utm Term'] || attrUtm.term || '',
-    gclid: body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '',
-    wbraid: body.wbraid || body['Wbraid'] || body.WBRAID || attr.wbraid || '',
-    gbraid: body.gbraid || body['Gbraid'] || body.GBRAID || attr.gbraid || '',
+    gclid: truncateClickId(body.gclid || body['Gclid'] || body.GCLID || attr.gclid || ''),
+    wbraid: truncateClickId(body.wbraid || body['Wbraid'] || body.WBRAID || attr.wbraid || ''),
+    gbraid: truncateClickId(body.gbraid || body['Gbraid'] || body.GBRAID || attr.gbraid || ''),
   };
+}
+
+function truncateClickId(value) {
+  return value ? String(value).slice(0, 255) : '';
 }
 
 function buildLeadWebhookIntake(body = {}) {
@@ -1040,9 +1037,9 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
     const gbpLocation = findGbpLocationByUtmContent(utmContent);
     return {
       source: 'google_business',
-      detail: gbpLocation ? `GBP ${gbpLocation.name}` : `GBP ${utmContent || ''}`.trim(),
+      detail: gbpLocation ? `GBP ${gbpLocation.name}` : 'GBP unattributed',
       channel: 'organic',
-      area: gbpLocation?.id || utmContent,
+      area: gbpLocation?.id || null,
     };
   }
   if (utmSource === 'google' && utmMedium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };

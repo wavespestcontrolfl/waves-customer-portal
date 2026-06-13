@@ -154,6 +154,8 @@ describe('quote workflow service interest labels', () => {
   });
 
   test('lead webhook resolves existing GBP UTM profile attribution and click IDs', () => {
+    const longWbraid = `W${'B'.repeat(260)}`;
+    const longGbraid = `G${'B'.repeat(260)}`;
     const intake = buildLeadWebhookIntake({
       firstName: 'Gina',
       lastName: 'Maps',
@@ -168,18 +170,42 @@ describe('quote workflow service interest labels', () => {
           campaign: 'website-link',
           content: 'sarasota-profile',
         },
-        wbraid: 'WBRAID-123',
-        gbraid: 'GBRAID-123',
+        wbraid: longWbraid,
+        gbraid: longGbraid,
       },
     });
 
-    expect(intake.wbraid).toBe('WBRAID-123');
-    expect(intake.gbraid).toBe('GBRAID-123');
+    expect(intake.wbraid).toBe(longWbraid.slice(0, 255));
+    expect(intake.gbraid).toBe(longGbraid.slice(0, 255));
     expect(intake.leadSource).toEqual(expect.objectContaining({
       source: 'google_business',
       detail: 'GBP Sarasota',
       channel: 'organic',
       area: 'sarasota',
+    }));
+  });
+
+  test('lead webhook keeps unknown GBP UTMs unprofiled', () => {
+    const intake = buildLeadWebhookIntake({
+      firstName: 'Uma',
+      lastName: 'Unknown',
+      email: 'uma@example.com',
+      phone: '9415550196',
+      attribution: {
+        utm: {
+          source: 'gbp',
+          medium: 'organic',
+          campaign: 'website-link',
+          content: 'legacy-profile',
+        },
+      },
+    });
+
+    expect(intake.leadSource).toEqual(expect.objectContaining({
+      source: 'google_business',
+      detail: 'GBP unattributed',
+      channel: 'organic',
+      area: null,
     }));
   });
 

@@ -19,6 +19,13 @@ function number(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function addDateStringDays(value, days) {
+  const d = new Date(`${String(value || '').slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return value;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().split('T')[0];
+}
+
 function newProfileRow(loc) {
   return {
     id: loc.id,
@@ -98,6 +105,51 @@ function contentFromLead(row) {
     || null;
 }
 
+function estimateLeadId(row) {
+  const data = parseJsonObject(row.estimate_data);
+  return data.lead_id ? String(data.lead_id) : null;
+}
+
+function estimateRank(row) {
+  const status = String(row?.status || '').toLowerCase();
+  const statusRank = status === 'accepted' ? 3 : (['sent', 'viewed'].includes(status) ? 2 : 1);
+  const timeRank = Date.parse(row?.accepted_at || row?.updated_at || row?.created_at || 0) || 0;
+  return [statusRank, timeRank];
+}
+
+function betterEstimate(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  const [aStatus, aTime] = estimateRank(a);
+  const [bStatus, bTime] = estimateRank(b);
+  if (bStatus !== aStatus) return bStatus > aStatus ? b : a;
+  return bTime > aTime ? b : a;
+}
+
+function mergeEstimateFields(rows, estimates) {
+  const byEstimateId = new Map();
+  const byLeadId = new Map();
+
+  for (const estimate of estimates || []) {
+    byEstimateId.set(String(estimate.id), estimate);
+    const leadId = estimateLeadId(estimate);
+    if (leadId) byLeadId.set(leadId, betterEstimate(byLeadId.get(leadId), estimate));
+  }
+
+  return (rows || []).map((row) => {
+    const direct = row.estimate_id ? byEstimateId.get(String(row.estimate_id)) : null;
+    const wizard = byLeadId.get(String(row.id));
+    const estimate = betterEstimate(direct, wizard);
+    return {
+      ...row,
+      estimate_status: estimate?.status || null,
+      estimate_monthly: estimate?.monthly_total || null,
+      estimate_annual: estimate?.annual_total || null,
+      estimate_onetime: estimate?.onetime_total || null,
+    };
+  });
+}
+
 function sumProfileTotals(profiles) {
   return profiles.reduce((acc, profile) => {
     acc.calls += profile.gbp.calls;
@@ -143,20 +195,22 @@ function sumProfileTotals(profiles) {
   });
 }
 
-async function getGbpRows(since) {
+async function getGbpRows(since, endDate) {
   try {
-    return await db('gbp_performance_daily').where('date', '>=', since);
+    return await db('gbp_performance_daily')
+      .where('date', '>=', since)
+      .where('date', '<', addDateStringDays(endDate, 1));
   } catch (err) {
     return { error: err.message, rows: [] };
   }
 }
 
-async function getCrmRows(since) {
+async function getCrmRows(since, endDate) {
   try {
-    return await db('leads')
+    const rows = await db('leads')
       .where('leads.first_contact_at', '>=', since)
+      .where('leads.first_contact_at', '<', addDateStringDays(endDate, 1))
       .leftJoin('lead_sources as ls', 'leads.lead_source_id', 'ls.id')
-      .leftJoin('estimates as e', 'leads.estimate_id', 'e.id')
       .where((q) => {
         q.where('ls.source_type', 'gbp')
           .orWhereRaw("COALESCE(leads.extracted_data::text, '') ILIKE '%\"campaign\":\"gbp\"%'")
@@ -171,13 +225,39 @@ async function getCrmRows(since) {
         'leads.gclid',
         'leads.wbraid',
         'leads.gbraid',
+        'leads.estimate_id',
         'leads.extracted_data',
-        'ls.gbp_location_id',
-        'e.status as estimate_status',
-        'e.monthly_total as estimate_monthly',
-        'e.annual_total as estimate_annual',
-        'e.onetime_total as estimate_onetime'
+        'ls.gbp_location_id'
       );
+
+    if (!rows.length) return rows;
+
+    const leadIds = rows.map((row) => String(row.id));
+    const estimateIds = rows.map((row) => row.estimate_id).filter(Boolean).map(String);
+    const estimates = await db('estimates')
+      .where((q) => {
+        if (estimateIds.length) q.whereIn('id', estimateIds);
+        if (leadIds.length) {
+          q.orWhere((qq) => {
+            qq.where('source', 'quote_wizard')
+              .whereIn(db.raw("estimate_data->>'lead_id'"), leadIds);
+          });
+        }
+      })
+      .select(
+        'id',
+        'status',
+        'source',
+        'estimate_data',
+        'monthly_total',
+        'annual_total',
+        'onetime_total',
+        'accepted_at',
+        'updated_at',
+        'created_at'
+      );
+
+    return mergeEstimateFields(rows, estimates);
   } catch (err) {
     return { error: err.message, rows: [] };
   }
@@ -186,11 +266,12 @@ async function getCrmRows(since) {
 async function buildLocalPerformance({ periodDays = 30 } = {}) {
   const days = Math.min(Math.max(parseInt(periodDays, 10) || 30, 7), 180);
   const since = etDateString(addETDays(new Date(), -days));
+  const endDate = etDateString(addETDays(new Date(), -1));
   const profileMap = buildProfileMap();
   const daily = new Map();
   const warnings = [];
 
-  const gbpResult = await getGbpRows(since);
+  const gbpResult = await getGbpRows(since, endDate);
   const gbpRows = Array.isArray(gbpResult) ? gbpResult : gbpResult.rows;
   if (gbpResult.error) warnings.push({ source: 'gbp_performance_daily', message: gbpResult.error });
 
@@ -227,7 +308,6 @@ async function buildLocalPerformance({ periodDays = 30 } = {}) {
     }
   }
 
-  const endDate = etDateString(addETDays(new Date(), -1));
   const ga4 = await GA4.getGbpUtmTraffic(since, endDate);
   if (ga4.error) warnings.push({ source: 'ga4_utm', message: ga4.error });
   for (const row of ga4.data || []) {
@@ -239,7 +319,7 @@ async function buildLocalPerformance({ periodDays = 30 } = {}) {
     profile.ga4.conversions += number(row.conversions);
   }
 
-  const crmResult = await getCrmRows(since);
+  const crmResult = await getCrmRows(since, endDate);
   const crmRows = Array.isArray(crmResult) ? crmResult : crmResult.rows;
   if (crmResult.error) warnings.push({ source: 'crm_attribution', message: crmResult.error });
   for (const row of crmRows) {
@@ -320,8 +400,11 @@ module.exports = {
   buildLocalPerformance,
   _internals: {
     acceptedEstimateRevenue,
+    addDateStringDays,
     contentFromLead,
+    estimateLeadId,
     isGbpUtmCampaign,
+    mergeEstimateFields,
     profileForContent,
   },
 };

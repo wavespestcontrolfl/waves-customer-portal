@@ -3593,9 +3593,22 @@ function AnalyticsTab() {
   const readiness = blended.dataManagerReadiness || {};
   const profiles = Array.isArray(local.profiles) ? local.profiles : [];
   const setupLinks = Array.isArray(local.setup?.utmWebsiteLinks) ? local.setup.utmWebsiteLinks : [];
-  const analyticsNotice = overview?.configured === false
-    ? "Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID, then grant the service account Viewer access in GA4."
-    : overview?.error || null;
+  const localWarnings = Array.isArray(local.warnings) ? local.warnings : [];
+  const analyticsNotices = [
+    ...(overview?.configured === false
+      ? [{
+        title: "Google Analytics access",
+        message: "Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID, then grant the service account Viewer access in GA4.",
+      }]
+      : []),
+    ...(overview?.configured !== false && overview?.error
+      ? [{ title: "Google Analytics access", message: overview.error }]
+      : []),
+    ...localWarnings.map((warning) => ({
+      title: "Local performance data",
+      message: `${warning?.source || "source"}: ${warning?.message || "Unavailable"}`,
+    })),
+  ];
   const fmt = (v) => (v != null ? Number(v).toLocaleString() : "—");
   const money = (v) => (v != null ? fmtMoney(v) : "—");
   const pct = (v) => (v != null ? `${(Number(v) * 100).toFixed(1)}%` : "—");
@@ -3628,13 +3641,17 @@ function AnalyticsTab() {
           </button>
         ))}
       </div>
-      {analyticsNotice && (
+      {analyticsNotices.length > 0 && (
         <Card style={{ padding: 16, borderColor: D.amber }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
-            Google Analytics access
+            Analytics data notices
           </div>
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 6, lineHeight: 1.5 }}>
-            {analyticsNotice}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+            {analyticsNotices.map((notice, idx) => (
+              <div key={`${notice.title}-${idx}`} style={{ fontSize: 12, color: D.muted, lineHeight: 1.5 }}>
+                <strong style={{ color: D.heading }}>{notice.title}:</strong> {notice.message}
+              </div>
+            ))}
           </div>
         </Card>
       )}
