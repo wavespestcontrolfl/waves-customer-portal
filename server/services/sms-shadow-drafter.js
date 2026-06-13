@@ -27,11 +27,12 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 
 const DRAFTER = 'house_voice';
-// v2 (06-13): hardened fact-discipline section targeting the fabrication
-// modes the judge flagged in the v1 cohort (invented dates/times/arrival
-// windows, tech names, trap findings, cadence, billing events). Bumped so
-// shadow_draft_judgments partitions cleanly v1 vs v2 by prompt_version.
-const PROMPT_VERSION = 'house_voice_v2';
+// v3 (06-13): the v2 prompt-hardening was a null result (32% draft_unsafe
+// unchanged) — negative instructions can't beat the completion instinct. v3
+// keeps the v2 prompt but wraps drafting in an adversarial verify→revise
+// loop (generateGroundedDraft + sms-draft-verifier). Bumped so the judge
+// partitions v3 vs the 32% v1=v2 baseline.
+const PROMPT_VERSION = 'house_voice_v3';
 const SHADOW_STATUS = 'shadow';
 
 const INTENDED_ACTION_TYPES = [
@@ -95,7 +96,12 @@ function formatEtDate(value) {
   }
 }
 
-function buildUserPrompt(context, inboundMessage, intent, schedulingIntent) {
+/**
+ * The fact block the drafter may draw from — and the EXACT same block the
+ * verifier checks the draft against, so the two agree on what counts as
+ * "supported". Shared by buildUserPrompt and the verify loop.
+ */
+function buildFactsBlock(context) {
   const conversation = (context.smsHistory || [])
     .slice(0, 10)
     .reverse()
@@ -128,7 +134,11 @@ ACCOUNT FLAGS:
 ${flagsSummary}
 
 RECENT SMS THREAD:
-${conversation || '(no recent thread)'}
+${conversation || '(no recent thread)'}`;
+}
+
+function buildUserPrompt(context, inboundMessage, intent, schedulingIntent) {
+  return `${buildFactsBlock(context)}
 
 CLASSIFIED INTENT: ${intent?.intent || 'GENERAL'}${schedulingIntent ? ' (scheduling-intent detected — be especially careful to only state schedule facts present above)' : ''}
 
@@ -137,6 +147,90 @@ The facts above are the ONLY ones you have. If answering needs a detail that isn
 NEW INBOUND MESSAGE: "${inboundMessage}"
 
 Draft the reply JSON now.`;
+}
+
+// Verify loop tunables. SHADOW_DRAFT_VERIFY=false reverts to single-pass
+// (the pre-v3 drafter) as a kill switch; max revisions is bounded so a
+// stubborn draft can't loop forever (default 2 → up to 3 generations and 3
+// verifies, mirroring the blog convergence loop's "3 passes").
+const VERIFY_ENABLED = process.env.SHADOW_DRAFT_VERIFY !== 'false';
+const MAX_REVISIONS = (() => {
+  const n = Number(process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS);
+  return Number.isInteger(n) && n >= 0 && n <= 4 ? n : 2;
+})();
+
+async function generateDraftOnce(client, system, userContent) {
+  const resp = await client.messages.create({
+    model: MODELS.FLAGSHIP,
+    max_tokens: 600,
+    system,
+    messages: [{ role: 'user', content: userContent }],
+  });
+  return parseShadowResponse(resp.content?.[0]?.text || '');
+}
+
+/**
+ * Draft → verify → revise convergence loop. Generates a draft, then runs the
+ * adversarial verifier; if the draft asserts facts the context doesn't
+ * support, feeds the violations back for a rewrite toward deferral, up to
+ * MAX_REVISIONS times. Returns the final draft + loop telemetry
+ * { parsed, passes, converged }. converged=true means the verifier signed
+ * off (or the reply was empty — nothing to assert). Verify failures degrade
+ * gracefully: keep the current draft, stop, converged=false — a verification
+ * miss must never break drafting. Caller supplies the Anthropic client so
+ * live + backfill share one implementation.
+ */
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent }) {
+  const system = buildSystemPrompt();
+  const factsBlock = buildFactsBlock(context);
+  const userContent = buildUserPrompt(context, inboundMessage, intent, schedulingIntent);
+
+  let parsed = await generateDraftOnce(client, system, userContent);
+  if (!parsed) return { parsed: null, passes: 1, converged: false };
+  // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
+  if (!VERIFY_ENABLED) return { parsed, passes: 1, converged: true };
+
+  const verifier = require('./sms-draft-verifier');
+  let passes = 1;
+  let converged = false;
+
+  for (let attempt = 0; attempt <= MAX_REVISIONS; attempt += 1) {
+    // An empty reply ("no reply warranted") asserts nothing — nothing to check.
+    if (!parsed.reply) { converged = true; break; }
+
+    let verdict;
+    try {
+      const vResp = await client.messages.create({
+        model: verifier.VERIFIER_MODEL,
+        max_tokens: 400,
+        system: verifier.buildVerifierSystemPrompt(),
+        messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, parsed.reply) }],
+      });
+      verdict = verifier.parseVerifierResponse(vResp.content?.[0]?.text || '');
+    } catch (err) {
+      logger.warn(`[sms-shadow] verify pass failed (${err.message}); keeping current draft`);
+      converged = false;
+      break;
+    }
+
+    if (!verdict) { converged = false; break; } // unparseable verdict — stop, don't loop
+    if (verdict.supported) { converged = true; break; }
+
+    // Violations present. Out of revision budget → stop, not converged.
+    converged = false;
+    if (attempt === MAX_REVISIONS) break;
+
+    const revised = await generateDraftOnce(
+      client,
+      system,
+      `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`
+    );
+    if (!revised) break; // revision unparseable — keep the prior draft
+    parsed = revised;
+    passes += 1;
+  }
+
+  return { parsed, passes, converged };
 }
 
 /**
@@ -201,15 +295,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const resp = await client.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 600,
-      system: buildSystemPrompt(),
-      messages: [{ role: 'user', content: buildUserPrompt(context, inboundMessage, intent, schedulingIntent) }],
+    // v3: draft → adversarial fact-check → revise loop (generateGroundedDraft).
+    const { parsed, passes, converged } = await generateGroundedDraft({
+      client, context, inboundMessage, intent, schedulingIntent,
     });
-
-    const raw = resp.content?.[0]?.text || '';
-    const parsed = parseShadowResponse(raw);
     if (!parsed) {
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
       return null;
@@ -250,14 +339,19 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         intended_actions: JSON.stringify({
           actions: parsed.intended_actions,
           missing_info: parsed.missing_info,
+          verify: { passes, converged },
         }),
         scheduling_intent: Boolean(schedulingIntent),
         draft_ms: Date.now() - startedAt,
       })
       .returning('id');
 
+    // Only verified-clean drafts may surface to a human as a suggestion: a
+    // draft the verify loop couldn't sign off (still asserting unsupported
+    // facts after the revision budget) stays a silent shadow row rather than
+    // putting a possibly-fabricated card in front of staff.
     let published = false;
-    if (row?.id && wantsSuggestion) {
+    if (row?.id && wantsSuggestion && converged) {
       const decisionId = await suggestMode.publishSuggestion({
         draftId: row.id,
         customerId: customer.id,
@@ -273,7 +367,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     }
 
     logger.info(
-      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${published ? suggestMode.SUGGESTED_STATUS : SHADOW_STATUS} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
+      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${published ? suggestMode.SUGGESTED_STATUS : SHADOW_STATUS} passes=${passes} converged=${converged} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
     );
     return row?.id || null;
   } catch (err) {
@@ -284,9 +378,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
 
 module.exports = {
   draftShadowReply,
+  generateGroundedDraft,
   parseShadowResponse,
   buildSystemPrompt,
   buildUserPrompt,
+  buildFactsBlock,
   DRAFTER,
   PROMPT_VERSION,
   SHADOW_STATUS,
