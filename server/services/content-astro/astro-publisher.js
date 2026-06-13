@@ -32,6 +32,7 @@ const contentGuardrails = require('../content/content-guardrails');
 const factCheckGate = require('../content/fact-check-gate');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS } = require('./spoke-sites');
+const { etDateString } = require('../../utils/datetime-et');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const ASTRO_HERO_DIR = 'public/images/blog';
@@ -86,7 +87,23 @@ function stampHubOnlyBlogDomains(frontmatter) {
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
+const SCHEMA_TYPES = new Set(['Article', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
 const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
+const DEFAULT_SERVICE_AREAS = Object.freeze(['Sarasota', 'Bradenton', 'Venice', 'Lakewood Ranch', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
+const DEFAULT_BLOG_AUTHOR = Object.freeze({
+  name: 'Adam Benetti',
+  role: 'Founder & Lead Technician',
+  fdacs_license: 'JB351547',
+  years_swfl: 12,
+  bio_url: '/about/authors/adam-benetti',
+});
+const DEFAULT_TECHNICAL_REVIEWER = Object.freeze({
+  name: 'Adam Benetti',
+  credential: 'FDACS Licensed Pest Control Operator',
+  fdacs_license: 'JB351547',
+  bio_url: '/about/authors/adam-benetti',
+});
+const DISCLOSURE_TYPES = new Set(['pricing-transparency', 'service-area-limits', 'regulatory', 'none']);
 
 const CATEGORY_ALIASES = {
   pest: 'pest-control',
@@ -250,6 +267,123 @@ function normalizeServiceAreas(value, city) {
   return [];
 }
 
+function inferServiceAreas(frontmatter = {}, brief = {}) {
+  const direct = normalizeServiceAreas(frontmatter.service_areas_tag, frontmatter.city || brief.city);
+  if (direct.length > 0) return direct;
+
+  const haystack = [
+    frontmatter.title,
+    frontmatter.primary_keyword,
+    brief.target_keyword,
+    brief.city,
+    frontmatter.tags,
+  ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ').toLowerCase();
+  const inferred = DEFAULT_SERVICE_AREAS.filter((area) => haystack.includes(area.toLowerCase()));
+  return inferred.length > 0 ? inferred : [...DEFAULT_SERVICE_AREAS];
+}
+
+function normalizeAuthorBlock(value, fallback) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const name = String(source.name || fallback.name || '').trim();
+  const role = String(source.role || fallback.role || '').trim();
+  const bioUrl = String(source.bio_url || fallback.bio_url || '').trim();
+  if (!name || !role || !/^\/about\/authors\/[a-z0-9-]+$/.test(bioUrl)) return { ...fallback };
+  const out = { name, role, bio_url: bioUrl };
+  const fdacs = String(source.fdacs_license || fallback.fdacs_license || '').trim();
+  if (/^JB\d{4,}$/.test(fdacs)) out.fdacs_license = fdacs;
+  const years = Number.isInteger(source.years_swfl) ? source.years_swfl : fallback.years_swfl;
+  if (Number.isInteger(years) && years >= 0) out.years_swfl = years;
+  return out;
+}
+
+function normalizeReviewerBlock(value, fallback) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const name = String(source.name || fallback.name || '').trim();
+  const credential = String(source.credential || source.role || fallback.credential || '').trim();
+  const bioUrl = String(source.bio_url || fallback.bio_url || '').trim();
+  if (!name || !credential || !/^\/about\/authors\/[a-z0-9-]+$/.test(bioUrl)) return { ...fallback };
+  const out = { name, credential, bio_url: bioUrl };
+  const fdacs = String(source.fdacs_license || fallback.fdacs_license || '').trim();
+  if (/^JB\d{4,}$/.test(fdacs)) out.fdacs_license = fdacs;
+  return out;
+}
+
+function normalizeDisclosure(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const type = String(source.type || '').trim();
+  const out = { type: DISCLOSURE_TYPES.has(type) ? type : 'pricing-transparency' };
+  const text = String(source.text || '').trim();
+  if (text) out.text = text;
+  return out;
+}
+
+function normalizeAutonomousCategory(frontmatter = {}, brief = {}) {
+  return normalizeCategory(frontmatter.category, [
+    frontmatter.tag,
+    frontmatter.tags,
+    frontmatter.service,
+    brief.service,
+    frontmatter.primary_keyword,
+    brief.target_keyword,
+    frontmatter.title,
+  ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ')) || 'pest-control';
+}
+
+function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body = '', { slug, canonical } = {}) {
+  const published = dateOnly(frontmatter.published)
+    || dateOnly(frontmatter.publish_date)
+    || dateOnly(brief.publish_window)
+    || etDateString();
+  const updated = dateOnly(frontmatter.updated) || published;
+  const reviewed = dateOnly(frontmatter.technically_reviewed) || updated;
+  const factChecked = dateOnly(frontmatter.fact_checked) || updated;
+  const heroAlt = String(frontmatter?.hero_image?.alt || frontmatter.hero_image_alt || frontmatter.title || '').trim();
+  const defaultHeroSrc = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
+  const emittedHeroSrc = String(frontmatter?.hero_image?.src || '').trim();
+  const heroSrc = emittedHeroSrc.startsWith(`${ASTRO_HERO_PUBLIC_BASE}/`) ? emittedHeroSrc : defaultHeroSrc;
+  const schemaBase = [
+    ...normalizeArray(brief.schema_types),
+    ...normalizeArray(frontmatter.schema_types),
+  ].filter((type) => type !== 'FAQPage' || contentHasFaqSection(body));
+
+  const data = {
+    title: String(frontmatter.title || brief.title || brief.target_keyword || '').trim(),
+    slug: `/${slug}/`,
+    meta_description: String(frontmatter.meta_description || '').trim(),
+    primary_keyword: String(frontmatter.primary_keyword || brief.target_keyword || '').trim(),
+    secondary_keywords: normalizeArray(frontmatter.secondary_keywords),
+    category: normalizeAutonomousCategory(frontmatter, brief),
+    post_type: normalizePostType(frontmatter.post_type || frontmatter.page_type),
+    service_areas_tag: inferServiceAreas(frontmatter, brief),
+    related_services: normalizeArray(frontmatter.related_services),
+    spoke_links: normalizeArray(frontmatter.spoke_links),
+    author: normalizeAuthorBlock(frontmatter.author, DEFAULT_BLOG_AUTHOR),
+    technically_reviewed_by: normalizeReviewerBlock(frontmatter.technically_reviewed_by, DEFAULT_TECHNICAL_REVIEWER),
+    fact_checked_by: String(frontmatter.fact_checked_by || 'Virginia Gelser').trim(),
+    published,
+    updated,
+    technically_reviewed: reviewed,
+    fact_checked: factChecked,
+    review_cadence: ['monthly', 'quarterly', 'annually'].includes(frontmatter.review_cadence) ? frontmatter.review_cadence : 'quarterly',
+    reading_time_min: Number.isInteger(frontmatter.reading_time_min) && frontmatter.reading_time_min > 0
+      ? frontmatter.reading_time_min
+      : estimateReadingTime(body),
+    hero_image: {
+      src: heroSrc,
+      alt: heroAlt || String(frontmatter.title || brief.target_keyword || 'Blog post hero image').trim(),
+    },
+    og_image: heroSrc,
+    canonical,
+    schema_types: schemaTypesForContent(body, schemaBase),
+    disclosure: normalizeDisclosure(frontmatter.disclosure),
+    tracking: frontmatter.tracking && typeof frontmatter.tracking === 'object' && !Array.isArray(frontmatter.tracking)
+      ? { ...frontmatter.tracking }
+      : undefined,
+  };
+
+  return JSON.parse(JSON.stringify(data));
+}
+
 function normalizeTargetSites(value) {
   const sites = normalizeSpokeSites(value);
   if (sites.length > 0) return sites;
@@ -265,7 +399,8 @@ function contentHasFaqSection(content) {
 function schemaTypesForContent(content, baseTypes = ['Article']) {
   const types = Array.from(new Set((Array.isArray(baseTypes) && baseTypes.length > 0 ? baseTypes : ['Article'])
     .map((type) => String(type))
-    .filter(Boolean)));
+    .filter((type) => SCHEMA_TYPES.has(type))));
+  if (types.length === 0) types.push('Article');
   if (contentHasFaqSection(content) && !types.includes('FAQPage')) {
     types.push('FAQPage');
   }
@@ -798,13 +933,13 @@ async function publishOrUpdatePage(draft, brief = {}) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
   }
 
-  const frontmatter = { ...(draft.frontmatter || {}) };
-  const slug = slugPathFromFrontmatter(frontmatter);
-  const canonical = assertCanonicalMatchesSlug(frontmatter, slug);
+  const sourceFrontmatter = { ...(draft.frontmatter || {}) };
+  const slug = slugPathFromFrontmatter(sourceFrontmatter);
   const branchSlug = slugify(slug.replace(/\//g, '-'));
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
-  frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
+  const canonical = assertCanonicalMatchesSlug(sourceFrontmatter, slug);
+  const frontmatter = normalizeAutonomousBlogFrontmatter(sourceFrontmatter, brief, body, { slug, canonical });
   stampHubOnlyBlogDomains(frontmatter);
 
   // Hero contract: the writer agent's emit_draft tool only constrains
@@ -1774,11 +1909,16 @@ function normalizeCanonicalPath(pathname) {
 function assertCanonicalMatchesSlug(frontmatter, slug) {
   const expected = canonicalUrlForSlug(slug);
   const supplied = String(frontmatter?.canonical || '').trim();
+  const expectedUrl = new URL(expected);
+  if (!supplied) {
+    frontmatter.canonical = expected;
+    return expected;
+  }
   let suppliedUrl;
-  let expectedUrl;
   try {
-    suppliedUrl = new URL(supplied);
-    expectedUrl = new URL(expected);
+    suppliedUrl = supplied.startsWith('/')
+      ? new URL(supplied, expectedUrl.origin)
+      : new URL(supplied);
   } catch {
     throw new Error('autonomous draft canonical is not a valid URL');
   }
