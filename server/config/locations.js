@@ -24,8 +24,8 @@ const WAVES_LOCATIONS = [
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_LWR',
     googleReviewUrl: 'https://g.page/r/CVRc_P5butTMEBM/review',
     gbpWebsitePath: '/pest-control-bradenton-fl/',
-    gbpUtmContent: 'lakewood_ranch',
-    gbpUtmAliases: ['bradenton', 'bradenton_profile', 'lakewood_ranch_profile', 'lwr'],
+    gbpUtmContent: 'bradenton-profile',
+    gbpUtmAliases: ['bradenton', 'lakewood_ranch', 'lakewood_ranch_profile', 'lwr'],
   },
   {
     id: 'parrish',
@@ -43,8 +43,8 @@ const WAVES_LOCATIONS = [
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_PARRISH',
     googleReviewUrl: 'https://g.page/r/Ca-4KKoWwFacEBM/review',
     gbpWebsitePath: '/pest-control-parrish-fl/',
-    gbpUtmContent: 'parrish',
-    gbpUtmAliases: ['parrish_profile'],
+    gbpUtmContent: 'parrish-profile',
+    gbpUtmAliases: ['parrish'],
   },
   {
     id: 'sarasota',
@@ -62,8 +62,8 @@ const WAVES_LOCATIONS = [
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_SARASOTA',
     googleReviewUrl: 'https://g.page/r/CRkzS6M4EpncEBM/review',
     gbpWebsitePath: '/pest-control-sarasota-fl/',
-    gbpUtmContent: 'sarasota',
-    gbpUtmAliases: ['sarasota_profile'],
+    gbpUtmContent: 'sarasota-profile',
+    gbpUtmAliases: ['sarasota'],
   },
   {
     id: 'venice',
@@ -81,15 +81,15 @@ const WAVES_LOCATIONS = [
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_VENICE',
     googleReviewUrl: 'https://g.page/r/CURA5pQ1KatBEBM/review',
     gbpWebsitePath: '/pest-control-venice-fl/',
-    gbpUtmContent: 'venice',
-    gbpUtmAliases: ['venice_profile'],
+    gbpUtmContent: 'venice-profile',
+    gbpUtmAliases: ['venice'],
   },
 ];
 
 const GBP_UTM_PARAMS = {
-  source: 'google',
+  source: 'gbp',
   medium: 'organic',
-  campaign: 'gbp',
+  campaign: 'website-link',
 };
 
 function normalizeGbpUtmContent(value) {
@@ -121,7 +121,7 @@ function gbpTrackingUrlForLocation(locationOrId) {
     ? WAVES_LOCATIONS.find((item) => item.id === locationOrId)
     : locationOrId;
   if (!loc) return null;
-  const url = new URL(loc.gbpWebsitePath || '/', 'https://wavespestcontrol.com');
+  const url = new URL(loc.gbpWebsitePath || '/', 'https://www.wavespestcontrol.com');
   url.searchParams.set('utm_source', GBP_UTM_PARAMS.source);
   url.searchParams.set('utm_medium', GBP_UTM_PARAMS.medium);
   url.searchParams.set('utm_campaign', GBP_UTM_PARAMS.campaign);

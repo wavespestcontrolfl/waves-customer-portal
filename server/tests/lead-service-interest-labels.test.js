@@ -153,7 +153,7 @@ describe('quote workflow service interest labels', () => {
     }));
   });
 
-  test('lead webhook resolves revised GBP UTM profile attribution and click IDs', () => {
+  test('lead webhook resolves existing GBP UTM profile attribution and click IDs', () => {
     const intake = buildLeadWebhookIntake({
       firstName: 'Gina',
       lastName: 'Maps',
@@ -163,10 +163,10 @@ describe('quote workflow service interest labels', () => {
       city: 'Sarasota',
       attribution: {
         utm: {
-          source: 'google',
+          source: 'gbp',
           medium: 'organic',
-          campaign: 'gbp',
-          content: 'sarasota',
+          campaign: 'website-link',
+          content: 'sarasota-profile',
         },
         wbraid: 'WBRAID-123',
         gbraid: 'GBRAID-123',

@@ -25,7 +25,7 @@ describe('local performance helpers', () => {
   });
 
   test('resolves profile content from GBP source rows and nested attribution JSON', () => {
-    expect(contentFromLead({ gbp_location_id: '2262372053807555721' })).toBe('sarasota');
+    expect(contentFromLead({ gbp_location_id: '2262372053807555721' })).toBe('sarasota-profile');
     expect(contentFromLead({
       extracted_data: JSON.stringify({
         attribution: { utm: { content: 'venice_profile' } },
@@ -33,9 +33,9 @@ describe('local performance helpers', () => {
     })).toBe('venice_profile');
   });
 
-  test('classifies revised and legacy GBP UTM traffic', () => {
-    expect(isGbpUtmCampaign({ source: 'google', medium: 'organic', campaign: 'gbp' })).toBe(true);
+  test('classifies existing and alternate GBP UTM traffic', () => {
     expect(isGbpUtmCampaign({ source: 'gbp', medium: 'organic', campaign: 'website-link' })).toBe(true);
+    expect(isGbpUtmCampaign({ source: 'google', medium: 'organic', campaign: 'gbp' })).toBe(true);
     expect(isGbpUtmCampaign({ source: 'google', medium: 'cpc', campaign: 'gbp' })).toBe(false);
   });
 });
