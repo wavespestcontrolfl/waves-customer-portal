@@ -170,6 +170,33 @@ const MODE_TONES = {
   locked: { bg: "#FEE2E2", fg: D.red, label: "Escalation — always shadow" },
 };
 
+// Phase E readiness: shows how close an intent is to its next ladder rung, or
+// a green chip when it has earned it. Recommend-only — flips stay manual.
+function GraduationNote({ g }) {
+  const j = g.judge || {};
+  const rungLabel = g.nextRung === "auto_send" ? "auto-send" : g.nextRung;
+  const context = [];
+  if (j.judged > 0) context.push(`${j.judged} live judged (${Math.round((j.unsafeRate || 0) * 100)}% unsafe)`);
+  if (j.backfillJudged > 0) context.push(`${j.backfillJudged} backfill excluded`);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
+      {g.eligibleFor === "suggest" && (
+        <span style={{ background: "#DCFCE7", color: D.green, fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Ready — enable suggest</span>
+      )}
+      {g.eligibleFor === "auto_send" && (
+        <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Send-ready — auto-send rung ships next</span>
+      )}
+      {!g.eligibleFor && rungLabel && (
+        <span style={{ color: D.muted }}>
+          <strong style={{ color: D.zinc }}>→ {rungLabel}:</strong> {g.blockers?.[0] || "gathering data"}
+        </span>
+      )}
+      {context.length > 0 && <span style={{ color: D.muted }}>· {context.join(" · ")}</span>}
+    </div>
+  );
+}
+
 function IntentModeCard({ row, busy, onToggle }) {
   const tone = row.locked ? MODE_TONES.locked : MODE_TONES[row.mode] || MODE_TONES.shadow;
   const s = row.suggest || {};
@@ -212,6 +239,7 @@ function IntentModeCard({ row, busy, onToggle }) {
           {s.expired ? <span><strong style={{ color: D.heading }}>{s.expired}</strong> expired</span> : null}
         </div>
       )}
+      {!row.locked && row.graduation && <GraduationNote g={row.graduation} />}
       {row.updatedBy && row.updatedBy !== "migration" && (
         <div style={{ fontSize: 11, color: D.muted }}>
           Set by {row.updatedBy} · {timeLabel(row.updatedAt)}{row.reason ? ` · ${row.reason}` : ""}
@@ -263,9 +291,16 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         method: "PUT",
         body: JSON.stringify({ mode: nextMode }),
       });
+      // Optimistic mode update. Drop the cached graduation: readiness depends
+      // on mode (the next-rung target changes), and the PUT response carries
+      // no recomputed graduation — keeping it would show a stale chip like
+      // "Ready — enable suggest" under a Suggest mode chip.
       setModes((current) => current
-        ? { ...current, intents: current.intents.map((r) => (r.intent === updated.intent ? { ...r, ...updated } : r)) }
+        ? { ...current, intents: current.intents.map((r) => (r.intent === updated.intent ? { ...r, ...updated, graduation: null } : r)) }
         : current);
+      // Reconcile readiness from the server (graduation isn't in the PUT body).
+      const fresh = await adminFetch("/admin/agents/intent-modes");
+      setModes(fresh);
     } catch (err) {
       setError(err.message || "Failed to update intent mode.");
     } finally {
