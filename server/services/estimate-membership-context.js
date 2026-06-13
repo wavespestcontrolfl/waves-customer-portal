@@ -378,7 +378,14 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     });
 
     return {
-      isExistingCustomer: true,
+      // "Existing customer" means the account already carries qualifying
+      // recurring plan services — NOT merely that a customers row exists. A
+      // brand-new lead can have a customers row (from intake/onsite) with zero
+      // services; flagging it existing wrongly suppressed the annual-prepay
+      // option and the WaveGuard setup fee on a fresh signup estimate. Mirror
+      // the live plan-customer check in estimate-deposits.js, which keys off
+      // the same loadExistingRecurringQualifyingRows rows.
+      isExistingCustomer: existingKeys.length > 0,
       firstName: customer.first_name || null,
       tier: combinedTier.tier,
       tierLabel: TIER_LABEL[combinedTier.tier] || 'Bronze',
