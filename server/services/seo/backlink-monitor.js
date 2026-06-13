@@ -25,6 +25,7 @@ class BacklinkMonitor {
     // Build active link map with composite keys BEFORE processing
     const activeLinks = await db('seo_backlinks')
       .where('status', 'active')
+      .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
       .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text');
     const activeMap = new Map(activeLinks.map(l => [`${l.source_url}::${l.target_url}`, l]));
     const seenKeys = new Set();
@@ -41,6 +42,7 @@ class BacklinkMonitor {
         anchor_text: link.anchor, domain_rating: link.domain_from_rank,
         toxicity_score: toxicity.score, toxicity_reasons: JSON.stringify(toxicity.reasons),
         severity: toxicity.severity, last_checked: etDateString(),
+        discovery_source: 'dataforseo',
       };
 
       if (existing) {
@@ -192,7 +194,7 @@ class BacklinkMonitor {
             .count('id as count').first().then(r => parseInt(r?.count) || 0)
         : 0,
       avg_domain_rating: all.length > 0 ? Math.round(all.reduce((s, b) => s + (b.domain_rating || 0), 0) / all.length) : 0,
-      dofollow_count: all.filter(b => b.is_dofollow !== false).length,
+      dofollow_count: all.filter(b => b.is_dofollow === true).length,
       nofollow_count: all.filter(b => b.is_dofollow === false).length,
       critical_count: all.filter(b => b.severity === 'critical').length,
       warning_count: all.filter(b => b.severity === 'warning').length,
