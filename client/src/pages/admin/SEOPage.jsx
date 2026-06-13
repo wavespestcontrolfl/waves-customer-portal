@@ -7,6 +7,7 @@ import {
   Search,
   Sparkles,
   TrendingUp,
+  UploadCloud,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 const SEODashboardPage = lazy(() => import("./SEODashboardPage"));
@@ -3544,6 +3545,9 @@ function AnalyticsTab() {
   const [traffic, setTraffic] = useState(null);
   const [pages, setPages] = useState(null);
   const [localPerformance, setLocalPerformance] = useState(null);
+  const [dataManager, setDataManager] = useState(null);
+  const [dataManagerBusy, setDataManagerBusy] = useState(null);
+  const [dataManagerResult, setDataManagerResult] = useState(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(30);
 
@@ -3554,12 +3558,14 @@ function AnalyticsTab() {
       adminFetch(`/admin/analytics/sources?period=${days}`).catch((e) => ({ data: [], error: e.message })),
       adminFetch(`/admin/analytics/landing-pages?period=${days}`).catch((e) => ({ data: [], error: e.message })),
       adminFetch(`/admin/analytics/local-performance?period=${days}`).catch((e) => ({ error: e.message })),
+      adminFetch(`/admin/analytics/data-manager/readiness?period=${days}`).catch((e) => ({ error: e.message })),
     ])
-      .then(([o, t, p, l]) => {
+      .then(([o, t, p, l, dm]) => {
         setOverview(o);
         setTraffic(t);
         setPages(p);
         setLocalPerformance(l);
+        setDataManager(dm);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -3591,9 +3597,14 @@ function AnalyticsTab() {
   const localGa4 = blended.ga4Website || {};
   const localCrm = blended.crm || {};
   const readiness = blended.dataManagerReadiness || {};
+  const dm = dataManager || {};
+  const dmConversions = dm.conversions || {};
+  const dmQualified = dmConversions.qualified_lead || {};
+  const dmCompleted = dmConversions.completed_job_revenue || {};
   const profiles = Array.isArray(local.profiles) ? local.profiles : [];
   const setupLinks = Array.isArray(local.setup?.utmWebsiteLinks) ? local.setup.utmWebsiteLinks : [];
   const localWarnings = Array.isArray(local.warnings) ? local.warnings : [];
+  const dataManagerWarnings = Array.isArray(dm.warnings) ? dm.warnings : [];
   const analyticsNotices = [
     ...(overview?.configured === false
       ? [{
@@ -3608,6 +3619,11 @@ function AnalyticsTab() {
       title: "Local performance data",
       message: `${warning?.source || "source"}: ${warning?.message || "Unavailable"}`,
     })),
+    ...(dm.error ? [{ title: "Google Ads Data Manager", message: dm.error }] : []),
+    ...dataManagerWarnings.map((warning) => ({
+      title: "Google Ads Data Manager",
+      message: `${warning?.source || "source"}: ${warning?.message || "Unavailable"}`,
+    })),
   ];
   const fmt = (v) => (v != null ? Number(v).toLocaleString() : "—");
   const money = (v) => (v != null ? fmtMoney(v) : "—");
@@ -3617,6 +3633,33 @@ function AnalyticsTab() {
     const s = Math.round(Number(v));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   };
+  const validateDataManager = (conversionType) => {
+    setDataManagerBusy(conversionType);
+    setDataManagerResult(null);
+    adminPost("/admin/analytics/data-manager/upload", {
+      conversionType,
+      period: days,
+      limit: 100,
+      validateOnly: true,
+    })
+      .then((result) => setDataManagerResult(result))
+      .catch((e) => setDataManagerResult({ synced: false, conversionType, error: e.message }))
+      .finally(() => setDataManagerBusy(null));
+  };
+  const dmStatus = (config) => {
+    if (config?.configured) return dm.liveUploadsAllowed ? "Live-ready" : "Validate-only";
+    if (config?.missing?.length) return "Needs config";
+    return "Checking";
+  };
+  const dmTone = (config) => (config?.configured ? D.green : D.amber);
+  const dmMetric = (config, key) => fmt(config?.candidates?.[key] || 0);
+  const dmResultText = dataManagerResult
+    ? `${dataManagerResult.conversionType === "qualified_lead" ? "Qualified Lead" : "Completed Revenue"}: ${
+      dataManagerResult.synced
+        ? `${fmt(dataManagerResult.sent || 0)} event${Number(dataManagerResult.sent || 0) === 1 ? "" : "s"} validated`
+        : dataManagerResult.error || "Validation failed"
+    }`
+    : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -3787,10 +3830,101 @@ function AnalyticsTab() {
                 <strong>Ads feedback loop</strong>
                 <br />
                 <span style={{ color: D.muted }}>
-                  Capture is ready for click IDs and enhanced lead identifiers; upload API remains separate.
+                  {dmStatus(dmCompleted)} · {dmMetric(dmCompleted, "eligible")} completed-revenue events ready
                 </span>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                  <button
+                    type="button"
+                    onClick={() => validateDataManager("qualified_lead")}
+                    disabled={!!dataManagerBusy || !dmQualified?.configured}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "7px 10px",
+                      borderRadius: 8,
+                      border: `1px solid ${D.border}`,
+                      background: dmQualified?.configured ? D.card : D.bg,
+                      color: dmQualified?.configured ? D.heading : D.muted,
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: dmQualified?.configured && !dataManagerBusy ? "pointer" : "not-allowed",
+                    }}
+                  >
+                    <UploadCloud size={14} />
+                    {dataManagerBusy === "qualified_lead" ? "Validating" : "Validate leads"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => validateDataManager("completed_job_revenue")}
+                    disabled={!!dataManagerBusy || !dmCompleted?.configured}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "7px 10px",
+                      borderRadius: 8,
+                      border: `1px solid ${D.border}`,
+                      background: dmCompleted?.configured ? D.card : D.bg,
+                      color: dmCompleted?.configured ? D.heading : D.muted,
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: dmCompleted?.configured && !dataManagerBusy ? "pointer" : "not-allowed",
+                    }}
+                  >
+                    <UploadCloud size={14} />
+                    {dataManagerBusy === "completed_job_revenue" ? "Validating" : "Validate revenue"}
+                  </button>
+                </div>
               </div>
             </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(2, 1fr)",
+                gap: 12,
+                marginTop: 14,
+                paddingTop: 12,
+                borderTop: `1px solid ${D.border}`,
+              }}
+            >
+              {[
+                ["Qualified Lead", dmQualified],
+                ["Completed Revenue", dmCompleted],
+              ].map(([label, config]) => (
+                <div key={label} style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <strong>{label}</strong>
+                    <span style={{
+                      color: dmTone(config),
+                      fontSize: 11,
+                      fontWeight: 800,
+                      textTransform: "uppercase",
+                    }}>
+                      {dmStatus(config)}
+                    </span>
+                  </div>
+                  <div style={{ color: D.muted, marginTop: 4 }}>
+                    {dmMetric(config, "eligible")} ready · {dmMetric(config, "alreadySent")} sent · {dmMetric(config, "missingMatchKeys")} missing match keys
+                  </div>
+                  {config?.missing?.length > 0 && (
+                    <div style={{ color: D.amber, marginTop: 4 }}>
+                      Missing {config.missing.join(", ")}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            {dmResultText && (
+              <div style={{
+                marginTop: 12,
+                fontSize: 12,
+                color: dataManagerResult?.synced ? D.green : D.red,
+                fontWeight: 700,
+              }}>
+                {dmResultText}
+              </div>
+            )}
           </Card>
         </>
       )}

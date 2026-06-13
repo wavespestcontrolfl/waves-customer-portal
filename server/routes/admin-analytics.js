@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const GA4 = require('../services/analytics/google-analytics');
 const LocalPerformance = require('../services/analytics/local-performance');
+const DataManager = require('../services/ads/data-manager');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -49,6 +50,38 @@ router.get('/local-performance', async (req, res, next) => {
   try {
     const period = parseInt(req.query.period || 30);
     const data = await LocalPerformance.buildLocalPerformance({ periodDays: period });
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/analytics/data-manager/readiness
+router.get('/data-manager/readiness', async (req, res, next) => {
+  try {
+    const period = parseInt(req.query.period || 30);
+    const limit = parseInt(req.query.limit || 250);
+    const data = await DataManager.buildReadiness({ periodDays: period, limit });
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/analytics/data-manager/upload
+router.post('/data-manager/upload', async (req, res, next) => {
+  try {
+    const result = await DataManager.uploadConversions({
+      conversionType: req.body?.conversionType || req.body?.type || 'completed_job_revenue',
+      periodDays: parseInt(req.body?.period || req.body?.days || 30),
+      limit: parseInt(req.body?.limit || 100),
+      validateOnly: req.body?.validateOnly !== false,
+      force: req.body?.force === true,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/analytics/data-manager/request-status/:requestId
+router.get('/data-manager/request-status/:requestId', async (req, res, next) => {
+  try {
+    const data = await DataManager.retrieveRequestStatus(req.params.requestId);
     res.json(data);
   } catch (err) { next(err); }
 });
