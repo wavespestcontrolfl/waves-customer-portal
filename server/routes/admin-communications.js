@@ -249,7 +249,18 @@ router.post('/sms', async (req, res, next) => {
         });
       }
     } catch (parkErr) {
-      logger.warn(`[sms-suggest] pre-send park failed: ${parkErr.message}`);
+      // FAIL CLOSED: proceeding would leave the thread's cards actionable
+      // during the provider call AND unrecorded in parkedDecisionIds, so
+      // crash recovery couldn't settle them. Release the claim and make the
+      // operator retry — same contract as a lost claim.
+      logger.warn(`[sms-suggest] pre-send park failed — aborting send: ${parkErr.message}`);
+      if (claimedDecisionId) {
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId],
+          reason: 'Pre-send reservation failed — suggestion reopened.',
+        });
+      }
+      return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
     }
 
     const sendStartedAt = new Date();
@@ -326,47 +337,58 @@ router.post('/sms', async (req, res, next) => {
     // vs send start: a suggestion for a customer message that arrived while
     // the send was in flight was never on the operator's screen and must
     // keep its card.
-    try {
+    const runStaleSweep = async () => {
       const ignoredPhoneLast10 = normalizePhoneLast10(to);
-      if (ignoredPhoneLast10) {
-        await db.transaction(async (trx) => {
-          // Same thread lock the drafter's publish takes: a publish that
-          // hasn't committed yet will land AFTER this sweep and re-check
-          // the (now committed) outbound in its answered guard.
-          await lockSuggestThread(trx, ignoredPhoneLast10);
+      if (!ignoredPhoneLast10) return;
+      await db.transaction(async (trx) => {
+        // Same thread lock the drafter's publish takes: a publish that
+        // hasn't committed yet will land AFTER this sweep and re-check
+        // the (now committed) outbound in its answered guard.
+        await lockSuggestThread(trx, ignoredPhoneLast10);
 
-          // s is always the suggestion's INBOUND row — from_phone is the
-          // customer; matching to_phone (the Waves line) would sweep every
-          // suggestion that arrived on that line.
-          const staleQuery = trx('agent_decisions as ad')
-            .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-            .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
-            .where('s.created_at', '<', sendStartedAt)
-            .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
-          if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
-          const stale = await staleQuery.select('ad.id', 'ad.entity_id');
-          if (stale.length) {
-            // Revert only rows the guarded UPDATE actually changed: a parallel
-            // operator can send one of these suggestions between the SELECT
-            // and the UPDATE, and that draft must stay out of the judge pool.
-            const ignored = await trx('agent_decisions')
-              .whereIn('id', stale.map((r) => r.id))
-              .where('status', 'pending_review')
-              .update({
-                status: 'ignored',
-                human_verdict: 'ignored',
-                correction_note: 'Staff sent their own reply from the SMS inbox.',
-                reviewed_by: req.technicianId || 'Admin',
-                reviewed_at: new Date(),
-                updated_at: new Date(),
-              })
-              .returning(['id', 'entity_id']);
-            await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
-          }
-        });
+        // s is always the suggestion's INBOUND row — from_phone is the
+        // customer; matching to_phone (the Waves line) would sweep every
+        // suggestion that arrived on that line.
+        const staleQuery = trx('agent_decisions as ad')
+          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+          .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+          .where('s.created_at', '<', sendStartedAt)
+          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
+        if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
+        const stale = await staleQuery.select('ad.id', 'ad.entity_id');
+        if (stale.length) {
+          // Revert only rows the guarded UPDATE actually changed: a parallel
+          // operator can send one of these suggestions between the SELECT
+          // and the UPDATE, and that draft must stay out of the judge pool.
+          const ignored = await trx('agent_decisions')
+            .whereIn('id', stale.map((r) => r.id))
+            .where('status', 'pending_review')
+            .update({
+              status: 'ignored',
+              human_verdict: 'ignored',
+              correction_note: 'Staff sent their own reply from the SMS inbox.',
+              reviewed_by: req.technicianId || 'Admin',
+              reviewed_at: new Date(),
+              updated_at: new Date(),
+            })
+            .returning(['id', 'entity_id']);
+          await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
+        }
+      });
+    };
+    // Retried once: this sweep is the only path that resolves cards
+    // published between the park commit and send completion — cards it
+    // misses have no recovery linkage and stay actionable on an answered
+    // thread until the next staff send on the thread or the 48h expiry.
+    try {
+      await runStaleSweep();
+    } catch (sweepErr) {
+      logger.warn(`[sms-suggest] stale-card sweep failed, retrying once: ${sweepErr.message}`);
+      try {
+        await runStaleSweep();
+      } catch (retryErr) {
+        logger.error(`[sms-suggest] stale-card sweep failed twice — pending cards may linger on an answered thread until the next send or expiry: ${retryErr.message}`);
       }
-    } catch (ignoreErr) {
-      logger.warn(`[sms-suggest] failed to mark pending suggestions ignored: ${ignoreErr.message}`);
     }
 
     res.json(result);
