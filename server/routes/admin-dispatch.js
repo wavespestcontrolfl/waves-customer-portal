@@ -1642,6 +1642,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       formResponses,
       formStartedAt,
       invoiceAlreadySent = false,
+      includePayLink = true,
       lawnAssessmentId = null,
       lawnProtocolCompletion = null,
       treeShrubCompletion = null,
@@ -3711,7 +3712,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms;
-    const suppressCompletionInvoiceLink = !!invoiceAlreadySent;
+    // The operator can choose to text the service report WITHOUT the pay link
+    // (e.g. the customer paid in person). Suppressing the invoice link must
+    // never suppress the report itself — the completion SMS still sends, just
+    // report-only. Honored alongside the existing invoiceAlreadySent path.
+    const suppressCompletionInvoiceLink = !!invoiceAlreadySent || includePayLink === false;
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
       ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()
