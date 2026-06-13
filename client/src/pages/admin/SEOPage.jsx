@@ -2,16 +2,8 @@ import { useState, useEffect, lazy, Suspense } from "react";
 import {
   Activity,
   BarChart3,
-  Bot,
-  CheckSquare,
-  Database,
-  FileCheck2,
-  Filter,
-  Globe,
   LayoutDashboard,
-  LineChart,
   Link,
-  Network,
   Search,
   Sparkles,
   TrendingUp,
@@ -81,6 +73,13 @@ function isAdminUser() {
 }
 
 function fmt(n) {
+  return Number(n || 0).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+}
+
+function fmtMoney(n) {
   return (
     "$" +
     Number(n || 0).toLocaleString(undefined, {
@@ -159,22 +158,70 @@ function KpiCard({ label, value, sub, color }) {
   );
 }
 
-const TABS = [
-  { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard },
-  { key: "advisor", label: "SEO Advisor", Icon: Sparkles },
-  { key: "rankings", label: "Rankings", Icon: TrendingUp },
-  { key: "rankings-monitor", label: "Rankings Monitor", Icon: LineChart },
-  { key: "backlinks", label: "Backlinks & Citations", Icon: Link },
-  { key: "content-qa", label: "Content QA", Icon: FileCheck2 },
-  { key: "ai-overview", label: "AI Overview", Icon: Bot },
-  { key: "funnel", label: "Funnel", Icon: Filter },
-  { key: "analytics", label: "Analytics", Icon: BarChart3 },
-  { key: "by-site", label: "By Site", Icon: Network },
-  { key: "url-intel", label: "URL Intel", Icon: Database },
-  { key: "actions", label: "Actions", Icon: CheckSquare },
-  { key: "indexation", label: "Indexation", Icon: Globe },
-  { key: "site-audit", label: "Site Health", Icon: Activity },
+const WORKSPACES = [
+  {
+    key: "command",
+    label: "Command",
+    Icon: LayoutDashboard,
+    sections: [
+      { key: "dashboard", label: "Dashboard" },
+      { key: "advisor", label: "SEO Advisor" },
+    ],
+  },
+  {
+    key: "strategy",
+    label: "Strategy",
+    Icon: Sparkles,
+    sections: [
+      { key: "actions", label: "Actions" },
+      { key: "content-qa", label: "Content QA" },
+    ],
+  },
+  {
+    key: "performance",
+    label: "Rankings",
+    Icon: TrendingUp,
+    sections: [
+      { key: "rankings", label: "Rankings" },
+      { key: "rankings-monitor", label: "Monitor" },
+      { key: "funnel", label: "Funnel" },
+    ],
+  },
+  {
+    key: "authority",
+    label: "Authority",
+    Icon: Link,
+    sections: [
+      { key: "backlinks", label: "Backlinks & Citations" },
+      { key: "ai-overview", label: "AI Overview" },
+    ],
+  },
+  {
+    key: "technical",
+    label: "Technical",
+    Icon: Activity,
+    sections: [
+      { key: "url-intel", label: "URL Intel" },
+      { key: "indexation", label: "Indexation" },
+      { key: "site-audit", label: "Site Health" },
+    ],
+  },
+  {
+    key: "measurement",
+    label: "Measurement",
+    Icon: BarChart3,
+    sections: [
+      { key: "analytics", label: "Analytics" },
+      { key: "by-site", label: "By Site" },
+    ],
+  },
 ];
+
+const WORKSPACE_BY_KEY = Object.fromEntries(WORKSPACES.map((w) => [w.key, w]));
+
+function defaultViewForWorkspace(key) {
+  return WORKSPACE_BY_KEY[key]?.sections?.[0]?.key || "dashboard";
+}
 
 const PRIMARY_DOMAIN = "wavespestcontrol.com";
 
@@ -404,8 +451,9 @@ function SyncHealthCard() {
   if (loading) return null;
   if (!health?.gsc || !health?.gbp) return null;
   const { gsc, gbp } = health;
+  const gbpLocations = Array.isArray(gbp.locations) ? gbp.locations : [];
   const gscOk = gsc.configured && gsc.daily?.count > 0;
-  const gbpOk = gbp.anyConfigured && gbp.locations.some((l) => l.rowCount > 0);
+  const gbpOk = gbp.anyConfigured && gbpLocations.some((l) => l.rowCount > 0);
   const anyIssue = !gscOk || !gbpOk;
   if (!anyIssue) return null; // Only surface when there's something to fix
 
@@ -457,7 +505,8 @@ function SyncHealthCard() {
         SEO sync health
       </div>{" "}
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
-        The Advisor runs on data from <code>gsc_performance_daily</code>+{" "}
+        The Advisor runs on data from <code>gsc_performance_daily</code>{" "}
+        +{" "}
         <code>gbp_performance_daily</code>. Below is what's actually present in
         the DB right now.
       </div>
@@ -470,7 +519,7 @@ function SyncHealthCard() {
             <strong>{gsc.configured ? "Configured" : "Not configured"}</strong>
             {!gsc.configured && (
               <span style={{ color: D.muted }}>
-                — set <code>GOOGLE_SERVICE_ACCOUNT_JSON</code>on Railway
+                — set <code>GOOGLE_SERVICE_ACCOUNT_JSON</code> on Railway
               </span>
             )}
           </div>{" "}
@@ -500,7 +549,7 @@ function SyncHealthCard() {
         <div
           style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}
         >
-          {gbp.locations.map((l) => (
+          {gbpLocations.map((l) => (
             <div key={l.id}>
               {" "}
               <StatusDot
@@ -511,7 +560,7 @@ function SyncHealthCard() {
               <div style={{ fontSize: 11, color: D.muted, marginLeft: 16 }}>
                 {!l.configured ? (
                   <>
-                    env <code>{l.envVar}</code>missing
+                    env <code>{l.envVar}</code> missing
                   </>
                 ) : l.rowCount === 0 ? (
                   <>token set, 0 rows</>
@@ -523,6 +572,9 @@ function SyncHealthCard() {
               </div>{" "}
             </div>
           ))}
+          {gbpLocations.length === 0 && (
+            <div style={{ color: D.muted }}>No location sync rows reported.</div>
+          )}
         </div>,
       )}
       <div
@@ -535,8 +587,8 @@ function SyncHealthCard() {
         }}
       >
         Sync runs daily at 6am ET (see <code>scheduler.js</code>). If rows stay
-        at 0 after 24h, grep Railway logs for <code>[GSC]</code>and{" "}
-        <code>[GBP]</code>to see init errors.
+        at 0 after 24h, grep Railway logs for <code>[GSC]</code> and{" "}
+        <code>[GBP]</code> to see init errors.
       </div>{" "}
     </Card>
   );
@@ -828,11 +880,8 @@ function RankingsTab() {
         />{" "}
       </div>{" "}
       <Card>
-        {" "}
         <div style={{ overflowX: "auto" }}>
-          {" "}
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            {" "}
             <thead>
               <tr>
                 <th style={thStyle}>Keyword</th>
@@ -841,11 +890,10 @@ function RankingsTab() {
                 <th style={thR}>Change</th>
                 <th style={thStyle}>AIO</th>
               </tr>
-            </thead>{" "}
+            </thead>
             <tbody>
               {data.rankings.map((r, i) => (
                 <tr key={i}>
-                  {" "}
                   <td
                     style={{
                       ...tdStyle,
@@ -854,7 +902,7 @@ function RankingsTab() {
                     }}
                   >
                     {r.keyword}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       ...tdStyle,
@@ -863,10 +911,10 @@ function RankingsTab() {
                     }}
                   >
                     {r.primary_city || "—"}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdR, color: posColor(r.currentPosition) }}>
                     {r.currentPosition || "—"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       ...tdR,
@@ -875,15 +923,15 @@ function RankingsTab() {
                     }}
                   >
                     {r.delta > 0 ? `+${r.delta}` : r.delta || "—"}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdStyle, textAlign: "center" }}>
                     {r.aiOverviewCited ? "Yes" : "—"}
-                  </td>{" "}
+                  </td>
                 </tr>
               ))}
-            </tbody>{" "}
-          </table>{" "}
-        </div>{" "}
+            </tbody>
+          </table>
+        </div>
       </Card>{" "}
     </div>
   );
@@ -1551,8 +1599,8 @@ function BacklinksTab() {
                     <th style={thStyle}>Lost</th>
                   </tr></thead>
                   <tbody>
-                    {data.recentlyLost.map((l) => (
-                      <tr key={l.id}>
+                    {data.recentlyLost.map((l, i) => (
+                      <tr key={l.id || `${l.source_domain || "lost"}-${l.target_url || i}`}>
                         <td style={tdStyle}>{l.source_domain}</td>
                         <td style={tdR}>{l.domain_rating || "—"}</td>
                         <td style={{ ...tdStyle, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.anchor_text || "—"}</td>
@@ -2862,15 +2910,161 @@ function ContentQATab() {
   if (!data || data.total === 0)
     return (
       <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>No QA scores yet.</div>
+        <div style={{ color: D.muted }}>
+          No QA scores yet. Run Content QA to populate scored URLs, fix-first
+          items, and publish readiness.
+        </div>
       </Card>
     );
+  const scores = data.scores || [];
+  const fixFirst = data.fixFirst || [];
   const gc = { A: D.green, B: D.teal, C: D.amber, D: D.orange, F: D.red };
+  const avgScore = scores.length
+    ? Math.round(
+        scores.reduce((sum, row) => sum + Number(row.total_score || 0), 0) /
+          scores.length,
+      )
+    : 0;
   return (
-    <div style={{ display: "flex", gap: 12 }}>
-      {Object.entries(data.gradeDistribution || {}).map(([g, c]) => (
-        <KpiCard key={g} label={`Grade ${g}`} value={c} color={gc[g]} />
-      ))}
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div
+        className="seo-kpi-grid-4"
+        style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}
+      >
+        <KpiCard label="Scored URLs" value={fmt(data.total)} />
+        <KpiCard
+          label="Avg Latest 50"
+          value={avgScore}
+          color={avgScore >= 38 ? D.green : avgScore >= 30 ? D.amber : D.red}
+        />
+        <KpiCard
+          label="Publish Ready"
+          value={(data.gradeDistribution?.A || 0) + (data.gradeDistribution?.B || 0)}
+          color={D.green}
+        />
+        <KpiCard
+          label="Top Fixes"
+          value={fixFirst.length}
+          color={fixFirst.length ? D.red : D.green}
+        />
+      </div>
+
+      <div
+        className="seo-kpi-grid-5"
+        style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}
+      >
+        {Object.entries(data.gradeDistribution || {}).map(([g, c]) => (
+          <KpiCard key={g} label={`Grade ${g}`} value={c} color={gc[g]} />
+        ))}
+      </div>
+
+      {fixFirst.length > 0 && (
+        <Card>
+          <div
+            style={{
+              fontSize: 15,
+              fontWeight: 600,
+              color: D.heading,
+              marginBottom: 12,
+            }}
+          >
+            Top Fixes
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={thStyle}>URL</th>
+                  <th style={thR}>Score</th>
+                  <th style={thStyle}>Grade</th>
+                  <th style={thStyle}>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fixFirst.map((row) => (
+                  <tr key={row.id || row.blog_post_id || row.url}>
+                    <td
+                      style={{
+                        ...tdStyle,
+                        fontFamily: "inherit",
+                        maxWidth: 420,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={row.url}
+                    >
+                      {row.url || `Blog post ${row.blog_post_id}`}
+                    </td>
+                    <td style={{ ...tdR, color: gc[row.grade] || D.text }}>
+                      {row.total_score}/50
+                    </td>
+                    <td style={tdStyle}>{row.grade || "—"}</td>
+                    <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                      {row.recommendation || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {scores.length > 0 && (
+        <Card>
+          <div
+            style={{
+              fontSize: 15,
+              fontWeight: 600,
+              color: D.heading,
+              marginBottom: 12,
+            }}
+          >
+            Latest Scores
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={thStyle}>URL</th>
+                  <th style={thR}>Total</th>
+                  <th style={thR}>Technical</th>
+                  <th style={thR}>On Page</th>
+                  <th style={thR}>Local</th>
+                  <th style={thStyle}>Grade</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scores.slice(0, 20).map((row) => (
+                  <tr key={`score-${row.id || row.blog_post_id || row.url}`}>
+                    <td
+                      style={{
+                        ...tdStyle,
+                        fontFamily: "inherit",
+                        maxWidth: 420,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={row.url}
+                    >
+                      {row.url || `Blog post ${row.blog_post_id}`}
+                    </td>
+                    <td style={tdR}>{row.total_score}/50</td>
+                    <td style={tdR}>{row.technical_score ?? "—"}</td>
+                    <td style={tdR}>{row.onpage_score ?? "—"}</td>
+                    <td style={tdR}>{row.local_score ?? "—"}</td>
+                    <td style={{ ...tdStyle, color: gc[row.grade] || D.text }}>
+                      {row.grade || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
@@ -2974,7 +3168,7 @@ function FunnelTab() {
       />{" "}
       <KpiCard
         label="Sitewide Revenue"
-        value={fmt(data.revenue || 0)}
+        value={fmtMoney(data.revenue || 0)}
         color={D.green}
         sub={{ text: "correlated, not attributed" }}
       />{" "}
@@ -5523,9 +5717,69 @@ function SitemapIssuesSubTab({ domain }) {
 }
 
 // ── Main Page ──
+function SEOWorkspaceNav({ sections, activeKey, onChange }) {
+  if (!sections?.length || sections.length === 1) return null;
+  return (
+    <div
+      className="seo-workspace-nav"
+      style={{
+        display: "flex",
+        gap: 6,
+        overflowX: "auto",
+        WebkitOverflowScrolling: "touch",
+        margin: "-4px 0 18px",
+        padding: "0 2px 2px",
+      }}
+    >
+      {sections.map((section) => {
+        const active = activeKey === section.key;
+        return (
+          <button
+            key={section.key}
+            type="button"
+            onClick={() => onChange(section.key)}
+            style={{
+              padding: "7px 13px",
+              borderRadius: 7,
+              border: `1px solid ${active ? D.heading : D.border}`,
+              background: active ? D.heading : D.card,
+              color: active ? D.white : D.text,
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+            }}
+          >
+            {section.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function SEOPage() {
-  const [tab, setTab] = useState("dashboard");
-  const tabs = TABS;
+  const [workspace, setWorkspace] = useState("command");
+  const [activeViews, setActiveViews] = useState(() =>
+    Object.fromEntries(
+      WORKSPACES.map((item) => [item.key, defaultViewForWorkspace(item.key)]),
+    ),
+  );
+  const activeWorkspace = WORKSPACE_BY_KEY[workspace] || WORKSPACES[0];
+  const activeView =
+    activeViews[workspace] || defaultViewForWorkspace(workspace);
+
+  function handleWorkspaceChange(key) {
+    setWorkspace(key);
+    setActiveViews((prev) =>
+      prev[key] ? prev : { ...prev, [key]: defaultViewForWorkspace(key) },
+    );
+  }
+
+  function handleViewChange(key) {
+    setActiveViews((prev) => ({ ...prev, [workspace]: key }));
+  }
 
   return (
     <div>
@@ -5541,6 +5795,8 @@ export default function SEOPage() {
           .seo-kpi-grid-3 { grid-template-columns: 1fr !important; }
           .seo-sub-tabs { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; flex-wrap: nowrap !important; }
           .seo-sub-tabs button { flex-shrink: 0 !important; }
+          .seo-workspace-nav { scrollbar-width: none; }
+          .seo-workspace-nav::-webkit-scrollbar { display: none; }
           .seo-top-pages-header { display: none !important; }
           .seo-top-pages-row { flex-wrap: wrap !important; gap: 4px !important; }
           .seo-top-pages-row >div:first-child { width: 100% !important; flex: none !important; }
@@ -5554,13 +5810,18 @@ export default function SEOPage() {
       <AdminCommandHeader
         title="SEO"
         icon={Search}
-        sections={tabs}
-        activeKey={tab}
-        onSectionChange={setTab}
+        sections={WORKSPACES}
+        activeKey={workspace}
+        onSectionChange={handleWorkspaceChange}
         ariaLabel="SEO section"
         navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
       />
-      {tab === "dashboard" && (
+      <SEOWorkspaceNav
+        sections={activeWorkspace.sections}
+        activeKey={activeView}
+        onChange={handleViewChange}
+      />
+      {activeView === "dashboard" && (
         <Suspense
           fallback={
             <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
@@ -5571,19 +5832,19 @@ export default function SEOPage() {
           <SEODashboardPage domain={PRIMARY_DOMAIN} />
         </Suspense>
       )}
-      {tab === "advisor" && <AdvisorTab />}
-      {tab === "rankings" && <RankingsTab />}
-      {tab === "rankings-monitor" && <RankingsMonitorTab />}
-      {tab === "backlinks" && <BacklinksTab />}
-      {tab === "content-qa" && <ContentQATab />}
-      {tab === "ai-overview" && <AIOverviewTab />}
-      {tab === "funnel" && <FunnelTab />}
-      {tab === "analytics" && <AnalyticsTab />}
-      {tab === "by-site" && <BySiteTab />}
-      {tab === "url-intel" && <UrlIntelTab domain={PRIMARY_DOMAIN} />}
-      {tab === "actions" && <ActionsTab domain={PRIMARY_DOMAIN} />}
-      {tab === "indexation" && <IndexationTab domain={PRIMARY_DOMAIN} />}
-      {tab === "site-audit" && <SiteAuditTab />}
+      {activeView === "advisor" && <AdvisorTab />}
+      {activeView === "rankings" && <RankingsTab />}
+      {activeView === "rankings-monitor" && <RankingsMonitorTab />}
+      {activeView === "backlinks" && <BacklinksTab />}
+      {activeView === "content-qa" && <ContentQATab />}
+      {activeView === "ai-overview" && <AIOverviewTab />}
+      {activeView === "funnel" && <FunnelTab />}
+      {activeView === "analytics" && <AnalyticsTab />}
+      {activeView === "by-site" && <BySiteTab />}
+      {activeView === "url-intel" && <UrlIntelTab domain={PRIMARY_DOMAIN} />}
+      {activeView === "actions" && <ActionsTab domain={PRIMARY_DOMAIN} />}
+      {activeView === "indexation" && <IndexationTab domain={PRIMARY_DOMAIN} />}
+      {activeView === "site-audit" && <SiteAuditTab />}
     </div>
   );
 }
