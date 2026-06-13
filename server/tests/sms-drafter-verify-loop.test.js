@@ -70,6 +70,29 @@ describe('generateGroundedDraft — convergence loop', () => {
     expect(client.calls).toHaveLength(1); // draft only — nothing to verify
   });
 
+  test('a revise error keeps the prior draft, not converged (Codex P2)', async () => {
+    // draft → verify(violation) → revise THROWS. Must keep the first draft,
+    // not drop the whole sample.
+    const queue = [
+      { reply: 'See you Tuesday at 2 PM.', intended_actions: [], missing_info: null },
+      { supported: false, violations: ['invents Tuesday 2 PM'] },
+    ];
+    const calls = [];
+    const client = {
+      calls,
+      messages: {
+        create: (args) => {
+          calls.push(args);
+          if (calls.length <= 2) return Promise.resolve({ content: [{ text: JSON.stringify(queue[calls.length - 1]) }] });
+          return Promise.reject(new Error('revise 429')); // the revision call fails
+        },
+      },
+    };
+    const r = await generateGroundedDraft(ARGS(client));
+    expect(r.parsed.reply).toBe('See you Tuesday at 2 PM.'); // prior draft kept
+    expect(r.converged).toBe(false);
+  });
+
   test('a verify error degrades gracefully — keeps the draft, not converged', async () => {
     const queue = [{ reply: 'Hello Dana! On it.', intended_actions: [], missing_info: null }];
     const calls = [];

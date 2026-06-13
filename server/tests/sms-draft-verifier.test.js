@@ -68,6 +68,16 @@ describe('verifier — verdict parsing (fails safe)', () => {
     expect(parseVerifierResponse('{"supported":"yes","violations":[]}').supported).toBe(false);
   });
 
+  test('malformed violations field (string, not array) fails safe to not-supported (Codex P2)', () => {
+    // A schema slip — model flagged something but as a bare string — must
+    // NOT be dropped to [] and waved through as converged.
+    const v = parseVerifierResponse('{"supported":true,"violations":"invents a 9am arrival"}');
+    expect(v.supported).toBe(false);
+    expect(v.violations).toEqual(['invents a 9am arrival']);
+    // non-string malformed → still not supported, with a placeholder
+    expect(parseVerifierResponse('{"supported":true,"violations":{"x":1}}').supported).toBe(false);
+  });
+
   test('unusable payloads return null (loop treats as inconclusive, stops)', () => {
     expect(parseVerifierResponse('')).toBeNull();
     expect(parseVerifierResponse(null)).toBeNull();

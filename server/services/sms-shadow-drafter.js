@@ -220,11 +220,20 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     converged = false;
     if (attempt === MAX_REVISIONS) break;
 
-    const revised = await generateDraftOnce(
-      client,
-      system,
-      `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`
-    );
+    let revised;
+    try {
+      revised = await generateDraftOnce(
+        client,
+        system,
+        `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`
+      );
+    } catch (err) {
+      // A revise call that times out / rate-limits must NOT drop the whole
+      // sample — we have a valid prior draft. Keep it (converged stays false
+      // so it can't publish as a suggestion).
+      logger.warn(`[sms-shadow] revise pass failed (${err.message}); keeping current draft`);
+      break;
+    }
     if (!revised) break; // revision unparseable — keep the prior draft
     parsed = revised;
     passes += 1;

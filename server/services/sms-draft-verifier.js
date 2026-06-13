@@ -70,8 +70,20 @@ function parseVerifierResponse(text) {
   try { parsed = JSON.parse(candidate); } catch { return null; }
   if (!parsed || typeof parsed !== 'object') return null;
 
-  const violations = Array.isArray(parsed.violations)
-    ? parsed.violations.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim().slice(0, 200))
+  const raw = parsed.violations;
+  // A malformed violations field (present but not an array — e.g. the model
+  // returns the text as a bare string) must NOT be silently dropped to []
+  // and waved through: the model flagged something. Fail safe to
+  // not-supported, capturing the text when we can.
+  if (raw !== undefined && raw !== null && !Array.isArray(raw)) {
+    const text = typeof raw === 'string' && raw.trim()
+      ? raw.trim().slice(0, 200)
+      : 'verifier returned a malformed violations field';
+    return { supported: false, violations: [text] };
+  }
+
+  const violations = Array.isArray(raw)
+    ? raw.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim().slice(0, 200))
     : [];
   // supported only when explicitly true AND nothing flagged — fail safe.
   const supported = parsed.supported === true && violations.length === 0;
