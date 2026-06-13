@@ -1150,6 +1150,101 @@ describe('service report v1', () => {
     });
   });
 
+  test('v1 data exposes only approved visual service moments for the customer report', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+      scheduled_services: [{ id: 'scheduled-visual' }],
+      visual_service_moments: [
+        {
+          id: 'moment-approved',
+          job_id: 'scheduled-visual',
+          visibility_status: 'approved_customer',
+          tag_code: 'weeds',
+          tag_label: 'Weeds',
+          tag_group: 'observation',
+          service_type: 'lawn',
+          location_area: 'Driveway Edge',
+          note: 'Weeds by driveway',
+          media_type: 'none',
+          upload_status: 'uploaded',
+          processing_status: 'none',
+          customer_caption: null,
+          captured_at: '2026-05-15T14:15:00.000Z',
+          created_at: '2026-05-15T14:15:00.000Z',
+          deleted_at: null,
+        },
+        {
+          id: 'moment-internal',
+          job_id: 'scheduled-visual',
+          visibility_status: 'internal_only',
+          tag_code: 'access_issue',
+          tag_label: 'Access Issue',
+          tag_group: 'access',
+          service_type: 'lawn',
+          media_type: 'none',
+          deleted_at: null,
+        },
+        {
+          id: 'moment-rejected',
+          job_id: 'scheduled-visual',
+          visibility_status: 'rejected',
+          tag_code: 'moisture_issue',
+          tag_label: 'Moisture Issue',
+          tag_group: 'observation',
+          service_type: 'lawn',
+          media_type: 'none',
+          deleted_at: null,
+        },
+      ],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-visual',
+      scheduled_service_id: 'scheduled-visual',
+      customer_id: 'customer-1',
+      service_line: 'lawn',
+      service_type: 'WaveGuard Lawn Visit',
+      service_date: '2026-05-15',
+      status: 'completed',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Front Yard']),
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-visual', knex);
+
+    expect(data.proofMoments).toHaveLength(1);
+    expect(data.proofMoments[0]).toMatchObject({
+      id: 'moment-approved',
+      tagLabel: 'Weeds',
+      locationArea: 'Driveway Edge',
+      customerCaption: 'Weed pressure was observed near Driveway Edge.',
+    });
+    expect(data.proofMoments[0]).not.toHaveProperty('note');
+    expect(data.visualServiceMoments.map((moment) => moment.id)).toEqual(['moment-approved']);
+  });
+
   test('workflow wall-clock timestamps are interpreted as Eastern time', async () => {
     const fixtures = {
       service_products: [],

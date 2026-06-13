@@ -41,6 +41,7 @@ const KNOWN_FLAGS = [
   // newsletter-v1 retired — newsletter rolled out at /admin/newsletter
   // with Compose/History/Subscribers/Automations consolidated under it.
   "ff_invoice_send_receipt",
+  "visual_service_notes_enabled",
 ];
 
 export default function DesignSystemFlagsPage() {

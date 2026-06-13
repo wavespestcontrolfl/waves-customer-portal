@@ -18,6 +18,9 @@ const {
   loadVisitTimelineConfig,
   buildVisitTimeline,
 } = require('./visit-timeline');
+const {
+  loadApprovedVisualServiceMomentsForReport,
+} = require('../visual-service-notes');
 const { resolveTechPhotoUrl } = require('../tech-photo');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const {
@@ -1723,13 +1726,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
-  const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService] = await Promise.all([
+  const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
+    loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
   ]);
   const products = await attachApprovedReportProductFacts(knex, rawProducts);
 
@@ -2174,6 +2178,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     advisory,
     lawnAssessment,
     lawnProgramOverview,
+    visualServiceMoments: approvedVisualMoments,
+    proofMoments: approvedVisualMoments,
     photos: photoPayload,
     photoChain,
     pdfUrl: `/api/reports/${token}`,

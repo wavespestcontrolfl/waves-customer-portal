@@ -4628,6 +4628,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
+  const proofMoments = Array.isArray(data.proofMoments)
+    ? data.proofMoments
+    : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
 
   useEffect(() => {
     if (mode !== 'live') return;
@@ -7385,6 +7388,37 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           data={data}
           mode={mode}
         />
+
+        {proofMoments.length > 0 && (
+          <section className="sr-section" id="service-highlights">
+            <h2>Service Highlights</h2>
+            <div className="sr-grid-3">
+              {proofMoments.map((moment) => (
+                <div className="sr-cell" key={moment.id}>
+                  {moment.mediaUrl && moment.mediaType === 'video' && (
+                    <video
+                      src={moment.mediaUrl}
+                      controls
+                      style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
+                    />
+                  )}
+                  {moment.mediaUrl && moment.mediaType !== 'video' && (
+                    <img
+                      src={moment.mediaUrl}
+                      alt={moment.tagLabel || 'Service highlight'}
+                      style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
+                    />
+                  )}
+                  <div className="sr-cell-label">{moment.tagLabel || 'Service highlight'}</div>
+                  {moment.locationArea && <div className="sr-cell-value">{moment.locationArea}</div>}
+                  <div style={{ fontSize: 14, lineHeight: 1.45, color: ESTIMATE_BODY, marginTop: 6 }}>
+                    {moment.customerCaption || moment.note || 'Service highlight documented by your technician.'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">
