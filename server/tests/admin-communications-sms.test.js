@@ -1,6 +1,12 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  // The /sms route wraps suggestion parking and the post-send sweep in
+  // db.transaction; pass the mock itself through as the trx handle.
+  fn.transaction = jest.fn(async (cb) => cb(fn));
+  return fn;
+});
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -27,6 +33,21 @@ jest.mock('../services/sms-media', () => ({
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({
   alertTwilioFailure: jest.fn(),
+}));
+// Inert suggest-mode plumbing: the route fails CLOSED if pre-send parking
+// throws (503), and the bare db mock above can't run the real park
+// transaction. The suggest-mode lifecycle has its own suites
+// (sms-suggest-mode.test.js, agent-decisions-suggest-guard.test.js) —
+// these route tests only need the hooks to succeed quietly.
+jest.mock('../services/sms-suggest-mode', () => ({
+  SUGGEST_WORKFLOW: 'sms_house_voice_suggest',
+  HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'],
+  revertDraftsToShadow: jest.fn(async () => 0),
+  markSuggestionScheduled: jest.fn(async () => 1),
+  parkThreadSuggestions: jest.fn(async () => []),
+  reopenScheduledSuggestions: jest.fn(async () => 0),
+  ignoreParkedSuggestions: jest.fn(async () => 0),
+  lockSuggestThread: jest.fn(async () => {}),
 }));
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => (
