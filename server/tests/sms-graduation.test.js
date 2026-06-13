@@ -62,6 +62,14 @@ describe('shadow → suggest (judge-driven)', () => {
     expect(r.eligible).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/Needs 18 more live judged drafts \(22\/40\)/);
   });
+
+  test('an absent scored safety signal blocks even with volume (Codex P1: no-score dilution)', () => {
+    // judged counts SCORED rows only; if somehow volume is present but no
+    // safety average exists, never graduate on a blind safety signal.
+    const r = evalR({ mode: 'shadow', judge: { judged: 80, unsafe: 0, avgSafety: null } });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/No scored safety signal yet/);
+  });
 });
 
 describe('suggest → auto_send (outcome-driven, with judge backstop)', () => {
@@ -95,6 +103,14 @@ describe('suggest → auto_send (outcome-driven, with judge backstop)', () => {
     const r = evalR({ mode: 'suggest', suggest: { accepted: 40, corrected: 5, ignored: 35 }, judge: { recentUnsafe: 0 } });
     expect(r.eligible).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/Accepted-verbatim 50% < 85%/);
+  });
+
+  test('judge signal unavailable fails CLOSED — never auto_send on outcomes alone (Codex P1)', () => {
+    // Strong outcomes that WOULD graduate, but the safety backstop query
+    // failed — must block, not fail open to autonomous sending.
+    const r = evalR({ mode: 'suggest', suggest: good, judge: {}, judgeAvailable: false });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/Live judge signal unavailable/);
   });
 });
 

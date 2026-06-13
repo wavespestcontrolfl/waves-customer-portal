@@ -65,7 +65,7 @@ const asPct = (x) => `${Math.round(x * 100)}%`;
  *   judge   = { judged, unsafe, avgSafety, recentUnsafe }  (LIVE, non-backfill)
  *   suggest = { accepted, corrected, ignored }             (agent_decisions)
  */
-function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {}, thresholds = THRESHOLDS } = {}) {
+function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {}, thresholds = THRESHOLDS, judgeAvailable = true } = {}) {
   const currentMode = LADDER.includes(mode) ? mode : 'shadow';
 
   if (locked) {
@@ -79,13 +79,16 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
 
   if (currentMode === 'shadow') {
     const t = thresholds.shadowToSuggest;
-    const judged = judge.judged || 0;
+    const judged = judge.judged || 0; // SCORED evaluations only (see fetchLiveJudgeSignals)
     const unsafeRate = rate(judge.unsafe || 0, judged);
     const avgSafety = judge.avgSafety == null ? null : Number(judge.avgSafety);
 
     if (judged < t.minJudged) blockers.push(`Needs ${t.minJudged - judged} more live judged drafts (${judged}/${t.minJudged}).`);
     if (judged > 0 && unsafeRate > t.maxUnsafeRate) blockers.push(`Unsafe rate ${asPct(unsafeRate)} > ${asPct(t.maxUnsafeRate)} cap.`);
-    if (avgSafety != null && avgSafety < t.minSafety) blockers.push(`Avg safety ${avgSafety.toFixed(1)} < ${t.minSafety.toFixed(1)} required.`);
+    // A scored safety average is mandatory — never graduate on an absent
+    // safety signal (judge query failed, or only no-reply rows exist).
+    if (avgSafety == null) blockers.push('No scored safety signal yet.');
+    else if (avgSafety < t.minSafety) blockers.push(`Avg safety ${avgSafety.toFixed(1)} < ${t.minSafety.toFixed(1)} required.`);
 
     // No data is never eligible, even if every threshold is vacuously clear.
     const eligible = blockers.length === 0 && judged >= t.minJudged;
@@ -102,6 +105,10 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
   const correctedRate = rate(corrected, decided);
   const recentUnsafe = judge.recentUnsafe || 0;
 
+  // Fail CLOSED: auto_send relies on the judge backstop (recent unsafe). If
+  // the live judge signal couldn't be loaded, the backstop is blind — never
+  // promote to autonomous sending on outcome counts alone.
+  if (!judgeAvailable) blockers.push('Live judge signal unavailable — safety backstop cannot be verified.');
   if (decided < t.minDecided) blockers.push(`Needs ${t.minDecided - decided} more human-decided suggestions (${decided}/${t.minDecided}).`);
   if (decided > 0 && acceptedRate < t.minAcceptedRate) blockers.push(`Accepted-verbatim ${asPct(acceptedRate)} < ${asPct(t.minAcceptedRate)} required.`);
   if (decided > 0 && correctedRate > t.maxCorrectedRate) blockers.push(`Correction rate ${asPct(correctedRate)} > ${asPct(t.maxCorrectedRate)} cap.`);
@@ -136,7 +143,12 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
       .where(liveOnly)
       .groupBy('j.intent')
       .select('j.intent')
-      .select(dbi.raw('COUNT(*)::int as judged'))
+      // judged = SCORED evaluations only. Deterministic no-reply verdicts
+      // (human_no_reply / both_no_reply) have null scores — the LLM never
+      // evaluated safety, so they are not readiness evidence. Counting them
+      // would dilute the unsafe rate and let an intent graduate on volume
+      // with no real safety signal.
+      .select(dbi.raw('COUNT(*) FILTER (WHERE j.scores IS NOT NULL)::int as judged'))
       .select(dbi.raw("COUNT(*) FILTER (WHERE j.verdict = 'draft_unsafe')::int as unsafe"))
       .select(dbi.raw("AVG((j.scores->>'safety')::numeric) FILTER (WHERE j.scores IS NOT NULL) as avg_safety")),
     dbi
@@ -144,6 +156,7 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
         qb.from({ j: 'shadow_draft_judgments' })
           .join({ md: 'message_drafts' }, 'md.id', 'j.draft_id')
           .where(liveOnly)
+          .whereNotNull('j.scores') // the backstop window is over scored rows
           .select('j.intent', 'j.verdict')
           .select(dbi.raw('ROW_NUMBER() OVER (PARTITION BY j.intent ORDER BY j.judged_at DESC) as rn'));
       })
@@ -187,16 +200,21 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
  */
 async function computeReadiness({ intents, dbi = db } = {}) {
   let judgeSignals = new Map();
+  let judgeAvailable = true;
   try {
     judgeSignals = await fetchLiveJudgeSignals(dbi);
   } catch (err) {
-    logger.warn(`[sms-graduation] judge-signal fetch failed: ${err.message}; readiness degrades to outcome-only`);
+    // Fail CLOSED, not open: a missing judge signal must BLOCK graduation
+    // (especially auto_send), never silently degrade to outcome-only and
+    // promote without the safety backstop.
+    judgeAvailable = false;
+    logger.warn(`[sms-graduation] judge-signal fetch failed: ${err.message}; graduation blocked until it recovers`);
   }
 
   const out = new Map();
   for (const { intent, mode, locked, suggest } of intents) {
     const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0 };
-    const verdict = evaluateRung({ mode, locked, judge, suggest });
+    const verdict = evaluateRung({ mode, locked, judge, suggest, judgeAvailable });
     out.set(intent, {
       ...verdict,
       eligibleFor: verdict.eligible ? verdict.nextRung : null,
