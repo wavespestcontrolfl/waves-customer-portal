@@ -3716,7 +3716,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // (e.g. the customer paid in person). Suppressing the invoice link must
     // never suppress the report itself — the completion SMS still sends, just
     // report-only. Honored alongside the existing invoiceAlreadySent path.
-    const suppressCompletionInvoiceLink = !!invoiceAlreadySent || includePayLink === false;
+    //
+    // Gate the includePayLink suppression on an actual completion SMS send:
+    // includePayLink only governs what goes IN the text, so when no completion
+    // SMS is sent it must not flip suppressCompletionInvoiceLink — otherwise it
+    // would also suppress the mobile in-person payment sheet
+    // (invoicePaymentActionRequired below), stranding a newly created unpaid
+    // invoice with neither a text nor a collection prompt.
+    const suppressCompletionInvoiceLink = !!invoiceAlreadySent
+      || (effectiveSendCompletionSms && includePayLink === false);
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
       ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()

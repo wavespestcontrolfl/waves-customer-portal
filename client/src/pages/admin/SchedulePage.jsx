@@ -8084,9 +8084,10 @@ export function CompletionPanel({
           : null,
         oneTimeRecapOnly,
         sendCompletionSms: effectiveSendSms,
-        // Only meaningful when an invoice/pay link would be attached; otherwise
-        // the server default (true) is a no-op. false = report-only SMS.
-        includePayLink: willInvoice ? includePayLink : true,
+        // Only meaningful when an invoice/pay link would be texted; mirror the
+        // sub-toggle's visibility (invoice + SMS being sent) so a stale false
+        // never posts when the completion SMS is off. false = report-only SMS.
+        includePayLink: willInvoice && effectiveSendSms ? includePayLink : true,
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
