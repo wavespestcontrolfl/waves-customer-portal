@@ -1475,9 +1475,19 @@ router.get('/intent-modes', async (req, res, next) => {
       if (key in b.suggest) b.suggest[key] = n;
     }
 
+    // Phase E readiness: per-intent eligibility for the next ladder rung,
+    // computed from the LIVE judge signal (backfill excluded) + the suggest
+    // outcomes above. Recommend-only — flips stay manual via PUT below.
+    const graduation = require('../services/sms-graduation');
+    const readiness = await graduation.computeReadiness({
+      intents: [...byIntent.values()].map((b) => ({ intent: b.intent, mode: b.mode, locked: b.locked, suggest: b.suggest })),
+    });
+    for (const b of byIntent.values()) b.graduation = readiness.get(b.intent) || null;
+
     res.json({
       generatedAt: new Date().toISOString(),
       gateEnabled: require('../config/feature-gates').isEnabled('smsSuggestMode'),
+      thresholds: graduation.THRESHOLDS,
       intents: [...byIntent.values()].sort((a, b) => a.intent.localeCompare(b.intent)),
     });
   } catch (err) {
