@@ -25,7 +25,7 @@ class ContextAggregator {
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereNotIn('ss.status', ['cancelled', 'completed']).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.status', 'tech.name as technician_name'),
+      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereNotIn('ss.status', ['cancelled', 'completed']).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       db('payments').where({ 'payments.customer_id': customer.id }).orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
@@ -67,13 +67,43 @@ class ContextAggregator {
       },
       smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
       lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: lastService.technician_notes } : null,
-      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: s.window_display, status: s.status, tech: s.technician_name || null })),
+      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null })),
       billing: { outstandingBalance: balance, recentPayments: payments.slice(0, 3) },
       propertyPrefs: propertyPrefs || {},
       flags, compliance,
       recentInteractions: interactions.slice(0, 5).map(i => ({ type: i.interaction_type, subject: i.subject, date: i.created_at })),
       summary,
     };
+  }
+
+  // The arrival window lives in window_start/window_end (Postgres `time`, ET
+  // wall-clock strings like '13:00:00') on nearly every row — booking and
+  // admin-schedule both write those, while window_display is set by only a
+  // few legacy paths (1 of 545 upcoming in prod). Derive a human window from
+  // whatever is present so the drafter states the REAL time instead of
+  // "no window set"; time_window ('morning'/'afternoon') is the coarse fallback.
+  deriveWindow(s) {
+    const display = (s.window_display || '').toString().trim();
+    if (display) return display;
+    const start = this.formatClockTime(s.window_start);
+    const end = this.formatClockTime(s.window_end);
+    if (start && end) return `${start}–${end}`;
+    if (start) return start;
+    const tw = (s.time_window || '').toString().trim();
+    if (tw) return tw.charAt(0).toUpperCase() + tw.slice(1);
+    return null;
+  }
+
+  // 'HH:MM:SS' (already ET wall clock, no tz) → '1:00 PM'. Returns null on a
+  // shape it can't parse so deriveWindow falls through rather than guessing.
+  formatClockTime(t) {
+    const m = /^(\d{1,2}):(\d{2})/.exec((t || '').toString());
+    if (!m) return null;
+    let h = parseInt(m[1], 10);
+    if (Number.isNaN(h)) return null;
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return `${h}:${m[2]} ${ampm}`;
   }
 
   buildSummary(c, flags, lastSvc, upcoming, balance) {

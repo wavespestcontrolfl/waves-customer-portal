@@ -39,11 +39,19 @@ const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { hasSchedulingIntent } = require('./sms-intent');
 
-// v4 (06-13): tracks the drafter's STRICT verifier. The natural candidate
-// pool is exhausted, so v4 is measured via re-draft mode (SHADOW_BACKFILL_
-// REDRAFT=true) — re-running already-judged inbounds under v4 for a
-// same-input cohort vs the v1/v2/v3 priors.
+// Prior versions (v1–v5) tracked verifier sharpening and WERE backfill-
+// measurable: their drafts depended only on the inbound + thread, so re-
+// drafting a historical inbound reproduced the same input. v6 is NOT — its
+// new facts (today's schedule, assigned tech) come from ContextAggregator at
+// draft time, so backfilling an old inbound would draft TODAY's schedule onto
+// a months-old message: drifted, misleading data. See LIVE_ONLY_VERSION.
 const BACKFILL_PROMPT_VERSION = 'house_voice_v6_backfill';
+
+// v6 grounds on live schedule state, so neither backfill path (natural pool
+// nor re-draft A/B) can produce a valid cohort — both would draft today's
+// facts onto historical inbounds. Backfill is therefore disabled for this
+// version; a future backfill-measurable drafter change flips this to false.
+const LIVE_ONLY_VERSION = true;
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
 
 // Inbound message_types the live webhook handles in a branch that returns
@@ -321,6 +329,13 @@ async function draftOneBackfill(inbound, customer) {
  */
 async function runShadowBackfill({ batchSize = DEFAULT_BATCH, sinceDays = DEFAULT_SINCE_DAYS, judgeBatch = DEFAULT_JUDGE_BATCH } = {}) {
   const startedAt = Date.now();
+  // v6+ is live-only: backfilling would draft today's schedule/tech facts onto
+  // historical inbounds. Refuse before drafting so no drifted cohort is
+  // created (the judge runs on its own cron, so live drafts still score).
+  if (LIVE_ONLY_VERSION) {
+    logger.info('[shadow-backfill] drafter version is live-only (grounds on current schedule); backfill skipped to avoid drifted cohorts');
+    return { drafted: 0, failed: 0, judged: 0, skipped: 'live_only', redraft: false, ms: Date.now() - startedAt };
+  }
   // Re-draft mode re-runs already-judged inbounds under the current version
   // (for A/B measurement once the natural pool is exhausted); default mode
   // drafts fresh historical candidates.
@@ -373,6 +388,7 @@ async function runShadowBackfill({ batchSize = DEFAULT_BATCH, sinceDays = DEFAUL
 
 module.exports = {
   BACKFILL_PROMPT_VERSION,
+  LIVE_ONLY_VERSION,
   REPLY_WINDOW_HOURS,
   PREHANDLED_INBOUND_TYPES,
   isBackfillableNumber,
