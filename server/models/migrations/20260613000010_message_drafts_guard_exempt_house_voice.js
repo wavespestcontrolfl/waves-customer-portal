@@ -20,9 +20,10 @@
  * This narrows the guard: legacy drafts (drafter IS NULL) stay subject to
  * the kill switch; house-voice rows are always allowed. CREATE OR REPLACE
  * is idempotent — on prod it updates the function the existing trigger
- * already calls; on a fresh DB (no trigger) it creates an unused function,
- * harmless. The trigger itself is left as-is (untracked prod drift, out of
- * scope here).
+ * already calls. It also CONVERGES the orphaned prod trigger into migration
+ * control by (re)creating it idempotently, so a freshly-replayed database
+ * gets the same BEFORE INSERT guard (system_config is created by an earlier
+ * migration, so the function's lookup is safe there).
  */
 exports.up = async function (knex) {
   await knex.raw(`
@@ -48,10 +49,22 @@ exports.up = async function (knex) {
     end;
     $function$;
   `);
+
+  // Idempotent: DROP IF EXISTS handles prod (trigger already present) and
+  // makes a freshly-replayed DB match — without it, a rebuilt database has
+  // the function but no trigger, so the legacy kill switch wouldn't fire.
+  await knex.raw('DROP TRIGGER IF EXISTS message_drafts_disabled_guard ON public.message_drafts');
+  await knex.raw(`
+    CREATE TRIGGER message_drafts_disabled_guard
+      BEFORE INSERT ON public.message_drafts
+      FOR EACH ROW EXECUTE FUNCTION block_message_drafts_when_disabled()
+  `);
 };
 
 exports.down = async function (knex) {
-  // Restore the all-blocking form (the pre-migration prod state).
+  // Restore the all-blocking form (the pre-migration prod state). The
+  // trigger is left in place — it pre-existed this migration in prod, and
+  // leaving the guard active is the fail-closed direction.
   await knex.raw(`
     CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled()
     RETURNS trigger
