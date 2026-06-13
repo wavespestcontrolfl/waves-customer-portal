@@ -5,6 +5,7 @@
 const {
   BACKFILL_PROMPT_VERSION,
   REPLY_WINDOW_HOURS,
+  PREHANDLED_INBOUND_TYPES,
   isBackfillableNumber,
   boundContextToInbound,
   buildBackfillDraftRow,
@@ -34,6 +35,16 @@ describe('shadow backfill — number gate (mirrors the live webhook gate)', () =
     expect(isBackfillableNumber('+19998887777')).toBe(false);
     expect(isBackfillableNumber('')).toBe(false);
     expect(isBackfillableNumber(null)).toBe(false);
+  });
+});
+
+describe('shadow backfill — live-parity exclusions (Codex P2)', () => {
+  test('excludes every inbound type the live webhook handles before the drafter runs', () => {
+    // Mirror of the early-return branches in twilio-webhook.js — if a new
+    // pre-drafter branch is added there, this list must grow too.
+    for (const type of ['opt_out', 'opt_in', 'sms_reaction', 'reschedule_reply', 'lead_intake']) {
+      expect(PREHANDLED_INBOUND_TYPES).toContain(type);
+    }
   });
 });
 

@@ -42,6 +42,12 @@ const { hasSchedulingIntent } = require('./sms-intent');
 const BACKFILL_PROMPT_VERSION = 'house_voice_v1_backfill';
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
 
+// Inbound message_types the live webhook handles in a branch that returns
+// BEFORE the shadow drafter runs (twilio-webhook.js): opt keywords +
+// reactions, plus reschedule_reply and lead_intake. The live system never
+// shadow-samples these, so the backfill must not either.
+const PREHANDLED_INBOUND_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'reschedule_reply', 'lead_intake'];
+
 function phoneLast10(value) {
   return String(value || '').replace(/\D/g, '').slice(-10);
 }
@@ -152,13 +158,21 @@ async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = D
     .whereNotNull('i.customer_id')
     .where('i.created_at', '>=', since)
     .where('i.created_at', '<', matureBefore)
-    .whereRaw("COALESCE(i.message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction')")
+    // Full parity with the live webhook's pre-drafter early returns
+    // (PREHANDLED_INBOUND_TYPES): drafting those would sample flows the live
+    // system never samples and skew per-intent graduation data.
+    .whereRaw("COALESCE(i.message_type, '') <> ALL(?)", [PREHANDLED_INBOUND_TYPES])
     .whereRaw("NULLIF(TRIM(i.message_body), '') IS NOT NULL")
     .whereRaw(
       `RIGHT(REGEXP_REPLACE(COALESCE(i.to_phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)`,
       [allowedLast10]
     )
-    .whereRaw('NOT EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id)')
+    // Skip only inbounds that already have a HOUSE-VOICE sample (live shadow
+    // row or a prior backfill row — both drafter='house_voice'). A legacy
+    // approval-queue draft (drafter NULL, non-shadow status) is invisible to
+    // the judge, so its inbound still needs a judgeable house-voice draft;
+    // the old any-draft anti-join wrongly skipped all of those.
+    .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id AND md.drafter = 'house_voice')")
     // Deleted customers would re-select every run (no draft ever lands, the
     // anti-join stays true) — exclude them here so exhaustion is clean.
     .whereRaw('EXISTS (SELECT 1 FROM customers c WHERE c.id = i.customer_id AND c.deleted_at IS NULL)')
@@ -286,6 +300,7 @@ async function runShadowBackfill({ batchSize = DEFAULT_BATCH, sinceDays = DEFAUL
 module.exports = {
   BACKFILL_PROMPT_VERSION,
   REPLY_WINDOW_HOURS,
+  PREHANDLED_INBOUND_TYPES,
   isBackfillableNumber,
   boundContextToInbound,
   buildBackfillDraftRow,
