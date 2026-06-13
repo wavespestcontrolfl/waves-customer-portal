@@ -27,13 +27,15 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 
 const DRAFTER = 'house_voice';
-// v4 (06-13): v3's verify loop ran but the verifier was too lenient —
-// passed all 18 backfill drafts incl. 3 blatant fabrications (zero
-// revisions fired). v4 keeps the loop, makes the verifier aggressively
-// strict (skeptical default, per-claim grounding, literal-only customer
-// source). Bumped so the judge partitions v4 vs v3 (verifier-lenient) and
-// the v1/v2 baselines.
-const PROMPT_VERSION = 'house_voice_v5';
+// v6 (06-13): DATA GROUNDING. Verifier sharpening plateaued at ~13-16%
+// (v4≈v5) — the residual is the drafter inventing schedule facts (dates,
+// arrival windows, tech names) it was never given. v6 surfaces the REAL
+// upcoming schedule with arrival window + assigned tech in the facts block
+// (UPCOMING SERVICES), so the drafter can state them instead of inventing
+// and the verifier can validate them. LIVE-only effect: backfill context is
+// drifted (today's schedule on old inbounds), so this is not backfill-
+// measurable — it improves real drafts that feed suggest mode.
+const PROMPT_VERSION = 'house_voice_v6';
 const SHADOW_STATUS = 'shadow';
 
 const INTENDED_ACTION_TYPES = [
@@ -50,13 +52,15 @@ function buildSystemPrompt() {
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
-FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (LAST SERVICE, NEXT SERVICE, BALANCE, ACCOUNT FLAGS, the thread). A plausible-sounding guess is still a fabrication. You must NEVER:
-- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in NEXT SERVICE or the thread. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
-- Name a technician, or say who is coming or on the way, unless the context names them.
+FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (LAST SERVICE, UPCOMING SERVICES, BALANCE, ACCOUNT FLAGS, the thread). A plausible-sounding guess is still a fabrication. You must NEVER:
+- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in UPCOMING SERVICES or the thread. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
+- Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
 - Assert a service cadence or frequency ("every other month") or treatment timing ("safe to water in 1–2 hours") that isn't in the context.
 - Reference a billing event — a payment, an auto-pay attempt, a charge — that isn't shown in BALANCE.
 When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.
+
+USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file. If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in.
 
 ALSO:
 - If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.
@@ -117,8 +121,21 @@ function buildFactsBlock(context) {
     ? `${context.lastService.type} on ${formatEtDate(context.lastService.date)} — "${(context.lastService.notes || '').slice(0, 150)}"`
     : 'None';
 
-  const nextService = context.upcomingServices?.[0]
-    ? `${context.upcomingServices[0].type} ${formatEtDate(context.upcomingServices[0].date)}${context.upcomingServices[0].window ? ` ${context.upcomingServices[0].window}` : ''}`
+  // v6 data grounding: surface the FULL upcoming schedule (up to 3) with the
+  // real arrival window and ASSIGNED TECH on each — the exact facts the
+  // drafter used to invent ("Tuesday 2 PM", "Adam's on the way"). Each line
+  // states only what's on file; a blank window or tech is shown as such so
+  // the drafter (and the verifier) know it's genuinely unknown, not omitted.
+  const upcoming = (context.upcomingServices || []).filter((s) => s && s.date);
+  const upcomingBlock = upcoming.length
+    ? upcoming
+        .map((s) => {
+          const parts = [`${s.type} on ${formatEtDate(s.date)}`];
+          parts.push(s.window ? `window ${s.window}` : 'no arrival window set');
+          parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
+          return `- ${parts.join(', ')}`;
+        })
+        .join('\n')
     : 'Nothing scheduled';
 
   const balance =
@@ -129,7 +146,8 @@ function buildFactsBlock(context) {
   return `CUSTOMER: ${context.summary}
 
 LAST SERVICE: ${lastService}
-NEXT SERVICE: ${nextService}
+UPCOMING SERVICES:
+${upcomingBlock}
 BALANCE: ${balance}
 ACCOUNT FLAGS:
 ${flagsSummary}

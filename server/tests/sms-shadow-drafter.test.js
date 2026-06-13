@@ -151,6 +151,33 @@ describe('sms shadow drafter — prompt contract', () => {
     expect(prompt).toContain('CLASSIFIED INTENT: GENERAL');
     expect(prompt).not.toContain('scheduling-intent detected');
   });
+
+  test('v6 surfaces the full schedule with real window + assigned tech (data grounding)', () => {
+    const prompt = buildUserPrompt({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-06-19', window: '8-10am', tech: 'Jose Alvarado' },
+        { type: 'Lawn', date: '2026-07-03', window: null, tech: null },
+      ],
+    }, 'When are you coming and who?', null, true);
+    // the real facts the drafter used to invent are now on file...
+    expect(prompt).toContain('UPCOMING SERVICES:');
+    expect(prompt).toContain('Quarterly Pest on Friday, Jun 19');
+    expect(prompt).toContain('window 8-10am');
+    expect(prompt).toContain('tech Jose Alvarado');
+    // ...and a genuinely-unknown window/tech is shown as such, not omitted,
+    // so the drafter knows to defer on it rather than invent.
+    expect(prompt).toContain('Lawn on Friday, Jul 3');
+    expect(prompt).toContain('no arrival window set');
+    expect(prompt).toContain('tech not yet assigned');
+  });
+
+  test('v6 system prompt grounds schedule facts in UPCOMING SERVICES and says to use them', () => {
+    const p = buildSystemPrompt();
+    expect(p).toContain('UPCOMING SERVICES');
+    expect(p).not.toContain('NEXT SERVICE'); // renamed — stale references would misdirect grounding
+    expect(p).toMatch(/answer with it directly|don't deflect/i);
+  });
 });
 
 describe('sms shadow drafter — structural unsendability', () => {
@@ -165,7 +192,7 @@ describe('sms shadow drafter — structural unsendability', () => {
 
   test('telemetry identity constants are stable for the judge pass', () => {
     expect(DRAFTER).toBe('house_voice');
-    expect(PROMPT_VERSION).toBe('house_voice_v5');
+    expect(PROMPT_VERSION).toBe('house_voice_v6');
     expect(INTENDED_ACTION_TYPES).toContain('escalate');
     expect(INTENDED_ACTION_TYPES).toContain('none');
   });

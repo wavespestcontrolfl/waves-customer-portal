@@ -4,11 +4,13 @@
  */
 const {
   BACKFILL_PROMPT_VERSION,
+  LIVE_ONLY_VERSION,
   REPLY_WINDOW_HOURS,
   PREHANDLED_INBOUND_TYPES,
   isBackfillableNumber,
   boundContextToInbound,
   buildBackfillDraftRow,
+  runShadowBackfill,
 } = require('../services/sms-shadow-backfill');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
@@ -85,6 +87,24 @@ describe('shadow backfill — ground-truth leak guard (Codex P1)', () => {
   });
 });
 
+describe('shadow backfill — live-only guard (Codex P2: no drifted v6 cohort)', () => {
+  test('v6 grounds on current schedule, so backfill is disabled for it', () => {
+    // v6 facts come from ContextAggregator at draft time; re-running an old
+    // inbound would draft TODAY's schedule onto a months-old message.
+    expect(LIVE_ONLY_VERSION).toBe(true);
+  });
+
+  test('runShadowBackfill no-ops BEFORE any draft when the version is live-only', async () => {
+    // The guard returns before findBackfillCandidates/findRedraftCandidates,
+    // so neither path can write a v6_backfill row from drifted context. The
+    // judge keeps scoring live drafts on its own cron — unaffected.
+    const result = await runShadowBackfill();
+    expect(result.skipped).toBe('live_only');
+    expect(result.drafted).toBe(0);
+    expect(result.failed).toBe(0);
+  });
+});
+
 describe('shadow backfill — draft row invariants', () => {
   const inbound = {
     id: 'sms-1',
@@ -111,9 +131,9 @@ describe('shadow backfill — draft row invariants', () => {
   });
 
   test('backfill samples are marked with a distinct prompt_version for Phase E weighting', () => {
-    expect(BACKFILL_PROMPT_VERSION).toBe('house_voice_v5_backfill');
+    expect(BACKFILL_PROMPT_VERSION).toBe('house_voice_v6_backfill');
     expect(row.prompt_version).toBe(BACKFILL_PROMPT_VERSION);
-    expect(row.prompt_version).not.toBe('house_voice_v5');
+    expect(row.prompt_version).not.toBe('house_voice_v6');
   });
 
   test('row links the inbound and carries the classified intent', () => {
