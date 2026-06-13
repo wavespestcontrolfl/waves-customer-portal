@@ -760,6 +760,24 @@ router.post('/assess', async (req, res, next) => {
       is_baseline: isBaseline,
     }).returning('*');
 
+    // Auto-capture grass type from the AI read into the turf profile so lawn
+    // reports use the real turf instead of the St. Augustine default. COALESCE-
+    // guarded: only fills a blank value, never overrides a real one (tech/admin
+    // edit or estimate). Fail-soft — never break the assessment.
+    if (mergedComposite.grass_type) {
+      try {
+        await db('customer_turf_profiles')
+          .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
+          .onConflict('customer_id')
+          .merge({
+            grass_type: db.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
+            updated_at: new Date(),
+          });
+      } catch (grassErr) {
+        logger.warn?.(`[lawn-assessment] grass-type auto-capture skipped for ${customerId}: ${grassErr.message}`);
+      }
+    }
+
     // ── Upload photos to S3 + create lawn_assessment_photos records ──
     const photoRecords = [];
     let bestPhotoId = null;
@@ -871,6 +889,7 @@ router.post('/assess', async (req, res, next) => {
       success: true,
       assessment: { ...assessment, overall_score: overallScore, best_photo_id: bestPhotoId },
       rawComposite: mergedComposite,
+      detectedGrassType: mergedComposite.grass_type || null,
       displayScores,
       adjustedScores,
       overallScore,

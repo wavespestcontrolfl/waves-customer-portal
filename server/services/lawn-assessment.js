@@ -9,6 +9,14 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { normalizeGrassType } = require('./lawn-grass-context');
+
+// Coerce a model's grass_type to a canonical key, or null when it can't tell
+// (unknown / unrecognized) so we never persist a guess that overrides real data.
+function normalizeDetectedGrass(v) {
+  const g = normalizeGrassType(v);
+  return g && g !== 'unknown' ? g : null;
+}
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -27,6 +35,8 @@ Write "observations" as ONE concise, plain-English paragraph for a homeowner —
 
 Set "overwatering_signal" true only when the photo shows a DIRECT sign of excess water — mushrooms/toadstools/fungal fruiting bodies, standing water, algae, or moss — not merely lush growth.
 
+Identify the turf "grass_type" from blade width, growth habit, and color. SWFL lawns are overwhelmingly St. Augustine (broad, flat blades, coarse stoloniferous runners); pick "unknown" only when the turf genuinely doesn't match a known type.
+
 Return this exact JSON structure and nothing else — no markdown, no backticks, no preamble:
 {
   "turf_density": <number 0-100>,
@@ -35,6 +45,7 @@ Return this exact JSON structure and nothing else — no markdown, no backticks,
   "fungal_activity": <"none" | "minor" | "moderate" | "severe">,
   "thatch_visibility": <"low" | "moderate" | "high">,
   "overwatering_signal": <true | false>,
+  "grass_type": <"st_augustine" | "bermuda" | "zoysia" | "bahia" | "mixed" | "unknown">,
   "observations": "<one concise paragraph>"
 }`;
 
@@ -79,6 +90,7 @@ async function callClaudeVision(base64Image, mimeType) {
     if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
     parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+    parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
     return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Claude vision failed: ${err.message}`);
@@ -117,6 +129,7 @@ async function callGeminiVision(base64Image, mimeType) {
 
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
     parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+    parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
     return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Gemini vision failed: ${err.message}`);
@@ -248,6 +261,8 @@ function averageScores(claudeResult, geminiResult) {
   // Either model seeing a direct overwatering tell (mushrooms/standing water/
   // algae) flags it — this cross-checks the water-balance surplus on the report.
   composite.overwatering_signal = !!(claudeResult.overwatering_signal || geminiResult.overwatering_signal);
+  // Grass type: prefer the primary model's confident read, else the other.
+  composite.grass_type = claudeResult.grass_type || geminiResult.grass_type || null;
 
   return { composite, divergenceFlags };
 }
