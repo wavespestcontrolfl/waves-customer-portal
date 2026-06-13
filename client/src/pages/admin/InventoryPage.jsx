@@ -45,6 +45,15 @@ function adminFetch(path, options = {}) {
   });
 }
 
+function safeExternalHref(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function formatMoney(value, decimals = 2) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "—";
@@ -826,6 +835,9 @@ function PriceSyncTab({ showToast }) {
   const [csvName, setCsvName] = useState("");
   const [mappingImportCsv, setMappingImportCsv] = useState("");
   const [importResult, setImportResult] = useState(null);
+  const [loginDiscoveryLimit, setLoginDiscoveryLimit] = useState(50);
+  const [loginDiscoveryQueueing, setLoginDiscoveryQueueing] = useState(false);
+  const [loginDiscoveryResult, setLoginDiscoveryResult] = useState(null);
   const showToastRef = useRef(showToast);
 
   useEffect(() => {
@@ -896,6 +908,26 @@ function PriceSyncTab({ showToast }) {
     }
   };
 
+  const queueLoginDiscovery = async () => {
+    setLoginDiscoveryQueueing(true);
+    try {
+      const result = await adminFetch("/admin/inventory/price-sync/hermes-login-discovery", {
+        method: "POST",
+        body: JSON.stringify({
+          limit: loginDiscoveryLimit,
+          includePublic: false,
+        }),
+      });
+      setLoginDiscoveryResult(result);
+      showToast?.(result.message || "Hermes login discovery queued");
+      await load();
+    } catch (e) {
+      showToast?.(`Login discovery failed: ${e.message}`);
+    } finally {
+      setLoginDiscoveryQueueing(false);
+    }
+  };
+
   if (loading) {
     return (
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
@@ -916,6 +948,9 @@ function PriceSyncTab({ showToast }) {
     (sum, vendor) => sum + (vendor.currentPrices || 0),
     0,
   );
+  const loginDiscoveryVendors = vendors.filter(
+    (vendor) => vendor.loginDiscoveryNeeded || vendor.loginDiscoveryStatus,
+  );
 
   return (
     <div>
@@ -926,6 +961,7 @@ function PriceSyncTab({ showToast }) {
           { label: "Needs Mapping", value: needsMapping.length },
           { label: "Verified Maps", value: verifiedMappings },
           { label: "Current Prices", value: currentPrices },
+          { label: "Needs Login", value: loginDiscoveryVendors.length },
           { label: "Pending Review", value: reviewQueue.length },
         ].map((item) => (
           <div
@@ -967,6 +1003,7 @@ function PriceSyncTab({ showToast }) {
         {[
           { key: "vendors", label: "Vendor Sync Status" },
           { key: "mapping", label: "Needs Mapping" },
+          { key: "login", label: "Login Discovery" },
           { key: "csv", label: "CSV Import / Export" },
           { key: "review", label: "Price Review Queue" },
         ].map((tab) => (
@@ -1096,6 +1133,95 @@ function PriceSyncTab({ showToast }) {
               All active products have verified mappings.
             </div>
           )}
+        </div>
+      )}
+
+      {view === "login" && (
+        <div style={sCard}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
+            <div>
+              <h3 style={{ margin: "0 0 4px", color: D.heading, fontSize: 18 }}>Hermes Vendor Login Discovery</h3>
+              <div style={{ color: D.muted, fontSize: 13 }}>
+                Queue active vendors missing login setup so Hermes can find portal, registration, and rep-contact paths.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <label>
+                <div style={{ fontSize: 10, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Vendor cap</div>
+                <input
+                  type="number"
+                  min="1"
+                  max="200"
+                  value={loginDiscoveryLimit}
+                  onChange={(e) => setLoginDiscoveryLimit(e.target.value)}
+                  style={{ ...sInput, width: 110 }}
+                />
+              </label>
+              <button
+                type="button"
+                onClick={queueLoginDiscovery}
+                disabled={loginDiscoveryQueueing}
+                style={sBtn(loginDiscoveryQueueing ? D.card : D.green, loginDiscoveryQueueing ? D.muted : D.white)}
+              >
+                {loginDiscoveryQueueing ? "Queueing..." : "Queue Hermes"}
+              </button>
+            </div>
+          </div>
+
+          {loginDiscoveryResult && (
+            <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 12, color: D.text, fontSize: 12, background: D.input }}>
+              Queued {loginDiscoveryResult.queued || 0}; skipped open jobs {loginDiscoveryResult.duplicates || 0}; candidates {loginDiscoveryResult.candidateCount || 0}.
+            </div>
+          )}
+
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Vendor", "Website", "Login URL", "Credentials", "Status", "Hermes"].map((h) => (
+                    <th key={h} style={thS}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {loginDiscoveryVendors.map((vendor) => {
+                  const websiteHref = safeExternalHref(vendor.website);
+                  const loginHref = safeExternalHref(vendor.loginUrl);
+                  return (
+                    <tr key={vendor.id}>
+                      <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>{vendor.name}</td>
+                      <td style={tdS}>
+                        {websiteHref ? (
+                          <a href={websiteHref} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                            {vendor.website}
+                          </a>
+                        ) : (vendor.website || "—")}
+                      </td>
+                      <td style={tdS}>
+                        {loginHref ? (
+                          <a href={loginHref} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                            {vendor.loginUrl}
+                          </a>
+                        ) : (vendor.loginUrl || "—")}
+                      </td>
+                      <td style={tdS}>{vendor.hasCredentials ? "Saved login metadata" : "Missing"}</td>
+                      <td style={tdS}>
+                        <span style={sBadge(vendor.loginDiscoveryNeeded ? `${D.amber}22` : `${D.green}22`, vendor.loginDiscoveryNeeded ? D.amber : D.green)}>
+                          {vendor.credentialStatus || "needs_login"}
+                        </span>
+                      </td>
+                      <td style={tdS}>{vendor.loginDiscoveryStatus || "not queued"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {loginDiscoveryVendors.length === 0 && (
+              <div style={{ color: D.muted, textAlign: "center", padding: 18 }}>
+                No vendors currently need login discovery.
+              </div>
+            )}
+          </div>
         </div>
       )}
 
