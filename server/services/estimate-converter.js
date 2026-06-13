@@ -104,6 +104,194 @@ function recurringServiceKey(svc = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+// Combined-service routing (combined-service-completions.md cutover): the
+// owner-named pairs complete as ONE service, ONE submission, ONE report. At
+// accept, when an estimate carries both lines of a pair AND their visit
+// cadences match, the converter schedules ONE combined service — the
+// combined catalog name resolves to the combined completion profile
+// (primary flow + companion section). Mismatched cadences stay separate
+// rows: a monthly pest visit can't absorb a quarterly bait check.
+//
+// Pricing, WaveGuard tier counting, and billing all read the ESTIMATE
+// lines, which this never touches — combining is purely how the sold work
+// is scheduled. Route order is precedence: a pest line combines with at
+// most ONE companion (rodent bait first), the other stays standalone.
+const COMBINED_SERVICE_ROUTES = [
+  {
+    primaryKey: 'pest_control',
+    companionKey: 'rodent_bait',
+    catalogServiceKey: 'pest_rodent_quarterly',
+    name: 'Pest & Rodent Control',
+    // Rodent bait stations are a quarterly program platform-wide
+    // (rodent_bait_quarterly); server-priced estimates persist the line
+    // with no cadence of its own.
+    companionDefaultPattern: 'quarterly',
+    // For PEST plans the accepted customerSelection.frequency IS the visit
+    // cadence the customer chose (quarterly/bimonthly/monthly plan) and
+    // beats stale quote-time line cadence. NOT true for lawn, where the
+    // selection stores the BILLING cadence.
+    primaryUsesAcceptFrequency: true,
+  },
+  {
+    primaryKey: 'pest_control',
+    companionKey: 'termite_bait',
+    catalogServiceKey: 'pest_termite_bait_quarterly',
+    name: 'Quarterly Pest + Termite Bait Station',
+    // Termite bait station checks are quarterly (termite_active_bait_*);
+    // the v1 mapper persists "Termite Bait" with no frequency/visits.
+    companionDefaultPattern: 'quarterly',
+    primaryUsesAcceptFrequency: true,
+  },
+  {
+    primaryKey: 'lawn_care',
+    companionKey: 'tree_shrub',
+    catalogServiceKey: 'lawn_tree_shrub_combo',
+    name: 'Lawn + Tree & Shrub',
+    // Pattern equality is NOT enough here: the bimonthly bucket spans 6–11
+    // visits/year, so a 9-app lawn and a 6-visit T&S program would pattern
+    // as equal. Lawn tiers (6/9/12 apps) and the T&S visit mandate (4x/6x)
+    // must agree EXACTLY — both lines need explicit, equal visits-per-year.
+    requireVisitsMatch: true,
+  },
+];
+
+// EXPLICIT service-level cadence only: frequency-ish fields, visit counts,
+// or pattern text in the display name. Deliberately NO platform defaults —
+// "pest defaults to quarterly" must not bypass the cadence gate for a
+// legacy monthly program (Codex P2), and the accept-level billing fallback
+// must not override an explicit 4x/6x line (pre-push P1).
+function explicitServiceCadence(svc = {}) {
+  const fromFields = [svc.frequency, svc.frequencyKey, svc.frequency_key, svc.recurringPattern, svc.recurring_pattern]
+    .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
+    .find(Boolean);
+  if (fromFields) return fromFields;
+  const visits = visitsPerYearForRecurringService(svc);
+  if (visits) return RecurringAppointmentSeeder.patternFromVisitsPerYear(visits);
+  return [svc.label, svc.name, svc.displayName, svc.service_type]
+    .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
+    .find(Boolean) || null;
+}
+
+// Server-priced estimates persist rodent bait OUTSIDE recurring.services —
+// it rides result.recurring.rodentBaitMo / results.rodBaitMo (the same
+// fields estimate-public's recurringServicesWithSupplements reads). Surface
+// it to the matcher as a synthetic companion line; supplements never got
+// their own scheduled row from the converter, so the combined row is
+// strictly added coverage.
+function supplementalCompanionLines(estimateData = {}) {
+  const result = estimateData.result || {};
+  const recurring = estimateData.recurring || result.recurring || {};
+  const resultStats = estimateData.results || result.results || {};
+  const lines = [];
+  const rodentMonthly = firstPositiveNumber(recurring.rodentBaitMo, resultStats.rodBaitMo);
+  if (rodentMonthly) {
+    lines.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: rodentMonthly });
+  }
+  return lines;
+}
+
+function combineRecurringServicesForScheduling(recurringServices = [], opts = {}) {
+  const { acceptFrequency = null, supplementalCompanions = [] } = opts;
+  const remaining = Array.isArray(recurringServices) ? recurringServices.slice() : [];
+  const supplements = Array.isArray(supplementalCompanions) ? supplementalCompanions : [];
+  const acceptPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(acceptFrequency);
+  const combos = [];
+  for (const route of COMBINED_SERVICE_ROUTES) {
+    const primaryIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.primaryKey);
+    if (primaryIdx === -1) continue;
+    // Companion may live in recurring.services OR ride as a supplement.
+    let companionIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
+    const companionFromSupplement = companionIdx === -1
+      ? supplements.find((svc) => recurringServiceKey(svc) === route.companionKey) || null
+      : null;
+    const primary = remaining[primaryIdx];
+    const companion = companionIdx !== -1 ? remaining[companionIdx] : companionFromSupplement;
+    if (!companion) continue;
+    // Cadence resolution is role-aware:
+    //  - PEST PRIMARY (primaryUsesAcceptFrequency): the ACCEPTED plan
+    //    selection wins — it is the customer's FINAL visit-cadence choice,
+    //    and the persisted line can carry stale quote-time frequency/visits
+    //    (a quarterly quote switched to monthly at accept must not combine
+    //    quarterly — pre-push P1). Line cadence is the fallback.
+    //  - LAWN PRIMARY: explicit line cadence/visits ONLY —
+    //    customerSelection.frequency stores the BILLING cadence for lawn
+    //    tiers (commonly monthly), not the visit cadence (pre-push P1).
+    //  - COMPANION: explicit line cadence, else the route's program default
+    //    (bait-station programs are quarterly regardless of how the pest
+    //    plan bills) — NEVER the accepted selection.
+    //  - nothing resolvable → no combine.
+    const primaryPattern = (route.primaryUsesAcceptFrequency && acceptPattern)
+      ? acceptPattern
+      : explicitServiceCadence(primary);
+    const companionPattern = explicitServiceCadence(companion) || route.companionDefaultPattern || null;
+    if (!primaryPattern || !companionPattern || primaryPattern !== companionPattern) continue;
+    // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
+    // are coarse, so explicit visit counts are the cadence truth when known.
+    // A count that CONTRADICTS the line's resolved cadence is stale quote
+    // debris — it neither blocks nor rides (an accepted quarterly plan with
+    // a stale 12-visit pest line must still combine — pre-push P1).
+    const primaryVisitsRaw = visitsPerYearForRecurringService(primary);
+    const companionVisitsRaw = visitsPerYearForRecurringService(companion);
+    const primaryVisits = primaryVisitsRaw
+      && RecurringAppointmentSeeder.patternFromVisitsPerYear(primaryVisitsRaw) === primaryPattern
+      ? primaryVisitsRaw
+      : null;
+    const companionVisits = companionVisitsRaw
+      && RecurringAppointmentSeeder.patternFromVisitsPerYear(companionVisitsRaw) === companionPattern
+      ? companionVisitsRaw
+      : null;
+    if (primaryVisits && companionVisits && primaryVisits !== companionVisits) continue;
+    if (route.requireVisitsMatch && !(primaryVisits && companionVisits)) continue;
+    // Remove combined lines from remaining (higher index first so the lower
+    // stays valid); a supplement was never in remaining.
+    const removeIdxs = [primaryIdx, companionIdx].filter((idx) => idx !== -1).sort((a, b) => b - a);
+    for (const idx of removeIdxs) remaining.splice(idx, 1);
+    // Only carry a visit count that AGREES with the resolved cadence — when
+    // the accepted pattern overrode a stale line, that line's count would
+    // over-seed follow-ups (12 visits at quarterly spacing — pre-push P1).
+    // Omitted, the seeder uses the pattern's own visit default.
+    const candidateVisits = firstPositiveNumber(primaryVisits, companionVisits);
+    const consistentVisits = candidateVisits
+      && RecurringAppointmentSeeder.patternFromVisitsPerYear(candidateVisits) === primaryPattern
+      ? candidateVisits
+      : null;
+    combos.push({
+      route,
+      frequency: primaryPattern,
+      combinedFrom: [primary, companion],
+      // The synthetic line the scheduling loop consumes: carries the
+      // combined catalog name (profile resolution) and explicit frequency
+      // so no downstream inference re-derives cadence from the name.
+      service: {
+        name: route.name,
+        frequency: primaryPattern,
+        combinedCatalogServiceKey: route.catalogServiceKey,
+        ...(consistentVisits ? { visitsPerYear: consistentVisits } : {}),
+      },
+    });
+  }
+  return { remaining, combos };
+}
+
+// A reserved (customer-picked) first appointment must reflect the same
+// combined decision as the auto-schedule path — otherwise the slot row
+// keeps the standalone primary name and every follow-up it seeds misses
+// the companion section (pre-push P1). A rewrite is safe ONLY when exactly
+// one reserved row maps to a combo's primary or companion key: with both
+// halves separately reserved, rewriting either would double-cover the
+// work, so both stay standalone.
+function reservedRowComboRewrites(reservedRows = [], combos = []) {
+  const rewrites = [];
+  for (const combo of combos) {
+    const matching = reservedRows.filter((row) => {
+      const key = recurringServiceKey({ name: row.service_type });
+      return key === combo.route.primaryKey || key === combo.route.companionKey;
+    });
+    if (matching.length === 1) rewrites.push({ row: matching[0], combo });
+  }
+  return rewrites;
+}
+
 function serviceCountsTowardWaveGuardTier(svc = {}) {
   if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
   return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
@@ -315,6 +503,11 @@ function visitsPerYearForRecurringService(svc = {}) {
 }
 
 function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {
+  // Combined synthetic lines carry the catalog row's duration explicitly
+  // (e.g. Pest + Termite Bait at 75min) — that beats the pest-quarterly
+  // default so combined follow-ups inherit the right visit length.
+  const explicit = firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes);
+  if (explicit) return explicit;
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
@@ -453,6 +646,12 @@ const EstimateConverter = {
     const monthlyRate = parseFloat(estimate.monthly_total || 0);
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
       || inferFrequencyKeyFromEstimateData(estimateData);
+    // Combined routing only trusts the customer's REAL accepted selection —
+    // inferFrequencyKeyFromEstimateData is a guess that can derive from a
+    // companion or unrelated line, and must never be treated as the pest
+    // plan cadence (pre-push P1). Absent a real selection, explicit line
+    // cadence decides and cadence-less pest lines don't combine.
+    const acceptedPlanFrequency = estimateData.customerSelection?.frequency || null;
     const billingCadence = inferredFrequencyKey
       ? resolveBillingCadence({
           monthlyRate,
@@ -503,18 +702,82 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
       );
-      const reservedStart = await database('scheduled_services')
+      const reservedRows = await database('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNotNull('customer_id')
         .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc')
-        .first('*');
+        .orderBy('scheduled_date', 'asc');
+      const reservedStart = reservedRows[0] || null;
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;
       scheduledCount = Number(existingFromReservation?.count || 0);
+
+      // Combined routing reaches reserved rows too: rewrite the slot row to
+      // the combined service (type/service_id/duration — the customer's
+      // picked date and window are untouched) so the first visit and every
+      // follow-up it seeds resolve the companion profile.
+      //
+      // ADJUDICATED (pre-push P1, 2026-06-12): non-combined `remaining`
+      // lines are NOT scheduled here. The reservation branch has never
+      // auto-scheduled lines beyond the reserved row (see the "Skipping
+      // auto-schedule" log above — established platform semantic predating
+      // combined routing); combining strictly improves coverage by making
+      // the rewritten row span two lines. Aligning multi-service reserved
+      // accepts with the auto-schedule path is a separate owner decision.
+      let reservedSeedSvc = null;
+      try {
+        const { combos } = combineRecurringServicesForScheduling(recurringServices, {
+          acceptFrequency: acceptedPlanFrequency,
+          supplementalCompanions: supplementalCompanionLines(estimateData),
+        });
+        for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
+          const update = { service_type: combo.route.name, updated_at: new Date() };
+          try {
+            const catalogRow = await database('services')
+              .where({ service_key: combo.route.catalogServiceKey })
+              .first('id', 'default_duration_minutes');
+            if (catalogRow) {
+              update.service_id = catalogRow.id;
+              if (catalogRow.default_duration_minutes) {
+                update.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                combo.service.estimatedDurationMinutes = catalogRow.default_duration_minutes;
+              }
+            }
+          } catch (lookupErr) {
+            logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
+          }
+          await database('scheduled_services').where({ id: row.id }).update(update);
+          // The public accept route registers the 72h/24h reminder BEFORE
+          // convertEstimate runs and appointment_reminders persists its own
+          // service_type — relabel it too or the reminder texts the
+          // standalone name (pre-push P1). Fail-soft: a reminder row may
+          // legitimately not exist yet.
+          try {
+            await database('appointment_reminders')
+              .where({ scheduled_service_id: row.id })
+              .update({ service_type: combo.route.name, updated_at: new Date() });
+          } catch (reminderErr) {
+            logger.warn(`[estimate-converter] reminder relabel failed for reserved row ${row.id}: ${reminderErr.message}`);
+          }
+          // Mirror EVERY rewritten field onto the in-memory row —
+          // follow-up seeding copies service_id and duration from the
+          // parent OBJECT, not the DB (pre-push P1). reservedStart is the
+          // same object reference when ids match.
+          row.service_type = combo.route.name;
+          if (update.service_id) row.service_id = update.service_id;
+          if (update.estimated_duration_minutes) row.estimated_duration_minutes = update.estimated_duration_minutes;
+          if (reservedStart && row.id === reservedStart.id) {
+            reservedSeedSvc = combo.service;
+          }
+          logger.info(`[estimate-converter] reserved row ${row.id} combined → "${combo.route.name}" (picked slot preserved)`);
+        }
+      } catch (comboErr) {
+        logger.warn(`[estimate-converter] combined routing on reserved rows failed: ${comboErr.message}`);
+      }
+
       if (reservedStart) {
         try {
-          const seedSvc = recurringServiceForScheduledRow(recurringServices, reservedStart);
+          const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServices, reservedStart);
           const seedResult = await seedRecurringFollowUpsForParent(database, reservedStart, seedSvc, {
             fallbackFrequency: inferredFrequencyKey,
           });
@@ -532,7 +795,39 @@ const EstimateConverter = {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;
 
-      for (const svc of recurringServices) {
+      // Combined-service routing: matching-cadence pairs schedule as ONE
+      // combined service; everything else flows through unchanged.
+      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServices, {
+        acceptFrequency: acceptedPlanFrequency,
+        supplementalCompanions: supplementalCompanionLines(estimateData),
+      });
+      const scheduleUnits = [
+        ...combos.map((combo) => ({ svc: combo.service, combo })),
+        ...remaining.map((svc) => ({ svc })),
+      ];
+      for (const unit of scheduleUnits) {
+        const svc = unit.svc;
+        let combinedServiceId = null;
+        if (unit.combo) {
+          // service_id makes profile resolution sturdy against later
+          // renames; name-based resolution still works without it, so a
+          // missing catalog row (env not yet migrated) degrades safely.
+          try {
+            const catalogRow = await database('services')
+              .where({ service_key: unit.combo.route.catalogServiceKey })
+              .first('id', 'default_duration_minutes');
+            if (catalogRow) {
+              combinedServiceId = catalogRow.id;
+              if (catalogRow.default_duration_minutes) {
+                svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
+              }
+            } else {
+              logger.warn(`[estimate-converter] combined catalog row ${unit.combo.route.catalogServiceKey} absent — scheduling by name only`);
+            }
+          } catch (lookupErr) {
+            logger.warn(`[estimate-converter] combined catalog lookup failed for ${unit.combo.route.catalogServiceKey}: ${lookupErr.message}`);
+          }
+        }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
         const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
           service: svc,
@@ -545,14 +840,20 @@ const EstimateConverter = {
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);
 
         try {
+          const combinedNote = unit.combo
+            ? ` Combined service: ${unit.combo.combinedFrom
+              .map((s) => s.name || s.serviceName || s.service_name || recurringServiceKey(s))
+              .join(' + ')} — one visit, one report.`
+            : '';
           const row = {
             customer_id: customerId,
             scheduled_date: firstServiceDate,
             service_type: serviceName,
             status: 'pending',
-            notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}`,
+            notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}.${combinedNote}`,
             source_estimate_id: estimateId,
           };
+          if (combinedServiceId) row.service_id = combinedServiceId;
           if (estimatedPrice) row.estimated_price = estimatedPrice;
           if (durationMinutes) row.estimated_duration_minutes = durationMinutes;
           const inserted = await database('scheduled_services').insert(row).returning('*');
@@ -857,6 +1158,12 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
+module.exports.reservedRowComboRewrites = reservedRowComboRewrites;
+module.exports.explicitServiceCadence = explicitServiceCadence;
+module.exports.supplementalCompanionLines = supplementalCompanionLines;
+module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
+module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;

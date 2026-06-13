@@ -86,6 +86,12 @@ function serviceKeyFor(value = {}) {
   if (/mosquito/.test(raw)) return 'mosquito';
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
   if (/palm/.test(raw)) return 'palm_injection';
+  // Combined services ("Pest & Rodent Control", "Quarterly Pest + Termite
+  // Bait Station"): "pest" BEFORE the rodent/termite token = pest-primary —
+  // these rows must keep pest cadence defaults and quarterly follow-up
+  // seeding. Order is load-bearing: "Rodent Pest Control" leads with rodent
+  // and stays rodent_bait (same rule as detectServiceLine).
+  if (/\bpest\b.*\b(rodent|termite)\b/.test(raw)) return 'pest_control';
   if (/rodent|rat|mouse|mice/.test(raw)) return 'rodent_bait';
   if (/termite/.test(raw)) return 'termite_bait';
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
@@ -283,6 +289,10 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     copyIfPresent(row, parent, [
       'create_invoice_on_complete',
       'annual_prepay_term_id',
+      // Catalog link: follow-ups must resolve the same completion profile
+      // as their parent (combined services especially — name matching alone
+      // breaks if the catalog row is ever renamed).
+      'service_id',
       'lat',
       'lng',
       'address',
