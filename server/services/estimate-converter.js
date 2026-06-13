@@ -17,6 +17,35 @@ const {
 } = require('./billing-cadence');
 const AccountMembershipEmail = require('./account-membership-email');
 const { etDateString } = require('../utils/datetime-et');
+const { normalizeGrassType } = require('./lawn-grass-context');
+
+// Find the first grassType/grass_type string anywhere in the estimate data
+// (confirmed primary path is inputs.grassType, but estimate shapes vary).
+// Depth-capped to avoid pathological recursion.
+function findGrassTypeDeep(node, depth = 6) {
+  if (depth < 0 || node == null || typeof node !== 'object') return null;
+  for (const k of ['grassType', 'grass_type']) {
+    if (typeof node[k] === 'string' && node[k].trim()) return node[k];
+  }
+  for (const v of Object.values(node)) {
+    if (v && typeof v === 'object') {
+      const found = findGrassTypeDeep(v, depth - 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// Grass type to persist on estimate acceptance, or null. Gated on a LAWN service
+// being present: the admin estimate form always saves grassType (defaulting to
+// st_augustine even for pest-only accepts), so an ungated write would stamp a
+// fake default turf profile on non-lawn customers.
+function grassTypeToPersist(recurringServices, estimateData) {
+  const hasLawn = (Array.isArray(recurringServices) ? recurringServices : [])
+    .some((svc) => recurringServiceKey(svc) === 'lawn_care');
+  return hasLawn ? normalizeGrassType(findGrassTypeDeep(estimateData)) : null;
+}
+
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
 
 const WAVEGUARD_SETUP_FEE = 99;
@@ -674,6 +703,28 @@ const EstimateConverter = {
       deleted_at: null,
     });
 
+    // 1b. Persist grass type captured during the estimate so lawn reports use
+    //     the real turf instead of the St. Augustine default. ONLY for estimates
+    //     with a lawn service — the admin estimate form always saves grassType
+    //     (defaulting to st_augustine even for pest-only accepts), so an
+    //     ungated write would stamp a fake default on non-lawn customers.
+    //     Fail-soft + COALESCE — never clobber an admin-set value, never break
+    //     acceptance.
+    try {
+      const grass = grassTypeToPersist(recurringServices, estimateData);
+      if (grass) {
+        await database('customer_turf_profiles')
+          .insert({ customer_id: customerId, grass_type: grass })
+          .onConflict('customer_id')
+          .merge({
+            grass_type: database.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [grass]),
+            updated_at: new Date(),
+          });
+      }
+    } catch (grassErr) {
+      logger.warn?.(`[estimate-converter] grass-type persist skipped for customer ${customerId}: ${grassErr.message}`);
+    }
+
     // 2. Create scheduled_services for recurring services — but ONLY if
     //    the accept path didn't already create one via slot reservation
     //    (PR B.1). The reservation path commits a scheduled_services row
@@ -1152,6 +1203,8 @@ const EstimateConverter = {
 };
 
 module.exports = EstimateConverter;
+module.exports.findGrassTypeDeep = findGrassTypeDeep;
+module.exports.grassTypeToPersist = grassTypeToPersist;
 module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
 module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
 module.exports.determineTier = determineTier;
