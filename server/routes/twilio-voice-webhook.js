@@ -7,6 +7,7 @@ const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conversations');
+const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -234,6 +235,11 @@ function queueVoiceMessageSync(callSid) {
 // We answer, enable recording, and log the call.
 // =========================================================================
 router.post('/voice', async (req, res) => {
+  // Whether THIS delivery took the dedupe ledger row (see /sms for rationale).
+  let claimOwned = false;
+  // Flipped true once the call_log row (non-idempotent; twilio_call_sid not
+  // unique) has committed, after which we must not release the claim on error.
+  let callLogged = false;
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
@@ -243,10 +249,24 @@ router.post('/voice', async (req, res) => {
 
     const { From, To, CallSid, CallStatus, Direction } = req.body;
 
+    // ── Idempotency claim (must run before spam-block + all side-effects) ──
+    // Twilio can redeliver the same CallSid. Claim it first so a redelivery
+    // does not duplicate the call_log row, touchpoint, paid Lookup, OR the
+    // spam-block audit write (RED audit R1). Unlike /sms we don't short-circuit
+    // — the call still needs routing TwiML — so `firstDelivery` gates the
+    // side-effecting work instead. Fails open (processable but not owned);
+    // only an owner releases the claim on error.
+    const voiceClaim = await tryClaimInboundWebhook(CallSid, 'voice');
+    const firstDelivery = voiceClaim.processable;
+    claimOwned = voiceClaim.owned;
+
     // ── Spam block (must run before any other routing) ──
+    // Runs on every delivery so routing stays correct, but only records the
+    // blocked-attempt audit row on the first delivery (recordAttempt).
     const { checkInboundBlock } = require('../middleware/spam-block');
     const blockResult = await checkInboundBlock({
       from: From, to: To, channel: 'voice', twilioSid: CallSid, addOns: req.body.AddOns,
+      recordAttempt: firstDelivery,
     });
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
 
@@ -256,7 +276,7 @@ router.post('/voice', async (req, res) => {
     let customer = await findSingleCustomerByPhone(db, From);
 
     // #4: Caller ID Enrichment via Twilio Lookup API
-    if (!customer && From) {
+    if (firstDelivery && !customer && From) {
       try {
         const lookupUrl = `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(From)}?Fields=caller_name`;
         const twilioAuth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
@@ -274,7 +294,8 @@ router.post('/voice', async (req, res) => {
       }
     }
 
-    // Log the inbound call
+    // Log the inbound call (first delivery only — see claim above)
+    if (firstDelivery) {
     await db('call_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound',
@@ -288,6 +309,8 @@ router.post('/voice', async (req, res) => {
         domain: numberConfig?.domain || null,
       }),
     });
+    // call_log now committed — don't release the claim on a later error.
+    callLogged = true;
 
     // Dual-write to unified messages table. Recording + transcription
     // arrive in later webhooks and update this row via twilio_sid.
@@ -307,6 +330,9 @@ router.post('/voice', async (req, res) => {
     }).catch((err) => {
       logger.error(`recordTouchpoint failed for inbound CallSid=${maskSid(CallSid)}: ${err.message}`);
     });
+    } else {
+      logger.info(`[twilio-voice] Duplicate inbound voice ${maskSid(CallSid)} — routing only, skipped re-logging`);
+    }
 
     logger.info(`Inbound call: ${maskPhone(From)} -> ${maskPhone(To)} (${maskSid(CallSid)}) customer=${customer?.first_name || 'unknown'}`);
 
@@ -363,6 +389,11 @@ router.post('/voice', async (req, res) => {
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Voice webhook error: ${err.message}`);
+    // Release the claim only if this delivery owns it AND call_log hasn't
+    // committed yet (!callLogged), so a Twilio retry can reprocess rather than
+    // duplicate the row. A fail-open delivery must not delete a sibling's good
+    // claim (see claim above).
+    if (claimOwned && !callLogged) void releaseInboundWebhook(req.body?.CallSid);
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'inbound',

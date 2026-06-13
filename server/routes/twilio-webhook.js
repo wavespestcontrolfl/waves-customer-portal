@@ -7,6 +7,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
 const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
+const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -120,6 +121,15 @@ function extractContactNameFromSms(body) {
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook
 router.post('/sms', async (req, res) => {
+  // Whether THIS delivery actually took the dedupe ledger row. Only an owner
+  // may release the claim on error (a fail-open delivery must not delete a
+  // sibling delivery's good claim). Declared out here so the catch can read it.
+  let claimOwned = false;
+  // Flipped true once a non-idempotent write keyed to this SID has committed
+  // (the inbound sms_log row). After that we must NOT release the claim on a
+  // later error — sms_log.twilio_sid is not unique, so a Twilio retry would
+  // duplicate the row. Better to keep the (already-logged) message claimed.
+  let persisted = false;
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('webhooks')) {
@@ -130,6 +140,22 @@ router.post('/sms', async (req, res) => {
     const { From, To, Body, MessageSid } = req.body;
     const smsReaction = isSmsReaction(Body);
     const schedulingIntent = hasSchedulingIntent(Body);
+
+    // ── Idempotency claim (must run before spam-block + all side-effects) ──
+    // Twilio can redeliver the same MessageSid (edge retry, a slow handler
+    // that blew the ~15s timeout, or a FallbackUrl re-hitting us). Claim the
+    // SID atomically BEFORE spam-block, so a confirmed redelivery short-circuits
+    // before it can re-write blocked_call_attempts / re-log / double-alert /
+    // send a second AI auto-reply (RED audit R1). Genuine first deliveries fall
+    // through to spam-block as before. Fails open (processable but not owned) so
+    // a dedupe outage never drops a message; we release on error only when we
+    // actually own the claim.
+    const smsClaim = await tryClaimInboundWebhook(MessageSid, 'sms');
+    claimOwned = smsClaim.owned;
+    if (!smsClaim.processable) {
+      logger.info(`[twilio-webhook] Duplicate inbound SMS ${MessageSid} ignored (already processed)`);
+      return res.type('text/xml').send('<Response></Response>');
+    }
 
     // ── Spam block (must run before any other routing) ──
     const { checkInboundBlock } = require('../middleware/spam-block');
@@ -371,6 +397,9 @@ router.post('/sms', async (req, res) => {
         media: inboundMedia,
       }),
     }).returning('id');
+    // The inbound message is now durably recorded — releasing the claim on a
+    // later error would let a retry duplicate this row (twilio_sid not unique).
+    persisted = true;
 
     await db('activity_log').insert({
       customer_id: customer?.id || null,
@@ -394,6 +423,17 @@ router.post('/sms', async (req, res) => {
       }).catch((err) => logger.warn(`[estimate-conversion-agent] async shadow failed: ${err.message}`));
     }
 
+    // Acknowledge Twilio now. Everything below — owner/admin alerts, in-app
+    // notifications, the AI auto-reply, and legacy/shadow drafts — is a
+    // side-effect that does NOT influence the (always-empty) TwiML reply.
+    // Two sequential Claude calls used to run inline here and could exceed
+    // Twilio's ~15s webhook timeout, making Twilio retry the webhook (RED
+    // audit R2). The inbound message is durably persisted above, so we
+    // respond first and finish the rest off the response path. This block
+    // carries its own try/catch — its errors can't affect the response.
+    res.type('text/xml').send('<Response></Response>');
+    setImmediate(() => { void (async () => {
+     try {
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
     const shouldNotifyKnownInbound = numberConfig.type === 'location' || isTrackingLeadInbound;
 
@@ -511,6 +551,34 @@ router.post('/sms', async (req, res) => {
               // to_last4.
               const last4 = String(From || '').replace(/\D/g, '').slice(-4);
               logger.warn(`[twilio-webhook] AI reply BLOCKED for ***${last4}: code=${sendResult.code}`);
+
+              // Transient provider failure (Twilio 429/5xx/timeout): don't
+              // silently drop the reply. Re-queue it onto the scheduled-SMS
+              // rail so the every-5-min cron retries it, bounded by
+              // SCHEDULED_SMS_MAX_ATTEMPTS. message_type maps to purpose
+              // 'conversational', matching the inbound send above. (RED R3)
+              if (sendResult.retryable && sendResult.nextAllowedAt) {
+                try {
+                  await db('sms_log').insert({
+                    customer_id: customer?.id || null,
+                    direction: 'outbound',
+                    from_phone: To,
+                    to_phone: From,
+                    message_body: aiResult.reply,
+                    status: 'scheduled',
+                    scheduled_for: new Date(sendResult.nextAllowedAt),
+                    message_type: 'ai_assistant_reply',
+                    metadata: JSON.stringify({
+                      entry_point: 'twilio_inbound_ai_assistant_retry',
+                      provider_retry: true,
+                      original_failure_code: sendResult.code || null,
+                    }),
+                  });
+                  logger.info(`[twilio-webhook] AI reply re-queued (retry at ${sendResult.nextAllowedAt}) for ***${last4}`);
+                } catch (requeueErr) {
+                  logger.error(`[twilio-webhook] AI reply re-queue failed: ${requeueErr.message}`);
+                }
+              }
             }
           } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
         }
@@ -640,10 +708,23 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
-    // Return empty TwiML — Adam approves drafts before sending
-    res.type('text/xml').send('<Response></Response>');
+     } catch (sideErr) {
+       logger.error(`[twilio-webhook] async inbound side-effects failed: ${sideErr.message}`);
+     }
+    })(); });
+    // Response already sent above (empty TwiML — Adam approves drafts before sending).
   } catch (err) {
     logger.error(`Webhook error: ${err.message}`);
+    // Release the idempotency claim ONLY if this delivery owns it AND nothing
+    // non-idempotent has committed yet (!persisted): handling failed before the
+    // inbound row landed, so a Twilio retry SHOULD reprocess rather than be
+    // short-circuited as a duplicate. A fail-open delivery (claimOwned=false)
+    // must NOT release — it never took the row, and deleting it would free a
+    // sibling delivery's good claim. Once persisted, we keep the claim so a
+    // retry can't duplicate sms_log. (The deferred side-effects run after the
+    // response with their own catch — they
+    // never reach here, so a post-ack failure correctly keeps the claim.)
+    if (claimOwned && !persisted) void releaseInboundWebhook(req.body?.MessageSid);
     notifyTwilioFailure({
       channel: 'sms',
       direction: 'inbound',

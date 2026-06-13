@@ -73,9 +73,13 @@ function parseMarchexVerdict(addOnsRaw) {
  * @param {string|object} [args.addOns] — Twilio Marketplace `AddOns` webhook
  *                                        param (voice only); carries the
  *                                        Marchex Clean Call spam verdict
+ * @param {boolean} [args.recordAttempt=true] — whether to write the
+ *        blocked_call_attempts audit row. Callers pass false for a Twilio
+ *        REDELIVERY of an already-seen SID so the same blocked attempt isn't
+ *        logged twice (the block decision/TwiML is still returned normally).
  * @returns {Promise<{blocked: boolean, twiml?: string, blockType?: string}>}
  */
-async function checkInboundBlock({ from, to, channel, twilioSid, addOns }) {
+async function checkInboundBlock({ from, to, channel, twilioSid, addOns, recordAttempt = true }) {
   if (!from) return { blocked: false };
 
   let block;
@@ -97,16 +101,18 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns }) {
           logger.info(`[spam-block] Marchex would block voice from ${maskPhone(from)} → ${maskPhone(to)} (shadow; sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
           return { blocked: false };
         }
-        try {
-          await db('blocked_call_attempts').insert({
-            number: from,
-            our_endpoint_id: to || null,
-            channel,
-            block_type: 'marchex_auto',
-            twilio_sid: twilioSid || null,
-          });
-        } catch (err) {
-          logger.error(`[spam-block] Audit insert failed: ${err.message}`);
+        if (recordAttempt) {
+          try {
+            await db('blocked_call_attempts').insert({
+              number: from,
+              our_endpoint_id: to || null,
+              channel,
+              block_type: 'marchex_auto',
+              twilio_sid: twilioSid || null,
+            });
+          } catch (err) {
+            logger.error(`[spam-block] Audit insert failed: ${err.message}`);
+          }
         }
         logger.info(`[spam-block] Marchex auto-blocked voice from ${maskPhone(from)} → ${maskPhone(to)} (sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
         return { blocked: true, twiml: TWIML_HARD_BLOCK_VOICE, blockType: 'marchex_auto' };
@@ -115,17 +121,20 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns }) {
     return { blocked: false };
   }
 
-  // Silent audit — never notify, never create a conversation row.
-  try {
-    await db('blocked_call_attempts').insert({
-      number: from,
-      our_endpoint_id: to || null,
-      channel,
-      block_type: block.block_type,
-      twilio_sid: twilioSid || null,
-    });
-  } catch (err) {
-    logger.error(`[spam-block] Audit insert failed: ${err.message}`);
+  // Silent audit — never notify, never create a conversation row. Skipped on
+  // a redelivery (recordAttempt=false) so a retried block isn't logged twice.
+  if (recordAttempt) {
+    try {
+      await db('blocked_call_attempts').insert({
+        number: from,
+        our_endpoint_id: to || null,
+        channel,
+        block_type: block.block_type,
+        twilio_sid: twilioSid || null,
+      });
+    } catch (err) {
+      logger.error(`[spam-block] Audit insert failed: ${err.message}`);
+    }
   }
 
   let twiml;

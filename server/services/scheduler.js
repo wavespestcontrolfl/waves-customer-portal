@@ -601,6 +601,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:20AM ET — Prune the inbound-webhook idempotency ledger. Twilio
+  // never redelivers a webhook days later, so a 7-day horizon is ample; this
+  // keeps inbound_webhook_events from growing unbounded.
+  // =========================================================================
+  cron.schedule('20 4 * * *', async () => {
+    try {
+      const { pruneInboundWebhookEvents } = require('./messaging/inbound-dedupe');
+      const deleted = await pruneInboundWebhookEvents({ olderThanDays: 7 });
+      if (deleted > 0) logger.info(`[inbound-dedupe] Pruned ${deleted} stale webhook dedupe row(s)`);
+    } catch (err) {
+      logger.error(`[inbound-dedupe] Prune cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 2:45AM ET — Voice-corpus miner (SMS brand-voice loop, Phase A).
   // Mines human-authored SMS replies (on a 7-day-delayed band so each
   // pair's outcome window has closed before the row freezes) + recent
@@ -1197,6 +1212,21 @@ function initScheduledJobs() {
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quiet_hours_held_at', ?::timestamptz, 'quiet_hours_reason', ?)", [completedAt, smsResult.reason || null]),
             });
             logger.info(`[scheduled-sms] Held scheduled SMS ${msg.id} until ${smsResult.nextAllowedAt}`);
+          } else if (smsResult.retryable && smsResult.nextAllowedAt
+                     && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+            // Transient provider failure (Twilio 429/5xx/timeout): re-queue
+            // like a quiet-hours hold so the next cron tick retries it,
+            // instead of marking it permanently blocked and dropping it
+            // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
+            // claim-time attempt counter. The message will still send, so
+            // parked decisions stay parked — we do NOT reopen them here.
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: new Date(smsResult.nextAllowedAt),
+              updated_at: completedAt,
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?)", [completedAt, smsResult.code || null]),
+            });
+            logger.warn(`[scheduled-sms] Provider failure on ${msg.id} (${smsResult.code}); retry at ${smsResult.nextAllowedAt} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
