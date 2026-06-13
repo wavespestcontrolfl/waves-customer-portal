@@ -104,6 +104,9 @@ function dimensionValue(row, index, fallback = '') {
   return value == null ? fallback : String(value);
 }
 
+const KEY_EVENTS_METRIC = 'keyEvents';
+const LEGACY_CONVERSIONS_METRIC = 'conversions';
+
 function makeDateMap(rows, rowMapper) {
   const map = new Map();
   for (const row of rows || []) {
@@ -114,18 +117,54 @@ function makeDateMap(rows, rowMapper) {
   return map;
 }
 
+function hasMetric(requestBody, metricName) {
+  return (requestBody?.metrics || []).some((metric) => metric?.name === metricName);
+}
+
+function replaceMetric(requestBody, fromMetric, toMetric) {
+  return {
+    ...requestBody,
+    metrics: (requestBody.metrics || []).map((metric) => (
+      metric?.name === fromMetric ? { ...metric, name: toMetric } : metric
+    )),
+    orderBys: (requestBody.orderBys || []).map((orderBy) => {
+      if (orderBy?.metric?.metricName !== fromMetric) return orderBy;
+      return {
+        ...orderBy,
+        metric: { ...orderBy.metric, metricName: toMetric },
+      };
+    }),
+  };
+}
+
+function isMetricCompatibilityError(err, metricName) {
+  const msg = String(err?.message || err || '');
+  return msg.includes(metricName) && /metric|field|invalid|unknown|unrecognized|not.*valid/i.test(msg);
+}
+
 async function runGa4Report(client, requestBody) {
-  return client.properties.runReport({
-    property: `properties/${propertyId}`,
-    requestBody,
-  });
+  try {
+    return await client.properties.runReport({
+      property: `properties/${propertyId}`,
+      requestBody,
+    });
+  } catch (err) {
+    if (hasMetric(requestBody, KEY_EVENTS_METRIC) && isMetricCompatibilityError(err, KEY_EVENTS_METRIC)) {
+      logger.warn('[GA4] keyEvents metric rejected; retrying report with legacy conversions metric');
+      return client.properties.runReport({
+        property: `properties/${propertyId}`,
+        requestBody: replaceMetric(requestBody, KEY_EVENTS_METRIC, LEGACY_CONVERSIONS_METRIC),
+      });
+    }
+    throw err;
+  }
 }
 
 async function getDailyConversions(client, startDate, endDate) {
   const response = await runGa4Report(client, {
     dateRanges: [{ startDate, endDate }],
     dimensions: [{ name: 'date' }],
-    metrics: [{ name: 'conversions' }],
+    metrics: [{ name: KEY_EVENTS_METRIC }],
     orderBys: [{ dimension: { dimensionName: 'date' } }],
     limit: 10000,
   });
@@ -206,7 +245,7 @@ async function getDailyTrafficSources(client, startDate, endDate) {
     metrics: [
       { name: 'sessions' },
       { name: 'totalUsers' },
-      { name: 'conversions' },
+      { name: KEY_EVENTS_METRIC },
     ],
     orderBys: [
       { dimension: { dimensionName: 'date' } },
@@ -312,22 +351,19 @@ async function getTrafficBySource(startDate, endDate) {
     if (!client) return { configured: false, data: [] };
 
     const range = defaultDateRange(startDate, endDate);
-    const response = await client.properties.runReport({
-      property: `properties/${propertyId}`,
-      requestBody: {
-        dateRanges: [range],
-        dimensions: [
-          { name: 'sessionSource' },
-          { name: 'sessionMedium' },
-        ],
-        metrics: [
-          { name: 'sessions' },
-          { name: 'totalUsers' },
-          { name: 'conversions' },
-        ],
-        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
-        limit: 50,
-      },
+    const response = await runGa4Report(client, {
+      dateRanges: [range],
+      dimensions: [
+        { name: 'sessionSource' },
+        { name: 'sessionMedium' },
+      ],
+      metrics: [
+        { name: 'sessions' },
+        { name: 'totalUsers' },
+        { name: KEY_EVENTS_METRIC },
+      ],
+      orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+      limit: 50,
     });
 
     const rows = (response.data.rows || []).map(row => ({
@@ -392,20 +428,17 @@ async function getTopLandingPages(startDate, endDate, limit = 20) {
     if (!client) return { configured: false, data: [] };
 
     const range = defaultDateRange(startDate, endDate);
-    const response = await client.properties.runReport({
-      property: `properties/${propertyId}`,
-      requestBody: {
-        dateRanges: [range],
-        dimensions: [{ name: 'landingPage' }],
-        metrics: [
-          { name: 'sessions' },
-          { name: 'totalUsers' },
-          { name: 'bounceRate' },
-          { name: 'conversions' },
-        ],
-        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
-        limit: parseInt(limit),
-      },
+    const response = await runGa4Report(client, {
+      dateRanges: [range],
+      dimensions: [{ name: 'landingPage' }],
+      metrics: [
+        { name: 'sessions' },
+        { name: 'totalUsers' },
+        { name: 'bounceRate' },
+        { name: KEY_EVENTS_METRIC },
+      ],
+      orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+      limit: parseInt(limit),
     });
 
     const rows = (response.data.rows || []).map(row => ({

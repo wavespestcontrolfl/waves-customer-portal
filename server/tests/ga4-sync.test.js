@@ -58,7 +58,7 @@ describe('GA4 daily sync', () => {
         ] } };
       }
 
-      if (dims === 'date' && metrics === 'conversions') {
+      if (dims === 'date' && metrics === 'keyEvents') {
         return { data: { rows: [
           makeRow(['20260610'], [2]),
           makeRow(['20260611'], [0]),
@@ -81,7 +81,7 @@ describe('GA4 daily sync', () => {
         ] } };
       }
 
-      if (dims === 'date,sessionSource,sessionMedium') {
+      if (dims === 'date,sessionSource,sessionMedium' && metrics === 'sessions,totalUsers,keyEvents') {
         return { data: { rows: [
           makeRow(['20260610', 'google', 'organic'], [7, 5, 2]),
           makeRow(['20260610', '(direct)', '(none)'], [3, 3, 0]),
@@ -150,5 +150,80 @@ describe('GA4 daily sync', () => {
       expect.objectContaining({ date: '2026-06-11', source: '(direct)', medium: '(none)', sessions: 5, users: 4, conversions: 0 }),
     ]);
     expect(sourceWrites[0].conflict).toEqual(['date', 'source', 'medium']);
+    expect(runReport).toHaveBeenCalledWith(expect.objectContaining({
+      requestBody: expect.objectContaining({ metrics: [{ name: 'keyEvents' }] }),
+    }));
+    expect(runReport).toHaveBeenCalledWith(expect.objectContaining({
+      requestBody: expect.objectContaining({
+        metrics: [
+          { name: 'sessions' },
+          { name: 'totalUsers' },
+          { name: 'keyEvents' },
+        ],
+      }),
+    }));
+  });
+
+  test('syncDailyData falls back to legacy conversions metric when keyEvents is rejected', async () => {
+    runReport.mockImplementation(async ({ requestBody }) => {
+      const dims = (requestBody.dimensions || []).map((d) => d.name).join(',');
+      const metrics = (requestBody.metrics || []).map((m) => m.name).join(',');
+
+      if (metrics.includes('keyEvents')) {
+        throw new Error('Metric keyEvents is not a valid metric');
+      }
+
+      if (dims === 'date' && metrics === 'sessions,totalUsers,newUsers,screenPageViews,bounceRate,averageSessionDuration') {
+        return { data: { rows: [
+          makeRow(['20260610'], [10, 8, 6, 20, 0.25, 35.5]),
+        ] } };
+      }
+
+      if (dims === 'date' && metrics === 'conversions') {
+        return { data: { rows: [
+          makeRow(['20260610'], [2]),
+        ] } };
+      }
+
+      if (dims === 'date,deviceCategory') {
+        return { data: { rows: [
+          makeRow(['20260610', 'mobile'], [6]),
+          makeRow(['20260610', 'desktop'], [4]),
+        ] } };
+      }
+
+      if (dims === 'date,landingPage') {
+        return { data: { rows: [
+          makeRow(['20260610', '/pest-control-bradenton-fl'], [7]),
+        ] } };
+      }
+
+      if (dims === 'date,sessionSource,sessionMedium' && metrics === 'sessions,totalUsers,conversions') {
+        return { data: { rows: [
+          makeRow(['20260610', 'google', 'organic'], [7, 5, 2]),
+        ] } };
+      }
+
+      throw new Error(`Unexpected GA4 report dims=${dims} metrics=${metrics}`);
+    });
+
+    const GA4 = require('../services/analytics/google-analytics');
+
+    const result = await GA4.syncDailyData(3);
+
+    expect(result).toEqual({
+      synced: true,
+      period: { start: '2026-06-10', end: '2026-06-12' },
+      rows: 1,
+      sourceRows: 1,
+    });
+    expect(dailyWrites[0].payload).toEqual(expect.objectContaining({ date: '2026-06-10', conversions: 2 }));
+    expect(sourceWrites[0].payload).toEqual(expect.objectContaining({ date: '2026-06-10', conversions: 2 }));
+    expect(runReport).toHaveBeenCalledWith(expect.objectContaining({
+      requestBody: expect.objectContaining({ metrics: [{ name: 'keyEvents' }] }),
+    }));
+    expect(runReport).toHaveBeenCalledWith(expect.objectContaining({
+      requestBody: expect.objectContaining({ metrics: [{ name: 'conversions' }] }),
+    }));
   });
 });
