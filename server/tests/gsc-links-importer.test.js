@@ -125,6 +125,7 @@ describe('GSC Links importer', () => {
       toxicity_score: 0,
       toxicity_reasons: JSON.stringify([]),
       anchor_text: 'Known DataForSEO Anchor',
+      notes: 'Manual backlink review note',
       is_dofollow: true,
       first_seen: '2026-05-01',
     };
@@ -154,6 +155,7 @@ describe('GSC Links importer', () => {
     expect(result).toMatchObject({ inserted: 0, updated: 1 });
     expect(updates[0]).toEqual(expect.objectContaining({
       anchor_text: 'Known DataForSEO Anchor',
+      notes: 'Manual backlink review note',
       is_dofollow: true,
     }));
   });
