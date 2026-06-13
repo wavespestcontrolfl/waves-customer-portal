@@ -37,6 +37,7 @@ const MODELS = require('../config/models');
 const db = require('../models/db');
 const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { hasSchedulingIntent } = require('./sms-intent');
 
 const BACKFILL_PROMPT_VERSION = 'house_voice_v1_backfill';
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
@@ -123,7 +124,9 @@ function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs }) {
       actions: parsed.intended_actions,
       missing_info: parsed.missing_info,
     }),
-    scheduling_intent: false,
+    // Same classifier the live webhook uses — scheduling texts keep their
+    // high-stakes prompt guard and stay distinguishable in judge data.
+    scheduling_intent: hasSchedulingIntent(inbound.message_body),
     draft_ms: draftMs,
     // Backdated on purpose — see the module header.
     created_at: inbound.created_at,
@@ -171,6 +174,7 @@ async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = D
         AND o.customer_id = i.customer_id
         AND o.message_type IN ('manual', 'ai_approved', 'ai_revised')
         AND o.status IN ('queued', 'sent', 'delivered')
+        AND NULLIF(TRIM(o.message_body), '') IS NOT NULL
         AND o.created_at > i.created_at
         AND o.created_at < i.created_at + interval '24 hours'
         AND NOT EXISTS (
@@ -209,7 +213,7 @@ async function draftOneBackfill(inbound, customer) {
     model: MODELS.FLAGSHIP,
     max_tokens: 600,
     system: drafter.buildSystemPrompt(),
-    messages: [{ role: 'user', content: drafter.buildUserPrompt(context, inbound.message_body, intent, false) }],
+    messages: [{ role: 'user', content: drafter.buildUserPrompt(context, inbound.message_body, intent, hasSchedulingIntent(inbound.message_body)) }],
   });
 
   const parsed = drafter.parseShadowResponse(resp.content?.[0]?.text || '');

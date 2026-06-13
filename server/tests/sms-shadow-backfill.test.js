@@ -112,6 +112,17 @@ describe('shadow backfill — draft row invariants', () => {
     expect(row.scheduling_intent).toBe(false);
   });
 
+  test('scheduling texts keep the live high-stakes flag (same classifier as the webhook)', () => {
+    const schedulingRow = buildBackfillDraftRow({
+      inbound: { ...inbound, message_body: 'Can we reschedule my appointment to next Tuesday?' },
+      parsed,
+      intent,
+      context: { summary: 's', flags: [] },
+      draftMs: 900,
+    });
+    expect(schedulingRow.scheduling_intent).toBe(true);
+  });
+
   test('window constant mirrors the judge', () => {
     expect(REPLY_WINDOW_HOURS).toBe(24);
   });
