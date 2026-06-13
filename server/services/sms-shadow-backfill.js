@@ -39,11 +39,11 @@ const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { hasSchedulingIntent } = require('./sms-intent');
 
-// v3 (06-13): tracks the drafter's verify→revise loop. v1/v2 cohorts (both
-// 32% unsafe — identical, confirming homogeneous populations) stay the
-// baseline; the remaining candidates run under v3 — a valid control cohort
-// to measure whether the verify loop cuts the draft_unsafe rate.
-const BACKFILL_PROMPT_VERSION = 'house_voice_v3_backfill';
+// v4 (06-13): tracks the drafter's STRICT verifier. The natural candidate
+// pool is exhausted, so v4 is measured via re-draft mode (SHADOW_BACKFILL_
+// REDRAFT=true) — re-running already-judged inbounds under v4 for a
+// same-input cohort vs the v1/v2/v3 priors.
+const BACKFILL_PROMPT_VERSION = 'house_voice_v4_backfill';
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
 
 // Inbound message_types the live webhook handles in a branch that returns
@@ -211,6 +211,61 @@ async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = D
     .limit(batchSize);
 }
 
+/**
+ * Re-draft mode (SHADOW_BACKFILL_REDRAFT=true): the natural pool is
+ * exhausted, so to measure a new drafter/verifier version we re-run inbounds
+ * that ALREADY have a house-voice draft (i.e. were backfilled before) but
+ * don't yet have one at the CURRENT version. Each becomes a fresh shadow row
+ * (same sms_log_id, new prompt_version) the judge scores independently — a
+ * same-input cohort vs the prior versions. Same eligibility filters as the
+ * natural finder; only the draft anti-join is inverted.
+ */
+async function findRedraftCandidates({ batchSize = DEFAULT_BATCH, sinceDays = DEFAULT_SINCE_DAYS } = {}) {
+  const allowedLast10 = locationNumberLast10s();
+  if (!allowedLast10.length) return [];
+  const since = new Date(Date.now() - sinceDays * 24 * 3600 * 1000);
+  const matureBefore = new Date(Date.now() - REPLY_WINDOW_HOURS * 3600 * 1000);
+
+  return db('sms_log as i')
+    .where('i.direction', 'inbound')
+    .whereNotNull('i.customer_id')
+    .where('i.created_at', '>=', since)
+    .where('i.created_at', '<', matureBefore)
+    .whereRaw("COALESCE(i.message_type, '') <> ALL(?)", [PREHANDLED_INBOUND_TYPES])
+    .whereRaw("NULLIF(TRIM(i.message_body), '') IS NOT NULL")
+    .whereRaw(
+      `RIGHT(REGEXP_REPLACE(COALESCE(i.to_phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)`,
+      [allowedLast10]
+    )
+    // Was backfilled before (has a house-voice draft) ...
+    .whereRaw("EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id AND md.drafter = 'house_voice')")
+    // ... but not yet under the CURRENT version (idempotent across batches).
+    .whereRaw('NOT EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id AND md.prompt_version = ?)', [BACKFILL_PROMPT_VERSION])
+    .whereRaw('EXISTS (SELECT 1 FROM customers c WHERE c.id = i.customer_id AND c.deleted_at IS NULL)')
+    .whereRaw(`EXISTS (
+      SELECT 1 FROM sms_log o
+      WHERE o.direction = 'outbound'
+        AND o.customer_id = i.customer_id
+        AND o.message_type IN ('manual', 'ai_approved', 'ai_revised')
+        AND o.status IN ('queued', 'sent', 'delivered')
+        AND NULLIF(TRIM(o.message_body), '') IS NOT NULL
+        AND o.created_at > i.created_at
+        AND o.created_at < i.created_at + interval '24 hours'
+        AND NOT EXISTS (
+          SELECT 1 FROM sms_log b
+          WHERE b.direction = 'inbound'
+            AND b.customer_id = i.customer_id
+            AND b.id <> i.id
+            AND COALESCE(b.message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction')
+            AND b.created_at > i.created_at
+            AND b.created_at < o.created_at
+        )
+    )`)
+    .select('i.id', 'i.customer_id', 'i.message_body', 'i.to_phone', 'i.created_at')
+    .orderBy('i.created_at', 'desc')
+    .limit(batchSize);
+}
+
 async function draftOneBackfill(inbound, customer) {
   const startedAt = Date.now();
   const drafter = require('./sms-shadow-drafter');
@@ -260,10 +315,16 @@ async function draftOneBackfill(inbound, customer) {
  */
 async function runShadowBackfill({ batchSize = DEFAULT_BATCH, sinceDays = DEFAULT_SINCE_DAYS, judgeBatch = DEFAULT_JUDGE_BATCH } = {}) {
   const startedAt = Date.now();
-  const candidates = await findBackfillCandidates({ batchSize, sinceDays });
+  // Re-draft mode re-runs already-judged inbounds under the current version
+  // (for A/B measurement once the natural pool is exhausted); default mode
+  // drafts fresh historical candidates.
+  const redraft = process.env.SHADOW_BACKFILL_REDRAFT === 'true';
+  const candidates = redraft
+    ? await findRedraftCandidates({ batchSize, sinceDays })
+    : await findBackfillCandidates({ batchSize, sinceDays });
   if (!candidates.length) {
-    logger.info('[shadow-backfill] no remaining candidates — backfill exhausted');
-    return { drafted: 0, failed: 0, judged: 0, exhausted: true, ms: Date.now() - startedAt };
+    logger.info(`[shadow-backfill] no ${redraft ? 'redraft' : 'remaining'} candidates — ${redraft ? 'redraft complete' : 'backfill exhausted'}`);
+    return { drafted: 0, failed: 0, judged: 0, exhausted: true, redraft, ms: Date.now() - startedAt };
   }
 
   const customerIds = [...new Set(candidates.map((c) => c.customer_id))];
@@ -299,8 +360,8 @@ async function runShadowBackfill({ batchSize = DEFAULT_BATCH, sinceDays = DEFAUL
     logger.error(`[shadow-backfill] judge pass failed: ${err.message}`);
   }
 
-  const summary = { drafted, failed, judged: judgeSummary.judged || 0, exhausted: false, ms: Date.now() - startedAt };
-  logger.info(`[shadow-backfill] run complete: drafted=${summary.drafted} failed=${summary.failed} judged=${summary.judged} ms=${summary.ms}`);
+  const summary = { drafted, failed, judged: judgeSummary.judged || 0, exhausted: false, redraft, ms: Date.now() - startedAt };
+  logger.info(`[shadow-backfill] run complete${redraft ? ' (redraft)' : ''}: drafted=${summary.drafted} failed=${summary.failed} judged=${summary.judged} ms=${summary.ms}`);
   return summary;
 }
 
