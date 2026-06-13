@@ -6291,6 +6291,7 @@ export function CompletionPanel({
   const [soilPh, setSoilPh] = useState("");
   const [soilMoisture, setSoilMoisture] = useState("");
   const [sendSms, setSendSms] = useState(true);
+  const [includePayLink, setIncludePayLink] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
   const [reviewTiming, setReviewTiming] = useState("120");
   const [reviewCustomAt, setReviewCustomAt] = useState("");
@@ -6549,7 +6550,10 @@ export function CompletionPanel({
     !reportOnlyCompletion &&
     (!!service.createInvoiceOnComplete || !!service.waveguardTier) &&
     invoiceAmount > 0;
-  const completionSmsTemplateName = willInvoice
+  // A pay link is only inserted when an invoice will be created AND the
+  // operator hasn't opted to send the report on its own (e.g. paid in person).
+  const willSendPayLink = willInvoice && includePayLink;
+  const completionSmsTemplateName = willSendPayLink
     ? "Service Complete + Invoice"
     : "Service Complete";
   const isIncompleteVisit = visitOutcome === "incomplete";
@@ -6574,7 +6578,7 @@ export function CompletionPanel({
     (oneTimeRecapOnly || reviewTiming === "now");
   const smsPreview = [
     customerRecap.trim(),
-    !isIncompleteVisit && willInvoice ? "[pay link inserted]" : "",
+    !isIncompleteVisit && willSendPayLink ? "[pay link inserted]" : "",
     reviewSendsWithCompletionSms ? "[review link inserted]" : "",
   ]
     .filter(Boolean)
@@ -7114,6 +7118,7 @@ export function CompletionPanel({
         soilPh,
         soilMoisture,
         sendSms,
+        includePayLink,
         requestReview,
         reviewTiming,
         reviewCustomAt,
@@ -7177,6 +7182,7 @@ export function CompletionPanel({
     soilPh,
     soilMoisture,
     sendSms,
+    includePayLink,
     requestReview,
     reviewTiming,
     reviewCustomAt,
@@ -7234,6 +7240,7 @@ export function CompletionPanel({
     setSoilPh(savedDraft.soilPh || "");
     setSoilMoisture(savedDraft.soilMoisture || "");
     setSendSms(savedDraft.sendSms !== false);
+    setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
@@ -8077,6 +8084,10 @@ export function CompletionPanel({
           : null,
         oneTimeRecapOnly,
         sendCompletionSms: effectiveSendSms,
+        // Only meaningful when an invoice/pay link would be texted; mirror the
+        // sub-toggle's visibility (invoice + SMS being sent) so a stale false
+        // never posts when the completion SMS is off. false = report-only SMS.
+        includePayLink: willInvoice && effectiveSendSms ? includePayLink : true,
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
@@ -10446,6 +10457,49 @@ export function CompletionPanel({
                       : "Send completion SMS to customer"}
                 </span>{" "}
               </label>{" "}
+              {willInvoice && effectiveSendSms && !oneTimeRecapOnly && (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    padding: "12px 16px",
+                    margin: "0 0 8px 30px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  {" "}
+                  <input
+                    type="checkbox"
+                    checked={includePayLink}
+                    onChange={(e) => setIncludePayLink(e.target.checked)}
+                    style={{
+                      width: 18,
+                      height: 18,
+                      accentColor: M.ink,
+                      marginTop: 1,
+                    }}
+                  />{" "}
+                  <span style={{ fontFamily: font, fontSize: 14, color: M.ink }}>
+                    Include payment link in the text
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: 12,
+                        color: M.ink3,
+                        marginTop: 2,
+                      }}
+                    >
+                      {includePayLink
+                        ? "Texts the service report and the pay link."
+                        : "Report only — no pay link (e.g. paid in person)."}
+                    </span>
+                  </span>{" "}
+                </label>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -12418,6 +12472,21 @@ export function CompletionPanel({
                   : "Send completion SMS to customer"}
             </span>{" "}
           </label>{" "}
+          {willInvoice && effectiveSendSms && !oneTimeRecapOnly && (
+            <label style={{ ...checkboxRow, marginLeft: 24 }}>
+              {" "}
+              <input
+                type="checkbox"
+                checked={includePayLink}
+                onChange={(e) => setIncludePayLink(e.target.checked)}
+              />{" "}
+              <span>
+                {includePayLink
+                  ? "Include payment link in the text"
+                  : "Report only — no pay link (paid in person)"}
+              </span>{" "}
+            </label>
+          )}{" "}
           <label style={checkboxRow}>
             {" "}
             <input
