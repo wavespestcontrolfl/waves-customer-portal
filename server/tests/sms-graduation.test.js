@@ -7,7 +7,7 @@ const { evaluateRung, THRESHOLDS, LADDER } = require('../services/sms-graduation
 // Fixed thresholds so the tests don't drift with env overrides.
 const T = {
   shadowToSuggest: { minJudged: 40, maxUnsafeRate: 0.08, minSafety: 8.0 },
-  suggestToAutosend: { minDecided: 60, minAcceptedRate: 0.85, maxCorrectedRate: 0.1, maxRecentUnsafe: 0, recentWindow: 30 },
+  suggestToAutosend: { minDecided: 60, minAcceptedRate: 0.85, maxCorrectedRate: 0.1, maxRecentUnsafe: 0, recentWindow: 30, minScoredBackstop: 30 },
 };
 const evalR = (args) => evaluateRung({ thresholds: T, ...args });
 
@@ -54,7 +54,7 @@ describe('shadow → suggest (judge-driven)', () => {
   test('low safety blocks even at a clean unsafe rate', () => {
     const r = evalR({ mode: 'shadow', judge: { judged: 50, unsafe: 0, avgSafety: 7.2 } });
     expect(r.eligible).toBe(false);
-    expect(r.blockers.join(' ')).toMatch(/Avg safety 7.2 < 8.0/);
+    expect(r.blockers.join(' ')).toMatch(/Avg safety 7.20 < 8.0/);
   });
 
   test('volume short of the bar reports the exact shortfall', () => {
@@ -70,37 +70,52 @@ describe('shadow → suggest (judge-driven)', () => {
     expect(r.eligible).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/No scored safety signal yet/);
   });
+
+  test('safety gates on FULL precision — 7.96 does not round up past an 8.0 bar (Codex P1)', () => {
+    const r = evalR({ mode: 'shadow', judge: { judged: 60, unsafe: 0, avgSafety: 7.96 } });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/Avg safety 7.96 < 8.0 required/);
+  });
 });
 
 describe('suggest → auto_send (outcome-driven, with judge backstop)', () => {
   const good = { accepted: 90, corrected: 6, ignored: 4 }; // 100 decided, 90% accepted, 6% corrected
+  const backstop = { recentUnsafe: 0, judged: 40 }; // a populated live scored backstop
 
-  test('high accept-rate, low corrections, zero recent unsafe graduates', () => {
-    const r = evalR({ mode: 'suggest', suggest: good, judge: { recentUnsafe: 0 } });
+  test('high accept-rate, low corrections, populated clean backstop graduates', () => {
+    const r = evalR({ mode: 'suggest', suggest: good, judge: backstop });
     expect(r.eligible).toBe(true);
     expect(r.nextRung).toBe('auto_send');
   });
 
   test('a single recent unsafe is a hard block (the judge backstop)', () => {
-    const r = evalR({ mode: 'suggest', suggest: good, judge: { recentUnsafe: 1 } });
+    const r = evalR({ mode: 'suggest', suggest: good, judge: { recentUnsafe: 1, judged: 40 } });
     expect(r.eligible).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/1 unsafe in last 30 judged/);
   });
 
+  test('an empty backstop (no live scored judge data) blocks, even on great outcomes (Codex P1)', () => {
+    // 100 decided, 90% accepted — but zero live judged: the "0 unsafe in
+    // last 30" backstop is vacuous, so it must NOT read send-ready.
+    const r = evalR({ mode: 'suggest', suggest: good, judge: { recentUnsafe: 0, judged: 8 } });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/22 more live judged drafts for the safety backstop \(8\/30\)/);
+  });
+
   test('too few decided outcomes blocks', () => {
-    const r = evalR({ mode: 'suggest', suggest: { accepted: 20, corrected: 1, ignored: 1 }, judge: { recentUnsafe: 0 } });
+    const r = evalR({ mode: 'suggest', suggest: { accepted: 20, corrected: 1, ignored: 1 }, judge: backstop });
     expect(r.eligible).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/Needs 38 more human-decided suggestions \(22\/60\)/);
   });
 
   test('staff keeps editing (correction rate over cap) blocks', () => {
-    const r = evalR({ mode: 'suggest', suggest: { accepted: 50, corrected: 20, ignored: 10 }, judge: { recentUnsafe: 0 } });
+    const r = evalR({ mode: 'suggest', suggest: { accepted: 50, corrected: 20, ignored: 10 }, judge: backstop });
     expect(r.eligible).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/Correction rate 25% > 10% cap/);
   });
 
   test('low accept-rate blocks', () => {
-    const r = evalR({ mode: 'suggest', suggest: { accepted: 40, corrected: 5, ignored: 35 }, judge: { recentUnsafe: 0 } });
+    const r = evalR({ mode: 'suggest', suggest: { accepted: 40, corrected: 5, ignored: 35 }, judge: backstop });
     expect(r.eligible).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/Accepted-verbatim 50% < 85%/);
   });

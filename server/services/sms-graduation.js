@@ -51,6 +51,10 @@ const THRESHOLDS = {
     maxCorrectedRate: envNum('GRAD_AUTOSEND_MAX_CORRECTED_RATE', 0.10),
     maxRecentUnsafe: envNum('GRAD_AUTOSEND_MAX_RECENT_UNSAFE', 0),
     recentWindow: envNum('GRAD_AUTOSEND_RECENT_WINDOW', 30),
+    // A "0 unsafe in last 30" backstop is meaningless with 3 scored rows.
+    // Require a populated live scored judge signal for THIS intent before
+    // auto_send — outcome counts alone never suffice.
+    minScoredBackstop: envNum('GRAD_AUTOSEND_MIN_SCORED', 30),
   },
 };
 
@@ -88,7 +92,7 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
     // A scored safety average is mandatory — never graduate on an absent
     // safety signal (judge query failed, or only no-reply rows exist).
     if (avgSafety == null) blockers.push('No scored safety signal yet.');
-    else if (avgSafety < t.minSafety) blockers.push(`Avg safety ${avgSafety.toFixed(1)} < ${t.minSafety.toFixed(1)} required.`);
+    else if (avgSafety < t.minSafety) blockers.push(`Avg safety ${avgSafety.toFixed(2)} < ${t.minSafety.toFixed(1)} required.`);
 
     // No data is never eligible, even if every threshold is vacuously clear.
     const eligible = blockers.length === 0 && judged >= t.minJudged;
@@ -109,6 +113,10 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
   // the live judge signal couldn't be loaded, the backstop is blind — never
   // promote to autonomous sending on outcome counts alone.
   if (!judgeAvailable) blockers.push('Live judge signal unavailable — safety backstop cannot be verified.');
+  // ...and even when loaded, an intent with no live SCORED judge data has an
+  // empty backstop (recentUnsafe defaults to 0). Require a populated one.
+  const scored = judge.judged || 0;
+  if (scored < t.minScoredBackstop) blockers.push(`Needs ${t.minScoredBackstop - scored} more live judged drafts for the safety backstop (${scored}/${t.minScoredBackstop}).`);
   if (decided < t.minDecided) blockers.push(`Needs ${t.minDecided - decided} more human-decided suggestions (${decided}/${t.minDecided}).`);
   if (decided > 0 && acceptedRate < t.minAcceptedRate) blockers.push(`Accepted-verbatim ${asPct(acceptedRate)} < ${asPct(t.minAcceptedRate)} required.`);
   if (decided > 0 && correctedRate > t.maxCorrectedRate) blockers.push(`Correction rate ${asPct(correctedRate)} > ${asPct(t.maxCorrectedRate)} cap.`);
@@ -184,7 +192,10 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
     const e = ensure(r.intent);
     e.judged = r.judged || 0;
     e.unsafe = r.unsafe || 0;
-    e.avgSafety = r.avg_safety == null ? null : Number(Number(r.avg_safety).toFixed(1));
+    // FULL precision — eligibility gates on the raw average. Rounding to one
+    // decimal here would let 7.96 round up to 8.0 and clear an 8.0 gate.
+    // Display rounding happens in computeReadiness output only.
+    e.avgSafety = r.avg_safety == null ? null : Number(r.avg_safety);
   }
   for (const r of recent) ensure(r.intent).recentUnsafe = r.recent_unsafe || 0;
   for (const r of backfill) ensure(r.intent).backfillJudged = r.backfill_judged || 0;
@@ -222,7 +233,7 @@ async function computeReadiness({ intents, dbi = db } = {}) {
         judged: judge.judged,
         unsafe: judge.unsafe,
         unsafeRate: Number(rate(judge.unsafe, judge.judged).toFixed(3)),
-        avgSafety: judge.avgSafety,
+        avgSafety: judge.avgSafety == null ? null : Number(Number(judge.avgSafety).toFixed(1)), // display only
         recentUnsafe: judge.recentUnsafe,
         backfillJudged: judge.backfillJudged || 0,
       },
