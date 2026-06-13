@@ -21,6 +21,24 @@ describe('ContextAggregator.formatClockTime', () => {
   });
 });
 
+describe('ContextAggregator.UPCOMING_SERVICE_STATUSES (Codex P2: no phantom visits)', () => {
+  const statuses = aggregator.UPCOMING_SERVICE_STATUSES;
+
+  test('is an allow-list of confidently-stateable upcoming statuses', () => {
+    expect(statuses).toEqual(['pending', 'confirmed', 'en_route', 'on_site']);
+  });
+
+  test("excludes 'rescheduled' (stale date until SmartRebooker) and 'skipped' (terminal)", () => {
+    // The bug: a deny-list of cancelled/completed would announce these as
+    // real visits — rescheduled with the OLD date, skipped as if happening.
+    expect(statuses).not.toContain('rescheduled');
+    expect(statuses).not.toContain('skipped');
+    expect(statuses).not.toContain('no_show');
+    expect(statuses).not.toContain('cancelled');
+    expect(statuses).not.toContain('completed');
+  });
+});
+
 describe('ContextAggregator.deriveWindow', () => {
   test('window_start/window_end (the populated columns) become the stated window', () => {
     // 545/545 upcoming prod rows have these times; only 1 has window_display.

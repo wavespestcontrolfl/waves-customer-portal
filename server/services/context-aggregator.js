@@ -2,6 +2,16 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 
+// Statuses that represent a real, confidently-stated upcoming visit. This is
+// an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
+// would leak phantom rows into customer-facing facts. 'rescheduled' keeps the
+// STALE date/window until the office actions it through SmartRebooker
+// (admin-schedule.js:1069-1075), and 'skipped'/'no_show' are terminal — none
+// is a visit we can promise a date for. pending+confirmed are the live set
+// (545/545 upcoming in prod); en_route/on_site cover the same-day in-progress
+// case a texting customer may hit.
+const UPCOMING_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+
 class ContextAggregator {
   async getFullCustomerContext(phone) {
     const clean = (phone || '').replace(/\D/g, '');
@@ -25,7 +35,7 @@ class ContextAggregator {
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereNotIn('ss.status', ['cancelled', 'completed']).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
+      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       db('payments').where({ 'payments.customer_id': customer.id }).orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
@@ -125,3 +135,4 @@ class ContextAggregator {
 }
 
 module.exports = new ContextAggregator();
+module.exports.UPCOMING_SERVICE_STATUSES = UPCOMING_SERVICE_STATUSES;
