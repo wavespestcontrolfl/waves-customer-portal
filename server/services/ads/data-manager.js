@@ -708,7 +708,9 @@ async function uploadConversions({
   const cappedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), MAX_EVENTS_PER_REQUEST, MAX_LIMIT);
   const effectiveValidateOnly = uploadValidateOnly(validateOnly);
   const config = configurationFor(conversionType);
-  const candidates = await collectCandidates(conversionType, { ...range, limit: cappedLimit });
+  const candidates = dedupeCandidatesByTransaction(
+    await collectCandidates(conversionType, { ...range, limit: cappedLimit })
+  );
   const existing = await existingUploads(conversionType, candidates.map((c) => c.transactionId));
   const skipped = [];
   const uploadable = [];
