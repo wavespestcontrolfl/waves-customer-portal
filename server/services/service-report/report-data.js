@@ -224,7 +224,7 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null } = {}) {
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null } = {}) {
   const irrigationInchesPerWeek = firstNumber(
     turfProfile?.irrigation_inches_per_week,
     assessment.irrigation_inches_per_week,
@@ -232,6 +232,10 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
   );
   const irrigationInchesPerDay = irrigationInchesPerWeek == null ? null : irrigationInchesPerWeek / 7;
   const rainfallInchesToday = firstNumber(
+    // Prefer the same rainfall the weather block shows (completion conditions —
+    // Open-Meteo) so the water line never reads 0" next to a non-zero "rain last
+    // 24 hr". FAWN snapshot fills in only when the completion value is absent.
+    completionRainfallInchesToday,
     fawnSnapshot.rainfall_in,
     fawnSnapshot.rain_24h_in,
     fawnSnapshot.precipitation_in,
@@ -1664,12 +1668,17 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     : [];
   const defaultCustomerSummary = lawnAssessmentSummary(currentScore, initialScore, trend.length);
   const fawnSnapshot = parseJsonObject(assessment.fawn_snapshot);
+  const completionConditions = parseJsonObject(service.conditions);
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
     propertyPrefs,
     fawnSnapshot,
     serviceDate: assessment.service_date,
+    completionRainfallInchesToday: firstNumber(
+      completionConditions.rain_24h_in,
+      completionConditions.rainfall_in,
+    ),
   });
 
   return {

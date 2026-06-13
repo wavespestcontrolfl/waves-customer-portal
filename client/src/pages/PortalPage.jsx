@@ -4800,6 +4800,11 @@ function PropertyTab({ customer }) {
           </div>
           <ToggleSwitch checked={!!prefs.irrigationSystem} onChange={() => updateField('irrigationSystem', !prefs.irrigationSystem)} label="Irrigation system" />
         </div>
+        {hasLawnCare && !prefs.irrigationSystem && (
+          <div style={{ marginTop: 2, marginBottom: 6, fontSize: 13, color: muted, lineHeight: 1.45 }}>
+            Turn this on and add your weekly watering so your lawn service reports can compare it to the recommended amount for your grass type and the season.
+          </div>
+        )}
         {prefs.irrigationSystem && (
           <>
             <div style={fieldGrid}>
