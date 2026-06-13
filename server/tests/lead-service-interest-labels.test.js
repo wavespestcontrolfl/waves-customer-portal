@@ -153,6 +153,36 @@ describe('quote workflow service interest labels', () => {
     }));
   });
 
+  test('lead webhook resolves revised GBP UTM profile attribution and click IDs', () => {
+    const intake = buildLeadWebhookIntake({
+      firstName: 'Gina',
+      lastName: 'Maps',
+      email: 'gina@example.com',
+      phone: '9415550197',
+      address: '1450 Pine Warbler Pl, Sarasota, FL 34240',
+      city: 'Sarasota',
+      attribution: {
+        utm: {
+          source: 'google',
+          medium: 'organic',
+          campaign: 'gbp',
+          content: 'sarasota',
+        },
+        wbraid: 'WBRAID-123',
+        gbraid: 'GBRAID-123',
+      },
+    });
+
+    expect(intake.wbraid).toBe('WBRAID-123');
+    expect(intake.gbraid).toBe('GBRAID-123');
+    expect(intake.leadSource).toEqual(expect.objectContaining({
+      source: 'google_business',
+      detail: 'GBP Sarasota',
+      channel: 'organic',
+      area: 'sarasota',
+    }));
+  });
+
   test('lead webhook normalizes legacy labeled form fields', () => {
     const intake = buildLeadWebhookIntake({
       'Whats Your Best Email': 'legacy@example.com',

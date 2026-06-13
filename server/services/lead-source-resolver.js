@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { findGbpLocationByUtmContent, isGbpUtmCampaign } = require('../config/locations');
 
 const MAIN_SITE_NAME = 'Main Site (wavespestcontrol.com)';
 
@@ -46,13 +47,22 @@ function clampDetail(s) {
 async function resolveLeadSource(attribution) {
   const referrer = attribution?.referrer || null;
   const landing = attribution?.landing_url || null;
+  const utm = attribution?.utm && typeof attribution.utm === 'object' ? attribution.utm : {};
   const referrerHost = extractHost(referrer);
   const landingHost = extractHost(landing);
 
   let targetName = MAIN_SITE_NAME;
   let detail = null;
 
-  if (referrerHost && SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost]) {
+  if (isGbpUtmCampaign({ source: utm.source, medium: utm.medium, campaign: utm.campaign })) {
+    const loc = findGbpLocationByUtmContent(utm.content);
+    if (loc) {
+      targetName = `GBP — ${loc.name}`;
+      detail = `GBP website link: ${loc.gbpUtmContent}`;
+    } else {
+      detail = `GBP website link: ${utm.content || 'unknown profile'}`;
+    }
+  } else if (referrerHost && SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost]) {
     targetName = SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost];
     detail = `Spoke referrer: ${referrer}`;
   } else if (landingHost && SPOKE_DOMAIN_TO_SOURCE_NAME[landingHost]) {

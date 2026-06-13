@@ -3543,20 +3543,23 @@ function AnalyticsTab() {
   const [overview, setOverview] = useState(null);
   const [traffic, setTraffic] = useState(null);
   const [pages, setPages] = useState(null);
+  const [localPerformance, setLocalPerformance] = useState(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(30);
 
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      adminFetch(`/admin/analytics/overview?period=${days}`),
-      adminFetch(`/admin/analytics/sources?period=${days}`),
-      adminFetch(`/admin/analytics/landing-pages?period=${days}`),
+      adminFetch(`/admin/analytics/overview?period=${days}`).catch((e) => ({ error: e.message })),
+      adminFetch(`/admin/analytics/sources?period=${days}`).catch((e) => ({ data: [], error: e.message })),
+      adminFetch(`/admin/analytics/landing-pages?period=${days}`).catch((e) => ({ data: [], error: e.message })),
+      adminFetch(`/admin/analytics/local-performance?period=${days}`).catch((e) => ({ error: e.message })),
     ])
-      .then(([o, t, p]) => {
+      .then(([o, t, p, l]) => {
         setOverview(o);
         setTraffic(t);
         setPages(p);
+        setLocalPerformance(l);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -3567,47 +3570,6 @@ function AnalyticsTab() {
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
         Loading analytics...
       </div>
-    );
-
-  if (overview?.configured === false)
-    return (
-      <Card style={{ textAlign: "center", padding: 60 }}>
-        {" "}
-        <div style={{ fontSize: 48, marginBottom: 16 }}></div>{" "}
-        <div
-          style={{
-            fontSize: 18,
-            fontWeight: 600,
-            color: D.heading,
-            marginBottom: 8,
-          }}
-        >
-          Google Analytics Not Connected
-        </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted }}>
-          Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID in Railway, then
-          grant the service account Viewer access in GA4.
-        </div>{" "}
-      </Card>
-    );
-
-  if (overview?.error)
-    return (
-      <Card style={{ textAlign: "center", padding: 60 }}>
-        <div
-          style={{
-            fontSize: 18,
-            fontWeight: 600,
-            color: D.heading,
-            marginBottom: 8,
-          }}
-        >
-          Google Analytics Needs Access
-        </div>
-        <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.6 }}>
-          {overview.error}
-        </div>
-      </Card>
     );
 
   const totals = overview?.totals || overview?.data || {};
@@ -3623,7 +3585,19 @@ function AnalyticsTab() {
   };
   const sources = traffic?.data || [];
   const topPages = pages?.data || [];
+  const local = localPerformance || {};
+  const blended = local.blended || {};
+  const localGbp = blended.gbp || {};
+  const localGa4 = blended.ga4Website || {};
+  const localCrm = blended.crm || {};
+  const readiness = blended.dataManagerReadiness || {};
+  const profiles = Array.isArray(local.profiles) ? local.profiles : [];
+  const setupLinks = Array.isArray(local.setup?.utmWebsiteLinks) ? local.setup.utmWebsiteLinks : [];
+  const analyticsNotice = overview?.configured === false
+    ? "Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID, then grant the service account Viewer access in GA4."
+    : overview?.error || null;
   const fmt = (v) => (v != null ? Number(v).toLocaleString() : "—");
+  const money = (v) => (v != null ? fmtMoney(v) : "—");
   const pct = (v) => (v != null ? `${(Number(v) * 100).toFixed(1)}%` : "—");
   const dur = (v) => {
     if (!v) return "—";
@@ -3654,6 +3628,155 @@ function AnalyticsTab() {
           </button>
         ))}
       </div>
+      {analyticsNotice && (
+        <Card style={{ padding: 16, borderColor: D.amber }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+            Google Analytics access
+          </div>
+          <div style={{ fontSize: 12, color: D.muted, marginTop: 6, lineHeight: 1.5 }}>
+            {analyticsNotice}
+          </div>
+        </Card>
+      )}
+      {profiles.length > 0 && (
+        <>
+          <div
+            className="seo-kpi-grid-3"
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(4, 1fr)",
+              gap: 12,
+            }}
+          >
+            <KpiCard
+              label="GBP Interactions"
+              value={fmt(localGbp.interactions)}
+              sub={{ text: `${fmt(localGbp.calls)} calls · ${fmt(localGbp.directionRequests)} directions` }}
+            />
+            <KpiCard
+              label="GBP Website Clicks"
+              value={fmt(localGbp.websiteClicks)}
+              sub={{ text: "4-profile blended total" }}
+            />
+            <KpiCard
+              label="GBP UTM Sessions"
+              value={fmt(localGa4.sessions)}
+              sub={{ text: `${fmt(localGa4.conversions)} GA4 key events` }}
+            />
+            <KpiCard
+              label="GBP CRM Revenue"
+              value={money(localCrm.acceptedEstimateRevenue)}
+              sub={{ text: `${fmt(localCrm.leads)} leads · ${fmt(localCrm.bookedJobs)} booked` }}
+            />
+          </div>
+          <Card>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 16,
+                alignItems: "flex-start",
+                marginBottom: 12,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+                  Local Performance By Profile
+                </div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+                  Native GBP totals stay blended in GA4; profile rows use Waves GBP sync, UTMs, and CRM attribution.
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
+                {fmt(readiness.eligible)}/{fmt(readiness.leads)} upload-ready leads
+              </div>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
+                <thead>
+                  <tr>
+                    <th style={thStyle}>Profile</th>
+                    <th style={thR}>GBP Clicks</th>
+                    <th style={thR}>GA4 Sessions</th>
+                    <th style={thR}>Leads</th>
+                    <th style={thR}>Booked</th>
+                    <th style={thR}>Revenue</th>
+                    <th style={thR}>Upload Ready</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {profiles.map((profile) => (
+                    <tr key={profile.id}>
+                      <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                        <div style={{ fontWeight: 700, color: D.heading }}>{profile.name}</div>
+                        <a
+                          href={profile.trackingUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            display: "block",
+                            marginTop: 4,
+                            fontSize: 11,
+                            color: D.muted,
+                            textDecoration: "none",
+                            maxWidth: 320,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {profile.trackingUrl}
+                        </a>
+                      </td>
+                      <td style={tdR}>{fmt(profile.gbp?.websiteClicks)}</td>
+                      <td style={tdR}>{fmt(profile.ga4?.sessions)}</td>
+                      <td style={tdR}>{fmt(profile.crm?.leads)}</td>
+                      <td style={tdR}>{fmt(profile.crm?.bookedJobs)}</td>
+                      <td style={tdR}>{money(profile.crm?.acceptedEstimateRevenue)}</td>
+                      <td style={tdR}>{fmt(profile.crm?.dataManagerEligible)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+          <Card style={{ padding: 16 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+              GA4 And Google Ads Setup
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, 1fr)",
+                gap: 12,
+                marginTop: 12,
+              }}
+            >
+              <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
+                <strong>GA4 GBP link</strong>
+                <br />
+                <span style={{ color: D.muted }}>
+                  Link all 4 profiles in GA4 Admin. Native GBP metrics are aggregate-only.
+                </span>
+              </div>
+              <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
+                <strong>GBP website URLs</strong>
+                <br />
+                <span style={{ color: D.muted }}>
+                  {setupLinks.length} tagged links configured for per-profile website attribution.
+                </span>
+              </div>
+              <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
+                <strong>Ads feedback loop</strong>
+                <br />
+                <span style={{ color: D.muted }}>
+                  Capture is ready for click IDs and enhanced lead identifiers; upload API remains separate.
+                </span>
+              </div>
+            </div>
+          </Card>
+        </>
+      )}
       {/* KPI Row */}
       <div
         className="seo-kpi-grid-3"

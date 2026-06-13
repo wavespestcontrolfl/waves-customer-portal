@@ -23,6 +23,9 @@ const WAVES_LOCATIONS = [
     googlePlaceId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw',
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_LWR',
     googleReviewUrl: 'https://g.page/r/CVRc_P5butTMEBM/review',
+    gbpWebsitePath: '/pest-control-bradenton-fl/',
+    gbpUtmContent: 'lakewood_ranch',
+    gbpUtmAliases: ['bradenton', 'bradenton_profile', 'lakewood_ranch_profile', 'lwr'],
   },
   {
     id: 'parrish',
@@ -39,6 +42,9 @@ const WAVES_LOCATIONS = [
     googlePlaceId: 'ChIJM32aQRIlw4gRr7goqhbAVpw',
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_PARRISH',
     googleReviewUrl: 'https://g.page/r/Ca-4KKoWwFacEBM/review',
+    gbpWebsitePath: '/pest-control-parrish-fl/',
+    gbpUtmContent: 'parrish',
+    gbpUtmAliases: ['parrish_profile'],
   },
   {
     id: 'sarasota',
@@ -55,6 +61,9 @@ const WAVES_LOCATIONS = [
     googlePlaceId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw',
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_SARASOTA',
     googleReviewUrl: 'https://g.page/r/CRkzS6M4EpncEBM/review',
+    gbpWebsitePath: '/pest-control-sarasota-fl/',
+    gbpUtmContent: 'sarasota',
+    gbpUtmAliases: ['sarasota_profile'],
   },
   {
     id: 'venice',
@@ -71,8 +80,61 @@ const WAVES_LOCATIONS = [
     googlePlaceId: 'ChIJ81vmrblZw4gRREDmlDUpq0E',
     googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_VENICE',
     googleReviewUrl: 'https://g.page/r/CURA5pQ1KatBEBM/review',
+    gbpWebsitePath: '/pest-control-venice-fl/',
+    gbpUtmContent: 'venice',
+    gbpUtmAliases: ['venice_profile'],
   },
 ];
+
+const GBP_UTM_PARAMS = {
+  source: 'google',
+  medium: 'organic',
+  campaign: 'gbp',
+};
+
+function normalizeGbpUtmContent(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function findGbpLocationByUtmContent(value) {
+  const normalized = normalizeGbpUtmContent(value);
+  if (!normalized) return null;
+  return WAVES_LOCATIONS.find((loc) => {
+    const aliases = [
+      loc.id,
+      loc.name,
+      loc.area,
+      loc.gbpUtmContent,
+      `${loc.id}_profile`,
+      ...(loc.gbpUtmAliases || []),
+    ].map(normalizeGbpUtmContent);
+    return aliases.includes(normalized);
+  }) || null;
+}
+
+function gbpTrackingUrlForLocation(locationOrId) {
+  const loc = typeof locationOrId === 'string'
+    ? WAVES_LOCATIONS.find((item) => item.id === locationOrId)
+    : locationOrId;
+  if (!loc) return null;
+  const url = new URL(loc.gbpWebsitePath || '/', 'https://wavespestcontrol.com');
+  url.searchParams.set('utm_source', GBP_UTM_PARAMS.source);
+  url.searchParams.set('utm_medium', GBP_UTM_PARAMS.medium);
+  url.searchParams.set('utm_campaign', GBP_UTM_PARAMS.campaign);
+  url.searchParams.set('utm_content', loc.gbpUtmContent || loc.id);
+  return url.href;
+}
+
+function isGbpUtmCampaign({ source, medium, campaign } = {}) {
+  const s = String(source || '').trim().toLowerCase();
+  const m = String(medium || '').trim().toLowerCase();
+  const c = String(campaign || '').trim().toLowerCase();
+  return s === 'gbp' || (s === 'google' && m === 'organic' && c === 'gbp');
+}
 
 // Haversine distance in miles between two lat/lng pairs. Returns Infinity if
 // either point is missing a component — caller falls back to city lookup.
@@ -116,4 +178,15 @@ function resolveLocation(city) {
   return WAVES_LOCATIONS.find(l => l.id === locId) || WAVES_LOCATIONS[0];
 }
 
-module.exports = { WAVES_LOCATIONS, CITY_TO_LOCATION, resolveLocation, nearestLocation, haversineMiles };
+module.exports = {
+  WAVES_LOCATIONS,
+  CITY_TO_LOCATION,
+  GBP_UTM_PARAMS,
+  normalizeGbpUtmContent,
+  findGbpLocationByUtmContent,
+  gbpTrackingUrlForLocation,
+  isGbpUtmCampaign,
+  resolveLocation,
+  nearestLocation,
+  haversineMiles,
+};

@@ -538,6 +538,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const serviceInterest = buildPublicQuoteServiceInterest(services);
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+    const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
+    const gbraid = attr?.gbraid ? String(attr.gbraid).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
 
     const isOneTimeOnly = !monthly && !annual && oneTimeTotal > 0;
@@ -558,6 +560,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       quoteRequiredService: manualQuoteLine?.service || null,
       manualQuoteLines,
       utm: attr?.utm || null,
+      clickIds: { gclid, wbraid, gbraid },
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
       address: normalizedAddress,
@@ -582,6 +585,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         extracted_data: extractedData,
         updated_at: new Date(),
       };
+      if (gclid) updateFields.gclid = gclid;
+      if (wbraid) updateFields.wbraid = wbraid;
+      if (gbraid) updateFields.gbraid = gbraid;
       const rows = await db('leads')
         .where({ id: leadId })
         .update(updateFields)
@@ -607,6 +613,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         monthly_value: leadMonthlyValue,
         status: 'new',
         gclid,
+        wbraid,
+        gbraid,
         extracted_data: extractedData,
       }).returning(['id']);
       lead = rows[0];

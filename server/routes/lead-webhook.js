@@ -4,7 +4,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
 const LeadScorer = require('../services/lead-scorer');
-const { resolveLocation } = require('../config/locations');
+const { resolveLocation, findGbpLocationByUtmContent } = require('../config/locations');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -94,6 +94,8 @@ router.post('/', async (req, res) => {
       formId,
       formName,
       gclid,
+      wbraid,
+      gbraid,
       firstName,
       lastName,
       serviceInterest,
@@ -119,6 +121,23 @@ router.post('/', async (req, res) => {
           .first();
       }
       // Match by source_type + channel
+      if (!sourceRecord && leadSource.source === 'google_business') {
+        const gbpLocation = findGbpLocationByUtmContent(leadSource.area || utmContent);
+        if (gbpLocation?.googleLocationId) {
+          sourceRecord = await db('lead_sources')
+            .where('source_type', 'gbp')
+            .where('gbp_location_id', gbpLocation.googleLocationId)
+            .where('is_active', true)
+            .first();
+        }
+      }
+      if (!sourceRecord && leadSource.source === 'google_business') {
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'gbp')
+          .where('channel', 'organic')
+          .where('is_active', true)
+          .first();
+      }
       if (!sourceRecord && leadSource.source === 'google_business') {
         sourceRecord = await db('lead_sources')
           .where('source_type', 'website_organic')
@@ -558,6 +577,7 @@ router.post('/', async (req, res) => {
               content: utmContent,
               term: utmTerm,
             },
+            clickIds: { gclid: gclid || null, wbraid: wbraid || null, gbraid: gbraid || null },
           },
           address: normalizedAddress,
         }),
@@ -566,6 +586,8 @@ router.post('/', async (req, res) => {
         status: 'new',
         customer_id: customer.id,
         gclid: gclid || null,
+        wbraid: wbraid || null,
+        gbraid: gbraid || null,
         is_residential: true,
       }).returning('*');
       leadRecord = newLead;
@@ -701,6 +723,8 @@ router.post('/', async (req, res) => {
         lead_source: leadSource.source,
         lead_source_detail: leadSource.detail,
         gclid: gclid || null,
+        wbraid: wbraid || null,
+        gbraid: gbraid || null,
         utm_campaign: utmCampaign,
         utm_term: utmTerm,
         funnel_stage: 'lead',
@@ -800,6 +824,8 @@ function getLeadWebhookAttribution(body = {}) {
     utmContent: body.utm_content || body['Utm Content'] || attrUtm.content || '',
     utmTerm: body.utm_term || body['Utm Term'] || attrUtm.term || '',
     gclid: body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '',
+    wbraid: body.wbraid || body['Wbraid'] || body.WBRAID || attr.wbraid || '',
+    gbraid: body.gbraid || body['Gbraid'] || body.GBRAID || attr.gbraid || '',
   };
 }
 
@@ -1005,9 +1031,20 @@ function cleanPhone(value) {
 
 function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent) {
   const url = landingUrl || pageUrl || '';
+  const source = String(utmSource || '').trim().toLowerCase();
+  const medium = String(utmMedium || '').trim().toLowerCase();
+  const campaign = String(utmCampaign || '').trim().toLowerCase();
 
   // UTM-based attribution (most specific)
-  if (utmSource === 'gbp') return { source: 'google_business', detail: `GBP ${utmContent || ''}`, channel: 'organic', area: utmContent };
+  if (source === 'gbp' || (source === 'google' && medium === 'organic' && campaign === 'gbp')) {
+    const gbpLocation = findGbpLocationByUtmContent(utmContent);
+    return {
+      source: 'google_business',
+      detail: gbpLocation ? `GBP ${gbpLocation.name}` : `GBP ${utmContent || ''}`.trim(),
+      channel: 'organic',
+      area: gbpLocation?.id || utmContent,
+    };
+  }
   if (utmSource === 'google' && utmMedium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
   if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
   if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
