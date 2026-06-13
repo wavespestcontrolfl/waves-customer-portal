@@ -45,6 +45,7 @@ function isBlogTarget(filePath) {
 }
 const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
 const HUB_ORIGIN = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+const BLOG_HUB_DOMAINS = Object.freeze(['wavespestcontrol.com']);
 
 // A hero already committed to the Astro repo — either the relative /images/blog
 // path or its absolute hub URL. These are NOT re-fetched on republish (the
@@ -66,6 +67,16 @@ function absoluteHeroUrl(ref) {
   if (/^https?:\/\//i.test(ref)) return ref;
   if (ref.startsWith('/')) return `${HUB_ORIGIN}${ref}`;
   return null;
+}
+
+function hubOnlyBlogDomains() {
+  return [...BLOG_HUB_DOMAINS];
+}
+
+function stampHubOnlyBlogDomains(frontmatter) {
+  frontmatter.domains = hubOnlyBlogDomains();
+  frontmatter.tracking = { domains: hubOnlyBlogDomains() };
+  return frontmatter;
 }
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
@@ -131,7 +142,7 @@ async function buildFrontmatter(post) {
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
   // carry spoke domains, but blog content should not fan out to city spokes.
-  const domains = ['wavespestcontrol.com'];
+  const domains = hubOnlyBlogDomains();
 
   const data = {
     title: post.title,
@@ -176,7 +187,7 @@ async function buildFrontmatter(post) {
     canonical,
     schema_types: schemaTypesForContent(post.content, ['Article']),
     disclosure: { type: 'pricing-transparency' },
-    tracking: { domains },
+    tracking: { domains: hubOnlyBlogDomains() },
   };
 
   // Drop undefined keys so YAML output stays clean.
@@ -789,6 +800,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
   frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
+  stampHubOnlyBlogDomains(frontmatter);
 
   // Hero contract: the writer agent's emit_draft tool only constrains
   // `frontmatter` to "object", while the binding blog schema REQUIRES

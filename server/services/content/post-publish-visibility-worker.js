@@ -357,7 +357,8 @@ function htmlHasCrawlableLinkTo(html = '', targetUrl, sourceUrl) {
   const anchors = String(html || '').matchAll(/<a\b([^>]*)>/gi);
   for (const match of anchors) {
     const attrs = match[1] || '';
-    if (/\brel\s*=\s*["'][^"']*\bnofollow\b/i.test(attrs)) continue;
+    const rel = attrValue(attrs, 'rel');
+    if (rel.split(/\s+/).some((value) => value.toLowerCase() === 'nofollow')) continue;
     const href = attrValue(attrs, 'href');
     if (!href) continue;
     if (comparableInternalUrl(href, sourceUrl) === target) return true;
@@ -379,7 +380,7 @@ function canonicalHost(hostname = '') {
 
 function attrValue(attrs = '', name = '') {
   const escaped = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = String(attrs || '').match(new RegExp(`\\b${escaped}\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s>]+))`, 'i'));
+  const match = String(attrs || '').match(new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s>]+))`, 'i'));
   return match ? (match[2] || match[3] || match[4] || '').trim() : '';
 }
 

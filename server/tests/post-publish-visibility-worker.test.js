@@ -112,6 +112,28 @@ describe('post-publish-visibility-worker', () => {
     expect(result.snapshot.ai_visibility.findings.some((f) => f.code === 'P0_NO_CRAWLABLE_INBOUND_INTERNAL_LINK')).toBe(false);
   });
 
+  test('does not count data-href placeholders as crawlable inbound links', () => {
+    const { htmlHasCrawlableLinkTo } = Worker._internals;
+    const target = 'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/';
+    const source = 'https://www.wavespestcontrol.com/blog/';
+
+    expect(htmlHasCrawlableLinkTo(
+      '<a data-href="/blog/ghost-ants-kitchen-florida/">Ghost ants</a>',
+      target,
+      source,
+    )).toBe(false);
+    expect(htmlHasCrawlableLinkTo(
+      '<a data-rel="nofollow" href="/blog/ghost-ants-kitchen-florida/">Ghost ants</a>',
+      target,
+      source,
+    )).toBe(true);
+    expect(htmlHasCrawlableLinkTo(
+      '<a rel="nofollow" href="/blog/ghost-ants-kitchen-florida/">Ghost ants</a>',
+      target,
+      source,
+    )).toBe(false);
+  });
+
   test('builds inbound-link target variants for relative planner paths', () => {
     expect(Worker._internals.inboundLinkTargetVariants('https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/')).toEqual(expect.arrayContaining([
       'https://www.wavespestcontrol.com/blog/ghost-ants-kitchen-florida/',

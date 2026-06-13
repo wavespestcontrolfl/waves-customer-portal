@@ -393,6 +393,36 @@ describe('blog Astro frontmatter validation', () => {
     });
   });
 
+  test('normalizes autonomous draft domains to the hub before committing markdown', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 123, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({
+          slug: '/ant-trails-bradenton/',
+          domains: ['veniceflpestcontrol.com'],
+          tracking: { domains: ['veniceflpestcontrol.com'] },
+        }),
+        body: 'Waves Pest Control guidance for Bradenton homeowners.',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    const fmModule = require('../services/content-astro/frontmatter');
+    const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('/ant-trails-bradenton.mdx'));
+    const parsed = fmModule.parse(markdownCall[0].content);
+    expect(parsed.data.domains).toEqual(['wavespestcontrol.com']);
+    expect(parsed.data.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
+    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/ant-trails-bradenton/');
+  });
+
   test('adds FAQPage schema to autonomous draft frontmatter when body has FAQs', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
