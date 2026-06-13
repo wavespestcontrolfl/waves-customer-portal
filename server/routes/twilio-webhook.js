@@ -7,6 +7,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
 const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
+const { claimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -140,6 +141,16 @@ router.post('/sms', async (req, res) => {
 
     if (!numberConfig) {
       logger.info(`Inbound SMS to unmanaged number ${To} — ignoring`);
+      return res.type('text/xml').send('<Response></Response>');
+    }
+
+    // ── Idempotency claim (must run before any side-effects) ──
+    // Twilio can redeliver the same MessageSid (edge retry, a slow handler
+    // that blew the ~15s timeout, or a FallbackUrl re-hitting us). Claim the
+    // SID atomically; a redelivery short-circuits here so we never double-log,
+    // double-alert, or send a second AI auto-reply (RED audit R1). Fails open.
+    if (!(await claimInboundWebhook(MessageSid, 'sms'))) {
+      logger.info(`[twilio-webhook] Duplicate inbound SMS ${MessageSid} ignored (already processed)`);
       return res.type('text/xml').send('<Response></Response>');
     }
 
@@ -394,6 +405,17 @@ router.post('/sms', async (req, res) => {
       }).catch((err) => logger.warn(`[estimate-conversion-agent] async shadow failed: ${err.message}`));
     }
 
+    // Acknowledge Twilio now. Everything below — owner/admin alerts, in-app
+    // notifications, the AI auto-reply, and legacy/shadow drafts — is a
+    // side-effect that does NOT influence the (always-empty) TwiML reply.
+    // Two sequential Claude calls used to run inline here and could exceed
+    // Twilio's ~15s webhook timeout, making Twilio retry the webhook (RED
+    // audit R2). The inbound message is durably persisted above, so we
+    // respond first and finish the rest off the response path. This block
+    // carries its own try/catch — its errors can't affect the response.
+    res.type('text/xml').send('<Response></Response>');
+    setImmediate(() => { void (async () => {
+     try {
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
     const shouldNotifyKnownInbound = numberConfig.type === 'location' || isTrackingLeadInbound;
 
@@ -511,6 +533,34 @@ router.post('/sms', async (req, res) => {
               // to_last4.
               const last4 = String(From || '').replace(/\D/g, '').slice(-4);
               logger.warn(`[twilio-webhook] AI reply BLOCKED for ***${last4}: code=${sendResult.code}`);
+
+              // Transient provider failure (Twilio 429/5xx/timeout): don't
+              // silently drop the reply. Re-queue it onto the scheduled-SMS
+              // rail so the every-5-min cron retries it, bounded by
+              // SCHEDULED_SMS_MAX_ATTEMPTS. message_type maps to purpose
+              // 'conversational', matching the inbound send above. (RED R3)
+              if (sendResult.retryable && sendResult.nextAllowedAt) {
+                try {
+                  await db('sms_log').insert({
+                    customer_id: customer?.id || null,
+                    direction: 'outbound',
+                    from_phone: To,
+                    to_phone: From,
+                    message_body: aiResult.reply,
+                    status: 'scheduled',
+                    scheduled_for: new Date(sendResult.nextAllowedAt),
+                    message_type: 'ai_assistant_reply',
+                    metadata: JSON.stringify({
+                      entry_point: 'twilio_inbound_ai_assistant_retry',
+                      provider_retry: true,
+                      original_failure_code: sendResult.code || null,
+                    }),
+                  });
+                  logger.info(`[twilio-webhook] AI reply re-queued (retry at ${sendResult.nextAllowedAt}) for ***${last4}`);
+                } catch (requeueErr) {
+                  logger.error(`[twilio-webhook] AI reply re-queue failed: ${requeueErr.message}`);
+                }
+              }
             }
           } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
         }
@@ -640,10 +690,19 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
-    // Return empty TwiML — Adam approves drafts before sending
-    res.type('text/xml').send('<Response></Response>');
+     } catch (sideErr) {
+       logger.error(`[twilio-webhook] async inbound side-effects failed: ${sideErr.message}`);
+     }
+    })(); });
+    // Response already sent above (empty TwiML — Adam approves drafts before sending).
   } catch (err) {
     logger.error(`Webhook error: ${err.message}`);
+    // Release the idempotency claim: this delivery failed before handling
+    // completed, so a Twilio retry SHOULD be allowed to reprocess it rather
+    // than being short-circuited as a duplicate. (The deferred side-effects
+    // run after the response and carry their own catch — they never reach
+    // here, so a post-ack failure correctly keeps the claim.)
+    void releaseInboundWebhook(req.body?.MessageSid);
     notifyTwilioFailure({
       channel: 'sms',
       direction: 'inbound',

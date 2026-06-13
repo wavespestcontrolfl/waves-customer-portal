@@ -7,6 +7,7 @@ const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conversations');
+const { claimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -252,11 +253,17 @@ router.post('/voice', async (req, res) => {
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
+    // Idempotency: Twilio can redeliver the same CallSid. Claim it so the DB
+    // writes below (call_log row, touchpoint, paid Lookup) run only on the
+    // first delivery — a redelivery is still routed (TwiML below) but does
+    // not duplicate the row (RED audit R1). Fails open.
+    const firstDelivery = await claimInboundWebhook(CallSid, 'voice');
+
     // Match caller to customer
     let customer = await findSingleCustomerByPhone(db, From);
 
     // #4: Caller ID Enrichment via Twilio Lookup API
-    if (!customer && From) {
+    if (firstDelivery && !customer && From) {
       try {
         const lookupUrl = `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(From)}?Fields=caller_name`;
         const twilioAuth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
@@ -274,7 +281,8 @@ router.post('/voice', async (req, res) => {
       }
     }
 
-    // Log the inbound call
+    // Log the inbound call (first delivery only — see claim above)
+    if (firstDelivery) {
     await db('call_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound',
@@ -307,6 +315,9 @@ router.post('/voice', async (req, res) => {
     }).catch((err) => {
       logger.error(`recordTouchpoint failed for inbound CallSid=${maskSid(CallSid)}: ${err.message}`);
     });
+    } else {
+      logger.info(`[twilio-voice] Duplicate inbound voice ${maskSid(CallSid)} — routing only, skipped re-logging`);
+    }
 
     logger.info(`Inbound call: ${maskPhone(From)} -> ${maskPhone(To)} (${maskSid(CallSid)}) customer=${customer?.first_name || 'unknown'}`);
 
@@ -363,6 +374,9 @@ router.post('/voice', async (req, res) => {
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Voice webhook error: ${err.message}`);
+    // Release the idempotency claim so a Twilio retry can reprocess this
+    // call rather than being treated as a duplicate (see claim above).
+    void releaseInboundWebhook(req.body?.CallSid);
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'inbound',
