@@ -1267,6 +1267,7 @@ async function mergeAstro(postId) {
     if (pr.state !== 'open') {
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
+    if (!isUnpublish) await assertOpenPublishPrIsHubOnly(post, pr);
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
 
     const result = await gh.mergePr(post.astro_pr_number, {
@@ -1287,6 +1288,46 @@ async function mergeAstro(postId) {
     });
     throw err;
   }
+}
+
+async function assertOpenPublishPrIsHubOnly(post, pr) {
+  const ref = post.astro_branch_name || pr?.head?.ref;
+  const slug = post.slug || slugify(post.title);
+  const resolved = await resolveExistingAstroFileAtRef(`${ASTRO_BLOG_DIR}/${slug}`, ref);
+  if (!resolved) {
+    throw new Error(`Astro PR #${pr.number} could not be verified as hub-only; republish the post before merge`);
+  }
+
+  const data = fm.parse(resolved.file.content)?.data || {};
+  const tracking = data.tracking && typeof data.tracking === 'object' && !Array.isArray(data.tracking)
+    ? data.tracking
+    : {};
+  const trackingHasDomains = Object.prototype.hasOwnProperty.call(tracking, 'domains');
+  if (
+    !isExplicitHubOnlyDomains(data.domains)
+    || (trackingHasDomains && !isExplicitHubOnlyDomains(tracking.domains))
+  ) {
+    throw new Error(
+      `Astro PR #${pr.number} was created with non-hub blog publish targets; republish the post before merge`,
+    );
+  }
+}
+
+async function resolveExistingAstroFileAtRef(pathOrBase, ref) {
+  if (!pathOrBase || !ref) return null;
+  const base = String(pathOrBase).replace(/\.mdx?$/, '');
+  const exts = isBlogTarget(`${base}.md`) ? ['.mdx', '.md'] : ['.md'];
+  for (const ext of exts) {
+    const file = await gh.getFile(`${base}${ext}`, ref);
+    if (file) return { path: `${base}${ext}`, file };
+  }
+  return null;
+}
+
+function isExplicitHubOnlyDomains(value) {
+  const raw = normalizeArray(value);
+  const normalized = normalizeSpokeSites(value);
+  return raw.length === 1 && normalized.length === 1 && normalized[0] === 'wavespestcontrol.com';
 }
 
 // ── Internal links (post-merge) ────────────────────────────────────

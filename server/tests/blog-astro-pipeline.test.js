@@ -1282,6 +1282,57 @@ describe('Astro publisher idempotency guard', () => {
   });
 });
 
+describe('Astro publisher merge guard', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('blocks stale spoke-targeted Astro PRs before merge', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      astro_status: 'pr_open',
+      astro_pr_number: 42,
+      astro_branch_name: 'content/blog-ant-trails-old',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+    gh.getPr.mockResolvedValue({
+      number: 42,
+      state: 'open',
+      merged: false,
+      head: { ref: 'content/blog-ant-trails-old', sha: 'head-sha' },
+    });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/ant-trails-bradenton.md' && ref === 'content/blog-ant-trails-old') {
+        return {
+          content: [
+            '---',
+            'title: Ant Trails in Bradenton',
+            'slug: /ant-trails-bradenton/',
+            'domains:',
+            '  - veniceflpestcontrol.com',
+            'tracking:',
+            '  domains:',
+            '    - veniceflpestcontrol.com',
+            '---',
+            'Stale spoke-targeted branch.',
+          ].join('\n'),
+        };
+      }
+      return null;
+    });
+
+    await expect(AstroPublisher.mergeAstro('post-1')).rejects.toThrow(/republish the post before merge/);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(gh.listIssueComments).not.toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_publish_error: expect.stringMatching(/non-hub blog publish targets/),
+    }));
+  });
+});
+
 describe('Pages poll auto-merge per-tick cap', () => {
   const originalEnv = {
     CF_API_TOKEN: process.env.CF_API_TOKEN,
