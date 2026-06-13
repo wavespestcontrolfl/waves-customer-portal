@@ -201,6 +201,11 @@ async function attachApprovedReportProductFacts(knex, products = []) {
 }
 
 function numberOrNull(value) {
+  // Nullish/empty must be null, not 0 — otherwise firstNumber() short-circuits
+  // on a null first arg (Number(null) === 0) and never reaches its fallbacks,
+  // e.g. a null completion-rain value would mask FAWN rainfall, or a null
+  // turf-profile irrigation value would mask the customer's portal entry.
+  if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -2259,4 +2264,5 @@ module.exports = {
   resolveReportArrivalTime,
   resolveReportCompletionTime,
   monthFromServiceDate,
+  firstNumber,
 };
