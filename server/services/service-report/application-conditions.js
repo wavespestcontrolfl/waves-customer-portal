@@ -128,46 +128,58 @@ async function fetchApplicationConditions({ latitude, longitude } = {}) {
   return fetchOpenMeteoConditions(coords);
 }
 
-// Trailing N-day rainfall total (inches) from an Open-Meteo daily
-// precipitation_sum array. With forecast_days=1 the final entry is today's
-// forecast — drop it and sum the trailing completed days. Null when no usable
-// data so the caller can degrade to 'rain_unknown'.
-function sumTrailingPrecipInches(dailySums, days = 7) {
+// Sum of daily precipitation (inches), skipping missing/non-numeric days so an
+// all-missing window returns null (unknown) rather than a false zero — a null
+// precip day must not be read as "no rain".
+function sumPrecipInches(dailySums) {
   if (!Array.isArray(dailySums) || !dailySums.length) return null;
-  const completed = dailySums.slice(0, Math.max(0, dailySums.length - 1)).slice(-days);
   let total = 0;
   let any = false;
-  for (const v of completed) {
+  for (const v of dailySums) {
+    if (v == null || v === '') continue;
     const n = Number(v);
     if (Number.isFinite(n)) { total += n; any = true; }
   }
   return any ? roundedNumber(total, 2) : null;
 }
 
-const _rain7dCache = new Map();
-const RAIN_7D_TTL_MS = 3 * 60 * 60 * 1000; // 3h — daily rainfall moves slowly
-
-function rain7dCacheKey(lat, lon) {
-  return `${Number(lat).toFixed(2)},${Number(lon).toFixed(2)}`;
+// { start, end } YYYY-MM-DD for the `days`-day window ending ON serviceDate.
+function rainWindowEndingOn(serviceDate, days = 7) {
+  const ymd = (serviceDate instanceof Date ? serviceDate.toISOString() : String(serviceDate || '')).slice(0, 10);
+  const end = new Date(`${ymd}T00:00:00Z`);
+  if (Number.isNaN(end.getTime())) return null;
+  const start = new Date(end.getTime() - (days - 1) * 86400000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { start: fmt(start), end: fmt(end) };
 }
 
-// Live trailing-7-day rainfall total (inches) for the lawn water balance, cached
-// by rounded grid coordinate. Returns null on any failure so the report degrades
-// to 'rain_unknown' rather than guessing.
-async function fetchPast7DayRainInches({ latitude, longitude } = {}) {
+const _rainCache = new Map();
+const RAIN_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+function rainCacheKey(lat, lon, end) {
+  return `${Number(lat).toFixed(2)},${Number(lon).toFixed(2)},${end}`;
+}
+
+// Trailing-7-day rainfall total (inches) for the week ENDING ON the service date
+// — keyed to the visit, never "now", so a long-lived report token always renders
+// the same season-consistent water balance. Cached by coord+date; fail-soft to
+// null so the report degrades to 'rain_unknown'. Open-Meteo's forecast endpoint
+// serves recent history via start_date/end_date; older dates resolve to null.
+async function fetchServiceWeekRainInches({ latitude, longitude, serviceDate } = {}) {
   const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
   const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
-  if (lat == null || lon == null) return null;
-  const key = rain7dCacheKey(lat, lon);
-  const cached = _rain7dCache.get(key);
-  if (cached && Date.now() - cached.at < RAIN_7D_TTL_MS) return cached.value;
+  const range = rainWindowEndingOn(serviceDate, 7);
+  if (lat == null || lon == null || !range) return null;
+  const key = rainCacheKey(lat, lon, range.end);
+  const cached = _rainCache.get(key);
+  if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
 
   const url = new URL('https://api.open-meteo.com/v1/forecast');
   url.searchParams.set('latitude', String(lat));
   url.searchParams.set('longitude', String(lon));
   url.searchParams.set('daily', 'precipitation_sum');
-  url.searchParams.set('past_days', '7');
-  url.searchParams.set('forecast_days', '1');
+  url.searchParams.set('start_date', range.start);
+  url.searchParams.set('end_date', range.end);
   url.searchParams.set('precipitation_unit', 'inch');
   url.searchParams.set('timezone', 'America/New_York');
 
@@ -177,11 +189,11 @@ async function fetchPast7DayRainInches({ latitude, longitude } = {}) {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) return null;
     const payload = await response.json();
-    const value = sumTrailingPrecipInches(payload?.daily?.precipitation_sum, 7);
-    _rain7dCache.set(key, { at: Date.now(), value });
+    const value = sumPrecipInches(payload?.daily?.precipitation_sum);
+    _rainCache.set(key, { at: Date.now(), value });
     return value;
   } catch (err) {
-    logger.warn(`[application-conditions] 7-day rainfall fetch failed: ${err.message}`);
+    logger.warn(`[application-conditions] service-week rainfall fetch failed: ${err.message}`);
     return null;
   } finally {
     clearTimeout(timeout);
@@ -191,8 +203,9 @@ async function fetchPast7DayRainInches({ latitude, longitude } = {}) {
 module.exports = {
   fetchApplicationConditions,
   fetchOpenMeteoConditions,
-  fetchPast7DayRainInches,
-  sumTrailingPrecipInches,
+  fetchServiceWeekRainInches,
+  sumPrecipInches,
+  rainWindowEndingOn,
   normalizeFawnConditions,
   weatherCodeLabel,
 };

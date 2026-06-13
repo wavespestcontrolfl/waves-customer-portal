@@ -7,7 +7,7 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
-const { fetchPast7DayRainInches } = require('./application-conditions');
+const { fetchServiceWeekRainInches } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -1710,14 +1710,15 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     ...parseJsonObject(service.conditions),
     ...parseJsonObject(service.weather_data),
   };
-  // Live trailing-7-day rainfall total for the water balance — the stored
-  // snapshots carry no real weekly figure. Cached by grid coord and fail-soft:
-  // null → advice degrades to 'rain_unknown' rather than guessing.
+  // Trailing-7-day rainfall total for the water balance, keyed to the SERVICE
+  // DATE (not now) so this long-lived report token always renders the same
+  // season-consistent balance. Cached + fail-soft: null → 'rain_unknown'.
   let completionRainfall7dInches = null;
   try {
-    completionRainfall7dInches = await fetchPast7DayRainInches({
+    completionRainfall7dInches = await fetchServiceWeekRainInches({
       latitude: service.customer_latitude ?? service.latitude ?? service.lat,
       longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+      serviceDate: assessment.service_date,
     });
   } catch (e) { /* non-blocking */ }
   const waterContext = buildLawnWaterContext({
