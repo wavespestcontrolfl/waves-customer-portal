@@ -22,7 +22,7 @@ jest.mock('../services/logger', () => ({
 
 const {
   runPropertyLookupCanary,
-  _private: { GOLDEN_PARCELS, evaluateGoldenRecord },
+  _private: { GOLDEN_PARCELS, evaluateGoldenRecord, errLabel },
 } = require('../services/property-lookup-canary');
 
 function healthyRecord() {
@@ -62,6 +62,23 @@ describe('evaluateGoldenRecord', () => {
       expect(text).not.toContain(golden.parcel.paoParcelId);
       expect(text).not.toContain(golden.parcel.situsAddress);
     }
+  });
+});
+
+describe('errLabel', () => {
+  it('collapses every abort spelling to a readable "timeout"', () => {
+    // AbortController fetch timeout: a DOMException named AbortError whose
+    // legacy numeric code is 20 — the case that rendered as an opaque "(20)".
+    expect(errLabel({ name: 'AbortError', code: 20 })).toBe('timeout');
+    expect(errLabel({ code: 'ABORT_ERR' })).toBe('timeout');
+    expect(errLabel({ name: 'AbortError' })).toBe('timeout');
+  });
+
+  it('keeps other error codes verbatim', () => {
+    expect(errLabel({ code: 'ETIMEDOUT' })).toBe('ETIMEDOUT');
+    expect(errLabel({ code: 'ECONNRESET' })).toBe('ECONNRESET');
+    expect(errLabel(new TypeError('fetch failed'))).toBe('TypeError');
+    expect(errLabel(null)).toBe('network/timeout');
   });
 });
 
@@ -127,6 +144,21 @@ describe('runPropertyLookupCanary', () => {
     expect(result.ok).toBe(false);
     expect(result.failures).toContain('Sarasota golden parcel: by-parcel lookup threw (ETIMEDOUT)');
     expect(result.failures).toContain('Charlotte golden parcel: by-parcel lookup returned no record');
+  });
+
+  it('an AbortController timeout reads as (timeout), not the raw DOMException code 20', async () => {
+    // Reproduces the 2026-06-13 Sarasota alert: the county PAO fetch aborted
+    // on the canary timeout and surfaced as "by-parcel lookup threw (20)".
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    abortErr.code = 20;
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw abortErr;
+      return healthyRecord();
+    });
+    const result = await runPropertyLookupCanary();
+    expect(result.failures).toContain('Sarasota golden parcel: by-parcel lookup threw (timeout)');
+    expect(result.failures.join(' ')).not.toContain('(20)');
   });
 
   it('throw labels carry only the error code — never the URL/parcel from err.message', async () => {
