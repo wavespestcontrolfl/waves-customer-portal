@@ -4670,6 +4670,56 @@ function LegacyReport({ data, token }) {
   );
 }
 
+const VISUAL_PROOF_STAGE_ORDER = {
+  Observed: 10,
+  Treated: 20,
+  Recommendation: 30,
+  Access: 40,
+  'Before / After': 50,
+  General: 60,
+};
+
+function visualProofMomentStage(moment = {}) {
+  const group = String(moment.tagGroup || '').toLowerCase();
+  const code = String(moment.tagCode || '').toLowerCase();
+  if (code === 'no_major_activity') return 'General';
+  if (group === 'treatment' || code === 'treatment_applied') return 'Treated';
+  if (group === 'recommendation' || code === 'recommendation') return 'Recommendation';
+  if (group === 'access' || code === 'access_issue' || code === 'entry_point') return 'Access';
+  if (group === 'before_after' || code === 'before' || code === 'after') return 'Before / After';
+  return 'Observed';
+}
+
+function visualProofMomentTime(moment = {}) {
+  const value = moment.capturedAt || moment.createdAt;
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function orderVisualProofMoments(moments = []) {
+  return [...moments].sort((a, b) => {
+    const stageDiff = (VISUAL_PROOF_STAGE_ORDER[visualProofMomentStage(a)] || 99)
+      - (VISUAL_PROOF_STAGE_ORDER[visualProofMomentStage(b)] || 99);
+    if (stageDiff !== 0) return stageDiff;
+    return visualProofMomentTime(a) - visualProofMomentTime(b);
+  });
+}
+
+function visualProofMomentIntro(moments = []) {
+  const stages = new Set(moments.map(visualProofMomentStage));
+  if (stages.has('Observed') && stages.has('Treated') && stages.has('Recommendation')) {
+    return 'Reviewed service highlights show what was observed, what was treated, and what to watch next.';
+  }
+  if (stages.has('Observed') && stages.has('Treated')) {
+    return 'Reviewed service highlights show what was observed and included in today\'s treatment.';
+  }
+  if (stages.has('Recommendation')) {
+    return 'Reviewed service highlights include follow-up recommendations from today\'s visit.';
+  }
+  return 'Reviewed service highlights from today\'s visit.';
+}
+
 function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
@@ -4681,6 +4731,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const proofMoments = Array.isArray(data.proofMoments)
     ? data.proofMoments
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
+  const orderedProofMoments = useMemo(() => orderVisualProofMoments(proofMoments), [proofMoments]);
 
   useEffect(() => {
     if (mode !== 'live') return;
@@ -7474,11 +7525,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
-        {proofMoments.length > 0 && (
+        {orderedProofMoments.length > 0 && (
           <section className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
+            <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, margin: '0 0 14px' }}>
+              {visualProofMomentIntro(orderedProofMoments)}
+            </p>
             <div className="sr-grid-3">
-              {proofMoments.map((moment) => (
+              {orderedProofMoments.map((moment) => (
                 <div className="sr-cell" key={moment.id}>
                   {moment.mediaUrl && moment.mediaType === 'video' && (
                     <video
@@ -7494,10 +7548,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                       style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
                     />
                   )}
-                  <div className="sr-cell-label">{moment.tagLabel || 'Service highlight'}</div>
-                  {moment.locationArea && <div className="sr-cell-value">{moment.locationArea}</div>}
+                  <div className="sr-cell-label">{visualProofMomentStage(moment)}</div>
+                  <div className="sr-cell-value">{moment.tagLabel || 'Service highlight'}</div>
+                  {moment.locationArea && (
+                    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4 }}>
+                      {moment.locationArea}
+                    </div>
+                  )}
                   <div style={{ fontSize: 14, lineHeight: 1.45, color: ESTIMATE_BODY, marginTop: 6 }}>
-                    {moment.customerCaption || moment.note || 'Service highlight documented by your technician.'}
+                    {moment.customerCaption || 'Service highlight documented by your technician.'}
                   </div>
                 </div>
               ))}

@@ -44,6 +44,19 @@ const KNOWN_FLAGS = [
   "visual_service_notes_enabled",
 ];
 
+const DEFAULT_VISUAL_SETTINGS = {
+  enabled: false,
+  required: false,
+};
+
+function normalizeVisualSettings(value) {
+  const settings = value?.settings || value || {};
+  return {
+    enabled: Boolean(settings.enabled),
+    required: Boolean(settings.required),
+  };
+}
+
 export default function DesignSystemFlagsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
@@ -52,18 +65,25 @@ export default function DesignSystemFlagsPage() {
   const [states, setStates] = useState({});
   const [newFlag, setNewFlag] = useState("");
   const [newFlagUser, setNewFlagUser] = useState("");
+  const [visualSettings, setVisualSettings] = useState(DEFAULT_VISUAL_SETTINGS);
+  const [visualSettingsSaving, setVisualSettingsSaving] = useState(false);
+  const [visualSettingsMessage, setVisualSettingsMessage] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
-      const data = await adminFetch("/admin/feature-flags/all");
+      const [data, visualData] = await Promise.all([
+        adminFetch("/admin/feature-flags/all"),
+        adminFetch("/admin/feature-flags/visual-service-notes"),
+      ]);
       setUsers(data.users || []);
       const merged = [
         ...new Set([...(data.flag_keys || []), ...KNOWN_FLAGS]),
       ].sort();
       setFlagKeys(merged);
       setStates(data.states || {});
+      setVisualSettings(normalizeVisualSettings(visualData));
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -108,6 +128,30 @@ export default function DesignSystemFlagsPage() {
     setNewFlag("");
   };
 
+  const updateVisualSettings = async (patch) => {
+    setVisualSettingsSaving(true);
+    setVisualSettingsMessage("");
+    setErr(null);
+    try {
+      const data = await adminFetch("/admin/feature-flags/visual-service-notes", {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      setVisualSettings(normalizeVisualSettings(data));
+      setVisualSettingsMessage("Visual Service Notes settings saved.");
+      refetchFlags();
+      window.setTimeout(() => {
+        setVisualSettingsMessage((current) =>
+          current === "Visual Service Notes settings saved." ? "" : current
+        );
+      }, 3500);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setVisualSettingsSaving(false);
+    }
+  };
+
   return (
     <div className="bg-surface-page min-h-full p-6 font-sans text-zinc-900">
       {" "}
@@ -122,6 +166,12 @@ export default function DesignSystemFlagsPage() {
           user's next page load. Absence of a row = disabled.
         </p>{" "}
       </header>{" "}
+      <VisualServiceNotesSettingsCard
+        settings={visualSettings}
+        saving={visualSettingsSaving || loading}
+        message={visualSettingsMessage}
+        onChange={updateVisualSettings}
+      />{" "}
       <Card className="mb-6">
         {" "}
         <CardHeader>
@@ -244,6 +294,60 @@ export default function DesignSystemFlagsPage() {
         </CardBody>{" "}
       </Card>{" "}
     </div>
+  );
+}
+
+function VisualServiceNotesSettingsCard({ settings, saving, message, onChange }) {
+  return (
+    <Card className="mb-6">
+      {" "}
+      <CardHeader>
+        {" "}
+        <CardTitle>Visual Service Notes</CardTitle>{" "}
+      </CardHeader>{" "}
+      <CardBody>
+        {" "}
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4">
+            <div>
+              <div className="text-14 font-semibold text-ink-primary">
+                Enabled globally
+              </div>
+              <div className="mt-1 text-12 leading-5 text-ink-secondary">
+                Shows Visual Notes for eligible active jobs without assigning
+                the per-user flag.
+              </div>
+            </div>
+            <Switch
+              checked={settings.enabled}
+              disabled={saving}
+              onChange={(next) => onChange({ enabled: next })}
+              aria-label="Enable Visual Service Notes globally"
+            />
+          </div>
+          <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4">
+            <div>
+              <div className="text-14 font-semibold text-ink-primary">
+                Required
+              </div>
+              <div className="mt-1 text-12 leading-5 text-ink-secondary">
+                Future-only setting. It is stored here but job completion does
+                not enforce visual notes.
+              </div>
+            </div>
+            <Switch
+              checked={settings.required}
+              disabled={saving}
+              onChange={(next) => onChange({ required: next })}
+              aria-label="Set Visual Service Notes required future setting"
+            />
+          </div>
+        </div>
+        {message && (
+          <div className="mt-3 text-12 text-green-700">{message}</div>
+        )}
+      </CardBody>{" "}
+    </Card>
   );
 }
 
