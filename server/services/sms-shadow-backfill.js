@@ -156,6 +156,15 @@ async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = D
       [allowedLast10]
     )
     .whereRaw('NOT EXISTS (SELECT 1 FROM message_drafts md WHERE md.sms_log_id = i.id)')
+    // Deleted customers would re-select every run (no draft ever lands, the
+    // anti-join stays true) — exclude them here so exhaustion is clean.
+    .whereRaw('EXISTS (SELECT 1 FROM customers c WHERE c.id = i.customer_id AND c.deleted_at IS NULL)')
+    // Mirrors the judge's pairing EXACTLY, including the burst cap: the
+    // judge ends each draft's reply window at the customer's NEXT real
+    // inbound, so a reply that lands after a follow-up text is ground
+    // truth for THAT text, not this one. Without the inner NOT EXISTS, an
+    // early burst inbound buys a paid draft the judge then files as
+    // human_no_reply — spend with no score.
     .whereRaw(`EXISTS (
       SELECT 1 FROM sms_log o
       WHERE o.direction = 'outbound'
@@ -164,6 +173,15 @@ async function findBackfillCandidates({ batchSize = DEFAULT_BATCH, sinceDays = D
         AND o.status IN ('queued', 'sent', 'delivered')
         AND o.created_at > i.created_at
         AND o.created_at < i.created_at + interval '24 hours'
+        AND NOT EXISTS (
+          SELECT 1 FROM sms_log b
+          WHERE b.direction = 'inbound'
+            AND b.customer_id = i.customer_id
+            AND b.id <> i.id
+            AND COALESCE(b.message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction')
+            AND b.created_at > i.created_at
+            AND b.created_at < o.created_at
+        )
     )`)
     .select('i.id', 'i.customer_id', 'i.message_body', 'i.to_phone', 'i.created_at')
     .orderBy('i.created_at', 'desc')
