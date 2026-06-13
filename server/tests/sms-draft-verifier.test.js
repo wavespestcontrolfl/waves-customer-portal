@@ -33,6 +33,19 @@ describe('verifier — prompt contract', () => {
     expect(p).toMatch(/pickup/i);        // a name ≠ a pickup request
   });
 
+  test('v5 verifier matches exact date VALUES and flags unverified billing (the v4 residual misses)', () => {
+    const p = buildVerifierSystemPrompt();
+    // value matching: a date off by a day is a violation, not "close enough"
+    expect(p).toMatch(/value matching/i);
+    expect(p).toMatch(/even by one day/i);
+    expect(p).toMatch(/6\/15.*June 16|June 16.*6\/15/is); // the worked example
+    // billing status reassurance not in facts = violation
+    expect(p).toMatch(/paid in full/i);
+    expect(p).toMatch(/billing is high-stakes|billing status/i);
+    // quote-the-source requirement
+    expect(p).toMatch(/QUOTE the exact/i);
+  });
+
   test('user prompt carries facts, the customer message, and the draft under check', () => {
     const p = buildVerifierUserPrompt(
       'NEXT SERVICE: Quarterly Pest Friday, Jun 19',

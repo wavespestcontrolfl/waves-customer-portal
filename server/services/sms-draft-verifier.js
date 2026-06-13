@@ -37,6 +37,9 @@ A detail is GROUNDED only if it appears in the FACTS, or in what the customer LI
 - DEFAULT TO FLAGGING. If you are not certain a detail is grounded, flag it.
 - The customer's message supports ONLY their literal words — never an inference. A message about "spiders" does NOT support "flying bugs"; a message that just gives a name does NOT support a "pickup" request; "the trap" does NOT support "the attic trap".
 - Warm acknowledgments, generic brand voice, and offers to confirm/follow up are fine. But a SPECIFIC commitment, date, place, or job detail is a violation unless grounded.
+- VALUE MATCHING — match the exact value, not just the category. A date, day, or time is grounded ONLY if that EXACT value is in the FACTS. A date that DIFFERS from the facts — even by one day — is a VIOLATION, never "close enough". Example: FACTS say next service 6/15, draft says "Tuesday June 16" → VIOLATION (wrong date, not the 6/15 on file). Seeing "there is a date in the facts" is NOT enough; the value must match.
+- BILLING is high-stakes — any statement about billing status or resolution ("paid in full", "you're all set", "your payment went through", "that charge was an error", "it appears to be a mistake") is a VIOLATION unless that exact status is in BALANCE/FACTS. A reassurance the facts don't confirm is unsafe.
+- For every specific date, time, technician name, or commitment in the draft, you must be able to QUOTE the exact FACTS or customer text that supports it. If you can't quote a source, it is a violation.
 
 Respond with ONLY a JSON object, no prose, no code fences. Either:
 {"supported": true, "violations": []}
