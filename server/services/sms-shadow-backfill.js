@@ -39,11 +39,11 @@ const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { hasSchedulingIntent } = require('./sms-intent');
 
-// v2 (06-13): tracks the drafter's hardened v2 fact-discipline prompt. The
-// ~50 candidates already drafted under v1 keep 'house_voice_v1_backfill';
-// the remaining backfill runs under v2 — a same-context (backfill) cohort
-// to compare draft_unsafe rates against the v1 cohort.
-const BACKFILL_PROMPT_VERSION = 'house_voice_v2_backfill';
+// v3 (06-13): tracks the drafter's verify→revise loop. v1/v2 cohorts (both
+// 32% unsafe — identical, confirming homogeneous populations) stay the
+// baseline; the remaining candidates run under v3 — a valid control cohort
+// to measure whether the verify loop cuts the draft_unsafe rate.
+const BACKFILL_PROMPT_VERSION = 'house_voice_v3_backfill';
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
 
 // Inbound message_types the live webhook handles in a branch that returns
@@ -116,7 +116,7 @@ function boundContextToInbound(context, inboundAt) {
  * builder so tests can pin the invariants (backdated created_at, shadow
  * status, backfill prompt_version).
  */
-function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs }) {
+function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs, verify }) {
   return {
     sms_log_id: inbound.id,
     customer_id: inbound.customer_id,
@@ -133,6 +133,7 @@ function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs }) {
     intended_actions: JSON.stringify({
       actions: parsed.intended_actions,
       missing_info: parsed.missing_info,
+      ...(verify ? { verify } : {}),
     }),
     // Same classifier the live webhook uses — scheduling texts keep their
     // high-stakes prompt guard and stay distinguishable in judge data.
@@ -227,20 +228,22 @@ async function draftOneBackfill(inbound, customer) {
 
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const resp = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 600,
-    system: drafter.buildSystemPrompt(),
-    messages: [{ role: 'user', content: drafter.buildUserPrompt(context, inbound.message_body, intent, hasSchedulingIntent(inbound.message_body)) }],
+  // Same draft→verify→revise loop the live drafter uses (v3).
+  const { parsed, passes, converged } = await drafter.generateGroundedDraft({
+    client,
+    context,
+    inboundMessage: inbound.message_body,
+    intent,
+    schedulingIntent: hasSchedulingIntent(inbound.message_body),
   });
-
-  const parsed = drafter.parseShadowResponse(resp.content?.[0]?.text || '');
   if (!parsed) {
     logger.warn(`[shadow-backfill] unparseable draft (inbound ${String(inbound.id).slice(0, 8)}); skipping`);
     return null;
   }
 
-  const row = buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs: Date.now() - startedAt });
+  const row = buildBackfillDraftRow({
+    inbound, parsed, intent, context, draftMs: Date.now() - startedAt, verify: { passes, converged },
+  });
   const [inserted] = await db('message_drafts')
     .insert(row)
     .onConflict()

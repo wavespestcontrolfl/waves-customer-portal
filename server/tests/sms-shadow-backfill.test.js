@@ -111,9 +111,9 @@ describe('shadow backfill — draft row invariants', () => {
   });
 
   test('backfill samples are marked with a distinct prompt_version for Phase E weighting', () => {
-    expect(BACKFILL_PROMPT_VERSION).toBe('house_voice_v2_backfill');
+    expect(BACKFILL_PROMPT_VERSION).toBe('house_voice_v3_backfill');
     expect(row.prompt_version).toBe(BACKFILL_PROMPT_VERSION);
-    expect(row.prompt_version).not.toBe('house_voice_v2');
+    expect(row.prompt_version).not.toBe('house_voice_v3');
   });
 
   test('row links the inbound and carries the classified intent', () => {
