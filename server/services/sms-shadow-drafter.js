@@ -33,7 +33,7 @@ const DRAFTER = 'house_voice';
 // strict (skeptical default, per-claim grounding, literal-only customer
 // source). Bumped so the judge partitions v4 vs v3 (verifier-lenient) and
 // the v1/v2 baselines.
-const PROMPT_VERSION = 'house_voice_v4';
+const PROMPT_VERSION = 'house_voice_v5';
 const SHADOW_STATUS = 'shadow';
 
 const INTENDED_ACTION_TYPES = [

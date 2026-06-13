@@ -43,7 +43,7 @@ const { hasSchedulingIntent } = require('./sms-intent');
 // pool is exhausted, so v4 is measured via re-draft mode (SHADOW_BACKFILL_
 // REDRAFT=true) — re-running already-judged inbounds under v4 for a
 // same-input cohort vs the v1/v2/v3 priors.
-const BACKFILL_PROMPT_VERSION = 'house_voice_v4_backfill';
+const BACKFILL_PROMPT_VERSION = 'house_voice_v5_backfill';
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
 
 // Inbound message_types the live webhook handles in a branch that returns
