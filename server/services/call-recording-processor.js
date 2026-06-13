@@ -34,11 +34,13 @@ const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../s
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
+const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
 
 const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 'true';
-const CALL_EXTRACTION_V2_DRIVES_ROUTING = process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true';
-const CALL_TRANSCRIPT_DIARIZATION_ENABLED = process.env.CALL_TRANSCRIPT_DIARIZATION_ENABLED === 'true';
+const CALL_EXTRACTION_V2_DRIVES_ROUTING =
+  process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
+  || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
@@ -951,7 +953,13 @@ async function transcribeWithOpenAI(audioBuffer) {
     const data = contentType.includes('application/json') ? await res.json() : await res.text();
     const text = normalizeOpenAITranscript(data);
     if (!text) return null;
-    return { text, segments: normalizeOpenAISegments(data) };
+    return {
+      text,
+      segments: normalizeOpenAISegments(data),
+      provider: 'openai',
+      model: OPENAI_TRANSCRIPTION_MODEL,
+      responseFormat: diarized ? 'diarized_json' : 'json',
+    };
   } catch (err) {
     logger.error(`[call-proc] OpenAI transcription error: ${err.message}`);
     return null;
@@ -1030,18 +1038,73 @@ async function transcribeRecording(mp3Url, opts = {}) {
 
     if (openaiTranscript && !openaiNeedsCompletenessFallback) {
       const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
-      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai', structuredSegments };
+      if (labeledTranscript) {
+        return {
+          transcription: labeledTranscript,
+          provider: 'openai',
+          model: OPENAI_TRANSCRIPTION_MODEL,
+          structuredSegments,
+          metadata: {
+            audio_bytes: audioBuffer.length,
+            response_format: openai?.responseFormat || null,
+            label_provider: 'openai',
+            label_model: OPENAI_TRANSCRIPT_LABEL_MODEL,
+            fallback_attempted: false,
+          },
+        };
+      }
       logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
     }
 
     const geminiTranscript = await transcribeWithGemini(audioBuffer, opts);
-    if (geminiTranscript) return { transcription: geminiTranscript, provider: 'gemini_fallback' };
+    if (geminiTranscript) {
+      return {
+        transcription: geminiTranscript,
+        provider: 'gemini_fallback',
+        model: GEMINI_TRANSCRIPTION_MODEL,
+        structuredSegments: null,
+        metadata: {
+          audio_bytes: audioBuffer.length,
+          fallback_reason: openaiTranscript ? 'openai_labeling_or_completeness' : 'openai_unavailable',
+          openai_model: OPENAI_TRANSCRIPTION_MODEL,
+        },
+      };
+    }
 
     if (openaiTranscript) {
       const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
-      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai_post_gemini_fallback', structuredSegments };
+      if (labeledTranscript) {
+        return {
+          transcription: labeledTranscript,
+          provider: 'openai_post_gemini_fallback',
+          model: OPENAI_TRANSCRIPTION_MODEL,
+          structuredSegments,
+          metadata: {
+            audio_bytes: audioBuffer.length,
+            response_format: openai?.responseFormat || null,
+            label_provider: 'openai',
+            label_model: OPENAI_TRANSCRIPT_LABEL_MODEL,
+            fallback_attempted: true,
+            fallback_provider: 'gemini',
+            fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+          },
+        };
+      }
       logger.warn('[call-proc] Using raw OpenAI transcript because labeling and Gemini fallback failed');
-      return { transcription: openaiTranscript, provider: 'openai_unlabeled_fallback', structuredSegments };
+      return {
+        transcription: openaiTranscript,
+        provider: 'openai_unlabeled_fallback',
+        model: OPENAI_TRANSCRIPTION_MODEL,
+        structuredSegments,
+        metadata: {
+          audio_bytes: audioBuffer.length,
+          response_format: openai?.responseFormat || null,
+          label_provider: null,
+          fallback_attempted: true,
+          fallback_provider: 'gemini',
+          fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+        },
+      };
     }
 
     return { transcription: null, provider: null };
@@ -1408,20 +1471,35 @@ const CallRecordingProcessor = {
 
     // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
+    let transcriptionProvenance = null;
 
     if (call.recording_url) {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
       transcription = result.transcription;
       if (transcription) {
+        transcriptionProvenance = {
+          provider: result.provider || null,
+          model: result.model || null,
+          metadata: {
+            ...(result.metadata || {}),
+            provider: result.provider || null,
+            model: result.model || null,
+            transcript_chars: transcription.length,
+            recording_url_present: !!call.recording_url,
+          },
+        };
         const transcriptUpdate = {
           transcription,
           transcription_status: 'completed',
+          transcription_provider: transcriptionProvenance.provider,
+          transcription_model: transcriptionProvenance.model,
+          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
           updated_at: new Date(),
         };
-        if (CALL_TRANSCRIPT_DIARIZATION_ENABLED && result.structuredSegments) {
+        if (result.structuredSegments) {
           transcriptUpdate.transcript_structured = JSON.stringify({
             provider: result.provider,
-            model: OPENAI_TRANSCRIPTION_MODEL,
+            model: result.model || OPENAI_TRANSCRIPTION_MODEL,
             segments: result.structuredSegments,
           });
         }
@@ -1439,9 +1517,41 @@ const CallRecordingProcessor = {
       const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
       if (freshCall?.transcription) {
         transcription = freshCall.transcription;
+        transcriptionProvenance = {
+          provider: 'twilio_builtin',
+          model: null,
+          metadata: {
+            provider: 'twilio_builtin',
+            fallback_reason: 'openai_gemini_unavailable',
+            transcript_chars: transcription.length,
+            source: 'fresh_call_log',
+          },
+        };
+        await db('call_log').where({ id: call.id }).update({
+          transcription_provider: transcriptionProvenance.provider,
+          transcription_model: null,
+          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          updated_at: new Date(),
+        });
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
       } else if (call.transcription) {
         transcription = call.transcription;
+        transcriptionProvenance = {
+          provider: 'twilio_builtin',
+          model: null,
+          metadata: {
+            provider: 'twilio_builtin',
+            fallback_reason: 'cached_transcription',
+            transcript_chars: transcription.length,
+            source: 'cached_call_log',
+          },
+        };
+        await db('call_log').where({ id: call.id }).update({
+          transcription_provider: transcriptionProvenance.provider,
+          transcription_model: null,
+          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          updated_at: new Date(),
+        });
         logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
@@ -1822,6 +1932,18 @@ const CallRecordingProcessor = {
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
       updated_at: new Date(),
+    });
+
+    const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
+      ? v2Result.extraction
+      : null;
+    await stageCustomerFieldCandidates({
+      callId: call.id,
+      customerId: customerId || call.customer_id || null,
+      extraction: extracted,
+      v2Extraction: v2ExtractionForAudit,
+    }).catch((err) => {
+      logger.warn(`[call-proc] Customer field candidate staging skipped for ${maskSid(callSid)}: ${err.message}`);
     });
 
     // Step 4b: Create lead in leads table for pipeline tracking
@@ -2405,6 +2527,66 @@ const CallRecordingProcessor = {
       } else {
         logger.warn(`[call-proc] Skipped newsletter subscribe for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
       }
+    }
+
+    if (v2Result) {
+      const validationMode = CALL_EXTRACTION_V2_DRIVES_ROUTING ? 'enforce' : 'shadow';
+      let routingResult = null;
+      let finalFlags = [];
+
+      if (v2ExtractionForAudit) {
+        const modelFlags = suppressAddressFlagsForAV(v2ExtractionForAudit.triage_flags, v2AddressValidation);
+        const deterministicFlags = computeDeterministicTriageFlags(v2ExtractionForAudit, {
+          contactPhone,
+          addressValidation: v2AddressValidation,
+        });
+        finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+        routingResult = canAutoRoute(v2ExtractionForAudit, {
+          contactPhone,
+          addressValidation: v2AddressValidation,
+        });
+
+        if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
+          const shadowDecision = buildRouteDecision({
+            callLogId: call.id,
+            extraction: v2ExtractionForAudit,
+            finalTriageFlags: finalFlags,
+            routingResult,
+            action: routingResult.allowed ? 'shadow_auto_route_candidate' : 'shadow_needs_review_candidate',
+            mode: 'shadow',
+          });
+          await db('route_decisions')
+            .insert(shadowDecision)
+            .onConflict(['call_log_id', 'decision_version', 'mode'])
+            .ignore()
+            .catch((err) => logger.warn(`[call-proc-v2] Shadow route decision skipped for ${maskSid(callSid)}: ${err.message}`));
+        }
+      }
+
+      const validationPayload = {
+        validator: 'v2-1.0.0',
+        mode: validationMode,
+        extraction_status: v2Result.status || null,
+        routing: routingResult ? {
+          allowed: routingResult.allowed,
+          reason: routingResult.reason || null,
+          flags: finalFlags,
+          appointment_blocking_flags: routingResult.appointmentBlockingFlags || [],
+        } : null,
+        address_validation_status: v2AddressValidation?.status || null,
+        errors: v2Result.errors || null,
+        generated_at: new Date().toISOString(),
+      };
+
+      await db('call_log').where({ id: call.id }).update({
+        ai_validation: JSON.stringify(validationPayload),
+        ai_validation_model: v2ExtractionForAudit?.meta?.extraction_model || GEMINI_EXTRACTION_MODEL,
+        ai_validation_prompt_version: v2ExtractionForAudit?.meta?.extraction_prompt_version || PROMPT_HASH,
+        ai_validation_schema_version: v2ExtractionForAudit?.meta?.schema_version || null,
+        updated_at: new Date(),
+      }).catch((err) => {
+        logger.warn(`[call-proc] AI validation payload write skipped for ${maskSid(callSid)}: ${err.message}`);
+      });
     }
 
     await writeLegacyShadowRouteDecision({

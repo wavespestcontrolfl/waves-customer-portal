@@ -721,6 +721,15 @@ router.post('/transcription', async (req, res) => {
       const update = {
         transcription: TranscriptionText,
         transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
+        transcription_provider: 'twilio_builtin',
+        transcription_model: null,
+        transcription_metadata: JSON.stringify({
+          provider: 'twilio_builtin',
+          source: 'twilio_transcription_webhook',
+          transcription_status: TranscriptionStatus || null,
+          transcript_chars: TranscriptionText.length,
+          recording_sid_present: !!RecordingSid,
+        }),
         updated_at: new Date(),
       };
 
