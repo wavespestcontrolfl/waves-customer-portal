@@ -5,6 +5,8 @@ const mockTriggerNotification = jest.fn();
 // In-memory stand-in for the property_lookup_canary_state table so the
 // consecutive-failure escalation can be exercised across simulated nights.
 const mockCanaryStore = new Map();
+// Toggle to simulate the state store being unreachable (e.g. table missing).
+const mockDbState = { loadFails: false };
 
 jest.mock('../services/property-lookup/ai-property-lookup', () => ({
   lookupPropertyFromCountyByParcel: (...args) => mockLookupByParcel(...args),
@@ -30,6 +32,7 @@ jest.mock('../models/db', () => {
     const builder = {
       whereIn(_col, vals) { whereInVals = vals; return builder; },
       select() {
+        if (mockDbState.loadFails) return Promise.reject(new Error('relation "property_lookup_canary_state" does not exist'));
         const keys = whereInVals || [...mockCanaryStore.keys()];
         return Promise.resolve(keys.map((k) => mockCanaryStore.get(k)).filter(Boolean));
       },
@@ -75,9 +78,12 @@ function abortError() {
 beforeEach(() => {
   jest.clearAllMocks();
   mockCanaryStore.clear();
+  mockDbState.loadFails = false;
   delete process.env.PROPERTY_LOOKUP_CANARY_DISABLED;
   mockLookupParcelByPoint.mockResolvedValue({ county: 'Manatee', paoParcelId: '579642409' });
   mockLookupByParcel.mockResolvedValue(healthyRecord());
+  // Default: the bell write lands. Tests that exercise failed delivery override.
+  mockTriggerNotification.mockResolvedValue({ bellWritten: true, push: null });
 });
 
 describe('evaluateGoldenRecord', () => {
@@ -165,6 +171,18 @@ describe('decideCanaryAlert', () => {
     expect(r.suppressed).toEqual([]);
     expect(r.nextCounts).toEqual({ 'golden:Manatee': 0 });
   });
+
+  it('fails closed: with state unavailable a transient pages immediately, never suppressed', () => {
+    const r = decideCanaryAlert([transientCheck], {}, { stateAvailable: false });
+    expect(r.alertFailures).toEqual(['Sarasota golden parcel: by-parcel lookup threw (timeout) (canary state unavailable — escalated)']);
+    expect(r.suppressed).toEqual([]);
+    expect(r.pendingAlerts).toEqual([]); // not a streak alert — no retry-hold
+  });
+
+  it('flags a streak alert in pendingAlerts so a failed delivery can be held', () => {
+    const r = decideCanaryAlert([transientCheck], { 'golden:Sarasota': 2 });
+    expect(r.pendingAlerts).toEqual([{ key: 'golden:Sarasota', count: 3 }]);
+  });
 });
 
 describe('runPropertyLookupCanary', () => {
@@ -198,6 +216,41 @@ describe('runPropertyLookupCanary', () => {
     expect(mockTriggerNotification).toHaveBeenCalledWith('property_lookup_canary_failed', {
       failures: ['Sarasota golden parcel: by-parcel lookup threw (timeout) — 3 nights running'],
     });
+  });
+
+  it('fails closed when the canary state table is unavailable — a transient pages immediately', async () => {
+    mockDbState.loadFails = true;
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw abortError();
+      return healthyRecord();
+    });
+    const result = await runPropertyLookupCanary();
+    expect(result.ok).toBe(false); // can't suppress without the streak → page now
+    expect(result.failures).toContain('Sarasota golden parcel: by-parcel lookup threw (timeout) (canary state unavailable — escalated)');
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds the counter when the threshold alert fails to deliver, so the next run retries', async () => {
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw abortError();
+      return healthyRecord();
+    });
+    await runPropertyLookupCanary(); // night 1
+    await runPropertyLookupCanary(); // night 2
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+
+    mockTriggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null }); // night 3 delivery fails
+    const n3 = await runPropertyLookupCanary();
+    expect(n3.failures.some((f) => f.includes('Sarasota'))).toBe(true);
+    expect(n3.delivered).toBe(false);
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+
+    // Counter was held — night 4 re-crosses the threshold and retries instead
+    // of going quiet until the weekly re-ping.
+    const n4 = await runPropertyLookupCanary();
+    expect(n4.delivered).toBe(true);
+    expect(n4.failures.some((f) => f.includes('Sarasota'))).toBe(true);
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(2);
   });
 
   it('a clean night resets the streak so a later blip restarts at night 1', async () => {

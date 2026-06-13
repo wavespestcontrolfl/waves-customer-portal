@@ -120,39 +120,53 @@ function atAlertPoint(count, threshold) {
 }
 
 // Pure escalation decision over this run's checks + the prior consecutive-
-// failure counts. Returns what to alert on, what to stay quiet about, and the
-// next counter per check — no I/O, so the whole policy is unit-testable.
+// failure counts. Returns what to alert on, what to stay quiet about, the next
+// counter per check, and which transient checks escalated via the streak
+// (pendingAlerts — held back if the alert isn't delivered). No I/O, so the
+// whole policy is unit-testable.
 //   checks: [{ key, status: 'ok'|'transient'|'regression', details: string[] }]
 //   priorCounts: { [key]: number }  (missing key = 0, i.e. a fresh check)
-function decideCanaryAlert(checks, priorCounts = {}, threshold = TRANSIENT_FAILURE_ALERT_THRESHOLD) {
+//   opts.stateAvailable: false ⇒ the streak store is unreadable, so we cannot
+//     safely suppress — every transient fails CLOSED and pages now (a broken
+//     canary that silently eats real outages is worse than a noisy one).
+function decideCanaryAlert(checks, priorCounts = {}, opts = {}) {
+  const { threshold = TRANSIENT_FAILURE_ALERT_THRESHOLD, stateAvailable = true } = opts;
   const alertFailures = [];
   const suppressed = [];
   const nextCounts = {};
+  const pendingAlerts = [];
   for (const check of checks) {
     if (check.status === 'transient') {
       // Reaching the data failed — advance the streak; only escalate once it
       // has persisted past the threshold (and on each weekly re-ping after).
       const count = Number(priorCounts[check.key] || 0) + 1;
       nextCounts[check.key] = count;
-      if (atAlertPoint(count, threshold)) {
+      if (!stateAvailable) {
+        // Can't trust (or advance) the streak — page now rather than suppress
+        // indefinitely. Only happens when the state store itself is broken.
+        alertFailures.push(...check.details.map((d) => `${d} (canary state unavailable — escalated)`));
+      } else if (atAlertPoint(count, threshold)) {
         alertFailures.push(...check.details.map((d) => `${d} — ${count} nights running`));
+        pendingAlerts.push({ key: check.key, count });
       } else {
         suppressed.push(...check.details.map((d) => `${d} (night ${count}/${threshold})`));
       }
     } else {
       // 'ok' or 'regression' both mean the data was reachable, so the
       // can't-reach-data streak resets. A regression still alerts immediately
-      // — a vanished parsing surface is never a transient blip.
+      // — a vanished parsing surface is never a transient blip. (No retry-hold
+      // needed: a still-broken surface re-alerts on its own next run.)
       nextCounts[check.key] = 0;
       if (check.status === 'regression') alertFailures.push(...check.details);
     }
   }
-  return { alertFailures, suppressed, nextCounts };
+  return { alertFailures, suppressed, nextCounts, pendingAlerts };
 }
 
-// Prior consecutive-failure counts keyed by check. Fail-open: if the state
-// table is unreachable, treat every check as fresh (count 0) so a regression
-// still pages immediately and a transient is merely suppressed one more night.
+// Prior consecutive-failure counts keyed by check. Returns null (NOT {}) when
+// the state store is unreachable so the caller can fail closed — an empty
+// object means "table queried fine, no rows yet" (legitimate night 1), which
+// is a different signal from "couldn't read the streak at all".
 async function loadPriorCounts(keys) {
   try {
     const rows = await db('property_lookup_canary_state')
@@ -160,8 +174,8 @@ async function loadPriorCounts(keys) {
       .select('check_key', 'consecutive_failures');
     return Object.fromEntries(rows.map((r) => [r.check_key, Number(r.consecutive_failures) || 0]));
   } catch (err) {
-    logger.warn(`[property-lookup-canary] state load failed, treating checks as fresh: ${err.message}`);
-    return {};
+    logger.warn(`[property-lookup-canary] state load failed — failing closed (will not suppress): ${err.message}`);
+    return null;
   }
 }
 
@@ -241,29 +255,48 @@ async function runPropertyLookupCanaryInner() {
     }
   }
 
-  // Escalate against the persisted streak, then advance it.
+  // Escalate against the persisted streak.
   const priorCounts = await loadPriorCounts(checks.map((c) => c.key));
-  const { alertFailures, suppressed, nextCounts } = decideCanaryAlert(checks, priorCounts);
-  await persistCheckStates(checks, nextCounts);
+  const stateAvailable = priorCounts !== null;
+  const { alertFailures, suppressed, nextCounts, pendingAlerts } =
+    decideCanaryAlert(checks, priorCounts || {}, { stateAvailable });
 
   if (suppressed.length) {
     logger.info('[property-lookup-canary] transient failures below alert threshold — suppressed', { suppressed });
   }
 
+  let delivered = true;
   if (alertFailures.length) {
     logger.warn('[property-lookup-canary] alert-worthy failures', {
       failing: alertFailures.length,
       failures: alertFailures,
     });
-    await triggerNotification('property_lookup_canary_failed', { failures: alertFailures });
+    const stats = await triggerNotification('property_lookup_canary_failed', { failures: alertFailures });
+    delivered = !!(stats && stats.bellWritten);
+    if (!delivered && pendingAlerts.length) {
+      // The bell write didn't land (triggerNotification never throws — it
+      // returns bellWritten:false). Don't "consume" the threshold crossing, or
+      // a missed first alert would stay silent until the weekly re-ping. Hold
+      // each escalating check one short of its alert point so the next run
+      // re-crosses and retries delivery.
+      for (const { key, count } of pendingAlerts) nextCounts[key] = count - 1;
+      logger.warn('[property-lookup-canary] alert not delivered — held counters for retry next run', {
+        checks: pendingAlerts.map((p) => p.key),
+      });
+    }
   } else {
     logger.info('[property-lookup-canary] no alert-worthy failures', { checks: checks.length });
   }
+
+  // Advance the streak AFTER the delivery outcome so a failed alert can be held
+  // for retry. Best-effort; a write failure just means the next run re-derives.
+  await persistCheckStates(checks, nextCounts);
 
   return {
     ok: alertFailures.length === 0,
     failures: alertFailures,
     suppressed,
+    delivered,
     checked: GOLDEN_PARCELS.length + 1,
   };
 }
