@@ -266,11 +266,12 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     grassType,
     month: monthFromServiceDate(serviceDate),
     irrigationInchesPerWeek,
-    // Weekly rainfall drives the water balance. When no 7-day value exists, fall
-    // back to the (completion-preferred) recent daily figure as a conservative
-    // floor — otherwise reports with 24h rain but no FAWN 7-day total would tell
-    // the customer their applied water is irrigation only.
-    rainfallInches7d: firstNumber(rainfallInches7d, rainfallInchesToday),
+    // Only a TRUE 7-day total drives the water balance. A 24-hour completion
+    // value is not a weekly figure — substituting it would let the advice claim
+    // deficit/balanced from a single day of rain. When no weekly total exists the
+    // advice returns 'rain_unknown' (and the 24h rain still shows in the weather
+    // block + the visible rainfallInchesToday field).
+    rainfallInches7d,
     // Portal irrigation-system toggle: when explicitly off, a stale weekly-inches
     // value must not count as a live schedule (prompt to re-add instead).
     irrigationEnabled: propertyPrefs && propertyPrefs.irrigation_system != null
