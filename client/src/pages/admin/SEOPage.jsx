@@ -2933,7 +2933,7 @@ function ContentQATab() {
       >
         <KpiCard label="Scored URLs" value={fmt(data.total)} />
         <KpiCard
-          label="Avg Score"
+          label="Avg Latest 50"
           value={avgScore}
           color={avgScore >= 38 ? D.green : avgScore >= 30 ? D.amber : D.red}
         />
@@ -2943,7 +2943,7 @@ function ContentQATab() {
           color={D.green}
         />
         <KpiCard
-          label="Fix First"
+          label="Top Fixes"
           value={fixFirst.length}
           color={fixFirst.length ? D.red : D.green}
         />
@@ -2968,7 +2968,7 @@ function ContentQATab() {
               marginBottom: 12,
             }}
           >
-            Fix First
+            Top Fixes
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
