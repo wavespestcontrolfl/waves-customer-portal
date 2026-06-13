@@ -10,7 +10,6 @@ import {
   Wand2,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { SPOKE_SITES } from "../../lib/spokeSites";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
@@ -32,6 +31,7 @@ const D = {
   inputBorder: "#D4D4D8",
 };
 const MONO = "'JetBrains Mono', monospace";
+const HUB_BLOG_TARGET_SITES = ["wavespestcontrol.com"];
 
 async function parseAdminResponse(response) {
   const text = await response.text();
@@ -402,7 +402,6 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
   const serviceAreaTags = toArray(editing.service_areas_tag);
   const relatedServices = toArray(editing.related_services);
-  const targetSites = toArray(editing.target_sites);
   const dateInputValue = (v) => {
     if (!v) return "";
     const d = new Date(v);
@@ -414,13 +413,6 @@ function PostEditor({ post, onBack, onUpdate }) {
       ? serviceAreaTags.filter((c) => c !== city)
       : [...serviceAreaTags, city];
     setEditing((prev) => ({ ...prev, service_areas_tag: next }));
-  };
-
-  const toggleTargetSite = (key) => {
-    const next = targetSites.includes(key)
-      ? targetSites.filter((k) => k !== key)
-      : [...targetSites, key];
-    setEditing((prev) => ({ ...prev, target_sites: next }));
   };
 
   const handleRegenerateImage = async () => {
@@ -502,7 +494,7 @@ function PostEditor({ post, onBack, onUpdate }) {
         post_type: editing.post_type || null,
         service_areas_tag: serviceAreaTags,
         related_services: relatedServices,
-        target_sites: targetSites,
+        target_sites: HUB_BLOG_TARGET_SITES,
         hero_image_alt: editing.hero_image_alt || null,
       });
       if (!updated.post)
@@ -562,7 +554,7 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
 
   const handleMergeAstro = async () => {
-    if (!window.confirm("Merge this PR and go live on the hub + spokes?"))
+    if (!window.confirm("Merge this PR and go live on wavespestcontrol.com?"))
       return;
     setAstroMerging(true);
     try {
@@ -1226,10 +1218,6 @@ function PostEditor({ post, onBack, onUpdate }) {
             })}
           </div>{" "}
         </div>
-        {/* Publish targets — controls which spoke sites will render this
-            post. Empty = render everywhere (backward-compat with older
-            posts). Typically pick one domain to avoid duplicate-content
-            SEO penalty across the fleet. */}
         <div style={{ marginTop: 14 }}>
           {" "}
           <label
@@ -1240,54 +1228,26 @@ function PostEditor({ post, onBack, onUpdate }) {
               marginBottom: 6,
             }}
           >
-            Publish to sites
-            {targetSites.length === 0 && (
-              <span style={{ marginLeft: 8, color: D.amber, fontWeight: 600 }}>
-                — no sites selected → will publish to ALL 15 domains
-                (duplicate-content risk)
-              </span>
-            )}
+            Publish target
           </label>
-          {["Hub", "Lawn", "Pest", "Exterminator"].map((group) => (
-            <div key={group} style={{ marginBottom: 6 }}>
-              {" "}
-              <div
-                style={{
-                  fontSize: 10,
-                  color: D.muted,
-                  textTransform: "uppercase",
-                  letterSpacing: 0.5,
-                  marginBottom: 4,
-                }}
-              >
-                {group}
-              </div>{" "}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {SPOKE_SITES.filter((s) => s.group === group).map((s) => {
-                  const active = targetSites.includes(s.key);
-                  return (
-                    <button
-                      key={s.key}
-                      type="button"
-                      onClick={() => toggleTargetSite(s.key)}
-                      style={{
-                        padding: "4px 10px",
-                        borderRadius: 999,
-                        fontSize: 11,
-                        cursor: "pointer",
-                        border: `1px solid ${active ? D.green : D.border}`,
-                        background: active ? D.green : "transparent",
-                        color: active ? D.white : D.muted,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {s.label}
-                    </button>
-                  );
-                })}
-              </div>{" "}
-            </div>
-          ))}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+            <span
+              style={{
+                padding: "4px 10px",
+                borderRadius: 999,
+                fontSize: 11,
+                border: `1px solid ${D.green}`,
+                background: D.green,
+                color: D.white,
+                whiteSpace: "nowrap",
+              }}
+            >
+              Hub — wavespestcontrol.com
+            </span>
+            <span style={{ color: D.muted, fontSize: 12 }}>
+              Blog posts publish only on the Waves hub. Use service/location pages for spoke domains.
+            </span>
+          </div>
         </div>{" "}
       </Card>
       {/* Content */}
