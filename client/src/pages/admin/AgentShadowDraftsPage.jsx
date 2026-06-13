@@ -291,9 +291,16 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         method: "PUT",
         body: JSON.stringify({ mode: nextMode }),
       });
+      // Optimistic mode update. Drop the cached graduation: readiness depends
+      // on mode (the next-rung target changes), and the PUT response carries
+      // no recomputed graduation — keeping it would show a stale chip like
+      // "Ready — enable suggest" under a Suggest mode chip.
       setModes((current) => current
-        ? { ...current, intents: current.intents.map((r) => (r.intent === updated.intent ? { ...r, ...updated } : r)) }
+        ? { ...current, intents: current.intents.map((r) => (r.intent === updated.intent ? { ...r, ...updated, graduation: null } : r)) }
         : current);
+      // Reconcile readiness from the server (graduation isn't in the PUT body).
+      const fresh = await adminFetch("/admin/agents/intent-modes");
+      setModes(fresh);
     } catch (err) {
       setError(err.message || "Failed to update intent mode.");
     } finally {
