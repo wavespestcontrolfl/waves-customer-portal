@@ -236,11 +236,19 @@ function monthFromServiceDate(serviceDate) {
 }
 
 function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null } = {}) {
+  const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
+  const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
+  const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
   const irrigationInchesPerWeek = firstNumber(
-    turfProfile?.irrigation_inches_per_week,
-    assessment.irrigation_inches_per_week,
-    propertyPrefs?.irrigation_inches_per_week,
+    turfIrrigationInches,
+    assessmentIrrigationInches,
+    prefsIrrigationInches,
   );
+  // The portal irrigation toggle (property_preferences.irrigation_system, which
+  // is backfilled to false) only governs a portal-sourced value. A higher-
+  // priority turf/assessment reading must NOT be suppressed by it.
+  const irrigationInchesFromPrefsOnly =
+    turfIrrigationInches == null && assessmentIrrigationInches == null && prefsIrrigationInches != null;
   const irrigationInchesPerDay = irrigationInchesPerWeek == null ? null : irrigationInchesPerWeek / 7;
   const rainfallInchesToday = firstNumber(
     // Prefer the same rainfall the weather block shows (completion conditions —
@@ -272,9 +280,11 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     // advice returns 'rain_unknown' (and the 24h rain still shows in the weather
     // block + the visible rainfallInchesToday field).
     rainfallInches7d,
-    // Portal irrigation-system toggle: when explicitly off, a stale weekly-inches
-    // value must not count as a live schedule (prompt to re-add instead).
-    irrigationEnabled: propertyPrefs && propertyPrefs.irrigation_system != null
+    // Portal irrigation-system toggle suppresses a stale weekly-inches value
+    // ONLY when that value is the portal-sourced one — never when turf/assessment
+    // data supplied it (the toggle's false default would otherwise hide a real
+    // schedule shown in the profile line).
+    irrigationEnabled: irrigationInchesFromPrefsOnly && propertyPrefs && propertyPrefs.irrigation_system != null
       ? !!propertyPrefs.irrigation_system
       : null,
   });
