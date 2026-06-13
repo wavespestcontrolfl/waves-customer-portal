@@ -22,10 +22,21 @@ describe('verifier — prompt contract', () => {
     expect(p).toContain('"violations"');
   });
 
-  test('user prompt carries the facts and the draft under check', () => {
-    const p = buildVerifierUserPrompt('NEXT SERVICE: Quarterly Pest Friday, Jun 19', 'See you Tuesday at 2 PM!');
+  test('user prompt carries facts, the customer message, and the draft under check', () => {
+    const p = buildVerifierUserPrompt(
+      'NEXT SERVICE: Quarterly Pest Friday, Jun 19',
+      'Can you come at 3pm instead?',
+      'See you Tuesday at 2 PM!'
+    );
     expect(p).toContain('NEXT SERVICE: Quarterly Pest Friday, Jun 19');
+    // the inbound must be visible so a draft referencing the customer's own
+    // stated detail isn't wrongly flagged as fabricated (Codex P1)
+    expect(p).toContain('Can you come at 3pm instead?');
     expect(p).toContain('See you Tuesday at 2 PM!');
+  });
+
+  test('system prompt treats the customer message as a valid fact source', () => {
+    expect(buildVerifierSystemPrompt()).toMatch(/customer'?s own current message is also a valid source/i);
   });
 });
 

@@ -26,7 +26,7 @@ function buildVerifierSystemPrompt() {
 - service cadence/frequency, or a treatment-timing rule
 - billing event (a payment, an auto-pay attempt, a charge)
 - any other specific detail not present in the FACTS or the thread
-A claim is a VIOLATION only if a customer could be misled because the draft asserts it as fact without support. Warm acknowledgments, general brand voice, and offers to confirm or follow up are NOT violations. Be strict but precise — never flag a fact that IS present in the FACTS.
+The customer's OWN CURRENT MESSAGE is also a valid source: if the customer states a detail (a time they're available, where they saw pests, what they need), the draft may acknowledge or reference it — that is NOT a violation. A claim is a VIOLATION only if a customer could be misled because the draft asserts as fact something neither the FACTS nor the customer's message support. Warm acknowledgments, general brand voice, and offers to confirm or follow up are NOT violations. Be strict but precise — never flag a detail that IS present in the FACTS or the customer's message.
 
 Respond with ONLY a JSON object, no prose, no code fences. Either:
 {"supported": true, "violations": []}
@@ -34,9 +34,12 @@ or:
 {"supported": false, "violations": ["invents a 9am arrival window", "names tech 'Adam' — not in facts"]}`;
 }
 
-function buildVerifierUserPrompt(factsBlock, draftReply) {
+function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply) {
   return `FACTS:
 ${factsBlock}
+
+CUSTOMER'S CURRENT MESSAGE:
+"${inboundMessage}"
 
 DRAFT REPLY:
 "${draftReply}"

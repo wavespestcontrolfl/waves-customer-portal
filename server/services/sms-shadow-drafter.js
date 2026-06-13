@@ -204,7 +204,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         model: verifier.VERIFIER_MODEL,
         max_tokens: 400,
         system: verifier.buildVerifierSystemPrompt(),
-        messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, parsed.reply) }],
+        messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
       });
       verdict = verifier.parseVerifierResponse(vResp.content?.[0]?.text || '');
     } catch (err) {
