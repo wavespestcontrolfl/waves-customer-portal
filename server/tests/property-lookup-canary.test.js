@@ -54,7 +54,7 @@ const {
   runPropertyLookupCanary,
   _private: {
     GOLDEN_PARCELS,
-    evaluateGoldenRecord, errLabel, atAlertPoint, decideCanaryAlert,
+    evaluateGoldenRecord, errLabel, atAlertPoint, decideCanaryAlert, notificationDelivered,
   },
 } = require('../services/property-lookup-canary');
 
@@ -123,6 +123,18 @@ describe('errLabel', () => {
     expect(errLabel({ code: 'ECONNRESET' })).toBe('ECONNRESET');
     expect(errLabel(new TypeError('fetch failed'))).toBe('TypeError');
     expect(errLabel(null)).toBe('network/timeout');
+  });
+});
+
+describe('notificationDelivered', () => {
+  it('counts a bell write OR a sent push as delivered', () => {
+    expect(notificationDelivered({ bellWritten: true, push: null })).toBe(true);
+    expect(notificationDelivered({ bellWritten: false, push: { sent: 2 } })).toBe(true); // bell off, push reached a device
+  });
+  it('is not delivered when neither channel landed', () => {
+    expect(notificationDelivered({ bellWritten: false, push: null })).toBe(false);
+    expect(notificationDelivered({ bellWritten: false, push: { sent: 0, failed: 3 } })).toBe(false);
+    expect(notificationDelivered(undefined)).toBe(false);
   });
 });
 
@@ -251,6 +263,26 @@ describe('runPropertyLookupCanary', () => {
     expect(n4.delivered).toBe(true);
     expect(n4.failures.some((f) => f.includes('Sarasota'))).toBe(true);
     expect(mockTriggerNotification).toHaveBeenCalledTimes(2);
+  });
+
+  it('a push-only delivery (bell disabled) counts as delivered — no nightly re-send', async () => {
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw abortError();
+      return healthyRecord();
+    });
+    await runPropertyLookupCanary(); // night 1
+    await runPropertyLookupCanary(); // night 2
+    // Night 3 crosses threshold: bell skipped (admins bell-disabled) but push lands.
+    mockTriggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 1 } });
+    const n3 = await runPropertyLookupCanary();
+    expect(n3.delivered).toBe(true);
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+
+    // Night 4 must NOT re-alert — the counter advanced past the alert point,
+    // so we observe the weekly re-ping cadence, not nightly spam.
+    const n4 = await runPropertyLookupCanary();
+    expect(n4.failures).toEqual([]);
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
 
   it('a clean night resets the streak so a later blip restarts at night 1', async () => {

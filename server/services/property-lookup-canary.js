@@ -111,6 +111,16 @@ function evaluateGoldenRecord(label, record) {
   return failures;
 }
 
+// Did the alert actually reach an operator? triggerNotification never throws;
+// it returns { bellWritten, push }. The bell is the durable panel entry, but a
+// push counts too — when admins have the bell disabled but push enabled, the
+// bell is skipped yet the alert still lands, so treating that as "not
+// delivered" would re-send every night instead of the weekly re-ping.
+function notificationDelivered(stats) {
+  if (!stats) return false;
+  return Boolean(stats.bellWritten) || Number(stats.push && stats.push.sent) > 0;
+}
+
 // A counter is "at an alert point" on the run it first crosses its threshold,
 // then every REPING_EVERY_RUNS runs after — so a long-broken check pages once
 // up front plus a weekly reminder, never nightly. Lifted from
@@ -272,7 +282,7 @@ async function runPropertyLookupCanaryInner() {
       failures: alertFailures,
     });
     const stats = await triggerNotification('property_lookup_canary_failed', { failures: alertFailures });
-    delivered = !!(stats && stats.bellWritten);
+    delivered = notificationDelivered(stats);
     if (!delivered && pendingAlerts.length) {
       // The bell write didn't land (triggerNotification never throws — it
       // returns bellWritten:false). Don't "consume" the threshold crossing, or
@@ -320,6 +330,7 @@ module.exports = {
     errLabel,
     atAlertPoint,
     decideCanaryAlert,
+    notificationDelivered,
     isCanaryDisabled,
     runPropertyLookupCanaryInner,
   },
