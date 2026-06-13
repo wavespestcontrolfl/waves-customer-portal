@@ -72,6 +72,14 @@ const gates = {
   // messages stay shadow regardless. Prod opt-in per house pattern.
   smsSuggestMode: isProd ? process.env.GATE_SMS_SUGGEST_MODE === 'true' : true,
 
+  // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
+  // replies for HISTORICAL inbound SMS that already have a human reply and
+  // feeds them to the existing judge, compressing months of per-intent
+  // score accumulation into days. Hourly batches, self-terminating once
+  // history is exhausted. Burns ~2 Anthropic calls per sample, so prod
+  // requires explicit opt-in; flip off (or leave — it no-ops) when done.
+  shadowBackfill: isProd ? process.env.GATE_SHADOW_BACKFILL === 'true' : true,
+
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
 
