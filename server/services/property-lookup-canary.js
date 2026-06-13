@@ -205,8 +205,14 @@ async function runPropertyLookupCanaryInner() {
     .catch((err) => { pointErrCode = errLabel(err); return null; });
   if (pointErrCode) {
     checks.push({ key: 'fdor_point', status: 'transient', details: [`FDOR cadastral layer: golden point lookup threw (${pointErrCode})`] });
-  } else if (!parcel || parcel.county !== GOLDEN_POINT.expectCounty) {
+  } else if (!parcel) {
+    // Layer unreachable / empty response — couldn't get the data → transient.
     checks.push({ key: 'fdor_point', status: 'transient', details: ['FDOR cadastral layer: golden point no longer resolves to a parcel'] });
+  } else if (parcel.county !== GOLDEN_POINT.expectCounty) {
+    // The layer WAS reachable but resolved a different county — adjacent-
+    // polygon selection / a broken point→parcel handoff, exactly the
+    // production break the GOLDEN_POINT comment flags. Page immediately.
+    checks.push({ key: 'fdor_point', status: 'regression', details: ['FDOR cadastral layer: golden point resolves to the wrong county'] });
   } else if (parcel.paoParcelId !== GOLDEN_POINT.expectPaoParcelId) {
     checks.push({ key: 'fdor_point', status: 'regression', details: ['FDOR cadastral layer: golden point resolves to the wrong PAO parcel id'] });
   } else {

@@ -255,6 +255,15 @@ describe('runPropertyLookupCanary', () => {
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
 
+  it('a wrong-county FDOR hit is a regression — pages immediately (adjacent-polygon break)', async () => {
+    // Layer reachable but resolved the wrong polygon → not a transient blip.
+    mockLookupParcelByPoint.mockResolvedValue({ county: 'Sarasota', paoParcelId: '579642409' });
+    const result = await runPropertyLookupCanary();
+    expect(result.ok).toBe(false);
+    expect(result.failures).toEqual(['FDOR cadastral layer: golden point resolves to the wrong county']);
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+  });
+
   it('an FDOR layer miss is transient — suppressed on the first night', async () => {
     mockLookupParcelByPoint.mockResolvedValue(null);
     const result = await runPropertyLookupCanary();
