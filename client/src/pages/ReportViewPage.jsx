@@ -910,10 +910,13 @@ function conditionInterpretation(conditions = {}) {
 }
 
 function lawnScoreLabel(score) {
+  // State labels describing the CURRENT health band — never a trend word.
+  // "Improving" implied a comparison the first report can't have (no prior
+  // assessment); the LawnTrendChart owns trend once there are 2+ visits.
   const value = Number(score);
   if (!Number.isFinite(value)) return 'Tracking';
   if (value >= 85) return 'Strong';
-  if (value >= 70) return 'Improving';
+  if (value >= 70) return 'Healthy';
   if (value >= 55) return 'Watch';
   return 'Needs attention';
 }
