@@ -132,6 +132,14 @@ const HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES = [
   'api',
   'workwave_marketplace',
 ];
+const HERMES_LOGIN_DISCOVERY_TERMINAL_STATUSES = ['completed'];
+const HERMES_QUEUE_PRESERVED_VENDOR_STATUSES = [
+  'configured',
+  'not_required',
+  'manual',
+  'needs_rep_setup',
+  'needs_api_key',
+];
 
 function isOpenLoginDiscoveryJob(loginDiscovery = {}) {
   if (loginDiscovery.status === 'queued') return true;
@@ -140,13 +148,47 @@ function isOpenLoginDiscoveryJob(loginDiscovery = {}) {
   return Number.isFinite(claimedUntil) && claimedUntil > Date.now();
 }
 
+function isTerminalLoginDiscoveryJob(loginDiscovery = {}) {
+  return HERMES_LOGIN_DISCOVERY_TERMINAL_STATUSES.includes(String(loginDiscovery.status || '').toLowerCase());
+}
+
+function loginDiscoveryFromConnection(connection = {}) {
+  if (connection.loginDiscovery && typeof connection.loginDiscovery === 'object') return connection.loginDiscovery;
+  return parseJsonObject(connection.config_json, {}).loginDiscovery || null;
+}
+
+function isLoginDiscoveryConnection(connection = {}) {
+  return connection.is_active !== false
+    && HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES.includes(connection.connection_type);
+}
+
+function findOpenLoginDiscoveryConnection(connections = []) {
+  return connections.find((connection) => (
+    isLoginDiscoveryConnection(connection)
+    && isOpenLoginDiscoveryJob(loginDiscoveryFromConnection(connection) || {})
+  )) || null;
+}
+
+function hasTerminalLoginDiscoveryResult(connections = []) {
+  return connections.some((connection) => (
+    isLoginDiscoveryConnection(connection)
+    && isTerminalLoginDiscoveryJob(loginDiscoveryFromConnection(connection) || {})
+  ));
+}
+
+function vendorCredentialStatusWhileQueued(status) {
+  const normalized = String(status || '').toLowerCase();
+  return HERMES_QUEUE_PRESERVED_VENDOR_STATUSES.includes(normalized) ? status : 'needs_login';
+}
+
 function vendorHasLoginIdentity(vendor = {}) {
   return Boolean(cleanString(vendor.login_username) || cleanString(vendor.login_email) || cleanString(vendor.account_number));
 }
 
-function vendorNeedsLoginDiscovery(vendor = {}, connections = [], includePublic = false) {
+function vendorNeedsLoginDiscovery(vendor = {}, connections = [], includePublic = false, options = {}) {
   if (vendor.active === false) return false;
   if (String(vendor.type || '') === 'competitor_reference') return false;
+  if (!options.retryTerminal && hasTerminalLoginDiscoveryResult(connections)) return false;
 
   const hasLoginUrl = Boolean(cleanString(vendor.login_url));
   const hasLoginIdentity = vendorHasLoginIdentity(vendor);
@@ -154,13 +196,9 @@ function vendorNeedsLoginDiscovery(vendor = {}, connections = [], includePublic 
   const syncMethod = String(vendor.sync_method || '').toLowerCase();
   if (['manual', 'manual_csv', 'manual_seed'].includes(credentialStatus)) return false;
   if (['manual', 'manual_csv', 'manual_seed'].includes(syncMethod)) return false;
-  const accountConnection = connections.find((connection) => (
-    connection.is_active !== false
-    && HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES.includes(connection.connection_type)
-  ));
+  const accountConnection = connections.find(isLoginDiscoveryConnection);
   const configured = connections.some((connection) => (
-    connection.is_active !== false
-    && HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES.includes(connection.connection_type)
+    isLoginDiscoveryConnection(connection)
     && connection.credential_status === 'configured'
   ));
 
@@ -174,7 +212,7 @@ function vendorNeedsLoginDiscovery(vendor = {}, connections = [], includePublic 
 
 async function ensureLoginDiscoveryConnection(trx, vendor) {
   const existingConnections = await trx('vendor_connections')
-    .where({ vendor_id: vendor.id, is_active: true })
+    .where({ vendor_id: vendor.id })
     .whereIn('connection_type', HERMES_LOGIN_DISCOVERY_CONNECTION_TYPES)
     .orderByRaw(`
       CASE connection_type
@@ -185,7 +223,30 @@ async function ensureLoginDiscoveryConnection(trx, vendor) {
         ELSE 4
       END
     `);
-  if (existingConnections.length) return existingConnections[0];
+  const activeConnection = existingConnections.find((connection) => connection.is_active !== false);
+  if (activeConnection) return activeConnection;
+  if (existingConnections.length) {
+    const inactiveConnection = existingConnections[0];
+    const config = parseJsonObject(inactiveConnection.config_json, {});
+    const [connection] = await trx('vendor_connections')
+      .where({ id: inactiveConnection.id })
+      .update({
+        approval_status: inactiveConnection.approval_status === 'approved' ? 'approved' : 'requested',
+        credential_status: inactiveConnection.credential_status === 'configured' ? 'configured' : 'missing',
+        supports_account_pricing: true,
+        supports_inventory: true,
+        supports_branch_availability: true,
+        is_active: true,
+        config_json: JSON.stringify({
+          ...config,
+          reactivatedFrom: config.reactivatedFrom || 'hermes_login_discovery',
+        }),
+        failure_reason: null,
+        updated_at: new Date(),
+      })
+      .returning('*');
+    return connection;
+  }
 
   const [connection] = await trx('vendor_connections')
     .insert({
@@ -1027,6 +1088,7 @@ router.get('/price-sync/vendors', async (req, res, next) => {
         'vc.approval_status',
         'vc.credential_status',
         'vc.config_json',
+        'vc.is_active',
         'vc.supports_account_pricing',
         'vc.supports_public_pricing',
         'vc.supports_inventory',
@@ -1106,6 +1168,7 @@ router.get('/price-sync/vendors', async (req, res, next) => {
           displayName: row.display_name || row.connection_type,
           approvalStatus: row.approval_status,
           credentialStatus: row.credential_status,
+          isActive: row.is_active !== false,
           loginDiscovery,
           supportsAccountPricing: row.supports_account_pricing,
           supportsPublicPricing: row.supports_public_pricing,
@@ -1117,7 +1180,7 @@ router.get('/price-sync/vendors', async (req, res, next) => {
           failureReason: row.failure_reason,
         };
         vendor.connections.push(connection);
-        if (loginDiscovery?.status) {
+        if (connection.isActive && loginDiscovery?.status) {
           vendor.loginDiscoveryStatus = loginDiscovery.status;
           vendor.loginDiscoveryResult = loginDiscovery.outcome || loginDiscovery.result || null;
         }
@@ -1131,9 +1194,10 @@ router.get('/price-sync/vendors', async (req, res, next) => {
 
     for (const vendor of grouped.values()) {
       const loginDiscoveryConnections = vendor.connections.map((connection) => ({
-        is_active: true,
+        is_active: connection.isActive,
         connection_type: connection.type,
         credential_status: connection.credentialStatus,
+        loginDiscovery: connection.loginDiscovery,
       }));
       vendor.loginDiscoveryNeeded = vendorNeedsLoginDiscovery({
         id: vendor.id,
@@ -1158,6 +1222,7 @@ router.post('/price-sync/hermes-login-discovery', async (req, res, next) => {
 
     const limit = parseBoundedInt(req.body?.limit, 50, 1, 200);
     const includePublic = req.body?.includePublic === true;
+    const retryTerminal = req.body?.retryTerminal === true;
     const requestedBy = req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin';
 
     const vendors = await db('vendors')
@@ -1178,7 +1243,7 @@ router.post('/price-sync/hermes-login-discovery', async (req, res, next) => {
 
     const vendorIds = vendors.map((vendor) => vendor.id);
     const connectionRows = vendorIds.length
-      ? await db('vendor_connections').whereIn('vendor_id', vendorIds).where({ is_active: true })
+      ? await db('vendor_connections').whereIn('vendor_id', vendorIds)
       : [];
     const connectionsByVendor = new Map();
     for (const connection of connectionRows) {
@@ -1187,13 +1252,30 @@ router.post('/price-sync/hermes-login-discovery', async (req, res, next) => {
       connectionsByVendor.get(key).push(connection);
     }
 
-    const candidates = vendors
-      .filter((vendor) => vendorNeedsLoginDiscovery(vendor, connectionsByVendor.get(String(vendor.id)) || [], includePublic))
-      .slice(0, limit);
-
     let queued = 0;
     let duplicates = 0;
     const jobs = [];
+    const candidates = [];
+    for (const vendor of vendors) {
+      const connections = connectionsByVendor.get(String(vendor.id)) || [];
+      if (!vendorNeedsLoginDiscovery(vendor, connections, includePublic, { retryTerminal })) continue;
+      const openConnection = findOpenLoginDiscoveryConnection(connections);
+      if (openConnection) {
+        const existing = loginDiscoveryFromConnection(openConnection) || {};
+        duplicates += 1;
+        jobs.push({
+          vendorId: vendor.id,
+          vendorName: vendor.name,
+          connectionId: openConnection.id,
+          status: existing.status,
+          duplicate: true,
+        });
+        continue;
+      }
+      candidates.push(vendor);
+      if (candidates.length >= limit) break;
+    }
+
     await db.transaction(async (trx) => {
       for (const vendor of candidates) {
         const connection = await ensureLoginDiscoveryConnection(trx, vendor);
@@ -1228,9 +1310,7 @@ router.post('/price-sync/hermes-login-discovery', async (req, res, next) => {
           updated_at: new Date(),
         });
 
-        const nextCredentialStatus = ['configured', 'not_required', 'manual'].includes(String(vendor.credential_status || ''))
-          ? vendor.credential_status
-          : 'needs_login';
+        const nextCredentialStatus = vendorCredentialStatusWhileQueued(vendor.credential_status);
         await trx('vendors').where({ id: vendor.id }).update({
           credential_status: nextCredentialStatus,
           updated_at: new Date(),
@@ -3210,5 +3290,15 @@ router.post('/ai-price-lookup/bulk', async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
+
+router._test = {
+  findOpenLoginDiscoveryConnection,
+  hasTerminalLoginDiscoveryResult,
+  isOpenLoginDiscoveryJob,
+  isTerminalLoginDiscoveryJob,
+  loginDiscoveryFromConnection,
+  vendorCredentialStatusWhileQueued,
+  vendorNeedsLoginDiscovery,
+};
 
 module.exports = router;

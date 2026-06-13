@@ -14,6 +14,30 @@ router.use(hermesAuth);
 
 const TERMINAL_OUTCOMES = ['found', 'needs_manual_signup', 'not_found', 'failed', 'skipped'];
 const CLAIM_LEASE_MINUTES = 15;
+const COMMON_BARE_HOST_TLDS = new Set([
+  'ai',
+  'app',
+  'biz',
+  'ca',
+  'cloud',
+  'co',
+  'com',
+  'dev',
+  'edu',
+  'gov',
+  'info',
+  'io',
+  'net',
+  'online',
+  'org',
+  'shop',
+  'site',
+  'solutions',
+  'store',
+  'supply',
+  'systems',
+  'us',
+]);
 
 function cleanString(value) {
   const str = String(value ?? '').trim();
@@ -23,11 +47,78 @@ function cleanString(value) {
 function normalizeHttpUrl(value, baseUrl = null) {
   const raw = cleanString(value);
   if (!raw) return null;
+  if (raw.startsWith('//')) {
+    try {
+      const protocolRelative = new URL(`https:${raw}`);
+      if (['http:', 'https:'].includes(protocolRelative.protocol)) return protocolRelative.href;
+    } catch {
+      // Fall through to normal absolute/base handling.
+    }
+  }
   try {
-    const base = cleanString(baseUrl);
-    const url = base ? new URL(raw, base) : new URL(raw);
+    const absolute = new URL(raw);
+    if (['http:', 'https:'].includes(absolute.protocol)) return absolute.href;
+  } catch {
+    // Raw may be a relative path; try the vendor website as a base below.
+  }
+  const schemeLessAbsolute = normalizeSchemeLessHttpUrl(raw);
+  if (schemeLessAbsolute) return schemeLessAbsolute;
+  const base = normalizeHttpBase(baseUrl);
+  if (!base) return null;
+  try {
+    const url = new URL(raw, base);
     if (!['http:', 'https:'].includes(url.protocol)) return null;
     return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSchemeLessHttpUrl(value) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  if (raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../') || raw.startsWith('?') || raw.startsWith('#')) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return null;
+  if (!isLikelySchemeLessHost(raw)) return null;
+  try {
+    const url = new URL(`https://${raw}`);
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeRelativePortalFile(value) {
+  const raw = cleanString(value);
+  if (!raw) return false;
+  const path = raw.split(/[?#]/, 1)[0];
+  return path.includes('.') && !path.includes('/') && !isLikelySchemeLessHost(raw);
+}
+
+function isLikelySchemeLessHost(value) {
+  const raw = cleanString(value);
+  if (!raw) return false;
+  const pathBeforeQuery = raw.split(/[?#]/, 1)[0];
+  const host = pathBeforeQuery.split('/', 1)[0].split(':', 1)[0];
+  if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(host)) return false;
+  const labels = host.toLowerCase().split('.');
+  if (labels.length >= 3) return true;
+  return COMMON_BARE_HOST_TLDS.has(labels[labels.length - 1]);
+}
+
+function normalizeHttpBase(value) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    // Vendor websites are editable text and are often stored as bare domains.
+  }
+  try {
+    const url = new URL(`https://${raw}`);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
   } catch {
     return null;
   }
@@ -120,6 +211,22 @@ function noteFromReport({ outcome, loginUrl, registrationUrl, contactUrl, repEma
   if (requirements.length) parts.push(`Requirements: ${requirements.join('; ')}`);
   if (notes) parts.push(`Notes: ${notes}`);
   return parts.join(' ');
+}
+
+function hasDiscoveryEvidence({ loginUrl, registrationUrl, pricingPortalUrl, contactUrl, repEmail, repPhone }) {
+  return Boolean(loginUrl || registrationUrl || pricingPortalUrl || contactUrl || repEmail || repPhone);
+}
+
+function hasFoundPortalEvidence({ loginUrl, registrationUrl, pricingPortalUrl }) {
+  return Boolean(loginUrl || registrationUrl || pricingPortalUrl);
+}
+
+function vendorCredentialStatusFromOutcome(outcome, currentStatus) {
+  if (['configured', 'not_required'].includes(String(currentStatus || ''))) return currentStatus;
+  if (outcome === 'found') return 'needs_login';
+  if (outcome === 'needs_manual_signup' || outcome === 'not_found') return 'needs_rep_setup';
+  if (outcome === 'failed') return 'failed';
+  return currentStatus || null;
 }
 
 // GET /claim?n=10 — lease queued vendor-login discovery tasks
@@ -239,8 +346,18 @@ router.post('/report', async (req, res, next) => {
       const notes = cleanString(body.notes);
       const requirements = cleanStringArray(body.signup_requirements || body.requirements);
 
-      if (['found', 'needs_manual_signup'].includes(outcome) && !loginUrl && !registrationUrl && !pricingPortalUrl && !contactUrl && !repEmail) {
-        return { status: 400, body: { error: 'found outcomes require a login, registration, portal, contact URL, or rep email' } };
+      if (outcome === 'found' && !hasFoundPortalEvidence({ loginUrl, registrationUrl, pricingPortalUrl })) {
+        return { status: 400, body: { error: 'found outcomes require a login, registration, or pricing portal URL' } };
+      }
+      if (outcome === 'needs_manual_signup' && !hasDiscoveryEvidence({
+        loginUrl,
+        registrationUrl,
+        pricingPortalUrl,
+        contactUrl,
+        repEmail,
+        repPhone,
+      })) {
+        return { status: 400, body: { error: 'manual signup outcomes require a portal, registration, contact URL, rep email, or rep phone' } };
       }
 
       const config = parseJsonObject(connection.config_json, {});
@@ -274,13 +391,7 @@ router.post('/report', async (req, res, next) => {
       const existingNotes = cleanString(connection.sync_method_notes);
       const nextNotes = [existingNotes, discoveryNote].filter(Boolean).join('\n').slice(-4000);
       const nextLoginUrl = loginUrl || pricingPortalUrl || registrationUrl || connection.vendor_login_url || null;
-      const protectedVendorStatus = ['configured', 'not_required'].includes(String(connection.vendor_credential_status || ''));
-      let nextVendorCredentialStatus = connection.vendor_credential_status || null;
-      if (!protectedVendorStatus) {
-        if (['found', 'needs_manual_signup'].includes(outcome)) nextVendorCredentialStatus = 'needs_login';
-        else if (outcome === 'not_found') nextVendorCredentialStatus = 'needs_rep_setup';
-        else if (outcome === 'failed') nextVendorCredentialStatus = 'failed';
-      }
+      const nextVendorCredentialStatus = vendorCredentialStatusFromOutcome(outcome, connection.vendor_credential_status);
 
       await trx('vendors').where({ id: connection.vendor_id }).update({
         ...(nextLoginUrl ? { login_url: nextLoginUrl } : {}),
@@ -317,5 +428,16 @@ router.post('/report', async (req, res, next) => {
     res.status(result.status).json(result.body);
   } catch (err) { next(err); }
 });
+
+router._test = {
+  hasDiscoveryEvidence,
+  hasFoundPortalEvidence,
+  isLikelySchemeLessHost,
+  looksLikeRelativePortalFile,
+  normalizeHttpBase,
+  normalizeSchemeLessHttpUrl,
+  normalizeHttpUrl,
+  vendorCredentialStatusFromOutcome,
+};
 
 module.exports = router;
