@@ -35,6 +35,17 @@ function findGrassTypeDeep(node, depth = 6) {
   }
   return null;
 }
+
+// Grass type to persist on estimate acceptance, or null. Gated on a LAWN service
+// being present: the admin estimate form always saves grassType (defaulting to
+// st_augustine even for pest-only accepts), so an ungated write would stamp a
+// fake default turf profile on non-lawn customers.
+function grassTypeToPersist(recurringServices, estimateData) {
+  const hasLawn = (Array.isArray(recurringServices) ? recurringServices : [])
+    .some((svc) => recurringServiceKey(svc) === 'lawn_care');
+  return hasLawn ? normalizeGrassType(findGrassTypeDeep(estimateData)) : null;
+}
+
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
 
 const WAVEGUARD_SETUP_FEE = 99;
@@ -693,11 +704,14 @@ const EstimateConverter = {
     });
 
     // 1b. Persist grass type captured during the estimate so lawn reports use
-    //     the real turf instead of the St. Augustine default. Fail-soft and
-    //     COALESCE-guarded — never clobber an admin-set value, never break
+    //     the real turf instead of the St. Augustine default. ONLY for estimates
+    //     with a lawn service — the admin estimate form always saves grassType
+    //     (defaulting to st_augustine even for pest-only accepts), so an
+    //     ungated write would stamp a fake default on non-lawn customers.
+    //     Fail-soft + COALESCE — never clobber an admin-set value, never break
     //     acceptance.
     try {
-      const grass = normalizeGrassType(findGrassTypeDeep(estimateData));
+      const grass = grassTypeToPersist(recurringServices, estimateData);
       if (grass) {
         await database('customer_turf_profiles')
           .insert({ customer_id: customerId, grass_type: grass })
@@ -1190,6 +1204,7 @@ const EstimateConverter = {
 
 module.exports = EstimateConverter;
 module.exports.findGrassTypeDeep = findGrassTypeDeep;
+module.exports.grassTypeToPersist = grassTypeToPersist;
 module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
 module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
 module.exports.determineTier = determineTier;
