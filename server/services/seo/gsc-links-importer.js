@@ -226,6 +226,7 @@ async function importCsv(csvText, {
 
     if (existing) {
       const existingDofollow = existing.is_dofollow === undefined ? existing.isDofollow : existing.is_dofollow;
+      const existingAnchor = existing.anchor_text === undefined ? existing.anchorText : existing.anchor_text;
       const existingToxicityScore = Number(existing.toxicity_score || 0);
       const hasExistingSafetySignal = existingToxicityScore > 0 || (existing.severity && existing.severity !== 'clean');
       const existingSafetyPatch = hasExistingSafetySignal
@@ -241,6 +242,7 @@ async function importCsv(csvText, {
         .update({
           ...patch,
           ...existingSafetyPatch,
+          anchor_text: candidate.anchor_text || existingAnchor || null,
           status: existing.status === 'disavowed' ? 'disavowed' : patch.status,
           is_dofollow: existingDofollow ?? null,
           first_seen: existing.first_seen || candidate.first_seen || today,

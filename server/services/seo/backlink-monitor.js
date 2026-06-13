@@ -192,7 +192,7 @@ class BacklinkMonitor {
             .count('id as count').first().then(r => parseInt(r?.count) || 0)
         : 0,
       avg_domain_rating: all.length > 0 ? Math.round(all.reduce((s, b) => s + (b.domain_rating || 0), 0) / all.length) : 0,
-      dofollow_count: all.filter(b => b.is_dofollow !== false).length,
+      dofollow_count: all.filter(b => b.is_dofollow === true).length,
       nofollow_count: all.filter(b => b.is_dofollow === false).length,
       critical_count: all.filter(b => b.severity === 'critical').length,
       warning_count: all.filter(b => b.severity === 'warning').length,

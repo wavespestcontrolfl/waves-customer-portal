@@ -31,7 +31,7 @@ describe('GSC Links importer', () => {
       candidates: 2,
       inserted: 0,
       updated: 0,
-      skipped: { missing_source_url: 1 },
+      skipped: { missing_source_url: 1, missing_target_url: 1 },
     });
     expect(result.sample).toEqual([
       expect.objectContaining({
@@ -109,6 +109,52 @@ describe('GSC Links importer', () => {
       toxicity_reasons: JSON.stringify(['manual_disavow']),
       is_dofollow: false,
       first_seen: '2026-05-01',
+    }));
+  });
+
+  test('re-import preserves existing anchor when GSC CSV has none', async () => {
+    const db = require('../models/db');
+    const BacklinkMonitor = require('../services/seo/backlink-monitor');
+    BacklinkMonitor.scoreToxicity.mockReturnValue({ score: 0, severity: 'clean', reasons: [] });
+    const existing = {
+      id: 'backlink-1',
+      source_url: 'https://example.com/listing',
+      target_url: 'https://wavespestcontrol.com/',
+      status: 'active',
+      severity: 'clean',
+      toxicity_score: 0,
+      toxicity_reasons: JSON.stringify([]),
+      anchor_text: 'Known DataForSEO Anchor',
+      is_dofollow: true,
+      first_seen: '2026-05-01',
+    };
+    const updates = [];
+
+    db.mockImplementation((table) => {
+      if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
+      const builder = {
+        where: jest.fn(() => builder),
+        first: jest.fn(async () => existing),
+        update: jest.fn(async (patch) => {
+          updates.push(patch);
+          return 1;
+        }),
+      };
+      return builder;
+    });
+
+    const importer = require('../services/seo/gsc-links-importer');
+    const csv = [
+      'Source page,Target page',
+      'https://example.com/listing,https://wavespestcontrol.com/',
+    ].join('\n');
+
+    const result = await importer.importCsv(csv, { apply: true });
+
+    expect(result).toMatchObject({ inserted: 0, updated: 1 });
+    expect(updates[0]).toEqual(expect.objectContaining({
+      anchor_text: 'Known DataForSEO Anchor',
+      is_dofollow: true,
     }));
   });
 
