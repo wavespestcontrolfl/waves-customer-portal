@@ -7,7 +7,7 @@ const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conversations');
-const { claimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
+const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -235,6 +235,11 @@ function queueVoiceMessageSync(callSid) {
 // We answer, enable recording, and log the call.
 // =========================================================================
 router.post('/voice', async (req, res) => {
+  // Whether THIS delivery took the dedupe ledger row (see /sms for rationale).
+  let claimOwned = false;
+  // Flipped true once the call_log row (non-idempotent; twilio_call_sid not
+  // unique) has committed, after which we must not release the claim on error.
+  let callLogged = false;
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
@@ -244,20 +249,28 @@ router.post('/voice', async (req, res) => {
 
     const { From, To, CallSid, CallStatus, Direction } = req.body;
 
+    // ── Idempotency claim (must run before spam-block + all side-effects) ──
+    // Twilio can redeliver the same CallSid. Claim it first so a redelivery
+    // does not duplicate the call_log row, touchpoint, paid Lookup, OR the
+    // spam-block audit write (RED audit R1). Unlike /sms we don't short-circuit
+    // — the call still needs routing TwiML — so `firstDelivery` gates the
+    // side-effecting work instead. Fails open (processable but not owned);
+    // only an owner releases the claim on error.
+    const voiceClaim = await tryClaimInboundWebhook(CallSid, 'voice');
+    const firstDelivery = voiceClaim.processable;
+    claimOwned = voiceClaim.owned;
+
     // ── Spam block (must run before any other routing) ──
+    // Runs on every delivery so routing stays correct, but only records the
+    // blocked-attempt audit row on the first delivery (recordAttempt).
     const { checkInboundBlock } = require('../middleware/spam-block');
     const blockResult = await checkInboundBlock({
       from: From, to: To, channel: 'voice', twilioSid: CallSid, addOns: req.body.AddOns,
+      recordAttempt: firstDelivery,
     });
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
-
-    // Idempotency: Twilio can redeliver the same CallSid. Claim it so the DB
-    // writes below (call_log row, touchpoint, paid Lookup) run only on the
-    // first delivery — a redelivery is still routed (TwiML below) but does
-    // not duplicate the row (RED audit R1). Fails open.
-    const firstDelivery = await claimInboundWebhook(CallSid, 'voice');
 
     // Match caller to customer
     let customer = await findSingleCustomerByPhone(db, From);
@@ -296,6 +309,8 @@ router.post('/voice', async (req, res) => {
         domain: numberConfig?.domain || null,
       }),
     });
+    // call_log now committed — don't release the claim on a later error.
+    callLogged = true;
 
     // Dual-write to unified messages table. Recording + transcription
     // arrive in later webhooks and update this row via twilio_sid.
@@ -374,9 +389,11 @@ router.post('/voice', async (req, res) => {
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Voice webhook error: ${err.message}`);
-    // Release the idempotency claim so a Twilio retry can reprocess this
-    // call rather than being treated as a duplicate (see claim above).
-    void releaseInboundWebhook(req.body?.CallSid);
+    // Release the claim only if this delivery owns it AND call_log hasn't
+    // committed yet (!callLogged), so a Twilio retry can reprocess rather than
+    // duplicate the row. A fail-open delivery must not delete a sibling's good
+    // claim (see claim above).
+    if (claimOwned && !callLogged) void releaseInboundWebhook(req.body?.CallSid);
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'inbound',

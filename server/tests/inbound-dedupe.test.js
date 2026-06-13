@@ -15,34 +15,51 @@ const mockChain = {
 jest.mock('../models/db', () => jest.fn(() => mockChain));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { claimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
+const { tryClaimInboundWebhook, claimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 
 beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe('claimInboundWebhook', () => {
-  test('first delivery wins the claim (returns true)', async () => {
+describe('tryClaimInboundWebhook', () => {
+  test('first delivery: processable AND owned', async () => {
     mockChain.returning.mockResolvedValue([{ twilio_sid: 'SM123' }]);
-    await expect(claimInboundWebhook('SM123', 'sms')).resolves.toBe(true);
+    await expect(tryClaimInboundWebhook('SM123', 'sms')).resolves.toEqual({ processable: true, owned: true });
     expect(mockChain.insert).toHaveBeenCalledWith({ twilio_sid: 'SM123', channel: 'sms' });
     expect(mockChain.onConflict).toHaveBeenCalledWith('twilio_sid');
     expect(mockChain.ignore).toHaveBeenCalled();
   });
 
-  test('redelivery hits the conflict and is reported as a duplicate (returns false)', async () => {
+  test('redelivery (conflict): neither processable nor owned', async () => {
     mockChain.returning.mockResolvedValue([]); // ON CONFLICT DO NOTHING -> 0 rows
+    await expect(tryClaimInboundWebhook('SM123', 'sms')).resolves.toEqual({ processable: false, owned: false });
+  });
+
+  test('FAILS OPEN on write error: processable but NOT owned (must not release a row it never took)', async () => {
+    mockChain.returning.mockRejectedValue(new Error('relation does not exist'));
+    await expect(tryClaimInboundWebhook('CA999', 'voice')).resolves.toEqual({ processable: true, owned: false });
+  });
+
+  test('missing SID: processable but not owned, no DB call', async () => {
+    await expect(tryClaimInboundWebhook(undefined, 'sms')).resolves.toEqual({ processable: true, owned: false });
+    expect(mockChain.insert).not.toHaveBeenCalled();
+  });
+});
+
+describe('claimInboundWebhook (boolean wrapper)', () => {
+  test('returns true for a fresh claim', async () => {
+    mockChain.returning.mockResolvedValue([{ twilio_sid: 'SM123' }]);
+    await expect(claimInboundWebhook('SM123', 'sms')).resolves.toBe(true);
+  });
+
+  test('returns false for a duplicate', async () => {
+    mockChain.returning.mockResolvedValue([]);
     await expect(claimInboundWebhook('SM123', 'sms')).resolves.toBe(false);
   });
 
-  test('FAILS OPEN when the dedupe write errors (returns true — never drop a message)', async () => {
-    mockChain.returning.mockRejectedValue(new Error('relation does not exist'));
-    await expect(claimInboundWebhook('CA999', 'voice')).resolves.toBe(true);
-  });
-
-  test('missing SID is treated as processable (returns true, no DB call)', async () => {
-    await expect(claimInboundWebhook(undefined, 'sms')).resolves.toBe(true);
-    expect(mockChain.insert).not.toHaveBeenCalled();
+  test('returns true on fail-open', async () => {
+    mockChain.returning.mockRejectedValue(new Error('boom'));
+    await expect(claimInboundWebhook('SM123', 'sms')).resolves.toBe(true);
   });
 });
 

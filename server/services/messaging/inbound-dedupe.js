@@ -4,36 +4,59 @@ const logger = require('../logger');
 /**
  * Atomically claim an inbound Twilio webhook delivery for processing.
  *
- * Returns true when this is the FIRST time we've seen this SID (the caller
- * owns the message and should process it), false when it's a redelivery of
- * an already-seen SID (the caller should short-circuit).
+ * Returns BOTH whether the delivery should be processed AND whether THIS
+ * delivery actually acquired the ledger row, because they differ in the
+ * fail-open case:
+ *   - fresh insert     -> { processable: true,  owned: true  }  (first delivery)
+ *   - conflict (dup)   -> { processable: false, owned: false }  (redelivery, skip)
+ *   - claim write error-> { processable: true,  owned: false }  (FAIL OPEN — process,
+ *                                                                 but we did NOT take a row)
+ *   - missing sid      -> { processable: true,  owned: false }
  *
  * The claim is a single INSERT ... ON CONFLICT (twilio_sid) DO NOTHING:
  * the first delivery inserts a row and gets it back; a redelivery hits the
  * conflict and gets zero rows. No check-then-act race window.
  *
- * FAILS OPEN: if the dedupe write itself errors (table missing during a
- * deploy window, transient DB hiccup), we return true so a real inbound
- * customer message is NEVER dropped on account of the dedupe layer. A rare
- * duplicate is strictly better than a lost message.
+ * FAILS OPEN (processable=true) if the dedupe write itself errors (table
+ * missing during a deploy window, transient DB hiccup) so a real inbound
+ * customer message is NEVER dropped on account of the dedupe layer. But
+ * `owned` stays false there — the caller must NOT release a claim it never
+ * took, or it could delete a *sibling* delivery's good claim and let that
+ * message be reprocessed (double-handled).
  *
  * @param {string} twilioSid  MessageSid (SMS) or CallSid (voice)
  * @param {string} channel    'sms' | 'voice'
- * @returns {Promise<boolean>} true = first delivery (process), false = duplicate (skip)
+ * @returns {Promise<{processable: boolean, owned: boolean}>}
  */
-async function claimInboundWebhook(twilioSid, channel) {
-  if (!twilioSid) return true; // nothing to dedupe on — process it
+async function tryClaimInboundWebhook(twilioSid, channel) {
+  if (!twilioSid) return { processable: true, owned: false }; // nothing to dedupe on
   try {
     const inserted = await db('inbound_webhook_events')
       .insert({ twilio_sid: twilioSid, channel })
       .onConflict('twilio_sid')
       .ignore()
       .returning('twilio_sid');
-    return inserted.length > 0;
+    const owned = inserted.length > 0;
+    return { processable: owned, owned };
   } catch (err) {
     logger.error(`[inbound-dedupe] claim failed (${channel}); failing open: ${err.message}`);
-    return true;
+    return { processable: true, owned: false };
   }
+}
+
+/**
+ * Boolean convenience wrapper around {@link tryClaimInboundWebhook}: true if
+ * the delivery should be processed (first delivery OR fail-open), false if it
+ * is a confirmed duplicate. Use tryClaimInboundWebhook when you also need to
+ * know whether to release the claim on error.
+ *
+ * @param {string} twilioSid
+ * @param {string} channel
+ * @returns {Promise<boolean>}
+ */
+async function claimInboundWebhook(twilioSid, channel) {
+  const { processable } = await tryClaimInboundWebhook(twilioSid, channel);
+  return processable;
 }
 
 /**
@@ -71,4 +94,4 @@ async function pruneInboundWebhookEvents({ olderThanDays = 7 } = {}) {
   }
 }
 
-module.exports = { claimInboundWebhook, releaseInboundWebhook, pruneInboundWebhookEvents };
+module.exports = { tryClaimInboundWebhook, claimInboundWebhook, releaseInboundWebhook, pruneInboundWebhookEvents };
