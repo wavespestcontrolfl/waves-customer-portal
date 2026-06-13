@@ -25,6 +25,7 @@ class BacklinkMonitor {
     // Build active link map with composite keys BEFORE processing
     const activeLinks = await db('seo_backlinks')
       .where('status', 'active')
+      .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
       .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text');
     const activeMap = new Map(activeLinks.map(l => [`${l.source_url}::${l.target_url}`, l]));
     const seenKeys = new Set();
@@ -41,6 +42,7 @@ class BacklinkMonitor {
         anchor_text: link.anchor, domain_rating: link.domain_from_rank,
         toxicity_score: toxicity.score, toxicity_reasons: JSON.stringify(toxicity.reasons),
         severity: toxicity.severity, last_checked: etDateString(),
+        discovery_source: 'dataforseo',
       };
 
       if (existing) {

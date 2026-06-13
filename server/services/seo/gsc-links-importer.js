@@ -6,6 +6,8 @@ const BacklinkMonitor = require('./backlink-monitor');
 const DEFAULT_TARGET = 'https://wavespestcontrol.com/';
 
 const SOURCE_FIELDS = [
+  'links',
+  'url',
   'source page',
   'source url',
   'source',
@@ -37,6 +39,8 @@ const ANCHOR_FIELDS = [
 ];
 
 const FIRST_SEEN_FIELDS = [
+  'first discovered',
+  'first discovered date',
   'first seen',
   'first detected',
   'discovered',
@@ -126,10 +130,14 @@ function parseRows(csvText) {
   });
 }
 
-function normalizeRow(row, { defaultTargetUrl = DEFAULT_TARGET } = {}) {
+function isGscImportNote(value) {
+  return String(value || '').includes('GSC Links exports do not include');
+}
+
+function normalizeRow(row, { defaultTargetUrl = null, defaultOrigin = DEFAULT_TARGET } = {}) {
   const sourceUrl = normalizeUrl(getField(row, SOURCE_FIELDS));
   const targetRaw = getField(row, TARGET_FIELDS) || defaultTargetUrl;
-  const targetUrl = normalizeUrl(targetRaw, { defaultOrigin: defaultTargetUrl });
+  const targetUrl = normalizeUrl(targetRaw, { defaultOrigin });
   const domain = sourceDomain(sourceUrl);
 
   if (!sourceUrl) return { skipped: true, reason: 'missing_source_url' };
@@ -154,8 +162,9 @@ function normalizeRow(row, { defaultTargetUrl = DEFAULT_TARGET } = {}) {
 
 async function importCsv(csvText, {
   apply = true,
-  defaultTargetUrl = DEFAULT_TARGET,
+  defaultTargetUrl = null,
   sourceLabel = 'gsc_links_export',
+  discoverySource = 'gsc_links_export',
 } = {}) {
   const rows = parseRows(csvText);
   const today = etDateString();
@@ -219,6 +228,7 @@ async function importCsv(csvText, {
       notes: `Imported from ${sourceLabel}. GSC Links exports do not include dofollow or authority metrics; verify separately.`,
       link_type: BacklinkMonitor.classifyLinkType(candidate),
       is_dofollow: null,
+      discovery_source: discoverySource,
       target_page_type: BacklinkMonitor.classifyTargetPage(candidate.target_url),
       discovered_date: candidate.discovered_date || candidate.first_seen || today,
       updated_at: new Date(),
@@ -228,6 +238,8 @@ async function importCsv(csvText, {
       const existingDofollow = existing.is_dofollow === undefined ? existing.isDofollow : existing.is_dofollow;
       const existingAnchor = existing.anchor_text === undefined ? existing.anchorText : existing.anchor_text;
       const existingNotes = existing.notes === undefined ? existing.note : existing.notes;
+      const existingDiscoverySource = existing.discovery_source === undefined ? existing.discoverySource : existing.discovery_source;
+      const discoverySourcePatch = existingDiscoverySource || (isGscImportNote(existingNotes) ? discoverySource : null);
       const existingToxicityScore = Number(existing.toxicity_score || 0);
       const hasExistingSafetySignal = existingToxicityScore > 0 || (existing.severity && existing.severity !== 'clean');
       const existingSafetyPatch = hasExistingSafetySignal
@@ -245,6 +257,7 @@ async function importCsv(csvText, {
           ...existingSafetyPatch,
           anchor_text: candidate.anchor_text || existingAnchor || null,
           notes: existingNotes || patch.notes,
+          discovery_source: discoverySourcePatch,
           status: existing.status === 'disavowed' ? 'disavowed' : patch.status,
           is_dofollow: existingDofollow ?? null,
           first_seen: existing.first_seen || candidate.first_seen || today,

@@ -50,6 +50,59 @@ describe('GSC Links importer', () => {
     ]);
   });
 
+  test('dry run accepts standard GSC Links column with first discovered date', async () => {
+    const importer = require('../services/seo/gsc-links-importer');
+    const csv = [
+      'Links,Target page,First discovered',
+      'https://example.com/gsc-link,https://wavespestcontrol.com/pest-control-bradenton-fl/,2026-06-01',
+    ].join('\n');
+
+    const result = await importer.importCsv(csv, { apply: false });
+
+    expect(result).toMatchObject({
+      apply: false,
+      parsed: 1,
+      candidates: 1,
+      skipped: {},
+    });
+    expect(result.sample[0]).toEqual(expect.objectContaining({
+      source_url: 'https://example.com/gsc-link',
+      source_domain: 'example.com',
+      target_url: 'https://wavespestcontrol.com/pest-control-bradenton-fl/',
+      first_seen: '2026-06-01',
+      discovered_date: '2026-06-01',
+    }));
+  });
+
+  test('target-less GSC source exports are skipped unless a default target is explicit', async () => {
+    const importer = require('../services/seo/gsc-links-importer');
+    const csv = [
+      'URL,First discovered',
+      'https://example.com/source-only,2026-06-01',
+    ].join('\n');
+
+    const withoutDefault = await importer.importCsv(csv, { apply: false });
+    expect(withoutDefault).toMatchObject({
+      parsed: 1,
+      candidates: 0,
+      skipped: { missing_target_url: 1 },
+    });
+
+    const withDefault = await importer.importCsv(csv, {
+      apply: false,
+      defaultTargetUrl: 'https://wavespestcontrol.com/pest-control-sarasota-fl/',
+    });
+    expect(withDefault).toMatchObject({
+      parsed: 1,
+      candidates: 1,
+      skipped: {},
+    });
+    expect(withDefault.sample[0]).toEqual(expect.objectContaining({
+      source_url: 'https://example.com/source-only',
+      target_url: 'https://wavespestcontrol.com/pest-control-sarasota-fl/',
+    }));
+  });
+
   test('normalizeRow rejects non-Waves targets', () => {
     const importer = require('../services/seo/gsc-links-importer');
 
@@ -160,6 +213,49 @@ describe('GSC Links importer', () => {
     }));
   });
 
+  test('re-import tags legacy GSC rows for source-aware loss detection', async () => {
+    const db = require('../models/db');
+    const existing = {
+      id: 'backlink-1',
+      source_url: 'https://example.com/listing',
+      target_url: 'https://wavespestcontrol.com/',
+      status: 'active',
+      severity: 'clean',
+      toxicity_score: 0,
+      toxicity_reasons: JSON.stringify([]),
+      notes: 'Imported from gsc_links_export. GSC Links exports do not include dofollow or authority metrics; verify separately.',
+      discovery_source: null,
+      first_seen: '2026-05-01',
+    };
+    const updates = [];
+
+    db.mockImplementation((table) => {
+      if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
+      const builder = {
+        where: jest.fn(() => builder),
+        first: jest.fn(async () => existing),
+        update: jest.fn(async (patch) => {
+          updates.push(patch);
+          return 1;
+        }),
+      };
+      return builder;
+    });
+
+    const importer = require('../services/seo/gsc-links-importer');
+    const csv = [
+      'Source page,Target page',
+      'https://example.com/listing,https://wavespestcontrol.com/',
+    ].join('\n');
+
+    const result = await importer.importCsv(csv, { apply: true });
+
+    expect(result).toMatchObject({ inserted: 0, updated: 1 });
+    expect(updates[0]).toEqual(expect.objectContaining({
+      discovery_source: 'gsc_links_export',
+    }));
+  });
+
   test('new imports use backlink toxicity scoring instead of defaulting clean', async () => {
     const db = require('../models/db');
     const BacklinkMonitor = require('../services/seo/backlink-monitor');
@@ -202,6 +298,7 @@ describe('GSC Links importer', () => {
       toxicity_reasons: JSON.stringify(['toxic_niche']),
       severity: 'critical',
       status: 'active',
+      discovery_source: 'gsc_links_export',
     }));
   });
 });

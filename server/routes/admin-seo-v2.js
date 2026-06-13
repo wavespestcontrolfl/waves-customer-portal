@@ -538,7 +538,7 @@ router.post('/backlinks/import-gsc-links', requireAdmin, async (req, res, next) 
 
     const result = await GscLinksImporter.importCsv(csv, {
       apply,
-      defaultTargetUrl: req.body.defaultTargetUrl || 'https://wavespestcontrol.com/',
+      defaultTargetUrl: req.body.defaultTargetUrl || null,
       sourceLabel: req.body.sourceLabel || 'gsc_links_export',
     });
     res.json(result);

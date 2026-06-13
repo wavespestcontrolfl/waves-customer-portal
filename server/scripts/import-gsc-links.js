@@ -6,6 +6,9 @@
  * Usage:
  *   node server/scripts/import-gsc-links.js ~/Downloads/gsc-links.csv          # dry run
  *   node server/scripts/import-gsc-links.js ~/Downloads/gsc-links.csv --apply  # write rows
+ *
+ * Source-only GSC exports need an explicit --default-target. Use it only when
+ * every row in that file is known to point at the same Waves URL.
  */
 
 const fs = require('fs');
