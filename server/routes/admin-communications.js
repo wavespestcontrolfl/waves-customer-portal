@@ -1224,81 +1224,92 @@ router.get('/scheduled', async (req, res, next) => {
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
-    // Atomic delete-with-returning: if the dispatch cron claimed the row
-    // (status flipped to 'sending') between any read and this delete, zero
-    // rows return and we must NOT reopen — the SMS is about to send and
-    // fire-time resolution owns the decisions.
-    const deleted = await db('sms_log')
+    // Peek (no delete yet) just to learn the thread key for the lock.
+    const peek = await db('sms_log')
       .where({ id: req.params.id, status: 'scheduled' })
-      .del(['id', 'metadata', 'to_phone', 'created_at']);
+      .first('id', 'to_phone');
+    if (!peek) return res.json({ success: true });
+    const threadLast10 = normalizePhoneLast10(peek.to_phone);
 
-    const row = deleted?.[0];
-    if (row) {
+    // Lock the thread BEFORE deleting, and resolve the decisions before the
+    // lock releases: in the gap between an unlocked delete and the decision
+    // handling, a concurrent publish sees neither the queued row nor the
+    // still-parked old decisions, inserts a fresh card, and a later reopen
+    // would resurrect stale cards beside it. (The ignore/reopen helpers run
+    // on their own connections but complete before this commit releases the
+    // lock, so the next locked path reads final state.)
+    await db.transaction(async (trx) => {
+      if (threadLast10) await lockSuggestThread(trx, threadLast10);
+
+      // Atomic delete-with-returning: if the dispatch cron claimed the row
+      // (status flipped to 'sending') between the peek and this delete,
+      // zero rows return and we must NOT touch the decisions — the SMS is
+      // about to send and fire-time resolution owns them.
+      const deleted = await trx('sms_log')
+        .where({ id: req.params.id, status: 'scheduled' })
+        .del(['id', 'metadata', 'created_at']);
+      const row = deleted?.[0];
+      if (!row) return;
+
       const meta = parseJson(row.metadata, {});
       const decisionIds = [
         meta.agent_decision_id,
         ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : []),
       ].filter(Boolean);
+      if (!decisionIds.length) return;
 
-      if (decisionIds.length) {
-        const threadLast10 = normalizePhoneLast10(row.to_phone);
-        let resolution = 'reopen';
-        if (threadLast10) {
-          await db.transaction(async (trx) => {
-            await lockSuggestThread(trx, threadLast10);
-            // Another queued staff reply on this thread will still answer
-            // the customer — reopening now would put an actionable card on
-            // top of it. Re-park the decisions behind the surviving row:
-            // its fire ignores them, its cancel/failure reopens them.
-            // Prefer a still-'scheduled' sibling: a 'sending' one has been
-            // claimed by the cron, which now re-reads metadata after every
-            // terminal update — so a transfer onto it still resolves, but
-            // an unclaimed row avoids even that window.
-            const sibling = await trx('sms_log')
-              .whereIn('status', ['scheduled', 'sending'])
-              .whereIn('message_type', HUMAN_REPLY_TYPES)
-              .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
-              .orderByRaw("CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END")
-              .orderBy('scheduled_for', 'asc')
-              .first('id');
-            if (sibling) {
-              await trx('sms_log')
-                .where({ id: sibling.id })
-                .update({
-                  metadata: trx.raw(
-                    `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{parked_decision_ids}', COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) || ?::jsonb)`,
-                    [JSON.stringify(decisionIds)]
-                  ),
-                });
-              resolution = 'transferred';
-              return;
-            }
-            // No live sibling — but one may have JUST flipped sending→sent
-            // while this cancel ran. The thread was answered since these
-            // decisions were parked, so they resolve as ignored (drafts
-            // back to the judge), not reopened onto an answered thread.
-            const sentSibling = await trx('sms_log')
-              .where({ direction: 'outbound' })
-              .whereIn('status', ['queued', 'sent', 'delivered'])
-              .whereIn('message_type', HUMAN_REPLY_TYPES)
-              .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
-              .where('created_at', '>', row.created_at)
-              .first('id');
-            if (sentSibling) resolution = 'ignore';
-          });
+      if (threadLast10) {
+        // Another queued staff reply on this thread will still answer the
+        // customer — reopening now would put an actionable card on top of
+        // it. Re-park the decisions behind the surviving row: its fire
+        // ignores them, its cancel/failure reopens them. Prefer a
+        // still-'scheduled' sibling: a 'sending' one has been claimed by
+        // the cron, which re-reads metadata after every terminal update —
+        // so a transfer onto it still resolves, but an unclaimed row
+        // avoids even that window.
+        const sibling = await trx('sms_log')
+          .whereIn('status', ['scheduled', 'sending'])
+          .whereIn('message_type', HUMAN_REPLY_TYPES)
+          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+          .orderByRaw("CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END")
+          .orderBy('scheduled_for', 'asc')
+          .first('id');
+        if (sibling) {
+          await trx('sms_log')
+            .where({ id: sibling.id })
+            .update({
+              metadata: trx.raw(
+                `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{parked_decision_ids}', COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) || ?::jsonb)`,
+                [JSON.stringify(decisionIds)]
+              ),
+            });
+          return;
         }
-        if (resolution === 'ignore') {
+
+        // No live sibling — but one may have JUST flipped sending→sent
+        // while this cancel ran. The thread was answered since these
+        // decisions were parked, so they resolve as ignored (drafts back
+        // to the judge), not reopened onto an answered thread.
+        const sentSibling = await trx('sms_log')
+          .where({ direction: 'outbound' })
+          .whereIn('status', ['queued', 'sent', 'delivered'])
+          .whereIn('message_type', HUMAN_REPLY_TYPES)
+          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+          .where('created_at', '>', row.created_at)
+          .first('id');
+        if (sentSibling) {
           await ignoreParkedSuggestions({ decisionIds, reviewedBy: req.technicianId || 'Admin' });
-        } else if (resolution === 'reopen') {
-          // No surviving or just-sent reply — the customer was never
-          // answered, the cards return to the composer.
-          await reopenScheduledSuggestions({
-            decisionIds,
-            reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
-          });
+          return;
         }
       }
-    }
+
+      // No surviving or just-sent reply — the customer was never answered,
+      // the cards return to the composer.
+      await reopenScheduledSuggestions({
+        decisionIds,
+        reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
+      });
+    });
 
     res.json({ success: true });
   } catch (err) { next(err); }
