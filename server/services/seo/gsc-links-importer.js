@@ -200,12 +200,20 @@ async function importCsv(csvText, {
       .where({ source_url: candidate.source_url, target_url: candidate.target_url })
       .first();
 
+    const toxicity = BacklinkMonitor.scoreToxicity({
+      domain_from: candidate.source_domain,
+      url_from: candidate.source_url,
+      anchor: candidate.anchor_text,
+      domain_from_rank: null,
+      external_links_count: null,
+    });
+
     const patch = {
       source_domain: candidate.source_domain,
       anchor_text: candidate.anchor_text,
-      toxicity_score: 0,
-      toxicity_reasons: JSON.stringify([]),
-      severity: 'clean',
+      toxicity_score: toxicity.score,
+      toxicity_reasons: JSON.stringify(toxicity.reasons),
+      severity: toxicity.severity,
       status: 'active',
       last_checked: candidate.last_checked || today,
       notes: `Imported from ${sourceLabel}. GSC Links exports do not include dofollow or authority metrics; verify separately.`,

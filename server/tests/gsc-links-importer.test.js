@@ -2,6 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/seo/backlink-monitor', () => ({
   classifyLinkType: jest.fn(() => 'directory'),
   classifyTargetPage: jest.fn(() => 'homepage'),
+  scoreToxicity: jest.fn(() => ({ score: 0, severity: 'clean', reasons: [] })),
   takeSnapshot: jest.fn(async () => {}),
 }));
 
@@ -63,6 +64,8 @@ describe('GSC Links importer', () => {
 
   test('re-import preserves existing disavow and toxicity decisions', async () => {
     const db = require('../models/db');
+    const BacklinkMonitor = require('../services/seo/backlink-monitor');
+    BacklinkMonitor.scoreToxicity.mockReturnValue({ score: 5, severity: 'clean', reasons: [] });
     const existing = {
       id: 'backlink-1',
       source_url: 'https://example.com/listing',
@@ -106,6 +109,51 @@ describe('GSC Links importer', () => {
       toxicity_reasons: JSON.stringify(['manual_disavow']),
       is_dofollow: false,
       first_seen: '2026-05-01',
+    }));
+  });
+
+  test('new imports use backlink toxicity scoring instead of defaulting clean', async () => {
+    const db = require('../models/db');
+    const BacklinkMonitor = require('../services/seo/backlink-monitor');
+    BacklinkMonitor.scoreToxicity.mockReturnValue({
+      score: 85,
+      severity: 'critical',
+      reasons: ['toxic_niche'],
+    });
+    const inserts = [];
+
+    db.mockImplementation((table) => {
+      if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
+      const builder = {
+        where: jest.fn(() => builder),
+        first: jest.fn(async () => null),
+        insert: jest.fn((payload) => {
+          inserts.push(payload);
+          return { returning: jest.fn(async () => [{ id: 'new-backlink' }]) };
+        }),
+      };
+      return builder;
+    });
+
+    const importer = require('../services/seo/gsc-links-importer');
+    const csv = [
+      'Source page,Target page,Anchor text',
+      'https://cheap-casino.example/listing,https://wavespestcontrol.com/,pest control',
+    ].join('\n');
+
+    const result = await importer.importCsv(csv, { apply: true });
+
+    expect(result).toMatchObject({ inserted: 1, updated: 0 });
+    expect(BacklinkMonitor.scoreToxicity).toHaveBeenCalledWith(expect.objectContaining({
+      domain_from: 'cheap-casino.example',
+      url_from: 'https://cheap-casino.example/listing',
+      anchor: 'pest control',
+    }));
+    expect(inserts[0]).toEqual(expect.objectContaining({
+      toxicity_score: 85,
+      toxicity_reasons: JSON.stringify(['toxic_niche']),
+      severity: 'critical',
+      status: 'active',
     }));
   });
 });
