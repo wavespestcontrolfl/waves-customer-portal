@@ -8,6 +8,7 @@ const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const AccountMembershipEmail = require('./account-membership-email');
+const AnnualPrepayRenewals = require('./annual-prepay-renewals');
 
 /**
  * Billing Cron Service
@@ -94,6 +95,19 @@ const BillingCron = {
         'billing_day',
       );
 
+    // Annual-prepay customers paid for the whole period up front. The paid
+    // coverage term is the source of truth for billing suppression — they keep
+    // their monthly_rate (renewal/reporting) but must never be monthly-charged
+    // while covered. First reconcile any paid-but-pending terms (webhook lag),
+    // then resolve the covered set once per run and enforce it per-customer.
+    try {
+      await AnnualPrepayRenewals.activatePaidPendingTerms();
+    } catch (err) {
+      logger.warn(`[billing-cron] annual-prepay paid-pending sync skipped: ${err.message}`);
+    }
+    const annualPrepayCoveredIds =
+      await AnnualPrepayRenewals.getActivelyCoveredCustomerIds(etDateString());
+
     const todayDay = etParts(now).day;
     let charged = 0;
     let skipped = 0;
@@ -123,6 +137,15 @@ const BillingCron = {
         // of their billing_day. See isBillingDayMatch for the NULL-default
         // contract.
         if (!isBillingDayMatch(customer.billing_day, todayDay)) {
+          continue;
+        }
+
+        // GUARD 4: active annual-prepay coverage — the customer paid for this
+        // period up front. Skip even when active + monthly_rate > 0 + autopay
+        // on; charging here would double-bill on top of the prepayment.
+        if (annualPrepayCoveredIds.has(String(customer.id))) {
+          await logAutopay(customer.id, 'skipped_annual_prepay');
+          skipped++;
           continue;
         }
 
