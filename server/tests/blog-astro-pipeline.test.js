@@ -431,6 +431,90 @@ describe('blog Astro frontmatter validation', () => {
     expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/ant-trails-bradenton/');
   });
 
+  test('normalizes raw autonomous blog frontmatter before schema validation', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 125, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/125' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: {
+          title: 'Orkin vs. a Local SWFL Pest Control Company',
+          slug: '/pest-control/orkin-vs-local-pest-control-swfl/',
+          canonical: '/pest-control/orkin-vs-local-pest-control-swfl/',
+          meta_description: 'Fair Orkin versus local Southwest Florida pest control comparison covering national scale, local accountability, and questions to ask before you switch.',
+          primary_keyword: 'orkin vs local pest control',
+          secondary_keywords: ['local pest control SWFL'],
+          category: 'pest-library',
+          page_type: 'supporting-blog',
+          service: 'pest',
+          publish_date: '2026-06-13',
+          operator_brief_id: 'operator-brief-1',
+          hero_image_alt: 'Technician checking a home exterior in Southwest Florida',
+        },
+        body: 'A comparison for Southwest Florida homeowners choosing between a national pest brand and local service.',
+      },
+      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'orkin vs local pest control', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] }
+    );
+
+    const fmModule = require('../services/content-astro/frontmatter');
+    const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('/pest-control/orkin-vs-local-pest-control-swfl.mdx'));
+    const parsed = fmModule.parse(markdownCall[0].content);
+    expect(validateBlogFrontmatter(parsed.data)).toEqual({ ok: true, errors: [] });
+    expect(parsed.data.slug).toBe('/pest-control/orkin-vs-local-pest-control-swfl/');
+    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/pest-control/orkin-vs-local-pest-control-swfl/');
+    expect(parsed.data.category).toBe('pest-control');
+    expect(parsed.data.post_type).toBe('location');
+    expect(parsed.data.schema_types).toEqual(['Article', 'BreadcrumbList']);
+    expect(parsed.data.service_areas_tag).toContain('Sarasota');
+    expect(parsed.data.related_services).toEqual([]);
+    expect(parsed.data.domains).toEqual(['wavespestcontrol.com']);
+    expect(parsed.data.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
+    expect(parsed.data).not.toHaveProperty('page_type');
+    expect(parsed.data).not.toHaveProperty('service');
+    expect(parsed.data).not.toHaveProperty('operator_brief_id');
+  });
+
+  test('stamps a missing autonomous canonical from the emitted slug', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 126, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/126' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    const result = await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: {
+          title: 'Banana Spiders in Florida: What That Giant Golden Web Actually Is',
+          slug: 'banana-spiders-in-florida',
+          meta_description: 'That huge golden web on your lanai is usually a Florida banana spider. Learn what they are, whether they bite, and when to call a pro.',
+          primary_keyword: 'banana spiders in florida',
+          category: 'pest-library',
+          publish_date: '2026-06-13',
+          tags: ['spiders'],
+        },
+        body: 'Florida banana spider identification and practical guidance for homeowners.',
+      },
+      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'banana spiders in florida' }
+    );
+
+    const fmModule = require('../services/content-astro/frontmatter');
+    const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('/banana-spiders-in-florida.mdx'));
+    const parsed = fmModule.parse(markdownCall[0].content);
+    expect(result.url).toBe('https://www.wavespestcontrol.com/banana-spiders-in-florida/');
+    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/banana-spiders-in-florida/');
+    expect(validateBlogFrontmatter(parsed.data)).toEqual({ ok: true, errors: [] });
+    expect(parsed.data).not.toHaveProperty('tags');
+  });
+
   test('adds FAQPage schema to autonomous draft frontmatter when body has FAQs', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
