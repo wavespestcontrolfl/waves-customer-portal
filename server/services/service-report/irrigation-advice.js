@@ -58,6 +58,30 @@ function recommendedInchesPerWeek(grassType, month) {
   return roundQuarter(peak * seasonMultiplier(month));
 }
 
+// Turf crop coefficients (Kc) for the FAO-56 water balance: weekly water need =
+// reference ET₀ × Kc. UF/IFAS warm-season range ~0.45–0.8; calibrated so a
+// typical SWFL summer week (ET₀ ≈ 1.6") lands near the approved seasonal targets
+// (St. Augustine 1.6 × 0.8 ≈ 1.25"). PENDING agronomic sign-off, like the
+// seasonal lookup.
+const CROP_COEFFICIENT_BY_GRASS = {
+  st_augustine: 0.8,
+  zoysia: 0.6,
+  bermuda: 0.8,
+  bahia: 0.45, // drought tolerant
+  centipede: 0.45,
+  seashore_paspalum: 0.7,
+};
+const DEFAULT_CROP_COEFFICIENT = 0.6;
+
+// ET₀-based weekly target (inches) = reference ET₀ for the week × turf Kc. Null
+// when ET₀ is unavailable so the caller falls back to the seasonal lookup.
+function recommendedFromEt0(et0InchesPerWeek, grassType) {
+  const et0 = Number(et0InchesPerWeek);
+  if (!Number.isFinite(et0) || et0 <= 0) return null;
+  const kc = CROP_COEFFICIENT_BY_GRASS[normalizeGrassKey(grassType)] ?? DEFAULT_CROP_COEFFICIENT;
+  return roundQuarter(et0 * kc);
+}
+
 function numberOrNull(value) {
   if (value == null || value === '') return null;
   const n = Number(value);
@@ -89,8 +113,12 @@ function buildIrrigationAdvice({
   irrigationInchesPerWeek = null,
   rainfallInches7d = null,
   irrigationEnabled = null,
+  referenceEt0InchesWeek = null,
 } = {}) {
-  const recommendedInchesPerWeek0 = recommendedInchesPerWeek(grassType, month);
+  // Prefer the weather-driven ET₀ target; fall back to the grass×season lookup.
+  const et0Target = recommendedFromEt0(referenceEt0InchesWeek, grassType);
+  const recommendedInchesPerWeek0 = et0Target != null ? et0Target : recommendedInchesPerWeek(grassType, month);
+  const targetBasis = et0Target != null ? 'evapotranspiration' : 'seasonal';
   const irrigation = numberOrNull(irrigationInchesPerWeek);
   const rain = numberOrNull(rainfallInches7d);
   const rainKnown = rain != null;
@@ -107,6 +135,7 @@ function buildIrrigationAdvice({
       status: 'unknown',
       profileMissing: true,
       rainKnown,
+      targetBasis,
     };
   }
 
@@ -138,11 +167,13 @@ function buildIrrigationAdvice({
     status,
     profileMissing: false,
     rainKnown,
+    targetBasis,
   };
 }
 
 module.exports = {
   recommendedInchesPerWeek,
+  recommendedFromEt0,
   buildIrrigationAdvice,
-  _private: { seasonMultiplier, normalizeGrassKey, PEAK_INCHES_BY_GRASS },
+  _private: { seasonMultiplier, normalizeGrassKey, PEAK_INCHES_BY_GRASS, CROP_COEFFICIENT_BY_GRASS },
 };

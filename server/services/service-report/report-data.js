@@ -7,7 +7,7 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
-const { fetchServiceWeekRainInches } = require('./application-conditions');
+const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -239,7 +239,7 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null } = {}) {
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
   const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
@@ -280,6 +280,9 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
   const irrigationAdvice = buildIrrigationAdvice({
     grassType,
     month: monthFromServiceDate(serviceDate),
+    // Reference ET₀ for the service week → weather-driven target (× turf Kc);
+    // null falls back to the grass×season seasonal lookup inside the advice.
+    referenceEt0InchesWeek: completionEt0Inches,
     irrigationInchesPerWeek,
     // Only a TRUE 7-day total drives the water balance. A 24-hour completion
     // value is not a weekly figure — substituting it would let the advice claim
@@ -1713,16 +1716,20 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     ...parseJsonObject(service.conditions),
     ...parseJsonObject(service.weather_data),
   };
-  // Trailing-7-day rainfall total for the water balance, keyed to the SERVICE
-  // DATE (not now) so this long-lived report token always renders the same
-  // season-consistent balance. Cached + fail-soft: null → 'rain_unknown'.
+  // Trailing-7-day rainfall + reference ET₀ for the water balance, keyed to the
+  // SERVICE DATE (not now) so this long-lived report token always renders the
+  // same season-consistent balance. Cached + fail-soft: rain null →
+  // 'rain_unknown'; ET₀ null → grass×season fallback target.
   let completionRainfall7dInches = null;
+  let completionEt0Inches = null;
   try {
-    completionRainfall7dInches = await fetchServiceWeekRainInches({
+    const weekWeather = await fetchServiceWeekWeather({
       latitude: service.customer_latitude ?? service.latitude ?? service.lat,
       longitude: service.customer_longitude ?? service.longitude ?? service.lng,
       serviceDate: assessment.service_date,
     });
+    completionRainfall7dInches = weekWeather.rainInches;
+    completionEt0Inches = weekWeather.et0Inches;
   } catch (e) { /* non-blocking */ }
   const waterContext = buildLawnWaterContext({
     assessment,
@@ -1735,6 +1742,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       completionConditions.rainfall_in,
     ),
     completionRainfall7dInches,
+    completionEt0Inches,
   });
 
   return {
@@ -1750,6 +1758,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     recommendations: parseJsonObject(assessment.recommendations),
     observations: assessment.observations || '',
     aiSummary: assessment.ai_summary || null,
+    // Explicit vision overwatering tell (mushrooms/standing water/algae), persisted
+    // in composite_scores. Cross-checked with the water-balance surplus on the
+    // report. Older assessments lack it → client also falls back to a low
+    // fungus_control score as fungal/mushroom evidence.
+    overwateringSignal: parseJsonObject(assessment.composite_scores).overwatering_signal === true,
     fawnSnapshot,
     waterContext,
     snapshot,
