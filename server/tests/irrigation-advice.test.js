@@ -44,4 +44,23 @@ describe('buildIrrigationAdvice (water-balance differential)', () => {
     expect(a.status).toBe('balanced');
     expect(a.differentialInchesPerWeek).toBe(0);
   });
+
+  test('irrigation system turned off → missing profile despite stale inches', () => {
+    const a = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 6, irrigationInchesPerWeek: 1.5, rainfallInches7d: 0.2, irrigationEnabled: false });
+    expect(a.profileMissing).toBe(true);
+    expect(a.status).toBe('unknown');
+  });
+
+  test('unknown rainfall + below-target irrigation → rain_unknown, not a false deficit', () => {
+    const a = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 6, irrigationInchesPerWeek: 0.75, rainfallInches7d: null });
+    expect(a.status).toBe('rain_unknown');
+    expect(a.differentialInchesPerWeek).toBeNull();
+    expect(a.profileMissing).toBe(false);
+  });
+
+  test('unknown rainfall but irrigation alone exceeds target → still surplus', () => {
+    const a = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 6, irrigationInchesPerWeek: 2, rainfallInches7d: null });
+    expect(a.status).toBe('surplus');
+    expect(a.differentialInchesPerWeek).toBe(0.75); // 2 - 1.25, a valid lower bound
+  });
 });

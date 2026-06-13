@@ -999,6 +999,8 @@ function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live' }) {
     message = <>You're applying about <strong>{applied}/week</strong> — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season. Easing back can reduce fungus, mushrooms, and weed pressure.</>;
   } else if (advice.status === 'deficit') {
     message = <>You're applying about <strong>{applied}/week</strong> — roughly {gap} short of the ~{recommended} your {grassLabel} needs this season.</>;
+  } else if (advice.status === 'rain_unknown') {
+    message = <>You're applying about <strong>{applied}/week</strong> of irrigation. We couldn't read recent rainfall to finish the water balance — the seasonal target for your {grassLabel} is about {recommended}/week.</>;
   } else {
     message = <>You're applying about <strong>{applied}/week</strong>, right around the ~{recommended} target for this season.</>;
   }
@@ -1824,12 +1826,14 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
   );
 }
 
-export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false } = {}) {
+export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true } = {}) {
   return [
     ['#visit-summary', 'Summary'],
     hasReentry ? ['#re-entry', 'Re-entry'] : null,
     hasVisitTimeline ? ['#service-timeline', 'Timeline'] : null,
-    ['#service-coverage', 'Map'],
+    // The Map link targets the coverage card's anchor; lawn/tree-shrub reports
+    // hide that card, so the link would jump nowhere — omit it there.
+    hasCoverageMap ? ['#service-coverage', 'Map'] : null,
     hasProducts ? ['#products-applied', 'Products'] : null,
     hasPestPressure ? ['#pest-pressure', 'Pest Pressure'] : null,
     hasActivity ? ['#activity', 'Activity'] : null,
@@ -1837,7 +1841,8 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
 }
 
 function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false }) {
-  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity });
+  const hasCoverageMap = !(serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')));
+  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity, hasCoverageMap });
 
   return (
     <section className="sr-section quick-report-tools" id="quick-navigation">

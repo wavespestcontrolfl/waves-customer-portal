@@ -271,6 +271,11 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     // floor — otherwise reports with 24h rain but no FAWN 7-day total would tell
     // the customer their applied water is irrigation only.
     rainfallInches7d: firstNumber(rainfallInches7d, rainfallInchesToday),
+    // Portal irrigation-system toggle: when explicitly off, a stale weekly-inches
+    // value must not count as a live schedule (prompt to re-add instead).
+    irrigationEnabled: propertyPrefs && propertyPrefs.irrigation_system != null
+      ? !!propertyPrefs.irrigation_system
+      : null,
   });
 
   // Always return a context for lawn reports: even with no inputs we carry the
@@ -1683,7 +1688,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     : [];
   const defaultCustomerSummary = lawnAssessmentSummary(currentScore, initialScore, trend.length);
   const fawnSnapshot = parseJsonObject(assessment.fawn_snapshot);
-  const completionConditions = parseJsonObject(service.conditions);
+  // Mirror the report payload's conditions merge (service.conditions +
+  // service.weather_data) so the water line reads the same rain the hero
+  // weather card shows, even when conditions is empty/stale.
+  const completionConditions = {
+    ...parseJsonObject(service.conditions),
+    ...parseJsonObject(service.weather_data),
+  };
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,

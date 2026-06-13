@@ -72,12 +72,15 @@ function numberOrNull(value) {
  * @param {number} [args.month] 1–12 (defaults to current month if omitted)
  * @param {number|null} [args.irrigationInchesPerWeek] scheduled irrigation on file
  * @param {number|null} [args.rainfallInches7d] recent rainfall (effective, last 7d)
+ * @param {boolean|null} [args.irrigationEnabled] portal irrigation-system toggle;
+ *   false forces missing-profile (stale inches don't count)
  * @returns {{
  *   recommendedInchesPerWeek: number,
  *   appliedInchesPerWeek: number|null,
  *   differentialInchesPerWeek: number|null,
- *   status: 'deficit'|'surplus'|'balanced'|'unknown',
+ *   status: 'deficit'|'surplus'|'balanced'|'rain_unknown'|'unknown',
  *   profileMissing: boolean,
+ *   rainKnown: boolean,
  * }}
  */
 function buildIrrigationAdvice({
@@ -85,14 +88,16 @@ function buildIrrigationAdvice({
   month = null,
   irrigationInchesPerWeek = null,
   rainfallInches7d = null,
+  irrigationEnabled = null,
 } = {}) {
   const recommendedInchesPerWeek0 = recommendedInchesPerWeek(grassType, month);
   const irrigation = numberOrNull(irrigationInchesPerWeek);
   const rain = numberOrNull(rainfallInches7d);
+  const rainKnown = rain != null;
 
-  // No schedule on file (null or 0). Rainfall alone can't establish what the
-  // customer applies, so we can't compute a meaningful differential yet.
-  const profileMissing = irrigation == null || irrigation <= 0;
+  // No usable schedule: null/zero inches, OR the customer turned their irrigation
+  // system off (a stale weekly-inches value must not count as a live schedule).
+  const profileMissing = irrigation == null || irrigation <= 0 || irrigationEnabled === false;
 
   if (profileMissing) {
     return {
@@ -101,24 +106,38 @@ function buildIrrigationAdvice({
       differentialInchesPerWeek: null,
       status: 'unknown',
       profileMissing: true,
+      rainKnown,
     };
   }
 
-  const appliedInchesPerWeek = roundQuarter(irrigation + (rain || 0));
+  const appliedInchesPerWeek = roundQuarter(irrigation + (rainKnown ? rain : 0));
   const differentialInchesPerWeek = roundQuarter(appliedInchesPerWeek - recommendedInchesPerWeek0);
 
-  // A quarter-inch band around the target counts as balanced; outside it the
-  // lawn is meaningfully over- or under-watered for the season.
-  let status = 'balanced';
-  if (differentialInchesPerWeek >= 0.25) status = 'surplus';
-  else if (differentialInchesPerWeek <= -0.25) status = 'deficit';
+  // A quarter-inch band around the target is balanced; outside it the lawn is
+  // meaningfully over/under-watered. Surplus is safe even when rainfall is
+  // unknown (rain only adds water), but we must NOT claim a deficit/balanced
+  // without rainfall — the missing rain could close the gap — so report
+  // 'rain_unknown' and withhold the differential in that case.
+  let status;
+  let differentialOut = differentialInchesPerWeek;
+  if (differentialInchesPerWeek >= 0.25) {
+    status = 'surplus';
+  } else if (!rainKnown) {
+    status = 'rain_unknown';
+    differentialOut = null;
+  } else if (differentialInchesPerWeek <= -0.25) {
+    status = 'deficit';
+  } else {
+    status = 'balanced';
+  }
 
   return {
     recommendedInchesPerWeek: recommendedInchesPerWeek0,
     appliedInchesPerWeek,
-    differentialInchesPerWeek,
+    differentialInchesPerWeek: differentialOut,
     status,
     profileMissing: false,
+    rainKnown,
   };
 }
 
