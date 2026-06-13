@@ -5,7 +5,9 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
+  getVisualServiceNotesSettings,
   isVisualServiceNotesEnabled,
+  setVisualServiceNotesSettings,
 } = require('../services/visual-service-notes');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -22,6 +24,36 @@ router.get('/', async (req, res, next) => {
     for (const row of rows) flags[row.flag_key] = !!row.enabled;
     flags[VISUAL_SERVICE_NOTES_FLAG] = await isVisualServiceNotesEnabled(req.technicianId);
     res.json({ flags });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/feature-flags/visual-service-notes
+// Admin-only global rollout controls for the optional Visual Service Notes MVP.
+router.get('/visual-service-notes', requireAdmin, async (req, res, next) => {
+  try {
+    const settings = await getVisualServiceNotesSettings();
+    res.json({ settings });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/feature-flags/visual-service-notes
+// Admin-only. Body: { enabled?: boolean, required?: boolean }
+// `required` is persisted for future use only; no completion enforcement reads it.
+router.patch('/visual-service-notes', requireAdmin, async (req, res, next) => {
+  try {
+    const { enabled, required } = req.body || {};
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+    if (required !== undefined && typeof required !== 'boolean') {
+      return res.status(400).json({ error: 'required must be a boolean' });
+    }
+    const settings = await setVisualServiceNotesSettings({ enabled, required });
+    res.json({ ok: true, settings });
   } catch (err) {
     next(err);
   }

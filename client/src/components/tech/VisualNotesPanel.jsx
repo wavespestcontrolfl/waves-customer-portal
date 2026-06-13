@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -66,22 +66,106 @@ function getCurrentGps() {
   });
 }
 
+function formatMomentTime(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'America/New_York',
+  });
+}
+
+function statusLabel(value) {
+  const labels = {
+    internal_only: 'Internal',
+    draft_customer: 'Draft',
+    approved_customer: 'Approved',
+    rejected: 'Rejected',
+  };
+  return labels[value] || 'Saved';
+}
+
+function mediaLabel(value) {
+  if (value === 'photo') return 'Photo';
+  if (value === 'video') return 'Clip';
+  return '';
+}
+
+function canRemoveMoment(moment) {
+  return ['internal_only', 'draft_customer'].includes(moment?.visibilityStatus);
+}
+
 export default function VisualNotesPanel({ service }) {
   const [selectedTag, setSelectedTag] = useState(null);
   const [locationArea, setLocationArea] = useState('');
   const [note, setNote] = useState('');
   const [media, setMedia] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [moments, setMoments] = useState([]);
+  const [loadingMoments, setLoadingMoments] = useState(false);
+  const [momentsError, setMomentsError] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const photoInputRef = useRef(null);
   const videoInputRef = useRef(null);
+
+  const loadMoments = useCallback(async () => {
+    if (!service?.id) {
+      setMoments([]);
+      return;
+    }
+    setLoadingMoments(true);
+    setMomentsError('');
+    try {
+      const res = await fetch(`${API}/api/jobs/${service.id}/visual-moments`, {
+        headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setMoments(Array.isArray(data.moments) ? data.moments : []);
+    } catch (err) {
+      setMomentsError(err.message || 'Could not load saved visual notes');
+    } finally {
+      setLoadingMoments(false);
+    }
+  }, [service?.id]);
+
+  useEffect(() => {
+    loadMoments();
+  }, [loadMoments]);
 
   const resetForm = () => {
     setSelectedTag(null);
     setLocationArea('');
     setNote('');
     setMedia(null);
+  };
+
+  const deleteMoment = async (moment) => {
+    if (!moment?.id || deletingId) return;
+    if (typeof window !== 'undefined' && !window.confirm('Remove this visual note?')) return;
+    setDeletingId(moment.id);
+    setMessage('');
+    setError('');
+    try {
+      const res = await fetch(`${API}/api/visual-moments/${moment.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setMoments((prev) => prev.filter((item) => item.id !== moment.id));
+      setMessage('Visual note removed.');
+    } catch (err) {
+      setError(err.message || 'Could not remove visual note');
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const saveMoment = async () => {
@@ -107,6 +191,7 @@ export default function VisualNotesPanel({ service }) {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setMessage(data.message || 'Visual note saved.');
       resetForm();
+      await loadMoments();
       window.setTimeout(() => setMessage((current) => current === 'Visual note saved.' ? '' : current), 3500);
     } catch (err) {
       setError(err.message || 'Could not save visual note');
@@ -141,6 +226,19 @@ export default function VisualNotesPanel({ service }) {
             Optional proof moments for this service.
           </div>
         </div>
+        {moments.length > 0 && (
+          <div style={{
+            flex: '0 0 auto',
+            border: `1px solid ${DARK.border}`,
+            borderRadius: 999,
+            color: DARK.muted,
+            fontSize: 11,
+            fontWeight: 700,
+            padding: '4px 8px',
+          }}>
+            {moments.length} saved
+          </div>
+        )}
       </div>
 
       {!selectedTag ? (
@@ -335,6 +433,117 @@ export default function VisualNotesPanel({ service }) {
           color: error ? DARK.red : DARK.green,
         }}>
           {error || message}
+        </div>
+      )}
+
+      {(loadingMoments || momentsError || moments.length > 0) && (
+        <div style={{
+          marginTop: 12,
+          border: `1px solid ${DARK.border}`,
+          borderRadius: 10,
+          overflow: 'hidden',
+          background: DARK.bg,
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            padding: '9px 10px',
+            borderBottom: `1px solid ${DARK.border}`,
+          }}>
+            <div style={{
+              color: DARK.text,
+              fontSize: 12,
+              fontWeight: 800,
+              fontFamily: "'Montserrat', sans-serif",
+            }}>
+              Saved moments
+            </div>
+            {loadingMoments && (
+              <div style={{ color: DARK.muted, fontSize: 11 }}>Loading...</div>
+            )}
+          </div>
+          {momentsError ? (
+            <div style={{ padding: 10, color: DARK.red, fontSize: 12 }}>
+              {momentsError}
+            </div>
+          ) : (
+            <div style={{ display: 'grid' }}>
+              {moments.map((moment) => {
+                const details = [
+                  moment.locationArea,
+                  formatMomentTime(moment.capturedAt),
+                  mediaLabel(moment.mediaType),
+                ].filter(Boolean).join(' · ');
+                return (
+                  <div
+                    key={moment.id}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: canRemoveMoment(moment) ? '1fr auto auto' : '1fr auto',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '9px 10px',
+                      borderTop: `1px solid ${DARK.border}`,
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{
+                        color: DARK.text,
+                        fontSize: 12,
+                        fontWeight: 750,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {moment.tagLabel || 'Visual note'}
+                      </div>
+                      {details && (
+                        <div style={{
+                          color: DARK.muted,
+                          fontSize: 11,
+                          marginTop: 2,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {details}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{
+                      color: DARK.muted,
+                      fontSize: 11,
+                      fontWeight: 700,
+                    }}>
+                      {statusLabel(moment.visibilityStatus)}
+                    </div>
+                    {canRemoveMoment(moment) && (
+                      <button
+                        type="button"
+                        onClick={() => deleteMoment(moment)}
+                        disabled={deletingId === moment.id}
+                        style={{
+                          border: `1px solid ${DARK.border}`,
+                          borderRadius: 7,
+                          background: 'transparent',
+                          color: DARK.muted,
+                          fontSize: 11,
+                          fontWeight: 800,
+                          minHeight: 28,
+                          padding: '0 9px',
+                          cursor: deletingId === moment.id ? 'wait' : 'pointer',
+                        }}
+                      >
+                        {deletingId === moment.id ? 'Removing' : 'Remove'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -9,6 +9,11 @@ const VISUAL_SERVICE_NOTES_FLAG = 'visual_service_notes_enabled';
 const VISUAL_SERVICE_NOTES_REQUIRED_FLAG = 'visual_service_notes_required';
 const VISUAL_SERVICE_NOTES_ENABLED_SETTING = 'visualServiceNotesEnabled';
 const VISUAL_SERVICE_NOTES_REQUIRED_SETTING = 'visualServiceNotesRequired';
+const VISUAL_SERVICE_NOTES_SETTING_CATEGORY = 'visual_service_notes';
+const VISUAL_SERVICE_NOTES_SETTING_DESCRIPTIONS = {
+  [VISUAL_SERVICE_NOTES_ENABLED_SETTING]: 'Global enable flag for optional Visual Service Notes. User feature flag visual_service_notes_enabled can also enable it per user.',
+  [VISUAL_SERVICE_NOTES_REQUIRED_SETTING]: 'Future-only setting for requiring Visual Service Notes. Default false and not enforced in MVP.',
+};
 
 const VISIBILITY_STATUSES = new Set([
   'internal_only',
@@ -101,6 +106,43 @@ async function isVisualServiceNotesEnabled(userId, knex = db) {
 async function isVisualServiceNotesRequired(knex = db) {
   const required = await systemSettingBoolean(VISUAL_SERVICE_NOTES_REQUIRED_SETTING, false, knex);
   return required === true;
+}
+
+async function getVisualServiceNotesSettings(knex = db) {
+  const [enabled, required] = await Promise.all([
+    systemSettingBoolean(VISUAL_SERVICE_NOTES_ENABLED_SETTING, false, knex),
+    systemSettingBoolean(VISUAL_SERVICE_NOTES_REQUIRED_SETTING, false, knex),
+  ]);
+  return { enabled, required };
+}
+
+async function upsertVisualServiceNotesSetting(key, value, knex = db) {
+  await knex('system_settings')
+    .insert({
+      key,
+      value: value ? 'true' : 'false',
+      category: VISUAL_SERVICE_NOTES_SETTING_CATEGORY,
+      description: VISUAL_SERVICE_NOTES_SETTING_DESCRIPTIONS[key] || null,
+    })
+    .onConflict('key')
+    .merge({
+      value: value ? 'true' : 'false',
+      category: VISUAL_SERVICE_NOTES_SETTING_CATEGORY,
+      description: VISUAL_SERVICE_NOTES_SETTING_DESCRIPTIONS[key] || null,
+      updated_at: knex.fn.now(),
+    });
+}
+
+async function setVisualServiceNotesSettings({ enabled, required } = {}, knex = db) {
+  const writes = [];
+  if (typeof enabled === 'boolean') {
+    writes.push(upsertVisualServiceNotesSetting(VISUAL_SERVICE_NOTES_ENABLED_SETTING, enabled, knex));
+  }
+  if (typeof required === 'boolean') {
+    writes.push(upsertVisualServiceNotesSetting(VISUAL_SERVICE_NOTES_REQUIRED_SETTING, required, knex));
+  }
+  if (writes.length) await Promise.all(writes);
+  return getVisualServiceNotesSettings(knex);
 }
 
 function serviceTypeKey(serviceType) {
@@ -381,11 +423,14 @@ module.exports = {
   VISUAL_SERVICE_NOTES_REQUIRED_FLAG,
   VISUAL_SERVICE_NOTES_ENABLED_SETTING,
   VISUAL_SERVICE_NOTES_REQUIRED_SETTING,
+  VISUAL_SERVICE_NOTES_SETTING_CATEGORY,
   VISIBILITY_STATUSES,
   TAG_CATALOG,
   LOCATION_AREAS,
   ACTIVE_VISUAL_NOTE_STATUSES,
   MAX_VISUAL_MOMENT_MEDIA_BYTES,
+  getVisualServiceNotesSettings,
+  setVisualServiceNotesSettings,
   isVisualServiceNotesEnabled,
   isVisualServiceNotesRequired,
   canCreateVisualServiceMoment,
